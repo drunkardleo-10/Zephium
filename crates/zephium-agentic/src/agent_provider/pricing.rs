@@ -9,13 +9,15 @@
 
 use std::fmt;
 use std::num::NonZeroU64;
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{
     AgentProviderBillingClass, AgentProviderCallConfig, AgentProviderKind,
-    AgentProviderModelRevision, AgentProviderUsage,
+    AgentProviderModelRevision, AgentProviderReasoningEffort, AgentProviderResponseIdentity,
+    AgentProviderResponseRoute, AgentProviderUsage, MAX_AGENT_PROVIDER_ALLOWED_EFFECTIVE_MODELS,
 };
 use crate::{SemanticTokenizerRevision, MAX_AGENT_RUN_COST_MICRO_USD, MAX_AGENT_RUN_MODEL_TOKENS};
 
@@ -51,6 +53,7 @@ impl AgentProviderPricingRevision {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AgentProviderPricingProfile {
     revision: AgentProviderPricingRevision,
+    min_input_tokens: u64,
     max_input_tokens: u64,
 }
 
@@ -60,11 +63,24 @@ impl AgentProviderPricingProfile {
         revision: AgentProviderPricingRevision,
         max_input_tokens: u64,
     ) -> Result<Self, AgentProviderPricingContractError> {
-        if max_input_tokens == 0 || max_input_tokens > MAX_AGENT_RUN_MODEL_TOKENS {
+        Self::try_for_input_range(revision, 1, max_input_tokens)
+    }
+
+    /// Binds a nonzero catalog revision to an inclusive pricing input range.
+    pub const fn try_for_input_range(
+        revision: AgentProviderPricingRevision,
+        min_input_tokens: u64,
+        max_input_tokens: u64,
+    ) -> Result<Self, AgentProviderPricingContractError> {
+        if min_input_tokens == 0
+            || min_input_tokens > max_input_tokens
+            || max_input_tokens > MAX_AGENT_RUN_MODEL_TOKENS
+        {
             return Err(AgentProviderPricingContractError::InputRange);
         }
         Ok(Self {
             revision,
+            min_input_tokens,
             max_input_tokens,
         })
     }
@@ -74,9 +90,18 @@ impl AgentProviderPricingProfile {
         self.revision
     }
 
+    /// Inclusive provider-accounted input-token floor for these rates.
+    pub const fn min_input_tokens(self) -> u64 {
+        self.min_input_tokens
+    }
+
     /// Inclusive provider-accounted input-token ceiling for these rates.
     pub const fn max_input_tokens(self) -> u64 {
         self.max_input_tokens
+    }
+
+    pub(super) const fn contains(self, input_tokens: u64) -> bool {
+        input_tokens >= self.min_input_tokens && input_tokens <= self.max_input_tokens
     }
 }
 
@@ -143,64 +168,245 @@ impl AgentProviderTokenRates {
     }
 }
 
-/// One immutable trusted schedule entry; no production entries are implicit.
-#[must_use]
-pub struct AgentProviderPricingSchedule {
+#[derive(Eq, PartialEq)]
+pub(super) struct AgentProviderCatalogBinding {
     provider: AgentProviderKind,
-    billing_class: AgentProviderBillingClass,
-    model: AgentProviderModelRevision,
+    requested_model: AgentProviderModelRevision,
+    allowed_effective_models: Vec<AgentProviderModelRevision>,
+    response_route: AgentProviderResponseRoute,
+    reasoning_effort: AgentProviderReasoningEffort,
     tokenizer: SemanticTokenizerRevision,
     profile: AgentProviderPricingProfile,
     rates: AgentProviderTokenRates,
     guard: [u8; 32],
 }
 
-impl AgentProviderPricingSchedule {
-    /// Constructs an immutable entry selected by the trusted product catalog.
-    pub fn new(
-        provider: AgentProviderKind,
-        model: AgentProviderModelRevision,
-        tokenizer: SemanticTokenizerRevision,
-        profile: AgentProviderPricingProfile,
-        rates: AgentProviderTokenRates,
-    ) -> Self {
-        let guard = schedule_guard(provider, &model, &tokenizer, profile, rates);
-        Self {
-            provider,
-            billing_class: provider.billing_class(),
-            model,
-            tokenizer,
-            profile,
-            rates,
-            guard,
-        }
+impl AgentProviderCatalogBinding {
+    pub(super) const fn provider(&self) -> AgentProviderKind {
+        self.provider
     }
 
-    /// Exact schedule pricing identity without exposing mutable catalog input.
-    pub const fn profile(&self) -> AgentProviderPricingProfile {
+    pub(super) const fn requested_model(&self) -> &AgentProviderModelRevision {
+        &self.requested_model
+    }
+
+    pub(super) const fn response_route(&self) -> AgentProviderResponseRoute {
+        self.response_route
+    }
+
+    pub(super) const fn reasoning_effort(&self) -> AgentProviderReasoningEffort {
+        self.reasoning_effort
+    }
+
+    pub(super) const fn tokenizer(&self) -> &SemanticTokenizerRevision {
+        &self.tokenizer
+    }
+
+    pub(super) const fn pricing_profile(&self) -> AgentProviderPricingProfile {
         self.profile
     }
 
-    /// Content-free digest of provider, billing, model, tokenizer, profile, and rates.
-    pub const fn accounting_guard(&self) -> [u8; 32] {
+    const fn rates(&self) -> AgentProviderTokenRates {
+        self.rates
+    }
+
+    pub(super) const fn accounting_guard(&self) -> [u8; 32] {
         self.guard
     }
 
-    /// Prices exact normalized usage only when every committed identity matches.
-    pub fn try_price(
+    pub(super) fn allows_response_identity(
+        &self,
+        effective_model: &str,
+        service_tier: &str,
+        inference_geo: Option<&str>,
+    ) -> bool {
+        self.response_route.response_service_tier() == service_tier
+            && self.response_route.response_inference_geo() == inference_geo
+            && self
+                .allowed_effective_models
+                .binary_search_by(|model| model.as_str().cmp(effective_model))
+                .is_ok()
+    }
+
+    fn matches_response_identity(&self, identity: AgentProviderResponseIdentity) -> bool {
+        identity.provider() == self.provider
+            && identity.requested_model() == self.requested_model.as_str()
+            && identity.response_route() == self.response_route
+            && identity.reasoning_effort() == self.reasoning_effort
+            && self.allows_response_identity(
+                identity.effective_model(),
+                identity.effective_service_tier(),
+                identity.effective_inference_geo(),
+            )
+    }
+}
+
+impl fmt::Debug for AgentProviderCatalogBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentProviderCatalogBinding")
+            .field("provider", &self.provider)
+            .field("requested_model", &self.requested_model)
+            .field(
+                "allowed_effective_models",
+                &self.allowed_effective_models.len(),
+            )
+            .field("response_route", &self.response_route)
+            .field("reasoning_effort", &self.reasoning_effort)
+            .field("tokenizer", &self.tokenizer)
+            .field("profile", &self.profile)
+            .field("guard", &"[redacted]")
+            .finish()
+    }
+}
+
+/// One immutable trusted schedule entry; no production entries are implicit.
+#[must_use]
+pub struct AgentProviderPricingSchedule {
+    binding: Arc<AgentProviderCatalogBinding>,
+}
+
+impl AgentProviderPricingSchedule {
+    /// Constructs an immutable entry selected by the trusted product catalog.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new(
+        provider: AgentProviderKind,
+        requested_model: AgentProviderModelRevision,
+        mut allowed_effective_models: Vec<AgentProviderModelRevision>,
+        response_route: AgentProviderResponseRoute,
+        reasoning_effort: AgentProviderReasoningEffort,
+        tokenizer: SemanticTokenizerRevision,
+        profile: AgentProviderPricingProfile,
+        rates: AgentProviderTokenRates,
+    ) -> Result<Self, AgentProviderPricingContractError> {
+        if allowed_effective_models.is_empty()
+            || allowed_effective_models.len() > MAX_AGENT_PROVIDER_ALLOWED_EFFECTIVE_MODELS
+            || response_route.provider() != provider
+            || (provider == AgentProviderKind::AnthropicMessages
+                && reasoning_effort != AgentProviderReasoningEffort::None)
+        {
+            return Err(AgentProviderPricingContractError::CatalogIdentity);
+        }
+        allowed_effective_models.sort();
+        if allowed_effective_models
+            .windows(2)
+            .any(|pair| pair[0] == pair[1])
+        {
+            return Err(AgentProviderPricingContractError::CatalogIdentity);
+        }
+        let mut binding = AgentProviderCatalogBinding {
+            provider,
+            requested_model,
+            allowed_effective_models,
+            response_route,
+            reasoning_effort,
+            tokenizer,
+            profile,
+            rates,
+            guard: [0; 32],
+        };
+        binding.guard = schedule_guard(&binding);
+        Ok(Self {
+            binding: Arc::new(binding),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn try_for_test(
+        provider: AgentProviderKind,
+        model: AgentProviderModelRevision,
+        reasoning_effort: AgentProviderReasoningEffort,
+        tokenizer: SemanticTokenizerRevision,
+        profile: AgentProviderPricingProfile,
+        rates: AgentProviderTokenRates,
+    ) -> Result<Self, AgentProviderPricingContractError> {
+        let response_route = match provider {
+            AgentProviderKind::OpenAiResponses => AgentProviderResponseRoute::OpenAiDefault,
+            AgentProviderKind::AnthropicMessages => {
+                AgentProviderResponseRoute::AnthropicStandardGlobal
+            }
+        };
+        Self::try_new(
+            provider,
+            model.clone(),
+            vec![model],
+            response_route,
+            reasoning_effort,
+            tokenizer,
+            profile,
+            rates,
+        )
+    }
+
+    /// Derives one per-call response budget from this exact trusted entry.
+    pub fn try_call_config(
+        &self,
+        fixed_input_tokens: u32,
+        max_output_tokens: u32,
+        stream: super::AgentProviderStreamBudget,
+    ) -> Result<AgentProviderCallConfig, super::AgentProviderContractError> {
+        AgentProviderCallConfig::from_catalog(
+            Arc::clone(&self.binding),
+            fixed_input_tokens,
+            max_output_tokens,
+            stream,
+        )
+    }
+
+    /// Requested provider model alias or snapshot bound by this entry.
+    pub fn requested_model(&self) -> &AgentProviderModelRevision {
+        self.binding.requested_model()
+    }
+
+    /// Closed response route bound by this entry.
+    pub fn response_route(&self) -> AgentProviderResponseRoute {
+        self.binding.response_route()
+    }
+
+    /// Explicit reasoning effort bound by this entry.
+    pub fn reasoning_effort(&self) -> AgentProviderReasoningEffort {
+        self.binding.reasoning_effort()
+    }
+
+    /// Exact tokenizer revision bound by this entry.
+    pub fn tokenizer(&self) -> &SemanticTokenizerRevision {
+        self.binding.tokenizer()
+    }
+
+    /// Exact provider protocol bound by this entry.
+    pub fn provider(&self) -> AgentProviderKind {
+        self.binding.provider()
+    }
+
+    /// Number of catalog-approved effective provider revisions.
+    pub fn allowed_effective_models(&self) -> usize {
+        self.binding.allowed_effective_models.len()
+    }
+
+    /// Whether this schedule contains the exact effective revision.
+    pub fn allows_effective_model(&self, model: &str) -> bool {
+        self.binding
+            .allowed_effective_models
+            .binary_search_by(|candidate| candidate.as_str().cmp(model))
+            .is_ok()
+    }
+
+    pub(super) fn exact_binding_matches(&self, config: &AgentProviderCallConfig) -> bool {
+        config.accounting_guard() == self.binding.guard
+            && config.catalog.as_ref() == self.binding.as_ref()
+    }
+
+    pub(super) fn try_price(
         &self,
         config: &AgentProviderCallConfig,
+        identity: AgentProviderResponseIdentity,
         usage: AgentProviderUsage,
     ) -> Result<AgentProviderPricedUsage, AgentProviderPricingError> {
-        if config.provider() != self.provider
-            || config.billing_class() != self.billing_class
-            || config.model() != &self.model
-            || config.tokenizer() != &self.tokenizer
-            || config.pricing_profile() != self.profile
+        if !self.exact_binding_matches(config) || !self.binding.matches_response_identity(identity)
         {
             return Err(AgentProviderPricingError::Identity);
         }
-        if usage.input_tokens() > self.profile.max_input_tokens {
+        if !self.binding.profile.contains(usage.input_tokens()) {
             return Err(AgentProviderPricingError::InputRange);
         }
 
@@ -212,18 +418,16 @@ impl AgentProviderPricingSchedule {
             .input_tokens()
             .checked_sub(priced_input_subsets)
             .ok_or(AgentProviderPricingError::Arithmetic)?;
-        let mut numerator = price_component(uncached_input, self.rates.uncached_input)?;
-        numerator = add_price_component(
-            numerator,
-            usage.cached_input_tokens(),
-            self.rates.cached_input,
-        )?;
+        let rates = self.binding.rates();
+        let mut numerator = price_component(uncached_input, rates.uncached_input)?;
+        numerator =
+            add_price_component(numerator, usage.cached_input_tokens(), rates.cached_input)?;
         numerator = add_price_component(
             numerator,
             usage.cache_write_input_tokens(),
-            self.rates.cache_write_input,
+            rates.cache_write_input,
         )?;
-        numerator = add_price_component(numerator, usage.output_tokens(), self.rates.output)?;
+        numerator = add_price_component(numerator, usage.output_tokens(), rates.output)?;
         let whole = numerator / TOKENS_PER_RATE_UNIT;
         let rounded = whole
             .checked_add(u128::from(numerator % TOKENS_PER_RATE_UNIT != 0))
@@ -234,10 +438,31 @@ impl AgentProviderPricingSchedule {
         Ok(AgentProviderPricedUsage {
             config: config.clone(),
             usage,
-            pricing_revision: self.profile.revision,
-            schedule_guard: self.guard,
+            pricing_revision: self.binding.profile.revision,
+            schedule_guard: self.binding.guard,
+            response_identity_guard: identity.guard(),
             cost_ceiling_micro_usd,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn try_price_for_test(
+        &self,
+        config: &AgentProviderCallConfig,
+        identity: AgentProviderResponseIdentity,
+        usage: AgentProviderUsage,
+    ) -> Result<AgentProviderPricedUsage, AgentProviderPricingError> {
+        self.try_price(config, identity, usage)
+    }
+
+    /// Exact schedule pricing identity without exposing mutable catalog input.
+    pub fn profile(&self) -> AgentProviderPricingProfile {
+        self.binding.profile
+    }
+
+    /// Content-free digest of provider, billing, model, tokenizer, profile, and rates.
+    pub fn accounting_guard(&self) -> [u8; 32] {
+        self.binding.guard
     }
 }
 
@@ -245,45 +470,60 @@ impl fmt::Debug for AgentProviderPricingSchedule {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AgentProviderPricingSchedule")
-            .field("provider", &self.provider)
-            .field("billing_class", &self.billing_class)
-            .field("model", &self.model)
-            .field("tokenizer", &self.tokenizer)
-            .field("profile", &self.profile)
-            .field("rates", &"[redacted]")
-            .field("guard", &"[redacted]")
+            .field("binding", &self.binding)
             .finish()
     }
 }
 
-fn schedule_guard(
-    provider: AgentProviderKind,
-    model: &AgentProviderModelRevision,
-    tokenizer: &SemanticTokenizerRevision,
-    profile: AgentProviderPricingProfile,
-    rates: AgentProviderTokenRates,
-) -> [u8; 32] {
+fn schedule_guard(binding: &AgentProviderCatalogBinding) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"ZEPHIUM-AGENT-PROVIDER-PRICING-SCHEDULE-1\0");
-    hasher.update([match provider {
+    hasher.update(b"ZEPHIUM-AGENT-PROVIDER-PRICING-SCHEDULE-2\0");
+    hasher.update([match binding.provider {
         AgentProviderKind::OpenAiResponses => 1,
         AgentProviderKind::AnthropicMessages => 2,
     }]);
-    hasher.update([match provider.billing_class() {
+    hasher.update([match binding.response_route.billing_class() {
         AgentProviderBillingClass::OpenAiDefault => 1,
         AgentProviderBillingClass::AnthropicStandardGlobal => 2,
     }]);
-    hasher.update(model.as_str().as_bytes());
+    hasher.update([response_route_guard_byte(binding.response_route)]);
+    hasher.update([reasoning_effort_guard_byte(binding.reasoning_effort)]);
+    hasher.update([binding.requested_model.as_str().len() as u8]);
+    hasher.update(binding.requested_model.as_str().as_bytes());
+    hasher.update([binding.allowed_effective_models.len() as u8]);
+    for model in &binding.allowed_effective_models {
+        hasher.update([model.as_str().len() as u8]);
+        hasher.update(model.as_str().as_bytes());
+    }
     hasher.update([0]);
-    hasher.update(tokenizer.as_str().as_bytes());
+    hasher.update(binding.tokenizer.as_str().as_bytes());
     hasher.update([0]);
-    hasher.update(profile.revision().value().to_be_bytes());
-    hasher.update(profile.max_input_tokens().to_be_bytes());
-    hasher.update(rates.uncached_input().to_be_bytes());
-    hasher.update(rates.cached_input().to_be_bytes());
-    hasher.update(rates.cache_write_input().to_be_bytes());
-    hasher.update(rates.output().to_be_bytes());
+    hasher.update(binding.profile.revision().value().to_be_bytes());
+    hasher.update(binding.profile.min_input_tokens().to_be_bytes());
+    hasher.update(binding.profile.max_input_tokens().to_be_bytes());
+    hasher.update(binding.rates.uncached_input().to_be_bytes());
+    hasher.update(binding.rates.cached_input().to_be_bytes());
+    hasher.update(binding.rates.cache_write_input().to_be_bytes());
+    hasher.update(binding.rates.output().to_be_bytes());
     hasher.finalize().into()
+}
+
+const fn response_route_guard_byte(route: AgentProviderResponseRoute) -> u8 {
+    match route {
+        AgentProviderResponseRoute::OpenAiDefault => 1,
+        AgentProviderResponseRoute::AnthropicStandardGlobal => 2,
+    }
+}
+
+const fn reasoning_effort_guard_byte(effort: AgentProviderReasoningEffort) -> u8 {
+    match effort {
+        AgentProviderReasoningEffort::None => 1,
+        AgentProviderReasoningEffort::Low => 2,
+        AgentProviderReasoningEffort::Medium => 3,
+        AgentProviderReasoningEffort::High => 4,
+        AgentProviderReasoningEffort::XHigh => 5,
+        AgentProviderReasoningEffort::Max => 6,
+    }
 }
 
 fn price_component(tokens: u64, rate: u64) -> Result<u128, AgentProviderPricingError> {
@@ -304,36 +544,42 @@ fn add_price_component(
 
 /// Opaque checked price bound to exact provider configuration and usage.
 #[must_use]
-pub struct AgentProviderPricedUsage {
+pub(crate) struct AgentProviderPricedUsage {
     config: AgentProviderCallConfig,
     usage: AgentProviderUsage,
     pricing_revision: AgentProviderPricingRevision,
     schedule_guard: [u8; 32],
+    response_identity_guard: [u8; 32],
     cost_ceiling_micro_usd: u64,
 }
 
 impl AgentProviderPricedUsage {
-    /// Exact provider/model/tokenizer/billing/pricing identity that was priced.
-    pub const fn config(&self) -> &AgentProviderCallConfig {
-        &self.config
-    }
-
     /// Exact normalized provider usage priced by the matching schedule.
+    #[cfg(test)]
     pub const fn usage(&self) -> AgentProviderUsage {
         self.usage
     }
 
     /// Exact immutable schedule revision used for this ceiling.
+    #[cfg(test)]
     pub const fn pricing_revision(&self) -> AgentProviderPricingRevision {
         self.pricing_revision
     }
 
     /// Content-free digest of the exact matching pricing schedule.
+    #[cfg(test)]
     pub const fn schedule_guard(&self) -> [u8; 32] {
         self.schedule_guard
     }
 
+    /// Content-free digest of the exact effective response identity.
+    #[cfg(test)]
+    pub const fn response_identity_guard(&self) -> [u8; 32] {
+        self.response_identity_guard
+    }
+
     /// Conservative checked catalog cost in micro-USD.
+    #[cfg(test)]
     pub const fn cost_ceiling_micro_usd(&self) -> u64 {
         self.cost_ceiling_micro_usd
     }
@@ -346,6 +592,7 @@ impl AgentProviderPricedUsage {
             billing_class: self.config.billing_class(),
             pricing_revision: self.pricing_revision,
             schedule_guard: self.schedule_guard,
+            response_identity_guard: self.response_identity_guard,
             cached_input_tokens: self.usage.cached_input_tokens(),
             cache_write_input_tokens: self.usage.cache_write_input_tokens(),
             reasoning_output_tokens: self.usage.reasoning_output_tokens(),
@@ -362,6 +609,7 @@ impl fmt::Debug for AgentProviderPricedUsage {
             .field("usage", &self.usage)
             .field("pricing_revision", &self.pricing_revision)
             .field("schedule_guard", &"[redacted]")
+            .field("response_identity_guard", &"[redacted]")
             .field("cost_ceiling_micro_usd", &self.cost_ceiling_micro_usd)
             .finish()
     }
@@ -379,6 +627,7 @@ pub struct AgentProviderPricingAttribution {
     billing_class: AgentProviderBillingClass,
     pricing_revision: AgentProviderPricingRevision,
     schedule_guard: [u8; 32],
+    response_identity_guard: [u8; 32],
     cached_input_tokens: u64,
     cache_write_input_tokens: u64,
     reasoning_output_tokens: u64,
@@ -405,6 +654,11 @@ impl AgentProviderPricingAttribution {
         self.schedule_guard
     }
 
+    /// Digest of the exact provider-attested effective response identity.
+    pub const fn response_identity_guard(self) -> [u8; 32] {
+        self.response_identity_guard
+    }
+
     /// Cached-read input subset normalized from provider terminal usage.
     pub const fn cached_input_tokens(self) -> u64 {
         self.cached_input_tokens
@@ -429,6 +683,7 @@ impl fmt::Debug for AgentProviderPricingAttribution {
             .field("billing_class", &self.billing_class)
             .field("pricing_revision", &self.pricing_revision)
             .field("schedule_guard", &"[redacted]")
+            .field("response_identity_guard", &"[redacted]")
             .field("cached_input_tokens", &self.cached_input_tokens)
             .field("cache_write_input_tokens", &self.cache_write_input_tokens)
             .field("reasoning_output_tokens", &self.reasoning_output_tokens)
@@ -439,6 +694,9 @@ impl fmt::Debug for AgentProviderPricingAttribution {
 /// Invalid fixed-catalog profile or rate contract.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum AgentProviderPricingContractError {
+    /// Provider, route, reasoning, or allowed-effective catalog identity is invalid.
+    #[error("agent provider pricing catalog identity is invalid")]
+    CatalogIdentity,
     /// Applicable input range was zero or above the hard model-token ceiling.
     #[error("agent provider pricing input range is invalid")]
     InputRange,
@@ -465,7 +723,8 @@ pub enum AgentProviderPricingError {
 mod tests {
     use super::*;
     use crate::{
-        AgentProviderReasoningEffort, AgentProviderStreamBudget, SemanticTokenizerRevision,
+        AgentProviderProtocolError, AgentProviderReasoningEffort, AgentProviderStreamBudget,
+        SemanticTokenizerRevision,
     };
 
     fn profile(max_input_tokens: u64) -> AgentProviderPricingProfile {
@@ -476,22 +735,38 @@ mod tests {
         .expect("profile")
     }
 
-    fn provider_config(
+    fn provider_schedule(
         provider: AgentProviderKind,
         model: &str,
         max_input_tokens: u64,
-    ) -> AgentProviderCallConfig {
-        AgentProviderCallConfig::try_new(
+        rates: AgentProviderTokenRates,
+    ) -> AgentProviderPricingSchedule {
+        AgentProviderPricingSchedule::try_for_test(
             provider,
             AgentProviderModelRevision::try_new(model.to_owned()).expect("model"),
             AgentProviderReasoningEffort::None,
             SemanticTokenizerRevision::try_new("tokenizer-v1".to_owned()).expect("tokenizer"),
             profile(max_input_tokens),
-            32,
-            64,
-            AgentProviderStreamBudget::STANDARD,
+            rates,
         )
-        .expect("config")
+        .expect("schedule")
+    }
+
+    fn call_config(schedule: &AgentProviderPricingSchedule) -> AgentProviderCallConfig {
+        schedule
+            .try_call_config(32, 64, AgentProviderStreamBudget::STANDARD)
+            .expect("config")
+    }
+
+    fn response_identity(config: &AgentProviderCallConfig) -> AgentProviderResponseIdentity {
+        let route = config.response_route();
+        AgentProviderResponseIdentity::try_attested(
+            config,
+            config.model().as_str(),
+            route.response_service_tier(),
+            route.response_inference_geo(),
+        )
+        .expect("response identity")
     }
 
     fn rates() -> AgentProviderTokenRates {
@@ -500,20 +775,21 @@ mod tests {
 
     #[test]
     fn pricing_uses_four_disjoint_categories_and_one_conservative_rounding() {
-        let config = provider_config(AgentProviderKind::OpenAiResponses, "gpt-fixed", 200);
-        let schedule = AgentProviderPricingSchedule::new(
-            config.provider(),
-            config.model().clone(),
-            config.tokenizer().clone(),
-            config.pricing_profile(),
+        let schedule = provider_schedule(
+            AgentProviderKind::OpenAiResponses,
+            "gpt-fixed",
+            200,
             rates(),
         );
+        let config = call_config(&schedule);
+        let identity = response_identity(&config);
         let usage = AgentProviderUsage::try_new(100, 3, 20, 10, 1).expect("usage");
-        let priced = schedule.try_price(&config, usage).expect("price");
+        let priced = schedule.try_price(&config, identity, usage).expect("price");
 
         assert_eq!(priced.usage(), usage);
         assert_eq!(priced.pricing_revision().value(), 7);
         assert_eq!(priced.schedule_guard(), schedule.accounting_guard());
+        assert_eq!(priced.response_identity_guard(), identity.guard());
         assert_eq!(priced.cost_ceiling_micro_usd(), 100);
         assert!(!format!("{priced:?}").contains("gpt-fixed"));
 
@@ -533,39 +809,77 @@ mod tests {
         let one_fractional = AgentProviderUsage::try_new(1, 0, 0, 0, 0).expect("usage");
         let fractional_rates =
             AgentProviderTokenRates::try_new(1, 1, 1, 1).expect("fractional rates");
-        let fractional = AgentProviderPricingSchedule::new(
-            config.provider(),
-            config.model().clone(),
-            config.tokenizer().clone(),
-            config.pricing_profile(),
+        let fractional_schedule = provider_schedule(
+            AgentProviderKind::OpenAiResponses,
+            "gpt-fixed",
+            200,
             fractional_rates,
-        )
-        .try_price(&config, one_fractional)
-        .expect("rounded price");
+        );
+        let fractional_config = call_config(&fractional_schedule);
+        let fractional = fractional_schedule
+            .try_price(
+                &fractional_config,
+                response_identity(&fractional_config),
+                one_fractional,
+            )
+            .expect("rounded price");
         assert_eq!(fractional.cost_ceiling_micro_usd(), 1);
         assert_ne!(fractional.schedule_guard(), schedule.accounting_guard());
     }
 
     #[test]
     fn identity_range_and_arithmetic_mismatches_fail_closed() {
-        let config = provider_config(AgentProviderKind::OpenAiResponses, "gpt-fixed", 100);
-        let schedule = AgentProviderPricingSchedule::new(
-            config.provider(),
-            config.model().clone(),
-            config.tokenizer().clone(),
-            config.pricing_profile(),
+        let schedule = provider_schedule(
+            AgentProviderKind::OpenAiResponses,
+            "gpt-fixed",
+            100,
             rates(),
         );
+        let config = call_config(&schedule);
+        let identity = response_identity(&config);
         let usage = AgentProviderUsage::try_new(50, 1, 0, 0, 0).expect("usage");
-        let other = provider_config(AgentProviderKind::OpenAiResponses, "gpt-other", 100);
+        let other_schedule = provider_schedule(
+            AgentProviderKind::OpenAiResponses,
+            "gpt-other",
+            100,
+            rates(),
+        );
+        let other = call_config(&other_schedule);
         assert!(matches!(
-            schedule.try_price(&other, usage),
+            schedule.try_price(&other, response_identity(&other), usage),
             Err(AgentProviderPricingError::Identity)
         ));
         assert!(matches!(
             schedule.try_price(
                 &config,
+                identity,
                 AgentProviderUsage::try_new(101, 0, 0, 0, 0).expect("usage")
+            ),
+            Err(AgentProviderPricingError::InputRange)
+        ));
+        let ranged_profile = AgentProviderPricingProfile::try_for_input_range(
+            AgentProviderPricingRevision::new(9).expect("revision"),
+            51,
+            100,
+        )
+        .expect("ranged profile");
+        let ranged = AgentProviderPricingSchedule::try_new(
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderModelRevision::try_new("gpt-fixed".to_owned()).expect("model"),
+            vec![AgentProviderModelRevision::try_new("gpt-fixed".to_owned()).expect("model")],
+            AgentProviderResponseRoute::OpenAiDefault,
+            AgentProviderReasoningEffort::None,
+            SemanticTokenizerRevision::try_new("tokenizer-v1".to_owned()).expect("tokenizer"),
+            ranged_profile,
+            rates(),
+        )
+        .expect("ranged schedule");
+        let ranged_config = call_config(&ranged);
+        assert!(matches!(
+            ranged.try_price(
+                &ranged_config,
+                response_identity(&ranged_config),
+                AgentProviderUsage::try_new(50, 1, 0, 0, 0).expect("usage")
             ),
             Err(AgentProviderPricingError::InputRange)
         ));
@@ -577,17 +891,18 @@ mod tests {
             MAX_AGENT_PROVIDER_RATE_MICRO_USD_PER_MILLION_TOKENS,
         )
         .expect("maximum rates");
-        let arithmetic = AgentProviderPricingSchedule::new(
-            config.provider(),
-            config.model().clone(),
-            config.tokenizer().clone(),
-            config.pricing_profile(),
+        let arithmetic = provider_schedule(
+            AgentProviderKind::OpenAiResponses,
+            "gpt-fixed",
+            100,
             maximum_rates,
         );
+        let arithmetic_config = call_config(&arithmetic);
         assert!(matches!(
             arithmetic.try_price(
-                &config,
-                AgentProviderUsage::try_new(0, u64::MAX, 0, 0, 0).expect("usage")
+                &arithmetic_config,
+                response_identity(&arithmetic_config),
+                AgentProviderUsage::try_new(1, u64::MAX - 1, 0, 0, 0).expect("usage")
             ),
             Err(AgentProviderPricingError::Arithmetic)
         ));
@@ -595,69 +910,115 @@ mod tests {
 
     #[test]
     fn schedule_guard_binds_every_pricing_identity_and_rate_dimension() {
-        let config = provider_config(AgentProviderKind::OpenAiResponses, "gpt-fixed", 100);
-        let base = AgentProviderPricingSchedule::new(
-            config.provider(),
-            config.model().clone(),
-            config.tokenizer().clone(),
-            config.pricing_profile(),
+        let base = provider_schedule(
+            AgentProviderKind::OpenAiResponses,
+            "gpt-fixed",
+            100,
             rates(),
         );
-        let exact = AgentProviderPricingSchedule::new(
-            config.provider(),
-            config.model().clone(),
-            config.tokenizer().clone(),
-            config.pricing_profile(),
+        let exact = provider_schedule(
+            AgentProviderKind::OpenAiResponses,
+            "gpt-fixed",
+            100,
             rates(),
         );
         assert_eq!(base.accounting_guard(), exact.accounting_guard());
 
-        let other_model = AgentProviderPricingSchedule::new(
-            config.provider(),
-            AgentProviderModelRevision::try_new("gpt-other".to_owned()).expect("model"),
-            config.tokenizer().clone(),
-            config.pricing_profile(),
+        let other_model = provider_schedule(
+            AgentProviderKind::OpenAiResponses,
+            "gpt-other",
+            100,
             rates(),
         );
-        let other_tokenizer = AgentProviderPricingSchedule::new(
-            config.provider(),
-            config.model().clone(),
+        let other_tokenizer = AgentProviderPricingSchedule::try_for_test(
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderModelRevision::try_new("gpt-fixed".to_owned()).expect("model"),
+            AgentProviderReasoningEffort::None,
             SemanticTokenizerRevision::try_new("tokenizer-v2".to_owned()).expect("tokenizer"),
-            config.pricing_profile(),
+            profile(100),
             rates(),
-        );
-        let other_profile = AgentProviderPricingSchedule::new(
-            config.provider(),
-            config.model().clone(),
-            config.tokenizer().clone(),
+        )
+        .expect("schedule");
+        let other_profile = AgentProviderPricingSchedule::try_for_test(
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderModelRevision::try_new("gpt-fixed".to_owned()).expect("model"),
+            AgentProviderReasoningEffort::None,
+            SemanticTokenizerRevision::try_new("tokenizer-v1".to_owned()).expect("tokenizer"),
             AgentProviderPricingProfile::try_new(
                 AgentProviderPricingRevision::new(8).expect("revision"),
                 101,
             )
             .expect("profile"),
             rates(),
-        );
-        let other_rates = AgentProviderPricingSchedule::new(
-            config.provider(),
-            config.model().clone(),
-            config.tokenizer().clone(),
-            config.pricing_profile(),
+        )
+        .expect("schedule");
+        let other_rates = provider_schedule(
+            AgentProviderKind::OpenAiResponses,
+            "gpt-fixed",
+            100,
             AgentProviderTokenRates::try_new(1_000_001, 100_000, 1_250_000, 5_000_000)
                 .expect("rates"),
         );
-        let other_provider = AgentProviderPricingSchedule::new(
+        let other_provider = AgentProviderPricingSchedule::try_for_test(
             AgentProviderKind::AnthropicMessages,
-            config.model().clone(),
-            config.tokenizer().clone(),
-            config.pricing_profile(),
+            AgentProviderModelRevision::try_new("claude-fixed".to_owned()).expect("model"),
+            AgentProviderReasoningEffort::None,
+            SemanticTokenizerRevision::try_new("tokenizer-v1".to_owned()).expect("tokenizer"),
+            profile(100),
             rates(),
-        );
+        )
+        .expect("schedule");
+        let other_range = AgentProviderPricingSchedule::try_new(
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderModelRevision::try_new("gpt-fixed".to_owned()).expect("model"),
+            vec![AgentProviderModelRevision::try_new("gpt-fixed".to_owned()).expect("model")],
+            AgentProviderResponseRoute::OpenAiDefault,
+            AgentProviderReasoningEffort::None,
+            SemanticTokenizerRevision::try_new("tokenizer-v1".to_owned()).expect("tokenizer"),
+            AgentProviderPricingProfile::try_for_input_range(
+                AgentProviderPricingRevision::new(7).expect("revision"),
+                2,
+                100,
+            )
+            .expect("profile"),
+            rates(),
+        )
+        .expect("schedule");
+        let other_reasoning = AgentProviderPricingSchedule::try_new(
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderModelRevision::try_new("gpt-fixed".to_owned()).expect("model"),
+            vec![AgentProviderModelRevision::try_new("gpt-fixed".to_owned()).expect("model")],
+            AgentProviderResponseRoute::OpenAiDefault,
+            AgentProviderReasoningEffort::High,
+            SemanticTokenizerRevision::try_new("tokenizer-v1".to_owned()).expect("tokenizer"),
+            profile(100),
+            rates(),
+        )
+        .expect("schedule");
+        let allowed_snapshot = AgentProviderPricingSchedule::try_new(
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderModelRevision::try_new("gpt-fixed".to_owned()).expect("model"),
+            vec![
+                AgentProviderModelRevision::try_new("gpt-fixed".to_owned()).expect("model"),
+                AgentProviderModelRevision::try_new("gpt-fixed-2026-01-01".to_owned())
+                    .expect("snapshot"),
+            ],
+            AgentProviderResponseRoute::OpenAiDefault,
+            AgentProviderReasoningEffort::None,
+            SemanticTokenizerRevision::try_new("tokenizer-v1".to_owned()).expect("tokenizer"),
+            profile(100),
+            rates(),
+        )
+        .expect("schedule");
         for changed in [
             other_model.accounting_guard(),
             other_tokenizer.accounting_guard(),
             other_profile.accounting_guard(),
             other_rates.accounting_guard(),
             other_provider.accounting_guard(),
+            other_range.accounting_guard(),
+            other_reasoning.accounting_guard(),
+            allowed_snapshot.accounting_guard(),
         ] {
             assert_ne!(base.accounting_guard(), changed);
         }
@@ -676,6 +1037,14 @@ mod tests {
             Err(AgentProviderPricingContractError::InputRange)
         );
         assert_eq!(
+            AgentProviderPricingProfile::try_for_input_range(revision, 0, 1),
+            Err(AgentProviderPricingContractError::InputRange)
+        );
+        assert_eq!(
+            AgentProviderPricingProfile::try_for_input_range(revision, 2, 1),
+            Err(AgentProviderPricingContractError::InputRange)
+        );
+        assert_eq!(
             AgentProviderTokenRates::try_new(0, 1, 1, 1),
             Err(AgentProviderPricingContractError::Rate)
         );
@@ -687,6 +1056,63 @@ mod tests {
                 MAX_AGENT_PROVIDER_RATE_MICRO_USD_PER_MILLION_TOKENS + 1,
             ),
             Err(AgentProviderPricingContractError::Rate)
+        );
+    }
+
+    #[test]
+    fn requested_alias_accepts_only_canonical_catalog_attested_effective_identity() {
+        let alias = AgentProviderModelRevision::try_new("gpt-alias".to_owned()).expect("alias");
+        let snapshot = AgentProviderModelRevision::try_new("gpt-snapshot-2026-01-01".to_owned())
+            .expect("snapshot");
+        let schedule = AgentProviderPricingSchedule::try_new(
+            AgentProviderKind::OpenAiResponses,
+            alias.clone(),
+            vec![snapshot.clone(), alias.clone()],
+            AgentProviderResponseRoute::OpenAiDefault,
+            AgentProviderReasoningEffort::High,
+            SemanticTokenizerRevision::try_new("tokenizer-v1".to_owned()).expect("tokenizer"),
+            profile(200),
+            rates(),
+        )
+        .expect("schedule");
+        let canonical = AgentProviderPricingSchedule::try_new(
+            AgentProviderKind::OpenAiResponses,
+            alias,
+            vec![
+                AgentProviderModelRevision::try_new("gpt-alias".to_owned()).expect("alias"),
+                snapshot.clone(),
+            ],
+            AgentProviderResponseRoute::OpenAiDefault,
+            AgentProviderReasoningEffort::High,
+            SemanticTokenizerRevision::try_new("tokenizer-v1".to_owned()).expect("tokenizer"),
+            profile(200),
+            rates(),
+        )
+        .expect("canonical schedule");
+        assert_eq!(schedule.accounting_guard(), canonical.accounting_guard());
+        let config = call_config(&schedule);
+        let identity = AgentProviderResponseIdentity::try_attested(
+            &config,
+            snapshot.as_str(),
+            "default",
+            None,
+        )
+        .expect("approved effective identity");
+        assert!(schedule
+            .try_price(
+                &config,
+                identity,
+                AgentProviderUsage::try_new(100, 1, 0, 0, 0).expect("usage"),
+            )
+            .is_ok());
+        assert_eq!(
+            AgentProviderResponseIdentity::try_attested(
+                &config,
+                "gpt-unapproved-snapshot",
+                "default",
+                None,
+            ),
+            Err(AgentProviderProtocolError::Event)
         );
     }
 }

@@ -25,6 +25,7 @@ const AGENTIC_PROVIDER_TOOL: &str = "crates/zephium-agentic/src/agent_provider/t
 const AGENTIC_PROVIDER_OPENAI: &str = "crates/zephium-agentic/src/agent_provider/openai.rs";
 const AGENTIC_PROVIDER_ANTHROPIC: &str = "crates/zephium-agentic/src/agent_provider/anthropic.rs";
 const AGENTIC_PROVIDER_PRICING: &str = "crates/zephium-agentic/src/agent_provider/pricing.rs";
+const AGENTIC_PROVIDER_SETTLEMENT: &str = "crates/zephium-agentic/src/agent_provider/settlement.rs";
 const AGENTIC_POLICY: &str = "crates/zephium-agentic/src/agent_policy.rs";
 const AGENTIC_EFFECT_POLICY: &str = "crates/zephium-agentic/src/agent_policy/effect.rs";
 const AGENTIC_AUDIT: &str = "crates/zephium-agentic/src/agent_audit.rs";
@@ -79,8 +80,11 @@ const DESKTOP_MANIFEST: &str = "desktop/Cargo.toml";
 const STORE_ACTOR: &str = "crates/zephium-store/src/actor.rs";
 const STORE_AGENT_AUDIT_ACTOR: &str = "crates/zephium-store/src/actor/agent_audit.rs";
 const STORE_AGENT_AUDIT_HUB: &str = "crates/zephium-store/src/hub/agent_audit.rs";
-const PROVIDER_TRANSPORT_MANIFEST: &str = "crates/zephium-agent-provider-transport/Cargo.toml";
-const PROVIDER_TRANSPORT_ROOT: &str = "crates/zephium-agent-provider-transport/src/lib.rs";
+const PROVIDER_TRANSPORT_MANIFEST: &str = "crates/zephium-agentic/Cargo.toml";
+const PROVIDER_TRANSPORT_ROOT: &str = "crates/zephium-agentic/src/provider_transport.rs";
+const PROVIDER_TRANSPORT_FACADE_MANIFEST: &str =
+    "crates/zephium-agent-provider-transport/Cargo.toml";
+const PROVIDER_TRANSPORT_FACADE_ROOT: &str = "crates/zephium-agent-provider-transport/src/lib.rs";
 const ENGINE_MANIFEST: &str = "crates/zephium-engine/Cargo.toml";
 const ENGINE_ROOT: &str = "crates/zephium-engine/src/lib.rs";
 const ENGINE_PLATFORM_MODULE: &str = "crates/zephium-engine/src/platform/mod.rs";
@@ -272,7 +276,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_provider_pricing_contract(
         &read(repository.join(AGENTIC_PROVIDER_PRICING))?,
         &read(repository.join(AGENTIC_POLICY))?,
-        &read(repository.join(PROVIDER_TRANSPORT_ROOT))?,
+        &read(repository.join(AGENTIC_PROVIDER_SETTLEMENT))?,
     )?;
     validate_semantic_diff_policy_contract(
         &read(repository.join(AGENTIC_ROOT))?,
@@ -389,6 +393,10 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(STORE_AGENT_AUDIT_HUB))?,
     )?;
     validate_provider_transport_manifest(&read(repository.join(PROVIDER_TRANSPORT_MANIFEST))?)?;
+    validate_provider_transport_facade(
+        &read(repository.join(PROVIDER_TRANSPORT_FACADE_MANIFEST))?,
+        &read(repository.join(PROVIDER_TRANSPORT_FACADE_ROOT))?,
+    )?;
     let provider_transport_root = read(repository.join(PROVIDER_TRANSPORT_ROOT))?;
     validate_provider_transport_root(&provider_transport_root)?;
     validate_provider_transport_commit_boundary(&provider_transport_root)?;
@@ -3590,21 +3598,62 @@ fn validate_manifest(source: &str) -> Result<(), String> {
     let expected = [
         "base64",
         "crc32fast",
+        "futures-util",
+        "reqwest",
         "serde",
         "serde_json",
         "sha2",
         "thiserror",
+        "tokio",
         "ulid",
         "url",
+        "zeroize",
         "zephium-core",
     ]
     .into_iter()
     .collect::<BTreeSet<_>>();
-    if actual != expected || manifest.get("target").is_some() {
+    if actual != expected {
         return Err(
             "zephium-agentic default dependency graph acquired unreviewed runtime authority"
                 .to_owned(),
         );
+    }
+    let provider_transport = manifest
+        .get("features")
+        .and_then(|features| features.get("provider-transport"))
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| "zephium-agentic provider-transport feature is missing".to_owned())?;
+    let actual_provider_transport = provider_transport
+        .iter()
+        .filter_map(toml::Value::as_str)
+        .collect::<BTreeSet<_>>();
+    let expected_provider_transport = [
+        "dep:futures-util",
+        "dep:reqwest",
+        "dep:security-framework",
+        "dep:security-framework-sys",
+        "dep:tokio",
+        "dep:zeroize",
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    if actual_provider_transport != expected_provider_transport
+        || actual_provider_transport.len() != provider_transport.len()
+    {
+        return Err("zephium-agentic provider-transport feature graph drifted".to_owned());
+    }
+    for runtime in ["futures-util", "reqwest", "tokio", "zeroize"] {
+        if dependencies
+            .get(runtime)
+            .and_then(toml::Value::as_table)
+            .and_then(|dependency| dependency.get("optional"))
+            .and_then(toml::Value::as_bool)
+            != Some(true)
+        {
+            return Err(format!(
+                "zephium-agentic runtime dependency {runtime} must remain optional"
+            ));
+        }
     }
     let review_binary = manifest
         .get("bin")
@@ -3661,6 +3710,11 @@ fn validate_root(source: &str) -> Result<(), String> {
         );
     }
     let source = compact(source);
+    if !source.contains("#[cfg(feature=\"provider-transport\")]modprovider_transport;") {
+        return Err(
+            "zephium-agentic provider transport must remain behind its optional feature".to_owned(),
+        );
+    }
     for module in [
         "contract",
         "control",
@@ -4652,6 +4706,7 @@ fn validate_provider_transport_manifest(source: &str) -> Result<(), String> {
             .get("default-features")
             .and_then(toml::Value::as_bool)
             != Some(false)
+        || reqwest.get("optional").and_then(toml::Value::as_bool) != Some(true)
     {
         return Err("agent provider transport reqwest pin or default features drifted".to_owned());
     }
@@ -4689,6 +4744,109 @@ fn validate_provider_transport_manifest(source: &str) -> Result<(), String> {
     if actual != expected || actual.len() != features.len() {
         return Err("agent provider transport Tokio feature graph drifted".to_owned());
     }
+    if tokio.get("optional").and_then(toml::Value::as_bool) != Some(true) {
+        return Err("agent provider transport Tokio dependency must remain optional".to_owned());
+    }
+    let macos_dependencies = manifest
+        .get("target")
+        .and_then(|targets| targets.get("cfg(target_os = \"macos\")"))
+        .and_then(|target| target.get("dependencies"))
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| "agent provider transport macOS dependency table is missing".to_owned())?;
+    for (name, version) in [
+        ("security-framework", "=3.7.0"),
+        ("security-framework-sys", "=2.17.0"),
+    ] {
+        let dependency = macos_dependencies
+            .get(name)
+            .and_then(toml::Value::as_table)
+            .ok_or_else(|| format!("agent provider transport dependency {name} is missing"))?;
+        if dependency.get("version").and_then(toml::Value::as_str) != Some(version)
+            || dependency.get("optional").and_then(toml::Value::as_bool) != Some(true)
+        {
+            return Err(format!(
+                "agent provider transport dependency {name} must remain pinned and optional"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_provider_transport_facade(manifest: &str, root: &str) -> Result<(), String> {
+    let manifest: toml::Value = toml::from_str(manifest)
+        .map_err(|error| format!("cannot parse {PROVIDER_TRANSPORT_FACADE_MANIFEST}: {error}"))?;
+    if manifest
+        .get("package")
+        .and_then(|package| package.get("publish"))
+        .and_then(toml::Value::as_bool)
+        != Some(false)
+    {
+        return Err("agent provider transport façade must remain unpublished".to_owned());
+    }
+    let features = manifest
+        .get("features")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| "agent provider transport façade features are missing".to_owned())?;
+    if features
+        .get("default")
+        .and_then(toml::Value::as_array)
+        .is_none_or(|default| !default.is_empty())
+        || features
+            .get("provider-transport")
+            .and_then(toml::Value::as_array)
+            .is_none_or(|feature| {
+                feature.as_slice()
+                    != [toml::Value::String(
+                        "zephium-agentic/provider-transport".to_owned(),
+                    )]
+            })
+    {
+        return Err(
+            "agent provider transport façade must preserve its opt-in feature graph".to_owned(),
+        );
+    }
+    let dependency = manifest
+        .get("dependencies")
+        .and_then(|dependencies| dependencies.get("zephium-agentic"))
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| "agent provider transport façade dependency is missing".to_owned())?;
+    if dependency.get("workspace").and_then(toml::Value::as_bool) != Some(true)
+        || dependency.len() != 1
+    {
+        return Err(
+            "agent provider transport façade must not activate runtime authority implicitly"
+                .to_owned(),
+        );
+    }
+
+    let root = compact(root);
+    for required in [
+        "#[cfg(feature=\"provider-transport\")]pubusezephium_agentic::{",
+        "AgentProviderTransport,",
+        "AgentProviderPolicySettlement,",
+        "AgentProviderSettledTerminal,",
+    ] {
+        if !root.contains(required) {
+            return Err(format!(
+                "agent provider transport façade lost safe re-export {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "reqwest::",
+        "AgentCommittedProviderRequest",
+        "AgentProviderFinishedStream",
+        "AgentProviderStreamDecoder",
+        "AgentProviderContinuationSeed",
+        "fnfinish(",
+        "fncommit(",
+    ] {
+        if root.contains(forbidden) {
+            return Err(format!(
+                "agent provider transport façade acquired raw authority {forbidden}"
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -4705,10 +4863,14 @@ fn validate_provider_billing_contract(
         "constANTHROPIC_STANDARD_SERVICE_TIER_RESPONSE:&str=\"standard\";",
         "constANTHROPIC_GLOBAL_INFERENCE_GEO:&str=\"global\";",
         "pubenumAgentProviderBillingClass",
-        "pubconstfnbilling_class(&self)->AgentProviderBillingClass",
-        "pricing:AgentProviderPricingProfile",
-        "pubconstfnpricing_profile(&self)->AgentProviderPricingProfile",
-        "total_input_tokens>self.pricing.max_input_tokens()",
+        "pubenumAgentProviderResponseRoute",
+        "catalog:Arc<AgentProviderCatalogBinding>",
+        "pub(incrate::agent_provider)fnfrom_catalog(",
+        "pubfnbilling_class(&self)->AgentProviderBillingClass",
+        "pubfnpricing_profile(&self)->AgentProviderPricingProfile",
+        "pubfnresponse_route(&self)->AgentProviderResponseRoute",
+        "pubfnaccounting_guard(&self)->[u8;32]",
+        "!self.pricing_profile().contains(total_input_tokens)",
     ] {
         if !root.contains(required) {
             return Err(format!(
@@ -4719,9 +4881,8 @@ fn validate_provider_billing_contract(
 
     let request = compact(request);
     for required in [
-        "service_tier:OPENAI_STANDARD_SERVICE_TIER",
-        "service_tier:ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST",
-        "inference_geo:ANTHROPIC_GLOBAL_INFERENCE_GEO",
+        "service_tier:config.response_route().request_service_tier()",
+        "inference_geo:config.response_route().response_inference_geo()",
     ] {
         if !request.contains(required) {
             return Err(format!(
@@ -4736,18 +4897,22 @@ fn validate_provider_billing_contract(
     }
 
     let openai = compact(openai);
-    if !openai.contains("event.response.service_tier!=OPENAI_STANDARD_SERVICE_TIER") {
-        return Err("OpenAI decoder lost terminal billing-class attestation".to_owned());
+    for required in [
+        "event.response.service_tier!=self.config.response_route().response_service_tier()",
+        "AgentProviderResponseIdentity::try_attested(&self.config,event.response.model,event.response.service_tier,None,)",
+    ] {
+        if !openai.contains(required) {
+            return Err(format!(
+                "OpenAI decoder lost catalog-bound response attestation {required}"
+            ));
+        }
     }
 
     let anthropic = compact(anthropic);
-    for required in [
-        "usage.service_tier!=ANTHROPIC_STANDARD_SERVICE_TIER_RESPONSE",
-        "usage.inference_geo!=ANTHROPIC_GLOBAL_INFERENCE_GEO",
-    ] {
+    for required in ["AgentProviderResponseIdentity::try_attested(&self.config,event.message.model,event.message.usage.service_tier,Some(event.message.usage.inference_geo),)"] {
         if !anthropic.contains(required) {
             return Err(format!(
-                "Anthropic decoder lost terminal billing-class attestation {required}"
+                "Anthropic decoder lost catalog-bound response attestation {required}"
             ));
         }
     }
@@ -4757,24 +4922,23 @@ fn validate_provider_billing_contract(
 fn validate_provider_pricing_contract(
     pricing: &str,
     policy: &str,
-    transport: &str,
+    settlement: &str,
 ) -> Result<(), String> {
     let pricing = compact(pricing);
     for required in [
-        "pubstructAgentProviderPricingSchedule",
-        "config.provider()!=self.provider",
-        "config.billing_class()!=self.billing_class",
-        "config.model()!=&self.model",
-        "config.tokenizer()!=&self.tokenizer",
-        "config.pricing_profile()!=self.profile",
-        "usage.input_tokens()>self.profile.max_input_tokens",
+        "pubstructAgentProviderPricingSchedule{binding:Arc<AgentProviderCatalogBinding>",
+        "fnexact_binding_matches(&self,config:&AgentProviderCallConfig)->bool",
+        "config.accounting_guard()==self.binding.guard",
+        "config.catalog.as_ref()==self.binding.as_ref()",
+        "!self.binding.matches_response_identity(identity)",
+        "!self.binding.profile.contains(usage.input_tokens())",
         ".checked_add(usage.cache_write_input_tokens())",
         ".checked_sub(priced_input_subsets)",
         "u64::try_from(rounded)",
-        "pubstructAgentProviderPricedUsage",
+        "pub(crate)structAgentProviderPricedUsage",
         "pubstructAgentProviderPricingAttribution",
         "schedule_guard:[u8;32]",
-        "AgentProviderPricingAttribution",
+        "response_identity_guard:[u8;32]",
     ] {
         if !pricing.contains(required) {
             return Err(format!(
@@ -4786,7 +4950,8 @@ fn validate_provider_pricing_contract(
     let policy = compact(policy);
     for required in [
         "PricedCeiling",
-        "pubfnsettle_model_call_priced(",
+        "pub(crate)fnsettle_model_call_priced(",
+        "pub(crate)fnprevalidate_active_model_call(",
         "AgentModelUsageAccounting::PricedCeiling",
         "pricing_attribution:Option<AgentProviderPricingAttribution>",
         "pricing_attribution:Some(pricing_attribution)",
@@ -4798,20 +4963,25 @@ fn validate_provider_pricing_contract(
         }
     }
 
-    let transport = compact(transport);
+    let settlement = compact(settlement);
     for required in [
         "schedule:&AgentProviderPricingSchedule",
-        ".settle_model_call_priced(self.active,self.settlement,priced)",
+        "policy.prevalidate_active_model_call(&self.active)",
+        "!schedule.exact_binding_matches(&self.config)",
+        "schedule.try_price(&self.config,self.identity,self.usage)",
+        ".settle_model_call_priced(active,settlement,priced)",
+        "pubfnsettle_at_reservation_ceiling(",
+        "AgentModelCallUnaccountedSettlement::ProviderFailed",
         "unsettled:Box<AgentProviderPricingSettlement>",
         "pubfninto_unsettled(self)->Option<AgentProviderPricingSettlement>",
     ] {
-        if !transport.contains(required) {
+        if !settlement.contains(required) {
             return Err(format!(
-                "agent provider transport lost price-authority join {required}"
+                "agent provider settlement lost price-authority join {required}"
             ));
         }
     }
-    if transport.contains("pubfnsettle(self,policy:&mutAgentRunPolicy,cost_micro_usd:u64)") {
+    if settlement.contains("pubfnsettle(self,policy:&mutAgentRunPolicy,cost_micro_usd:u64)") {
         return Err("agent provider settlement regained an unbound raw-cost handoff".to_owned());
     }
     Ok(())
@@ -5875,8 +6045,11 @@ fn validate_semantic_extraction_provider_contract(
     for required in [
         "try_reserve_exact(MAX_SEMANTIC_EXTRACTION_INPUT_BYTES)",
         "ifself.failed||batch.call()!=self.call",
-        "AgentProviderStreamEvent::ToolCall(_)",
         ".checked_add(delta.len()).filter(|bytes|*bytes<=MAX_SEMANTIC_EXTRACTION_INPUT_BYTES)",
+        "terminal:&AgentProviderSettledTerminal",
+        "terminal.receipt().settlement()!=AgentModelCallSettlement::Completed",
+        "terminal.receipt().pricing_attribution().is_none()",
+        "terminal.has_tool_turn()",
         "completion.stop()!=AgentProviderStopReason::Completed",
         "completion.stats().tool_calls()!=0",
         "completion.stats().tool_argument_bytes()!=0",
@@ -6743,7 +6916,7 @@ fn validate_provider_input_evidence_contract(
         "fnvalidate_diff_request(",
         "structured_input.quality()!=crate::SemanticTokenCountQuality::ExactLocal",
         "u64::from(structured_input.tokens())>allowed_input_tokens",
-        "u64::from(structured_input.tokens())>self.pricing.max_input_tokens()",
+        "!self.pricing_profile().contains(u64::from(structured_input.tokens()))",
     ] {
         if !provider.contains(required) {
             return Err(format!(
@@ -7815,7 +7988,9 @@ fn validate_agentic_zero_idle_sources(repository: &Path) -> Result<(), String> {
             || path
                 .file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| AGENTIC_DIAGNOSTIC_MODULES.contains(&name))
+                .is_some_and(|name| {
+                    AGENTIC_DIAGNOSTIC_MODULES.contains(&name) || name == "provider_transport.rs"
+                })
         {
             continue;
         }
@@ -7964,13 +8139,12 @@ fn validate_release_graph(metadata: &CargoMetadata) -> Result<(), String> {
                 );
             }
             if package == *agentic
-                && node
-                    .features
-                    .iter()
-                    .any(|feature| feature == "probe-harness")
+                && node.features.iter().any(|feature| {
+                    matches!(feature.as_str(), "probe-harness" | "provider-transport")
+                })
             {
                 return Err(
-                    "ordinary zephium-desktop release graph activates agentic probe-harness"
+                    "ordinary zephium-desktop release graph activates an opt-in agentic runtime"
                         .to_owned(),
                 );
             }
@@ -8859,6 +9033,18 @@ mod tests {
             .features
             .push("probe-harness".to_owned());
         assert!(validate_release_graph(&direct).is_err());
+        let mut provider_runtime = metadata(vec!["agentic".to_owned()]);
+        provider_runtime
+            .resolve
+            .as_mut()
+            .expect("resolve")
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "agentic")
+            .expect("agentic")
+            .features
+            .push("provider-transport".to_owned());
+        assert!(validate_release_graph(&provider_runtime).is_err());
         let mut transitive = metadata(vec!["engine".to_owned()]);
         transitive
             .resolve
@@ -8890,6 +9076,8 @@ mod tests {
         let valid = r#"
             #[cfg(all(feature = "probe-harness", not(debug_assertions)))]
             compile_error!("the agentic probe harness is forbidden in optimized builds");
+            #[cfg(feature = "provider-transport")]
+            mod provider_transport;
             #[cfg(feature = "probe-harness")]
             mod contract;
             #[cfg(feature = "probe-harness")]
@@ -10166,7 +10354,7 @@ mod tests {
             fn validate_diff_request() {
                 structured_input.quality() != crate::SemanticTokenCountQuality::ExactLocal;
                 u64::from(structured_input.tokens()) > allowed_input_tokens;
-                u64::from(structured_input.tokens()) > self.pricing.max_input_tokens();
+                !self.pricing_profile().contains(u64::from(structured_input.tokens()));
             }
         "#;
         let policy = r#"
@@ -10950,6 +11138,7 @@ mod tests {
             publish = false
             [features]
             default = []
+            provider-transport = ["dep:futures-util", "dep:reqwest", "dep:tokio", "dep:zeroize", "dep:security-framework", "dep:security-framework-sys"]
             probe-harness = []
             [[bin]]
             name = "windows-agentic-input-evidence-review"
@@ -10962,16 +11151,27 @@ mod tests {
             [dependencies]
             base64 = "0.22"
             crc32fast = "1"
+            futures-util = { version = "1", optional = true }
+            reqwest = { version = "1", optional = true }
             serde = "1"
             serde_json = "1"
             sha2 = "1"
             thiserror = "2"
+            tokio = { version = "1", optional = true }
             ulid = "1"
             url = "2"
+            zeroize = { version = "1", optional = true }
             zephium-core = "1"
+            [target.'cfg(target_os = "macos")'.dependencies]
+            security-framework = { version = "1", optional = true }
+            security-framework-sys = { version = "1", optional = true }
         "#;
         validate_manifest(manifest).expect("closed functional-core manifest");
-        assert!(validate_manifest(&format!("{manifest}\ntokio = \"1\"")).is_err());
+        assert!(validate_manifest(&manifest.replace(
+            "tokio = { version = \"1\", optional = true }",
+            "tokio = \"1\""
+        ))
+        .is_err());
         assert!(
             validate_manifest(&manifest.replace("default = []", "default = [\"runtime\"]"))
                 .is_err()
@@ -10990,9 +11190,16 @@ mod tests {
         let manifest = r#"
             [package]
             publish = false
+            [features]
+            provider-transport = ["dep:futures-util", "dep:reqwest", "dep:tokio", "dep:zeroize", "dep:security-framework", "dep:security-framework-sys"]
             [dependencies]
-            reqwest = { version = "=0.13.4", default-features = false, features = ["http2", "rustls", "stream", "system-proxy"] }
-            tokio = { workspace = true, features = ["sync", "time"] }
+            futures-util = { version = "=0.3.32", optional = true }
+            reqwest = { version = "=0.13.4", default-features = false, features = ["http2", "rustls", "stream", "system-proxy"], optional = true }
+            tokio = { workspace = true, features = ["sync", "time"], optional = true }
+            zeroize = { version = "=1.9.0", optional = true }
+            [target.'cfg(target_os = "macos")'.dependencies]
+            security-framework = { version = "=3.7.0", optional = true }
+            security-framework-sys = { version = "=2.17.0", optional = true }
         "#;
         validate_provider_transport_manifest(manifest).expect("valid transport manifest");
         assert!(
@@ -11043,8 +11250,40 @@ mod tests {
     }
 
     #[test]
-    fn provider_transport_disclosure_commit_is_linearized_with_cancellation() {
+    fn provider_transport_facade_is_opt_in_and_authority_free() {
+        let manifest = include_str!("../../crates/zephium-agent-provider-transport/Cargo.toml");
         let root = include_str!("../../crates/zephium-agent-provider-transport/src/lib.rs");
+        validate_provider_transport_facade(manifest, root).expect("safe provider transport facade");
+
+        for invalid_manifest in [
+            manifest.replacen("publish = false", "publish = true", 1),
+            manifest.replacen("default = []", "default = [\"provider-transport\"]", 1),
+            manifest.replacen(
+                "provider-transport = [\"zephium-agentic/provider-transport\"]",
+                "provider-transport = []",
+                1,
+            ),
+            manifest.replacen(
+                "zephium-agentic.workspace = true",
+                "zephium-agentic = { workspace = true, features = [\"provider-transport\"] }",
+                1,
+            ),
+        ] {
+            assert!(validate_provider_transport_facade(&invalid_manifest, root).is_err());
+        }
+
+        for invalid_root in [
+            root.replacen("AgentProviderTransport,", "AgentProviderTransportInput,", 1),
+            format!("{root}\npub use reqwest::Client;"),
+            format!("{root}\npub fn finish() {{}}"),
+        ] {
+            assert!(validate_provider_transport_facade(manifest, &invalid_root).is_err());
+        }
+    }
+
+    #[test]
+    fn provider_transport_disclosure_commit_is_linearized_with_cancellation() {
+        let root = include_str!("../../crates/zephium-agentic/src/provider_transport.rs");
         validate_provider_transport_commit_boundary(root)
             .expect("provider transport disclosure commit boundary");
 
@@ -11087,7 +11326,7 @@ mod tests {
 
     #[test]
     fn provider_batch_consumer_panic_is_contained_and_fail_stopped() {
-        let transport = include_str!("../../crates/zephium-agent-provider-transport/src/lib.rs");
+        let transport = include_str!("../../crates/zephium-agentic/src/provider_transport.rs");
         let provider = include_str!("../../crates/zephium-agentic/src/agent_provider.rs");
         validate_provider_consumer_panic_boundary(transport, provider)
             .expect("provider consumer panic boundary");
@@ -11113,7 +11352,7 @@ mod tests {
 
     #[test]
     fn provider_transport_bounds_decoded_headers_before_status_or_body() {
-        let root = include_str!("../../crates/zephium-agent-provider-transport/src/lib.rs");
+        let root = include_str!("../../crates/zephium-agentic/src/provider_transport.rs");
         validate_provider_transport_response_header_boundary(root)
             .expect("provider transport response-header boundary");
 
@@ -11165,7 +11404,7 @@ mod tests {
 
     #[test]
     fn provider_transport_pins_http2_ingress_flow_control_and_frames() {
-        let root = include_str!("../../crates/zephium-agent-provider-transport/src/lib.rs");
+        let root = include_str!("../../crates/zephium-agentic/src/provider_transport.rs");
         validate_provider_transport_http2_ingress_boundary(root)
             .expect("provider transport HTTP/2 ingress boundary");
 
@@ -11207,7 +11446,7 @@ mod tests {
 
     #[test]
     fn provider_transport_shutdown_proof_requires_sticky_seal_and_exact_idle() {
-        let root = include_str!("../../crates/zephium-agent-provider-transport/src/lib.rs");
+        let root = include_str!("../../crates/zephium-agentic/src/provider_transport.rs");
         validate_provider_transport_shutdown_contract(root)
             .expect("provider transport shutdown proof boundary");
 
@@ -11266,23 +11505,41 @@ mod tests {
             const ANTHROPIC_STANDARD_SERVICE_TIER_RESPONSE: &str = "standard";
             const ANTHROPIC_GLOBAL_INFERENCE_GEO: &str = "global";
             pub enum AgentProviderBillingClass {}
-            struct Config { pricing: AgentProviderPricingProfile }
-            pub const fn billing_class(&self) -> AgentProviderBillingClass {}
-            pub const fn pricing_profile(&self) -> AgentProviderPricingProfile {}
-            if total_input_tokens > self.pricing.max_input_tokens() {}
+            pub enum AgentProviderResponseRoute {}
+            struct Config { catalog: Arc<AgentProviderCatalogBinding> }
+            pub(in crate::agent_provider) fn from_catalog() {}
+            pub fn billing_class(&self) -> AgentProviderBillingClass {}
+            pub fn pricing_profile(&self) -> AgentProviderPricingProfile {}
+            pub fn response_route(&self) -> AgentProviderResponseRoute {}
+            pub fn accounting_guard(&self) -> [u8; 32] {}
+            if !self.pricing_profile().contains(total_input_tokens) {}
         "#;
         let request = r#"
-            OpenAiRequestWire { service_tier: OPENAI_STANDARD_SERVICE_TIER };
+            OpenAiRequestWire {
+                service_tier: config.response_route().request_service_tier()
+            };
             AnthropicRequestWire {
-                service_tier: ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST,
-                inference_geo: ANTHROPIC_GLOBAL_INFERENCE_GEO,
+                service_tier: config.response_route().request_service_tier(),
+                inference_geo: config.response_route().response_inference_geo(),
             };
         "#;
-        let openai =
-            "if event.response.service_tier != OPENAI_STANDARD_SERVICE_TIER { return Err(()); }";
+        let openai = r#"
+            if event.response.service_tier
+                != self.config.response_route().response_service_tier() {}
+            AgentProviderResponseIdentity::try_attested(
+                &self.config,
+                event.response.model,
+                event.response.service_tier,
+                None,
+            );
+        "#;
         let anthropic = r#"
-            if usage.service_tier != ANTHROPIC_STANDARD_SERVICE_TIER_RESPONSE
-                || usage.inference_geo != ANTHROPIC_GLOBAL_INFERENCE_GEO {}
+            AgentProviderResponseIdentity::try_attested(
+                &self.config,
+                event.message.model,
+                event.message.usage.service_tier,
+                Some(event.message.usage.inference_geo),
+            );
         "#;
 
         validate_provider_billing_contract(root, request, openai, anthropic)
@@ -11308,18 +11565,23 @@ mod tests {
     #[test]
     fn provider_pricing_requires_checked_identity_range_and_move_only_join() {
         let pricing = r#"
-            pub struct AgentProviderPricingSchedule;
-            if config.provider() != self.provider
-                || config.billing_class() != self.billing_class
-                || config.model() != &self.model
-                || config.tokenizer() != &self.tokenizer
-                || config.pricing_profile() != self.profile {}
-            if usage.input_tokens() > self.profile.max_input_tokens {}
+            pub struct AgentProviderPricingSchedule {
+                binding: Arc<AgentProviderCatalogBinding>,
+            }
+            fn exact_binding_matches(&self, config: &AgentProviderCallConfig) -> bool {
+                config.accounting_guard() == self.binding.guard
+                    && config.catalog.as_ref() == self.binding.as_ref()
+            }
+            if !self.binding.matches_response_identity(identity) {}
+            if !self.binding.profile.contains(usage.input_tokens()) {}
             usage.cached_input_tokens().checked_add(usage.cache_write_input_tokens());
             usage.input_tokens().checked_sub(priced_input_subsets);
             u64::try_from(rounded);
-            pub struct AgentProviderPricedUsage;
-            pub struct AgentProviderPricingAttribution { schedule_guard: [u8; 32] }
+            pub(crate) struct AgentProviderPricedUsage;
+            pub struct AgentProviderPricingAttribution {
+                schedule_guard: [u8; 32],
+                response_identity_guard: [u8; 32],
+            }
             fn retain(value: AgentProviderPricingAttribution) {}
         "#;
         let policy = r#"
@@ -11327,36 +11589,43 @@ mod tests {
             struct Receipt {
                 pricing_attribution: Option<AgentProviderPricingAttribution>,
             }
-            pub fn settle_model_call_priced() {
+            pub(crate) fn prevalidate_active_model_call() {}
+            pub(crate) fn settle_model_call_priced() {
                 AgentModelUsageAccounting::PricedCeiling;
                 Receipt { pricing_attribution: Some(pricing_attribution) };
             }
         "#;
-        let transport = r#"
+        let settlement = r#"
             pub fn settle(
                 self,
                 policy: &mut AgentRunPolicy,
                 schedule: &AgentProviderPricingSchedule,
             ) {
-                policy.settle_model_call_priced(self.active, self.settlement, priced);
+                policy.prevalidate_active_model_call(&self.active);
+                if !schedule.exact_binding_matches(&self.config) {}
+                schedule.try_price(&self.config, self.identity, self.usage);
+                policy.settle_model_call_priced(active, settlement, priced);
+            }
+            pub fn settle_at_reservation_ceiling() {
+                AgentModelCallUnaccountedSettlement::ProviderFailed;
             }
             struct Error { unsettled: Box<AgentProviderPricingSettlement> }
             pub fn into_unsettled(self) -> Option<AgentProviderPricingSettlement> {}
         "#;
 
-        validate_provider_pricing_contract(pricing, policy, transport)
+        validate_provider_pricing_contract(pricing, policy, settlement)
             .expect("valid checked pricing boundary");
         assert!(validate_provider_pricing_contract(
-            &pricing.replace("config.tokenizer() != &self.tokenizer", "true"),
+            &pricing.replace("config.catalog.as_ref() == self.binding.as_ref()", "true"),
             policy,
-            transport,
+            settlement,
         )
         .is_err());
         assert!(validate_provider_pricing_contract(
             pricing,
             policy,
             &format!(
-                "{transport}\npub fn settle(self, policy: &mut AgentRunPolicy, cost_micro_usd: u64) {{}}"
+                "{settlement}\npub fn settle(self, policy: &mut AgentRunPolicy, cost_micro_usd: u64) {{}}"
             ),
         )
         .is_err());

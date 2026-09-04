@@ -380,6 +380,7 @@ pub struct AgentPricingScheduleMetrics {
     billing_class: AgentProviderBillingClass,
     pricing_revision: AgentProviderPricingRevision,
     schedule_guard: [u8; 32],
+    response_identity_guard: [u8; 32],
     calls: u32,
     input_tokens: u64,
     output_tokens: u64,
@@ -408,6 +409,11 @@ impl AgentPricingScheduleMetrics {
     /// Digest of the exact provider/model/tokenizer/profile/rate schedule.
     pub const fn schedule_guard(self) -> [u8; 32] {
         self.schedule_guard
+    }
+
+    /// Digest of the provider-attested effective model and response route.
+    pub const fn response_identity_guard(self) -> [u8; 32] {
+        self.response_identity_guard
     }
 
     /// Calls priced under this exact schedule.
@@ -454,6 +460,7 @@ impl AgentPricingScheduleMetrics {
             billing_class: attribution.billing_class(),
             pricing_revision: attribution.pricing_revision(),
             schedule_guard: attribution.schedule_guard(),
+            response_identity_guard: attribution.response_identity_guard(),
             calls: 1,
             input_tokens: receipt.input_tokens(),
             output_tokens: receipt.output_tokens(),
@@ -469,14 +476,16 @@ impl AgentPricingScheduleMetrics {
             && self.billing_class == attribution.billing_class()
             && self.pricing_revision == attribution.pricing_revision()
             && self.schedule_guard == attribution.schedule_guard()
+            && self.response_identity_guard == attribution.response_identity_guard()
     }
 
-    fn key(self) -> (u8, u8, u64, [u8; 32]) {
+    fn key(self) -> (u8, u8, u64, [u8; 32], [u8; 32]) {
         (
             provider_index(self.provider),
             billing_index(self.billing_class),
             self.pricing_revision.value(),
             self.schedule_guard,
+            self.response_identity_guard,
         )
     }
 
@@ -518,6 +527,7 @@ impl fmt::Debug for AgentPricingScheduleMetrics {
             .field("billing_class", &self.billing_class)
             .field("pricing_revision", &self.pricing_revision)
             .field("schedule_guard", &"[redacted]")
+            .field("response_identity_guard", &"[redacted]")
             .field("calls", &self.calls)
             .field("input_tokens", &self.input_tokens)
             .field("output_tokens", &self.output_tokens)
@@ -877,12 +887,15 @@ fn add_u64(left: u64, right: u64) -> Result<u64, AgentMetricError> {
     left.checked_add(right).ok_or(AgentMetricError::Overflow)
 }
 
-fn attribution_key(attribution: AgentProviderPricingAttribution) -> (u8, u8, u64, [u8; 32]) {
+fn attribution_key(
+    attribution: AgentProviderPricingAttribution,
+) -> (u8, u8, u64, [u8; 32], [u8; 32]) {
     (
         provider_index(attribution.provider()),
         billing_index(attribution.billing_class()),
         attribution.pricing_revision().value(),
         attribution.schedule_guard(),
+        attribution.response_identity_guard(),
     )
 }
 
@@ -954,11 +967,10 @@ mod tests {
     use crate::{
         AgentAccountScope, AgentDelegationSpec, AgentDelegationTopology, AgentEffectScope,
         AgentPlanLeaseId, AgentPlanNodeAuthority, AgentPlanNodeScope, AgentPolicyInstant,
-        AgentProviderCallConfig, AgentProviderModelRevision, AgentProviderPricingProfile,
-        AgentProviderPricingSchedule, AgentProviderReasoningEffort, AgentProviderStreamBudget,
-        AgentProviderTokenRates, AgentProviderUsage, AgentRunBudget, AgentRunScope,
-        AgentSupervisorAttemptId, ContextRunId, SemanticOrigin, SemanticSensitivity,
-        SemanticTokenizerRevision,
+        AgentProviderModelRevision, AgentProviderPricingProfile, AgentProviderPricingSchedule,
+        AgentProviderReasoningEffort, AgentProviderStreamBudget, AgentProviderTokenRates,
+        AgentProviderUsage, AgentRunBudget, AgentRunScope, AgentSupervisorAttemptId, ContextRunId,
+        SemanticOrigin, SemanticSensitivity, SemanticTokenizerRevision,
     };
     use zephium_core::ids::ProfileId;
 
@@ -1085,26 +1097,31 @@ mod tests {
             10_000,
         )
         .expect("profile");
-        let config = AgentProviderCallConfig::try_new(
-            provider,
-            model.clone(),
-            AgentProviderReasoningEffort::None,
-            tokenizer.clone(),
-            profile,
-            1,
-            1_000,
-            AgentProviderStreamBudget::STANDARD,
-        )
-        .expect("config");
-        let schedule = AgentProviderPricingSchedule::new(
+        let reasoning = AgentProviderReasoningEffort::None;
+        let schedule = AgentProviderPricingSchedule::try_for_test(
             provider,
             model,
+            reasoning,
             tokenizer,
             profile,
             AgentProviderTokenRates::try_new(1_000_000, 1_000_000, 1_000_000, 1_000_000)
                 .expect("rates"),
-        );
-        let priced = schedule.try_price(&config, usage).expect("price");
+        )
+        .expect("schedule");
+        let config = schedule
+            .try_call_config(1, 1_000, AgentProviderStreamBudget::STANDARD)
+            .expect("config");
+        let route = config.response_route();
+        let identity = crate::AgentProviderResponseIdentity::try_attested(
+            &config,
+            config.model().as_str(),
+            route.response_service_tier(),
+            route.response_inference_geo(),
+        )
+        .expect("identity");
+        let priced = schedule
+            .try_price_for_test(&config, identity, usage)
+            .expect("price");
         let guard = priced.schedule_guard();
         let (_, cost, attribution) = priced.into_policy_parts();
         (attribution, cost, guard)

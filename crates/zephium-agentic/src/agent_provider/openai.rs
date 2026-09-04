@@ -24,12 +24,11 @@ use super::tool::{
 use super::{
     AgentBrowserToolCall, AgentBrowserToolCallId, AgentBrowserToolKind, AgentProviderCallConfig,
     AgentProviderCallIdentity, AgentProviderCompletion, AgentProviderFailure,
-    AgentProviderFailureClass, AgentProviderKind, AgentProviderModelRevision,
-    AgentProviderProtocolError, AgentProviderReasoningEffort, AgentProviderResponseIdentity,
-    AgentProviderStopReason, AgentProviderStreamBatch, AgentProviderStreamBudget,
-    AgentProviderStreamConclusion, AgentProviderStreamEvent, AgentProviderStreamStats,
-    AgentProviderTerminalFailure, AgentProviderTextDelta, AgentProviderUsage,
-    OPENAI_STANDARD_SERVICE_TIER,
+    AgentProviderFailureClass, AgentProviderFinishedStream, AgentProviderKind,
+    AgentProviderProtocolError, AgentProviderResponseIdentity, AgentProviderStopReason,
+    AgentProviderStreamBatch, AgentProviderStreamBudget, AgentProviderStreamConclusion,
+    AgentProviderStreamStats, AgentProviderTerminalFailure, AgentProviderTextDelta,
+    AgentProviderUsage,
 };
 
 const MAX_OPENAI_RESPONSE_ID_BYTES: usize = 128;
@@ -103,6 +102,35 @@ enum OutputItemAccumulator {
     },
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ContentPartKind {
+    OutputText,
+    Refusal,
+}
+
+struct ContentPartAccumulator {
+    item_id: String,
+    output_index: usize,
+    content_index: usize,
+    kind: ContentPartKind,
+    output_done: bool,
+    part_done: bool,
+}
+
+enum PendingTerminal {
+    Completed {
+        stop: AgentProviderStopReason,
+        usage: AgentProviderUsage,
+        tool_only_output: bool,
+        identity: AgentProviderResponseIdentity,
+    },
+    Failed {
+        failure: AgentProviderFailure,
+        usage: Option<AgentProviderUsage>,
+        identity: AgentProviderResponseIdentity,
+    },
+}
+
 /// Single-owner incremental decoder for one OpenAI Responses SSE body.
 ///
 /// The HTTP shell supplies arbitrary byte chunks and must call `finish` once
@@ -110,21 +138,23 @@ enum OutputItemAccumulator {
 /// failure is returned as a typed conclusion rather than being confused with
 /// malformed wire data.
 #[must_use]
-pub struct OpenAiResponsesStreamDecoder {
+pub(super) struct OpenAiResponsesStreamDecoder {
     call: AgentProviderCallIdentity,
-    requested_model: AgentProviderModelRevision,
-    reasoning_effort: AgentProviderReasoningEffort,
+    config: AgentProviderCallConfig,
     budget: AgentProviderStreamBudget,
     sse: SseDecoder,
     phase: StreamPhase,
     response_id: Option<String>,
     response_identity: Option<AgentProviderResponseIdentity>,
+    saw_in_progress: bool,
     output: OutputState,
+    content_part: Option<ContentPartAccumulator>,
     output_items: Vec<OutputItemAccumulator>,
     tools: Vec<ToolAccumulator>,
     tool_argument_bytes: u32,
     encrypted_reasoning_bytes: usize,
-    conclusion: Option<AgentProviderStreamConclusion>,
+    terminal: Option<PendingTerminal>,
+    saw_done: bool,
     failure: Option<AgentProviderProtocolError>,
 }
 
@@ -139,8 +169,7 @@ impl OpenAiResponsesStreamDecoder {
         }
         Ok(Self {
             call,
-            requested_model: config.model().clone(),
-            reasoning_effort: config.reasoning_effort(),
+            config: config.clone(),
             budget: config.stream_budget(),
             sse: SseDecoder::new(
                 config.stream_budget().max_events(),
@@ -149,18 +178,21 @@ impl OpenAiResponsesStreamDecoder {
             phase: StreamPhase::AwaitCreated,
             response_id: None,
             response_identity: None,
+            saw_in_progress: false,
             output: OutputState::None,
+            content_part: None,
             output_items: Vec::with_capacity(MAX_OPENAI_TERMINAL_OUTPUT_ITEMS),
             tools: Vec::with_capacity(usize::from(config.stream_budget().max_tool_calls())),
             tool_argument_bytes: 0,
             encrypted_reasoning_bytes: 0,
-            conclusion: None,
+            terminal: None,
+            saw_done: false,
             failure: None,
         })
     }
 
     /// Decodes one arbitrary transport chunk into bounded normalized events.
-    pub fn push(
+    pub(super) fn push(
         &mut self,
         bytes: &[u8],
     ) -> Result<AgentProviderStreamBatch, AgentProviderProtocolError> {
@@ -188,36 +220,82 @@ impl OpenAiResponsesStreamDecoder {
     }
 
     /// Requires complete SSE framing and exactly one terminal provider event.
-    pub fn finish(self) -> Result<AgentProviderStreamConclusion, AgentProviderProtocolError> {
+    pub(super) fn finish(
+        mut self,
+    ) -> Result<AgentProviderFinishedStream, AgentProviderProtocolError> {
         if let Some(error) = self.failure {
             return Err(error);
         }
+        let stats = self.stats();
         self.sse.finish()?;
         if self.phase != StreamPhase::Terminal {
             return Err(AgentProviderProtocolError::Terminal);
         }
-        let conclusion = self
-            .conclusion
+        let terminal = self
+            .terminal
+            .take()
             .ok_or(AgentProviderProtocolError::Terminal)?;
-        if matches!(conclusion, AgentProviderStreamConclusion::Completed(_))
-            && !self.output.is_done()
-        {
-            return Err(AgentProviderProtocolError::Terminal);
-        }
-        Ok(conclusion)
+        let (conclusion, tool) = match terminal {
+            PendingTerminal::Completed {
+                stop,
+                usage,
+                tool_only_output,
+                identity,
+            } => {
+                if !self.output.is_done() {
+                    return Err(AgentProviderProtocolError::Terminal);
+                }
+                let tool = if stop == AgentProviderStopReason::ToolCalls {
+                    Some(
+                        self.tools
+                            .first_mut()
+                            .and_then(|tool| tool.call.take())
+                            .ok_or(AgentProviderProtocolError::Terminal)?,
+                    )
+                } else {
+                    None
+                };
+                (
+                    AgentProviderStreamConclusion::Completed(
+                        AgentProviderCompletion::new_with_response_identity(
+                            self.call,
+                            stop,
+                            usage,
+                            stats,
+                            tool_only_output,
+                            identity,
+                        ),
+                    ),
+                    tool,
+                )
+            }
+            PendingTerminal::Failed {
+                failure,
+                usage,
+                identity,
+            } => (
+                AgentProviderStreamConclusion::Failed(
+                    AgentProviderTerminalFailure::new_with_response_identity(
+                        self.call, failure, usage, stats, identity,
+                    ),
+                ),
+                None,
+            ),
+        };
+        AgentProviderFinishedStream::new(conclusion, tool)
     }
 
     fn handle_event(
         &mut self,
         event: SseEvent,
-        output: &mut Vec<AgentProviderStreamEvent>,
+        output: &mut Vec<AgentProviderTextDelta>,
     ) -> Result<(), AgentProviderProtocolError> {
         if event.data() == "[DONE]" {
-            return if self.phase == StreamPhase::Terminal {
-                Ok(())
-            } else {
-                Err(AgentProviderProtocolError::Terminal)
-            };
+            if self.phase != StreamPhase::Terminal || self.saw_done {
+                return Err(AgentProviderProtocolError::Terminal);
+            }
+            self.saw_done = true;
+            return Ok(());
         }
         let kind = parse_event_type(event.data())?;
         if event.event() != kind {
@@ -243,7 +321,7 @@ impl OpenAiResponsesStreamDecoder {
                 self.handle_tool_arguments_done(event.data())
             }
             "response.completed" | "response.incomplete" => {
-                self.handle_success_terminal(event.data(), kind, output)
+                self.handle_success_terminal(event.data(), kind)
             }
             "response.failed" | "response.cancelled" => {
                 self.handle_failure_terminal(event.data(), kind)
@@ -267,16 +345,16 @@ impl OpenAiResponsesStreamDecoder {
         let event: ResponseEnvelope<'_> = parse(data)?;
         if event.kind != "response.created"
             || event.response.status != "in_progress"
-            || event.response.service_tier != OPENAI_STANDARD_SERVICE_TIER
+            || event.response.service_tier != self.config.response_route().response_service_tier()
         {
             return Err(AgentProviderProtocolError::Event);
         }
         validate_response_id(event.response.id)?;
-        let identity = AgentProviderResponseIdentity::try_openai(
-            &self.requested_model,
-            self.reasoning_effort,
+        let identity = AgentProviderResponseIdentity::try_attested(
+            &self.config,
             event.response.model,
             event.response.service_tier,
+            None,
         )?;
         self.response_id = Some(event.response.id.to_owned());
         self.response_identity = Some(identity);
@@ -284,8 +362,11 @@ impl OpenAiResponsesStreamDecoder {
         Ok(())
     }
 
-    fn handle_in_progress(&self, data: &str) -> Result<(), AgentProviderProtocolError> {
+    fn handle_in_progress(&mut self, data: &str) -> Result<(), AgentProviderProtocolError> {
         self.require_in_progress()?;
+        if self.saw_in_progress {
+            return Err(AgentProviderProtocolError::Sequence);
+        }
         let event: ResponseEnvelope<'_> = parse(data)?;
         if event.kind != "response.in_progress"
             || event.response.status != "in_progress"
@@ -293,7 +374,9 @@ impl OpenAiResponsesStreamDecoder {
         {
             return Err(AgentProviderProtocolError::Event);
         }
-        self.validate_response_id(event.response.id)
+        self.validate_response_id(event.response.id)?;
+        self.saw_in_progress = true;
+        Ok(())
     }
 
     fn handle_output_item(&mut self, data: &str) -> Result<(), AgentProviderProtocolError> {
@@ -357,6 +440,10 @@ impl OpenAiResponsesStreamDecoder {
             || item.arguments.is_some()
             || item.summary.is_some()
             || item.encrypted_content.is_some()
+            || self
+                .output_items
+                .iter()
+                .any(|item| matches!(item, OutputItemAccumulator::Message { .. }))
             || self.output_item_id_exists(item_id)
         {
             return Err(AgentProviderProtocolError::Sequence);
@@ -391,6 +478,12 @@ impl OpenAiResponsesStreamDecoder {
             || item.arguments.is_some()
             || item.summary.is_some()
             || item.encrypted_content.is_some()
+            || self.content_part.as_ref().is_none_or(|part| {
+                part.item_id != item_id
+                    || part.output_index != output_index
+                    || !part.output_done
+                    || !part.part_done
+            })
         {
             return Err(AgentProviderProtocolError::Sequence);
         }
@@ -577,7 +670,7 @@ impl OpenAiResponsesStreamDecoder {
         Ok(())
     }
 
-    fn handle_content_part(&self, data: &str) -> Result<(), AgentProviderProtocolError> {
+    fn handle_content_part(&mut self, data: &str) -> Result<(), AgentProviderProtocolError> {
         self.require_in_progress()?;
         let event: ContentPartEnvelope<'_> = parse(data)?;
         if !matches!(
@@ -586,9 +679,53 @@ impl OpenAiResponsesStreamDecoder {
         ) {
             return Err(AgentProviderProtocolError::Event);
         }
-        match event.part.kind {
-            "output_text" | "refusal" => Ok(()),
-            _ => Err(AgentProviderProtocolError::UnsupportedOutput),
+        let kind = match event.part.kind {
+            "output_text" => ContentPartKind::OutputText,
+            "refusal" => ContentPartKind::Refusal,
+            _ => return Err(AgentProviderProtocolError::UnsupportedOutput),
+        };
+        match event.kind {
+            "response.content_part.added" => {
+                if event.content_index != 0 || self.content_part.is_some() {
+                    return Err(AgentProviderProtocolError::Sequence);
+                }
+                let Some(OutputItemAccumulator::Message {
+                    item_id,
+                    done: false,
+                }) = self.output_items.get(event.output_index)
+                else {
+                    return Err(AgentProviderProtocolError::Sequence);
+                };
+                if item_id != event.item_id {
+                    return Err(AgentProviderProtocolError::Sequence);
+                }
+                self.content_part = Some(ContentPartAccumulator {
+                    item_id: event.item_id.to_owned(),
+                    output_index: event.output_index,
+                    content_index: event.content_index,
+                    kind,
+                    output_done: false,
+                    part_done: false,
+                });
+                Ok(())
+            }
+            "response.content_part.done" => {
+                let Some(part) = self.content_part.as_mut() else {
+                    return Err(AgentProviderProtocolError::Sequence);
+                };
+                if part.item_id != event.item_id
+                    || part.output_index != event.output_index
+                    || part.content_index != event.content_index
+                    || part.kind != kind
+                    || !part.output_done
+                    || part.part_done
+                {
+                    return Err(AgentProviderProtocolError::Sequence);
+                }
+                part.part_done = true;
+                Ok(())
+            }
+            _ => Err(AgentProviderProtocolError::Event),
         }
     }
 
@@ -596,7 +733,7 @@ impl OpenAiResponsesStreamDecoder {
         &mut self,
         data: &str,
         refusal: bool,
-        output: &mut Vec<AgentProviderStreamEvent>,
+        output: &mut Vec<AgentProviderTextDelta>,
     ) -> Result<(), AgentProviderProtocolError> {
         self.require_in_progress()?;
         let event: DeltaEnvelope<'_> = parse(data)?;
@@ -608,6 +745,13 @@ impl OpenAiResponsesStreamDecoder {
         if event.kind != expected {
             return Err(AgentProviderProtocolError::Event);
         }
+        self.validate_content_event(
+            event.item_id,
+            event.output_index,
+            event.content_index,
+            refusal,
+            false,
+        )?;
         let delta_bytes =
             u32::try_from(event.delta.len()).map_err(|_| AgentProviderProtocolError::Limit)?;
         let state = match (&mut self.output, refusal) {
@@ -649,9 +793,7 @@ impl OpenAiResponsesStreamDecoder {
         hash.update(event.delta.as_bytes());
         *bytes = next;
         if !event.delta.is_empty() {
-            output.push(AgentProviderStreamEvent::TextDelta(
-                AgentProviderTextDelta::new(event.delta.into_owned()),
-            ));
+            output.push(AgentProviderTextDelta::new(event.delta.into_owned()));
         }
         Ok(())
     }
@@ -671,6 +813,13 @@ impl OpenAiResponsesStreamDecoder {
         if event.kind != expected {
             return Err(AgentProviderProtocolError::Event);
         }
+        self.validate_content_event(
+            event.item_id,
+            event.output_index,
+            event.content_index,
+            refusal,
+            false,
+        )?;
         let state = match (&mut self.output, refusal) {
             (OutputState::None, false) => {
                 self.output = OutputState::Text {
@@ -707,6 +856,38 @@ impl OpenAiResponsesStreamDecoder {
             return Err(AgentProviderProtocolError::Sequence);
         }
         *done = true;
+        let Some(part) = self.content_part.as_mut() else {
+            return Err(AgentProviderProtocolError::Sequence);
+        };
+        part.output_done = true;
+        Ok(())
+    }
+
+    fn validate_content_event(
+        &self,
+        item_id: &str,
+        output_index: usize,
+        content_index: usize,
+        refusal: bool,
+        require_output_done: bool,
+    ) -> Result<(), AgentProviderProtocolError> {
+        let expected_kind = if refusal {
+            ContentPartKind::Refusal
+        } else {
+            ContentPartKind::OutputText
+        };
+        let Some(part) = self.content_part.as_ref() else {
+            return Err(AgentProviderProtocolError::Sequence);
+        };
+        if part.item_id != item_id
+            || part.output_index != output_index
+            || part.content_index != content_index
+            || part.kind != expected_kind
+            || part.part_done
+            || part.output_done != require_output_done
+        {
+            return Err(AgentProviderProtocolError::Sequence);
+        }
         Ok(())
     }
 
@@ -802,7 +983,6 @@ impl OpenAiResponsesStreamDecoder {
         &mut self,
         data: &str,
         kind: &str,
-        output: &mut Vec<AgentProviderStreamEvent>,
     ) -> Result<(), AgentProviderProtocolError> {
         self.require_in_progress()?;
         if !self.output.is_done()
@@ -828,8 +1008,12 @@ impl OpenAiResponsesStreamDecoder {
             return Err(AgentProviderProtocolError::Event);
         }
         self.validate_response_id(event.response.id)?;
-        let validated_output =
-            validate_terminal_output(&event.response.output, &self.output_items, &self.tools)?;
+        let validated_output = validate_terminal_output(
+            &event.response.output,
+            &self.output_items,
+            self.content_part.as_ref(),
+            &self.tools,
+        )?;
         if !validated_output.kind.matches_state(&self.output) {
             return Err(AgentProviderProtocolError::Sequence);
         }
@@ -859,20 +1043,9 @@ impl OpenAiResponsesStreamDecoder {
                 _ => return Err(AgentProviderProtocolError::Terminal),
             }
         };
-        let stats = self.stats();
         let identity = self
             .response_identity
             .ok_or(AgentProviderProtocolError::Sequence)?;
-        self.conclusion = Some(AgentProviderStreamConclusion::Completed(
-            AgentProviderCompletion::new_with_response_identity(
-                self.call,
-                stop,
-                usage,
-                stats,
-                tool_only_output,
-                identity,
-            ),
-        ));
         if stop == AgentProviderStopReason::ToolCalls {
             let replay = validated_output
                 .replay
@@ -886,15 +1059,12 @@ impl OpenAiResponsesStreamDecoder {
                 .ok_or(AgentProviderProtocolError::Sequence)?
                 .attach_openai_replay(replay);
         }
-        for tool in &mut self.tools {
-            let call = tool
-                .call
-                .take()
-                .ok_or(AgentProviderProtocolError::Sequence)?;
-            if stop == AgentProviderStopReason::ToolCalls {
-                output.push(AgentProviderStreamEvent::ToolCall(call));
-            }
-        }
+        self.terminal = Some(PendingTerminal::Completed {
+            stop,
+            usage,
+            tool_only_output,
+            identity,
+        });
         self.phase = StreamPhase::Terminal;
         Ok(())
     }
@@ -930,15 +1100,14 @@ impl OpenAiResponsesStreamDecoder {
         };
         let failure = AgentProviderFailure::try_new(class, None)
             .map_err(|_| AgentProviderProtocolError::Event)?;
-        let stats = self.stats();
         let identity = self
             .response_identity
             .ok_or(AgentProviderProtocolError::Sequence)?;
-        self.conclusion = Some(AgentProviderStreamConclusion::Failed(
-            AgentProviderTerminalFailure::new_with_response_identity(
-                self.call, failure, usage, stats, identity,
-            ),
-        ));
+        self.terminal = Some(PendingTerminal::Failed {
+            failure,
+            usage,
+            identity,
+        });
         self.phase = StreamPhase::Terminal;
         Ok(())
     }
@@ -953,15 +1122,14 @@ impl OpenAiResponsesStreamDecoder {
         }
         let failure = AgentProviderFailure::try_new(AgentProviderFailureClass::Provider, None)
             .map_err(|_| AgentProviderProtocolError::Event)?;
-        let stats = self.stats();
         let identity = self
             .response_identity
             .ok_or(AgentProviderProtocolError::Sequence)?;
-        self.conclusion = Some(AgentProviderStreamConclusion::Failed(
-            AgentProviderTerminalFailure::new_with_response_identity(
-                self.call, failure, None, stats, identity,
-            ),
-        ));
+        self.terminal = Some(PendingTerminal::Failed {
+            failure,
+            usage: None,
+            identity,
+        });
         self.phase = StreamPhase::Terminal;
         Ok(())
     }
@@ -984,7 +1152,7 @@ impl OpenAiResponsesStreamDecoder {
 
     fn response_identity_matches(&self, model: &str, service_tier: &str) -> bool {
         self.response_identity
-            .is_some_and(|identity| identity.matches_attestation(model, service_tier))
+            .is_some_and(|identity| identity.matches_attestation(model, service_tier, None))
     }
 
     fn stats(&self) -> AgentProviderStreamStats {
@@ -1003,7 +1171,7 @@ impl fmt::Debug for OpenAiResponsesStreamDecoder {
         formatter
             .debug_struct("OpenAiResponsesStreamDecoder")
             .field("call", &self.call)
-            .field("requested_model", &self.requested_model)
+            .field("config", &self.config)
             .field("has_response_identity", &self.response_identity.is_some())
             .field("budget", &self.budget)
             .field("phase", &self.phase)
@@ -1075,6 +1243,10 @@ struct ContentPartEnvelope<'a> {
     #[serde(borrow, rename = "type")]
     kind: &'a str,
     #[serde(borrow)]
+    item_id: &'a str,
+    output_index: usize,
+    content_index: usize,
+    #[serde(borrow)]
     part: ContentPartHead<'a>,
 }
 
@@ -1089,6 +1261,10 @@ struct DeltaEnvelope<'a> {
     #[serde(borrow, rename = "type")]
     kind: &'a str,
     #[serde(borrow)]
+    item_id: &'a str,
+    output_index: usize,
+    content_index: usize,
+    #[serde(borrow)]
     delta: Cow<'a, str>,
 }
 
@@ -1096,6 +1272,10 @@ struct DeltaEnvelope<'a> {
 struct DoneEnvelope<'a> {
     #[serde(borrow, rename = "type")]
     kind: &'a str,
+    #[serde(borrow)]
+    item_id: &'a str,
+    output_index: usize,
+    content_index: usize,
     #[serde(borrow, alias = "refusal")]
     text: Cow<'a, str>,
 }
@@ -1329,12 +1509,13 @@ fn validate_encrypted_reasoning(value: &str) -> Result<(), AgentProviderProtocol
 fn validate_terminal_output(
     output: &[TerminalOutputItem<'_>],
     streamed_output: &[OutputItemAccumulator],
+    content_part: Option<&ContentPartAccumulator>,
     tools: &[ToolAccumulator],
 ) -> Result<ValidatedTerminalOutput, AgentProviderProtocolError> {
     if output.len() > MAX_OPENAI_TERMINAL_OUTPUT_ITEMS {
         return Err(AgentProviderProtocolError::Limit);
     }
-    if !streamed_output.is_empty() && streamed_output.len() != output.len() {
+    if streamed_output.len() != output.len() {
         return Err(AgentProviderProtocolError::Sequence);
     }
     if tools.len() > 1 {
@@ -1388,8 +1569,12 @@ fn validate_terminal_output(
             "message" => {
                 let item_id = item.id.ok_or(AgentProviderProtocolError::Event)?;
                 validate_response_id(item_id)?;
-                if item.content.len() > MAX_OPENAI_TERMINAL_CONTENT_PARTS {
-                    return Err(AgentProviderProtocolError::Limit);
+                if item.content.len() != 1 {
+                    return Err(if item.content.len() > MAX_OPENAI_TERMINAL_CONTENT_PARTS {
+                        AgentProviderProtocolError::Limit
+                    } else {
+                        AgentProviderProtocolError::UnsupportedOutput
+                    });
                 }
                 if !tools.is_empty()
                     || item.status != Some("completed")
@@ -1417,15 +1602,28 @@ fn validate_terminal_output(
                     }
                     output_kind = part_kind;
                 }
-                if !streamed_output.is_empty()
-                    && !matches!(
-                        streamed_output.get(output_index),
-                        Some(OutputItemAccumulator::Message {
-                            item_id: streamed_id,
-                            done: true,
-                        }) if streamed_id == item_id
-                    )
-                {
+                if !matches!(
+                    streamed_output.get(output_index),
+                    Some(OutputItemAccumulator::Message {
+                        item_id: streamed_id,
+                        done: true,
+                    }) if streamed_id == item_id
+                ) {
+                    return Err(AgentProviderProtocolError::Sequence);
+                }
+                let expected_kind = if item.content[0].kind == "refusal" {
+                    ContentPartKind::Refusal
+                } else {
+                    ContentPartKind::OutputText
+                };
+                if content_part.is_none_or(|part| {
+                    part.item_id != item_id
+                        || part.output_index != output_index
+                        || part.content_index != 0
+                        || part.kind != expected_kind
+                        || !part.output_done
+                        || !part.part_done
+                }) {
                     return Err(AgentProviderProtocolError::Sequence);
                 }
             }
@@ -1518,8 +1716,10 @@ impl TerminalOutputKind {
 mod tests {
     use super::*;
     use crate::{
-        AgentModelCallId, AgentPlanLeaseId, AgentPlanNodeId, AgentProviderPricingProfile,
-        AgentProviderPricingRevision, AgentRunManifestId, SemanticTokenizerRevision,
+        AgentModelCallId, AgentPlanLeaseId, AgentPlanNodeId, AgentProviderModelRevision,
+        AgentProviderPricingProfile, AgentProviderPricingRevision, AgentProviderPricingSchedule,
+        AgentProviderReasoningEffort, AgentProviderResponseRoute, AgentProviderTokenRates,
+        AgentRunManifestId, SemanticTokenizerRevision,
     };
     use serde_json::json;
 
@@ -1533,9 +1733,26 @@ mod tests {
     }
 
     fn config(max_text: u32) -> AgentProviderCallConfig {
-        AgentProviderCallConfig::try_new(
+        config_with_effective_models(max_text, &["gpt-5.6-terra"])
+    }
+
+    fn config_with_effective_models(
+        max_text: u32,
+        effective_models: &[&str],
+    ) -> AgentProviderCallConfig {
+        let requested =
+            AgentProviderModelRevision::try_new("gpt-5.6-terra".to_owned()).expect("model");
+        let allowed = effective_models
+            .iter()
+            .map(|model| {
+                AgentProviderModelRevision::try_new((*model).to_owned()).expect("effective model")
+            })
+            .collect();
+        AgentProviderPricingSchedule::try_new(
             AgentProviderKind::OpenAiResponses,
-            AgentProviderModelRevision::try_new("gpt-5.6-terra".to_owned()).expect("model"),
+            requested,
+            allowed,
+            AgentProviderResponseRoute::OpenAiDefault,
             AgentProviderReasoningEffort::Medium,
             SemanticTokenizerRevision::try_new("openai:gpt-5.6-terra:v1".to_owned())
                 .expect("tokenizer"),
@@ -1544,9 +1761,13 @@ mod tests {
                 16_384,
             )
             .expect("pricing profile"),
+            AgentProviderTokenRates::try_new(1, 1, 1, 1).expect("rates"),
+        )
+        .expect("schedule")
+        .try_call_config(
             512,
             1_024,
-            AgentProviderStreamBudget::try_new(64 * 1024, 64, max_text, 2, 1_024).expect("budget"),
+            AgentProviderStreamBudget::try_new(64 * 1024, 64, max_text, 1, 1_024).expect("budget"),
         )
         .expect("config")
     }
@@ -1564,6 +1785,15 @@ mod tests {
             "response.created",
             &format!(
                 "{{\"type\":\"response.created\",\"response\":{{\"id\":\"{id}\",\"status\":\"in_progress\",\"model\":\"{model}\",\"service_tier\":\"{service_tier}\"}}}}"
+            ),
+        )
+    }
+
+    fn in_progress(id: &str) -> String {
+        sse(
+            "response.in_progress",
+            &format!(
+                "{{\"type\":\"response.in_progress\",\"response\":{{\"id\":\"{id}\",\"status\":\"in_progress\",\"model\":\"gpt-5.6-terra\",\"service_tier\":\"default\"}}}}"
             ),
         )
     }
@@ -1600,24 +1830,67 @@ mod tests {
         )
     }
 
+    fn message_item_event(kind: &str, output_index: usize, item_id: &str) -> String {
+        let status = if kind == "response.output_item.added" {
+            "in_progress"
+        } else {
+            "completed"
+        };
+        output_item_event(
+            kind,
+            output_index,
+            json!({
+                "type": "message",
+                "id": item_id,
+                "status": status,
+                "role": "assistant"
+            }),
+        )
+    }
+
+    fn content_part_event(kind: &str, item_id: &str, part_kind: &str) -> String {
+        sse(
+            kind,
+            &json!({
+                "type": kind,
+                "item_id": item_id,
+                "output_index": 0,
+                "content_index": 0,
+                "part": {"type": part_kind}
+            })
+            .to_string(),
+        )
+    }
+
+    fn text_event(kind: &str, item_id: &str, field: &str, value: &str) -> String {
+        let mut event = json!({
+            "type": kind,
+            "item_id": item_id,
+            "output_index": 0,
+            "content_index": 0
+        });
+        event[field] = Value::String(value.to_owned());
+        sse(kind, &event.to_string())
+    }
+
     #[test]
     fn fragmented_text_stream_normalizes_deltas_and_terminal_usage() {
         let mut decoder =
             OpenAiResponsesStreamDecoder::try_new(call(), &config(64)).expect("decoder");
         let stream = [
             created("resp_1"),
-            sse(
-                "response.output_text.delta",
-                r#"{"type":"response.output_text.delta","delta":"hello "}"#,
-            ),
-            sse(
-                "response.output_text.delta",
-                r#"{"type":"response.output_text.delta","delta":"world"}"#,
-            ),
-            sse(
+            message_item_event("response.output_item.added", 0, "msg_1"),
+            content_part_event("response.content_part.added", "msg_1", "output_text"),
+            text_event("response.output_text.delta", "msg_1", "delta", "hello "),
+            text_event("response.output_text.delta", "msg_1", "delta", "world"),
+            text_event(
                 "response.output_text.done",
-                r#"{"type":"response.output_text.done","text":"hello world"}"#,
+                "msg_1",
+                "text",
+                "hello world",
             ),
+            content_part_event("response.content_part.done", "msg_1", "output_text"),
+            message_item_event("response.output_item.done", 0, "msg_1"),
             terminal(
                 "resp_1",
                 "response.completed",
@@ -1636,17 +1909,14 @@ mod tests {
             .push(&stream.as_bytes()[(split * 2)..])
             .expect("third");
         let text = first
-            .into_events()
+            .into_deltas()
             .into_iter()
-            .chain(second.into_events())
-            .chain(third.into_events())
-            .map(|event| match event {
-                AgentProviderStreamEvent::TextDelta(delta) => delta.as_str().to_owned(),
-                AgentProviderStreamEvent::ToolCall(_) => panic!("unexpected tool call"),
-            })
+            .chain(second.into_deltas())
+            .chain(third.into_deltas())
+            .map(|delta| delta.as_str().to_owned())
             .collect::<String>();
         assert_eq!(text, "hello world");
-        let conclusion = decoder.finish().expect("terminal");
+        let conclusion = decoder.finish().expect("terminal").conclusion();
         let AgentProviderStreamConclusion::Completed(completion) = conclusion else {
             panic!("expected completion");
         };
@@ -1655,11 +1925,26 @@ mod tests {
         assert_eq!(completion.usage().total_tokens(), 20);
         assert_eq!(completion.usage().cached_input_tokens(), 4);
         assert_eq!(completion.stats().output_text_bytes(), 11);
-        assert_eq!(completion.stats().events(), 6);
+        assert_eq!(completion.stats().events(), 10);
         assert_eq!(
             completion.stats().wire_bytes(),
             u32::try_from(stream.len()).expect("stream bytes")
         );
+
+        let mut bytewise =
+            OpenAiResponsesStreamDecoder::try_new(call(), &config(64)).expect("decoder");
+        let mut bytewise_text = String::new();
+        for chunk in stream.as_bytes().chunks(1) {
+            for delta in bytewise.push(chunk).expect("one-byte chunk").into_deltas() {
+                bytewise_text.push_str(delta.as_str());
+            }
+        }
+        assert_eq!(bytewise_text, "hello world");
+        assert!(matches!(
+            bytewise.finish().expect("bytewise terminal").conclusion(),
+            AgentProviderStreamConclusion::Completed(completion)
+                if completion.stop() == AgentProviderStopReason::Completed
+        ));
     }
 
     #[test]
@@ -1670,22 +1955,20 @@ mod tests {
             .push(created("resp_2").as_bytes())
             .expect("created");
         mismatch
+            .push(message_item_event("response.output_item.added", 0, "msg_2").as_bytes())
+            .expect("message added");
+        mismatch
             .push(
-                sse(
-                    "response.output_text.delta",
-                    r#"{"type":"response.output_text.delta","delta":"abc"}"#,
-                )
-                .as_bytes(),
+                content_part_event("response.content_part.added", "msg_2", "output_text")
+                    .as_bytes(),
             )
+            .expect("content added");
+        mismatch
+            .push(text_event("response.output_text.delta", "msg_2", "delta", "abc").as_bytes())
             .expect("delta");
         assert_eq!(
-            mismatch.push(
-                sse(
-                    "response.output_text.done",
-                    r#"{"type":"response.output_text.done","text":"xyz"}"#,
-                )
-                .as_bytes(),
-            ),
+            mismatch
+                .push(text_event("response.output_text.done", "msg_2", "text", "xyz").as_bytes(),),
             Err(AgentProviderProtocolError::Sequence)
         );
         assert_eq!(
@@ -1696,13 +1979,18 @@ mod tests {
         let mut limited =
             OpenAiResponsesStreamDecoder::try_new(call(), &config(3)).expect("decoder");
         limited.push(created("resp_3").as_bytes()).expect("created");
+        limited
+            .push(message_item_event("response.output_item.added", 0, "msg_3").as_bytes())
+            .expect("message added");
+        limited
+            .push(
+                content_part_event("response.content_part.added", "msg_3", "output_text")
+                    .as_bytes(),
+            )
+            .expect("content added");
         assert_eq!(
             limited.push(
-                sse(
-                    "response.output_text.delta",
-                    r#"{"type":"response.output_text.delta","delta":"four"}"#,
-                )
-                .as_bytes(),
+                text_event("response.output_text.delta", "msg_3", "delta", "four").as_bytes(),
             ),
             Err(AgentProviderProtocolError::Limit)
         );
@@ -1727,9 +2015,9 @@ mod tests {
 
     #[test]
     fn encrypted_reasoning_is_terminal_authenticated_and_identity_is_distinct() {
-        let mut decoder =
-            OpenAiResponsesStreamDecoder::try_new(call(), &config(64)).expect("decoder");
         let effective_model = "gpt-5.6-terra-2026-08-01";
+        let config = config_with_effective_models(64, &["gpt-5.6-terra", effective_model]);
+        let mut decoder = OpenAiResponsesStreamDecoder::try_new(call(), &config).expect("decoder");
         decoder
             .push(created_with_identity("resp_replay", effective_model, "default").as_bytes())
             .expect("created");
@@ -1751,7 +2039,7 @@ mod tests {
         assert!(decoder
             .push(reasoning_added.as_bytes())
             .expect("reasoning added")
-            .events()
+            .deltas()
             .is_empty());
         let reasoning_done = sse(
             "response.output_item.done",
@@ -1771,7 +2059,7 @@ mod tests {
         assert!(decoder
             .push(reasoning_done.as_bytes())
             .expect("reasoning done")
-            .events()
+            .deltas()
             .is_empty());
 
         let arguments = r#"{"url":"https://example.test/replay"}"#;
@@ -1807,7 +2095,7 @@ mod tests {
         assert!(decoder
             .push(arguments_done.as_bytes())
             .expect("arguments done")
-            .events()
+            .deltas()
             .is_empty());
         let tool_done = sse(
             "response.output_item.done",
@@ -1828,7 +2116,7 @@ mod tests {
         assert!(decoder
             .push(tool_done.as_bytes())
             .expect("tool done")
-            .events()
+            .deltas()
             .is_empty());
 
         let terminal_output = serde_json::json!([
@@ -1862,17 +2150,14 @@ mod tests {
                 .as_bytes(),
             )
             .expect("authenticated terminal");
-        let mut events = terminal_batch.into_events();
-        assert_eq!(events.len(), 1);
-        let AgentProviderStreamEvent::ToolCall(tool) = events.remove(0) else {
-            panic!("terminal-gated tool proposal");
-        };
+        assert!(terminal_batch.deltas().is_empty());
+        let finished = decoder.finish().expect("completion");
+        let (conclusion, tool) = finished.into_parts();
+        let tool = tool.expect("EOF-private tool");
         let (correlation, _) = tool.into_continuation_parts();
         assert!(!format!("{correlation:?}").contains(encrypted));
 
-        let AgentProviderStreamConclusion::Completed(completion) =
-            decoder.finish().expect("completion")
-        else {
+        let AgentProviderStreamConclusion::Completed(completion) = conclusion else {
             panic!("completed response");
         };
         assert!(completion.tool_only_output());
@@ -2109,11 +2394,10 @@ mod tests {
         ]
         .concat();
         let batch = decoder.push(stream.as_bytes()).expect("tool stream");
-        let mut events = batch.into_events();
-        assert_eq!(events.len(), 1);
-        let AgentProviderStreamEvent::ToolCall(tool) = events.remove(0) else {
-            panic!("typed tool call");
-        };
+        assert!(batch.deltas().is_empty());
+        let finished = decoder.finish().expect("terminal");
+        let (conclusion, tool) = finished.into_parts();
+        let tool = tool.expect("EOF-private tool");
         assert_eq!(tool.id().as_str(), "call_tool1");
         let (_, proposal) = tool.into_parts();
         let crate::AgentBrowserToolProposal::Navigate(target) = proposal else {
@@ -2121,9 +2405,7 @@ mod tests {
         };
         assert_eq!(target.as_url().as_str(), "https://example.test/path");
 
-        let AgentProviderStreamConclusion::Completed(completion) =
-            decoder.finish().expect("terminal")
-        else {
+        let AgentProviderStreamConclusion::Completed(completion) = conclusion else {
             panic!("completed tool response");
         };
         assert_eq!(completion.stop(), AgentProviderStopReason::ToolCalls);
@@ -2197,6 +2479,39 @@ mod tests {
     }
 
     #[test]
+    fn second_tool_is_rejected_before_any_proposal_can_escape() {
+        let mut decoder =
+            OpenAiResponsesStreamDecoder::try_new(call(), &config(64)).expect("decoder");
+        decoder
+            .push(created("resp_second_tool").as_bytes())
+            .expect("created");
+        let tool_added = |output_index: usize, item_id: &str, call_id: &str| {
+            output_item_event(
+                "response.output_item.added",
+                output_index,
+                json!({
+                    "type": "function_call",
+                    "id": item_id,
+                    "call_id": call_id,
+                    "name": "back",
+                    "arguments": "",
+                    "status": "in_progress"
+                }),
+            )
+        };
+        assert!(decoder
+            .push(tool_added(0, "fc_first", "call_first").as_bytes())
+            .expect("first tool")
+            .deltas()
+            .is_empty());
+        assert_eq!(
+            decoder.push(tool_added(1, "fc_second", "call_second").as_bytes()),
+            Err(AgentProviderProtocolError::Limit)
+        );
+        assert_eq!(decoder.push(b""), Err(AgentProviderProtocolError::Limit));
+    }
+
+    #[test]
     fn incomplete_and_failed_terminals_are_typed_without_provider_text() {
         let mut incomplete =
             OpenAiResponsesStreamDecoder::try_new(call(), &config(64)).expect("decoder");
@@ -2209,7 +2524,7 @@ mod tests {
         );
         incomplete.push(event.as_bytes()).expect("incomplete");
         let AgentProviderStreamConclusion::Completed(completion) =
-            incomplete.finish().expect("terminal")
+            incomplete.finish().expect("terminal").conclusion()
         else {
             panic!("expected typed incomplete response");
         };
@@ -2223,7 +2538,7 @@ mod tests {
             r#"{"type":"response.failed","response":{"id":"resp_6","status":"failed","model":"gpt-5.6-terra","service_tier":"default","output":[],"usage":null,"error":{"code":"server_error","message":"must not escape"}}}"#,
         );
         failed.push(event.as_bytes()).expect("failure");
-        let conclusion = failed.finish().expect("terminal");
+        let conclusion = failed.finish().expect("terminal").conclusion();
         assert_eq!(
             format!("{conclusion:?}"),
             format!(
@@ -2272,15 +2587,10 @@ mod tests {
 
         let mut model_drift =
             OpenAiResponsesStreamDecoder::try_new(call(), &config(64)).expect("decoder");
-        model_drift
-            .push(
-                created_with_identity("resp_model_drift", "gpt-5.6-terra-2026-08-01", "default")
-                    .as_bytes(),
-            )
-            .expect("created alias resolution");
         assert_eq!(
             model_drift.push(
-                terminal("resp_model_drift", "response.completed", "completed", "[]").as_bytes()
+                created_with_identity("resp_model_drift", "gpt-5.6-terra-2026-08-01", "default")
+                    .as_bytes(),
             ),
             Err(AgentProviderProtocolError::Event)
         );
@@ -2394,7 +2704,7 @@ mod tests {
             },
         ];
         assert!(matches!(
-            validate_terminal_output(&mixed, &mixed_stream, &tools),
+            validate_terminal_output(&mixed, &mixed_stream, None, &tools),
             Err(AgentProviderProtocolError::UnsupportedOutput)
         ));
 
@@ -2423,7 +2733,7 @@ mod tests {
             OutputItemAccumulator::FunctionCall { tool_index: 0 },
         ];
         assert!(matches!(
-            validate_terminal_output(&reordered, &expected_stream, &tools),
+            validate_terminal_output(&reordered, &expected_stream, None, &tools),
             Err(AgentProviderProtocolError::Sequence)
         ));
     }
@@ -2525,5 +2835,163 @@ mod tests {
             parse::<TerminalEnvelope<'_>>(&over_limit_wire),
             Err(AgentProviderProtocolError::Event)
         ));
+    }
+
+    #[test]
+    fn post_terminal_duplicate_done_unknown_and_trailing_framing_fail_closed() {
+        let terminal_event = terminal("resp_eof_gate", "response.completed", "completed", "[]");
+
+        let mut post_terminal =
+            OpenAiResponsesStreamDecoder::try_new(call(), &config(64)).expect("decoder");
+        post_terminal
+            .push(created("resp_eof_gate").as_bytes())
+            .expect("created");
+        let terminal_batch = post_terminal
+            .push(terminal_event.as_bytes())
+            .expect("terminal event");
+        assert!(terminal_batch.deltas().is_empty());
+        assert_eq!(
+            post_terminal.push(sse("ping", r#"{"type":"ping"}"#).as_bytes()),
+            Err(AgentProviderProtocolError::Sequence)
+        );
+
+        let mut duplicate_done =
+            OpenAiResponsesStreamDecoder::try_new(call(), &config(64)).expect("decoder");
+        duplicate_done
+            .push(created("resp_eof_gate").as_bytes())
+            .expect("created");
+        duplicate_done
+            .push(terminal_event.as_bytes())
+            .expect("terminal");
+        duplicate_done
+            .push(b"data: [DONE]\n\n")
+            .expect("single done");
+        assert_eq!(
+            duplicate_done.push(b"data: [DONE]\n\n"),
+            Err(AgentProviderProtocolError::Terminal)
+        );
+
+        let mut unknown =
+            OpenAiResponsesStreamDecoder::try_new(call(), &config(64)).expect("decoder");
+        unknown
+            .push(created("resp_unknown").as_bytes())
+            .expect("created");
+        assert_eq!(
+            unknown.push(
+                sse(
+                    "response.future_output",
+                    r#"{"type":"response.future_output","opaque":true}"#,
+                )
+                .as_bytes(),
+            ),
+            Err(AgentProviderProtocolError::UnsupportedOutput)
+        );
+
+        let mut trailing =
+            OpenAiResponsesStreamDecoder::try_new(call(), &config(64)).expect("decoder");
+        trailing
+            .push(created("resp_eof_gate").as_bytes())
+            .expect("created");
+        trailing.push(terminal_event.as_bytes()).expect("terminal");
+        trailing
+            .push(b"data: unfinished")
+            .expect("buffer bounded trailing bytes");
+        assert!(matches!(
+            trailing.finish(),
+            Err(AgentProviderProtocolError::Framing)
+        ));
+    }
+
+    #[test]
+    fn in_progress_and_content_part_lifecycle_are_one_shot_and_correlated() {
+        let mut progress =
+            OpenAiResponsesStreamDecoder::try_new(call(), &config(64)).expect("decoder");
+        progress
+            .push(created("resp_progress_once").as_bytes())
+            .expect("created");
+        progress
+            .push(in_progress("resp_progress_once").as_bytes())
+            .expect("in progress");
+        assert_eq!(
+            progress.push(in_progress("resp_progress_once").as_bytes()),
+            Err(AgentProviderProtocolError::Sequence)
+        );
+
+        let mut before_added =
+            OpenAiResponsesStreamDecoder::try_new(call(), &config(64)).expect("decoder");
+        before_added
+            .push(created("resp_before_added").as_bytes())
+            .expect("created");
+        before_added
+            .push(message_item_event("response.output_item.added", 0, "msg_before").as_bytes())
+            .expect("message");
+        assert_eq!(
+            before_added.push(
+                text_event("response.output_text.delta", "msg_before", "delta", "x").as_bytes()
+            ),
+            Err(AgentProviderProtocolError::Sequence)
+        );
+
+        let mut duplicate_added =
+            OpenAiResponsesStreamDecoder::try_new(call(), &config(64)).expect("decoder");
+        duplicate_added
+            .push(created("resp_duplicate_part").as_bytes())
+            .expect("created");
+        duplicate_added
+            .push(message_item_event("response.output_item.added", 0, "msg_part").as_bytes())
+            .expect("message");
+        let added = content_part_event("response.content_part.added", "msg_part", "output_text");
+        duplicate_added.push(added.as_bytes()).expect("part");
+        assert_eq!(
+            duplicate_added.push(added.as_bytes()),
+            Err(AgentProviderProtocolError::Sequence)
+        );
+
+        let mut cross_index =
+            OpenAiResponsesStreamDecoder::try_new(call(), &config(64)).expect("decoder");
+        cross_index
+            .push(created("resp_cross_index").as_bytes())
+            .expect("created");
+        cross_index
+            .push(message_item_event("response.output_item.added", 0, "msg_cross").as_bytes())
+            .expect("message");
+        cross_index
+            .push(
+                content_part_event("response.content_part.added", "msg_cross", "output_text")
+                    .as_bytes(),
+            )
+            .expect("part");
+        assert_eq!(
+            cross_index.push(
+                sse(
+                    "response.output_text.delta",
+                    r#"{"type":"response.output_text.delta","item_id":"msg_cross","output_index":1,"content_index":0,"delta":"x"}"#,
+                )
+                .as_bytes(),
+            ),
+            Err(AgentProviderProtocolError::Sequence)
+        );
+
+        let mut out_of_order =
+            OpenAiResponsesStreamDecoder::try_new(call(), &config(64)).expect("decoder");
+        out_of_order
+            .push(created("resp_part_order").as_bytes())
+            .expect("created");
+        out_of_order
+            .push(message_item_event("response.output_item.added", 0, "msg_order").as_bytes())
+            .expect("message");
+        out_of_order
+            .push(
+                content_part_event("response.content_part.added", "msg_order", "output_text")
+                    .as_bytes(),
+            )
+            .expect("part");
+        assert_eq!(
+            out_of_order.push(
+                content_part_event("response.content_part.done", "msg_order", "output_text")
+                    .as_bytes(),
+            ),
+            Err(AgentProviderProtocolError::Sequence)
+        );
     }
 }

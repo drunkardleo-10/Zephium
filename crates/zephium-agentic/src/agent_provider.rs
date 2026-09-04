@@ -6,39 +6,53 @@
 //! the first provider codecs. Vendor wire data remains private to those
 //! codecs and can cross the public boundary only as closed typed values.
 
+#[cfg(any(test, feature = "provider-transport"))]
 mod anthropic;
 mod continuation;
 mod extraction;
+#[cfg(any(test, feature = "provider-transport"))]
 mod openai;
 mod pricing;
 mod request;
+mod settlement;
+#[cfg(any(test, feature = "provider-transport"))]
 mod sse;
 mod tool;
 
 use std::fmt;
+use std::sync::Arc;
 
+#[cfg(any(test, feature = "provider-transport"))]
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+#[cfg(feature = "provider-transport")]
 use anthropic::AnthropicMessagesStreamDecoder;
+#[cfg(feature = "provider-transport")]
 use openai::OpenAiResponsesStreamDecoder;
 
+pub(crate) use continuation::AgentProviderContinuationSeed;
 pub use continuation::{
     AgentProviderBoundDiffContinuation, AgentProviderBoundExtractionContinuation,
     AgentProviderBoundLocateContinuation, AgentProviderBoundReadContinuation,
     AgentProviderBoundScreenshotContinuation, AgentProviderContinuation,
-    AgentProviderContinuationError, AgentProviderContinuationSeed,
-    MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES,
+    AgentProviderContinuationError, MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES,
     MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES, MAX_AGENT_PROVIDER_CONTINUATION_TURNS,
 };
 pub use extraction::{
     AgentProviderExtractionOutputBinding, AgentProviderExtractionOutputCollector,
     AgentProviderExtractionOutputError,
 };
+use pricing::AgentProviderCatalogBinding;
+pub(crate) use pricing::AgentProviderPricedUsage;
 pub use pricing::{
-    AgentProviderPricedUsage, AgentProviderPricingAttribution, AgentProviderPricingContractError,
-    AgentProviderPricingError, AgentProviderPricingProfile, AgentProviderPricingRevision,
-    AgentProviderPricingSchedule, AgentProviderTokenRates,
-    MAX_AGENT_PROVIDER_RATE_MICRO_USD_PER_MILLION_TOKENS,
+    AgentProviderPricingAttribution, AgentProviderPricingContractError, AgentProviderPricingError,
+    AgentProviderPricingProfile, AgentProviderPricingRevision, AgentProviderPricingSchedule,
+    AgentProviderTokenRates, MAX_AGENT_PROVIDER_RATE_MICRO_USD_PER_MILLION_TOKENS,
+};
+pub use settlement::{
+    AgentProviderPricingSettlement, AgentProviderPricingSettlementError,
+    AgentProviderSettledTerminal, AgentProviderSettledToolTurn,
 };
 
 use crate::{
@@ -47,9 +61,11 @@ use crate::{
     SemanticTokenizerRevision, MAX_AGENT_RUN_MODEL_TOKENS,
 };
 
+#[cfg(feature = "provider-transport")]
+pub(crate) use request::AgentCommittedProviderRequest;
 pub use request::{
-    AgentCommittedProviderInput, AgentCommittedProviderRequest, AgentPreparedDiffRequest,
-    AgentPreparedExtractionRequest, AgentPreparedLocateRequest, AgentPreparedObservationRequest,
+    AgentCommittedProviderInput, AgentPreparedDiffRequest, AgentPreparedExtractionRequest,
+    AgentPreparedLocateRequest, AgentPreparedObservationRequest,
     AgentPreparedReadContinuationRequest, AgentPreparedReadRequest, AgentPreparedScreenshotRequest,
     AgentProviderDiffRequestDraft, AgentProviderEndpoint, AgentProviderExactInputCount,
     AgentProviderExtractionRequestDraft, AgentProviderInputEvidence,
@@ -66,16 +82,18 @@ pub use request::{
 };
 pub use tool::{
     AgentBrowserActProposal, AgentBrowserHumanReason, AgentBrowserScopeProposal,
-    AgentBrowserSemanticQuery, AgentBrowserToolCall, AgentBrowserToolCallId,
-    AgentBrowserToolContractError, AgentBrowserToolKind, AgentBrowserToolProposal,
-    AgentBrowserWaitCondition, AgentProviderToolCallCorrelation,
+    AgentBrowserSemanticQuery, AgentBrowserToolCallId, AgentBrowserToolContractError,
+    AgentBrowserToolKind, AgentBrowserToolProposal, AgentBrowserWaitCondition,
     MAX_AGENT_BROWSER_SEMANTIC_QUERY_BYTES, MAX_AGENT_PROVIDER_TOOL_CALL_ID_BYTES,
 };
+pub(crate) use tool::{AgentBrowserToolCall, AgentProviderToolCallCorrelation};
 
 /// Maximum bytes in one pinned provider model revision.
 pub const MAX_AGENT_PROVIDER_MODEL_REVISION_BYTES: usize = 96;
 /// Maximum bytes in one provider-attested service-tier identity.
 pub const MAX_AGENT_PROVIDER_SERVICE_TIER_BYTES: usize = 32;
+/// Maximum trusted effective model revisions accepted for one requested alias.
+pub const MAX_AGENT_PROVIDER_ALLOWED_EFFECTIVE_MODELS: usize = 4;
 /// Maximum decoded UTF-8 bytes in one SSE line.
 pub const MAX_AGENT_PROVIDER_SSE_LINE_BYTES: usize = 512 * 1024;
 /// Maximum decoded UTF-8 bytes in one complete SSE event payload.
@@ -87,7 +105,7 @@ pub const MAX_AGENT_PROVIDER_STREAM_EVENTS: u32 = 4_096;
 /// Maximum model-authored plain-text bytes accepted for one model call.
 pub const MAX_AGENT_PROVIDER_OUTPUT_TEXT_BYTES: u32 = 64 * 1024;
 /// Maximum client tool calls accepted from one model response.
-pub const MAX_AGENT_PROVIDER_TOOL_CALLS: u8 = 8;
+pub const MAX_AGENT_PROVIDER_TOOL_CALLS: u8 = 1;
 /// Maximum aggregate tool-argument bytes accepted for one model response.
 pub const MAX_AGENT_PROVIDER_TOOL_ARGUMENT_BYTES: u32 = 32 * 1024;
 /// Maximum provider-requested retry delay surfaced to policy.
@@ -162,23 +180,78 @@ pub enum AgentProviderBillingClass {
     AnthropicStandardGlobal,
 }
 
+/// Closed provider execution route selected by the trusted catalog.
+///
+/// The route fixes both the request wire value and every response-side tier or
+/// geography attestation. Arbitrary provider strings never become pricing
+/// identity.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum AgentProviderResponseRoute {
+    /// OpenAI standard processing: request and response `service_tier=default`.
+    OpenAiDefault,
+    /// Anthropic standard capacity constrained to global inference.
+    AnthropicStandardGlobal,
+}
+
+impl AgentProviderResponseRoute {
+    /// Provider protocol compatible with this exact route.
+    pub const fn provider(self) -> AgentProviderKind {
+        match self {
+            Self::OpenAiDefault => AgentProviderKind::OpenAiResponses,
+            Self::AnthropicStandardGlobal => AgentProviderKind::AnthropicMessages,
+        }
+    }
+
+    /// Billing class fixed by this route.
+    pub const fn billing_class(self) -> AgentProviderBillingClass {
+        match self {
+            Self::OpenAiDefault => AgentProviderBillingClass::OpenAiDefault,
+            Self::AnthropicStandardGlobal => AgentProviderBillingClass::AnthropicStandardGlobal,
+        }
+    }
+
+    pub(crate) const fn request_service_tier(self) -> &'static str {
+        match self {
+            Self::OpenAiDefault => OPENAI_STANDARD_SERVICE_TIER,
+            Self::AnthropicStandardGlobal => ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST,
+        }
+    }
+
+    pub(crate) const fn response_service_tier(self) -> &'static str {
+        match self {
+            Self::OpenAiDefault => OPENAI_STANDARD_SERVICE_TIER,
+            Self::AnthropicStandardGlobal => ANTHROPIC_STANDARD_SERVICE_TIER_RESPONSE,
+        }
+    }
+
+    pub(crate) const fn response_inference_geo(self) -> Option<&'static str> {
+        match self {
+            Self::OpenAiDefault => None,
+            Self::AnthropicStandardGlobal => Some(ANTHROPIC_GLOBAL_INFERENCE_GEO),
+        }
+    }
+}
+
 /// Provider-neutral single-owner decoder for one exact streamed model call.
 ///
 /// The selected provider is fixed by `AgentProviderCallConfig`; callers do not
 /// branch on vendor wire events and receive only the shared bounded contract.
 #[must_use]
-pub struct AgentProviderStreamDecoder {
+#[cfg(feature = "provider-transport")]
+pub(crate) struct AgentProviderStreamDecoder {
     inner: AgentProviderStreamDecoderInner,
 }
 
+#[cfg(feature = "provider-transport")]
 enum AgentProviderStreamDecoderInner {
     OpenAi(Box<OpenAiResponsesStreamDecoder>),
     Anthropic(Box<AnthropicMessagesStreamDecoder>),
 }
 
+#[cfg(feature = "provider-transport")]
 impl AgentProviderStreamDecoder {
     /// Constructs the exact decoder selected by one admitted call config.
-    pub fn try_new(
+    pub(crate) fn try_new(
         call: AgentProviderCallIdentity,
         config: &AgentProviderCallConfig,
     ) -> Result<Self, AgentProviderProtocolError> {
@@ -194,7 +267,7 @@ impl AgentProviderStreamDecoder {
     }
 
     /// Decodes one arbitrary transport chunk through the selected adapter.
-    pub fn push(
+    pub(crate) fn push(
         &mut self,
         bytes: &[u8],
     ) -> Result<AgentProviderStreamBatch, AgentProviderProtocolError> {
@@ -205,7 +278,7 @@ impl AgentProviderStreamDecoder {
     }
 
     /// Requires complete framing and one unambiguous terminal provider event.
-    pub fn finish(self) -> Result<AgentProviderStreamConclusion, AgentProviderProtocolError> {
+    pub(crate) fn finish(self) -> Result<AgentProviderFinishedStream, AgentProviderProtocolError> {
         match self.inner {
             AgentProviderStreamDecoderInner::OpenAi(decoder) => (*decoder).finish(),
             AgentProviderStreamDecoderInner::Anthropic(decoder) => (*decoder).finish(),
@@ -213,6 +286,7 @@ impl AgentProviderStreamDecoder {
     }
 }
 
+#[cfg(feature = "provider-transport")]
 impl fmt::Debug for AgentProviderStreamDecoder {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.inner {
@@ -262,49 +336,64 @@ impl fmt::Debug for AgentProviderModelRevision {
 /// is not thereby catalog-approved, tokenizer-compatible, or priceable.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct AgentProviderResponseIdentity {
+    provider: AgentProviderKind,
     requested_model: [u8; MAX_AGENT_PROVIDER_MODEL_REVISION_BYTES],
     requested_model_len: u8,
     effective_model: [u8; MAX_AGENT_PROVIDER_MODEL_REVISION_BYTES],
     effective_model_len: u8,
-    effective_service_tier: [u8; MAX_AGENT_PROVIDER_SERVICE_TIER_BYTES],
-    effective_service_tier_len: u8,
+    route: AgentProviderResponseRoute,
     reasoning_effort: AgentProviderReasoningEffort,
+    guard: [u8; 32],
 }
 
 impl AgentProviderResponseIdentity {
-    pub(crate) fn try_openai(
-        requested_model: &AgentProviderModelRevision,
-        reasoning_effort: AgentProviderReasoningEffort,
+    #[cfg(any(test, feature = "provider-transport"))]
+    pub(crate) fn try_attested(
+        config: &AgentProviderCallConfig,
         effective_model: &str,
         effective_service_tier: &str,
+        effective_inference_geo: Option<&str>,
     ) -> Result<Self, AgentProviderProtocolError> {
         if !valid_model_revision(effective_model)
-            || effective_service_tier.is_empty()
-            || effective_service_tier.len() > MAX_AGENT_PROVIDER_SERVICE_TIER_BYTES
-            || !effective_service_tier
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+            || !config.allows_response_identity(
+                effective_model,
+                effective_service_tier,
+                effective_inference_geo,
+            )
         {
             return Err(AgentProviderProtocolError::Event);
         }
         let (requested_model, requested_model_len) =
-            copy_identity::<MAX_AGENT_PROVIDER_MODEL_REVISION_BYTES>(requested_model.as_str())
+            copy_identity::<MAX_AGENT_PROVIDER_MODEL_REVISION_BYTES>(config.model().as_str())
                 .ok_or(AgentProviderProtocolError::Event)?;
         let (effective_model, effective_model_len) =
             copy_identity::<MAX_AGENT_PROVIDER_MODEL_REVISION_BYTES>(effective_model)
                 .ok_or(AgentProviderProtocolError::Event)?;
-        let (effective_service_tier, effective_service_tier_len) =
-            copy_identity::<MAX_AGENT_PROVIDER_SERVICE_TIER_BYTES>(effective_service_tier)
-                .ok_or(AgentProviderProtocolError::Event)?;
+        let provider = config.provider();
+        let route = config.response_route();
+        let reasoning_effort = config.reasoning_effort();
+        let guard = response_identity_guard(
+            provider,
+            config.model().as_str(),
+            bounded_identity_str(&effective_model, effective_model_len),
+            route,
+            reasoning_effort,
+        );
         Ok(Self {
+            provider,
             requested_model,
             requested_model_len,
             effective_model,
             effective_model_len,
-            effective_service_tier,
-            effective_service_tier_len,
+            route,
             reasoning_effort,
+            guard,
         })
+    }
+
+    /// Provider protocol that attested this response identity.
+    pub const fn provider(self) -> AgentProviderKind {
+        self.provider
     }
 
     /// Exact bounded model identity sent in the immutable request.
@@ -319,10 +408,17 @@ impl AgentProviderResponseIdentity {
 
     /// Exact bounded service tier attested by the provider response.
     pub fn effective_service_tier(&self) -> &str {
-        bounded_identity_str(
-            &self.effective_service_tier,
-            self.effective_service_tier_len,
-        )
+        self.route.response_service_tier()
+    }
+
+    /// Exact bounded inference geography, when the provider attests one.
+    pub const fn effective_inference_geo(self) -> Option<&'static str> {
+        self.route.response_inference_geo()
+    }
+
+    /// Closed catalog-bound provider response route.
+    pub const fn response_route(self) -> AgentProviderResponseRoute {
+        self.route
     }
 
     /// Explicit requested reasoning effort used by this response.
@@ -330,8 +426,21 @@ impl AgentProviderResponseIdentity {
         self.reasoning_effort
     }
 
-    pub(crate) fn matches_attestation(self, model: &str, service_tier: &str) -> bool {
-        self.effective_model() == model && self.effective_service_tier() == service_tier
+    /// Content-free digest of the exact provider-attested execution identity.
+    pub const fn guard(self) -> [u8; 32] {
+        self.guard
+    }
+
+    #[cfg(any(test, feature = "provider-transport"))]
+    pub(crate) fn matches_attestation(
+        self,
+        model: &str,
+        service_tier: &str,
+        inference_geo: Option<&str>,
+    ) -> bool {
+        self.effective_model() == model
+            && self.effective_service_tier() == service_tier
+            && self.effective_inference_geo() == inference_geo
     }
 }
 
@@ -339,16 +448,48 @@ impl fmt::Debug for AgentProviderResponseIdentity {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AgentProviderResponseIdentity")
+            .field("provider", &self.provider)
             .field("requested_model_bytes", &self.requested_model_len)
             .field("effective_model_bytes", &self.effective_model_len)
-            .field(
-                "effective_service_tier_bytes",
-                &self.effective_service_tier_len,
-            )
+            .field("response_route", &self.route)
             .field("reasoning_effort", &self.reasoning_effort)
+            .field("guard", &"[redacted]")
             .field("identity", &"[redacted]")
             .finish()
     }
+}
+
+#[cfg(any(test, feature = "provider-transport"))]
+fn response_identity_guard(
+    provider: AgentProviderKind,
+    requested_model: &str,
+    effective_model: &str,
+    route: AgentProviderResponseRoute,
+    reasoning_effort: AgentProviderReasoningEffort,
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"ZEPHIUM-AGENT-PROVIDER-RESPONSE-IDENTITY-1\0");
+    hasher.update([match provider {
+        AgentProviderKind::OpenAiResponses => 1,
+        AgentProviderKind::AnthropicMessages => 2,
+    }]);
+    hasher.update([match route {
+        AgentProviderResponseRoute::OpenAiDefault => 1,
+        AgentProviderResponseRoute::AnthropicStandardGlobal => 2,
+    }]);
+    hasher.update([match reasoning_effort {
+        AgentProviderReasoningEffort::None => 1,
+        AgentProviderReasoningEffort::Low => 2,
+        AgentProviderReasoningEffort::Medium => 3,
+        AgentProviderReasoningEffort::High => 4,
+        AgentProviderReasoningEffort::XHigh => 5,
+        AgentProviderReasoningEffort::Max => 6,
+    }]);
+    hasher.update([requested_model.len() as u8]);
+    hasher.update(requested_model.as_bytes());
+    hasher.update([effective_model.len() as u8]);
+    hasher.update(effective_model.as_bytes());
+    hasher.finalize().into()
 }
 
 fn valid_model_revision(value: &str) -> bool {
@@ -360,6 +501,7 @@ fn valid_model_revision(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
 }
 
+#[cfg(any(test, feature = "provider-transport"))]
 fn copy_identity<const N: usize>(value: &str) -> Option<([u8; N], u8)> {
     let len = u8::try_from(value.len()).ok()?;
     if value.len() > N {
@@ -525,25 +667,41 @@ impl AgentProviderStreamBudget {
 /// Fixed provider, pricing identity, and response bounds for one admitted call.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentProviderCallConfig {
-    provider: AgentProviderKind,
-    model: AgentProviderModelRevision,
-    reasoning_effort: AgentProviderReasoningEffort,
-    tokenizer: SemanticTokenizerRevision,
-    pricing: AgentProviderPricingProfile,
+    catalog: Arc<AgentProviderCatalogBinding>,
     fixed_input_tokens: u32,
     max_output_tokens: u32,
     stream: AgentProviderStreamBudget,
 }
 
 impl AgentProviderCallConfig {
-    /// Binds explicit provider/model/reasoning/tokenizer/pricing identity to response limits.
+    pub(in crate::agent_provider) fn from_catalog(
+        catalog: Arc<AgentProviderCatalogBinding>,
+        fixed_input_tokens: u32,
+        max_output_tokens: u32,
+        stream: AgentProviderStreamBudget,
+    ) -> Result<Self, AgentProviderContractError> {
+        if fixed_input_tokens == 0 || u64::from(fixed_input_tokens) > MAX_AGENT_RUN_MODEL_TOKENS {
+            return Err(AgentProviderContractError::InputTokens);
+        }
+        if max_output_tokens == 0 || u64::from(max_output_tokens) > MAX_AGENT_RUN_MODEL_TOKENS {
+            return Err(AgentProviderContractError::OutputTokens);
+        }
+        Ok(Self {
+            catalog,
+            fixed_input_tokens,
+            max_output_tokens,
+            stream,
+        })
+    }
+
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
-    pub fn try_new(
+    pub(crate) fn try_for_test(
         provider: AgentProviderKind,
         model: AgentProviderModelRevision,
         reasoning_effort: AgentProviderReasoningEffort,
         tokenizer: SemanticTokenizerRevision,
-        pricing: AgentProviderPricingProfile,
+        pricing_profile: AgentProviderPricingProfile,
         fixed_input_tokens: u32,
         max_output_tokens: u32,
         stream: AgentProviderStreamBudget,
@@ -553,52 +711,58 @@ impl AgentProviderCallConfig {
         {
             return Err(AgentProviderContractError::ReasoningEffort);
         }
-        if fixed_input_tokens == 0 || u64::from(fixed_input_tokens) > MAX_AGENT_RUN_MODEL_TOKENS {
-            return Err(AgentProviderContractError::InputTokens);
-        }
-        if max_output_tokens == 0 || u64::from(max_output_tokens) > MAX_AGENT_RUN_MODEL_TOKENS {
-            return Err(AgentProviderContractError::OutputTokens);
-        }
-        Ok(Self {
+        let rates = AgentProviderTokenRates::try_new(1, 1, 1, 1)
+            .expect("fixed test rates must remain valid");
+        let schedule = AgentProviderPricingSchedule::try_for_test(
             provider,
             model,
             reasoning_effort,
             tokenizer,
-            pricing,
-            fixed_input_tokens,
-            max_output_tokens,
-            stream,
-        })
+            pricing_profile,
+            rates,
+        )
+        .expect("validated test catalog must remain constructible");
+        schedule.try_call_config(fixed_input_tokens, max_output_tokens, stream)
     }
 
     /// Selected provider protocol.
-    pub const fn provider(&self) -> AgentProviderKind {
-        self.provider
+    pub fn provider(&self) -> AgentProviderKind {
+        self.catalog.provider()
     }
 
     /// Exact billing mode encoded into and required from the provider call.
-    pub const fn billing_class(&self) -> AgentProviderBillingClass {
-        self.provider.billing_class()
+    pub fn billing_class(&self) -> AgentProviderBillingClass {
+        self.catalog.response_route().billing_class()
     }
 
     /// Exact selected provider model revision.
-    pub const fn model(&self) -> &AgentProviderModelRevision {
-        &self.model
+    pub fn model(&self) -> &AgentProviderModelRevision {
+        self.catalog.requested_model()
     }
 
     /// Explicit reasoning effort encoded for this exact call.
-    pub const fn reasoning_effort(&self) -> AgentProviderReasoningEffort {
-        self.reasoning_effort
+    pub fn reasoning_effort(&self) -> AgentProviderReasoningEffort {
+        self.catalog.reasoning_effort()
     }
 
     /// Exact tokenizer/counting revision used for input admission.
-    pub const fn tokenizer(&self) -> &SemanticTokenizerRevision {
-        &self.tokenizer
+    pub fn tokenizer(&self) -> &SemanticTokenizerRevision {
+        self.catalog.tokenizer()
     }
 
     /// Exact trusted catalog revision and inclusive input pricing range.
-    pub const fn pricing_profile(&self) -> AgentProviderPricingProfile {
-        self.pricing
+    pub fn pricing_profile(&self) -> AgentProviderPricingProfile {
+        self.catalog.pricing_profile()
+    }
+
+    /// Exact provider response route bound by the trusted catalog.
+    pub fn response_route(&self) -> AgentProviderResponseRoute {
+        self.catalog.response_route()
+    }
+
+    /// Digest of the complete trusted execution and pricing catalog entry.
+    pub fn accounting_guard(&self) -> [u8; 32] {
+        self.catalog.accounting_guard()
     }
 
     /// Exact pinned envelope/tool-schema token count reserved beyond payload.
@@ -622,7 +786,7 @@ impl AgentProviderCallConfig {
         payload: &SemanticTokenMeasurement,
         objective: &SemanticTokenMeasurement,
     ) -> Result<(), AgentProviderContractError> {
-        if payload.revision() != &self.tokenizer || objective.revision() != &self.tokenizer {
+        if payload.revision() != self.tokenizer() || objective.revision() != self.tokenizer() {
             return Err(AgentProviderContractError::TokenizerRevision);
         }
         let additional_input_tokens = u64::from(objective.tokens())
@@ -633,7 +797,7 @@ impl AgentProviderCallConfig {
             .ok_or(AgentProviderContractError::AdmissionBudget)?;
         if additional_input_tokens > u64::from(request.budget().additional_input_tokens())
             || u64::from(self.max_output_tokens) > u64::from(request.budget().output_tokens())
-            || total_input_tokens > self.pricing.max_input_tokens()
+            || !self.pricing_profile().contains(total_input_tokens)
         {
             return Err(AgentProviderContractError::AdmissionBudget);
         }
@@ -646,7 +810,7 @@ impl AgentProviderCallConfig {
         diff: &SemanticTokenMeasurement,
         structured_input: &SemanticTokenMeasurement,
     ) -> Result<(), AgentProviderContractError> {
-        if diff.revision() != &self.tokenizer || structured_input.revision() != &self.tokenizer {
+        if diff.revision() != self.tokenizer() || structured_input.revision() != self.tokenizer() {
             return Err(AgentProviderContractError::TokenizerRevision);
         }
         if structured_input.quality() != crate::SemanticTokenCountQuality::ExactLocal {
@@ -659,7 +823,9 @@ impl AgentProviderCallConfig {
             > u64::from(request.budget().additional_input_tokens())
             || u64::from(structured_input.tokens()) > allowed_input_tokens
             || u64::from(self.max_output_tokens) > u64::from(request.budget().output_tokens())
-            || u64::from(structured_input.tokens()) > self.pricing.max_input_tokens()
+            || !self
+                .pricing_profile()
+                .contains(u64::from(structured_input.tokens()))
         {
             return Err(AgentProviderContractError::AdmissionBudget);
         }
@@ -707,7 +873,7 @@ impl AgentProviderCallConfig {
         request: AgentModelCallRequest,
         structured_input: &SemanticTokenMeasurement,
     ) -> Result<(), AgentProviderContractError> {
-        if structured_input.revision() != &self.tokenizer {
+        if structured_input.revision() != self.tokenizer() {
             return Err(AgentProviderContractError::TokenizerRevision);
         }
         if structured_input.quality() != crate::SemanticTokenCountQuality::ExactLocal {
@@ -717,11 +883,24 @@ impl AgentProviderCallConfig {
         if u64::from(self.fixed_input_tokens) > authorized_input_tokens
             || u64::from(structured_input.tokens()) > authorized_input_tokens
             || u64::from(self.max_output_tokens) > u64::from(request.budget().output_tokens())
-            || u64::from(structured_input.tokens()) > self.pricing.max_input_tokens()
+            || !self
+                .pricing_profile()
+                .contains(u64::from(structured_input.tokens()))
         {
             return Err(AgentProviderContractError::AdmissionBudget);
         }
         Ok(())
+    }
+
+    #[cfg(any(test, feature = "provider-transport"))]
+    pub(crate) fn allows_response_identity(
+        &self,
+        effective_model: &str,
+        service_tier: &str,
+        inference_geo: Option<&str>,
+    ) -> bool {
+        self.catalog
+            .allows_response_identity(effective_model, service_tier, inference_geo)
     }
 }
 
@@ -739,15 +918,18 @@ pub struct AgentProviderUsage {
     reasoning_output_tokens: u64,
 }
 
-/// One bounded untrusted plain-text delta from a provider stream.
+/// One bounded untrusted pre-EOF plain-text delta from a provider stream.
 ///
 /// This value is never HTML, policy, a browser operation, or trusted UI. A
 /// presentation consumer must render it as escaped text and must not persist
-/// or log it indiscriminately.
+/// or log it indiscriminately. It is model-authored progress only: it is not a
+/// terminal result, extraction authority, or evidence that a response reached
+/// an authenticated transport EOF.
 #[derive(Eq, PartialEq)]
 pub struct AgentProviderTextDelta(String);
 
 impl AgentProviderTextDelta {
+    #[cfg(any(test, feature = "provider-transport"))]
     pub(crate) fn new(value: String) -> Self {
         Self(value)
     }
@@ -778,40 +960,24 @@ impl fmt::Debug for AgentProviderTextDelta {
     }
 }
 
-/// Closed normalized incremental provider output.
-#[derive(Eq, PartialEq)]
-pub enum AgentProviderStreamEvent {
-    /// Bounded untrusted plain text. It never authorizes a browser operation.
-    TextDelta(AgentProviderTextDelta),
-    /// Closed pre-policy browser proposal from one complete client tool call.
-    ///
-    /// The response terminal must still confirm `ToolCalls`; this value alone
-    /// cannot be bound, authorized, or executed.
-    ToolCall(AgentBrowserToolCall),
-}
-
-impl fmt::Debug for AgentProviderStreamEvent {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::TextDelta(delta) => formatter.debug_tuple("TextDelta").field(delta).finish(),
-            Self::ToolCall(call) => formatter.debug_tuple("ToolCall").field(call).finish(),
-        }
-    }
-}
-
-/// One bounded batch emitted from an arbitrary transport chunk.
+/// One bounded, non-authorizing text batch emitted before transport EOF.
+///
+/// Browser proposals, provider correlation, continuation state, terminal
+/// usage, and extraction authority can never enter this type. Those remain in
+/// the move-only finished stream until exact pricing and policy settlement.
 #[derive(Eq, PartialEq)]
 pub struct AgentProviderStreamBatch {
     call: AgentProviderCallIdentity,
-    events: Vec<AgentProviderStreamEvent>,
+    deltas: Vec<AgentProviderTextDelta>,
 }
 
 impl AgentProviderStreamBatch {
+    #[cfg(any(test, feature = "provider-transport"))]
     pub(crate) fn new(
         call: AgentProviderCallIdentity,
-        events: Vec<AgentProviderStreamEvent>,
+        deltas: Vec<AgentProviderTextDelta>,
     ) -> Self {
-        Self { call, events }
+        Self { call, deltas }
     }
 
     /// Exact non-authorizing call correlation.
@@ -819,14 +985,14 @@ impl AgentProviderStreamBatch {
         self.call
     }
 
-    /// Ordered normalized events decoded from this transport chunk.
-    pub fn events(&self) -> &[AgentProviderStreamEvent] {
-        &self.events
+    /// Ordered untrusted, nonterminal text deltas decoded from this chunk.
+    pub fn deltas(&self) -> &[AgentProviderTextDelta] {
+        &self.deltas
     }
 
     /// Consumes the batch without copying model-authored text.
-    pub fn into_events(self) -> Vec<AgentProviderStreamEvent> {
-        self.events
+    pub fn into_deltas(self) -> Vec<AgentProviderTextDelta> {
+        self.deltas
     }
 }
 
@@ -835,7 +1001,7 @@ impl fmt::Debug for AgentProviderStreamBatch {
         formatter
             .debug_struct("AgentProviderStreamBatch")
             .field("call", &self.call)
-            .field("events", &self.events.len())
+            .field("deltas", &self.deltas.len())
             .finish()
     }
 }
@@ -851,6 +1017,7 @@ pub struct AgentProviderStreamStats {
 }
 
 impl AgentProviderStreamStats {
+    #[cfg(any(test, feature = "provider-transport"))]
     pub(crate) const fn new(
         wire_bytes: u32,
         events: u32,
@@ -905,6 +1072,7 @@ pub struct AgentProviderCompletion {
 }
 
 impl AgentProviderCompletion {
+    #[cfg(test)]
     pub(crate) const fn new(
         call: AgentProviderCallIdentity,
         stop: AgentProviderStopReason,
@@ -922,6 +1090,7 @@ impl AgentProviderCompletion {
         }
     }
 
+    #[cfg(any(test, feature = "provider-transport"))]
     pub(crate) const fn new_with_response_identity(
         call: AgentProviderCallIdentity,
         stop: AgentProviderStopReason,
@@ -989,6 +1158,7 @@ pub struct AgentProviderTerminalFailure {
 }
 
 impl AgentProviderTerminalFailure {
+    #[cfg(any(test, feature = "provider-transport"))]
     pub(crate) const fn new(
         call: AgentProviderCallIdentity,
         failure: AgentProviderFailure,
@@ -1004,6 +1174,7 @@ impl AgentProviderTerminalFailure {
         }
     }
 
+    #[cfg(any(test, feature = "provider-transport"))]
     pub(crate) const fn new_with_response_identity(
         call: AgentProviderCallIdentity,
         failure: AgentProviderFailure,
@@ -1053,6 +1224,102 @@ pub enum AgentProviderStreamConclusion {
     Completed(AgentProviderCompletion),
     /// Provider returned one closed failure or cancellation.
     Failed(AgentProviderTerminalFailure),
+}
+
+/// Move-only provider terminal constructed only after complete SSE framing and
+/// transport-observed response-body EOF.
+///
+/// A client tool call, when present, remains private inside this value until
+/// trusted catalog pricing and exact policy settlement both succeed.
+#[must_use]
+pub(crate) struct AgentProviderFinishedStream {
+    conclusion: AgentProviderStreamConclusion,
+    tool: Option<AgentBrowserToolCall>,
+}
+
+impl AgentProviderFinishedStream {
+    #[cfg(any(test, feature = "provider-transport"))]
+    pub(super) fn new(
+        conclusion: AgentProviderStreamConclusion,
+        tool: Option<AgentBrowserToolCall>,
+    ) -> Result<Self, AgentProviderProtocolError> {
+        let (stop, tool_only, tool_calls) = match conclusion {
+            AgentProviderStreamConclusion::Completed(completion) => (
+                Some(completion.stop()),
+                completion.tool_only_output(),
+                completion.stats().tool_calls(),
+            ),
+            AgentProviderStreamConclusion::Failed(failure) => {
+                (None, false, failure.stats().tool_calls())
+            }
+        };
+        let valid_tool = matches!(stop, Some(AgentProviderStopReason::ToolCalls))
+            && tool_only
+            && tool_calls == 1
+            && tool.is_some();
+        let valid_without_tool = !matches!(stop, Some(AgentProviderStopReason::ToolCalls))
+            && !tool_only
+            && tool.is_none();
+        if !valid_tool && !valid_without_tool {
+            return Err(AgentProviderProtocolError::Terminal);
+        }
+        Ok(Self { conclusion, tool })
+    }
+
+    /// Content-free normalized terminal facts. This is not tool authority.
+    pub const fn conclusion(&self) -> AgentProviderStreamConclusion {
+        self.conclusion
+    }
+
+    /// Borrowed content-free terminal facts without copying response identity.
+    #[cfg(feature = "provider-transport")]
+    pub const fn conclusion_ref(&self) -> &AgentProviderStreamConclusion {
+        &self.conclusion
+    }
+
+    /// Exact non-authorizing call correlation.
+    #[cfg(feature = "provider-transport")]
+    pub const fn call(&self) -> AgentProviderCallIdentity {
+        match self.conclusion {
+            AgentProviderStreamConclusion::Completed(completion) => completion.call(),
+            AgentProviderStreamConclusion::Failed(failure) => failure.call(),
+        }
+    }
+
+    /// Provider-reported usage when an authenticated terminal supplied it.
+    #[cfg(feature = "provider-transport")]
+    pub const fn usage(&self) -> Option<AgentProviderUsage> {
+        match self.conclusion {
+            AgentProviderStreamConclusion::Completed(completion) => Some(completion.usage()),
+            AgentProviderStreamConclusion::Failed(failure) => failure.usage(),
+        }
+    }
+
+    /// Provider-attested response identity when established by the adapter.
+    #[cfg(feature = "provider-transport")]
+    pub const fn response_identity(&self) -> Option<AgentProviderResponseIdentity> {
+        match self.conclusion {
+            AgentProviderStreamConclusion::Completed(completion) => completion.response_identity(),
+            AgentProviderStreamConclusion::Failed(failure) => failure.response_identity(),
+        }
+    }
+
+    pub(super) fn into_parts(
+        self,
+    ) -> (AgentProviderStreamConclusion, Option<AgentBrowserToolCall>) {
+        (self.conclusion, self.tool)
+    }
+}
+
+impl fmt::Debug for AgentProviderFinishedStream {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentProviderFinishedStream")
+            .field("conclusion", &self.conclusion)
+            .field("has_tool", &self.tool.is_some())
+            .field("content", &"[redacted]")
+            .finish()
+    }
 }
 
 impl AgentProviderUsage {
@@ -1348,7 +1615,7 @@ mod tests {
             .expect("valid revision");
         assert_eq!(model.as_str(), "gpt-5.6-terra");
         assert!(!format!("{model:?}").contains("gpt-5.6-terra"));
-        let config = AgentProviderCallConfig::try_new(
+        let config = AgentProviderCallConfig::try_for_test(
             AgentProviderKind::OpenAiResponses,
             model,
             AgentProviderReasoningEffort::High,
@@ -1373,7 +1640,7 @@ mod tests {
             AgentProviderReasoningEffort::High
         );
         assert_eq!(config.max_output_tokens(), 4_096);
-        assert_eq!(config.stream_budget().max_tool_calls(), 8);
+        assert_eq!(config.stream_budget().max_tool_calls(), 1);
         assert_eq!(config.pricing_profile().revision().value(), 1);
         assert_eq!(config.pricing_profile().max_input_tokens(), 16_384);
         assert_eq!(AgentProviderReasoningEffort::None.as_openai_str(), "none");
@@ -1397,7 +1664,7 @@ mod tests {
             Err(AgentProviderContractError::ModelRevision)
         );
         assert_eq!(
-            AgentProviderCallConfig::try_new(
+            AgentProviderCallConfig::try_for_test(
                 AgentProviderKind::AnthropicMessages,
                 AgentProviderModelRevision::try_new("claude-opus-5".to_owned())
                     .expect("valid revision"),
@@ -1415,7 +1682,7 @@ mod tests {
             Err(AgentProviderContractError::OutputTokens)
         );
         assert_eq!(
-            AgentProviderCallConfig::try_new(
+            AgentProviderCallConfig::try_for_test(
                 AgentProviderKind::AnthropicMessages,
                 AgentProviderModelRevision::try_new("claude-opus-5".to_owned())
                     .expect("valid revision"),

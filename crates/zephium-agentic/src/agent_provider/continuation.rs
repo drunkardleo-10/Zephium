@@ -26,11 +26,12 @@ use crate::{
 };
 
 use super::{
-    AgentBrowserToolCallId, AgentBrowserToolKind, AgentCommittedProviderInput,
-    AgentProviderCallConfig, AgentProviderCallIdentity, AgentProviderCompletion,
-    AgentProviderInputEvidence, AgentProviderKind, AgentProviderStopReason,
+    AgentBrowserToolCallId, AgentBrowserToolKind, AgentProviderCallConfig,
+    AgentProviderCallIdentity, AgentProviderCompletion, AgentProviderKind, AgentProviderStopReason,
     AgentProviderToolCallCorrelation,
 };
+#[cfg(any(test, feature = "provider-transport"))]
+use super::{AgentCommittedProviderInput, AgentProviderInputEvidence};
 
 /// Maximum initial semantic-observation bytes retained for stateless replay.
 ///
@@ -252,7 +253,7 @@ impl fmt::Debug for AgentProviderBoundTranscript {
 /// non-tool, multi-tool, or mismatched terminal consumes it without producing
 /// continuation authority.
 #[must_use]
-pub struct AgentProviderContinuationSeed {
+pub(crate) struct AgentProviderContinuationSeed {
     call: AgentProviderCallIdentity,
     config: AgentProviderCallConfig,
     baseline: SemanticObservationAcknowledgement,
@@ -260,6 +261,7 @@ pub struct AgentProviderContinuationSeed {
 }
 
 impl AgentProviderContinuationSeed {
+    #[cfg(any(test, feature = "provider-transport"))]
     pub(super) fn from_committed(
         call: AgentProviderCallIdentity,
         config: &AgentProviderCallConfig,
@@ -303,12 +305,13 @@ impl AgentProviderContinuationSeed {
     }
 
     /// Private structured transcript bytes retained for resource accounting.
+    #[cfg(any(test, feature = "provider-transport"))]
     pub const fn retained_transcript_bytes(&self) -> usize {
         self.transcript.retained_bytes()
     }
 
     /// Joins this exact committed turn to its sole tool-only provider terminal.
-    pub fn join_terminal_tool(
+    pub(super) fn join_terminal_tool(
         self,
         completion: AgentProviderCompletion,
         correlation: AgentProviderToolCallCorrelation,
@@ -342,6 +345,15 @@ impl AgentProviderContinuationSeed {
             correlation,
             transcript: self.transcript,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn join_terminal_tool_for_test(
+        self,
+        completion: AgentProviderCompletion,
+        correlation: AgentProviderToolCallCorrelation,
+    ) -> Result<AgentProviderContinuation, AgentProviderContinuationError> {
+        self.join_terminal_tool(completion, correlation)
     }
 }
 
@@ -379,7 +391,7 @@ impl AgentProviderContinuation {
     }
 
     /// Selected fixed provider protocol.
-    pub const fn provider(&self) -> AgentProviderKind {
+    pub fn provider(&self) -> AgentProviderKind {
         self.config.provider()
     }
 
@@ -792,7 +804,7 @@ impl AgentProviderBoundDiffContinuation {
     }
 
     /// Fixed provider protocol retained across the continuation.
-    pub const fn provider(&self) -> AgentProviderKind {
+    pub fn provider(&self) -> AgentProviderKind {
         self.config.provider()
     }
 
@@ -901,7 +913,7 @@ impl AgentProviderBoundLocateContinuation {
     }
 
     /// Fixed provider protocol retained across the continuation.
-    pub const fn provider(&self) -> AgentProviderKind {
+    pub fn provider(&self) -> AgentProviderKind {
         self.config.provider()
     }
 
@@ -1011,7 +1023,7 @@ impl AgentProviderBoundReadContinuation {
     }
 
     /// Fixed provider protocol retained across the continuation.
-    pub const fn provider(&self) -> AgentProviderKind {
+    pub fn provider(&self) -> AgentProviderKind {
         self.config.provider()
     }
 
@@ -1123,7 +1135,7 @@ impl AgentProviderBoundExtractionContinuation {
     }
 
     /// Fixed provider protocol retained across the mapping turn.
-    pub const fn provider(&self) -> AgentProviderKind {
+    pub fn provider(&self) -> AgentProviderKind {
         self.config.provider()
     }
 
@@ -1230,7 +1242,7 @@ impl AgentProviderBoundScreenshotContinuation {
     }
 
     /// Fixed provider protocol retained across the result turn.
-    pub const fn provider(&self) -> AgentProviderKind {
+    pub fn provider(&self) -> AgentProviderKind {
         self.config.provider()
     }
 
@@ -1589,7 +1601,7 @@ mod tests {
                 super::super::AgentProviderReasoningEffort::None
             }
         };
-        AgentProviderCallConfig::try_new(
+        AgentProviderCallConfig::try_for_test(
             provider,
             super::super::AgentProviderModelRevision::try_new(model.to_owned()).expect("model"),
             reasoning_effort,

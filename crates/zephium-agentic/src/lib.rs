@@ -53,6 +53,8 @@ mod probe_recipes;
 mod profile_lease;
 #[cfg(feature = "probe-harness")]
 mod protocol;
+#[cfg(feature = "provider-transport")]
+mod provider_transport;
 mod semantic;
 mod semantic_action;
 mod semantic_action_batch_result;
@@ -145,38 +147,43 @@ pub use agent_progress_metrics::{
     AgentDurationMetrics, AgentNeedsHumanMetrics, AgentProgressMetricError,
     AgentRunProgressMetrics, AgentRunProgressOutcome, AgentRunProgressSnapshot,
 };
+#[cfg(test)]
+pub(crate) use agent_provider::AgentBrowserToolCall;
+pub(crate) use agent_provider::AgentProviderPricedUsage;
 pub use agent_provider::{
     AgentBrowserActProposal, AgentBrowserHumanReason, AgentBrowserScopeProposal,
-    AgentBrowserSemanticQuery, AgentBrowserToolCall, AgentBrowserToolCallId,
-    AgentBrowserToolContractError, AgentBrowserToolKind, AgentBrowserToolProposal,
-    AgentBrowserWaitCondition, AgentCommittedProviderInput, AgentCommittedProviderRequest,
-    AgentPreparedDiffRequest, AgentPreparedExtractionRequest, AgentPreparedLocateRequest,
-    AgentPreparedObservationRequest, AgentPreparedReadContinuationRequest,
-    AgentPreparedReadRequest, AgentPreparedScreenshotRequest, AgentProviderBillingClass,
-    AgentProviderBoundDiffContinuation, AgentProviderBoundExtractionContinuation,
-    AgentProviderBoundLocateContinuation, AgentProviderBoundReadContinuation,
-    AgentProviderBoundScreenshotContinuation, AgentProviderCallConfig, AgentProviderCallIdentity,
-    AgentProviderCompletion, AgentProviderContinuation, AgentProviderContinuationError,
-    AgentProviderContinuationSeed, AgentProviderContractError, AgentProviderDiffRequestDraft,
-    AgentProviderEndpoint, AgentProviderExactInputCount, AgentProviderExtractionOutputBinding,
-    AgentProviderExtractionOutputCollector, AgentProviderExtractionOutputError,
-    AgentProviderExtractionRequestDraft, AgentProviderFailure, AgentProviderFailureClass,
-    AgentProviderInputEvidence, AgentProviderInputMetricReceipt, AgentProviderInputMetrics,
-    AgentProviderInputOutcome, AgentProviderInputTokenBinding, AgentProviderInputTokenCount,
-    AgentProviderInputTokenRequest, AgentProviderKind, AgentProviderLocalInputTokenCounter,
-    AgentProviderLocateRequestDraft, AgentProviderModelRevision, AgentProviderObjective,
-    AgentProviderObjectiveError, AgentProviderPricedUsage, AgentProviderPricingAttribution,
-    AgentProviderPricingContractError, AgentProviderPricingError, AgentProviderPricingProfile,
-    AgentProviderPricingRevision, AgentProviderPricingSchedule, AgentProviderProtocolError,
-    AgentProviderReadContinuationRequestDraft, AgentProviderReasoningEffort, AgentProviderRequest,
-    AgentProviderRequestDigest, AgentProviderRequestError, AgentProviderRequestSettlement,
-    AgentProviderResponseIdentity, AgentProviderRetryAfter, AgentProviderRetryDisposition,
-    AgentProviderScreenshotRequestDraft, AgentProviderSemanticInputStats, AgentProviderStopReason,
+    AgentBrowserSemanticQuery, AgentBrowserToolCallId, AgentBrowserToolContractError,
+    AgentBrowserToolKind, AgentBrowserToolProposal, AgentBrowserWaitCondition,
+    AgentCommittedProviderInput, AgentPreparedDiffRequest, AgentPreparedExtractionRequest,
+    AgentPreparedLocateRequest, AgentPreparedObservationRequest,
+    AgentPreparedReadContinuationRequest, AgentPreparedReadRequest, AgentPreparedScreenshotRequest,
+    AgentProviderBillingClass, AgentProviderBoundDiffContinuation,
+    AgentProviderBoundExtractionContinuation, AgentProviderBoundLocateContinuation,
+    AgentProviderBoundReadContinuation, AgentProviderBoundScreenshotContinuation,
+    AgentProviderCallConfig, AgentProviderCallIdentity, AgentProviderCompletion,
+    AgentProviderContinuation, AgentProviderContinuationError, AgentProviderContractError,
+    AgentProviderDiffRequestDraft, AgentProviderEndpoint, AgentProviderExactInputCount,
+    AgentProviderExtractionOutputBinding, AgentProviderExtractionOutputCollector,
+    AgentProviderExtractionOutputError, AgentProviderExtractionRequestDraft, AgentProviderFailure,
+    AgentProviderFailureClass, AgentProviderInputEvidence, AgentProviderInputMetricReceipt,
+    AgentProviderInputMetrics, AgentProviderInputOutcome, AgentProviderInputTokenBinding,
+    AgentProviderInputTokenCount, AgentProviderInputTokenRequest, AgentProviderKind,
+    AgentProviderLocalInputTokenCounter, AgentProviderLocateRequestDraft,
+    AgentProviderModelRevision, AgentProviderObjective, AgentProviderObjectiveError,
+    AgentProviderPricingAttribution, AgentProviderPricingContractError, AgentProviderPricingError,
+    AgentProviderPricingProfile, AgentProviderPricingRevision, AgentProviderPricingSchedule,
+    AgentProviderPricingSettlement, AgentProviderPricingSettlementError,
+    AgentProviderProtocolError, AgentProviderReadContinuationRequestDraft,
+    AgentProviderReasoningEffort, AgentProviderRequest, AgentProviderRequestDigest,
+    AgentProviderRequestError, AgentProviderRequestSettlement, AgentProviderResponseIdentity,
+    AgentProviderResponseRoute, AgentProviderRetryAfter, AgentProviderRetryDisposition,
+    AgentProviderScreenshotRequestDraft, AgentProviderSemanticInputStats,
+    AgentProviderSettledTerminal, AgentProviderSettledToolTurn, AgentProviderStopReason,
     AgentProviderStreamBatch, AgentProviderStreamBudget, AgentProviderStreamConclusion,
-    AgentProviderStreamDecoder, AgentProviderStreamEvent, AgentProviderStreamStats,
-    AgentProviderTerminalFailure, AgentProviderTextDelta, AgentProviderTokenRates,
-    AgentProviderToolCallCorrelation, AgentProviderTransportInput, AgentProviderUsage,
+    AgentProviderStreamStats, AgentProviderTerminalFailure, AgentProviderTextDelta,
+    AgentProviderTokenRates, AgentProviderTransportInput, AgentProviderUsage,
     MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES, MAX_AGENT_BROWSER_SEMANTIC_QUERY_BYTES,
+    MAX_AGENT_PROVIDER_ALLOWED_EFFECTIVE_MODELS,
     MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES,
     MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES, MAX_AGENT_PROVIDER_CONTINUATION_TURNS,
     MAX_AGENT_PROVIDER_INPUT_METRIC_RECEIPT_BYTES, MAX_AGENT_PROVIDER_MODEL_REVISION_BYTES,
@@ -188,6 +195,11 @@ pub use agent_provider::{
     MAX_AGENT_PROVIDER_SSE_LINE_BYTES, MAX_AGENT_PROVIDER_STREAM_EVENTS,
     MAX_AGENT_PROVIDER_STREAM_WIRE_BYTES, MAX_AGENT_PROVIDER_TOOL_ARGUMENT_BYTES,
     MAX_AGENT_PROVIDER_TOOL_CALLS, MAX_AGENT_PROVIDER_TOOL_CALL_ID_BYTES,
+};
+#[cfg(feature = "provider-transport")]
+pub(crate) use agent_provider::{
+    AgentCommittedProviderRequest, AgentProviderContinuationSeed, AgentProviderFinishedStream,
+    AgentProviderStreamDecoder,
 };
 pub use agent_supervisor::{
     AgentDelegationNode, AgentDelegationSpec, AgentDelegationTopology, AgentNodeExecution,
@@ -203,6 +215,27 @@ pub use agent_supervisor::{
     AgentSupervisorNodeStatus, AgentSupervisorRuntimeError, AgentSupervisorRuntimeStatus,
     AgentSupervisorWait, MAX_AGENT_DELEGATION_DEPTH, MAX_AGENT_EXECUTING_SUPERVISOR_NODES,
     MAX_AGENT_LIVE_SUPERVISOR_NODES,
+};
+#[cfg(all(feature = "provider-transport", target_os = "macos"))]
+pub use provider_transport::{
+    load_macos_development_openai_credential, MacosAgentProviderCredentialError,
+    MACOS_OPENAI_KEYCHAIN_ACCOUNT, MACOS_OPENAI_KEYCHAIN_SERVICE,
+};
+#[cfg(feature = "provider-transport")]
+pub use provider_transport::{
+    AgentProviderAdmissionError, AgentProviderAttempt, AgentProviderBatchDisposition,
+    AgentProviderCancellation, AgentProviderCountedAttempt, AgentProviderCredential,
+    AgentProviderCredentialError, AgentProviderDisclosureStage, AgentProviderExactCountOutcome,
+    AgentProviderImmediateSettlement, AgentProviderPolicySettlement, AgentProviderTransport,
+    AgentProviderTransportConfig, AgentProviderTransportConfigError, AgentProviderTransportOutcome,
+    AgentProviderTransportResult, AgentProviderTransportShutdownError,
+    AgentProviderTransportShutdownProof, AgentProviderTransportSnapshot,
+    AgentProviderTransportStateError, AgentProviderUsageKnowledge,
+    AGENT_PROVIDER_HTTP2_INITIAL_RECEIVE_WINDOW_BYTES, MAX_AGENT_PROVIDER_CONNECT_TIMEOUT_MILLIS,
+    MAX_AGENT_PROVIDER_CREDENTIAL_BYTES, MAX_AGENT_PROVIDER_HTTP2_FRAME_BYTES,
+    MAX_AGENT_PROVIDER_READ_TIMEOUT_MILLIS, MAX_AGENT_PROVIDER_REQUEST_TIMEOUT_MILLIS,
+    MAX_AGENT_PROVIDER_RESPONSE_HEADER_BYTES, MAX_AGENT_PROVIDER_TRANSPORT_CALLS,
+    MAX_AGENT_PROVIDER_TRANSPORT_SHUTDOWN_PROOF_BYTES, MAX_OPENAI_INPUT_TOKEN_RESPONSE_BYTES,
 };
 
 pub use semantic_locate::{

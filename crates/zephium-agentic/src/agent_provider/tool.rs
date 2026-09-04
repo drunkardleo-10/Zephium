@@ -6,6 +6,12 @@
 //! identities cannot cross the public boundary. Every result remains a
 //! pre-policy proposal and grants no browser or supervisor authority.
 
+// The public proposal vocabulary remains available in the zero-runtime core,
+// while its co-located private JSON codec is reachable only from tests or the
+// explicit provider transport. Keep that dormant codec type-checked without
+// treating its intentional no-feature unreachability as dead production code.
+#![cfg_attr(not(any(test, feature = "provider-transport")), allow(dead_code))]
+
 use std::fmt;
 
 use serde::Deserialize;
@@ -591,7 +597,7 @@ impl fmt::Debug for AgentBrowserToolProposal {
 /// One typed provider tool call; still not browser or policy authority.
 #[must_use]
 #[derive(Eq, PartialEq)]
-pub struct AgentBrowserToolCall {
+pub(crate) struct AgentBrowserToolCall {
     source_call: AgentProviderCallIdentity,
     id: AgentBrowserToolCallId,
     proposal: Box<AgentBrowserToolProposal>,
@@ -677,16 +683,19 @@ impl AgentBrowserToolCall {
     }
 
     /// Opaque provider correlation for a later fixed tool result.
+    #[cfg(test)]
     pub const fn id(&self) -> &AgentBrowserToolCallId {
         &self.id
     }
 
     /// Closed pre-policy browser proposal.
+    #[cfg(test)]
     pub fn proposal(&self) -> &AgentBrowserToolProposal {
         self.proposal.as_ref()
     }
 
     /// Consumes the call without copying model-authored text.
+    #[cfg(test)]
     pub fn into_parts(self) -> (AgentBrowserToolCallId, AgentBrowserToolProposal) {
         (self.id, *self.proposal)
     }
@@ -696,7 +705,7 @@ impl AgentBrowserToolCall {
     /// The correlation retains bounded provider-authored arguments only for a
     /// later fixed continuation request. It exposes no raw JSON or browser
     /// authority and must never be logged or persisted.
-    pub fn into_continuation_parts(
+    pub(super) fn into_continuation_parts(
         self,
     ) -> (AgentProviderToolCallCorrelation, AgentBrowserToolProposal) {
         let extraction_schema = match self.proposal.as_ref() {
@@ -716,6 +725,13 @@ impl AgentBrowserToolCall {
             *self.proposal,
         )
     }
+
+    #[cfg(test)]
+    pub(crate) fn into_continuation_parts_for_test(
+        self,
+    ) -> (AgentProviderToolCallCorrelation, AgentBrowserToolProposal) {
+        self.into_continuation_parts()
+    }
 }
 
 impl fmt::Debug for AgentBrowserToolCall {
@@ -734,7 +750,7 @@ impl fmt::Debug for AgentBrowserToolCall {
 /// arguments remain private so no caller can reinterpret them as selectors,
 /// JavaScript, DOM, or a generic provider payload.
 #[must_use]
-pub struct AgentProviderToolCallCorrelation {
+pub(crate) struct AgentProviderToolCallCorrelation {
     pub(super) source_call: AgentProviderCallIdentity,
     pub(super) id: AgentBrowserToolCallId,
     pub(super) kind: AgentBrowserToolKind,

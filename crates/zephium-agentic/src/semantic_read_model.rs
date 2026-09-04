@@ -346,6 +346,7 @@ impl SemanticReadDeliveryReceipt {
         self.context
     }
 
+    #[cfg(any(test, feature = "provider-transport"))]
     pub(crate) const fn observation_guard(&self) -> [u8; 32] {
         self.observation_guard
     }

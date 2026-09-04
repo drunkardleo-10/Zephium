@@ -38,14 +38,14 @@ use crate::{
 
 use super::continuation::{AgentProviderBoundTranscript, AgentProviderTranscript};
 use super::tool::{AgentBrowserToolKind, OpenAiResponseReplayItem};
+#[cfg(any(test, feature = "provider-transport"))]
+use super::AgentProviderContinuationSeed;
 use super::{
     AgentProviderBoundDiffContinuation, AgentProviderBoundExtractionContinuation,
     AgentProviderBoundLocateContinuation, AgentProviderBoundReadContinuation,
     AgentProviderBoundScreenshotContinuation, AgentProviderCallConfig, AgentProviderCallIdentity,
-    AgentProviderContinuationSeed, AgentProviderContractError,
-    AgentProviderExtractionOutputBinding, AgentProviderKind, AgentProviderModelRevision,
-    AgentProviderToolCallCorrelation, ANTHROPIC_GLOBAL_INFERENCE_GEO,
-    ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST, OPENAI_STANDARD_SERVICE_TIER,
+    AgentProviderContractError, AgentProviderExtractionOutputBinding, AgentProviderKind,
+    AgentProviderModelRevision, AgentProviderToolCallCorrelation,
 };
 
 /// Maximum UTF-8 bytes in one approved browser objective.
@@ -907,6 +907,11 @@ impl AgentCommittedProviderInput {
         AgentProviderInputMetricReceipt::from_committed(self)
     }
 
+    /// Maximum provider-accounted input tokens reserved for this call.
+    pub const fn input_token_limit(&self) -> u64 {
+        self.input_token_limit
+    }
+
     /// Separates terminal usage authority from cloneable content-free input proof.
     ///
     /// Callers that retain qualification metrics must read `metrics` before
@@ -915,6 +920,7 @@ impl AgentCommittedProviderInput {
         (self.active, self.evidence)
     }
 
+    #[cfg(feature = "provider-transport")]
     fn bind_provider_exact_input_count(
         &mut self,
         count: &AgentProviderExactInputCount,
@@ -1164,7 +1170,8 @@ impl AgentProviderTransportInput {
     }
 
     /// Commits disclosure and returns the request joined to active authority.
-    pub fn commit(
+    #[cfg(any(test, feature = "provider-transport"))]
+    pub(crate) fn commit(
         self,
         policy: &mut AgentRunPolicy,
     ) -> Result<AgentCommittedProviderRequest, AgentProviderRequestError> {
@@ -1262,12 +1269,14 @@ impl fmt::Debug for AgentProviderTransportInput {
 /// The move-only active authority must be returned to the policy owner for one
 /// terminal settlement whether the transport succeeds, fails, or is cancelled.
 #[must_use]
-pub struct AgentCommittedProviderRequest {
+#[cfg(any(test, feature = "provider-transport"))]
+pub(crate) struct AgentCommittedProviderRequest {
     request: AgentProviderRequest,
     input: AgentCommittedProviderInput,
     continuation: Option<AgentProviderContinuationSeed>,
 }
 
+#[cfg(any(test, feature = "provider-transport"))]
 impl AgentCommittedProviderRequest {
     /// Immutable request bytes and fixed endpoint committed for transmission.
     pub const fn request(&self) -> &AgentProviderRequest {
@@ -1275,6 +1284,7 @@ impl AgentCommittedProviderRequest {
     }
 
     /// Exact active call authority paired with this request.
+    #[cfg(test)]
     pub const fn active(&self) -> &AgentActiveModelCall {
         self.input.active()
     }
@@ -1300,6 +1310,7 @@ impl AgentCommittedProviderRequest {
     /// original policy reservation. An existing exact-local count must agree;
     /// disagreement is a version/integration failure rather than a metric
     /// overwrite.
+    #[cfg(feature = "provider-transport")]
     pub fn bind_provider_exact_input_count(
         &mut self,
         count: AgentProviderExactInputCount,
@@ -1326,7 +1337,7 @@ impl AgentCommittedProviderRequest {
     ///
     /// A committed full observation, diff, or locate result can carry a seed.
     /// Bounded reads and screenshots never create continuation authority.
-    pub fn into_parts(
+    pub(crate) fn into_parts(
         self,
     ) -> (
         AgentProviderRequest,
@@ -1337,6 +1348,7 @@ impl AgentCommittedProviderRequest {
     }
 }
 
+#[cfg(any(test, feature = "provider-transport"))]
 impl fmt::Debug for AgentCommittedProviderRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -3317,7 +3329,7 @@ fn encode_openai_body(
         parallel_tool_calls: false,
         max_output_tokens: config.max_output_tokens(),
         truncation: "disabled",
-        service_tier: OPENAI_STANDARD_SERVICE_TIER,
+        service_tier: config.response_route().request_service_tier(),
         reasoning: OpenAiReasoningWire {
             effort: config.reasoning_effort().as_openai_str(),
         },
@@ -3393,7 +3405,7 @@ fn encode_openai_continuation_body(
         parallel_tool_calls: false,
         max_output_tokens: config.max_output_tokens(),
         truncation: "disabled",
-        service_tier: OPENAI_STANDARD_SERVICE_TIER,
+        service_tier: config.response_route().request_service_tier(),
         reasoning: OpenAiReasoningWire {
             effort: config.reasoning_effort().as_openai_str(),
         },
@@ -3466,7 +3478,7 @@ fn encode_openai_extraction_body(
         },
         max_output_tokens: config.max_output_tokens(),
         truncation: "disabled",
-        service_tier: OPENAI_STANDARD_SERVICE_TIER,
+        service_tier: config.response_route().request_service_tier(),
         reasoning: OpenAiReasoningWire {
             effort: config.reasoning_effort().as_openai_str(),
         },
@@ -3560,7 +3572,7 @@ fn encode_openai_screenshot_continuation_body(
         parallel_tool_calls: false,
         max_output_tokens: config.max_output_tokens(),
         truncation: "disabled",
-        service_tier: OPENAI_STANDARD_SERVICE_TIER,
+        service_tier: config.response_route().request_service_tier(),
         reasoning: OpenAiReasoningWire {
             effort: config.reasoning_effort().as_openai_str(),
         },
@@ -3615,8 +3627,11 @@ fn encode_anthropic_body(
             r#type: "auto",
             disable_parallel_tool_use: true,
         },
-        service_tier: ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST,
-        inference_geo: ANTHROPIC_GLOBAL_INFERENCE_GEO,
+        service_tier: config.response_route().request_service_tier(),
+        inference_geo: config
+            .response_route()
+            .response_inference_geo()
+            .ok_or(AgentProviderRequestError::Encoding)?,
         stream: true,
     };
     encode_bounded_provider_body(&wire)
@@ -3708,8 +3723,11 @@ fn encode_anthropic_continuation_body(
             r#type: "auto",
             disable_parallel_tool_use: true,
         },
-        service_tier: ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST,
-        inference_geo: ANTHROPIC_GLOBAL_INFERENCE_GEO,
+        service_tier: config.response_route().request_service_tier(),
+        inference_geo: config
+            .response_route()
+            .response_inference_geo()
+            .ok_or(AgentProviderRequestError::Encoding)?,
         stream: true,
     };
     encode_bounded_provider_body(&wire)
@@ -3793,8 +3811,11 @@ fn encode_anthropic_extraction_body(
                 schema: anthropic_extraction_output_schema(),
             },
         },
-        service_tier: ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST,
-        inference_geo: ANTHROPIC_GLOBAL_INFERENCE_GEO,
+        service_tier: config.response_route().request_service_tier(),
+        inference_geo: config
+            .response_route()
+            .response_inference_geo()
+            .ok_or(AgentProviderRequestError::Encoding)?,
         stream: true,
     };
     encode_bounded_provider_body(&wire)
@@ -3929,8 +3950,11 @@ fn encode_anthropic_screenshot_continuation_body(
             r#type: "auto",
             disable_parallel_tool_use: true,
         },
-        service_tier: ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST,
-        inference_geo: ANTHROPIC_GLOBAL_INFERENCE_GEO,
+        service_tier: config.response_route().request_service_tier(),
+        inference_geo: config
+            .response_route()
+            .response_inference_geo()
+            .ok_or(AgentProviderRequestError::Encoding)?,
         stream: true,
     };
     encode_bounded_provider_body(&wire)
@@ -4578,7 +4602,7 @@ mod tests {
     }
 
     fn openai_config(max_output_tokens: u32) -> AgentProviderCallConfig {
-        AgentProviderCallConfig::try_new(
+        AgentProviderCallConfig::try_for_test(
             AgentProviderKind::OpenAiResponses,
             super::super::AgentProviderModelRevision::try_new("gpt-5.6-terra".to_owned())
                 .expect("model"),
@@ -4959,7 +4983,7 @@ mod tests {
 
     #[test]
     fn anthropic_request_is_stateless_strict_bounded_and_provider_compatible() {
-        let config = AgentProviderCallConfig::try_new(
+        let config = AgentProviderCallConfig::try_for_test(
             AgentProviderKind::AnthropicMessages,
             super::super::AgentProviderModelRevision::try_new("claude-opus-5".to_owned())
                 .expect("model"),

@@ -950,6 +950,26 @@ impl AgentModelCallReceipt {
     }
 
     #[cfg(test)]
+    pub(crate) fn for_provider_terminal_test(
+        call: crate::AgentProviderCallIdentity,
+        settlement: AgentModelCallSettlement,
+    ) -> Self {
+        Self {
+            manifest: call.manifest(),
+            manifest_guard: [0; 32],
+            id: call.call(),
+            lease: call.lease(),
+            node: call.node(),
+            settlement,
+            usage_accounting: AgentModelUsageAccounting::Exact,
+            pricing_attribution: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cost_micro_usd: 0,
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) const fn for_metrics_test(
         manifest: &AgentRunManifest,
         id: AgentModelCallId,
@@ -1088,6 +1108,11 @@ impl AgentRunPolicy {
     /// Whether a mismatched/ambiguous settlement terminally sealed this policy.
     pub const fn is_sealed(&self) -> bool {
         self.sealed
+    }
+
+    #[cfg(all(test, feature = "provider-transport"))]
+    pub(crate) fn seal_for_test(&mut self) {
+        self.sealed = true;
     }
 
     /// Consumed and reserved run-wide accounting.
@@ -1559,7 +1584,7 @@ impl AgentRunPolicy {
     /// contract after exact provider/model/tokenizer/billing/revision matching.
     /// Pricing details remain joined to the move-only terminal authority until
     /// this single policy transition.
-    pub fn settle_model_call_priced(
+    pub(crate) fn settle_model_call_priced(
         &mut self,
         active: AgentActiveModelCall,
         settlement: AgentModelCallSettlement,
@@ -1578,6 +1603,33 @@ impl AgentRunPolicy {
                 cost_micro_usd: cost_ceiling_micro_usd,
             },
         )
+    }
+
+    /// Checks that one active call belongs to this live policy without
+    /// consuming either authority or fail-stopping a different policy.
+    ///
+    /// Provider settlement uses this before destructuring its move-only EOF
+    /// owner. The subsequent mutable settlement remains the authoritative
+    /// transition and repeats the check defensively.
+    pub(crate) fn prevalidate_active_model_call(
+        &self,
+        active: &AgentActiveModelCall,
+    ) -> Result<(), AgentPolicyError> {
+        if self.sealed {
+            return Err(AgentPolicyError::Sealed);
+        }
+        let Some(call) = self.calls.iter().find(|call| call.id == active.id) else {
+            return Err(AgentPolicyError::CallMissing);
+        };
+        if call.state != ModelCallState::Delivered
+            || !active.matches_manifest_revision(self.manifest.id(), self.manifest.guard())
+            || call.lease != active.lease
+            || call.node != active.node
+            || call.admission_guard != active.guard
+        {
+            return Err(AgentPolicyError::AdmissionMismatch);
+        }
+        Ok(())
     }
 
     /// Settles a committed call whose provider usage is unknowable.
@@ -2730,11 +2782,11 @@ mod tests {
         AgentProviderReadContinuationRequestDraft, AgentProviderReasoningEffort,
         AgentProviderRequestSettlement, AgentProviderScreenshotRequestDraft,
         AgentProviderSemanticInputStats, AgentProviderStreamBatch, AgentProviderStreamBudget,
-        AgentProviderStreamConclusion, AgentProviderStreamEvent, AgentProviderTextDelta,
-        AgentRunManifestId, AgentRunProviderInputMetrics, AgentRunScope, AgentRunSupervisor,
-        AgentSupervisorId, ContextAutomationState, ContextCapabilities, ContextCapability,
-        ContextId, ContextIdentity, ContextKind, ContextOperationId, ContextRegistry, ContextRunId,
-        ContextSettlement, FrameGeneration, FrameId, SemanticActionBatch, SemanticActionBatchId,
+        AgentProviderStreamConclusion, AgentProviderTextDelta, AgentRunManifestId,
+        AgentRunProviderInputMetrics, AgentRunScope, AgentRunSupervisor, AgentSupervisorId,
+        ContextAutomationState, ContextCapabilities, ContextCapability, ContextId, ContextIdentity,
+        ContextKind, ContextOperationId, ContextRegistry, ContextRunId, ContextSettlement,
+        FrameGeneration, FrameId, SemanticActionBatch, SemanticActionBatchId,
         SemanticActionFailure, SemanticActionIntent, SemanticActionProposal,
         SemanticCaptureInstant, SemanticDecodeContext, SemanticDiffBudget, SemanticDiffOutcome,
         SemanticEffectEvidence, SemanticExtractionFieldSchema, SemanticExtractionSchema,
@@ -3276,7 +3328,7 @@ mod tests {
         max_output_tokens: u32,
         max_priced_input_tokens: u64,
     ) -> AgentProviderCallConfig {
-        AgentProviderCallConfig::try_new(
+        AgentProviderCallConfig::try_for_test(
             AgentProviderKind::OpenAiResponses,
             AgentProviderModelRevision::try_new("gpt-5.6-terra".to_owned()).expect("model"),
             AgentProviderReasoningEffort::Medium,
@@ -3298,7 +3350,7 @@ mod tests {
         fixed_input_tokens: u32,
         max_output_tokens: u32,
     ) -> AgentProviderCallConfig {
-        AgentProviderCallConfig::try_new(
+        AgentProviderCallConfig::try_for_test(
             AgentProviderKind::AnthropicMessages,
             AgentProviderModelRevision::try_new("claude-opus-5".to_owned()).expect("model"),
             AgentProviderReasoningEffort::None,
@@ -3526,7 +3578,7 @@ mod tests {
         );
         let continuation = continuation
             .expect("visual continuation seed")
-            .join_terminal_tool(completion, tool.into_continuation_parts().0)
+            .join_terminal_tool_for_test(completion, tool.into_continuation_parts_for_test().0)
             .expect("visual terminal join");
         let screenshot =
             admitted_test_screenshot(observation, &acknowledgement, screenshot_id, pixel);
@@ -4291,7 +4343,7 @@ mod tests {
             "{}".to_owned(),
         )
         .expect("tool call");
-        let correlation = tool.into_continuation_parts().0;
+        let correlation = tool.into_continuation_parts_for_test().0;
         let completion = crate::AgentProviderCompletion::new(
             initial_request.call(),
             crate::AgentProviderStopReason::ToolCalls,
@@ -4301,7 +4353,7 @@ mod tests {
         );
         let continuation = continuation
             .expect("continuation seed")
-            .join_terminal_tool(completion, correlation)
+            .join_terminal_tool_for_test(completion, correlation)
             .expect("terminal tool join");
 
         let diff_request = call_request(2, fixture.lease, binding, 500, 20, 100, NOW);
@@ -4448,7 +4500,7 @@ mod tests {
             true,
         );
         let continuation = continuation
-            .join_terminal_tool(completion, tool.into_continuation_parts().0)
+            .join_terminal_tool_for_test(completion, tool.into_continuation_parts_for_test().0)
             .expect("second terminal tool join");
         let third_request = call_request(3, fixture.lease, binding, 500, 20, 100, NOW);
         let draft = AgentProviderDiffRequestDraft::try_new(
@@ -4562,7 +4614,7 @@ mod tests {
         );
         let continuation = continuation
             .expect("continuation seed")
-            .join_terminal_tool(completion, tool.into_continuation_parts().0)
+            .join_terminal_tool_for_test(completion, tool.into_continuation_parts_for_test().0)
             .expect("locate terminal join");
         let frames = observation
             .frames()
@@ -4759,7 +4811,7 @@ mod tests {
         );
         let continuation = continuation
             .expect("continuation seed")
-            .join_terminal_tool(completion, tool.into_continuation_parts().0)
+            .join_terminal_tool_for_test(completion, tool.into_continuation_parts_for_test().0)
             .expect("read terminal join");
         let read = read_semantic_observation(
             &observation,
@@ -4901,7 +4953,7 @@ mod tests {
         );
         let next_continuation = continuation
             .expect("read retains baseline for continuation")
-            .join_terminal_tool(completion, tool.into_continuation_parts().0)
+            .join_terminal_tool_for_test(completion, tool.into_continuation_parts_for_test().0)
             .expect("post-read terminal join");
         assert!(next_continuation.baseline().matches(&observation));
     }
@@ -4979,7 +5031,7 @@ mod tests {
         );
         let continuation = continuation
             .expect("continuation seed")
-            .join_terminal_tool(completion, tool.into_continuation_parts().0)
+            .join_terminal_tool_for_test(completion, tool.into_continuation_parts_for_test().0)
             .expect("extract terminal join");
         let read = read_semantic_observation(
             &observation,
@@ -5087,24 +5139,21 @@ mod tests {
         collector
             .push_batch(AgentProviderStreamBatch::new(
                 request.call(),
-                vec![AgentProviderStreamEvent::TextDelta(
-                    AgentProviderTextDelta::new(output[..split].to_owned()),
-                )],
+                vec![AgentProviderTextDelta::new(output[..split].to_owned())],
             ))
             .expect("first extraction delta");
         collector
             .push_batch(AgentProviderStreamBatch::new(
                 request.call(),
-                vec![AgentProviderStreamEvent::TextDelta(
-                    AgentProviderTextDelta::new(output[split..].to_owned()),
-                )],
+                vec![AgentProviderTextDelta::new(output[split..].to_owned())],
             ))
             .expect("second extraction delta");
         assert_eq!(collector.retained_bytes(), output.len());
+        let usage = crate::AgentProviderUsage::try_new(120, 4, 0, 0, 0).expect("usage");
         let completion = crate::AgentProviderCompletion::new(
             request.call(),
             crate::AgentProviderStopReason::Completed,
-            crate::AgentProviderUsage::try_new(120, 4, 0, 0, 0).expect("usage"),
+            usage,
             crate::AgentProviderStreamStats::new(
                 240,
                 2,
@@ -5114,9 +5163,38 @@ mod tests {
             ),
             false,
         );
+        let pricing = crate::AgentProviderPricingSchedule::try_for_test(
+            config.provider(),
+            config.model().clone(),
+            config.reasoning_effort(),
+            config.tokenizer().clone(),
+            config.pricing_profile(),
+            crate::AgentProviderTokenRates::try_new(1, 1, 1, 1).expect("test rates"),
+        )
+        .expect("matching pricing schedule");
+        let route = config.response_route();
+        let response_identity = crate::AgentProviderResponseIdentity::try_attested(
+            &config,
+            config.model().as_str(),
+            route.response_service_tier(),
+            route.response_inference_geo(),
+        )
+        .expect("response identity");
+        let priced = pricing
+            .try_price_for_test(&config, response_identity, usage)
+            .expect("priced usage");
+        let receipt = fixture
+            .policy
+            .settle_model_call_priced(active, AgentModelCallSettlement::Completed, priced)
+            .expect("extraction settlement");
+        let terminal = crate::AgentProviderSettledTerminal::for_test(
+            receipt,
+            AgentProviderStreamConclusion::Completed(completion),
+            None,
+        );
         let result = collector
             .finish(
-                AgentProviderStreamConclusion::Completed(completion),
+                &terminal,
                 &schema,
                 &read,
                 SemanticReadSensitivityLimit::PublicOnly,
@@ -5125,10 +5203,6 @@ mod tests {
         assert_eq!(result.schema(), schema.id());
         assert_eq!(result.stats().fields(), 1);
         assert_eq!(result.stats().source_edges(), 1);
-        fixture
-            .policy
-            .settle_model_call(active, AgentModelCallSettlement::Completed, 120, 4, 80)
-            .expect("extraction settlement");
     }
 
     #[test]

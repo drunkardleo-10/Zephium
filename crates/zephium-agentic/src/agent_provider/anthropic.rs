@@ -17,11 +17,11 @@ use super::sse::{SseDecoder, SseEvent};
 use super::{
     AgentBrowserToolCall, AgentBrowserToolCallId, AgentBrowserToolKind, AgentProviderCallConfig,
     AgentProviderCallIdentity, AgentProviderCompletion, AgentProviderFailure,
-    AgentProviderFailureClass, AgentProviderKind, AgentProviderModelRevision,
-    AgentProviderProtocolError, AgentProviderStopReason, AgentProviderStreamBatch,
-    AgentProviderStreamBudget, AgentProviderStreamConclusion, AgentProviderStreamEvent,
+    AgentProviderFailureClass, AgentProviderFinishedStream, AgentProviderKind,
+    AgentProviderProtocolError, AgentProviderResponseIdentity, AgentProviderStopReason,
+    AgentProviderStreamBatch, AgentProviderStreamBudget, AgentProviderStreamConclusion,
     AgentProviderStreamStats, AgentProviderTerminalFailure, AgentProviderTextDelta,
-    AgentProviderUsage, ANTHROPIC_GLOBAL_INFERENCE_GEO, ANTHROPIC_STANDARD_SERVICE_TIER_RESPONSE,
+    AgentProviderUsage,
 };
 
 const MAX_ANTHROPIC_MESSAGE_ID_BYTES: usize = 128;
@@ -32,7 +32,7 @@ const MAX_ANTHROPIC_STOP_SEQUENCE_BYTES: usize = 1_024;
 enum StreamPhase {
     AwaitStart,
     Content,
-    MessageDeltas,
+    AwaitMessageStop,
     Terminal,
 }
 
@@ -57,6 +57,20 @@ struct ToolAccumulator {
     open: bool,
 }
 
+enum PendingTerminal {
+    Completed {
+        stop: AgentProviderStopReason,
+        usage: AgentProviderUsage,
+        tool_only_output: bool,
+        identity: AgentProviderResponseIdentity,
+    },
+    Failed {
+        failure: AgentProviderFailure,
+        usage: Option<AgentProviderUsage>,
+        identity: Option<AgentProviderResponseIdentity>,
+    },
+}
+
 #[derive(Clone, Copy)]
 struct UsageState {
     input_tokens: u64,
@@ -68,11 +82,6 @@ struct UsageState {
 
 impl UsageState {
     fn from_start(usage: AnthropicStartUsage<'_>) -> Result<Self, AgentProviderProtocolError> {
-        if usage.service_tier != ANTHROPIC_STANDARD_SERVICE_TIER_RESPONSE
-            || usage.inference_geo != ANTHROPIC_GLOBAL_INFERENCE_GEO
-        {
-            return Err(AgentProviderProtocolError::Usage);
-        }
         let state = Self {
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
@@ -143,13 +152,14 @@ fn update_cumulative(
 /// EOF is reached. Protocol errors are content-free. Mid-stream provider
 /// errors become typed terminal failures and never surface their message text.
 #[must_use]
-pub struct AnthropicMessagesStreamDecoder {
+pub(super) struct AnthropicMessagesStreamDecoder {
     call: AgentProviderCallIdentity,
-    model: AgentProviderModelRevision,
+    config: AgentProviderCallConfig,
     budget: AgentProviderStreamBudget,
     sse: SseDecoder,
     phase: StreamPhase,
     has_message_id: bool,
+    response_identity: Option<AgentProviderResponseIdentity>,
     blocks: Vec<ContentBlockState>,
     output_text_bytes: u32,
     tool_argument_bytes: u32,
@@ -157,7 +167,8 @@ pub struct AnthropicMessagesStreamDecoder {
     usage: Option<UsageState>,
     stop: Option<AgentProviderStopReason>,
     has_stop_sequence: bool,
-    conclusion: Option<AgentProviderStreamConclusion>,
+    terminal: Option<PendingTerminal>,
+    tool: Option<AgentBrowserToolCall>,
     failure: Option<AgentProviderProtocolError>,
 }
 
@@ -172,7 +183,7 @@ impl AnthropicMessagesStreamDecoder {
         }
         Ok(Self {
             call,
-            model: config.model().clone(),
+            config: config.clone(),
             budget: config.stream_budget(),
             sse: SseDecoder::new(
                 config.stream_budget().max_events(),
@@ -180,6 +191,7 @@ impl AnthropicMessagesStreamDecoder {
             )?,
             phase: StreamPhase::AwaitStart,
             has_message_id: false,
+            response_identity: None,
             blocks: Vec::with_capacity(MAX_ANTHROPIC_CONTENT_BLOCKS),
             output_text_bytes: 0,
             tool_argument_bytes: 0,
@@ -187,13 +199,14 @@ impl AnthropicMessagesStreamDecoder {
             usage: None,
             stop: None,
             has_stop_sequence: false,
-            conclusion: None,
+            terminal: None,
+            tool: None,
             failure: None,
         })
     }
 
     /// Decodes one arbitrary transport chunk into bounded normalized events.
-    pub fn push(
+    pub(super) fn push(
         &mut self,
         bytes: &[u8],
     ) -> Result<AgentProviderStreamBatch, AgentProviderProtocolError> {
@@ -221,21 +234,69 @@ impl AnthropicMessagesStreamDecoder {
     }
 
     /// Requires complete SSE framing and exactly one terminal provider event.
-    pub fn finish(self) -> Result<AgentProviderStreamConclusion, AgentProviderProtocolError> {
+    pub(super) fn finish(
+        mut self,
+    ) -> Result<AgentProviderFinishedStream, AgentProviderProtocolError> {
         if let Some(error) = self.failure {
             return Err(error);
         }
+        let stats = self.stats();
         self.sse.finish()?;
         if self.phase != StreamPhase::Terminal {
             return Err(AgentProviderProtocolError::Terminal);
         }
-        self.conclusion.ok_or(AgentProviderProtocolError::Terminal)
+        let terminal = self
+            .terminal
+            .take()
+            .ok_or(AgentProviderProtocolError::Terminal)?;
+        let (conclusion, tool) = match terminal {
+            PendingTerminal::Completed {
+                stop,
+                usage,
+                tool_only_output,
+                identity,
+            } => (
+                AgentProviderStreamConclusion::Completed(
+                    AgentProviderCompletion::new_with_response_identity(
+                        self.call,
+                        stop,
+                        usage,
+                        stats,
+                        tool_only_output,
+                        identity,
+                    ),
+                ),
+                if stop == AgentProviderStopReason::ToolCalls {
+                    Some(
+                        self.tool
+                            .take()
+                            .ok_or(AgentProviderProtocolError::Terminal)?,
+                    )
+                } else {
+                    None
+                },
+            ),
+            PendingTerminal::Failed {
+                failure,
+                usage,
+                identity,
+            } => {
+                let failure = match identity {
+                    Some(identity) => AgentProviderTerminalFailure::new_with_response_identity(
+                        self.call, failure, usage, stats, identity,
+                    ),
+                    None => AgentProviderTerminalFailure::new(self.call, failure, usage, stats),
+                };
+                (AgentProviderStreamConclusion::Failed(failure), None)
+            }
+        };
+        AgentProviderFinishedStream::new(conclusion, tool)
     }
 
     fn handle_event(
         &mut self,
         event: SseEvent,
-        output: &mut Vec<AgentProviderStreamEvent>,
+        output: &mut Vec<AgentProviderTextDelta>,
     ) -> Result<(), AgentProviderProtocolError> {
         if self.phase == StreamPhase::Terminal {
             return Err(AgentProviderProtocolError::Sequence);
@@ -247,6 +308,9 @@ impl AnthropicMessagesStreamDecoder {
         if event.event() != kind {
             return Err(AgentProviderProtocolError::Event);
         }
+        if self.phase == StreamPhase::AwaitMessageStop && kind != "message_stop" {
+            return Err(AgentProviderProtocolError::Sequence);
+        }
         match kind {
             "message_start" => self.handle_message_start(event.data()),
             "content_block_start" => self.handle_content_block_start(event.data()),
@@ -256,7 +320,7 @@ impl AnthropicMessagesStreamDecoder {
             "message_stop" => self.handle_message_stop(event.data()),
             "ping" => self.handle_ping(event.data()),
             "error" => self.handle_error(event.data()),
-            _ => Ok(()),
+            _ => Err(AgentProviderProtocolError::UnsupportedOutput),
         }
     }
 
@@ -268,7 +332,6 @@ impl AnthropicMessagesStreamDecoder {
         if event.kind != "message_start"
             || event.message.kind != "message"
             || event.message.role != "assistant"
-            || event.message.model != self.model.as_str()
             || !event.message.content.is_empty()
             || event.message.stop_reason.is_some()
             || event.message.stop_sequence.is_some()
@@ -276,7 +339,14 @@ impl AnthropicMessagesStreamDecoder {
             return Err(AgentProviderProtocolError::Event);
         }
         validate_message_id(event.message.id)?;
+        let identity = AgentProviderResponseIdentity::try_attested(
+            &self.config,
+            event.message.model,
+            event.message.usage.service_tier,
+            Some(event.message.usage.inference_geo),
+        )?;
         self.usage = Some(UsageState::from_start(event.message.usage)?);
+        self.response_identity = Some(identity);
         self.has_message_id = true;
         self.phase = StreamPhase::Content;
         Ok(())
@@ -357,7 +427,7 @@ impl AnthropicMessagesStreamDecoder {
     fn handle_content_block_delta(
         &mut self,
         data: &str,
-        output: &mut Vec<AgentProviderStreamEvent>,
+        output: &mut Vec<AgentProviderTextDelta>,
     ) -> Result<(), AgentProviderProtocolError> {
         self.require_content_phase()?;
         let event: ContentBlockDeltaEnvelope<'_> = parse(data)?;
@@ -387,9 +457,7 @@ impl AnthropicMessagesStreamDecoder {
                 }
                 self.output_text_bytes = next;
                 if !text.is_empty() {
-                    output.push(AgentProviderStreamEvent::TextDelta(
-                        AgentProviderTextDelta::new(text.into_owned()),
-                    ));
+                    output.push(AgentProviderTextDelta::new(text.into_owned()));
                 }
                 Ok(())
             }
@@ -465,12 +533,9 @@ impl AnthropicMessagesStreamDecoder {
     fn handle_message_delta(
         &mut self,
         data: &str,
-        output: &mut Vec<AgentProviderStreamEvent>,
+        _output: &mut Vec<AgentProviderTextDelta>,
     ) -> Result<(), AgentProviderProtocolError> {
-        if !matches!(
-            self.phase,
-            StreamPhase::Content | StreamPhase::MessageDeltas
-        ) || self.blocks.iter().any(ContentBlockState::is_open)
+        if self.phase != StreamPhase::Content || self.blocks.iter().any(ContentBlockState::is_open)
         {
             return Err(AgentProviderProtocolError::Sequence);
         }
@@ -478,49 +543,43 @@ impl AnthropicMessagesStreamDecoder {
         if event.kind != "message_delta" {
             return Err(AgentProviderProtocolError::Event);
         }
-        let usage = self
-            .usage
-            .as_mut()
-            .ok_or(AgentProviderProtocolError::Usage)?;
-        usage.update(event.usage)?;
-        if let Some(reason) = event.delta.stop_reason {
-            if self.stop.is_some() {
-                return Err(AgentProviderProtocolError::Sequence);
-            }
-            let stop = match reason {
-                "end_turn" => AgentProviderStopReason::Completed,
-                "tool_use" => AgentProviderStopReason::ToolCalls,
-                "max_tokens" | "model_context_window_exceeded" => {
-                    AgentProviderStopReason::OutputLimit
-                }
-                "stop_sequence" => AgentProviderStopReason::StopSequence,
-                "refusal" => AgentProviderStopReason::Refused,
-                "pause_turn" => AgentProviderStopReason::Paused,
-                _ => return Err(AgentProviderProtocolError::UnsupportedOutput),
-            };
-            self.validate_stop_shape(stop, event.delta.stop_sequence.as_deref())?;
-            if stop == AgentProviderStopReason::ToolCalls {
-                let tool = self
-                    .blocks
-                    .iter_mut()
-                    .find_map(|block| match block {
-                        ContentBlockState::Tool(tool) => Some(tool),
-                        ContentBlockState::Text { .. } => None,
-                    })
-                    .ok_or(AgentProviderProtocolError::Terminal)?;
-                let id = tool.id.clone();
-                let name = tool.name;
-                let arguments = std::mem::take(&mut tool.arguments);
-                let call = AgentBrowserToolCall::decode(self.call, id, name.as_str(), arguments)
-                    .map_err(|_| AgentProviderProtocolError::ToolCall)?;
-                self.decoded_tool_calls = 1;
-                output.push(AgentProviderStreamEvent::ToolCall(call));
-            }
-            self.stop = Some(stop);
-        } else if event.delta.stop_sequence.is_some() {
-            return Err(AgentProviderProtocolError::Event);
+        let reason = event
+            .delta
+            .stop_reason
+            .ok_or(AgentProviderProtocolError::Sequence)?;
+        let stop = match reason {
+            "end_turn" => AgentProviderStopReason::Completed,
+            "tool_use" => AgentProviderStopReason::ToolCalls,
+            "max_tokens" | "model_context_window_exceeded" => AgentProviderStopReason::OutputLimit,
+            "stop_sequence" => AgentProviderStopReason::StopSequence,
+            "refusal" => AgentProviderStopReason::Refused,
+            "pause_turn" => AgentProviderStopReason::Paused,
+            _ => return Err(AgentProviderProtocolError::UnsupportedOutput),
+        };
+        self.validate_stop_shape(stop, event.delta.stop_sequence.as_deref())?;
+        if stop == AgentProviderStopReason::ToolCalls {
+            let tool = self
+                .blocks
+                .iter_mut()
+                .find_map(|block| match block {
+                    ContentBlockState::Tool(tool) => Some(tool),
+                    ContentBlockState::Text { .. } => None,
+                })
+                .ok_or(AgentProviderProtocolError::Terminal)?;
+            let id = tool.id.clone();
+            let name = tool.name;
+            let arguments = std::mem::take(&mut tool.arguments);
+            let call = AgentBrowserToolCall::decode(self.call, id, name.as_str(), arguments)
+                .map_err(|_| AgentProviderProtocolError::ToolCall)?;
+            self.decoded_tool_calls = 1;
+            self.tool = Some(call);
         }
-        self.phase = StreamPhase::MessageDeltas;
+        self.usage
+            .as_mut()
+            .ok_or(AgentProviderProtocolError::Usage)?
+            .update(event.usage)?;
+        self.stop = Some(stop);
+        self.phase = StreamPhase::AwaitMessageStop;
         Ok(())
     }
 
@@ -558,7 +617,7 @@ impl AnthropicMessagesStreamDecoder {
     }
 
     fn handle_message_stop(&mut self, data: &str) -> Result<(), AgentProviderProtocolError> {
-        if self.phase != StreamPhase::MessageDeltas
+        if self.phase != StreamPhase::AwaitMessageStop
             || self.stop.is_none()
             || self.blocks.iter().any(ContentBlockState::is_open)
         {
@@ -572,15 +631,18 @@ impl AnthropicMessagesStreamDecoder {
             .usage
             .ok_or(AgentProviderProtocolError::Usage)?
             .normalize()?;
-        let tool_only_output = matches!(self.blocks.as_slice(), [ContentBlockState::Tool(_)]);
-        let completion = AgentProviderCompletion::new(
-            self.call,
-            self.stop.ok_or(AgentProviderProtocolError::Terminal)?,
+        let stop = self.stop.ok_or(AgentProviderProtocolError::Terminal)?;
+        let tool_only_output = stop == AgentProviderStopReason::ToolCalls
+            && matches!(self.blocks.as_slice(), [ContentBlockState::Tool(_)]);
+        let identity = self
+            .response_identity
+            .ok_or(AgentProviderProtocolError::Sequence)?;
+        self.terminal = Some(PendingTerminal::Completed {
+            stop,
             usage,
-            self.stats(),
             tool_only_output,
-        );
-        self.conclusion = Some(AgentProviderStreamConclusion::Completed(completion));
+            identity,
+        });
         self.phase = StreamPhase::Terminal;
         Ok(())
     }
@@ -620,9 +682,11 @@ impl AnthropicMessagesStreamDecoder {
         let failure = AgentProviderFailure::try_new(class, None)
             .map_err(|_| AgentProviderProtocolError::Event)?;
         let usage = self.usage.and_then(|usage| usage.normalize().ok());
-        self.conclusion = Some(AgentProviderStreamConclusion::Failed(
-            AgentProviderTerminalFailure::new(self.call, failure, usage, self.stats()),
-        ));
+        self.terminal = Some(PendingTerminal::Failed {
+            failure,
+            usage,
+            identity: self.response_identity,
+        });
         self.phase = StreamPhase::Terminal;
         Ok(())
     }
@@ -651,7 +715,7 @@ impl fmt::Debug for AnthropicMessagesStreamDecoder {
         formatter
             .debug_struct("AnthropicMessagesStreamDecoder")
             .field("call", &self.call)
-            .field("model", &self.model)
+            .field("config", &self.config)
             .field("budget", &self.budget)
             .field("phase", &self.phase)
             .field("has_message_id", &self.has_message_id)
@@ -831,9 +895,9 @@ fn validate_message_id(value: &str) -> Result<(), AgentProviderProtocolError> {
 mod tests {
     use super::*;
     use crate::{
-        AgentModelCallId, AgentPlanLeaseId, AgentPlanNodeId, AgentProviderPricingProfile,
-        AgentProviderPricingRevision, AgentProviderReasoningEffort, AgentRunManifestId,
-        SemanticTokenizerRevision,
+        AgentModelCallId, AgentPlanLeaseId, AgentPlanNodeId, AgentProviderModelRevision,
+        AgentProviderPricingProfile, AgentProviderPricingRevision, AgentProviderReasoningEffort,
+        AgentRunManifestId, SemanticTokenizerRevision,
     };
 
     fn call() -> AgentProviderCallIdentity {
@@ -846,7 +910,7 @@ mod tests {
     }
 
     fn config(max_text: u32, max_arguments: u32) -> AgentProviderCallConfig {
-        AgentProviderCallConfig::try_new(
+        AgentProviderCallConfig::try_for_test(
             AgentProviderKind::AnthropicMessages,
             AgentProviderModelRevision::try_new("claude-opus-5".to_owned()).expect("model"),
             AgentProviderReasoningEffort::None,
@@ -859,7 +923,7 @@ mod tests {
             .expect("pricing profile"),
             512,
             1_024,
-            AgentProviderStreamBudget::try_new(64 * 1024, 64, max_text, 2, max_arguments)
+            AgentProviderStreamBudget::try_new(64 * 1024, 64, max_text, 1, max_arguments)
                 .expect("budget"),
         )
         .expect("config")
@@ -909,12 +973,47 @@ mod tests {
         )
     }
 
+    fn null_message_delta(output_tokens: u64) -> String {
+        sse(
+            "message_delta",
+            &serde_json::json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": null, "stop_sequence": null},
+                "usage": {"output_tokens": output_tokens}
+            })
+            .to_string(),
+        )
+    }
+
+    fn tool_decoder_awaiting_message_stop() -> AnthropicMessagesStreamDecoder {
+        let mut decoder =
+            AnthropicMessagesStreamDecoder::try_new(call(), &config(64, 1_024)).expect("decoder");
+        let prefix = [
+            start("msg_stop_boundary"),
+            sse(
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_stop_boundary","name":"back","input":{}}}"#,
+            ),
+            sse(
+                "content_block_stop",
+                r#"{"type":"content_block_stop","index":0}"#,
+            ),
+            message_delta("tool_use", 12),
+        ]
+        .concat();
+        decoder
+            .push(prefix.as_bytes())
+            .expect("terminal stop delta");
+        assert_eq!(decoder.phase, StreamPhase::AwaitMessageStop);
+        decoder
+    }
+
     fn message_stop() -> String {
         sse("message_stop", r#"{"type":"message_stop"}"#)
     }
 
     #[test]
-    fn fragmented_text_ping_and_unknown_event_normalize_usage() {
+    fn fragmented_text_and_ping_normalize_usage_while_unknown_events_fail_closed() {
         let mut decoder =
             AnthropicMessagesStreamDecoder::try_new(call(), &config(64, 1_024)).expect("decoder");
         let stream = [
@@ -924,10 +1023,6 @@ mod tests {
                 r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
             ),
             sse("ping", r#"{"type":"ping"}"#),
-            sse(
-                "future_accounting_hint",
-                r#"{"type":"future_accounting_hint","opaque":{"must":"not escape"}}"#,
-            ),
             sse(
                 "content_block_delta",
                 r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello "}}"#,
@@ -956,18 +1051,15 @@ mod tests {
             .push(&stream.as_bytes()[second_split..])
             .expect("third");
         let text = first
-            .into_events()
+            .into_deltas()
             .into_iter()
-            .chain(second.into_events())
-            .chain(third.into_events())
-            .map(|event| match event {
-                AgentProviderStreamEvent::TextDelta(delta) => delta.as_str().to_owned(),
-                AgentProviderStreamEvent::ToolCall(_) => panic!("unexpected tool"),
-            })
+            .chain(second.into_deltas())
+            .chain(third.into_deltas())
+            .map(|delta| delta.as_str().to_owned())
             .collect::<String>();
         assert_eq!(text, "hello world");
         let AgentProviderStreamConclusion::Completed(completion) =
-            decoder.finish().expect("terminal")
+            decoder.finish().expect("terminal").conclusion()
         else {
             panic!("completion");
         };
@@ -978,7 +1070,38 @@ mod tests {
         assert_eq!(completion.usage().cache_write_input_tokens(), 3);
         assert_eq!(completion.usage().output_tokens(), 9);
         assert_eq!(completion.stats().output_text_bytes(), 11);
-        assert_eq!(completion.stats().events(), 9);
+        assert_eq!(completion.stats().events(), 8);
+
+        let mut bytewise =
+            AnthropicMessagesStreamDecoder::try_new(call(), &config(64, 1_024)).expect("decoder");
+        let mut bytewise_text = String::new();
+        for chunk in stream.as_bytes().chunks(1) {
+            for delta in bytewise.push(chunk).expect("one-byte chunk").into_deltas() {
+                bytewise_text.push_str(delta.as_str());
+            }
+        }
+        assert_eq!(bytewise_text, "hello world");
+        assert!(matches!(
+            bytewise.finish().expect("bytewise terminal").conclusion(),
+            AgentProviderStreamConclusion::Completed(completion)
+                if completion.stop() == AgentProviderStopReason::Completed
+        ));
+
+        let mut unknown =
+            AnthropicMessagesStreamDecoder::try_new(call(), &config(64, 1_024)).expect("decoder");
+        unknown
+            .push(start("msg_unknown").as_bytes())
+            .expect("start");
+        assert_eq!(
+            unknown.push(
+                sse(
+                    "future_accounting_hint",
+                    r#"{"type":"future_accounting_hint","opaque":{"must":"not escape"}}"#,
+                )
+                .as_bytes(),
+            ),
+            Err(AgentProviderProtocolError::UnsupportedOutput)
+        );
     }
 
     #[test]
@@ -995,9 +1118,67 @@ mod tests {
             let mismatched = start("msg_billing").replace(expected, replacement);
             assert_eq!(
                 decoder.push(mismatched.as_bytes()),
-                Err(AgentProviderProtocolError::Usage)
+                Err(AgentProviderProtocolError::Event)
             );
         }
+    }
+
+    #[test]
+    fn terminal_stop_subphase_rejects_every_intervening_event_without_usage_mutation() {
+        for intervening in [
+            null_message_delta(99),
+            message_delta("tool_use", 99),
+            sse("ping", r#"{"type":"ping"}"#),
+            sse(
+                "content_block_stop",
+                r#"{"type":"content_block_stop","index":0}"#,
+            ),
+            sse(
+                "error",
+                r#"{"type":"error","error":{"type":"overloaded_error","message":"ignored"}}"#,
+            ),
+        ] {
+            let mut decoder = tool_decoder_awaiting_message_stop();
+            assert_eq!(
+                decoder.push(intervening.as_bytes()),
+                Err(AgentProviderProtocolError::Sequence)
+            );
+            assert_eq!(
+                decoder.usage.expect("usage retained").output_tokens,
+                12,
+                "a rejected post-stop event must not mutate authenticated usage"
+            );
+            assert!(matches!(
+                decoder.finish(),
+                Err(AgentProviderProtocolError::Sequence)
+            ));
+        }
+
+        let mut null_before_stop =
+            AnthropicMessagesStreamDecoder::try_new(call(), &config(64, 1_024)).expect("decoder");
+        null_before_stop
+            .push(start("msg_null_stop").as_bytes())
+            .expect("start");
+        assert_eq!(
+            null_before_stop.push(null_message_delta(99).as_bytes()),
+            Err(AgentProviderProtocolError::Sequence)
+        );
+        assert_eq!(
+            null_before_stop
+                .usage
+                .expect("usage retained")
+                .output_tokens,
+            1
+        );
+
+        let mut exact = tool_decoder_awaiting_message_stop();
+        exact.push(message_stop().as_bytes()).expect("message stop");
+        assert!(matches!(
+            exact.finish().expect("EOF terminal").conclusion(),
+            AgentProviderStreamConclusion::Completed(completion)
+                if completion.stop() == AgentProviderStopReason::ToolCalls
+                    && completion.usage().output_tokens() == 12
+        ));
     }
 
     #[test]
@@ -1038,20 +1219,17 @@ mod tests {
         ]
         .concat();
         let batch = decoder.push(stream.as_bytes()).expect("tool stream");
-        let mut events = batch.into_events();
-        assert_eq!(events.len(), 1);
-        let AgentProviderStreamEvent::ToolCall(tool) = events.remove(0) else {
-            panic!("typed tool");
-        };
+        assert!(batch.deltas().is_empty());
+        let finished = decoder.finish().expect("terminal");
+        let (conclusion, tool) = finished.into_parts();
+        let tool = tool.expect("EOF-private tool");
         assert_eq!(tool.id().as_str(), "toolu_1");
         let (_, proposal) = tool.into_parts();
         let crate::AgentBrowserToolProposal::Navigate(target) = proposal else {
             panic!("navigate");
         };
         assert_eq!(target.as_url().as_str(), "https://example.test/path");
-        let AgentProviderStreamConclusion::Completed(completion) =
-            decoder.finish().expect("terminal")
-        else {
+        let AgentProviderStreamConclusion::Completed(completion) = conclusion else {
             panic!("completion");
         };
         assert_eq!(completion.stop(), AgentProviderStopReason::ToolCalls);
@@ -1120,9 +1298,9 @@ mod tests {
         ]
         .concat();
         let batch = decoder.push(stream.as_bytes()).expect("empty tool");
-        assert_eq!(batch.events().len(), 1);
+        assert!(batch.deltas().is_empty());
         let AgentProviderStreamConclusion::Completed(completion) =
-            decoder.finish().expect("terminal")
+            decoder.finish().expect("terminal").conclusion()
         else {
             panic!("completion");
         };
@@ -1163,9 +1341,9 @@ mod tests {
         ]
         .concat();
         let batch = decoder.push(stream.as_bytes()).expect("limited stream");
-        assert!(batch.events().is_empty());
+        assert!(batch.deltas().is_empty());
         let AgentProviderStreamConclusion::Completed(completion) =
-            decoder.finish().expect("terminal")
+            decoder.finish().expect("terminal").conclusion()
         else {
             panic!("completion");
         };
@@ -1308,7 +1486,7 @@ mod tests {
                 .as_bytes(),
             )
             .expect("error event");
-        let conclusion = decoder.finish().expect("terminal failure");
+        let conclusion = decoder.finish().expect("terminal failure").conclusion();
         assert!(!format!("{conclusion:?}").contains("sensitive provider detail"));
         let AgentProviderStreamConclusion::Failed(failure) = conclusion else {
             panic!("failure");
@@ -1322,5 +1500,47 @@ mod tests {
             super::super::AgentProviderRetryDisposition::PolicyMayRetry
         );
         assert_eq!(failure.usage().expect("partial usage").input_tokens(), 15);
+    }
+
+    #[test]
+    fn post_terminal_done_and_trailing_framing_fail_closed() {
+        let terminal_stream = [
+            start("msg_eof_gate"),
+            message_delta("end_turn", 2),
+            message_stop(),
+        ]
+        .concat();
+
+        let mut post_terminal =
+            AnthropicMessagesStreamDecoder::try_new(call(), &config(64, 1_024)).expect("decoder");
+        let terminal_batch = post_terminal
+            .push(terminal_stream.as_bytes())
+            .expect("terminal events");
+        assert!(terminal_batch.deltas().is_empty());
+        assert_eq!(
+            post_terminal.push(sse("ping", r#"{"type":"ping"}"#).as_bytes()),
+            Err(AgentProviderProtocolError::Sequence)
+        );
+
+        let mut done =
+            AnthropicMessagesStreamDecoder::try_new(call(), &config(64, 1_024)).expect("decoder");
+        done.push(start("msg_done").as_bytes()).expect("start");
+        assert_eq!(
+            done.push(b"data: [DONE]\n\n"),
+            Err(AgentProviderProtocolError::Event)
+        );
+
+        let mut trailing =
+            AnthropicMessagesStreamDecoder::try_new(call(), &config(64, 1_024)).expect("decoder");
+        trailing
+            .push(terminal_stream.as_bytes())
+            .expect("terminal events");
+        trailing
+            .push(b"data: unfinished")
+            .expect("buffer bounded trailing bytes");
+        assert!(matches!(
+            trailing.finish(),
+            Err(AgentProviderProtocolError::Framing)
+        ));
     }
 }

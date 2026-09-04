@@ -6162,16 +6162,7 @@ dependencies = [
 name = "zephium-agent-provider-transport"
 version = "0.1.0"
 dependencies = [
- "futures-util",
- "reqwest",
- "security-framework",
- "security-framework-sys",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
  "zephium-agentic",
- "zephium-core",
- "zeroize",
 ]
 
 [[package]]
@@ -6180,14 +6171,20 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "crc32fast",
+ "futures-util",
  "proptest",
+ "reqwest",
+ "security-framework",
+ "security-framework-sys",
  "serde",
  "serde_json",
  "sha2",
  "thiserror 2.0.18",
+ "tokio",
  "ulid",
  "url",
  "zephium-core",
+ "zeroize",
 ]
 
 [[package]]

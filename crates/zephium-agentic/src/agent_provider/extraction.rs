@@ -15,9 +15,10 @@ use crate::{
 };
 
 use super::{
-    AgentProviderCallIdentity, AgentProviderInputEvidence, AgentProviderStopReason,
-    AgentProviderStreamBatch, AgentProviderStreamConclusion, AgentProviderStreamEvent,
+    AgentProviderCallIdentity, AgentProviderInputEvidence, AgentProviderSettledTerminal,
+    AgentProviderStopReason, AgentProviderStreamBatch, AgentProviderStreamConclusion,
 };
+use crate::AgentModelCallSettlement;
 
 /// One-shot join between an extraction request and its exact committed input.
 #[must_use]
@@ -104,8 +105,9 @@ impl AgentProviderExtractionOutputCollector {
 
     /// Consumes one normalized batch from the exact provider attempt.
     ///
-    /// Any wrong-call or tool event permanently poisons this collector. The
-    /// caller should return `Cancel` to transport after an error.
+    /// Any wrong-call batch permanently poisons this collector. Browser tool
+    /// output is retained privately by the decoder and can never enter a text
+    /// batch. The caller should return `Cancel` after an error.
     pub fn push_batch(
         &mut self,
         batch: AgentProviderStreamBatch,
@@ -113,32 +115,26 @@ impl AgentProviderExtractionOutputCollector {
         if self.failed || batch.call() != self.call {
             return self.fail(AgentProviderExtractionOutputError::Batch);
         }
-        for event in batch.into_events() {
-            match event {
-                AgentProviderStreamEvent::TextDelta(delta) => {
-                    let next = self
-                        .output
-                        .len()
-                        .checked_add(delta.len())
-                        .filter(|bytes| *bytes <= MAX_SEMANTIC_EXTRACTION_INPUT_BYTES)
-                        .ok_or(AgentProviderExtractionOutputError::OutputLimit);
-                    let Ok(_next) = next else {
-                        return self.fail(AgentProviderExtractionOutputError::OutputLimit);
-                    };
-                    self.output.push_str(delta.as_str());
-                }
-                AgentProviderStreamEvent::ToolCall(_) => {
-                    return self.fail(AgentProviderExtractionOutputError::ToolOutput);
-                }
-            }
+        for delta in batch.into_deltas() {
+            let next = self
+                .output
+                .len()
+                .checked_add(delta.len())
+                .filter(|bytes| *bytes <= MAX_SEMANTIC_EXTRACTION_INPUT_BYTES)
+                .ok_or(AgentProviderExtractionOutputError::OutputLimit);
+            let Ok(_next) = next else {
+                return self.fail(AgentProviderExtractionOutputError::OutputLimit);
+            };
+            self.output.push_str(delta.as_str());
         }
         Ok(())
     }
 
-    /// Joins a successful terminal to the exact schema/read and validates output.
+    /// Joins a successfully priced and policy-settled terminal to the exact
+    /// schema/read and validates its retained constrained output.
     pub fn finish<'a>(
         self,
-        conclusion: AgentProviderStreamConclusion,
+        terminal: &AgentProviderSettledTerminal,
         schema: &SemanticExtractionSchema,
         read: &SemanticReadResult<'a>,
         sensitivity_limit: SemanticReadSensitivityLimit,
@@ -146,6 +142,13 @@ impl AgentProviderExtractionOutputCollector {
         if self.failed || schema.id() != self.schema || !self.delivery.matches(schema, read) {
             return Err(AgentProviderExtractionOutputError::Evidence);
         }
+        if terminal.receipt().settlement() != AgentModelCallSettlement::Completed
+            || terminal.receipt().pricing_attribution().is_none()
+            || terminal.has_tool_turn()
+        {
+            return Err(AgentProviderExtractionOutputError::Terminal);
+        }
+        let conclusion = terminal.conclusion();
         let AgentProviderStreamConclusion::Completed(completion) = conclusion else {
             return Err(AgentProviderExtractionOutputError::Terminal);
         };
@@ -201,9 +204,6 @@ pub enum AgentProviderExtractionOutputError {
     /// A normalized batch belonged to another provider call or followed failure.
     #[error("agent provider extraction batch does not match")]
     Batch,
-    /// Provider attempted a browser tool during the constrained-output turn.
-    #[error("agent provider extraction returned tool output")]
-    ToolOutput,
     /// Retained output exceeded the fixed extraction byte ceiling.
     #[error("agent provider extraction output byte ceiling exceeded")]
     OutputLimit,
@@ -416,8 +416,8 @@ mod tests {
         collector
             .push_batch(AgentProviderStreamBatch::new(
                 expected_call,
-                vec![AgentProviderStreamEvent::TextDelta(
-                    super::super::AgentProviderTextDelta::new("private".to_owned()),
+                vec![super::super::AgentProviderTextDelta::new(
+                    "private".to_owned(),
                 )],
             ))
             .expect("first delta");
@@ -436,5 +436,62 @@ mod tests {
             AgentProviderExtractionOutputError::Batch
         );
         assert!(!format!("{collector:?}").contains("private"));
+    }
+
+    #[test]
+    fn unpriced_terminal_cannot_release_extraction_output() {
+        let observation = observation();
+        let read = read_semantic_observation(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(911),
+            SemanticReadSensitivityLimit::Sensitive,
+            SemanticReadBudget::STANDARD,
+        )
+        .expect("read");
+        let schema = schema(64);
+        let expected_call = call(1);
+        let (binding, evidence) = binding_and_evidence(&schema, &read, expected_call);
+        let mut collector = binding.start(&evidence).expect("matching evidence");
+        let output = r#"{"v":1,"schema":910,"fields":[{"name":"title","value":{"k":"text","value":"private","sources":["@r1"]}}]}"#;
+        collector
+            .push_batch(AgentProviderStreamBatch::new(
+                expected_call,
+                vec![super::super::AgentProviderTextDelta::new(output.to_owned())],
+            ))
+            .expect("output batch");
+        let completion = super::super::AgentProviderCompletion::new(
+            expected_call,
+            AgentProviderStopReason::Completed,
+            super::super::AgentProviderUsage::try_new(1, 1, 0, 0, 0).expect("usage"),
+            super::super::AgentProviderStreamStats::new(
+                1,
+                1,
+                u32::try_from(output.len()).expect("output bytes"),
+                0,
+                0,
+            ),
+            false,
+        );
+        let receipt = crate::AgentModelCallReceipt::for_provider_terminal_test(
+            expected_call,
+            AgentModelCallSettlement::Completed,
+        );
+        let terminal = AgentProviderSettledTerminal::for_test(
+            receipt,
+            AgentProviderStreamConclusion::Completed(completion),
+            None,
+        );
+        assert_eq!(
+            collector
+                .finish(
+                    &terminal,
+                    &schema,
+                    &read,
+                    SemanticReadSensitivityLimit::Sensitive,
+                )
+                .expect_err("unpriced receipt must not release retained output"),
+            AgentProviderExtractionOutputError::Terminal
+        );
     }
 }
