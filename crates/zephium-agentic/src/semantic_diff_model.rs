@@ -23,7 +23,7 @@ use crate::{
 };
 
 /// Version of the compact semantic-diff model-input grammar.
-pub const SEMANTIC_DIFF_MODEL_SCHEMA_VERSION: u16 = 2;
+pub const SEMANTIC_DIFF_MODEL_SCHEMA_VERSION: u16 = 3;
 
 /// Content-free deterministic compact-diff metrics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -333,7 +333,7 @@ impl fmt::Debug for SemanticDiffModelPayload {
     }
 }
 
-/// Encodes one complete semantic delta into deterministic compact `ZDIFF2` lines.
+/// Encodes one complete semantic delta into deterministic compact `ZDIFF3` lines.
 pub fn encode_semantic_diff(
     diff: &SemanticDiff,
     budget: SemanticModelEncodingBudget,
@@ -588,18 +588,6 @@ fn write_full_node(
         output.push(" value=")?;
         write_value(output, value)?;
     }
-    if let Some(rect) = node.geometry() {
-        checked_write(
-            output,
-            format_args!(
-                " rect={},{},{},{}",
-                rect.x(),
-                rect.y(),
-                rect.width(),
-                rect.height()
-            ),
-        )?;
-    }
     Ok(())
 }
 
@@ -657,22 +645,10 @@ fn write_changed_fields(
     if changes.contains(SemanticNodeChange::Trust) {
         checked_write(output, format_args!(" src={}", source_label(node.trust())))?;
     }
-    if changes.contains(SemanticNodeChange::Geometry) {
-        output.push(" rect=")?;
-        match node.geometry() {
-            Some(rect) => checked_write(
-                output,
-                format_args!(
-                    "{},{},{},{}",
-                    rect.x(),
-                    rect.y(),
-                    rect.width(),
-                    rect.height()
-                ),
-            )?,
-            None => output.push("-")?,
-        }
-    }
+    // Geometry remains in the authenticated semantic diff and fingerprint for
+    // Rust-side freshness, hit-testing, and occlusion checks. Coordinates are
+    // deliberately not projected into the model transcript, which acts only
+    // through opaque references.
     if changes.contains(SemanticNodeChange::HeadingLevel) {
         output.push(" level=")?;
         match node.heading_level() {
@@ -1026,7 +1002,7 @@ mod tests {
         let second = encode_semantic_diff(&diff, budget).expect("encode");
         assert_eq!(first.content, second.content);
         assert!(first.content.starts_with(
-            "ZDIFF2 content=untrusted from_generation=1 to_generation=1 entries=4 rebases=0\n"
+            "ZDIFF3 content=untrusted from_generation=1 to_generation=1 entries=4 rebases=0\n"
         ));
         assert!(first
             .content
@@ -1161,7 +1137,7 @@ mod tests {
         assert!(!alternate_payload.matches_diff(&exact_diff));
 
         let (content, stats, delivery) = exact_payload.into_provider_parts();
-        assert!(content.starts_with("ZDIFF2"));
+        assert!(content.starts_with("ZDIFF3"));
         assert_eq!(
             usize::try_from(stats.bytes()).expect("bytes"),
             content.len()
@@ -1215,7 +1191,7 @@ mod tests {
         .admit(&estimated, &expected)
         .expect("admit");
         assert_eq!(payload.token_measurement().tokens(), 190);
-        assert!(payload.as_str().starts_with("ZDIFF2"));
+        assert!(payload.as_str().starts_with("ZDIFF3"));
         let debug = format!("{payload:?}");
         assert!(!debug.contains("Private"));
         assert!(!debug.contains("encoded-private"));

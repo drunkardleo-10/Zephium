@@ -5754,7 +5754,7 @@ fn validate_provider_revocation_before_secret_materialization(source: &str) -> R
             "agent provider dispatch-time authentication header is missing".to_owned()
         })?;
     let request = execute[header..]
-        .find("letrequest=provider_request(")
+        .find("letSome(request)=provider_request(")
         .map(|offset| header + offset)
         .ok_or_else(|| "agent provider fixed request construction is missing".to_owned())?;
     if !(checks[0] < decoder && decoder < header && header < request && request < checks[1]) {
@@ -5867,6 +5867,7 @@ fn validate_semantic_locate_contract(
         "pubconstMAX_SEMANTIC_LOCATE_QUERY_TERMS:usize=16;",
         "pubconstMAX_SEMANTIC_LOCATE_MATCHES:u8=32;",
         "||looks_like_secret_value(&source)",
+        "ifterms.iter().all(|term|is_query_stopword(term))",
         "if!acknowledgement.matches(observation)",
         "validate_current_frames(observation,current_frames)?;",
         "fingerprint:SemanticObservationFingerprint",
@@ -5875,7 +5876,10 @@ fn validate_semantic_locate_contract(
         "SemanticFrameBoundaryStatus::Observed{frame,..}=>Some(frame)",
         "Vec::<RankedMatch>::with_capacity(usize::from(request.budget.max_matches))",
         "ifnode.sensitivity()==SemanticSensitivity::Secret",
-        "letSome(quality)=match_node(node,&request.query,&mutscratch)",
+        "letSome(candidate)=match_node(frame.nodes(),node_index,&request.query,&mutscratch)",
+        "ancestor_term_bits(nodes,node_index,&query.terms,scratch)",
+        "content_bits&required!=0&&(matched_terms>=2||exact_name_term)",
+        "for_in0..MAX_SEMANTIC_DEPTH",
         "truncated:usize::from(matched_nodes)>matches.len()",
     ] {
         if !locate.contains(required) {
@@ -5888,7 +5892,7 @@ fn validate_semantic_locate_contract(
         .find("ifnode.sensitivity()==SemanticSensitivity::Secret")
         .ok_or_else(|| "semantic locate secret exclusion is missing".to_owned())?;
     let matching = locate
-        .find("letSome(quality)=match_node(node,&request.query,&mutscratch)")
+        .find("letSome(candidate)=match_node(frame.nodes(),node_index,&request.query,&mutscratch)")
         .ok_or_else(|| "semantic locate matcher is missing".to_owned())?;
     if secret_check >= matching {
         return Err("semantic locate must exclude secret nodes before matching".to_owned());
@@ -8767,7 +8771,7 @@ mod tests {
                 }
                 let mut decoder = match AgentProviderStreamDecoder::try_new() {};
                 let credential = match self.credential.as_ref() {};
-                let request = provider_request();
+                let Some(request) = provider_request() else { return self.finish_terminal(); };
                 if self.cancellation.is_cancelled() || self.shutdown.is_cancelled() {
                     return self.finish_terminal();
                 }
@@ -8792,7 +8796,7 @@ mod tests {
         );
         assert!(
             validate_provider_revocation_before_secret_materialization(&valid.replace(
-                "let request = provider_request();\n                if self.cancellation",
+                "let Some(request) = provider_request() else { return self.finish_terminal(); };\n                if self.cancellation",
                 "if self.cancellation"
             ))
             .is_err()

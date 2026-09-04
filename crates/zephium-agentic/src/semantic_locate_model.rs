@@ -592,6 +592,7 @@ const fn match_quality_label(quality: SemanticLocateMatchQuality) -> &'static st
         SemanticLocateMatchQuality::AllTermsInName => "all_terms_name",
         SemanticLocateMatchQuality::AllTermsInText => "all_terms_text",
         SemanticLocateMatchQuality::AllTermsAcrossSemantics => "all_terms_semantics",
+        SemanticLocateMatchQuality::PartialSemantics => "partial_semantics",
     }
 }
 

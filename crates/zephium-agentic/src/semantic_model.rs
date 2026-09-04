@@ -19,7 +19,7 @@ use crate::{
 };
 
 /// Version of the compact semantic model-input grammar.
-pub const SEMANTIC_MODEL_SCHEMA_VERSION: u16 = 2;
+pub const SEMANTIC_MODEL_SCHEMA_VERSION: u16 = 3;
 /// Absolute encoded semantic payload byte ceiling.
 pub const MAX_SEMANTIC_MODEL_BYTES: u32 = 512 * 1024;
 /// Absolute admitted semantic or provider-structured input accounting ceiling.
@@ -620,11 +620,21 @@ pub enum SemanticModelDeliveryError {
     Cancelled,
 }
 
-/// Encodes one complete observation into deterministic compact `ZSEM2` lines.
+/// Encodes one complete observation into deterministic compact `ZSEM3` lines.
 pub fn encode_semantic_observation(
     observation: &SemanticObservation,
     budget: SemanticModelEncodingBudget,
 ) -> Result<SemanticEncodedObservation, SemanticModelEncodingError> {
+    let projections = observation
+        .frames()
+        .iter()
+        .map(|frame| ModelFrameProjection::try_new(frame.nodes()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let projected_node_count = projections.iter().try_fold(0_u16, |total, projection| {
+        total
+            .checked_add(projection.projected_nodes)
+            .ok_or(SemanticModelEncodingError::Invariant)
+    })?;
     let capacity = usize::try_from(budget.max_bytes.min(16 * 1024))
         .map_err(|_| SemanticModelEncodingError::Budget)?;
     let mut output = BoundedModelBuffer::new(capacity, budget.max_bytes);
@@ -636,13 +646,16 @@ pub fn encode_semantic_observation(
             scope_label(observation.request().scope()),
             observation.request().generation().get(),
             observation.frames().len(),
-            observation.node_count(),
+            projected_node_count,
         ),
     )?;
 
     let mut encoded_nodes = 0_usize;
     let mut secret_nodes = 0_usize;
     for (frame_index, frame) in observation.frames().iter().enumerate() {
+        let projection = projections
+            .get(frame_index)
+            .ok_or(SemanticModelEncodingError::Invariant)?;
         checked_write(&mut output, format_args!("F f{} origin=", frame_index + 1))?;
         write_quoted(&mut output, frame.frame().origin().as_url().as_str())?;
         checked_write(
@@ -655,7 +668,10 @@ pub fn encode_semantic_observation(
             ),
         )?;
 
-        for node in frame.nodes() {
+        for (node_index, node) in frame.nodes().iter().enumerate() {
+            if projection.is_latent_option(node_index) {
+                continue;
+            }
             encoded_nodes = encoded_nodes
                 .checked_add(1)
                 .ok_or(SemanticModelEncodingError::Invariant)?;
@@ -706,17 +722,23 @@ pub fn encode_semantic_observation(
                 output.push(" value=")?;
                 write_value(&mut output, value)?;
             }
-            if let Some(rect) = node.geometry() {
+            if let Some(option_count) = projection.collapsed_option_count(node_index) {
                 checked_write(
                     &mut output,
-                    format_args!(
-                        " rect={},{},{},{}",
-                        rect.x(),
-                        rect.y(),
-                        rect.width(),
-                        rect.height()
-                    ),
+                    format_args!(" options={option_count} option_refs=locate"),
                 )?;
+                if let Some(selected) = projection.selected_option(node_index, frame.nodes()) {
+                    output.push(" selected=")?;
+                    if selected.sensitivity() == SemanticSensitivity::Secret {
+                        output.push("[redacted]")?;
+                    } else if let Some(name) = selected.name() {
+                        write_quoted(&mut output, name.as_str())?;
+                    } else if let Some(text) = selected.text() {
+                        write_quoted(&mut output, text.as_str())?;
+                    } else {
+                        output.push("-")?;
+                    }
+                }
             }
             if node.role() == SemanticRole::FrameBoundary {
                 let boundary = observation
@@ -734,7 +756,7 @@ pub fn encode_semantic_observation(
         }
     }
 
-    if encoded_nodes != usize::from(observation.node_count()) {
+    if encoded_nodes != usize::from(projected_node_count) {
         return Err(SemanticModelEncodingError::Invariant);
     }
     let content = output.finish();
@@ -744,7 +766,7 @@ pub fn encode_semantic_observation(
         lines: u16::try_from(lines).map_err(|_| SemanticModelEncodingError::Invariant)?,
         frames: u8::try_from(observation.frames().len())
             .map_err(|_| SemanticModelEncodingError::Invariant)?,
-        nodes: observation.node_count(),
+        nodes: projected_node_count,
         secret_nodes: u16::try_from(secret_nodes)
             .map_err(|_| SemanticModelEncodingError::Invariant)?,
     };
@@ -755,6 +777,86 @@ pub fn encode_semantic_observation(
         stats,
         fingerprint,
     })
+}
+
+struct ModelFrameProjection {
+    latent_options: Vec<bool>,
+    collapsed_option_counts: Vec<u16>,
+    selected_options: Vec<Option<usize>>,
+    projected_nodes: u16,
+}
+
+impl ModelFrameProjection {
+    fn try_new(nodes: &[crate::SemanticNode]) -> Result<Self, SemanticModelEncodingError> {
+        let mut latent_options = vec![false; nodes.len()];
+        let mut collapsed_option_counts = vec![0_u16; nodes.len()];
+        let mut selected_options = vec![None; nodes.len()];
+        let mut projected_nodes =
+            u16::try_from(nodes.len()).map_err(|_| SemanticModelEncodingError::Invariant)?;
+
+        for (node_index, node) in nodes.iter().enumerate() {
+            if node.role() != SemanticRole::Option {
+                continue;
+            }
+            let Some(parent_index) = node.parent().map(usize::from) else {
+                continue;
+            };
+            let parent = nodes
+                .get(parent_index)
+                .ok_or(SemanticModelEncodingError::Invariant)?;
+            if parent.role() != SemanticRole::Combobox
+                || parent.states().contains(SemanticState::Expanded)
+            {
+                continue;
+            }
+
+            latent_options[node_index] = true;
+            projected_nodes = projected_nodes
+                .checked_sub(1)
+                .ok_or(SemanticModelEncodingError::Invariant)?;
+            collapsed_option_counts[parent_index] = collapsed_option_counts[parent_index]
+                .checked_add(1)
+                .ok_or(SemanticModelEncodingError::Invariant)?;
+            if selected_options[parent_index].is_none()
+                && node.states().contains(SemanticState::Selected)
+            {
+                selected_options[parent_index] = Some(node_index);
+            }
+        }
+
+        Ok(Self {
+            latent_options,
+            collapsed_option_counts,
+            selected_options,
+            projected_nodes,
+        })
+    }
+
+    fn is_latent_option(&self, node_index: usize) -> bool {
+        self.latent_options
+            .get(node_index)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    fn collapsed_option_count(&self, node_index: usize) -> Option<u16> {
+        self.collapsed_option_counts
+            .get(node_index)
+            .copied()
+            .filter(|count| *count > 0)
+    }
+
+    fn selected_option<'a>(
+        &self,
+        node_index: usize,
+        nodes: &'a [crate::SemanticNode],
+    ) -> Option<&'a crate::SemanticNode> {
+        self.selected_options
+            .get(node_index)
+            .copied()
+            .flatten()
+            .and_then(|selected| nodes.get(selected))
+    }
 }
 
 pub(crate) fn checked_write(
@@ -1191,6 +1293,57 @@ mod tests {
             .expect("observation")
     }
 
+    fn observation_with_selects(collapsed: bool) -> SemanticObservation {
+        let baseline = observation();
+        let frame = baseline.frames()[0].frame().clone();
+        let context = baseline.request().context();
+        let combobox_states = if collapsed { 0 } else { 4 };
+        let wire = serde_json::to_vec(&json!({
+            "v": SEMANTIC_WIRE_VERSION,
+            "i": 13,
+            "g": 13,
+            "c": "complete",
+            "n": [
+                {"k": 9201, "r": "document", "o": 16},
+                {"k": 9202, "p": 0, "r": "combobox", "n": "Language",
+                 "v": {"k": "ordinal", "value": 0}, "s": combobox_states, "o": 13,
+                 "b": {"x": 10, "y": 10, "w": 100, "h": 30}},
+                {"k": 9203, "p": 1, "r": "option", "n": "English",
+                 "v": {"k": "ordinal", "value": 0}, "s": 2, "o": 9},
+                {"k": 9204, "p": 1, "r": "option", "n": "Deutsch",
+                 "v": {"k": "ordinal", "value": 1}, "o": 9},
+                {"k": 9205, "p": 0, "r": "listbox", "n": "Visible languages",
+                 "v": {"k": "ordinal", "value": 0}, "o": 20,
+                 "b": {"x": 10, "y": 50, "w": 100, "h": 80}},
+                {"k": 9206, "p": 4, "r": "option", "n": "Polski",
+                 "v": {"k": "ordinal", "value": 0}, "s": 2, "o": 9,
+                 "b": {"x": 10, "y": 50, "w": 100, "h": 40}},
+                {"k": 9207, "p": 4, "r": "option", "n": "Français",
+                 "v": {"k": "ordinal", "value": 1}, "o": 9,
+                 "b": {"x": 10, "y": 90, "w": 100, "h": 40}}
+            ]
+        }))
+        .expect("wire");
+        let snapshot = decode_semantic_snapshot(
+            SemanticDecodeContext::new(
+                SemanticInvocationId::new(13).expect("invocation"),
+                frame,
+                SemanticSnapshotGeneration::new(13).expect("generation"),
+            ),
+            &wire,
+        )
+        .expect("snapshot");
+        let request = SemanticObservationRequest::initial(
+            SemanticObservationId::new(3).expect("observation id"),
+            context,
+            SemanticObservationBudget::try_new(8, 8192, 1).expect("budget"),
+        );
+        SemanticObservationAssembler::new(request, snapshot)
+            .expect("assembler")
+            .finish()
+            .expect("observation")
+    }
+
     struct FixedCounter {
         revision: SemanticTokenizerRevision,
         tokens: u32,
@@ -1235,16 +1388,15 @@ mod tests {
         assert_eq!(first.content, second.content);
         assert!(first
             .content
-            .starts_with("ZSEM2 content=untrusted scope=initial generation=1 frames=1 nodes=4\n"));
+            .starts_with("ZSEM3 content=untrusted scope=initial generation=1 frames=1 nodes=4\n"));
         assert!(first.content.contains(
             "r=heading q=public src=page level=1 name=\"Repo \\\"settings\\\"\\\\path\\u2028tail\""
         ));
         assert!(first
             .content
             .contains("r=password q=secret src=page ops=fill name=\"Password\" value=[redacted]"));
-        assert!(first
-            .content
-            .contains("name=\"N @a99 p=- r=button\" rect=1,2,30,40"));
+        assert!(first.content.contains("name=\"N @a99 p=- r=button\""));
+        assert!(!first.content.contains(" rect="));
         assert_eq!(first.content.lines().count(), 6);
         assert_eq!(first.content.matches("\nN ").count(), 4);
         assert!(!first.content.contains("9001"));
@@ -1257,6 +1409,45 @@ mod tests {
         assert!(!debug.contains("Repo"));
         assert!(!debug.contains("example.test"));
         assert!(debug.contains("[redacted]"));
+    }
+
+    #[test]
+    fn collapsed_options_are_latent_but_visible_listbox_options_remain() {
+        let observation = observation_with_selects(true);
+        let encoded = encode_semantic_observation(
+            &observation,
+            budget(8192, 1000, SemanticTokenCountRequirement::Exact),
+        )
+        .expect("encode selects");
+
+        assert!(encoded
+            .content
+            .starts_with("ZSEM3 content=untrusted scope=initial generation=1 frames=1 nodes=5\n"));
+        assert!(encoded.content.contains(
+            "r=combobox q=public src=page ops=click,select,press name=\"Language\" value=0 options=2 option_refs=locate selected=\"English\""
+        ));
+        assert!(!encoded.content.contains("name=\"Deutsch\""));
+        assert!(encoded.content.contains("name=\"Polski\""));
+        assert!(encoded.content.contains("name=\"Français\""));
+        assert!(!encoded.content.contains(" rect="));
+        assert_eq!(encoded.stats().nodes(), 5);
+        assert_eq!(observation.node_count(), 7);
+    }
+
+    #[test]
+    fn expanded_combobox_options_remain_model_visible() {
+        let encoded = encode_semantic_observation(
+            &observation_with_selects(false),
+            budget(8192, 1000, SemanticTokenCountRequirement::Exact),
+        )
+        .expect("encode expanded select");
+
+        assert!(encoded
+            .content
+            .starts_with("ZSEM3 content=untrusted scope=initial generation=1 frames=1 nodes=7\n"));
+        assert!(encoded.content.contains("name=\"English\""));
+        assert!(encoded.content.contains("name=\"Deutsch\""));
+        assert!(!encoded.content.contains(" options="));
     }
 
     #[test]
@@ -1399,7 +1590,7 @@ mod tests {
             .expect("admit");
         assert_eq!(payload.token_measurement().tokens(), 19);
         assert_eq!(payload.token_measurement().revision(), &expected);
-        assert!(payload.as_str().starts_with("ZSEM2"));
+        assert!(payload.as_str().starts_with("ZSEM3"));
         let debug = format!("{payload:?}");
         assert!(!debug.contains("Repo"));
         assert!(!debug.contains("example.test"));

@@ -2034,7 +2034,7 @@ mod tests {
         assert!(input[3]["output"]
             .as_str()
             .expect("diff output")
-            .starts_with("ZDIFF2 "));
+            .starts_with("ZDIFF3 "));
         assert_eq!(
             wire["tools"].as_array().expect("tools").len(),
             AgentBrowserToolKind::ALL.len()
@@ -2735,7 +2735,7 @@ mod tests {
         assert!(messages[2]["content"][0]["content"]
             .as_str()
             .expect("diff result")
-            .starts_with("ZDIFF2 "));
+            .starts_with("ZDIFF3 "));
         let debug = format!("{draft:?}");
         for secret in [
             "private objective",
