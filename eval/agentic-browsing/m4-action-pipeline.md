@@ -13,16 +13,20 @@ structured extraction admission, exact tool-result/constrained-output
 extraction transport, and the one-shot viewport screenshot contract are
 implemented.
 General native input, physical timer installation, installed visual token
-counters, and live screenshot/provider qualification remain pending. Exact
+counters, live screenshot qualification, and the broad provider/site matrix
+remain pending. Exact
 one-shot visual policy and fixed OpenAI /
 Anthropic tool-result wiring are implemented. Production macOS and Windows owned-context
 viewport adapters are implemented and mechanically bounded. The macOS hidden
 semantic runtime and compatible fixed ref-bound click recipe have now passed a
 named-device production-adapter qualifier with exact visibility/occlusion,
 zero page activation, popup denial, fresh `Expanded`-state verification through
-the existing settlement/verifier core, and teardown; this is not a real policy
-assessment, full host/controller qualifier, general native-input, or real-site
-claim. The Windows host keeps screenshot dispatch
+the existing settlement/verifier core, and teardown. A real Terra session also
+passed a deterministic two-turn click/diff/fill workflow, and a separate fixed-
+origin Wikipedia slice passed three live model-selected fills with exact value
+verification and drained teardown. These are bounded qualification slices, not
+a full policy assessment, difficult-site matrix, general native-input claim,
+or shipping-controller integration. The Windows host keeps screenshot dispatch
 unsupported until its physical semantic-runtime qualifier promotes exact
 snapshot-generation lifecycle support.
 

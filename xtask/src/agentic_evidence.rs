@@ -296,7 +296,7 @@ struct NativeMatrix {
     results: Vec<NativeResult>,
     backend_order_decisions: Vec<serde_json::Value>,
     unsupported_interactions: Vec<serde_json::Value>,
-    real_site_runs: Vec<serde_json::Value>,
+    real_site_runs: Vec<RealSiteRun>,
 }
 
 #[derive(Deserialize)]
@@ -333,6 +333,42 @@ struct NativeResult {
     focus_theft_rows: u32,
     retained_native_views: u32,
     status: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RealSiteRun {
+    reviewed_on: String,
+    scope: String,
+    site: String,
+    task: String,
+    command: String,
+    platform: String,
+    os_version: String,
+    os_build: String,
+    engine: String,
+    engine_version: String,
+    model: String,
+    profile: String,
+    extensions: String,
+    presentation: String,
+    backend: String,
+    runs: u32,
+    successful_runs: u32,
+    verified_actions: u32,
+    exact_value_verifications: u32,
+    input_tokens_per_run: Vec<u64>,
+    output_tokens_per_run: Vec<u64>,
+    serialized_request_bytes_per_run: Vec<u32>,
+    semantic_bytes_per_run: Vec<u32>,
+    charged_micro_usd_per_run: Vec<u64>,
+    provider_elapsed_ms_per_run: Vec<u64>,
+    elapsed_ms_per_run: Vec<u64>,
+    focus_theft_rows: u32,
+    hidden_page_autofocus: String,
+    native_teardown: String,
+    status: String,
+    non_claims: Vec<String>,
 }
 
 fn validate_native_matrix(evidence: NativeMatrix) -> Result<(), String> {
@@ -425,12 +461,11 @@ fn validate_native_matrix(evidence: NativeMatrix) -> Result<(), String> {
     )?;
     validate_deterministic_ci(&evidence.deterministic_ci)?;
     validate_native_results(&evidence.results, &evidence.reviewed_on)?;
-    if !evidence.backend_order_decisions.is_empty()
-        || !evidence.unsupported_interactions.is_empty()
-        || !evidence.real_site_runs.is_empty()
+    validate_real_site_runs(&evidence.real_site_runs)?;
+    if !evidence.backend_order_decisions.is_empty() || !evidence.unsupported_interactions.is_empty()
     {
         return Err(
-            "pending native-input evidence must not claim backend, unsupported, or real-site conclusions"
+            "pending native-input evidence must not claim backend-order or unsupported conclusions"
                 .to_owned(),
         );
     }
@@ -542,6 +577,64 @@ fn validate_native_results(results: &[NativeResult], reviewed_on: &str) -> Resul
         return Err("reviewed macOS native-input aggregate drifted".to_owned());
     }
     Ok(())
+}
+
+fn validate_real_site_runs(results: &[RealSiteRun]) -> Result<(), String> {
+    if results.len() != 1 {
+        return Err(
+            "committed real-site evidence must contain one reviewed early slice".to_owned(),
+        );
+    }
+    let result = &results[0];
+    validate_date("real-site result reviewed_on", &result.reviewed_on)?;
+    if result.reviewed_on != "2026-09-04"
+        || result.scope != "allowlisted_public_discovery_fill"
+        || result.site != "Wikipedia"
+        || result.task != "fill_search_input_without_submission"
+        || result.command
+            != "cargo run --quiet --locked -p zephium-terra-macos-probe --features live-probe -- --live-public-wikipedia-fill"
+        || result.platform != "macos"
+        || result.os_version != "27.0"
+        || result.os_build != "26A5425a"
+        || result.engine != "WebKit"
+        || result.engine_version != "22625.1.29.11.26"
+        || result.model != "gpt-5.6-terra"
+        || result.profile != "ephemeral"
+        || result.extensions != "absent"
+        || result.presentation != "hidden"
+        || result.backend != "page_world_compatibility_fill"
+        || result.runs != 3
+        || result.successful_runs != 3
+        || result.verified_actions != 3
+        || result.exact_value_verifications != 3
+        || result.input_tokens_per_run != [5081, 5081, 5081]
+        || result.output_tokens_per_run != [92, 93, 95]
+        || result.serialized_request_bytes_per_run != [33217, 33217, 33217]
+        || result.semantic_bytes_per_run != [3668, 3668, 3668]
+        || result.charged_micro_usd_per_run != [5341, 2138, 2162]
+        || result.provider_elapsed_ms_per_run != [4986, 3812, 3565]
+        || result.elapsed_ms_per_run != [6001, 4777, 4554]
+        || result.focus_theft_rows != 0
+        || result.hidden_page_autofocus != "internal_responder_change_only"
+        || result.native_teardown != "drained_each_run"
+        || result.status != "passed"
+    {
+        return Err("reviewed macOS real-site aggregate drifted".to_owned());
+    }
+    exact_strings(
+        "real-site non-claims",
+        &result.non_claims,
+        &[
+            "difficult_real_site_qualification",
+            "navigation_or_submission",
+            "authenticated_profile_behavior",
+            "extension_interaction",
+            "multi_site_compatibility",
+            "windows_behavior",
+            "browse_concurrency",
+            "shipping_policy_actor_integration",
+        ],
+    )
 }
 
 #[derive(Deserialize)]

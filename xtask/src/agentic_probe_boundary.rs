@@ -860,6 +860,8 @@ fn validate_engine_root(source: &str) -> Result<(), String> {
         "#[cfg(all(target_os=\"macos\",feature=\"native-agentic-semantic-probe\"))]",
         "pubfnrun_macos_agentic_semantic_probe()->Result<(),&'staticstr>",
         "platform::macos::run_agentic_semantic_probe()",
+        "pubfnrun_macos_agentic_semantic_model_public_fill_probe(",
+        "platform::macos::run_agentic_semantic_model_public_fill_probe(prepare)",
         "#[cfg(all(target_os=\"windows\",feature=\"native-agentic-semantic-probe\"))]",
         "pubfnrun_windows_agentic_semantic_probe(",
         "mode:zephium_agentic::WindowsSemanticProbeMode",
@@ -2514,6 +2516,7 @@ fn validate_macos_semantic_probe(
     for required in [
         "#[cfg(feature=\"native-agentic-semantic-probe\")]modagentic_semantic_probe;",
         "#[cfg(feature=\"native-agentic-semantic-probe\")]pub(crate)useagentic_semantic_probe::runasrun_agentic_semantic_probe;",
+        "pub(crate)useagentic_semantic_probe::run_model_public_fillasrun_agentic_semantic_model_public_fill_probe;",
     ] {
         if !module.contains(required) {
             return Err(format!(
@@ -2563,6 +2566,10 @@ fn validate_macos_semantic_probe(
         "view.retire_semantic_runtime()",
         "Weak::from_retained(&page)",
         "server.shutdown()",
+        "constPUBLIC_DISCOVERY_PROBE_URL:&str=\"https://www.wikipedia.org/\";",
+        "ProbeMode::ModelPublicFill",
+        "url==PUBLIC_DISCOVERY_PROBE_URL",
+        "allow_hidden_responder_change:public_fill_probe",
     ] {
         if !source.contains(required) {
             return Err(format!(

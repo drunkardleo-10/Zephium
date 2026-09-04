@@ -19,6 +19,15 @@ is claimed until the separately authorized run and human aggregate review
 occur. Every Cargo command in both phases is offline; dependency acquisition
 must finish before collection authority is exercised.
 
+The first allowlisted public-site slice is now recorded in
+`native-input-matrix-v1.json`: three of three hidden macOS/WebKit runs used
+Terra to select and fill Wikipedia's live search control, then independently
+verified the exact value and drained every native owner. The page's autofocus
+changed only the responder inside its hidden non-key window; application
+activation, visibility, key/main-window state, and user focus remained strict
+failure conditions. This does not clear the difficult-site, authenticated,
+navigation, extension, concurrency, Windows, or shipping-policy blockers.
+
 ## Mechanically enforced evidence
 
 `cargo xtask check-agentic-probe-boundary` is part of ordinary CI and now:

@@ -126,5 +126,48 @@
   ],
   "backend_order_decisions": [],
   "unsupported_interactions": [],
-  "real_site_runs": []
+  "real_site_runs": [
+    {
+      "reviewed_on": "2026-09-04",
+      "scope": "allowlisted_public_discovery_fill",
+      "site": "Wikipedia",
+      "task": "fill_search_input_without_submission",
+      "command": "cargo run --quiet --locked -p zephium-terra-macos-probe --features live-probe -- --live-public-wikipedia-fill",
+      "platform": "macos",
+      "os_version": "27.0",
+      "os_build": "26A5425a",
+      "engine": "WebKit",
+      "engine_version": "22625.1.29.11.26",
+      "model": "gpt-5.6-terra",
+      "profile": "ephemeral",
+      "extensions": "absent",
+      "presentation": "hidden",
+      "backend": "page_world_compatibility_fill",
+      "runs": 3,
+      "successful_runs": 3,
+      "verified_actions": 3,
+      "exact_value_verifications": 3,
+      "input_tokens_per_run": [5081, 5081, 5081],
+      "output_tokens_per_run": [92, 93, 95],
+      "serialized_request_bytes_per_run": [33217, 33217, 33217],
+      "semantic_bytes_per_run": [3668, 3668, 3668],
+      "charged_micro_usd_per_run": [5341, 2138, 2162],
+      "provider_elapsed_ms_per_run": [4986, 3812, 3565],
+      "elapsed_ms_per_run": [6001, 4777, 4554],
+      "focus_theft_rows": 0,
+      "hidden_page_autofocus": "internal_responder_change_only",
+      "native_teardown": "drained_each_run",
+      "status": "passed",
+      "non_claims": [
+        "difficult_real_site_qualification",
+        "navigation_or_submission",
+        "authenticated_profile_behavior",
+        "extension_interaction",
+        "multi_site_compatibility",
+        "windows_behavior",
+        "browse_concurrency",
+        "shipping_policy_actor_integration"
+      ]
+    }
+  ]
 }

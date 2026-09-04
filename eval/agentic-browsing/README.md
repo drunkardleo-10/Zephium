@@ -366,8 +366,9 @@ accepts no stdout form and neither runner nor reviewer overwrites an existing
 record. It shares the same direct-path/reparse-point rejection as the input
 evidence path. Archive the local directory before any retry.
 
-The authorized hidden fixed-DOM macOS safety result is recorded only as reviewed
-aggregate fields. Native AppKit/accessibility, visible/background behavior,
-physical Windows, real-site, and Browse baseline results remain empty until
-their separately authorized runs occur. `pending_device_capture` is a blocking
+The authorized hidden fixed-DOM macOS safety result and the bounded allowlisted
+Wikipedia fill slice are recorded only as reviewed aggregate fields. Native
+AppKit/accessibility, visible/background behavior, physical Windows, the
+difficult-site matrix, and Browse baseline results remain empty until their
+separately authorized runs occur. `pending_device_capture` is a blocking
 evidence state, not a passing result or an inferred zero.
