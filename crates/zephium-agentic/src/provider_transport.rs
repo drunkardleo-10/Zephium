@@ -2265,7 +2265,7 @@ impl AgentProviderAttempt {
         }
         let mut decoder = match AgentProviderStreamDecoder::try_new(call, &config) {
             Ok(decoder) => decoder,
-            Err(_) => return self.finish_terminal(protocol_failure()),
+            Err(error) => return self.finish_terminal(protocol_decoder_failure(error, None)),
         };
         let credential = match self
             .credential
@@ -2338,7 +2338,10 @@ impl AgentProviderAttempt {
             };
             let batch = match decoder.push(&chunk) {
                 Ok(batch) => batch,
-                Err(_) => return self.finish_terminal(protocol_failure()),
+                Err(error) => {
+                    let event = decoder.protocol_event();
+                    return self.finish_terminal(protocol_decoder_failure(error, event));
+                }
             };
             if !batch.deltas().is_empty() {
                 let disposition =
@@ -2359,9 +2362,10 @@ impl AgentProviderAttempt {
         // Cancellation wins while another body item is pending; once EOF wins,
         // later cancellation cannot erase the terminal. Pricing and controller
         // policy checks remain required before any native effect can occur.
+        let protocol_event = decoder.protocol_event();
         let outcome = match decoder.finish() {
             Ok(finished) => AgentProviderTransportOutcomeOwned::Stream(Box::new(finished)),
-            Err(_) => protocol_failure(),
+            Err(error) => protocol_decoder_failure(error, protocol_event),
         };
         self.finish_terminal(outcome)
     }
@@ -2521,6 +2525,13 @@ const fn protocol_failure_value() -> AgentProviderFailure {
 
 fn protocol_failure() -> AgentProviderTransportOutcomeOwned {
     AgentProviderTransportOutcomeOwned::Failed(protocol_failure_value())
+}
+
+fn protocol_decoder_failure(
+    error: crate::AgentProviderProtocolError,
+    event: Option<crate::AgentProviderProtocolEvent>,
+) -> AgentProviderTransportOutcomeOwned {
+    AgentProviderTransportOutcomeOwned::Failed(AgentProviderFailure::protocol_at(error, event))
 }
 
 fn integration_failure() -> AgentProviderTransportOutcomeOwned {

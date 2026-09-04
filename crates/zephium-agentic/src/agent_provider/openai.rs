@@ -25,10 +25,10 @@ use super::{
     AgentBrowserToolCall, AgentBrowserToolCallId, AgentBrowserToolKind, AgentProviderCallConfig,
     AgentProviderCallIdentity, AgentProviderCompletion, AgentProviderFailure,
     AgentProviderFailureClass, AgentProviderFinishedStream, AgentProviderKind,
-    AgentProviderProtocolError, AgentProviderResponseIdentity, AgentProviderStopReason,
-    AgentProviderStreamBatch, AgentProviderStreamBudget, AgentProviderStreamConclusion,
-    AgentProviderStreamStats, AgentProviderTerminalFailure, AgentProviderTextDelta,
-    AgentProviderUsage,
+    AgentProviderProtocolError, AgentProviderProtocolEvent, AgentProviderResponseIdentity,
+    AgentProviderStopReason, AgentProviderStreamBatch, AgentProviderStreamBudget,
+    AgentProviderStreamConclusion, AgentProviderStreamStats, AgentProviderTerminalFailure,
+    AgentProviderTextDelta, AgentProviderUsage,
 };
 
 const MAX_OPENAI_RESPONSE_ID_BYTES: usize = 128;
@@ -156,6 +156,7 @@ pub(super) struct OpenAiResponsesStreamDecoder {
     terminal: Option<PendingTerminal>,
     saw_done: bool,
     failure: Option<AgentProviderProtocolError>,
+    protocol_event: Option<AgentProviderProtocolEvent>,
 }
 
 impl OpenAiResponsesStreamDecoder {
@@ -188,6 +189,7 @@ impl OpenAiResponsesStreamDecoder {
             terminal: None,
             saw_done: false,
             failure: None,
+            protocol_event: None,
         })
     }
 
@@ -290,6 +292,7 @@ impl OpenAiResponsesStreamDecoder {
         event: SseEvent,
         output: &mut Vec<AgentProviderTextDelta>,
     ) -> Result<(), AgentProviderProtocolError> {
+        self.protocol_event = Some(openai_protocol_event(&event));
         if event.data() == "[DONE]" {
             if self.phase != StreamPhase::Terminal || self.saw_done {
                 return Err(AgentProviderProtocolError::Terminal);
@@ -336,6 +339,10 @@ impl OpenAiResponsesStreamDecoder {
             }
             _ => Err(AgentProviderProtocolError::UnsupportedOutput),
         }
+    }
+
+    pub(super) const fn protocol_event(&self) -> Option<AgentProviderProtocolEvent> {
+        self.protocol_event
     }
 
     fn handle_created(&mut self, data: &str) -> Result<(), AgentProviderProtocolError> {
@@ -497,8 +504,11 @@ impl OpenAiResponsesStreamDecoder {
         item: OutputItemHead<'_>,
     ) -> Result<(), AgentProviderProtocolError> {
         let item_id = item.id.ok_or(AgentProviderProtocolError::Event)?;
+        if let Some(encrypted_content) = item.encrypted_content.as_deref() {
+            validate_encrypted_reasoning(encrypted_content)?;
+        }
         if output_index != self.output_items.len()
-            || item.status != Some("in_progress")
+            || !matches!(item.status, None | Some("in_progress"))
             || item.role.is_some()
             || item.call_id.is_some()
             || item.name.is_some()
@@ -507,7 +517,6 @@ impl OpenAiResponsesStreamDecoder {
                 .summary
                 .as_ref()
                 .is_none_or(|summary| !summary.is_empty())
-            || item.encrypted_content.is_some()
             || self.output_item_id_exists(item_id)
         {
             return Err(AgentProviderProtocolError::Sequence);
@@ -531,7 +540,7 @@ impl OpenAiResponsesStreamDecoder {
             .encrypted_content
             .ok_or(AgentProviderProtocolError::UnsupportedOutput)?;
         validate_encrypted_reasoning(&encrypted_content)?;
-        if item.status != Some("completed")
+        if !matches!(item.status, None | Some("completed"))
             || item.role.is_some()
             || item.call_id.is_some()
             || item.name.is_some()
@@ -909,10 +918,24 @@ impl OpenAiResponsesStreamDecoder {
         if next_total > self.budget.max_tool_argument_bytes() {
             return Err(AgentProviderProtocolError::Limit);
         }
+        let tool_index = self
+            .tools
+            .iter()
+            .position(|tool| tool.item_id == event.item_id)
+            .ok_or(AgentProviderProtocolError::Sequence)?;
+        if event.output_index.is_some_and(|output_index| {
+            !matches!(
+                self.output_items.get(output_index),
+                Some(OutputItemAccumulator::FunctionCall {
+                    tool_index: expected,
+                }) if *expected == tool_index
+            )
+        }) {
+            return Err(AgentProviderProtocolError::Sequence);
+        }
         let tool = self
             .tools
-            .iter_mut()
-            .find(|tool| tool.item_id == event.item_id)
+            .get_mut(tool_index)
             .ok_or(AgentProviderProtocolError::Sequence)?;
         let arguments = tool
             .arguments
@@ -936,12 +959,29 @@ impl OpenAiResponsesStreamDecoder {
         if event.kind != "response.function_call_arguments.done" {
             return Err(AgentProviderProtocolError::Event);
         }
+        let tool_index = self
+            .tools
+            .iter()
+            .position(|tool| tool.item_id == event.item_id)
+            .ok_or(AgentProviderProtocolError::Sequence)?;
+        if event.output_index.is_some_and(|output_index| {
+            !matches!(
+                self.output_items.get(output_index),
+                Some(OutputItemAccumulator::FunctionCall {
+                    tool_index: expected,
+                }) if *expected == tool_index
+            )
+        }) {
+            return Err(AgentProviderProtocolError::Sequence);
+        }
         let tool = self
             .tools
-            .iter_mut()
-            .find(|tool| tool.item_id == event.item_id)
+            .get_mut(tool_index)
             .ok_or(AgentProviderProtocolError::Sequence)?;
-        if tool.item_done || tool.argument_guard.is_some() || tool.name.as_str() != event.name {
+        if tool.item_done
+            || tool.argument_guard.is_some()
+            || event.name.is_some_and(|name| tool.name.as_str() != name)
+        {
             return Err(AgentProviderProtocolError::Sequence);
         }
         let mut arguments = tool
@@ -1286,6 +1326,7 @@ struct ToolArgumentsDeltaEnvelope<'a> {
     kind: &'a str,
     #[serde(borrow)]
     item_id: &'a str,
+    output_index: Option<usize>,
     #[serde(borrow)]
     delta: Cow<'a, str>,
 }
@@ -1297,7 +1338,8 @@ struct ToolArgumentsDoneEnvelope<'a> {
     #[serde(borrow)]
     item_id: &'a str,
     #[serde(borrow)]
-    name: &'a str,
+    name: Option<&'a str>,
+    output_index: Option<usize>,
     #[serde(borrow)]
     arguments: Cow<'a, str>,
 }
@@ -1471,6 +1513,36 @@ fn parse_event_type(data: &str) -> Result<&str, AgentProviderProtocolError> {
     Ok(event.kind)
 }
 
+fn openai_protocol_event(event: &SseEvent) -> AgentProviderProtocolEvent {
+    if event.data() == "[DONE]" {
+        return AgentProviderProtocolEvent::OpenAiDone;
+    }
+    match event.event() {
+        "response.created" => AgentProviderProtocolEvent::OpenAiCreated,
+        "response.in_progress" => AgentProviderProtocolEvent::OpenAiInProgress,
+        "response.output_item.added" => AgentProviderProtocolEvent::OpenAiOutputItemAdded,
+        "response.output_item.done" => AgentProviderProtocolEvent::OpenAiOutputItemDone,
+        "response.content_part.added" | "response.content_part.done" => {
+            AgentProviderProtocolEvent::OpenAiContentPart
+        }
+        "response.output_text.delta"
+        | "response.output_text.done"
+        | "response.refusal.delta"
+        | "response.refusal.done" => AgentProviderProtocolEvent::OpenAiText,
+        "response.function_call_arguments.delta" => {
+            AgentProviderProtocolEvent::OpenAiToolArgumentsDelta
+        }
+        "response.function_call_arguments.done" => {
+            AgentProviderProtocolEvent::OpenAiToolArgumentsDone
+        }
+        "response.completed" | "response.incomplete" | "response.failed" | "response.cancelled" => {
+            AgentProviderProtocolEvent::OpenAiTerminal
+        }
+        "error" => AgentProviderProtocolEvent::OpenAiError,
+        _ => AgentProviderProtocolEvent::OpenAiUnknown,
+    }
+}
+
 fn parse<'a, T>(data: &'a str) -> Result<T, AgentProviderProtocolError>
 where
     T: Deserialize<'a>,
@@ -1538,7 +1610,7 @@ fn validate_terminal_output(
                 validate_response_id(item_id)?;
                 validate_encrypted_reasoning(encrypted_content)?;
                 if !item.content.is_empty()
-                    || item.status != Some("completed")
+                    || !matches!(item.status, None | Some("completed"))
                     || item.role.is_some()
                     || item.call_id.is_some()
                     || item.name.is_some()
@@ -1552,13 +1624,13 @@ fn validate_terminal_output(
                 }
                 let Some(OutputItemAccumulator::Reasoning {
                     item_id: streamed_id,
-                    encrypted_content: Some(streamed_content),
+                    encrypted_content: Some(_),
                     done: true,
                 }) = streamed_output.get(output_index)
                 else {
                     return Err(AgentProviderProtocolError::Sequence);
                 };
-                if streamed_id != item_id || streamed_content.as_str() != encrypted_content {
+                if streamed_id != item_id {
                     return Err(AgentProviderProtocolError::Sequence);
                 }
                 replay_items.push(OpenAiResponseReplayItem::Reasoning {
@@ -2015,6 +2087,33 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_status_is_optional_but_cannot_contradict_the_lifecycle() {
+        let mut decoder =
+            OpenAiResponsesStreamDecoder::try_new(call(), &config(64)).expect("decoder");
+        decoder
+            .push(created("resp_reasoning_status").as_bytes())
+            .expect("created");
+        let contradictory = sse(
+            "response.output_item.added",
+            &serde_json::json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "type": "reasoning",
+                    "id": "rs_contradictory",
+                    "summary": [],
+                    "status": "completed"
+                }
+            })
+            .to_string(),
+        );
+        assert_eq!(
+            decoder.push(contradictory.as_bytes()),
+            Err(AgentProviderProtocolError::Sequence)
+        );
+    }
+
+    #[test]
     fn encrypted_reasoning_is_terminal_authenticated_and_identity_is_distinct() {
         let effective_model = "gpt-5.6-terra-2026-08-01";
         let config = config_with_effective_models(64, &["gpt-5.6-terra", effective_model]);
@@ -2022,7 +2121,9 @@ mod tests {
         decoder
             .push(created_with_identity("resp_replay", effective_model, "default").as_bytes())
             .expect("created");
-        let encrypted = "opaque_encrypted_reasoning_AQID";
+        let streamed_encrypted = "opaque_streamed_reasoning_AQID";
+        let terminal_encrypted = "opaque_terminal_reasoning_BAUG";
+        let provisional_encrypted = "opaque_provisional_reasoning_AQID";
         let reasoning_added = sse(
             "response.output_item.added",
             &serde_json::json!({
@@ -2032,7 +2133,7 @@ mod tests {
                     "type": "reasoning",
                     "id": "rs_private_1",
                     "summary": [],
-                    "status": "in_progress"
+                    "encrypted_content": provisional_encrypted
                 }
             })
             .to_string(),
@@ -2051,8 +2152,7 @@ mod tests {
                     "type": "reasoning",
                     "id": "rs_private_1",
                     "summary": [],
-                    "encrypted_content": encrypted,
-                    "status": "completed"
+                    "encrypted_content": streamed_encrypted
                 }
             })
             .to_string(),
@@ -2125,8 +2225,7 @@ mod tests {
                 "type": "reasoning",
                 "id": "rs_private_1",
                 "summary": [],
-                "encrypted_content": encrypted,
-                "status": "completed"
+                "encrypted_content": terminal_encrypted
             },
             {
                 "type": "function_call",
@@ -2156,7 +2255,9 @@ mod tests {
         let (conclusion, tool) = finished.into_parts();
         let tool = tool.expect("EOF-private tool");
         let (correlation, _) = tool.into_continuation_parts();
-        assert!(!format!("{correlation:?}").contains(encrypted));
+        assert!(!format!("{correlation:?}").contains(streamed_encrypted));
+        assert!(!format!("{correlation:?}").contains(terminal_encrypted));
+        assert!(!format!("{correlation:?}").contains(provisional_encrypted));
 
         let AgentProviderStreamConclusion::Completed(completion) = conclusion else {
             panic!("completed response");
@@ -2351,6 +2452,7 @@ mod tests {
                 &serde_json::json!({
                     "type": "response.function_call_arguments.delta",
                     "item_id": "fc_1",
+                    "output_index": 0,
                     "delta": "{\"url\":"
                 })
                 .to_string(),
@@ -2360,6 +2462,7 @@ mod tests {
                 &serde_json::json!({
                     "type": "response.function_call_arguments.delta",
                     "item_id": "fc_1",
+                    "output_index": 0,
                     "delta": "\"https://example.test/path\"}"
                 })
                 .to_string(),
@@ -2369,7 +2472,7 @@ mod tests {
                 &serde_json::json!({
                     "type": "response.function_call_arguments.done",
                     "item_id": "fc_1",
-                    "name": "navigate",
+                    "output_index": 0,
                     "arguments": arguments
                 })
                 .to_string(),

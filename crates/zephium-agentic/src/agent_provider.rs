@@ -285,6 +285,13 @@ impl AgentProviderStreamDecoder {
             AgentProviderStreamDecoderInner::Anthropic(decoder) => (*decoder).finish(),
         }
     }
+
+    pub(crate) fn protocol_event(&self) -> Option<AgentProviderProtocolEvent> {
+        match &self.inner {
+            AgentProviderStreamDecoderInner::OpenAi(decoder) => decoder.protocol_event(),
+            AgentProviderStreamDecoderInner::Anthropic(_) => None,
+        }
+    }
 }
 
 #[cfg(feature = "provider-transport")]
@@ -1584,6 +1591,35 @@ pub enum AgentProviderFailureClass {
     Cancelled,
 }
 
+/// Closed provider event phase retained for content-free protocol diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentProviderProtocolEvent {
+    /// OpenAI response creation event.
+    OpenAiCreated,
+    /// OpenAI response in-progress event.
+    OpenAiInProgress,
+    /// OpenAI output-item added event.
+    OpenAiOutputItemAdded,
+    /// OpenAI output-item completed event.
+    OpenAiOutputItemDone,
+    /// OpenAI content-part lifecycle event.
+    OpenAiContentPart,
+    /// OpenAI text or refusal delta/done event.
+    OpenAiText,
+    /// OpenAI function-call argument delta event.
+    OpenAiToolArgumentsDelta,
+    /// OpenAI function-call argument completion event.
+    OpenAiToolArgumentsDone,
+    /// OpenAI response terminal event.
+    OpenAiTerminal,
+    /// OpenAI stream-level error event.
+    OpenAiError,
+    /// OpenAI `[DONE]` sentinel.
+    OpenAiDone,
+    /// Unrecognized OpenAI event name.
+    OpenAiUnknown,
+}
+
 impl AgentProviderFailureClass {
     /// Whether policy may consider a newly admitted retry.
     ///
@@ -1642,6 +1678,8 @@ impl AgentProviderRetryAfter {
 pub struct AgentProviderFailure {
     class: AgentProviderFailureClass,
     retry_after: Option<AgentProviderRetryAfter>,
+    protocol_error: Option<AgentProviderProtocolError>,
+    protocol_event: Option<AgentProviderProtocolEvent>,
 }
 
 impl AgentProviderFailure {
@@ -1650,6 +1688,21 @@ impl AgentProviderFailure {
         Self {
             class,
             retry_after: None,
+            protocol_error: None,
+            protocol_event: None,
+        }
+    }
+
+    /// Constructs a content-free provider-wire failure at a closed event phase.
+    pub const fn protocol_at(
+        error: AgentProviderProtocolError,
+        event: Option<AgentProviderProtocolEvent>,
+    ) -> Self {
+        Self {
+            class: AgentProviderFailureClass::Protocol,
+            retry_after: None,
+            protocol_error: Some(error),
+            protocol_event: event,
         }
     }
 
@@ -1666,7 +1719,12 @@ impl AgentProviderFailure {
         {
             return Err(AgentProviderContractError::RetryAfter);
         }
-        Ok(Self { class, retry_after })
+        Ok(Self {
+            class,
+            retry_after,
+            protocol_error: None,
+            protocol_event: None,
+        })
     }
 
     /// Closed terminal failure class.
@@ -1677,6 +1735,16 @@ impl AgentProviderFailure {
     /// Bounded provider hint, not retry authority.
     pub const fn retry_after(self) -> Option<AgentProviderRetryAfter> {
         self.retry_after
+    }
+
+    /// Closed decoder cause when provider wire data violated its contract.
+    pub const fn protocol_error(self) -> Option<AgentProviderProtocolError> {
+        self.protocol_error
+    }
+
+    /// Closed provider event phase where typed decoding failed.
+    pub const fn protocol_event(self) -> Option<AgentProviderProtocolEvent> {
+        self.protocol_event
     }
 
     /// Non-authorizing retry classification.
@@ -1974,5 +2042,19 @@ mod tests {
             ),
             Err(AgentProviderContractError::RetryAfter)
         );
+        let protocol = AgentProviderFailure::protocol_at(
+            AgentProviderProtocolError::Sequence,
+            Some(AgentProviderProtocolEvent::OpenAiTerminal),
+        );
+        assert_eq!(protocol.class(), AgentProviderFailureClass::Protocol);
+        assert_eq!(
+            protocol.protocol_error(),
+            Some(AgentProviderProtocolError::Sequence)
+        );
+        assert_eq!(
+            protocol.protocol_event(),
+            Some(AgentProviderProtocolEvent::OpenAiTerminal)
+        );
+        assert_eq!(protocol.retry_after(), None);
     }
 }
