@@ -264,3 +264,36 @@ Clippy, three foreground architecture adversaries, both architecture commands
 and hostile JavaScript smoke, ordinary non-probe `agentic-browser` engine check,
 normal isolated application bundle, workspace fmt and diff checks. There has
 been no second actual-application launch.
+
+## Second actual-application launch: native rendering refusal
+
+The second independently run witness used clean committed source
+`d88e63652e1beca03ef0ba54d9c8b5da8401dedd` and executable SHA-256
+`482e9682f08fea751a706ffa5665f388ce985dd55f4d10a07e55ba5b42b05721`.
+Recorded date: 2026-09-06; exact UTC start and total process duration were not
+provided. Launch Services `open` returned exit 0; that is not the child
+application's exit-status evidence. Complete diagnostic output:
+
+```text
+work-rendering-admission: outcome=Admitted waited_ms=0 checks=1
+work-rendering-provisional: outcome=rendering_refused cleanup_failure=None native_cohort_clean=true human_ownership_preserved=true fixture_clean=true elapsed_ms=518
+work-rendering-closure: qualified=false normal_shutdown_clean=false exact_native_weak_drain=Some(true)
+```
+
+The exact foreground admission succeeded on its first check. The real context
+then reached native rendering acquisition but returned generic Failed before
+any semantic/RAF sample. Driver-measured closure was 518 ms. The Work cohort and
+fixture closed cleanly, the retained human baseline was unchanged, and the exact
+native page/auxiliary-window/store weak witnesses drained. Qualification remains
+false. No public site or provider was used.
+
+Source-level inference: the context-bound weak witness is published near the
+end of native preparation, so `Some(true)` establishes that preparation reached
+auxiliary-window creation and that witness publication. It does not identify
+which later presentation, poll, or watchdog setup predicate refused. The
+`normal_shutdown_clean` field tests the coordinator's authorized exit code for
+zero; the driver deliberately marks a rendering refusal as terminal failure, so
+this false value alone does not establish a native teardown leak. The generic
+Failed result cannot justify relaxing any acceptance predicate. The next change
+must retain bounded, content-free, exact native refusal predicates and separate
+cleanup evidence before any behavior correction or newly authorized rerun.
