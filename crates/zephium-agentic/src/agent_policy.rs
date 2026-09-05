@@ -1040,8 +1040,8 @@ pub struct AgentRunPolicy {
     calls: Vec<ModelCallRow>,
     effects: Vec<AgentEffectRow>,
     navigation: Option<AgentNavigationRow>,
-    navigation_receipt: Option<AgentNavigationReceipt>,
-    navigation_used: bool,
+    navigation_receipts: [Option<AgentNavigationReceipt>; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS],
+    navigation_attempts: usize,
     last_call: Option<AgentModelCallId>,
     last_effect: Option<AgentEffectId>,
     last_action_attempt: Option<SemanticActionAttemptId>,
@@ -1091,8 +1091,8 @@ impl AgentRunPolicy {
             calls: Vec::with_capacity(MAX_AGENT_PENDING_MODEL_CALLS),
             effects: Vec::with_capacity(MAX_AGENT_PENDING_EFFECTS),
             navigation: None,
-            navigation_receipt: None,
-            navigation_used: false,
+            navigation_receipts: [None; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS],
+            navigation_attempts: 0,
             last_call: None,
             last_effect: None,
             last_action_attempt: None,
@@ -2017,7 +2017,7 @@ fn validate_metric_settlement(
         || snapshot.model().calls() != closure.model_calls()
         || snapshot.effects().attempts() != closure.effects()
         || snapshot.navigations() != closure.navigations()
-        || snapshot.navigation() != policy.navigation_receipt
+        || snapshot.navigation_receipts() != &policy.navigation_receipts
     {
         return Err(AgentRunPolicySettlementError::Authority);
     }

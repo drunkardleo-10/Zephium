@@ -553,7 +553,7 @@ pub struct AgentRunAccountingSnapshot {
     operations: u32,
     model: AgentModelAccountingMetrics,
     effects: AgentEffectAccountingMetrics,
-    navigation: Option<crate::AgentNavigationReceipt>,
+    navigation: [Option<crate::AgentNavigationReceipt>; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS],
 }
 
 impl AgentRunAccountingSnapshot {
@@ -582,18 +582,25 @@ impl AgentRunAccountingSnapshot {
         self.effects
     }
 
-    /// The run's one policy-accounted navigation, when terminal.
+    /// The sole terminal for a one-hop run; multi-hop coverage uses all receipts.
     pub const fn navigation(self) -> Option<crate::AgentNavigationReceipt> {
-        self.navigation
+        if self.navigation[1].is_none() {
+            self.navigation[0]
+        } else {
+            None
+        }
+    }
+
+    /// Exact ordered fixed-capacity terminals; absent entries are unobserved.
+    pub const fn navigation_receipts(
+        &self,
+    ) -> &[Option<crate::AgentNavigationReceipt>; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS] {
+        &self.navigation
     }
 
     /// Terminal native document-navigation attempt count, never action count.
     pub const fn navigations(self) -> u32 {
-        if self.navigation.is_some() {
-            1
-        } else {
-            0
-        }
+        self.navigation[0].is_some() as u32 + self.navigation[1].is_some() as u32
     }
 }
 
@@ -638,7 +645,7 @@ pub struct AgentRunAccountingMetrics {
     operations: u32,
     model: AgentModelAccountingMetrics,
     effects: AgentEffectAccountingMetrics,
-    navigation: Option<crate::AgentNavigationReceipt>,
+    navigation: [Option<crate::AgentNavigationReceipt>; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS],
     nodes: Vec<AgentNodeAccountingRow>,
     model_receipts: Vec<AgentModelCallId>,
     effect_receipts: Vec<AgentEffectId>,
@@ -703,7 +710,7 @@ impl AgentRunAccountingMetrics {
             operations: 0,
             model: AgentModelAccountingMetrics::default(),
             effects: AgentEffectAccountingMetrics::default(),
-            navigation: None,
+            navigation: [None; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS],
             nodes,
             model_receipts: Vec::new(),
             effect_receipts: Vec::new(),
@@ -815,7 +822,7 @@ impl AgentRunAccountingMetrics {
         Ok(())
     }
 
-    /// Records the run's one exact native navigation terminal, never an action.
+    /// Records the next exact ordered native navigation terminal, never an action.
     pub fn record_navigation_receipt(
         &mut self,
         receipt: crate::AgentNavigationReceipt,
@@ -823,7 +830,18 @@ impl AgentRunAccountingMetrics {
         if !receipt.matches_manifest_revision(self.manifest, self.manifest_guard) {
             return Err(AgentMetricError::Authority);
         }
-        if self.navigation.is_some() {
+        let hop = receipt.hop();
+        if self.navigation.get(hop).is_none_or(Option::is_some)
+            || hop != self.navigation.iter().flatten().count()
+            || (hop > 0
+                && !self.navigation[hop - 1].is_some_and(|prior| {
+                    prior.settlement() == crate::AgentNavigationSettlement::Committed
+                        && prior.node() == receipt.node()
+                        && prior.lease() == receipt.lease()
+                        && prior.operation().context() == receipt.source()
+                        && prior.account() == receipt.account()
+                }))
+        {
             return Err(AgentMetricError::ReceiptReplay);
         }
         let index = self.node_index(receipt.node())?;
@@ -837,7 +855,7 @@ impl AgentRunAccountingMetrics {
         node.validate()?;
         self.operations = operations;
         self.nodes[index] = node;
-        self.navigation = Some(receipt);
+        self.navigation[hop] = Some(receipt);
         Ok(())
     }
 

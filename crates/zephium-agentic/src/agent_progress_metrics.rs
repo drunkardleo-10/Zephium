@@ -143,10 +143,10 @@ pub struct AgentRunProgressSnapshot {
     model: AgentDurationMetrics,
     effect: AgentDurationMetrics,
     navigation: AgentDurationMetrics,
-    navigation_terminal: Option<(
+    navigation_terminal: [Option<(
         crate::AgentNavigationProgressId,
         crate::AgentNavigationSettlement,
-    )>,
+    )>; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS],
     human_wait: AgentDurationMetrics,
     outcome: Option<AgentRunProgressOutcome>,
     total_elapsed_millis: Option<u64>,
@@ -207,13 +207,13 @@ impl AgentRunProgressSnapshot {
     pub const fn navigation(self) -> Option<AgentDurationMetrics> {
         self.navigation.observed()
     }
-    pub(crate) const fn navigation_terminal(
-        self,
-    ) -> Option<(
+    pub(crate) const fn navigation_terminals(
+        &self,
+    ) -> &[Option<(
         crate::AgentNavigationProgressId,
         crate::AgentNavigationSettlement,
-    )> {
-        self.navigation_terminal
+    )>; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS] {
+        &self.navigation_terminal
     }
 
     /// Observed `NeedsHuman` wait durations, or `None` while absent or open.
@@ -235,6 +235,7 @@ impl AgentRunProgressSnapshot {
 #[derive(Clone, Copy)]
 struct NodeProgressMetricRow {
     node: AgentPlanNodeId,
+    navigation_limit: usize,
     activated: bool,
     terminal: bool,
     last_progress: Option<AgentSemanticProgress>,
@@ -300,10 +301,11 @@ pub struct AgentRunProgressMetrics {
         AgentPlanNodeId,
         AgentPolicyInstant,
     )>,
-    navigation_terminal: Option<(
+    navigation_terminal: [Option<(
         crate::AgentNavigationProgressId,
         crate::AgentNavigationSettlement,
-    )>,
+    )>; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS],
+    navigation_owner: Option<AgentPlanNodeId>,
     takeover_cancellations: Vec<AgentSupervisorCancellationId>,
     last_event: Option<AgentAuditEventId>,
     last_recorded_at: Option<AgentPolicyInstant>,
@@ -347,6 +349,10 @@ impl AgentRunProgressMetrics {
             .map_err(|_| AgentProgressMetricError::Capacity)?;
         nodes.extend(topology_nodes.iter().map(|node| NodeProgressMetricRow {
             node: node.node(),
+            navigation_limit: manifest.plan_node(node.node()).map_or(0, |node| {
+                node.navigation_route()
+                    .map_or(1, |route| route.destinations().len())
+            }),
             activated: false,
             terminal: false,
             last_progress: None,
@@ -365,7 +371,8 @@ impl AgentRunProgressMetrics {
             active_models: Vec::new(),
             active_effects: Vec::new(),
             active_navigation: None,
-            navigation_terminal: None,
+            navigation_terminal: [None; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS],
+            navigation_owner: None,
             takeover_cancellations: Vec::new(),
             last_event: None,
             last_recorded_at: None,
@@ -445,6 +452,7 @@ impl AgentRunProgressMetrics {
         let mut next_navigation = self.navigation;
         let mut next_active_navigation = self.active_navigation;
         let mut next_navigation_terminal = self.navigation_terminal;
+        let mut next_navigation_owner = self.navigation_owner;
         let mut next_human_wait = self.human_wait;
         let mut next_root_queued_at = self.root_queued_at;
         let mut next_outcome = self.outcome;
@@ -480,10 +488,23 @@ impl AgentRunProgressMetrics {
 
         match projection {
             ProjectionKind::NavigationActive(id) => {
-                if self.active_navigation.is_some() || self.navigation_terminal.is_some() {
+                let count = self.navigation_terminal.iter().flatten().count();
+                if self.active_navigation.is_some()
+                    || count >= next_node.navigation_limit
+                    || self.navigation_owner.is_some_and(|owner| owner != node)
+                    || self
+                        .navigation_terminal
+                        .iter()
+                        .flatten()
+                        .any(|(prior, settlement)| {
+                            *prior == id
+                                || *settlement != crate::AgentNavigationSettlement::Committed
+                        })
+                {
                     return Err(AgentProgressMetricError::OperationSequence);
                 }
                 next_active_navigation = Some((id, node, recorded_at));
+                next_navigation_owner = Some(node);
             }
             ProjectionKind::NavigationTerminal(id, settlement) => {
                 let Some((active_id, active_node, started_at)) = self.active_navigation else {
@@ -495,7 +516,11 @@ impl AgentRunProgressMetrics {
                 next_navigation =
                     next_navigation.checked_record(duration_millis(recorded_at, started_at)?)?;
                 next_active_navigation = None;
-                next_navigation_terminal = Some((id, settlement));
+                let slot = next_navigation_terminal
+                    .iter_mut()
+                    .find(|slot| slot.is_none())
+                    .ok_or(AgentProgressMetricError::OperationSequence)?;
+                *slot = Some((id, settlement));
             }
             ProjectionKind::ModelActive(id) => {
                 let index = self
@@ -662,6 +687,7 @@ impl AgentRunProgressMetrics {
         self.navigation = next_navigation;
         self.active_navigation = next_active_navigation;
         self.navigation_terminal = next_navigation_terminal;
+        self.navigation_owner = next_navigation_owner;
         self.human_wait = next_human_wait;
         self.outcome = next_outcome;
         self.total_elapsed_millis = next_total_elapsed_millis;

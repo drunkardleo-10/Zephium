@@ -26,6 +26,8 @@ pub const MAX_AGENT_RUN_ORIGINS: usize = 32;
 pub const MAX_AGENT_DATA_FLOW_RULES: usize = 64;
 /// Maximum explicit approved plan nodes in one run manifest.
 pub const MAX_AGENT_PLAN_NODES: usize = 64;
+/// Maximum exact hops in one explicitly approved finite navigation route.
+pub const MAX_AGENT_NAVIGATION_ROUTE_HOPS: usize = 2;
 /// Hard operation ceiling for one run or plan node.
 pub const MAX_AGENT_RUN_OPERATIONS: u32 = 4_096;
 /// Hard model-token ceiling for one run or plan node.
@@ -550,6 +552,67 @@ impl fmt::Debug for AgentRunScope {
     }
 }
 
+/// Immutable ordered same-origin document checkpoints, not navigation permits.
+/// Default plan nodes have no route and retain the existing one-hop boundary.
+#[derive(Clone, Eq, PartialEq)]
+pub struct AgentNavigationRoute {
+    departure: crate::ContextNavigationTarget,
+    destinations: Vec<crate::ContextNavigationTarget>,
+    origin: SemanticOrigin,
+}
+
+impl AgentNavigationRoute {
+    /// Freezes one departure and one or two distinct exact same-origin targets.
+    /// Repeats (including return to departure), fragments and redirects are absent.
+    pub fn try_new(
+        departure: crate::ContextNavigationTarget,
+        destinations: Vec<crate::ContextNavigationTarget>,
+    ) -> Result<Self, AgentManifestContractError> {
+        let origin = SemanticOrigin::parse(departure.as_url().as_str())
+            .map_err(|_| AgentManifestContractError::NavigationRoute)?;
+        if destinations.is_empty() || destinations.len() > MAX_AGENT_NAVIGATION_ROUTE_HOPS {
+            return Err(AgentManifestContractError::NavigationRoute);
+        }
+        for (index, target) in std::iter::once(&departure).chain(&destinations).enumerate() {
+            if target.as_url().fragment().is_some()
+                || target.as_url().as_str().len() > crate::MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES
+                || SemanticOrigin::parse(target.as_url().as_str()).as_ref() != Ok(&origin)
+                || (index > 0
+                    && (target == &departure || destinations[..index - 1].contains(target)))
+            {
+                return Err(AgentManifestContractError::NavigationRoute);
+            }
+        }
+        Ok(Self {
+            departure,
+            destinations,
+            origin,
+        })
+    }
+    /// Exact initial document admitted by the trusted host.
+    pub const fn departure(&self) -> &crate::ContextNavigationTarget {
+        &self.departure
+    }
+    /// Immutable ordered successor targets. No model/page may append or reorder.
+    pub fn destinations(&self) -> &[crate::ContextNavigationTarget] {
+        &self.destinations
+    }
+    /// The single canonical origin shared by every checkpoint.
+    pub const fn origin(&self) -> &SemanticOrigin {
+        &self.origin
+    }
+}
+
+impl fmt::Debug for AgentNavigationRoute {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentNavigationRoute")
+            .field("hops", &self.destinations.len())
+            .field("targets", &"[redacted]")
+            .finish()
+    }
+}
+
 /// Exact profile/account/origin/data/effect authority of one plan node.
 pub struct AgentPlanNodeAuthority {
     profiles: Vec<ProfileId>,
@@ -557,6 +620,7 @@ pub struct AgentPlanNodeAuthority {
     origins: Vec<SemanticOrigin>,
     max_sensitivity: SemanticSensitivity,
     effects: AgentEffectScope,
+    navigation_route: Option<AgentNavigationRoute>,
 }
 
 impl AgentPlanNodeAuthority {
@@ -598,7 +662,26 @@ impl AgentPlanNodeAuthority {
             origins,
             max_sensitivity,
             effects,
+            navigation_route: None,
         })
+    }
+
+    /// Installs ordered navigation checkpoints inside this approved authority.
+    /// The manifest fingerprints every exact URL; this cannot widen origin scope.
+    pub fn with_navigation_route(
+        mut self,
+        route: AgentNavigationRoute,
+    ) -> Result<Self, AgentManifestContractError> {
+        if self.navigation_route.is_some() || self.origins.binary_search(route.origin()).is_err() {
+            return Err(AgentManifestContractError::NavigationRoute);
+        }
+        self.navigation_route = Some(route);
+        Ok(self)
+    }
+
+    /// Optional immutable route approved with this node, not a dynamic counter.
+    pub const fn navigation_route(&self) -> Option<&AgentNavigationRoute> {
+        self.navigation_route.as_ref()
     }
 
     /// Canonical profiles allowed by this node.
@@ -636,6 +719,7 @@ impl fmt::Debug for AgentPlanNodeAuthority {
             .field("origins", &self.origins.len())
             .field("max_sensitivity", &self.max_sensitivity)
             .field("effects", &self.effects)
+            .field("navigation_route", &self.navigation_route)
             .finish()
     }
 }
@@ -649,6 +733,10 @@ pub struct AgentPlanNodeScope {
 }
 
 impl AgentPlanNodeScope {
+    /// Optional exact ordered route inherited from this node's authority.
+    pub const fn navigation_route(&self) -> Option<&AgentNavigationRoute> {
+        self.authority.navigation_route()
+    }
     /// Constructs one node; its containing manifest checks non-widening inheritance.
     pub const fn new(
         id: AgentPlanNodeId,
@@ -868,6 +956,9 @@ impl fmt::Debug for AgentRunManifest {
 /// Refusal while constructing approved run-manifest policy facts.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum AgentManifestContractError {
+    /// Exact navigation checkpoints were empty, repeated, widened or unbounded.
+    #[error("agent navigation route is invalid")]
+    NavigationRoute,
     /// Profile scope was empty.
     #[error("agent manifest profile scope is empty")]
     ProfileScopeEmpty,
@@ -1023,6 +1114,28 @@ fn manifest_guard(
         hasher.update([node.effects().bits()]);
         hash_budget(&mut hasher, node.budget());
         hasher.update(node.expires_at().millis().to_be_bytes());
+    }
+    // Preserve historical no-route manifest fingerprints. The closed extension
+    // commits each routed node and ordered URL; matching public ids cannot
+    // substitute another route or drop back to the default single-hop policy.
+    let routed = nodes
+        .iter()
+        .filter(|node| node.navigation_route().is_some())
+        .count();
+    if routed != 0 {
+        hasher.update(b"ZEPHIUM-AGENT-NAVIGATION-ROUTES-1\0");
+        hasher.update((routed as u64).to_be_bytes());
+        for node in nodes {
+            if let Some(route) = node.navigation_route() {
+                hasher.update(node.id().bytes());
+                hasher.update((route.destinations().len() as u64).to_be_bytes());
+                for target in std::iter::once(route.departure()).chain(route.destinations()) {
+                    let bytes = target.as_url().as_str().as_bytes();
+                    hasher.update((bytes.len() as u64).to_be_bytes());
+                    hasher.update(bytes);
+                }
+            }
+        }
     }
     hasher.finalize().into()
 }
@@ -1253,6 +1366,129 @@ mod tests {
         assert!(!debug.contains(&Ulid(11).to_string()));
         assert!(debug.contains("plan_nodes"));
         assert!(debug.contains("[redacted]"));
+    }
+
+    #[test]
+    fn navigation_route_is_finite_exact_same_origin_nonrepeating_and_redacted() {
+        let target = |path: &str| crate::ContextNavigationTarget::parse(path).unwrap();
+        let departure = target("https://sink.example.test/start");
+        let first = target("https://sink.example.test/first");
+        let second = target("https://sink.example.test/second");
+        for destinations in [
+            vec![],
+            vec![
+                first.clone(),
+                second.clone(),
+                target("https://sink.example.test/third"),
+            ],
+            vec![departure.clone()],
+            vec![first.clone(), first.clone()],
+            vec![first.clone(), departure.clone()],
+            vec![target("https://other.example.test/first")],
+            vec![target("http://sink.example.test/first")],
+            vec![target("https://sink.example.test:444/first")],
+            vec![target("https://sink.example.test/first#section")],
+        ] {
+            assert_eq!(
+                AgentNavigationRoute::try_new(departure.clone(), destinations).unwrap_err(),
+                AgentManifestContractError::NavigationRoute
+            );
+        }
+        assert!(crate::ContextNavigationTarget::parse(&format!(
+            "https://sink.example.test/{}",
+            "x".repeat(8192)
+        ))
+        .is_err());
+        assert!(AgentNavigationRoute::try_new(
+            target("https://sink.example.test/start#section"),
+            vec![first.clone()]
+        )
+        .is_err());
+        let route =
+            AgentNavigationRoute::try_new(departure.clone(), vec![first.clone(), second.clone()])
+                .unwrap();
+        assert_eq!(route.departure(), &departure);
+        assert_eq!(route.destinations(), &[first, second]);
+        assert_eq!(route.origin(), &origin("sink"));
+        assert!(!format!("{route:?}").contains("example.test"));
+        let base = || {
+            authority(
+                vec![profile(1)],
+                vec![account(12)],
+                vec![origin("sink")],
+                SemanticSensitivity::Public,
+                effects(&[SemanticEffectClass::Read]),
+            )
+        };
+        assert!(base()
+            .with_navigation_route(route.clone())
+            .unwrap()
+            .with_navigation_route(route.clone())
+            .is_err());
+        assert!(authority(
+            vec![profile(1)],
+            vec![account(12)],
+            vec![origin("outside")],
+            SemanticSensitivity::Public,
+            effects(&[SemanticEffectClass::Read])
+        )
+        .with_navigation_route(route)
+        .is_err());
+    }
+
+    #[test]
+    fn navigation_route_fingerprint_binds_departure_order_length_and_node_without_default_change() {
+        let base = manifest();
+        assert!(base
+            .plan_nodes()
+            .iter()
+            .all(|node| node.navigation_route().is_none()));
+        let target = |path: &str| {
+            crate::ContextNavigationTarget::parse(&format!("https://sink.example.test/{path}"))
+                .unwrap()
+        };
+        let mut guards = vec![base.guard()];
+        for (departure, destinations) in [
+            ("start", vec!["one", "two"]),
+            ("other", vec!["one", "two"]),
+            ("start", vec!["two", "one"]),
+            ("start", vec!["one"]),
+            ("start", vec!["one", "three"]),
+        ] {
+            let mut candidate = manifest();
+            candidate.plan_nodes[0].authority.navigation_route = Some(
+                AgentNavigationRoute::try_new(
+                    target(departure),
+                    destinations.into_iter().map(target).collect(),
+                )
+                .unwrap(),
+            );
+            let guard = manifest_guard(
+                candidate.id,
+                candidate.run,
+                &candidate.scope,
+                candidate.budget,
+                candidate.issued_at,
+                candidate.expires_at,
+                &candidate.plan_nodes,
+            );
+            assert!(!guards.contains(&guard));
+            guards.push(guard);
+        }
+        // Adding no route performs no hash extension: existing immutable ids,
+        // node ordering and historical default behavior remain unchanged.
+        assert_eq!(
+            base.guard(),
+            manifest_guard(
+                base.id,
+                base.run,
+                &base.scope,
+                base.budget,
+                base.issued_at,
+                base.expires_at,
+                &base.plan_nodes
+            )
+        );
     }
 
     #[test]

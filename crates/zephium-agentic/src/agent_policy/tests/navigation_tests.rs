@@ -1,6 +1,445 @@
 use super::*;
 use crate::{ContextNavigationSettlement, ContextNavigationTarget, ContextPortFailure};
 
+fn route_fixture(operations: u32) -> (PolicyFixture, ContextRegistry, SemanticObservation) {
+    let (mut registry, context) = make_context_registry(901, 902, 903);
+    registry
+        .acknowledge_observation(context.identity().id(), context)
+        .unwrap();
+    let source = origin("source");
+    let observation = actionable_observation(context, source.clone(), 1);
+    let budget = run_budget(operations, 10_000, 10_000);
+    let effects = effects(&[SemanticEffectClass::Read]);
+    let route = crate::AgentNavigationRoute::try_new(
+        ContextNavigationTarget::parse("https://source.example.test/start").unwrap(),
+        vec![target(), final_target()],
+    )
+    .unwrap();
+    let authority = AgentPlanNodeAuthority::try_new(
+        vec![profile(902)],
+        vec![AgentAccountScope::Anonymous],
+        vec![source.clone()],
+        SemanticSensitivity::Sensitive,
+        effects,
+    )
+    .unwrap()
+    .with_navigation_route(route)
+    .unwrap();
+    let manifest = AgentRunManifest::try_new(
+        AgentRunManifestId::from_raw(1),
+        ContextRunId::from_raw(901),
+        AgentRunScope::try_new(
+            vec![profile(902)],
+            vec![AgentAccountScope::Anonymous],
+            vec![source],
+            SemanticSensitivity::Sensitive,
+            effects,
+            vec![],
+        )
+        .unwrap(),
+        budget,
+        AgentPolicyInstant::from_millis(ISSUED_AT),
+        AgentPolicyInstant::from_millis(EXPIRES_AT),
+        vec![AgentPlanNodeScope::new(
+            AgentPlanNodeId::from_raw(1),
+            authority,
+            budget,
+            AgentPolicyInstant::from_millis(EXPIRES_AT - 1),
+        )],
+    )
+    .unwrap();
+    let lease = AgentPlanLeaseId::from_raw(1);
+    let mut policy = AgentRunPolicy::try_new(
+        manifest,
+        vec![AgentPlanLeaseBinding::new(
+            lease,
+            AgentPlanNodeId::from_raw(1),
+        )],
+    )
+    .unwrap();
+    commit_observation_to_model(
+        &mut policy,
+        lease,
+        1,
+        account(context, NOW - 1),
+        &observation,
+    );
+    (PolicyFixture { policy, lease }, registry, observation)
+}
+
+fn final_target() -> ContextNavigationTarget {
+    ContextNavigationTarget::parse("https://source.example.test/final").unwrap()
+}
+
+fn committed_route() -> (
+    PolicyFixture,
+    Vec<(AgentActiveNavigation, AgentNavigationReceipt)>,
+) {
+    let (mut f, mut registry, mut current) = route_fixture(5);
+    let mut terminals = vec![];
+    for (hop, destination) in [target(), final_target()].into_iter().enumerate() {
+        let binding = account(
+            current.request().context(),
+            if hop == 0 { NOW - 1 } else { NOW },
+        );
+        if hop > 0 {
+            commit_observation_to_model(&mut f.policy, f.lease, 2, binding, &current);
+        }
+        let request = route_request(&f, &registry, &current, binding);
+        let permit = f
+            .policy
+            .authorize_navigation(request, &current, &baseline(&current), &destination)
+            .unwrap();
+        let operation = registry
+            .begin_navigation(
+                current.request().context().identity().id(),
+                ContextOperationId::new(2 + hop as u64).unwrap(),
+            )
+            .unwrap();
+        let active = f
+            .policy
+            .dispatch_navigation(permit, operation, AgentPolicyInstant::from_millis(NOW))
+            .unwrap();
+        let receipt = f
+            .policy
+            .settle_navigation(
+                &active,
+                &ContextNavigationSettlement::try_new(operation, Ok(destination)).unwrap(),
+                AgentPolicyInstant::from_millis(NOW),
+            )
+            .unwrap();
+        registry
+            .settle_navigation(
+                operation.context().identity().id(),
+                operation,
+                ContextSettlement::Applied,
+            )
+            .unwrap();
+        registry
+            .acknowledge_observation(operation.context().identity().id(), operation.context())
+            .unwrap();
+        current = actionable_observation(operation.context(), origin("source"), hop as u64 + 2);
+        terminals.push((active, receipt));
+    }
+    (f, terminals)
+}
+
+#[test]
+fn finite_navigation_route_metrics_require_two_distinct_ordered_exact_terminals() {
+    for fault in 0..4 {
+        let (f, terminals) = committed_route();
+        let root = AgentPlanNodeId::from_raw(1);
+        let mut supervisor = AgentRunSupervisor::new(
+            AgentSupervisorId::new(1).unwrap(),
+            AgentDelegationTopology::try_new(
+                f.policy.manifest(),
+                vec![AgentDelegationSpec::new(root, None)],
+            )
+            .unwrap(),
+        );
+        let mut accounting =
+            crate::AgentRunAccountingMetrics::try_new(f.policy.manifest(), &supervisor).unwrap();
+        let mut progress =
+            crate::AgentRunProgressMetrics::try_new(f.policy.manifest(), &supervisor).unwrap();
+        let mut audit = crate::AgentAuditLedger::try_new(f.policy.manifest(), &supervisor).unwrap();
+        let record = |audit: &mut crate::AgentAuditLedger,
+                      supervisor: &AgentRunSupervisor,
+                      progress: &mut crate::AgentRunProgressMetrics,
+                      id| {
+            let event = audit
+                .record_current(
+                    supervisor,
+                    root,
+                    crate::AgentAuditEventId::new(id).unwrap(),
+                    AgentPolicyInstant::from_millis(NOW + id),
+                )
+                .unwrap();
+            let bytes = event.persistence_record();
+            assert_eq!(bytes.as_bytes().len(), 128);
+            assert!(!bytes
+                .as_bytes()
+                .windows(7)
+                .any(|bytes| bytes == b"https://"));
+            progress.record_event(event)
+        };
+        record(&mut audit, &supervisor, &mut progress, 1).unwrap();
+        let execution = supervisor
+            .start(root, crate::AgentSupervisorAttemptId::new(1).unwrap())
+            .unwrap();
+        record(&mut audit, &supervisor, &mut progress, 2).unwrap();
+        if fault == 1 {
+            assert_eq!(
+                accounting
+                    .record_navigation_receipt(terminals[1].1)
+                    .unwrap_err(),
+                crate::AgentMetricError::ReceiptReplay
+            );
+            assert_eq!(accounting.snapshot().navigations(), 0);
+        }
+        for (hop, (active, receipt)) in terminals.iter().enumerate() {
+            supervisor
+                .record_active_navigation(
+                    &execution,
+                    if fault == 3 && hop == 1 {
+                        &terminals[0].0
+                    } else {
+                        active
+                    },
+                )
+                .unwrap();
+            let result = record(&mut audit, &supervisor, &mut progress, 3 + hop as u64 * 2);
+            if fault == 3 && hop == 1 {
+                assert_eq!(
+                    result.unwrap_err(),
+                    crate::AgentProgressMetricError::OperationSequence
+                );
+                assert_eq!(progress.snapshot().navigation().unwrap().samples(), 1);
+                break;
+            }
+            result.unwrap();
+            supervisor
+                .record_navigation_result(
+                    &execution,
+                    if fault == 2 { terminals[1].1 } else { *receipt },
+                )
+                .unwrap();
+            let result = record(&mut audit, &supervisor, &mut progress, 4 + hop as u64 * 2);
+            if fault == 2 {
+                assert_eq!(
+                    result.unwrap_err(),
+                    crate::AgentProgressMetricError::OperationSequence
+                );
+                assert!(progress.snapshot().navigation().is_none());
+                break;
+            }
+            result.unwrap();
+            accounting.record_navigation_receipt(*receipt).unwrap();
+            assert_eq!(
+                accounting.record_navigation_receipt(*receipt).unwrap_err(),
+                crate::AgentMetricError::ReceiptReplay
+            );
+            assert_eq!(accounting.snapshot().navigations(), hop as u32 + 1);
+        }
+        if fault < 2 {
+            assert_eq!(accounting.snapshot().navigations(), 2);
+            assert_eq!(accounting.snapshot().operations(), 2);
+            assert_eq!(accounting.snapshot().effects().attempts(), 0);
+            assert_eq!(
+                accounting.snapshot().navigation(),
+                None,
+                "legacy accessor must not hide the second receipt"
+            );
+            assert_eq!(
+                accounting.snapshot().navigation_receipts(),
+                &f.policy.navigation_receipts
+            );
+            assert_eq!(progress.snapshot().navigation().unwrap().samples(), 2);
+            assert_eq!(
+                progress.snapshot().navigation_terminals(),
+                &[
+                    Some((terminals[0].1.progress_id(), terminals[0].1.settlement())),
+                    Some((terminals[1].1.progress_id(), terminals[1].1.settlement()))
+                ]
+            );
+        }
+    }
+}
+
+fn route_request(
+    f: &PolicyFixture,
+    registry: &ContextRegistry,
+    observation: &SemanticObservation,
+    binding: AgentContextAccountBinding,
+) -> AgentNavigationAuthorizationRequest {
+    AgentNavigationAuthorizationRequest::new(
+        f.lease,
+        binding,
+        registry
+            .automation_state(observation.request().context().identity().id())
+            .unwrap(),
+        AgentPolicyInstant::from_millis(NOW),
+    )
+}
+
+#[test]
+fn finite_navigation_route_requires_each_exact_prior_checkpoint_and_retains_original_budget() {
+    for fault in 0..12 {
+        let (mut f, mut registry, source) = route_fixture(if fault == 11 { 3 } else { 5 });
+        let request = route_request(
+            &f,
+            &registry,
+            &source,
+            account(source.request().context(), NOW - 1),
+        );
+        assert!(
+            f.policy
+                .authorize_navigation(request, &source, &baseline(&source), &final_target())
+                .is_err(),
+            "cannot skip first"
+        );
+        assert_eq!(f.policy.pending_navigations(), 0);
+        let permit = f
+            .policy
+            .authorize_navigation(request, &source, &baseline(&source), &target())
+            .unwrap();
+        if fault == 1 {
+            f.policy.cancel_navigation(permit).unwrap();
+            assert!(f
+                .policy
+                .authorize_navigation(request, &source, &baseline(&source), &target())
+                .is_err());
+            assert!(f
+                .policy
+                .authorize_navigation(request, &source, &baseline(&source), &final_target())
+                .is_err());
+            continue;
+        }
+        let operation = registry
+            .begin_navigation(
+                source.request().context().identity().id(),
+                ContextOperationId::new(2).unwrap(),
+            )
+            .unwrap();
+        assert!(registry
+            .acknowledge_observation(
+                source.request().context().identity().id(),
+                source.request().context()
+            )
+            .is_err());
+        let active = f
+            .policy
+            .dispatch_navigation(permit, operation, AgentPolicyInstant::from_millis(NOW))
+            .unwrap();
+        assert!(active.native_request().unwrap().redirect_policy().is_none());
+        let terminal = ContextNavigationSettlement::try_new(
+            operation,
+            if fault == 2 {
+                Err(ContextPortFailure::Cancelled)
+            } else {
+                Ok(target())
+            },
+        )
+        .unwrap();
+        let receipt = f
+            .policy
+            .settle_navigation(&active, &terminal, AgentPolicyInstant::from_millis(NOW))
+            .unwrap();
+        registry
+            .settle_navigation(
+                operation.context().identity().id(),
+                operation,
+                ContextSettlement::Applied,
+            )
+            .unwrap();
+        let fresh = actionable_observation(operation.context(), origin("source"), 2);
+        registry
+            .acknowledge_observation(operation.context().identity().id(), operation.context())
+            .unwrap();
+        let binding = if fault == 5 {
+            account(source.request().context(), NOW)
+        } else if fault == 6 {
+            AgentContextAccountBinding::new(
+                AgentAccountAttestationId::generate(),
+                operation.context(),
+                AgentAccountScope::Authenticated(AgentAccountId::generate()),
+                AgentPolicyInstant::from_millis(NOW),
+            )
+        } else {
+            account(operation.context(), if fault == 7 { NOW - 1 } else { NOW })
+        };
+        if !matches!(fault, 5 | 6 | 8) {
+            commit_observation_to_model(&mut f.policy, f.lease, 2, binding, &fresh);
+        }
+        let mut request = route_request(&f, &registry, &fresh, binding);
+        if fault == 9 {
+            request = AgentNavigationAuthorizationRequest::new(
+                f.lease,
+                binding,
+                registry
+                    .automation_state(operation.context().identity().id())
+                    .unwrap(),
+                AgentPolicyInstant::from_millis(EXPIRES_AT),
+            );
+        }
+        if fault == 10 {
+            registry
+                .observe_navigation_replacement(
+                    operation.context().identity().id(),
+                    operation.context(),
+                )
+                .unwrap();
+            request = route_request(&f, &registry, &fresh, binding);
+        }
+        let departure = if fault == 4 { &source } else { &fresh };
+        let destination = if fault == 3 { target() } else { final_target() };
+        let result =
+            f.policy
+                .authorize_navigation(request, departure, &baseline(departure), &destination);
+        if fault != 0 {
+            assert!(result.is_err(), "second checkpoint fault {fault}");
+            assert_eq!(f.policy.pending_navigations(), 0);
+            assert_eq!(f.policy.navigation_receipts, [Some(receipt), None]);
+            continue;
+        }
+        let permit = result.unwrap();
+        let final_operation = registry
+            .begin_navigation(
+                operation.context().identity().id(),
+                ContextOperationId::new(3).unwrap(),
+            )
+            .unwrap();
+        assert!(registry
+            .acknowledge_observation(operation.context().identity().id(), operation.context())
+            .is_err());
+        let second = f
+            .policy
+            .dispatch_navigation(
+                permit,
+                final_operation,
+                AgentPolicyInstant::from_millis(NOW),
+            )
+            .unwrap();
+        let second_receipt = f
+            .policy
+            .settle_navigation(
+                &second,
+                &ContextNavigationSettlement::try_new(final_operation, Ok(final_target())).unwrap(),
+                AgentPolicyInstant::from_millis(NOW),
+            )
+            .unwrap();
+        assert_eq!(receipt.hop(), 0);
+        assert_eq!(second_receipt.hop(), 1);
+        assert_ne!(receipt.progress_id(), second_receipt.progress_id());
+        assert_eq!(second_receipt.source(), receipt.operation().context());
+        assert_eq!(
+            f.policy.navigation_receipts,
+            [Some(receipt), Some(second_receipt)]
+        );
+        assert_eq!(f.policy.accounting().consumed_operations(), 4);
+        assert_eq!(
+            f.policy
+                .lease_accounting(f.lease)
+                .unwrap()
+                .consumed_operations(),
+            4
+        );
+        assert_eq!(f.policy.accounting().reserved_operations(), 0);
+        assert_eq!(f.policy.taints().len(), 2);
+        assert!(
+            f.policy
+                .authorize_navigation(request, &fresh, &baseline(&fresh), &final_target())
+                .is_err(),
+            "route exhausted"
+        );
+        assert!(
+            f.policy
+                .authorize_navigation(request, &fresh, &baseline(&fresh), &target())
+                .is_err(),
+            "cannot repeat"
+        );
+    }
+}
+
 fn target() -> ContextNavigationTarget {
     ContextNavigationTarget::parse("https://source.example.test/next").unwrap()
 }

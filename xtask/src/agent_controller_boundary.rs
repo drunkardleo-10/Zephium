@@ -14,6 +14,7 @@ const WORK: &str = "crates/zephium-agent-controller/src/work.rs";
 const FORM: &str = "crates/zephium-agent-controller/src/work_form.rs";
 const NAVIGATION: &str = "crates/zephium-agent-controller/src/work_navigation.rs";
 const NAVIGATION_POLICY: &str = "crates/zephium-agentic/src/agent_policy/navigation.rs";
+const RUN_MANIFEST: &str = "crates/zephium-agentic/src/agent_manifest.rs";
 const READ: &str = "crates/zephium-agentic/src/semantic_read.rs";
 const CONTINUATION: &str = "crates/zephium-agentic/src/agent_provider/continuation.rs";
 const POLICY: &str = "crates/zephium-agentic/src/agent_policy.rs";
@@ -68,6 +69,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(NAVIGATION_POLICY))?,
         &read(repository.join(CONTINUATION))?,
     )?;
+    validate_navigation_route_contract(&read(repository.join(RUN_MANIFEST))?)?;
     validate_scoped_extraction(
         &read(repository.join(READ))?,
         &read(repository.join(CONTINUATION))?,
@@ -243,6 +245,30 @@ fn validate_scoped_extraction(read: &str, continuation: &str, policy: &str) -> R
     Ok(())
 }
 
+fn validate_navigation_route_contract(source: &str) -> Result<(), String> {
+    for required in [
+        "pub const MAX_AGENT_NAVIGATION_ROUTE_HOPS: usize = 2;",
+        "destinations.is_empty() || destinations.len() > MAX_AGENT_NAVIGATION_ROUTE_HOPS",
+        "target.as_url().fragment().is_some()",
+        "SemanticOrigin::parse(target.as_url().as_str()).as_ref() != Ok(&origin)",
+        "target == &departure || destinations[..index - 1].contains(target)",
+        "self.navigation_route.is_some() || self.origins.binary_search(route.origin()).is_err()",
+        "if routed != 0",
+        "ZEPHIUM-AGENT-NAVIGATION-ROUTES-1",
+        "hasher.update(node.id().bytes())",
+        "std::iter::once(route.departure()).chain(route.destinations())",
+        "hasher.update((bytes.len() as u64).to_be_bytes())",
+        "hasher.update(bytes)",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "finite navigation route lost immutable boundary: {required}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_navigation(actor: &str, policy: &str, continuation: &str) -> Result<(), String> {
     for (source, boundaries) in [
         (actor, &[
@@ -265,12 +291,21 @@ fn validate_navigation(actor: &str, policy: &str, continuation: &str) -> Result<
             "self.drive(prepared.into_transport_input()).await",
         ][..]),
         (policy, &[
-            "self.navigation_used || self.navigation.is_some()", "!self.calls.is_empty()", "!self.effects.is_empty()",
+            "self.navigation.is_some()", "!self.calls.is_empty()", "!self.effects.is_empty()",
+            "let route = node.navigation_route();", "route.map_or(1, |route| route.destinations().len())",
+            "hop != self.navigation_receipts.iter().flatten().count()",
+            "route.destinations().get(hop) != Some(target)",
+            "prior.settlement() == AgentNavigationSettlement::Committed",
+            "prior.lease() == request.lease", "prior.node() == node_id",
+            "prior.operation().context() == observation.request().context()",
+            "request.account.observed_at() >= prior.settled_at()",
             "!baseline.matches(observation)", "!request.automation.can_automate()",
             "observation.frames()[0].frame().origin() != &origin",
             "operation.kind() != ContextOperationKind::Navigate", "!is_document_successor(",
             "terminal.operation() != active.operation", "target != &active.row.target",
-            "self.navigation_receipt = Some(receipt)", "AgentNavigationProgressId(hash.finalize().into())",
+            "self.navigation_attempts += 1;", ".get_mut(active.row.hop)", "*slot = Some(receipt)",
+            "hash.update(node.bytes())", "hash.update(lease.bytes())", "hash.update((hop as u64).to_be_bytes())",
+            "AgentNavigationProgressId(hash.finalize().into())",
         ][..]),
         (continuation, &[
             "pub struct AgentProviderNavigationCheckpoint", "pub fn retire_for_navigation(",
@@ -845,7 +880,10 @@ fn validate_work_actor_qualifier(source: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_account_refresh, validate_navigation, validate_scoped_extraction};
+    use super::{
+        validate_account_refresh, validate_navigation, validate_navigation_route_contract,
+        validate_scoped_extraction,
+    };
     use super::{
         validate_action, validate_form, validate_manifest, validate_probe, validate_root,
         validate_terra, validate_work, validate_work_actor_qualifier, validate_workflow_qualifier,
@@ -861,6 +899,7 @@ mod tests {
     const CONTINUATION: &str =
         include_str!("../../crates/zephium-agentic/src/agent_provider/continuation.rs");
     const POLICY: &str = include_str!("../../crates/zephium-agentic/src/agent_policy.rs");
+    const RUN_MANIFEST: &str = include_str!("../../crates/zephium-agentic/src/agent_manifest.rs");
     const QUALIFIER: &str = include_str!("../../crates/zephium-terra-macos-probe/src/main.rs");
     const WORK_QUALIFIER: &str =
         include_str!("../../crates/zephium-terra-macos-probe/src/work_actor.rs");
@@ -890,6 +929,19 @@ mod tests {
 
     #[test]
     fn navigation_cannot_restore_replay_widen_target_or_replace_run_owners() {
+        validate_navigation_route_contract(RUN_MANIFEST).unwrap();
+        for removed in [
+            "MAX_AGENT_NAVIGATION_ROUTE_HOPS: usize = 2",
+            "destinations.is_empty() || destinations.len() > MAX_AGENT_NAVIGATION_ROUTE_HOPS",
+            "target == &departure || destinations[..index - 1].contains(target)",
+            "std::iter::once(route.departure()).chain(route.destinations())",
+            "ZEPHIUM-AGENT-NAVIGATION-ROUTES-1",
+        ] {
+            assert!(
+                validate_navigation_route_contract(&RUN_MANIFEST.replace(removed, "removed"))
+                    .is_err()
+            );
+        }
         for removed in [
             "state.refresh_account(worker, browser)?",
             ".begin_navigation(id, op)",
@@ -908,7 +960,11 @@ mod tests {
         for removed in [
             "target != &active.row.target",
             "!is_document_successor(",
-            "self.navigation_receipt = Some(receipt)",
+            "*slot = Some(receipt)",
+            "hop != self.navigation_receipts.iter().flatten().count()",
+            "route.destinations().get(hop) != Some(target)",
+            "prior.operation().context() == observation.request().context()",
+            "request.account.observed_at() >= prior.settled_at()",
         ] {
             assert!(validate_navigation(
                 NAVIGATION,

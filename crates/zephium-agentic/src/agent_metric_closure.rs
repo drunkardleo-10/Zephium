@@ -151,9 +151,12 @@ impl AgentRunMetricClosure {
             ],
         )?;
         if accounting_snapshot
-            .navigation()
-            .map(|receipt| (receipt.progress_id(), receipt.settlement()))
-            != progress_snapshot.navigation_terminal()
+            .navigation_receipts()
+            .iter()
+            .zip(progress_snapshot.navigation_terminals())
+            .any(|(receipt, terminal)| {
+                receipt.map(|receipt| (receipt.progress_id(), receipt.settlement())) != *terminal
+            })
             || progress_snapshot
                 .navigation()
                 .map_or(0, |duration| duration.samples())

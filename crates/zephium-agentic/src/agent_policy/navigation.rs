@@ -1,4 +1,4 @@
-//! One exact same-origin document transition, distinct from semantic actions.
+//! Exact same-origin document transitions, distinct from semantic actions.
 
 use super::*;
 use crate::{
@@ -7,7 +7,7 @@ use crate::{
     FrameId,
 };
 
-/// Trusted policy facts for the single task-authored document transition.
+/// Trusted policy facts for the next task-authored document checkpoint.
 #[derive(Clone, Copy, Debug)]
 pub struct AgentNavigationAuthorizationRequest {
     lease: AgentPlanLeaseId,
@@ -42,6 +42,7 @@ pub(super) struct AgentNavigationRow {
     target: ContextNavigationTarget,
     operation: Option<ContextOperationJoin>,
     started_at: AgentPolicyInstant,
+    hop: usize,
 }
 
 impl AgentNavigationRow {
@@ -93,6 +94,9 @@ impl AgentActiveNavigation {
             self.row.source_guard,
             target_guard(&self.row.target),
             self.operation,
+            self.row.node,
+            self.row.lease,
+            self.row.hop,
         )
     }
     /// Exact navigation operation including its successor document join.
@@ -149,9 +153,14 @@ pub struct AgentNavigationReceipt {
     settlement: AgentNavigationSettlement,
     account: AgentAccountScope,
     settled_at: AgentPolicyInstant,
+    hop: usize,
 }
 
 impl AgentNavigationReceipt {
+    /// Zero-based ordered checkpoint, bound to the immutable manifest revision.
+    pub const fn hop(self) -> usize {
+        self.hop
+    }
     /// Exact content-free authority joined to the original active audit record.
     pub fn progress_id(self) -> AgentNavigationProgressId {
         navigation_progress_id(
@@ -159,6 +168,9 @@ impl AgentNavigationReceipt {
             self.source_guard,
             self.target_guard,
             self.operation,
+            self.node,
+            self.lease,
+            self.hop,
         )
     }
     /// Exact approved plan node.
@@ -240,7 +252,7 @@ impl AgentRunPolicy {
         if self.sealed {
             return Err(AgentPolicyError::Sealed);
         }
-        if self.navigation_used || self.navigation.is_some() {
+        if self.navigation.is_some() {
             return Err(AgentPolicyError::Navigation);
         }
         if !self.calls.is_empty() {
@@ -257,6 +269,31 @@ impl AgentRunPolicy {
             .manifest
             .plan_node(node_id)
             .ok_or(AgentPolicyError::Invariant)?;
+        let hop = self.navigation_attempts;
+        let route = node.navigation_route();
+        let limit = route.map_or(1, |route| route.destinations().len());
+        if hop >= limit
+            || hop != self.navigation_receipts.iter().flatten().count()
+            || route.is_some_and(|route| route.destinations().get(hop) != Some(target))
+        {
+            return Err(AgentPolicyError::Navigation);
+        }
+        if hop > 0
+            && !self
+                .navigation_receipts
+                .get(hop - 1)
+                .and_then(|receipt| *receipt)
+                .is_some_and(|prior| {
+                    prior.settlement() == AgentNavigationSettlement::Committed
+                        && prior.lease() == request.lease
+                        && prior.node() == node_id
+                        && prior.operation().context() == observation.request().context()
+                        && prior.account() == request.account.account()
+                        && request.account.observed_at() >= prior.settled_at()
+                })
+        {
+            return Err(AgentPolicyError::Navigation);
+        }
         validate_time(
             &self.manifest,
             node.expires_at(),
@@ -307,16 +344,18 @@ impl AgentRunPolicy {
             target: target.clone(),
             operation: None,
             started_at: request.now,
+            hop,
         };
         self.navigation = Some(row.clone());
-        self.navigation_used = true;
+        self.navigation_attempts += 1;
         Ok(AgentNavigationPermit {
             manifest_guard: self.manifest.guard(),
             row,
         })
     }
 
-    /// Releases only an undispatched matching permit. No second hop/retry is minted.
+    /// Releases only an undispatched matching permit. The route cannot retry or
+    /// skip that uncommitted checkpoint to reach another destination.
     pub fn cancel_navigation(
         &mut self,
         permit: AgentNavigationPermit,
@@ -358,8 +397,8 @@ impl AgentRunPolicy {
         if let Err(error) =
             validate_time(&self.manifest, node.expires_at(), permit.row.account, now)
         {
-            // The exact undispatched owner is known. Expiry consumes the one-hop
-            // choice but releases its reservation; no native callback is owed.
+            // The exact undispatched owner is known. Expiry consumes this route
+            // checkpoint but releases its reservation; no native callback is owed.
             self.navigation.take();
             return Err(error);
         }
@@ -426,6 +465,13 @@ impl AgentRunPolicy {
         let index = self
             .lease_index(active.row.lease)
             .ok_or(AgentPolicyError::Invariant)?;
+        let slot = self
+            .navigation_receipts
+            .get_mut(active.row.hop)
+            .ok_or(AgentPolicyError::Invariant)?;
+        if slot.is_some() {
+            return Err(AgentPolicyError::Invariant);
+        }
         let added = ConsumedUsage {
             operations: 1,
             model_tokens: 0,
@@ -448,8 +494,9 @@ impl AgentRunPolicy {
             settlement,
             account: active.row.account.account(),
             settled_at: now,
+            hop: active.row.hop,
         };
-        self.navigation_receipt = Some(receipt);
+        *slot = Some(receipt);
         Ok(receipt)
     }
 
@@ -481,12 +528,18 @@ fn navigation_progress_id(
     source: [u8; 32],
     target: [u8; 32],
     operation: ContextOperationJoin,
+    node: AgentPlanNodeId,
+    lease: AgentPlanLeaseId,
+    hop: usize,
 ) -> AgentNavigationProgressId {
     let mut hash = Sha256::new();
-    hash.update(b"zephium.navigation-progress-authority.v1\0");
+    hash.update(b"zephium.navigation-progress-authority.v2\0");
     hash.update(manifest);
     hash.update(source);
     hash.update(target);
+    hash.update(node.bytes());
+    hash.update(lease.bytes());
+    hash.update((hop as u64).to_be_bytes());
     super::hash_context(&mut hash, operation.context());
     hash.update(operation.operation().get().to_be_bytes());
     AgentNavigationProgressId(hash.finalize().into())
