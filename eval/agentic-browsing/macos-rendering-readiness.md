@@ -1,6 +1,6 @@
 # Hidden macOS rendering readiness diagnostic
 
-Status: release-excluded, provider-free measurement; no runtime policy change.
+Status: release-excluded, provider-free measurement; no production policy change.
 
 ## Why this diagnostic exists
 
@@ -217,3 +217,69 @@ single dispatch and fixed size/deadline, original navigation/teardown joins,
 closed CLI and absence of presentation/script/provider authority. Native
 outcomes must be recorded against a pinned commit before selecting any
 production-policy correction.
+
+### 2026-09-05 — pinned public-native comparison outcomes
+
+Each approved command ran once on clean HEAD
+`4168507c4dffc0fd27476008f51f2c71e21479cc`, in a separate fresh native lifetime,
+and exited 0. The tree remained clean after both invocations. Pre-invocation
+host clock readings were `20:36:02 UTC` for `unthrottled` and `20:36:24 UTC`
+for `snapshot`; neither is claimed to be the exact process start.
+
+Both reports returned `AnimationFrameNotObservedWithinWindow`. Every sample
+had six nodes, a `Complete` document marker, and true load/microtask/timer
+controls; the RAF reveal marker was false throughout. The exact original
+native-finish fact crossed false→true during the first unthrottled capture,
+then remained true before/after all later captures. It was already true
+before and after every snapshot-comparison capture.
+
+| Fixed opportunity | Acquisition (ms) | Actual sample offsets after acquisition (ms) | RAF reveal |
+| --- | --- | --- | --- |
+| Public scheduling `None` | 0 | 5, 56, 106, 206, 406, 806, 1606, 3278 | absent in all eight |
+| One native 1×1 logical-pixel snapshot | 49 | 5, 55, 106, 207, 407, 807, 1607, 3223 | absent in all eight |
+
+The zero-millisecond scheduling acquisition is rounded elapsed time, not a
+zero-cost claim. The snapshot's exact successful callback preceded measurement;
+no pixels were exported. Both reports retained `fixture=loopback-only`,
+`provider=absent`, `profile=ephemeral`, `presentation=hidden`,
+`original_scheduling=throttle`, `scheduling_restored=verified` and
+`original_native_teardown=verified`. No focus/input or original isolation
+attestation was relaxed to obtain either outcome.
+
+Preparation gates passed: all 470 native-feature engine library tests, both
+rendering architecture-mutation tests, strict all-target native-feature engine
+Clippy, debug native-probe build, non-probe `agentic-browser` engine check,
+both actual architecture gates including hostile immutable-runtime JavaScript
+smoke, formatting and diff-whitespace checks. The previously disclosed full
+`xtask` seven-versus-nine fixture failure was not changed or rerun; no new green
+full-`xtask` claim is made.
+
+The unchanged `--ci-hidden-fixed-dom` path also passed once with the same
+built executable: ten snapshots, four world epochs, verified click/fill,
+stale-anchor refusal and mutation/epoch recovery, redacted secrets, zero user
+activation, admitted popups, focus theft and retained views. Event trust
+remains `untrusted`. Only this evidence document was being edited during that
+regression; no source or fixture changed after the pinned build.
+
+These results reject the two tested public non-presentation interventions as
+sufficient fixes for this fixture within their bounded windows. They do not
+prove every public WebKit path impossible, permanent starvation, the failed
+public commerce page's exact root cause, or a general battery/CPU budget.
+The production constructor, runtime, scheduling policy, task facts, model
+contract, authority and Browse path remain unchanged. There was no commercial
+or other public/provider retry.
+
+The measured boundary now requires separate review: either a genuinely
+presented, non-key, input-isolated Work rendering surface with explicit native
+visibility/resource ownership, or a deliberately approved compatibility
+mechanism that changes page scheduling semantics. Neither is equivalent to
+the current permanently hidden contract. Transparent/offscreen presentation
+tricks, private SPI, and a page-world scheduler replacement are **not** adopted
+by this diagnostic. A load-complete wait, higher ceiling or looser task
+predicate does not resolve the measured gap.
+
+This platform decision is separate from open-objective agent planning.
+The task-authored route qualifiers prove the kernel's exact transitions; they
+do not prove general objective interpretation or model-selected plans. A
+rendering solution should make bounded real-page evidence available to that
+future decision loop, not replace it with more site-specific task predicates.
