@@ -138,7 +138,7 @@ impl fmt::Debug for SemanticReadAuthority<'_> {
 /// Closed reason why a read truthfully omitted one or more values.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SemanticReadOmission {
-    /// At least one source frame snapshot was already truthfully truncated.
+    /// A source snapshot was truncated or a child frame was not observed.
     SourceIncomplete,
     /// Trusted policy did not admit sensitive page content.
     SensitivityLimit,
@@ -515,7 +515,8 @@ impl SemanticReadStats {
         self.redacted_values
     }
 
-    /// Source frame snapshots that were truthfully incomplete.
+    /// Source frames truncated or containing unobserved child boundaries.
+    /// Multiple omitted children count their parent once.
     pub const fn incomplete_frames(self) -> u8 {
         self.incomplete_frames
     }
@@ -662,7 +663,14 @@ pub fn read_semantic_observation<'a>(
     let subtree = validate_authority(observation, authority)?;
     let mut builder = SemanticReadBuilder::new(observation, captured_at, budget);
     for snapshot in observation.frames() {
-        if snapshot.completeness() != SemanticCompleteness::Complete {
+        let omitted_child = observation.frame_boundaries().iter().any(|boundary| {
+            boundary.parent_frame() == snapshot.frame().frame()
+                && !matches!(
+                    boundary.status(),
+                    crate::SemanticFrameBoundaryStatus::Observed { .. }
+                )
+        });
+        if snapshot.completeness() != SemanticCompleteness::Complete || omitted_child {
             builder
                 .omissions
                 .insert(SemanticReadOmission::SourceIncomplete);
@@ -1273,6 +1281,80 @@ mod tests {
             "Password",
         ] {
             assert!(!debug.contains(content));
+        }
+    }
+
+    #[test]
+    fn omitted_child_frames_make_read_incomplete_without_hiding_parent_content() {
+        for deferred in [false, true] {
+            let context = context();
+            let frame = SemanticFrameJoin::try_new(
+                context,
+                FrameId::MAIN,
+                context.frame_generation(),
+                SemanticOrigin::parse("https://read.example.test/").unwrap(),
+                SemanticFrameTrust::SameOrigin,
+            )
+            .unwrap();
+            let main = snapshot(
+                frame,
+                7,
+                9,
+                "complete",
+                json!([
+                    {"k":1,"r":"document"},
+                    {"k":2,"p":0,"r":"heading","l":1,"n":"Main content"},
+                    {"k":3,"p":0,"r":"frame_boundary"},
+                    {"k":4,"p":0,"r":"frame_boundary"}
+                ]),
+            );
+            let request = crate::SemanticObservationRequest::initial(
+                SemanticObservationId::new(1).unwrap(),
+                context,
+                SemanticObservationBudget::INITIAL_FILTERED,
+            );
+            let mut assembler = SemanticObservationAssembler::new(request, main).unwrap();
+            for reference in [3, 4] {
+                if deferred {
+                    assembler
+                        .defer_frame(
+                            FrameId::MAIN,
+                            SemanticReferenceId::new(reference).unwrap(),
+                            crate::SemanticFrameDeferral::OutsideScope,
+                        )
+                        .unwrap();
+                } else {
+                    assembler
+                        .mark_frame_unsupported(
+                            FrameId::MAIN,
+                            SemanticReferenceId::new(reference).unwrap(),
+                            crate::SemanticFrameUnsupported::PolicyBlocked,
+                        )
+                        .unwrap();
+                }
+            }
+            let observation = assembler.finish().unwrap();
+            let read = read_semantic_observation(
+                &observation,
+                SemanticReadAuthority::Initial,
+                SemanticCaptureInstant::from_millis(50),
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::STANDARD,
+            )
+            .unwrap();
+            assert!(read
+                .omissions()
+                .contains(SemanticReadOmission::SourceIncomplete));
+            assert_eq!(
+                read.stats().incomplete_frames(),
+                1,
+                "count the parent once, not each absent child"
+            );
+            assert_eq!(read.fragments().len(), 1);
+            assert_eq!(
+                read.fragments()[0].content().text().unwrap().as_str(),
+                "Main content"
+            );
         }
     }
 

@@ -9,6 +9,81 @@ use zephium_agent_runtime::{
 static SERIAL: Mutex<()> = Mutex::new(());
 
 #[test]
+fn main_document_keeps_unadmitted_frames_explicit_without_child_native_calls() {
+    struct MainTask;
+    impl AgentWorkTask for MainTask {
+        fn evaluate(
+            &mut self,
+            observation: &SemanticObservation,
+        ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+            assert_eq!(observation.frames().len(), 1);
+            let [boundary] = observation.frame_boundaries() else {
+                panic!("missing boundary disposition");
+            };
+            assert_eq!(
+                boundary.status(),
+                SemanticFrameBoundaryStatus::Unsupported(SemanticFrameUnsupported::PolicyBlocked)
+            );
+            assert_eq!(boundary.parent_frame(), FrameId::MAIN);
+            assert_eq!(
+                observation
+                    .resolve_node(boundary.reference(), observation.frames()[0].frame())
+                    .unwrap()
+                    .role(),
+                SemanticRole::FrameBoundary
+            );
+            let read = read_semantic_observation(
+                observation,
+                SemanticReadAuthority::Initial,
+                SemanticCaptureInstant::from_millis(5),
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::STANDARD,
+            )
+            .unwrap();
+            assert!(read
+                .omissions()
+                .contains(SemanticReadOmission::SourceIncomplete));
+            assert_eq!(read.stats().incomplete_frames(), 1);
+            Ok(AgentWorkTaskProgress::Complete)
+        }
+        fn assess(
+            &self,
+            _: &SemanticPreparedAction,
+        ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+            panic!("no action authority");
+        }
+        fn attest_account(
+            &self,
+            context: ContextJoin,
+            now: AgentPolicyInstant,
+        ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
+            Task.attest_account(context, now)
+        }
+    }
+    let _serial = lock(&SERIAL);
+    let (controller, handle) = AgentWorkController::try_new(
+        input(),
+        AgentProviderTransportConfig::STANDARD,
+        AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "fixture-not-a-secret".into(),
+        )
+        .unwrap(),
+        Arc::new(Audit(Fault::None)),
+        Box::new(MainTask),
+    )
+    .unwrap();
+    let (outcome, shutdown, calls, events) = drive(controller, handle, Fault::EmbeddedFrame);
+    assert!(matches!(outcome, AgentWorkOutcome::Succeeded(_)));
+    assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+    assert_eq!(calls, [1, 2, 3, 4, 5, 6]);
+    assert!(!events.iter().any(|event| matches!(
+        event.kind(),
+        AgentWorkEventKind::ModelActive | AgentWorkEventKind::ActionActive
+    )));
+}
+
+#[test]
 fn baseline_read_capability_is_frozen_before_any_provider_or_native_action() {
     struct MutatingTask(bool);
     impl AgentWorkTask for MutatingTask {
@@ -393,6 +468,7 @@ enum Fault {
     #[cfg(feature = "probe-harness")]
     Scoped(ScopedFault),
     None,
+    EmbeddedFrame,
     ConstructDispatch,
     ConstructCallback,
     NavigateDispatch,
@@ -584,6 +660,11 @@ impl AgentBrowserPort for Port {
             if lock(&self.calls).contains(&7) { 2 } else { 1 }
         );
         let wire = format!("{{\"v\":1,\"i\":{},\"g\":{},\"c\":\"complete\",\"n\":[{{\"k\":1,\"r\":\"document\",\"o\":16}},{{\"k\":2,\"p\":0,\"r\":\"textbox\",\"n\":\"Field\",\"s\":64,\"o\":2,\"v\":{{\"k\":\"text\",\"value\":\"\"}},\"b\":{{\"x\":10,\"y\":20,\"w\":120,\"h\":30}}}}]}}", correlation.invocation().get(), correlation.snapshot_generation().get());
+        let wire = if self.fault == Fault::EmbeddedFrame {
+            wire.replace("]}", ",{\"k\":3,\"p\":0,\"r\":\"frame_boundary\"}]}")
+        } else {
+            wire
+        };
         #[cfg(feature = "probe-harness")]
         let wire = if self.fault == Fault::ActionApplied && lock(&self.calls).contains(&7) {
             wire.replace("\"value\":\"\"", "\"value\":\"fixture value\"")

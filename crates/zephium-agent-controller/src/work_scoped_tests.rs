@@ -6,6 +6,7 @@ pub(super) enum ScopedFault {
     Ceiling,
     UnexpectedAction,
     None,
+    EmbeddedFrame,
     Combined,
     UnknownRef,
     WrongSchema,
@@ -202,6 +203,11 @@ pub(super) fn capture(
     } else {
         r#"{"k":1,"r":"document","o":16},{"k":2,"p":0,"r":"textbox","n":"Field","s":64,"o":2,"v":{"k":"text","value":""},"b":{"x":10,"y":20,"w":120,"h":30}},{"k":3,"p":0,"r":"group","n":"Details"}"#
     };
+    let nodes = if scoped && fault == ScopedFault::EmbeddedFrame {
+        format!("{nodes},{{\"k\":5,\"p\":0,\"r\":\"frame_boundary\"}}")
+    } else {
+        nodes.to_owned()
+    };
     let wire = format!(
         "{{\"v\":1,\"i\":{},\"g\":{},\"c\":\"complete\",\"n\":[{nodes}]}}",
         correlation.invocation().get(),
@@ -242,6 +248,7 @@ fn scoped_mapping_retains_exact_source_capture_and_all_original_failure_owners()
         ScopedFault::Ceiling,
         ScopedFault::UnexpectedAction,
         ScopedFault::None,
+        ScopedFault::EmbeddedFrame,
         ScopedFault::Combined,
         ScopedFault::UnknownRef,
         ScopedFault::WrongSchema,
@@ -289,7 +296,10 @@ pub(super) fn assert_outcome(
     );
     match outcome {
         AgentWorkOutcome::Succeeded(mut success) => {
-            assert!(matches!(fault, ScopedFault::None | ScopedFault::Combined));
+            assert!(matches!(
+                fault,
+                ScopedFault::None | ScopedFault::Combined | ScopedFault::EmbeddedFrame
+            ));
             assert_eq!(
                 success.closure().model_calls(),
                 if fault == ScopedFault::Combined { 3 } else { 2 }
@@ -344,6 +354,7 @@ pub(super) fn assert_outcome(
                 !matches!(
                     fault,
                     ScopedFault::None
+                        | ScopedFault::EmbeddedFrame
                         | ScopedFault::Combined
                         | ScopedFault::LostCapture
                         | ScopedFault::AuditLost

@@ -81,6 +81,15 @@ not measured battery, RAM or CPU qualification.
 
 ## Stops, audit and terminal truth
 
+The current Work capture admits its exact main frame only. Embedded frames are
+retained as explicit `Unsupported(PolicyBlocked)` boundaries before observation
+assembly, including in a requested subtree. They do not erase usable main-page
+content or silently disappear, and they authorize no child capture, origin
+inference, native call or action. Read/extraction projection marks a parent with
+unobserved child boundaries `source_incomplete` even when the native main-frame
+snapshot itself completed. The task must be satisfied by the actual cited
+main-page evidence; embedded content remains outside this controller's scope.
+
 Account evidence is sampled through the trusted task before each provider or
 effect admission, including locate/read continuations, verified-action diffs
 and extraction mapping. The actor owns that outer inspection loop; several

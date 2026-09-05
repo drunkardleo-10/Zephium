@@ -1406,9 +1406,28 @@ impl AgentWorkController {
                     .into_outcome()
                     .map_err(AgentWorkFailure::Observation)?;
                 state.native.snapshot_generation = Some(generation);
-                let observation = SemanticObservationAssembler::new(request, snapshot)
-                    .and_then(SemanticObservationAssembler::finish)
+                // This controller admits only its exact main frame. Keep each
+                // encountered child boundary visible with an explicit refusal;
+                // do not infer a child origin, capture it, or lose the usable
+                // main document merely because it embeds an iframe.
+                let boundaries = snapshot
+                    .nodes()
+                    .iter()
+                    .filter(|node| node.role() == SemanticRole::FrameBoundary)
+                    .map(SemanticNode::reference)
+                    .collect::<Vec<_>>();
+                let mut assembler = SemanticObservationAssembler::new(request, snapshot)
                     .map_err(|_| AgentWorkFailure::Context)?;
+                for boundary in boundaries {
+                    assembler
+                        .mark_frame_unsupported(
+                            FrameId::MAIN,
+                            boundary,
+                            SemanticFrameUnsupported::PolicyBlocked,
+                        )
+                        .map_err(|_| AgentWorkFailure::Context)?;
+                }
+                let observation = assembler.finish().map_err(|_| AgentWorkFailure::Context)?;
                 state
                     .native
                     .contexts()?
