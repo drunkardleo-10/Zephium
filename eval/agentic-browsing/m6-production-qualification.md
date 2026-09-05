@@ -1138,6 +1138,25 @@ parallel admission, trusted task authoring/UI and resource/battery qualification
 remain separate seams. This single corrected public workflow is not broad
 production qualification.
 
+### Parallel application-fixture deadline correction
+
+Independent acceptance of the artifact pass exposed four `Deadline` failures in
+the 338-test shipping-feature application suite. Healthy fixtures captured a
+ten-second absolute run deadline before synchronous HTTP-client construction;
+under parallel load, preparation's subsequent deadline recheck could correctly
+reject that input. Healthy fixtures now use the existing transport-aligned
+ten-minute production ceiling and a matching synthetic policy-clock expiry.
+This changes no production check, serialization, explicit expiry test, or short
+callback/pump/shutdown wait.
+
+The exact `cargo test --locked -p zephium-app --features work-execution --quiet`
+command passed six post-fix full-suite runs, including three launched together
+(338 each). All-feature application tests passed twice (342 plus the existing
+parent-exercised ignored subprocess helper), once at 32 test threads. Strict
+shipping/all-feature Clippy, 172 xtask tests, all four agent architecture gates,
+optimized default/`macos-work` desktop checks and the default dependency
+exclusions passed. No live provider rerun was needed for this test-only fix.
+
 ## Remaining release blockers
 
 - authorized named-device macOS native-input routes beyond fixed DOM;

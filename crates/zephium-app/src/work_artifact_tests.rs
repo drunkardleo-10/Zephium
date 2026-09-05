@@ -118,7 +118,7 @@ fn prepared_result(
 ) -> (PreparedAgentWork, std::thread::JoinHandle<usize>) {
     let (transport, server) = fixture_provider();
     let input = input_with_storage(
-        Instant::now() + Duration::from_secs(8),
+        Instant::now() + HEALTHY_RUN_HORIZON,
         ContextProfileStorageClass::Durable,
     )
     .persist_extraction_result()

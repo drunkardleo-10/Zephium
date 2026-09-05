@@ -9,6 +9,16 @@ use zephium_agent_controller::{
 
 static SERIAL: Mutex<()> = Mutex::new(());
 
+// Healthy runs use the controller's transport-aligned ten-minute hard ceiling.
+// Their absolute deadline includes synchronous HTTP-client construction, which
+// can exceed ten seconds under parallel test load. This is not a test wait:
+// pump, callback and shutdown timeouts below remain short, and expiry tests
+// supply their own deadlines. Production still validates the original horizon.
+const HEALTHY_RUN_HORIZON: Duration = Duration::from_millis(
+    zephium_agent_provider_transport::MAX_AGENT_PROVIDER_REQUEST_TIMEOUT_MILLIS,
+);
+const FIXTURE_POLICY_NOW_MILLIS: u64 = 2;
+
 #[cfg(feature = "work-execution-probe")]
 #[path = "work_artifact_tests.rs"]
 mod artifact_tests;
@@ -214,7 +224,7 @@ fn required_artifact_rejects_missing_contract_and_retains_premature_success_with
         };
         let prepared = PreparedAgentWork::try_new(
             input_with_storage(
-                Instant::now() + Duration::from_secs(8),
+                Instant::now() + HEALTHY_RUN_HORIZON,
                 ContextProfileStorageClass::Durable,
             )
             .persist_extraction_result()
@@ -271,7 +281,7 @@ fn required_artifact_rejects_missing_contract_and_retains_premature_success_with
 }
 
 fn input() -> AgentWorkRunInput {
-    input_with_deadline(Instant::now() + Duration::from_secs(10))
+    input_with_deadline(Instant::now() + HEALTHY_RUN_HORIZON)
 }
 
 fn input_with_deadline(deadline: Instant) -> AgentWorkRunInput {
@@ -290,6 +300,10 @@ fn input_with_storage(deadline: Instant, storage: ContextProfileStorageClass) ->
     let effects = AgentEffectScope::try_new(&[SemanticEffectClass::Read]).unwrap();
     let budget = AgentRunBudget::try_new(24, 1_000_000, 1_000_000, 1).unwrap();
     let node = AgentPlanNodeId::generate();
+    // The synthetic policy clock must authorize the same bounded horizon as
+    // the absolute run deadline; neither clock is extended during preparation.
+    let policy_expires_millis = FIXTURE_POLICY_NOW_MILLIS
+        + zephium_agent_provider_transport::MAX_AGENT_PROVIDER_REQUEST_TIMEOUT_MILLIS;
     let manifest = AgentRunManifest::try_new(
         AgentRunManifestId::generate(),
         context.owner(),
@@ -304,7 +318,7 @@ fn input_with_storage(deadline: Instant, storage: ContextProfileStorageClass) ->
         .unwrap(),
         budget,
         AgentPolicyInstant::from_millis(1),
-        AgentPolicyInstant::from_millis(100_000),
+        AgentPolicyInstant::from_millis(policy_expires_millis),
         vec![AgentPlanNodeScope::new(
             node,
             AgentPlanNodeAuthority::try_new(
@@ -316,7 +330,7 @@ fn input_with_storage(deadline: Instant, storage: ContextProfileStorageClass) ->
             )
             .unwrap(),
             budget,
-            AgentPolicyInstant::from_millis(99_999),
+            AgentPolicyInstant::from_millis(policy_expires_millis),
         )],
     )
     .unwrap();
@@ -342,7 +356,7 @@ fn input_with_storage(deadline: Instant, storage: ContextProfileStorageClass) ->
         AgentWorkRunSettings::new(
             AgentBrowserModel::Luna,
             ids,
-            Arc::new(Clock(AtomicU64::new(2))),
+            Arc::new(Clock(AtomicU64::new(FIXTURE_POLICY_NOW_MILLIS))),
             deadline,
         ),
     )
