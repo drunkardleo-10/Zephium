@@ -1,6 +1,49 @@
 //! Two documents through the shipping actor, provider transport and mailbox.
 use super::*;
 use std::cell::Cell;
+use std::sync::atomic::AtomicBool;
+
+pub(super) struct NavigationSchedule {
+    pub(super) events: Mutex<Option<Arc<Mutex<WorkEvents>>>>,
+    native_started: AtomicBool,
+    audit_faulted: AtomicBool,
+    fault: NavigationFault,
+}
+impl NavigationSchedule {
+    pub(super) fn new(fault: NavigationFault) -> Self {
+        Self {
+            events: Mutex::new(None),
+            native_started: AtomicBool::new(false),
+            audit_faulted: AtomicBool::new(false),
+            fault,
+        }
+    }
+}
+pub(super) struct NavigationClock {
+    ticks: Clock,
+    schedule: Arc<NavigationSchedule>,
+}
+impl NavigationClock {
+    pub(super) fn new(schedule: Arc<NavigationSchedule>) -> Self {
+        Self {
+            ticks: Clock(AtomicU64::new(FIXTURE_POLICY_NOW_MILLIS)),
+            schedule,
+        }
+    }
+}
+impl TerraControllerClock for NavigationClock {
+    fn now(&self) -> Result<AgentPolicyInstant, super::super::super::TerraControllerClockError> {
+        if matches!(
+            self.schedule.fault,
+            NavigationFault::AuditActive | NavigationFault::AuditRefused
+        ) && self.schedule.native_started.load(Ordering::Relaxed)
+            && !self.schedule.audit_faulted.swap(true, Ordering::Relaxed)
+        {
+            return Err(super::super::super::TerraControllerClockError::Invalid);
+        }
+        self.ticks.now()
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum NavigationFault {
@@ -32,6 +75,9 @@ pub(super) enum NavigationFault {
     OldCitation,
     ResultMutation,
     AuditLost,
+    Backpressure,
+    AuditActive,
+    AuditRefused,
 }
 
 impl NavigationFault {
@@ -133,9 +179,11 @@ pub(super) struct NavigationTask {
     arrival: Option<SemanticObservationId>,
     mutate: Cell<bool>,
     prior_account: Cell<Option<AgentContextAccountBinding>>,
+    account_samples: Cell<u8>,
+    schedule: Arc<NavigationSchedule>,
 }
 impl NavigationTask {
-    pub(super) fn new(fault: NavigationFault) -> Self {
+    pub(super) fn new(fault: NavigationFault, schedule: Arc<NavigationSchedule>) -> Self {
         Self {
             extraction: AgentWorkExtractionTask::try_new(
                 vec![SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap()],
@@ -153,6 +201,8 @@ impl NavigationTask {
             arrival: None,
             mutate: Cell::new(false),
             prior_account: Cell::new(None),
+            account_samples: Cell::new(0),
+            schedule,
         }
     }
 }
@@ -210,6 +260,14 @@ impl AgentWorkTask for NavigationTask {
         now: AgentPolicyInstant,
     ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
         let current = Task.attest_account(context, now)?;
+        self.account_samples.set(self.account_samples.get() + 1);
+        if self.fault == NavigationFault::Backpressure && self.account_samples.get() == 3 {
+            let events = lock(&self.schedule.events).as_ref().unwrap().clone();
+            let mut events = lock(&events);
+            while events.queue.len() < MAX_AGENT_WORK_EVENTS {
+                events.publish(AgentWorkEventKind::Observing).unwrap();
+            }
+        }
         if let Some(prior) = self.prior_account.get() {
             if self.fault == NavigationFault::AccountMutation && self.departed.is_some() {
                 self.mutate.set(true);
@@ -260,12 +318,20 @@ pub(super) fn navigate(
     fault: NavigationFault,
 ) -> ContextDispatch {
     lock(&port.calls).push(9);
+    port.navigation_schedule
+        .as_ref()
+        .unwrap()
+        .native_started
+        .store(true, Ordering::Relaxed);
     assert_eq!(
         request.target().as_url().as_str(),
         "https://work-fixture.invalid/arrival"
     );
     assert!(request.redirect_policy().is_none());
-    if fault == NavigationFault::Dispatch {
+    if matches!(
+        fault,
+        NavigationFault::Dispatch | NavigationFault::AuditRefused
+    ) {
         return ContextDispatch::Rejected(ContextPortFailure::NativeRefused);
     }
     if matches!(fault, NavigationFault::Lost | NavigationFault::Takeover) {
@@ -386,6 +452,9 @@ fn two_document_workflow_retires_provider_replay_and_preserves_original_run_owne
         NavigationFault::OldCitation,
         NavigationFault::ResultMutation,
         NavigationFault::AuditLost,
+        NavigationFault::Backpressure,
+        NavigationFault::AuditActive,
+        NavigationFault::AuditRefused,
     ] {
         provider_fixture(ProviderFault::Navigation(fault));
     }
@@ -438,6 +507,8 @@ pub(super) fn assert_outcome(
             | NavigationFault::Renderer
             | NavigationFault::LostCapture
             | NavigationFault::AuditLost
+            | NavigationFault::AuditActive
+            | NavigationFault::AuditRefused
     ) {
         let AgentWorkOutcome::Recovery(recovery) = outcome else {
             panic!("{fault:?} must retain debt: {outcome:?}");
@@ -454,6 +525,26 @@ pub(super) fn assert_outcome(
                 assert_eq!(session.policy.pending_navigations(), 1);
                 assert!(session.navigation.is_some());
             }
+            if matches!(
+                fault,
+                NavigationFault::AuditActive | NavigationFault::AuditRefused
+            ) {
+                assert!(calls.contains(&9));
+                assert_eq!(session.policy.pending_navigations(), 0);
+                assert!(session.navigation.is_none());
+                let receipt = session
+                    .navigation_receipt
+                    .expect("accounted terminal retains audit debt, not a native reservation");
+                assert_eq!(
+                    receipt.settlement(),
+                    if fault == NavigationFault::AuditActive {
+                        AgentNavigationSettlement::Committed
+                    } else {
+                        AgentNavigationSettlement::Failed(ContextPortFailure::NativeRefused)
+                    }
+                );
+                assert!(recovery.state.native.operation.is_none());
+            }
         }
     } else {
         let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
@@ -461,6 +552,20 @@ pub(super) fn assert_outcome(
         };
         assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
         let closure = closed.policy_settlement().closure();
+        if fault == NavigationFault::Backpressure {
+            assert_eq!(closed.failure(), AgentWorkFailure::Backpressure);
+            assert!(!calls.contains(&9));
+            assert_eq!(calls.iter().filter(|call| **call == 2).count(), 1);
+            assert_eq!(
+                closed
+                    .policy_settlement()
+                    .accounting()
+                    .reserved_operations(),
+                0
+            );
+            assert_eq!(closure.navigations(), 0);
+            assert_eq!(closure.model_calls(), 1);
+        }
         assert_eq!(closure.effects(), 0);
         assert_eq!(closure.navigations(), u32::from(calls.contains(&9)));
         assert_eq!(

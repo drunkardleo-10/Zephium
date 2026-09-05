@@ -1131,6 +1131,15 @@ The native exact-target gate admits no redirects, including a same-URL
 redirect, and the policy accepts only its original next-document operation
 and exact committed destination. Failure, callback loss, or audit ambiguity
 cannot become task success or silently release the original owner.
+Product proposal publication happens before navigation policy/registry
+mutation. The original policy and native-operation owners are then stored
+before dispatch; the active audit projection is recorded synchronously after
+the port's dispatch decision and before processing any callback. This is not
+a durable pre-dispatch audit guarantee. A fallible audit record therefore
+retains a real callback obligation or an explicit refusal, not a never-issued
+navigation. Once policy accounts an exact terminal, a later journal refusal
+retains that receipt as audit debt without pretending a native reservation is
+still pending; it grants neither further provider work nor clean closure.
 
 After a commit, Work requires a fresh successor initial observation, an
 independent arrival predicate, and a newly sampled same-account attestation

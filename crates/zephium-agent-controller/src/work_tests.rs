@@ -569,6 +569,8 @@ struct Port {
     fault: Fault,
     calls: Mutex<Vec<u8>>,
     control: Arc<Mutex<Option<AgentRuntimeHandle>>>,
+    #[cfg(feature = "probe-harness")]
+    navigation_schedule: Option<Arc<navigation_tests::NavigationSchedule>>,
 }
 
 impl Port {
@@ -926,9 +928,27 @@ fn drive(
 
 fn drive_with_control(
     controller: AgentWorkController,
+    handle: AgentWorkHandle,
+    fault: Fault,
+    control: Arc<Mutex<Option<AgentRuntimeHandle>>>,
+) -> (
+    AgentWorkOutcome,
+    AgentBrowserShutdownOutcome,
+    Vec<u8>,
+    Vec<AgentWorkEvent>,
+) {
+    drive_with_schedule(controller, handle, fault, control, None)
+}
+
+fn drive_with_schedule(
+    controller: AgentWorkController,
     mut handle: AgentWorkHandle,
     fault: Fault,
     control: Arc<Mutex<Option<AgentRuntimeHandle>>>,
+    #[cfg(feature = "probe-harness")] navigation_schedule: Option<
+        Arc<navigation_tests::NavigationSchedule>,
+    >,
+    #[cfg(not(feature = "probe-harness"))] _navigation_schedule: Option<()>,
 ) -> (
     AgentWorkOutcome,
     AgentBrowserShutdownOutcome,
@@ -945,6 +965,8 @@ fn drive_with_control(
         fault,
         calls: Mutex::new(Vec::new()),
         control,
+        #[cfg(feature = "probe-harness")]
+        navigation_schedule,
     });
     let (runtime, completion, lifecycle) = pending.bind_browser_port(port.clone()).into_parts();
     let mut lifecycle = Some(lifecycle);
@@ -1417,6 +1439,14 @@ fn provider_fixture_with_account(
     } else {
         input()
     };
+    let navigation_schedule = if let ProviderFault::Navigation(fault) = fault {
+        let schedule = Arc::new(navigation_tests::NavigationSchedule::new(fault));
+        approved.settings.clock =
+            Arc::new(navigation_tests::NavigationClock::new(schedule.clone()));
+        Some(schedule)
+    } else {
+        None
+    };
     if let Some(clock) = account_clock {
         approved.settings.clock = clock;
     }
@@ -1438,7 +1468,10 @@ fn provider_fixture_with_account(
             .unwrap(),
         )
     } else if let ProviderFault::Navigation(fault) = fault {
-        Box::new(NavigationTask::new(fault))
+        Box::new(NavigationTask::new(
+            fault,
+            navigation_schedule.as_ref().unwrap().clone(),
+        ))
     } else if let ProviderFault::Read(fault) = fault {
         Box::new(ReadTask::new(&approved, fault))
     } else if let ProviderFault::Scoped(fault) = fault {
@@ -1498,6 +1531,9 @@ fn provider_fixture_with_account(
         AgentBrowserRetention::Stateless,
     )
     .expect("actor");
+    if let Some(schedule) = &navigation_schedule {
+        *lock(&schedule.events) = Some(handle.events.clone());
+    }
     if audit_fault == Fault::AuditLost {
         // This case deliberately waits for missing audit delivery. Preserve its
         // original ten-second timeout, starting after all client construction.
@@ -1525,8 +1561,13 @@ fn provider_fixture_with_account(
     } else {
         Fault::None
     };
-    let (outcome, shutdown, calls, events) =
-        drive_with_control(controller, handle, native_fault, control);
+    let (outcome, shutdown, calls, events) = drive_with_schedule(
+        controller,
+        handle,
+        native_fault,
+        control,
+        navigation_schedule,
+    );
     if let ProviderFault::Navigation(fault) = fault {
         assert_eq!(
             server.join().expect("navigation fixture server"),

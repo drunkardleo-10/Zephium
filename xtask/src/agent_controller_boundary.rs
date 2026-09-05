@@ -319,6 +319,18 @@ fn validate_navigation(actor: &str, policy: &str, continuation: &str) -> Result<
     if revoke >= dispatch {
         return Err("navigation dispatched before old refs were revoked".into());
     }
+    let proposal = actor
+        .find(".emit(AgentWorkEventKind::ToolProposed(")
+        .ok_or("navigation lost pre-authority proposal publication")?;
+    let authorize = actor
+        .find(".authorize_navigation(")
+        .ok_or("navigation lost policy admission")?;
+    let audit = actor
+        .find("journal.navigation_active(active)")
+        .ok_or("navigation lost active audit recording")?;
+    if proposal >= authorize || dispatch >= audit {
+        return Err("fallible navigation event/audit work can strand an undispatched owner".into());
+    }
     Ok(())
 }
 
@@ -906,6 +918,15 @@ mod tests {
             )
             .is_err());
         }
+        assert!(validate_navigation(
+            &NAVIGATION.replace(
+                "let dispatch = browser.dispatch",
+                "journal.navigation_active(active); let dispatch = browser.dispatch"
+            ),
+            NAVIGATION_POLICY,
+            CONTINUATION
+        )
+        .is_err());
         assert!(validate_navigation(
             NAVIGATION,
             NAVIGATION_POLICY,

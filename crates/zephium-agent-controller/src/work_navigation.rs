@@ -2,6 +2,11 @@
 
 use super::*;
 
+pub(super) struct NavigationTerminal {
+    receipt: AgentNavigationReceipt,
+    journal_failure: Option<AgentWorkFailure>,
+}
+
 impl AgentWorkController {
     pub(super) fn validate_navigation_target(
         target: &ContextNavigationTarget,
@@ -59,6 +64,11 @@ impl AgentWorkController {
             ));
         }
         state.refresh_account(worker, browser)?;
+        state.journal_mut()?.emit(AgentWorkEventKind::ToolProposed(
+            AgentBrowserToolKind::Navigate,
+        ))?;
+        state.native.check_control(worker, browser)?;
+        state.check_task_contract()?;
         let id = state.native.identity.id();
         let automation = state
             .native
@@ -122,13 +132,18 @@ impl AgentWorkController {
         let request = active
             .native_request()
             .map_err(|_| AgentWorkFailure::Contract)?;
-        session
-            .journal
-            .as_mut()
-            .ok_or(AgentWorkFailure::Contract)?
-            .navigation_active(active)?;
         state.native.operation = Some(operation);
         let dispatch = browser.dispatch(ContextNativeRequest::Navigate(request));
+        // Both original owners exist before dispatch. Audit/progress recording
+        // is fallible, so do it before processing callbacks, but only after the
+        // port has either accepted a real callback debt or explicitly refused.
+        // A local journal error must never strand an undispatched successor.
+        let journal_failure = session
+            .journal
+            .as_mut()
+            .ok_or(AgentWorkFailure::Contract)
+            .and_then(|journal| journal.navigation_active(active))
+            .err();
         let refusal = match dispatch {
             ContextDispatch::Rejected(failure) => Some(failure),
             ContextDispatch::Unsupported => Some(ContextPortFailure::Unsupported),
@@ -141,12 +156,17 @@ impl AgentWorkController {
                 .contexts()?
                 .settle_navigation(id, operation, ContextSettlement::Refused)
                 .map_err(|_| AgentWorkFailure::Context)?;
-            state
+            let terminal = state
                 .session
                 .as_mut()
                 .ok_or(AgentWorkFailure::Contract)?
                 .settle_navigation_refusal(failure)?;
-            return Err(AgentWorkFailure::Native(failure));
+            return Err(journal_failure
+                .or(terminal.journal_failure)
+                .unwrap_or(AgentWorkFailure::Native(failure)));
+        }
+        if let Some(failure) = journal_failure {
+            return Err(failure);
         }
         let receipt = match state.native.next_event(worker, browser).await? {
             AgentRuntimeEvent::NativeTerminal(ContextNativeEvent::NavigationSettled(terminal))
@@ -157,8 +177,8 @@ impl AgentWorkController {
                     .as_mut()
                     .ok_or(AgentWorkFailure::Contract)?
                     .settle_navigation_terminal(&terminal);
-                let receipt = match result {
-                    Ok(receipt) => receipt,
+                let terminal_record = match result {
+                    Ok(terminal_record) => terminal_record,
                     Err(failure) => {
                         state.native.retain(AgentRuntimeEvent::NativeTerminal(
                             ContextNativeEvent::NavigationSettled(terminal),
@@ -180,6 +200,10 @@ impl AgentWorkController {
                         },
                     )
                     .map_err(|_| AgentWorkFailure::Context)?;
+                if let Some(failure) = terminal_record.journal_failure {
+                    return Err(failure);
+                }
+                let receipt = terminal_record.receipt;
                 if let AgentNavigationSettlement::Failed(failure) = receipt.settlement() {
                     return Err(AgentWorkFailure::Native(failure));
                 }
@@ -230,7 +254,7 @@ impl AgentBrowserSession {
     pub(super) fn settle_navigation_terminal(
         &mut self,
         terminal: &ContextNavigationSettlement,
-    ) -> Result<AgentNavigationReceipt, AgentWorkFailure> {
+    ) -> Result<NavigationTerminal, AgentWorkFailure> {
         let now = self.policy_now().map_err(AgentWorkFailure::Browser)?;
         let active = self.navigation.as_ref().ok_or(AgentWorkFailure::Contract)?;
         let receipt = self
@@ -239,13 +263,13 @@ impl AgentBrowserSession {
             .map_err(|error| {
                 AgentWorkFailure::Browser(AgentBrowserProviderError::Navigation(error))
             })?;
-        self.record_navigation_terminal(receipt)
+        Ok(self.record_navigation_terminal(receipt))
     }
 
     fn settle_navigation_refusal(
         &mut self,
         failure: ContextPortFailure,
-    ) -> Result<AgentNavigationReceipt, AgentWorkFailure> {
+    ) -> Result<NavigationTerminal, AgentWorkFailure> {
         let now = self.policy_now().map_err(AgentWorkFailure::Browser)?;
         let active = self.navigation.as_ref().ok_or(AgentWorkFailure::Contract)?;
         let receipt = self
@@ -254,21 +278,28 @@ impl AgentBrowserSession {
             .map_err(|error| {
                 AgentWorkFailure::Browser(AgentBrowserProviderError::Navigation(error))
             })?;
-        self.record_navigation_terminal(receipt)
+        Ok(self.record_navigation_terminal(receipt))
     }
 
     fn record_navigation_terminal(
         &mut self,
         receipt: AgentNavigationReceipt,
-    ) -> Result<AgentNavigationReceipt, AgentWorkFailure> {
+    ) -> NavigationTerminal {
         self.navigation_receipt = Some(receipt);
-        self.journal
-            .as_mut()
-            .ok_or(AgentWorkFailure::Contract)?
-            .navigation_settled(receipt)?;
         self.navigation.take();
-        self.navigation_receipt.take();
-        Ok(receipt)
+        let journal_failure = self
+            .journal
+            .as_mut()
+            .ok_or(AgentWorkFailure::Contract)
+            .and_then(|journal| journal.navigation_settled(receipt))
+            .err();
+        if journal_failure.is_none() {
+            self.navigation_receipt.take();
+        }
+        NavigationTerminal {
+            receipt,
+            journal_failure,
+        }
     }
 
     async fn continue_after_navigation(
@@ -338,10 +369,7 @@ impl WorkJournal {
                 active,
             )
             .map_err(|_| AgentWorkFailure::Accounting)?;
-        self.record()?;
-        self.emit(AgentWorkEventKind::ToolProposed(
-            AgentBrowserToolKind::Navigate,
-        ))
+        self.record()
     }
 
     fn navigation_settled(
