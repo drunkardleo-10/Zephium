@@ -13,8 +13,9 @@ mod platform;
 #[cfg(all(target_os = "macos", feature = "native-agentic-foreground-probe"))]
 #[doc(hidden)]
 pub use platform::macos::agentic_foreground_driver::{
-    cancel_foreground_rendering_witness, foreground_rendering_native_drain,
-    foreground_rendering_policy_event, start_foreground_rendering_witness,
+    cancel_foreground_rendering_witness, capture_foreground_rendering_admission,
+    foreground_rendering_native_drain, foreground_rendering_policy_event,
+    start_foreground_rendering_witness, ForegroundRenderingAdmission,
     ForegroundRenderingWitnessReport,
 };
 

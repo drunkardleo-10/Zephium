@@ -6,6 +6,7 @@ use super::{
     agentic_semantic_probe::{sample_foreground_snapshot, RenderingDocumentState},
     ContentPolicyTimeout,
 };
+use objc2_app_kit::NSWindow;
 use objc2_foundation::MainThreadMarker;
 use std::{
     cell::RefCell,
@@ -25,6 +26,17 @@ use zephium_core::{
 const OFFSETS_MS: [u64; 8] = [0, 50, 100, 200, 400, 800, 1600, 3200];
 const TOTAL_BUDGET: Duration = Duration::from_secs(15);
 const CLEANUP_BUDGET: Duration = Duration::from_secs(5);
+
+/// Move-only diagnostic admission; no native handle or mutable owner escapes.
+/// Captured by the desktop for its exact trusted main window, not ambient focus.
+pub struct ForegroundRenderingAdmission(HumanForegroundGuard);
+
+/// Binds the composition root's exact window and current responder once.
+pub fn capture_foreground_rendering_admission(
+    expected_main: &NSWindow,
+) -> Option<ForegroundRenderingAdmission> {
+    HumanForegroundGuard::capture_exact(expected_main).map(ForegroundRenderingAdmission)
+}
 
 /// Called only after normal application/engine shutdown; never forces release.
 pub fn foreground_rendering_native_drain() -> Option<bool> {
@@ -161,27 +173,29 @@ struct Driver {
 }
 
 /// Starts once, only on the actual application's main thread and foreground.
-/// The composition root must independently identify its exact main surface.
+/// Consumes the composition root's exact retained admission and revalidates it.
 pub fn start_foreground_rendering_witness(
     engine: Arc<crate::WebviewEngine>,
+    admission: ForegroundRenderingAdmission,
     completion: impl FnOnce(ForegroundRenderingWitnessReport) + Send + 'static,
 ) -> Result<(), &'static str> {
     MainThreadMarker::new().ok_or("main_thread")?;
     if USED.with(|used| used.replace(true)) {
         return Err("already_used");
     }
-    let Some(human) = HumanForegroundGuard::capture() else {
+    let ForegroundRenderingAdmission(human) = admission;
+    if !human.is_current() {
         completion(ForegroundRenderingWitnessReport {
             outcome: "DeferredForeground",
             cleanup_failure: None,
             samples: Vec::new(),
             native_cohort_clean: true,
-            human_ownership_preserved: true,
+            human_ownership_preserved: false,
             fixture_clean: true,
             elapsed_ms: 0,
         });
         return Ok(());
-    };
+    }
     let started = Instant::now();
     let deadline = started.checked_add(TOTAL_BUDGET).ok_or("deadline")?;
     let identity = ContextIdentity::new(

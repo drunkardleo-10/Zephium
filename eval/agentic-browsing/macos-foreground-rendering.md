@@ -90,8 +90,13 @@ After trusted chrome is mapped, the desktop independently verifies that its
 exact native `main` window is already the active application's key/main surface
 with a responder. Missing foreground yields normal `DeferredForeground` without
 allocating a Work context, fixture or presentation. Admission itself never
-activates Zephium. The driver retains the original human window/responder before
-constructing Work so construction cannot silently redefine that baseline.
+activates Zephium. The desktop passes its exact native main identity into a
+move-only opaque diagnostic admission. The engine retains that same window and
+its responder, then consumes and revalidates the token before constructing any
+Work/fixture resources. It does not recapture whichever ambient main window
+happens to exist at the second call. A stale token yields `DeferredForeground`,
+reports the lost baseline honestly, and never allocates Work. Native handles do
+not enter the core, model, or browser-port contracts.
 
 One generated ephemeral profile receives the fixed content policy and exact
 loopback document through the production owned-context port. The fixed driver
@@ -152,7 +157,28 @@ application bundle and explicit creator-owned foreground; it remains pending.
 The normal Tauri debug application bundle also built successfully on 2026-09-06
 with the fixed configuration and `--bundles app --ci --no-sign`. Its inspected
 Info.plist identifies `app.zephium.work-rendering-probe` and executable
-`zephium-desktop`. The unlaunched executable SHA-256 is
+`zephium-desktop`. The first, now-superseded executable SHA-256 was
 `c12bda7274a9cf75caf002c7f4cc338eac080f06a1595e2dfeb22d187736a74d`.
 This local unsigned development bundle is not a signing/notarization or
 distribution qualification. No native launch has occurred.
+
+## Pre-launch exact-admission correction
+
+Independent review found that separate desktop verification and ambient engine
+capture could bind a different window between calls. The move-only admission
+above closes that seam without another model/native-port capability. Pure
+identity/ownership schedules refuse a different otherwise-active key/main window,
+null identity, and loss of the retained key/main/responder/active facts.
+Architecture mutations additionally reject dropping the admission argument,
+replacing exact identity comparison, or skipping revalidation before resource
+allocation. The policy-dispatch refusal is present exactly once; a duplicate is
+also rejected mechanically. Both architecture commands and both adversarial
+tests pass after this correction. The normal Tauri bundle was rebuilt with the
+same pinned toolchain, fixed configuration and unsigned-debug options. Its exact
+isolated Info.plist identity was verified; the corrected executable SHA-256 is
+`fc41c33e082eeb618407271a715b8e354bb9f178013fadc94489bf34b7f29635`.
+Correction gates pass: all 492 engine library tests, strict all-target
+foreground-feature desktop/engine Clippy, ordinary `agentic-browser` engine
+check, both architecture commands/hostile JavaScript smoke, both foreground
+architecture adversaries, normal isolated desktop bundle, workspace fmt and diff
+checks. There has still been no native launch.

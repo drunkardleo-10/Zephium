@@ -1,14 +1,16 @@
 //! Actual Tauri startup/event/shutdown composition for a fixed native witness.
 //! No IPC command, user task, provider, focus activation or replacement loop.
 
-use objc2_app_kit::{NSApplication, NSWindow};
+use objc2_app_kit::NSWindow;
 use objc2_foundation::MainThreadMarker;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
 use tauri::Manager;
-use zephium_engine::{ForegroundRenderingWitnessReport, WebviewEngine};
+use zephium_engine::{
+    ForegroundRenderingAdmission, ForegroundRenderingWitnessReport, WebviewEngine,
+};
 
 #[path = "../foreground_probe_config.rs"]
 mod configuration;
@@ -59,7 +61,7 @@ pub(super) fn on_run_event(app: &tauri::AppHandle, event: &tauri::RunEvent) -> b
                 finish_unavailable(app, "engine_owner");
                 return false;
             };
-            if !exact_foreground_main(app) {
+            let Some(admission) = exact_foreground_main(app) else {
                 finish(
                     app,
                     ForegroundRenderingWitnessReport {
@@ -73,14 +75,14 @@ pub(super) fn on_run_event(app: &tauri::AppHandle, event: &tauri::RunEvent) -> b
                     },
                 );
                 return false;
-            }
+            };
             state.active.store(true, Ordering::Release);
             let completion_app = app.clone();
-            if let Err(reason) =
-                zephium_engine::start_foreground_rendering_witness(engine, move |report| {
-                    finish(&completion_app, report)
-                })
-            {
+            if let Err(reason) = zephium_engine::start_foreground_rendering_witness(
+                engine,
+                admission,
+                move |report| finish(&completion_app, report),
+            ) {
                 finish_unavailable(app, reason);
             }
         }
@@ -118,25 +120,17 @@ pub(super) fn on_run_event(app: &tauri::AppHandle, event: &tauri::RunEvent) -> b
     false
 }
 
-fn exact_foreground_main(app: &tauri::AppHandle) -> bool {
-    let Some(mtm) = MainThreadMarker::new() else {
-        return false;
-    };
-    let Some(window) = app.get_webview_window("main") else {
-        return false;
-    };
-    let Ok(native) = window.ns_window() else {
-        return false;
-    };
-    let application = NSApplication::sharedApplication(mtm);
-    application.isActive()
-        && window.is_visible().unwrap_or(false)
-        && application
-            .keyWindow()
-            .is_some_and(|key| std::ptr::eq(&*key, native.cast::<NSWindow>()))
-        && application.mainWindow().is_some_and(|main| {
-            std::ptr::eq(&*main, native.cast::<NSWindow>()) && main.firstResponder().is_some()
-        })
+fn exact_foreground_main(app: &tauri::AppHandle) -> Option<ForegroundRenderingAdmission> {
+    MainThreadMarker::new()?;
+    let window = app.get_webview_window("main")?;
+    if !window.is_visible().unwrap_or(false) {
+        return None;
+    }
+    let native = window.ns_window().ok()?;
+    // SAFETY: Tauri owns this exact NSWindow for the retained main surface;
+    // the synchronous main-thread call retains the checked owner before return.
+    let expected_main = unsafe { native.cast::<NSWindow>().as_ref() }?;
+    zephium_engine::capture_foreground_rendering_admission(expected_main)
 }
 
 fn finish_unavailable(app: &tauri::AppHandle, reason: &'static str) {

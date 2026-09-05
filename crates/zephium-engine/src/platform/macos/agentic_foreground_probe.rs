@@ -450,12 +450,11 @@ pub(crate) struct HumanForegroundGuard {
 }
 
 impl HumanForegroundGuard {
-    pub(crate) fn capture() -> Option<Self> {
+    pub(crate) fn capture_exact(expected_main: &NSWindow) -> Option<Self> {
         let app = NSApplication::sharedApplication(MainThreadMarker::new()?);
         let main = app.mainWindow()?;
         let responder = main.firstResponder()?;
-        foreground(&app, &main, &responder)
-            .admitted()
+        exact_foreground_admission(expected_main, &*main, foreground(&app, &main, &responder))
             .then_some(Self {
                 app,
                 main,
@@ -468,9 +467,63 @@ impl HumanForegroundGuard {
     }
 }
 
+fn exact_foreground_admission(
+    expected: *const NSWindow,
+    observed: *const NSWindow,
+    facts: ForegroundFacts,
+) -> bool {
+    !expected.is_null() && expected == observed && facts.admitted()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn foreground_admission_cannot_substitute_another_active_key_main_window() {
+        // Pointer identities only: no Objective-C object is made or dereferenced.
+        let windows = [0_u8; 2];
+        let expected = std::ptr::from_ref(&windows[0]).cast::<NSWindow>();
+        let other = std::ptr::from_ref(&windows[1]).cast::<NSWindow>();
+        let facts = ForegroundFacts {
+            active: true,
+            main_visible: true,
+            exact_key: true,
+            exact_main: true,
+            exact_responder: true,
+        };
+        assert!(exact_foreground_admission(expected, expected, facts));
+        assert!(!exact_foreground_admission(expected, other, facts));
+        assert!(!exact_foreground_admission(
+            std::ptr::null(),
+            std::ptr::null(),
+            facts
+        ));
+    }
+
+    #[test]
+    fn captured_foreground_facts_do_not_authorize_a_later_changed_owner() {
+        let window = 0_u8;
+        let expected = std::ptr::from_ref(&window).cast::<NSWindow>();
+        let captured = ForegroundFacts {
+            active: true,
+            main_visible: true,
+            exact_key: true,
+            exact_main: true,
+            exact_responder: true,
+        };
+        assert!(exact_foreground_admission(expected, expected, captured));
+        for change in [
+            |facts: &mut ForegroundFacts| facts.exact_key = false,
+            |facts: &mut ForegroundFacts| facts.exact_main = false,
+            |facts: &mut ForegroundFacts| facts.exact_responder = false,
+            |facts: &mut ForegroundFacts| facts.active = false,
+        ] {
+            let mut current = captured;
+            change(&mut current);
+            assert!(!exact_foreground_admission(expected, expected, current));
+        }
+    }
 
     #[test]
     fn retirement_never_erases_a_prior_cleanup_failure() {

@@ -51,7 +51,11 @@ fn validate_driver(driver: &str, desktop: &str) -> Result<(), String> {
         }
     }
     for required in [
-        "HumanForegroundGuard::capture()",
+        "pubstructForegroundRenderingAdmission(HumanForegroundGuard);",
+        "HumanForegroundGuard::capture_exact(expected_main)",
+        "admission:ForegroundRenderingAdmission",
+        "letForegroundRenderingAdmission(human)=admission;",
+        "if!human.is_current()",
         "mpsc::sync_channel(4)",
         "Duration::from_secs(15)",
         "Duration::from_secs(5)",
@@ -69,6 +73,8 @@ fn validate_driver(driver: &str, desktop: &str) -> Result<(), String> {
     for required in [
         "UiStartupGate",
         "exact_foreground_main(app)",
+        "start_foreground_rendering_witness(engine,admission,",
+        "capture_foreground_rendering_admission(expected_main)",
         "api.prevent_exit()",
         "cancel_foreground_rendering_witness()",
         "normal_shutdown_clean",
@@ -78,8 +84,13 @@ fn validate_driver(driver: &str, desktop: &str) -> Result<(), String> {
     ] {
         require(&desktop, required)?;
     }
-    if driver.find("HumanForegroundGuard::capture()") >= driver.find("FixtureServer::start()") {
-        return Err("foreground baseline must precede fixture and Work construction".into());
+    if driver.find("if!human.is_current()") >= driver.find("FixtureServer::start()") {
+        return Err(
+            "exact foreground admission revalidation must precede Work construction".into(),
+        );
+    }
+    if driver.matches("fail_driver(\"policy_dispatch\");").count() != 1 {
+        return Err("foreground policy dispatch refusal must settle once".into());
     }
     Ok(())
 }
@@ -132,6 +143,8 @@ fn validate(native: &str, host: &str, port: &str) -> Result<(), String> {
         "Weak::from_retained(&surface)",
         "cleanup_state(self.cleanup_failed,true)",
         "self.state=ForegroundRenderingState::DeferredForeground",
+        "exact_foreground_admission(expected_main,&*main,foreground(&app,&main,&responder))",
+        "!expected.is_null()&&expected==observed&&facts.admitted()",
     ] {
         require(&native, required)?;
     }
@@ -177,6 +190,9 @@ mod tests {
         for changed in [
             DRIVER.replace("mpsc::sync_channel(4)", "mpsc::channel()"),
             DRIVER.replace("reply_matches(&self.phase, &reply)", "true"),
+            DRIVER.replace("if !human.is_current()", "if false"),
+            DRIVER.replace("admission: ForegroundRenderingAdmission", "admission: ()"),
+            format!("{DRIVER}\nfail_driver(\"policy_dispatch\");"),
             format!("{DRIVER}\napp.finishLaunching();"),
         ] {
             assert!(validate_driver(&changed, DESKTOP).is_err());
@@ -184,6 +200,7 @@ mod tests {
         for changed in [
             DESKTOP.replace("native_drain == Some(true)", "true"),
             DESKTOP.replace("configuration::require_fresh_data_root(root)", "Ok(())"),
+            compact(DESKTOP).replace("engine,admission,", "engine,"),
             format!("{DESKTOP}\nwindow.makeKeyAndOrderFront(None);"),
         ] {
             assert!(validate_driver(DRIVER, &changed).is_err());
@@ -221,6 +238,7 @@ mod tests {
             PORT
         )
         .is_err());
+        assert!(validate(&NATIVE.replace("expected == observed", "true"), HOST, PORT).is_err());
         assert!(validate(
             NATIVE,
             HOST,
