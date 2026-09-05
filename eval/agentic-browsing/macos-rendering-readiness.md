@@ -382,3 +382,12 @@ whether the exact page responder was observed. Hiding must restore the original
 strict hidden guard, including its original responder, before reporting.
 No responder is assigned by the probe, no keyboard event is synthesized, and
 no `makeFirstResponder`, focus, key-window or app-activation API is introduced.
+
+One corrected attempt used clean `2e3e75ce82502f477ecb932c7a8fe002d1a81366`
+(pre-invocation host clock `2026-09-05 20:58:46 UTC`, not exact process start).
+It exited 1 with `stage=presented_surface_geometry`, after the independent
+app/key/main/mouse/responder/visibility/opacity guards, but before semantic
+measurement. It therefore supplies no RAF result. The compound geometry
+refusal does not yet identify window-frame, exact child-size or parent-window
+identity mismatch; diagnosis must distinguish those rather than relax them.
+The original hide/restore and teardown did not replace that refusal.
