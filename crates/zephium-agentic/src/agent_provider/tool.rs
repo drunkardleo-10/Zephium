@@ -716,6 +716,10 @@ impl AgentBrowserToolCall {
             AgentBrowserToolProposal::Extract { scope, .. } => Some(scope.clone()),
             _ => None,
         };
+        let read_scope = match self.proposal.as_ref() {
+            AgentBrowserToolProposal::Read(scope) => Some(scope.clone()),
+            _ => None,
+        };
         (
             AgentProviderToolCallCorrelation {
                 source_call: self.source_call,
@@ -723,6 +727,7 @@ impl AgentBrowserToolCall {
                 kind: self.proposal.kind(),
                 extraction_schema,
                 extraction_scope,
+                read_scope,
                 provider_item_id: self.provider_item_id,
                 arguments: self.arguments,
                 openai_replay: self.openai_replay,
@@ -761,6 +766,7 @@ pub(crate) struct AgentProviderToolCallCorrelation {
     pub(super) kind: AgentBrowserToolKind,
     pub(super) extraction_schema: Option<SemanticExtractionSchemaId>,
     pub(super) extraction_scope: Option<AgentBrowserScopeProposal>,
+    pub(super) read_scope: Option<AgentBrowserScopeProposal>,
     pub(super) provider_item_id: Option<String>,
     pub(super) arguments: String,
     pub(super) openai_replay: Option<Box<OpenAiResponseReplay>>,

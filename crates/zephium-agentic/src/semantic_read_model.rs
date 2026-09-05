@@ -135,7 +135,24 @@ impl SemanticEncodedRead {
         expected_revision: &SemanticTokenizerRevision,
     ) -> Result<SemanticReadModelPayload, SemanticModelEncodingError> {
         let measurement = self.measure(counter, expected_revision)?;
-        Ok(SemanticReadModelPayload {
+        Ok(self.into_payload(measurement))
+    }
+
+    /// Uses a conservative UTF-8 bound for preflight only. Exact-budget reads
+    /// still refuse it; provider-exact callers must count the whole immutable
+    /// request before dispatching generation.
+    pub fn admit_conservative_utf8(
+        self,
+        revision: &SemanticTokenizerRevision,
+    ) -> Result<SemanticReadModelPayload, SemanticModelEncodingError> {
+        let measurement =
+            crate::semantic_model::conservative_utf8_measurement(&self.content, revision)?;
+        validate_semantic_token_measurement(&self.budget, &measurement, revision)?;
+        Ok(self.into_payload(measurement))
+    }
+
+    fn into_payload(self, measurement: SemanticTokenMeasurement) -> SemanticReadModelPayload {
+        SemanticReadModelPayload {
             content: self.content,
             stats: self.stats,
             measurement,
@@ -145,7 +162,7 @@ impl SemanticEncodedRead {
             observation_guard: self.observation_guard,
             captured_at: self.captured_at,
             read_guard: self.read_guard,
-        })
+        }
     }
 
     pub(crate) fn into_extraction_parts(self) -> SemanticEncodedReadParts {
@@ -820,6 +837,24 @@ mod tests {
         )
         .expect("read");
         let selected = revision("model-tokenizer-v1");
+        assert_eq!(
+            encode_semantic_read(&read, budget(8192, 8192))
+                .unwrap()
+                .admit_conservative_utf8(&selected)
+                .unwrap_err(),
+            SemanticModelEncodingError::TokenQuality
+        );
+        let preflight = encode_semantic_read(
+            &read,
+            SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .unwrap()
+        .admit_conservative_utf8(&selected)
+        .unwrap();
+        assert_eq!(
+            preflight.token_measurement().tokens() as usize,
+            preflight.as_str().len()
+        );
         let counter = FixedCounter {
             revision: selected.clone(),
             tokens: 50,

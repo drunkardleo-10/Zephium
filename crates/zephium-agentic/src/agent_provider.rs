@@ -728,6 +728,7 @@ pub struct AgentProviderCallConfig {
     stream: AgentProviderStreamBudget,
     store_response: bool,
     tools: BrowserToolProfile,
+    baseline_read: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -774,6 +775,7 @@ impl AgentProviderCallConfig {
             stream,
             store_response: false,
             tools: BrowserToolProfile::Full,
+            baseline_read: false,
         })
     }
 
@@ -785,6 +787,23 @@ impl AgentProviderCallConfig {
     pub fn restrict_to_locate_and_act(mut self) -> Self {
         self.tools = BrowserToolProfile::LocateAct;
         self
+    }
+
+    /// Enables bounded, nonterminal reads of the already acknowledged initial
+    /// observation. This frozen capability grants no recapture, new refs or
+    /// action authority and adds no turns to the shared transcript ceiling.
+    pub fn with_baseline_read(mut self) -> Self {
+        self.baseline_read = true;
+        self
+    }
+
+    /// Whether the host explicitly enabled nonterminal initial-baseline reads.
+    pub const fn permits_baseline_read(&self) -> bool {
+        self.baseline_read
+    }
+
+    pub(super) fn adds_baseline_read(&self) -> bool {
+        self.baseline_read && self.tools != BrowserToolProfile::Full
     }
 
     /// Restricts browser planning to the one trusted run-local extraction
@@ -829,6 +848,9 @@ impl AgentProviderCallConfig {
     }
 
     pub(super) fn permits_tool(&self, kind: AgentBrowserToolKind) -> bool {
+        if self.baseline_read && kind == AgentBrowserToolKind::Read {
+            return true;
+        }
         match self.tools {
             BrowserToolProfile::Full => true,
             BrowserToolProfile::Extraction => kind == AgentBrowserToolKind::Extract,

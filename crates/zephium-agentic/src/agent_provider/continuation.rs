@@ -582,6 +582,19 @@ impl AgentProviderContinuation {
         if self.correlation.kind() != AgentBrowserToolKind::Read {
             return Err(AgentProviderContinuationError::ToolKind);
         }
+        // A scope-expansion request cannot be answered from the existing
+        // baseline merely because opaque ref ordinals happen to coincide.
+        // Fresh scoped read-to-tool continuation needs its own host protocol;
+        // today only an initial-baseline read can preserve action authority.
+        if !matches!(
+            (self.correlation.read_scope.as_ref(), read.scope()),
+            (
+                Some(super::AgentBrowserScopeProposal::Initial),
+                crate::SemanticScope::Initial
+            )
+        ) {
+            return Err(AgentProviderContinuationError::Scope);
+        }
         if !read.matches_acknowledgement(&self.baseline) {
             return Err(AgentProviderContinuationError::Baseline);
         }
@@ -2560,6 +2573,65 @@ mod tests {
     }
 
     #[test]
+    fn read_scope_and_frozen_capability_cannot_be_substituted() {
+        let observed = observation(context(), 1, 1, 1, "synthetic detail");
+        let baseline = SemanticObservationAcknowledgement::from_fingerprint(
+            SemanticObservationFingerprint::from_observation(&observed),
+        );
+        let config = config(AgentProviderKind::OpenAiResponses)
+            .restrict_to_locate_and_act()
+            .with_baseline_read();
+        for (scope, changed) in [
+            (json!({"kind":"initial"}), false),
+            (json!({"kind":"initial"}), true),
+            (json!({"kind":"subtree","target":"@a2"}), false),
+            (json!({"kind":"region","target":"@a2"}), false),
+            (json!({"kind":"table","target":"@a2"}), false),
+            (json!({"kind":"frame","target":"@a2"}), false),
+        ] {
+            let arguments = json!({"scope":scope}).to_string();
+            let correlation = super::super::AgentBrowserToolCall::decode_openai(
+                call(1),
+                "fc_read".into(),
+                "call_read".into(),
+                "read",
+                arguments.clone(),
+            )
+            .unwrap()
+            .into_continuation_parts()
+            .0;
+            let continuation = AgentProviderContinuationSeed {
+                call: call(1),
+                config: config.clone(),
+                baseline: baseline.clone(),
+                transcript: transcript(),
+            }
+            .join_terminal_tool(completion(call(1), arguments.len() as u32), correlation)
+            .unwrap();
+            let read = read_result(&observed);
+            let payload = encode_semantic_read(
+                &read,
+                SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
+            )
+            .unwrap()
+            .admit_conservative_utf8(config.tokenizer())
+            .unwrap();
+            let mut next = config.clone();
+            if changed {
+                next.baseline_read = false;
+            }
+            let bound = continuation.bind_read(call(2), &next, &read, payload);
+            if changed {
+                assert_eq!(bound.unwrap_err(), AgentProviderContinuationError::Config);
+            } else if scope["kind"] == "initial" {
+                assert!(bound.is_ok());
+            } else {
+                assert_eq!(bound.unwrap_err(), AgentProviderContinuationError::Scope);
+            }
+        }
+    }
+
+    #[test]
     fn anthropic_read_result_is_adjacent_and_provider_shape_exact() {
         let context = context();
         let observed = observation(context, 1, 1, 1, "private readable state");
@@ -3275,6 +3347,9 @@ impl fmt::Debug for AgentProviderContinuation {
 /// Closed refusal while binding one provider turn to a semantic result.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum AgentProviderContinuationError {
+    /// Read projection did not match the exact requested semantic scope.
+    #[error("agent provider continuation read scope mismatched")]
+    Scope,
     /// Terminal provider correlation named another committed model call.
     #[error("agent provider continuation call identity mismatched")]
     Call,

@@ -523,6 +523,7 @@ impl SemanticReadStats {
 
 /// Bounded borrowed readable projection of one exact semantic observation.
 pub struct SemanticReadResult<'a> {
+    scope: &'a crate::SemanticScope,
     observation: SemanticObservationId,
     observation_generation: SemanticObservationGeneration,
     context: ContextJoin,
@@ -544,6 +545,9 @@ struct SemanticReadSubtreeProof {
 }
 
 impl<'a> SemanticReadResult<'a> {
+    pub(crate) const fn scope(&self) -> &crate::SemanticScope {
+        self.scope
+    }
     /// Exact observation request projected by this result.
     pub const fn observation(&self) -> SemanticObservationId {
         self.observation
@@ -945,6 +949,7 @@ impl<'a> SemanticReadBuilder<'a> {
             guard = hasher.finalize().into();
         }
         SemanticReadResult {
+            scope: self.observation.request().scope(),
             observation: self.observation.request().id(),
             observation_generation: self.observation.request().generation(),
             context: self.observation.request().context(),

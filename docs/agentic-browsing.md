@@ -421,10 +421,15 @@ growth. Its delivery receipt remains deliberately weaker than an observation
 acknowledgement; the move-only bound request carries the prior acknowledgement
 separately so a successful read result can retain stateless continuation
 without allowing a standalone read to manufacture diff or expansion authority.
-The current seam accepts only a read projected from that already-acknowledged
-observation; a progressive expansion must first establish a new delivered
-observation rather than silently rebasing through a read result. Refusal and
-cancellation release the reservation.
+The current tool-continuation seam accepts only `scope: initial` projected from
+that already-acknowledged initial observation. The original requested scope is
+retained in the sealed correlation and checked independently; an expansion
+request cannot be answered by baseline data or coincident ref ordinals. A
+nonterminal expanded observation needs a separate delivery/host contract rather
+than silently rebasing through a read receipt. Refusal and cancellation release
+the reservation. An explicit frozen `with_baseline_read` provider configuration
+adds only this initial-scope tool to the restricted capability profiles; no
+other profile capability or continuation budget changes.
 
 `extract` now consumes that bounded read through a distinct, terminal mapping
 turn. Only the exact prior tool-only `extract` correlation selecting the same

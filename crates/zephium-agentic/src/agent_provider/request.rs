@@ -3493,6 +3493,7 @@ fn encode_openai_body(
     }
     let tools = browser_tool_definitions_for(config)
         .iter()
+        .chain(config.adds_baseline_read().then(|| &*BASELINE_READ_TOOL))
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| OpenAiToolWire {
             r#type: "function",
@@ -3586,6 +3587,7 @@ fn encode_openai_continuation_body(
     debug_assert_eq!(input.len(), input_items);
     let tools = browser_tool_definitions_for(config)
         .iter()
+        .chain(config.adds_baseline_read().then(|| &*BASELINE_READ_TOOL))
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| OpenAiToolWire {
             r#type: "function",
@@ -3757,6 +3759,7 @@ fn encode_openai_screenshot_continuation_body(
     debug_assert_eq!(input.len(), input_items);
     let tools = browser_tool_definitions_for(config)
         .iter()
+        .chain(config.adds_baseline_read().then(|| &*BASELINE_READ_TOOL))
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| OpenAiToolWire {
             r#type: "function",
@@ -3799,9 +3802,14 @@ fn encode_anthropic_body(
         return Err(AgentProviderContractError::ProviderKind.into());
     }
     let definitions = anthropic_browser_tool_definitions(config);
-    validate_anthropic_tool_definitions(definitions)?;
+    validate_anthropic_tool_definitions(definitions, config.adds_baseline_read())?;
     let tools = definitions
         .iter()
+        .chain(
+            config
+                .adds_baseline_read()
+                .then(|| &*ANTHROPIC_BASELINE_READ_TOOL),
+        )
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| AnthropicToolWire {
             name: tool.kind.as_str(),
@@ -3850,7 +3858,7 @@ fn encode_anthropic_continuation_body(
         return Err(AgentProviderContractError::ProviderKind.into());
     }
     let definitions = anthropic_browser_tool_definitions(config);
-    validate_anthropic_tool_definitions(definitions)?;
+    validate_anthropic_tool_definitions(definitions, config.adds_baseline_read())?;
     let message_count = 1_usize
         .checked_add(
             transcript
@@ -3911,6 +3919,11 @@ fn encode_anthropic_continuation_body(
     debug_assert_eq!(messages.len(), message_count);
     let tools = definitions
         .iter()
+        .chain(
+            config
+                .adds_baseline_read()
+                .then(|| &*ANTHROPIC_BASELINE_READ_TOOL),
+        )
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| AnthropicToolWire {
             name: tool.kind.as_str(),
@@ -4037,7 +4050,7 @@ fn encode_anthropic_screenshot_continuation_body(
         return Err(AgentProviderContractError::ProviderKind.into());
     }
     let definitions = anthropic_browser_tool_definitions(config);
-    validate_anthropic_tool_definitions(definitions)?;
+    validate_anthropic_tool_definitions(definitions, config.adds_baseline_read())?;
     let transcript = continuation.transcript();
     let message_count = 3_usize
         .checked_add(
@@ -4141,6 +4154,11 @@ fn encode_anthropic_screenshot_continuation_body(
     debug_assert_eq!(messages.len(), message_count);
     let tools = definitions
         .iter()
+        .chain(
+            config
+                .adds_baseline_read()
+                .then(|| &*ANTHROPIC_BASELINE_READ_TOOL),
+        )
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| AnthropicToolWire {
             name: tool.kind.as_str(),
@@ -4208,11 +4226,15 @@ fn encode_png_base64_with_prefix(
 
 fn validate_anthropic_tool_definitions(
     definitions: &[AnthropicBrowserToolDefinition],
+    baseline_read: bool,
 ) -> Result<(), AgentProviderRequestError> {
-    let union_parameters = definitions.iter().try_fold(0_usize, |total, tool| {
-        total.checked_add(count_schema_unions(&tool.input_schema))
-    });
-    if definitions.len() > MAX_ANTHROPIC_STRICT_TOOLS
+    let union_parameters = definitions
+        .iter()
+        .chain(baseline_read.then(|| &*ANTHROPIC_BASELINE_READ_TOOL))
+        .try_fold(0_usize, |total, tool| {
+            total.checked_add(count_schema_unions(&tool.input_schema))
+        });
+    if definitions.len() + usize::from(baseline_read) > MAX_ANTHROPIC_STRICT_TOOLS
         || union_parameters.is_none_or(|count| count > MAX_ANTHROPIC_SCHEMA_UNIONS)
     {
         return Err(AgentProviderRequestError::Encoding);
@@ -4247,6 +4269,21 @@ static BROWSER_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolDefinition>> =
 
 static LOCATE_ACT_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolDefinition>> =
     LazyLock::new(|| build_browser_tool_definitions(true));
+
+static BASELINE_READ_TOOL: LazyLock<BrowserToolDefinition> = LazyLock::new(|| {
+    BrowserToolDefinition {
+    kind: AgentBrowserToolKind::Read,
+    description: "Read bounded public semantic detail from the current acknowledged initial observation, including collapsed option labels and their source refs. This does not refresh the page, expand a subtree, verify an effect or create new refs. Omissions remain explicit. Use only when more detail is needed before choosing the next tool; every read consumes the same turn budget.",
+    parameters: strict_object(vec![("scope", strict_object(vec![("kind", string_enum(&["initial"]))]))]),
+}
+});
+
+static ANTHROPIC_BASELINE_READ_TOOL: LazyLock<AnthropicBrowserToolDefinition> =
+    LazyLock::new(|| AnthropicBrowserToolDefinition {
+        kind: BASELINE_READ_TOOL.kind,
+        description: BASELINE_READ_TOOL.description,
+        input_schema: project_anthropic_schema(&BASELINE_READ_TOOL.parameters),
+    });
 
 static EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolDefinition>> = LazyLock::new(|| {
     vec![BrowserToolDefinition {
@@ -5119,6 +5156,52 @@ mod tests {
             let restricted = config.clone().restrict_to_locate_and_act();
             let extraction = config.clone().restrict_to_extraction();
             let combined = config.clone().restrict_to_actions_and_extraction();
+            for base in [
+                restricted.clone(),
+                extraction.clone(),
+                combined.clone(),
+                config.clone().restrict_to_scoped_extraction(),
+                config.clone().restrict_to_actions_and_scoped_extraction(),
+            ] {
+                let inspected = base.clone().with_baseline_read();
+                assert_ne!(inspected, base);
+                assert!(inspected.permits_baseline_read());
+                assert!(inspected.permits_tool(AgentBrowserToolKind::Read));
+                let body = match provider {
+                    AgentProviderKind::OpenAiResponses => encode_openai_body(
+                        &inspected,
+                        "synthetic objective",
+                        "synthetic observation",
+                    ),
+                    AgentProviderKind::AnthropicMessages => encode_anthropic_body(
+                        &inspected,
+                        "synthetic objective",
+                        "synthetic observation",
+                    ),
+                }
+                .unwrap();
+                let wire: Value = serde_json::from_slice(&body).unwrap();
+                let reads: Vec<_> = wire["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|tool| tool["name"] == "read")
+                    .collect();
+                assert_eq!(reads.len(), 1);
+                let schema = if provider == AgentProviderKind::OpenAiResponses {
+                    &reads[0]["parameters"]
+                } else {
+                    &reads[0]["input_schema"]
+                };
+                assert_eq!(
+                    schema["properties"]["scope"]["properties"]["kind"]["enum"],
+                    json!(["initial"])
+                );
+                assert_eq!(schema["properties"]["scope"]["additionalProperties"], false);
+                if provider == AgentProviderKind::OpenAiResponses {
+                    assert_eq!(wire["store"], false);
+                }
+            }
             for actions in [false, true] {
                 let scoped = if actions {
                     config.clone().restrict_to_actions_and_scoped_extraction()
