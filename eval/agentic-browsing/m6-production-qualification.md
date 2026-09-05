@@ -1610,6 +1610,86 @@ cross-document work remain separate product seams. This task does not restore
 goals/phase position/refs after restart or authorize mutation replay. The
 existing interrupted-run/recovery and new-admission barriers remain unchanged.
 
+## Closed refusal → review → fresh application lifetime (2026-09-05)
+
+Production commits `4e555f7` and `4ee4ef9` remove a real admission dead end:
+an exact pre-dispatch policy refusal can now close its original failed run,
+require a durable explicit review decision, and admit independently supplied
+fresh Work input through a distinct native lifetime. The refused proposal is
+never replayed. See [closed review](../../docs/agent-work-review.md).
+
+The final-build command was
+`target/debug/macos-terra-agentic-probe --live-public-luna-work-review-inspectable`.
+It used GPT-5.6 Luna and public Wikipedia in isolated ephemeral Work pages,
+through the actual Shell/SQLite/MacosWorkComposition/native lifetime factory.
+The first trusted task had only Read effect authority: Luna's local-form Act
+proposal was independently refused as `NeedsHuman(ScopeExpansion)` before any
+permit/native dispatch. Original provider/native/audit/policy/runtime closure
+allowed zero-debt `NeedsApproval`. An explicit trusted public-fixture decision
+through the application review port wrote `FreshAdmissionRequired`; it did not
+act on the proposal. A newly supplied authorized form task/manifest/context then
+completed all three independently snapshot-verified effects. No ordinary tab,
+replacement Store, reopened port or model-authored authority was used.
+
+Final run on `4ee4ef9`: two distinct lifetimes, **0 native effects before review,
+3/3 verified effects after fresh admission**, exact predecessor preserved,
+stale takeover control ignored, durable successor Succeeded, application-owned
+Shell cleanup Clean, and focus isolation passed. The initial refused run used
+one model turn; the successor used four. Total: **13,973 input / 596 output
+tokens, 1,166 µUSD, 14,446 ms summed provider-turn time, 16,249 ms wall**.
+These are one workflow's measurements, not latency/resource qualification.
+
+| Lifetime/turn | Tool | Input | Output | Request bytes | Semantic bytes | µUSD | Turn ms |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Refused 1 | Act | 2,516 | 113 | 12,012 | 3,116 | 187 | 2,899 |
+| Fresh 1 | Locate | 2,516 | 131 | 12,012 | 3,116 | 209 | 2,673 |
+| Fresh 2 | Act | 2,729 | 94 | 14,558 | 302 | 217 | 3,091 |
+| Fresh 3 | Act | 2,974 | 166 | 16,915 | 408 | 316 | 3,471 |
+| Fresh 4 | Act | 3,238 | 92 | 19,706 | 287 | 237 | 2,312 |
+
+An earlier development run also passed the complete path: initial Locate→Act
+refusal with zero effects, then a fresh four-turn 3/3-effect run, clean Shell
+teardown and focus isolation. It used 16,368 input / 546 output tokens, 1,732
+µUSD, 29,935 ms summed provider turns and 31,652 ms wall. It preceded the final
+application shutdown/review-ACK ordering unification and is excluded from the
+final-build aggregate. The different tool ordering was model-selected; neither
+run retried a refused action. No navigation, submission or external write was
+performed.
+
+Deterministic coverage includes exact refusal manifest/run authority, retained
+original supervisor token, refusal counts without invented human-wait time,
+zero-debt review proof construction, generic debt-preserving transitions,
+native shutdown callback loss, audit refusal/loss, takeover during drain,
+accept/reject/stale/replayed review, lost classification and decision ACKs,
+old callback arrival after reconciliation, cancellation/shutdown on both sides
+of classification ACK, unresolved original audit debt after review, and
+rejection of decoded terminal facts without original lifecycle/native owners.
+SQLite tests inject pre-write/post-write/lost-ACK faults at both review stages,
+require exact-once CAS, preserve immutable decisions, and classify unreviewed
+restart state as Interrupted with unknown debt. No closure owner is fabricated.
+
+Validation: 525 core tests plus three native-action and five semantic-runtime
+integration tests; 22 shipping and 29 probe controller tests; 339 Work App and
+347 all-feature App tests; 265 Store tests plus four doctests; 37 runtime;
+97 opt-in desktop; two qualifier; 179 xtask. Ignored subprocess helpers remain
+parent-exercised. Strict core, controller/App/Store/composition/xtask, qualifier
+and opt-in desktop Clippy pass. Controller, runtime, model-catalog and probe
+source gates pass, including native semantic smoke and composition/persistence
+checks. Optimized default/Work desktop checks pass; optimized probe compilation
+is refused. Default desktop dependencies still exclude controller, runtime,
+provider transport, Work composition and reqwest. No manifest/lockfile, native
+scheduling, queue or idle polling changed.
+
+Only the excluded public qualifier retained OpenAI logs. Production/BYOK remains
+stateless. Local evidence contains only typed phases, counts, timing and size
+measurements—no objective, page/provider body, credential, profile path or raw
+trace. The durable envelope remains 96 bytes; older readers reject newly valid
+zero-debt review combinations. Review does not clear unresolved debt or restore
+executable state after restart. Trusted product task/review authoring, broader
+site/effect contracts, cross-document tools, concurrency and resource/battery
+qualification remain separate seams; this is not default-desktop enablement
+or production-wide readiness.
+
 ## Remaining release blockers
 
 - authorized named-device macOS native-input routes beyond fixed DOM;
