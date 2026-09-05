@@ -495,6 +495,10 @@ fn erase_extension_controller_data(
 fn erase_named_profile_data(erasure: ProfileErasure) {
     use wry::WebViewExtDarwin;
 
+    if initialize_data_store_enumeration().is_err() {
+        erasure.finish(zephium_core::ports::engine::ProfileDataErasureOutcome::Failed);
+        return;
+    }
     let identifier = erasure.profile.bytes();
     let initial_erasure = erasure.clone();
     let result =
@@ -536,11 +540,59 @@ fn erase_named_profile_data(erasure: ProfileErasure) {
     }
 }
 
+/// Cold recovery may enumerate before any view or data store has initialized
+/// WebKit's main run loop. A configuration's API::Object constructor performs
+/// that initialization; enumeration itself does not. Do not access its lazy
+/// data-store/process-pool properties or create a view or named profile here.
+fn initialize_data_store_enumeration() -> Result<(), &'static str> {
+    let mtm = objc2_foundation::MainThreadMarker::new()
+        .ok_or("profile erasure requires the main thread")?;
+    // SAFETY: the marker proves main-thread construction, the local retained
+    // configuration is immediately released, and no browser/data-store getter
+    // is invoked. The initialized WebKit run loop is process-owned.
+    drop(unsafe { objc2_web_kit::WKWebViewConfiguration::new(mtm) });
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    #[test]
+    fn cold_erasure_initializes_only_a_configuration_before_identifier_enumeration() {
+        let source = include_str!("mod.rs");
+        let erasure = source
+            .split("fn erase_named_profile_data(")
+            .nth(1)
+            .unwrap()
+            .split("/// Cold recovery")
+            .next()
+            .unwrap();
+        assert!(
+            erasure.find("initialize_data_store_enumeration()").unwrap()
+                < erasure.find("fetch_data_store_identifiers").unwrap()
+        );
+        let initialization = source
+            .split("fn initialize_data_store_enumeration()")
+            .nth(1)
+            .unwrap()
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(initialization.contains("MainThreadMarker::new()"));
+        assert!(initialization.contains("WKWebViewConfiguration::new(mtm)"));
+        for forbidden in [
+            "websiteDataStore()",
+            "dataStoreForIdentifier",
+            "defaultDataStore",
+            "processPool()",
+            "WKWebView::",
+        ] {
+            assert!(!initialization.contains(forbidden));
+        }
+    }
 
     #[test]
     fn failed_ephemeral_verification_cannot_be_forgotten_by_a_retry() {

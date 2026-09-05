@@ -76,3 +76,24 @@ The current database uses the existing OS file-permission boundary, not
 application-level encryption. Neither SQLite deletion nor profile deletion is
 a forensic secure-erase promise. General artifact deletion/export, large blob
 storage, UI, and execution restoration are not part of this vertical.
+
+## Cold native cleanup finding
+
+The first public artifact run published and reloaded its exact cited result,
+but the no-UI qualifier's normal Shell deletion request correctly refused:
+that host has no Browse bootstrap. Excluded cleanup now composes the existing
+Store deletion authorization, exact native-namespace obligation, engine absence
+proof and Store finalization ports; it does not weaken Shell policy or create
+ordinary tabs. Failure retains the exact private test recovery directory.
+
+A separate cold recovery exposed a pre-existing WebKit initialization defect:
+identifier enumeration crashed in the WebsiteDataStore I/O queue before any view
+had initialized WebKit's main run loop. Upstream [enumeration code](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/WebsiteData/Cocoa/WebsiteDataStoreCocoa.mm)
+dispatches to the main singleton without initialization, whereas the
+[API object constructor](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/Shared/API/APIObject.cpp)
+initializes WebKit. The scoped production erasure adapter now constructs and
+immediately releases only a `WKWebViewConfiguration` before enumeration. It
+never accesses a lazy data-store/process-pool property or creates a page. The
+same retained deletion subsequently passed native absence verification and
+Store finalization in a cold process. No raw crash report or profile identity
+is committed; this is scoped recovery evidence, not general platform qualification.
