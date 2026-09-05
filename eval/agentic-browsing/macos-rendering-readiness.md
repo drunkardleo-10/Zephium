@@ -465,3 +465,13 @@ unclipped viewport, unchanged five-second deadline, original semantic samples
 and strict restoration/teardown remain required. This corrects a plausible
 standalone-harness prerequisite; a pinned native measurement must establish
 whether it changes the outcome.
+
+The one AppKit-service attempt used clean
+`6095fd6e2178d973e87ff69ad61a9aa6eeb27e92`, with pre-invocation host clock
+`2026-09-05 21:16:16 UTC` (not exact process start). It exited 1 in approximately
+447ms with `stage=presented_restored_native_state`. This is a restoration
+refusal, not a successful measurement. The then-current generic restoration
+error replaced the inner outcome, so the captured output does not establish
+whether rendering/RAF advanced or which original native guard failed. Native
+fixture/teardown did not replace the reported stage. The next diagnostic must
+preserve both facts without treating pre-teardown evidence as success.
