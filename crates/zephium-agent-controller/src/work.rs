@@ -29,6 +29,9 @@ mod tests;
 pub enum AgentWorkTaskProgress {
     /// The approved task still requires work.
     Continue,
+    /// Fresh trusted state satisfies the action postcondition. Only extraction
+    /// may follow; it still requires the registered schema and result predicate.
+    ReadyForExtraction,
     /// The product's own task predicate is satisfied.
     Complete,
 }
@@ -37,6 +40,12 @@ pub enum AgentWorkTaskProgress {
 /// page instructions, or a model-authored predicate. The UI does not receive
 /// this port; it receives only the content-free handle below.
 pub trait AgentWorkTask: Send {
+    /// Explicitly enables verified snapshot actions before extraction. Default
+    /// schema tasks remain read-only. This setting and the schema are frozen at
+    /// admission; it grants no effect permission beyond the original policy.
+    fn allows_actions_before_extraction(&self) -> bool {
+        false
+    }
     /// Optional single trusted extraction schema. Identity 1 is run-local;
     /// model/page content cannot register or replace it. Default is no extraction.
     fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
@@ -565,7 +574,9 @@ impl AgentWorkController {
         task: Box<dyn AgentWorkTask>,
         retention: AgentBrowserRetention,
     ) -> Result<(Self, AgentWorkHandle), AgentWorkFailure> {
-        if (input.durable_result && task.extraction_schema().is_none())
+        let extraction_schema = task.extraction_schema().cloned();
+        let actions_before_extraction = task.allows_actions_before_extraction();
+        if ((input.durable_result || actions_before_extraction) && extraction_schema.is_none())
             || task
                 .extraction_schema()
                 .is_some_and(|schema| schema.id().get() != 1)
@@ -600,6 +611,8 @@ impl AgentWorkController {
                     retention,
                     audit,
                     task,
+                    extraction_schema,
+                    actions_before_extraction,
                     extraction: None,
                     failure: None,
                     observation: None,
@@ -613,6 +626,8 @@ impl AgentWorkController {
 }
 
 struct WorkState {
+    extraction_schema: Option<SemanticExtractionSchema>,
+    actions_before_extraction: bool,
     extraction: Option<SemanticOwnedExtractionResult>,
     input: Option<AgentWorkRunInput>,
     session: Option<AgentBrowserSession>,
@@ -630,6 +645,30 @@ struct WorkState {
 }
 
 impl WorkState {
+    fn task_progress(
+        &mut self,
+        observation: &SemanticObservation,
+    ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+        self.check_task_contract()?;
+        let progress = self.task.evaluate(observation)?;
+        self.check_task_contract()?;
+        if (progress == AgentWorkTaskProgress::ReadyForExtraction
+            && self.extraction_schema.is_none())
+            || (progress == AgentWorkTaskProgress::Complete && self.actions_before_extraction)
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
+        Ok(progress)
+    }
+
+    fn check_task_contract(&self) -> Result<(), AgentWorkFailure> {
+        if self.task.extraction_schema() != self.extraction_schema.as_ref()
+            || self.task.allows_actions_before_extraction() != self.actions_before_extraction
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
+        Ok(())
+    }
     fn journal_mut(&mut self) -> Result<&mut WorkJournal, AgentWorkFailure> {
         if let Some(session) = self.session.as_mut() {
             return session.journal.as_mut().ok_or(AgentWorkFailure::Contract);
@@ -1113,8 +1152,12 @@ impl AgentWorkController {
         )
         .map_err(AgentWorkFailure::Browser)?;
         session.journal = state.journal.take();
-        if state.task.extraction_schema().is_some() {
-            session.config = session.config.restrict_to_extraction();
+        if state.extraction_schema.is_some() {
+            session.config = if state.actions_before_extraction {
+                session.config.restrict_to_actions_and_extraction()
+            } else {
+                session.config.restrict_to_extraction()
+            };
         }
         state.session = Some(session);
         Ok(())
@@ -1249,7 +1292,7 @@ impl AgentWorkController {
     ) -> Result<(), AgentWorkFailure> {
         let state = self.state.as_mut().ok_or(AgentWorkFailure::Contract)?;
         let mut observation = Self::observe(state, worker, browser).await?;
-        let captured_at = SemanticCaptureInstant::from_millis(
+        let mut captured_at = SemanticCaptureInstant::from_millis(
             state
                 .journal_mut()?
                 .clock
@@ -1257,7 +1300,8 @@ impl AgentWorkController {
                 .map_err(|_| AgentWorkFailure::Contract)?
                 .millis(),
         );
-        if state.task.evaluate(&observation)? == AgentWorkTaskProgress::Complete {
+        let mut progress = state.task_progress(&observation)?;
+        if progress == AgentWorkTaskProgress::Complete {
             state.observation = Some(observation);
             return Ok(());
         }
@@ -1270,28 +1314,8 @@ impl AgentWorkController {
             session.start_initial(&observation),
         )
         .await?;
-        if let Some(schema) = state.task.extraction_schema() {
-            let frames = observation
-                .frames()
-                .iter()
-                .map(|snapshot| snapshot.frame().clone())
-                .collect::<Vec<_>>();
-            let result = Self::provider(
-                &mut state.native,
-                worker,
-                browser,
-                session.cancellation.clone(),
-                session.extract(turn, &observation, &frames, captured_at, schema),
-            )
-            .await?;
-            if state.task.accept_extraction(&result)? != AgentWorkTaskProgress::Complete {
-                return Err(AgentWorkFailure::Contract);
-            }
-            state.extraction = Some(
-                result
-                    .into_owned()
-                    .map_err(|_| AgentWorkFailure::Contract)?,
-            );
+        if state.extraction_schema.is_some() && !state.actions_before_extraction {
+            Self::extract_current(state, worker, browser, turn, &observation, captured_at).await?;
             state.observation = Some(observation);
             return Ok(());
         }
@@ -1302,14 +1326,46 @@ impl AgentWorkController {
                 .map(|snapshot| snapshot.frame().clone())
                 .collect::<Vec<_>>();
             let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
-            let proposal = Self::provider(
+            let step = Self::provider(
                 &mut state.native,
                 worker,
                 browser,
                 session.cancellation.clone(),
-                session.next_action(turn, &observation, &frames, |_, _, _| {}),
+                session.next_step(
+                    turn,
+                    &observation,
+                    &frames,
+                    state.actions_before_extraction,
+                    |_, _, _| {},
+                ),
             )
             .await?;
+            let proposal = match step.turn.proposal().kind() {
+                AgentBrowserToolKind::Extract => {
+                    if progress != AgentWorkTaskProgress::ReadyForExtraction {
+                        return Err(AgentWorkFailure::TaskPhase {
+                            expected: progress,
+                            proposed: AgentBrowserToolKind::Extract,
+                        });
+                    }
+                    Self::extract_current(state, worker, browser, step, &observation, captured_at)
+                        .await?;
+                    state.observation = Some(observation);
+                    return Ok(());
+                }
+                AgentBrowserToolKind::Act => {
+                    if progress == AgentWorkTaskProgress::ReadyForExtraction {
+                        return Err(AgentWorkFailure::TaskPhase {
+                            expected: progress,
+                            proposed: AgentBrowserToolKind::Act,
+                        });
+                    }
+                    session
+                        .bind_action_turn(step, &observation, &frames)
+                        .map_err(AgentWorkFailure::Browser)?
+                }
+                _ => return Err(AgentWorkFailure::Contract),
+            };
             let assessment = state.task.assess(proposal.action())?;
             let id = state.native.identity.id();
             let automation = state
@@ -1397,10 +1453,13 @@ impl AgentWorkController {
                 )
                 .map_err(AgentWorkFailure::Browser)?;
             observation = current;
-            if state.task.evaluate(&observation)? == AgentWorkTaskProgress::Complete {
+            captured_at = SemanticCaptureInstant::from_millis(now.millis());
+            progress = state.task_progress(&observation)?;
+            if progress == AgentWorkTaskProgress::Complete {
                 state.observation = Some(observation);
                 return Ok(());
             }
+            let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
             turn = Self::provider(
                 &mut state.native,
                 worker,
@@ -1410,6 +1469,45 @@ impl AgentWorkController {
             )
             .await?;
         }
+    }
+
+    async fn extract_current(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &AgentRuntimeBrowser,
+        turn: AgentBrowserProviderTurn,
+        observation: &SemanticObservation,
+        captured_at: SemanticCaptureInstant,
+    ) -> Result<(), AgentWorkFailure> {
+        state.check_task_contract()?;
+        let frames = observation
+            .frames()
+            .iter()
+            .map(|snapshot| snapshot.frame().clone())
+            .collect::<Vec<_>>();
+        let schema = state
+            .extraction_schema
+            .as_ref()
+            .ok_or(AgentWorkFailure::Contract)?;
+        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let result = Self::provider(
+            &mut state.native,
+            worker,
+            browser,
+            session.cancellation.clone(),
+            session.extract(turn, observation, &frames, captured_at, schema),
+        )
+        .await?;
+        if state.task.accept_extraction(&result)? != AgentWorkTaskProgress::Complete {
+            return Err(AgentWorkFailure::Contract);
+        }
+        state.check_task_contract()?;
+        state.extraction = Some(
+            result
+                .into_owned()
+                .map_err(|_| AgentWorkFailure::Contract)?,
+        );
+        Ok(())
     }
 
     async fn close_context(
@@ -2168,6 +2266,13 @@ impl AgentWorkEvent {
 /// Closed failure vocabulary; no variant contains page, provider or user text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentWorkFailure {
+    /// A settled model proposal crossed the trusted task's fresh phase gate.
+    TaskPhase {
+        /// Current product-side task state, never model completion text.
+        expected: AgentWorkTaskProgress,
+        /// Proposed bounded tool; no arguments or page content are retained.
+        proposed: AgentBrowserToolKind,
+    },
     /// Runtime cancellation or human revocation won admission.
     Cancelled,
     /// Human takeover requested revocation; no transfer is implied by recovery.

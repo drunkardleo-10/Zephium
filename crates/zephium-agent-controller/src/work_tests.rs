@@ -7,7 +7,69 @@ use zephium_agent_runtime::{
 };
 
 static SERIAL: Mutex<()> = Mutex::new(());
+#[cfg(feature = "probe-harness")]
+#[path = "work_combined_tests.rs"]
+mod combined_tests;
+#[cfg(feature = "probe-harness")]
+use combined_tests::{CombinedFault, CombinedTask};
 const FIXTURE_POLICY_NOW_MILLIS: u64 = 2;
+
+#[test]
+fn missing_schema_cannot_admit_combined_mode_or_certify_result_readiness() {
+    struct MissingSchema(bool);
+    impl AgentWorkTask for MissingSchema {
+        fn allows_actions_before_extraction(&self) -> bool {
+            self.0
+        }
+        fn evaluate(
+            &mut self,
+            _: &SemanticObservation,
+        ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+            Ok(AgentWorkTaskProgress::ReadyForExtraction)
+        }
+        fn assess(
+            &self,
+            _: &SemanticPreparedAction,
+        ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+            panic!("missing schema cannot authorize an action")
+        }
+        fn attest_account(
+            &self,
+            context: ContextJoin,
+            now: AgentPolicyInstant,
+        ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
+            Task.attest_account(context, now)
+        }
+    }
+    let _serial = lock(&SERIAL);
+    for combined in [true, false] {
+        let admitted = AgentWorkController::try_new(
+            input(),
+            AgentProviderTransportConfig::STANDARD,
+            AgentProviderCredential::try_new(
+                AgentProviderKind::OpenAiResponses,
+                "synthetic-not-a-secret".into(),
+            )
+            .unwrap(),
+            Arc::new(Audit(Fault::None)),
+            Box::new(MissingSchema(combined)),
+        );
+        if combined {
+            assert!(matches!(admitted, Err(AgentWorkFailure::Contract)));
+        } else {
+            let (controller, handle) = admitted.unwrap();
+            let (outcome, shutdown, calls, _) = drive(controller, handle, Fault::None);
+            let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+                panic!("readiness without a schema cannot succeed: {outcome:?}");
+            };
+            assert_eq!(closed.failure(), AgentWorkFailure::Contract);
+            assert_eq!(closed.policy_settlement().closure().model_calls(), 0);
+            assert_eq!(closed.policy_settlement().closure().effects(), 0);
+            assert_eq!(calls, [1, 2, 3, 4, 5, 6]);
+            assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        }
+    }
+}
 
 #[test]
 fn dormant_refusal_retains_original_identity_and_reconciles_only_exact_audit() {
@@ -222,6 +284,8 @@ enum Fault {
     #[cfg(feature = "probe-harness")]
     ActionVerification,
     #[cfg(feature = "probe-harness")]
+    ActionApplied,
+    #[cfg(feature = "probe-harness")]
     ActionBudget,
     #[cfg(feature = "probe-harness")]
     ActionCancel,
@@ -357,6 +421,12 @@ impl AgentBrowserPort for Port {
             if lock(&self.calls).contains(&7) { 2 } else { 1 }
         );
         let wire = format!("{{\"v\":1,\"i\":{},\"g\":{},\"c\":\"complete\",\"n\":[{{\"k\":1,\"r\":\"document\",\"o\":16}},{{\"k\":2,\"p\":0,\"r\":\"textbox\",\"n\":\"Field\",\"s\":64,\"o\":2,\"v\":{{\"k\":\"text\",\"value\":\"\"}},\"b\":{{\"x\":10,\"y\":20,\"w\":120,\"h\":30}}}}]}}", correlation.invocation().get(), correlation.snapshot_generation().get());
+        #[cfg(feature = "probe-harness")]
+        let wire = if self.fault == Fault::ActionApplied && lock(&self.calls).contains(&7) {
+            wire.replace("\"value\":\"\"", "\"value\":\"fixture value\"")
+        } else {
+            wire
+        };
         let snapshot = decode_semantic_snapshot(
             SemanticDecodeContext::new(
                 correlation.invocation(),
@@ -498,7 +568,7 @@ impl AgentBrowserPort for Port {
         match self.fault {
             Fault::ActionDispatch => return ContextDispatch::Unsupported,
             Fault::ActionCallback => {}
-            Fault::ActionVerification => {
+            Fault::ActionVerification | Fault::ActionApplied => {
                 let now = request.requested_at();
                 let geometry = request.expected_geometry();
                 completion(request.complete(
@@ -683,6 +753,7 @@ fn variable_provider_turns_use_real_worker_io_and_stop_at_the_exact_ceiling() {
 #[cfg(feature = "probe-harness")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProviderFault {
+    Combined(CombinedFault),
     Ceiling,
     CountRefused,
     StreamRefused,
@@ -792,6 +863,19 @@ fn provider_fixture(fault: ProviderFault) {
     let control = Arc::new(Mutex::new(None::<AgentRuntimeHandle>));
     let server_control = control.clone();
     let requests = match fault {
+        ProviderFault::Combined(
+            CombinedFault::Premature
+            | CombinedFault::SchemaMutation
+            | CombinedFault::ModeMutation
+            | CombinedFault::CompleteWithoutResult
+            | CombinedFault::ActionLost,
+        ) => 2,
+        ProviderFault::Combined(
+            CombinedFault::ExtraAction | CombinedFault::WrongSchema | CombinedFault::ExpandedScope,
+        ) => 4,
+        ProviderFault::Combined(CombinedFault::CancelMapCount) => 5,
+        ProviderFault::Combined(CombinedFault::Ceiling) => 16,
+        ProviderFault::Combined(_) => 6,
         ProviderFault::Ceiling => 16,
         ProviderFault::CountRefused | ProviderFault::CancelCount => 1,
         ProviderFault::Extraction(ExtractionFault::CancelCount) => 3,
@@ -848,7 +932,11 @@ fn provider_fixture(fault: ProviderFault) {
                 request.extend_from_slice(&bytes[..count]);
             }
             let is_count = request.starts_with(b"POST /v1/responses/input_tokens ");
-            let cancelled = (is_count && fault == ProviderFault::CancelCount)
+            let cancelled = (turns == 2
+                && ((is_count && fault == ProviderFault::Combined(CombinedFault::CancelMapCount))
+                    || (!is_count
+                        && fault == ProviderFault::Combined(CombinedFault::CancelMapStream))))
+                || (is_count && fault == ProviderFault::CancelCount)
                 || (!is_count && fault == ProviderFault::CancelStream)
                 || (turns == 1
                     && ((is_count
@@ -875,7 +963,42 @@ fn provider_fixture(fault: ProviderFault) {
                 turns += 1;
                 (
                     "text/event-stream",
-                    if let ProviderFault::Extraction(fault) = fault {
+                    if let ProviderFault::Combined(fault) = fault {
+                        if fault == CombinedFault::Ceiling && turns < 7 {
+                            tool_stream(turns, false)
+                        } else if fault == CombinedFault::Ceiling && turns == 7 {
+                            tool_stream(turns, true)
+                        } else if fault == CombinedFault::Ceiling {
+                            named_tool_stream(
+                                turns,
+                                "extract",
+                                r#"{\"scope\":{\"kind\":\"initial\"},\"schema_id\":1}"#,
+                            )
+                        } else if turns == 1 && fault != CombinedFault::Premature {
+                            tool_stream(turns, true)
+                        } else if turns <= 2 {
+                            if fault == CombinedFault::ExtraAction {
+                                tool_stream(turns, true)
+                            } else {
+                                let arguments = if fault == CombinedFault::WrongSchema {
+                                    r#"{\"scope\":{\"kind\":\"initial\"},\"schema_id\":2}"#
+                                } else if fault == CombinedFault::ExpandedScope {
+                                    r#"{\"scope\":{\"kind\":\"subtree\",\"target\":\"@a2\"},\"schema_id\":1}"#
+                                } else {
+                                    r#"{\"scope\":{\"kind\":\"initial\"},\"schema_id\":1}"#
+                                };
+                                named_tool_stream(turns, "extract", arguments)
+                            }
+                        } else {
+                            extraction_stream(if fault == CombinedFault::ForeignSource {
+                                ExtractionFault::ForeignSource
+                            } else {
+                                ExtractionFault::None
+                            })
+                            .replace("resp_2", "resp_3")
+                            .replace("msg_2", "msg_3")
+                        }
+                    } else if let ProviderFault::Extraction(fault) = fault {
                         if turns == 1 {
                             let arguments = match fault {
                                 ExtractionFault::WrongSchema => {
@@ -926,7 +1049,17 @@ fn provider_fixture(fault: ProviderFault) {
     } else {
         input()
     };
-    let task: Box<dyn AgentWorkTask> = if matches!(fault, ProviderFault::Extraction(_)) {
+    let task: Box<dyn AgentWorkTask> = if let ProviderFault::Combined(fault) = fault {
+        Box::new(CombinedTask {
+            extraction: AgentWorkExtractionTask::try_new(
+                vec![SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap()],
+                AgentAccountScope::Anonymous,
+            )
+            .unwrap(),
+            fault,
+            ready: None,
+        })
+    } else if matches!(fault, ProviderFault::Extraction(_)) {
         Box::new(
             AgentWorkExtractionTask::try_new(
                 vec![SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap()],
@@ -937,7 +1070,11 @@ fn provider_fixture(fault: ProviderFault) {
     } else {
         Box::new(Continue)
     };
-    let audit_fault = if fault == ProviderFault::Extraction(ExtractionFault::AuditLost) {
+    let audit_fault = if matches!(
+        fault,
+        ProviderFault::Extraction(ExtractionFault::AuditLost)
+            | ProviderFault::Combined(CombinedFault::AuditLost)
+    ) {
         Fault::AuditLost
     } else {
         Fault::None
@@ -959,13 +1096,25 @@ fn provider_fixture(fault: ProviderFault) {
         state.input.as_mut().unwrap().settings.deadline = deadline;
         state.native.deadline = deadline;
     }
-    let native_fault = if let ProviderFault::Native(fault) = fault {
+    let native_fault = if fault == ProviderFault::Combined(CombinedFault::ActionLost) {
+        Fault::ActionLost
+    } else if matches!(fault, ProviderFault::Combined(_)) {
+        Fault::ActionApplied
+    } else if let ProviderFault::Native(fault) = fault {
         fault
     } else {
         Fault::None
     };
     let (outcome, shutdown, calls, events) =
         drive_with_control(controller, handle, native_fault, control);
+    if let ProviderFault::Combined(fault) = fault {
+        assert_eq!(
+            server.join().expect("combined fixture server"),
+            requests / 2
+        );
+        combined_tests::assert_outcome(fault, outcome, shutdown, &calls, &events);
+        return;
+    }
     if let ProviderFault::Extraction(fault) = fault {
         assert_eq!(server.join().expect("fixture server"), requests / 2);
         assert_eq!(

@@ -83,6 +83,13 @@ and durable terminal ACK. See [Work results](agent-work-results.md) for bounds
 and trust, and [Work artifacts](agent-work-artifacts.md) for explicit private
 durable-profile publication.
 
+The Work actor can explicitly admit a combined trusted task. Its private typed
+step dispatch reuses `next_action`'s locate/settled-turn binding, then checks the
+fresh task phase before either policy-authorizing an action or mapping extraction.
+No extra action allocation, worker or native port is introduced. The frozen
+locate/act/extract profile is continuation-bound; both action and result phases
+share all existing ceilings. Read-only schema tasks remain read-only by default.
+
 - Snapshot-verifiable actions only. Navigation, dialog and scroll evidence
   require distinct host adapters and are explicitly refused.
 - Immediate and mutation-quiet waits only. State/navigation/dialog/scroll waits
@@ -94,8 +101,10 @@ durable-profile publication.
 - Model selection is centralized in the trusted catalog: the supplied transport
   adapters are currently GPT-5.6 Terra and Luna. Both use the same semantic
   loop. Local/other hosted adapters and the Work UI wiring remain outstanding.
-- Only locate and act schemas are advertised, in every OpenAI/Anthropic
-  request serializer. Capability restriction is part of continuation config
+- Action sessions advertise only locate and act; read-only result tasks advertise
+  extract, and explicitly combined tasks advertise their closed union. These
+  profiles apply equally to every OpenAI/Anthropic request serializer.
+  Capability restriction is part of continuation config
   equality. Advertising support does not replace Rust tool/action validation.
 - Production and BYOK requests use `store:false`. Only the release-excluded
   explicit public qualifier can opt into retained provider logs.

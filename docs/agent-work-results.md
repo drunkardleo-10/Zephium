@@ -21,7 +21,7 @@ integer and flat text lists. Schema identity `1` is scoped to this run; the mode
 cannot register a schema or substitute an executable task. The existing approved
 objective describes the mapping requested by the user. It is not effect authority.
 
-The actor restricts this task to one advertised tool: `extract` with the initial
+The actor restricts the generic extraction task to one advertised tool: `extract` with the initial
 scope and exact schema identity. Native actions, navigation and observation
 expansion are not advertised or admitted by this task. After a fresh actual
 native observation, the session validates the current frame cohort and consumes
@@ -68,6 +68,36 @@ product task can additionally inspect the admitted result in `accept_extraction`
 model text never supplies this predicate. The public qualifier independently
 compares each returned value with its exact cited native source text.
 
+## Verified actions followed by one result
+
+A trusted `AgentWorkTask` can explicitly opt into `allows_actions_before_extraction`
+and supply the same single schema. Schema and mode are frozen at admission;
+changing either is a contract refusal. The provider configuration advertises only
+the existing bounded `locate`, snapshot-verifiable `act`, and schema-1 `extract`
+tools. That exact configuration remains bound to the entire continuation lineage.
+An extraction schema alone still enables no actions, and the combined profile
+grants no effect authority beyond the original manifest and trusted assessment.
+
+The task evaluates the initial observation and every independently verified
+adjacent post-action observation. `Continue` permits more actions but refuses
+extraction. `ReadyForExtraction` certifies the trusted action postcondition and
+permits extraction but refuses further actions. A combined task cannot declare
+`Complete` instead of returning a result. Readiness may already hold initially;
+neither a fixed action count nor a model response is completion authority.
+
+The extraction proposal and mapping call consume the same bounded session, policy,
+transport, accounting and audit owners as the actions. The eight-call ceiling
+includes locate, actions, the extraction proposal and mapping; no budget resets
+at the phase boundary. Premature extraction, late actions, scope expansion and
+schema mismatch are typed refusals with no retry. Mapping is bound to the exact
+current observation, its frame cohort and refreshed capture timestamp, not the
+pre-action baseline. `accept_extraction` must then explicitly accept the validated
+result before the original closure/publication path can expose it.
+
+This enables a useful action-to-result workflow without a second controller,
+worker, result queue or native authority. It does not enable navigation, richer
+read scopes, another extraction round, mutation replay or model-authored tasks.
+
 ## Publication, cancellation and recovery
 
 The original runtime, native-resource, provider, policy and durable audit closure
@@ -103,6 +133,7 @@ Only this explicit public mode retains provider logs. See the [M6 evidence](../e
 The artifact vertical adds bounded typed private bodies and exact immutable
 publication on the same Store actor, separate from content-free journal/audit
 rows. User-facing task authoring, initial-scope expansion,
-navigation, multi-page research, new native lifetimes and parallel runs remain
-separate authorities. Default Browse dependencies and scheduling are unchanged;
+navigation, multi-page research and parallel runs remain separate authorities.
+Explicit sequential native lifetimes require the original predecessor's exact
+closure and a newly admitted run, not result references. Default Browse dependencies and scheduling are unchanged;
 this is structural evidence, not battery, CPU/RAM or broad-site qualification.

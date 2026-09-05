@@ -2615,18 +2615,46 @@ impl AgentBrowserSession {
     /// accounting, and the shared eight-turn transcript ceiling is authoritative.
     pub async fn next_action(
         &mut self,
-        mut turn: AgentBrowserProviderTurn,
+        turn: AgentBrowserProviderTurn,
         observation: &zephium_agentic::SemanticObservation,
         current_frames: &[zephium_agentic::SemanticFrameJoin],
-        mut record: impl FnMut(
+        record: impl FnMut(
             AgentModelCallReceipt,
             zephium_agentic::AgentProviderInputMetricReceipt,
             Duration,
         ),
     ) -> Result<crate::AgentBrowserActionProposal, AgentBrowserProviderError> {
+        let turn = self
+            .next_step(turn, observation, current_frames, false, record)
+            .await?;
+        self.bind_action_turn(turn, observation, current_frames)
+    }
+
+    // Shares exact locate/action ownership with the public action driver.
+    // Extract retains its original settled turn until the trusted Work task
+    // authorizes readiness against the same current observation.
+    async fn next_step(
+        &mut self,
+        mut turn: AgentBrowserProviderTurn,
+        observation: &zephium_agentic::SemanticObservation,
+        current_frames: &[zephium_agentic::SemanticFrameJoin],
+        extraction: bool,
+        mut record: impl FnMut(
+            AgentModelCallReceipt,
+            zephium_agentic::AgentProviderInputMetricReceipt,
+            Duration,
+        ),
+    ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
         loop {
             self.check_live()?;
             record(turn.receipt(), turn.input(), turn.provider_elapsed());
+            if turn.turn.proposal().kind() == zephium_agentic::AgentBrowserToolKind::Act
+                || (extraction
+                    && turn.turn.proposal().kind()
+                        == zephium_agentic::AgentBrowserToolKind::Extract)
+            {
+                return Ok(turn);
+            }
             let tool = turn.into_tool_turn();
             if let Some(journal) = self.journal.as_ref() {
                 journal
@@ -2651,26 +2679,36 @@ impl AgentBrowserSession {
                         .continue_after_locate(tool, observation, self.next_call)
                         .await?;
                 }
-                zephium_agentic::AgentBrowserToolKind::Act => {
-                    if self.next_action > MAX_BROWSER_ACTIONS {
-                        return Err(AgentBrowserProviderError::ActionLimit);
-                    }
-                    if self.action.is_some() {
-                        return Err(AgentBrowserProviderError::ActionPending);
-                    }
-                    let batch = zephium_agentic::SemanticActionBatchId::new(self.next_action)
-                        .ok_or(AgentBrowserProviderError::Authority)?;
-                    return crate::AgentBrowserActionProposal::bind(
-                        tool,
-                        observation,
-                        current_frames,
-                        batch,
-                    )
-                    .map_err(AgentBrowserProviderError::Action);
-                }
                 kind => return Err(AgentBrowserProviderError::UnsupportedTool(kind)),
             }
         }
+    }
+
+    fn bind_action_turn(
+        &self,
+        turn: AgentBrowserProviderTurn,
+        observation: &zephium_agentic::SemanticObservation,
+        current_frames: &[zephium_agentic::SemanticFrameJoin],
+    ) -> Result<crate::AgentBrowserActionProposal, AgentBrowserProviderError> {
+        self.check_live()?;
+        if self.next_action > MAX_BROWSER_ACTIONS {
+            return Err(AgentBrowserProviderError::ActionLimit);
+        }
+        if self.action.is_some() {
+            return Err(AgentBrowserProviderError::ActionPending);
+        }
+        let tool = turn.into_tool_turn();
+        if let Some(journal) = &self.journal {
+            journal
+                .emit(work::AgentWorkEventKind::ToolProposed(
+                    tool.proposal().kind(),
+                ))
+                .map_err(|_| AgentBrowserProviderError::Journal)?;
+        }
+        let batch = zephium_agentic::SemanticActionBatchId::new(self.next_action)
+            .ok_or(AgentBrowserProviderError::Authority)?;
+        crate::AgentBrowserActionProposal::bind(tool, observation, current_frames, batch)
+            .map_err(AgentBrowserProviderError::Action)
     }
 
     /// Applies real policy to an independently assessed action and retains its debt.

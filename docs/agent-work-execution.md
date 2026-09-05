@@ -50,6 +50,10 @@ may manufacture a clean proof.
 - Action tasks advertise only locate and snapshot-verifiable act. A trusted
   `AgentWorkExtractionTask` instead advertises only initial-scope extraction;
   its [bounded result](agent-work-results.md) remains explicitly model-mapped.
+  A trusted task can explicitly combine these existing tools: its frozen schema
+  and mode require fresh `ReadyForExtraction` before mapping and refuse further
+  actions afterward. All phases share the same eight-call ceiling and original
+  policy, native and result-publication owners.
   Immediate and
   mutation-quiet settlement use the core's bounded wake schedule before one
   adjacent fresh observation. Navigation/dialog/scroll adapters are absent.

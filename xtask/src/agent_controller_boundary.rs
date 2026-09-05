@@ -283,6 +283,7 @@ fn validate_inventory(crate_root: &Path) -> Result<(), String> {
             "terra.rs".to_owned(),
             "work.rs".to_owned(),
             "work_tests.rs".to_owned(),
+            "work_combined_tests.rs".to_owned(),
         ])
     {
         return Err("controller source inventory drifted".to_owned());
@@ -375,7 +376,18 @@ fn validate_work(source: &str) -> Result<(), String> {
         "AgentRunMetricClosure::try_close",
         "AgentNativeShutdownResources::new",
         "claim.commit_with_shutdown(proof, settlement, provider)",
-        "state.task.evaluate(&observation)",
+        "state.task_progress(&observation)?",
+        "let progress = self.task.evaluate(observation)?;",
+        "self.task.extraction_schema() != self.extraction_schema.as_ref()",
+        "self.task.allows_actions_before_extraction() != self.actions_before_extraction",
+        "(input.durable_result || actions_before_extraction) && extraction_schema.is_none()",
+        "progress == AgentWorkTaskProgress::Complete && self.actions_before_extraction",
+        "progress != AgentWorkTaskProgress::ReadyForExtraction",
+        "progress == AgentWorkTaskProgress::ReadyForExtraction",
+        "session.config.restrict_to_actions_and_extraction()",
+        "captured_at = SemanticCaptureInstant::from_millis(now.millis());",
+        "session.extract(turn, observation, &frames, captured_at, schema)",
+        "state.task.accept_extraction(&result)? != AgentWorkTaskProgress::Complete",
         "state.native.revoke(browser)",
         ".begin_action_settlement(",
         "MAX_AGENT_WORK_EVENTS: usize = 64",
@@ -527,6 +539,24 @@ mod tests {
             "state.drained.is_some()",
             "(closure.outcome() == AgentRunProgressOutcome::Succeeded) == unsuccessful",
             "claim.commit_with_shutdown(proof, settlement, provider)",
+        ] {
+            assert!(validate_work(&WORK.replace(boundary, "removed_boundary")).is_err());
+        }
+    }
+
+    #[test]
+    fn combined_task_cannot_bypass_frozen_phase_or_current_result_binding() {
+        for boundary in [
+            "self.task.extraction_schema() != self.extraction_schema.as_ref()",
+            "self.task.allows_actions_before_extraction() != self.actions_before_extraction",
+            "(input.durable_result || actions_before_extraction) && extraction_schema.is_none()",
+            "progress == AgentWorkTaskProgress::Complete && self.actions_before_extraction",
+            "progress != AgentWorkTaskProgress::ReadyForExtraction",
+            "progress == AgentWorkTaskProgress::ReadyForExtraction",
+            "session.config.restrict_to_actions_and_extraction()",
+            "captured_at = SemanticCaptureInstant::from_millis(now.millis());",
+            "session.extract(turn, observation, &frames, captured_at, schema)",
+            "state.task.accept_extraction(&result)? != AgentWorkTaskProgress::Complete",
         ] {
             assert!(validate_work(&WORK.replace(boundary, "removed_boundary")).is_err());
         }
