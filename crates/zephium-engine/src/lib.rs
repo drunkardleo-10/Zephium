@@ -72,6 +72,19 @@ pub fn run_macos_agentic_rendering_probe() -> Result<MacosAgenticRenderingProbeR
 #[doc(hidden)]
 pub use platform::macos::MacosAgenticRenderingProbeReport;
 
+/// Closed provider-free public-native rendering comparison; no production policy.
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[doc(hidden)]
+pub fn run_macos_agentic_rendering_opportunity_probe(
+    opportunity: RenderingOpportunity,
+) -> Result<MacosAgenticRenderingOpportunityReport, &'static str> {
+    platform::macos::run_agentic_rendering_opportunity_probe(opportunity)
+}
+
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[doc(hidden)]
+pub use platform::macos::{MacosAgenticRenderingOpportunityReport, RenderingOpportunity};
+
 /// Runs one fixed-fixture semantic session using a caller-supplied model action.
 ///
 /// The callback receives the initial production semantic observation and must

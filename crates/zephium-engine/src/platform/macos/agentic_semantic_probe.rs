@@ -3,6 +3,9 @@
 #[path = "agentic_rendering_probe.rs"]
 mod rendering;
 pub use rendering::MacosAgenticRenderingProbeReport;
+#[path = "agentic_rendering_opportunity_probe.rs"]
+mod rendering_opportunity;
+pub use rendering_opportunity::{MacosAgenticRenderingOpportunityReport, RenderingOpportunity};
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -260,6 +263,10 @@ pub enum MacosAgenticSemanticTwoActionScenario {
 enum ProbeMode<'a> {
     Full,
     Rendering(&'a mut Option<MacosAgenticRenderingProbeReport>),
+    RenderingOpportunity {
+        opportunity: RenderingOpportunity,
+        report: &'a mut Option<MacosAgenticRenderingOpportunityReport>,
+    },
     ModelClick(&'a mut ModelInitialCallback<'a>),
     ModelPublicFill(&'a mut ModelInitialCallback<'a>),
     ModelWorkflow {
@@ -377,6 +384,22 @@ pub(crate) fn run_rendering() -> Result<MacosAgenticRenderingProbeReport, &'stat
     report.ok_or("rendering_report_missing")
 }
 
+pub(crate) fn run_rendering_opportunity(
+    opportunity: RenderingOpportunity,
+) -> Result<MacosAgenticRenderingOpportunityReport, &'static str> {
+    let mut report = None;
+    let pending = objc2::rc::autoreleasepool(|_| {
+        begin(ProbeMode::RenderingOpportunity {
+            opportunity,
+            report: &mut report,
+        })
+    })?;
+    if finish(pending)?.is_some() {
+        return Err("unexpected_model_terminal");
+    }
+    report.ok_or("rendering_opportunity_report_missing")
+}
+
 pub(crate) fn run_model_click(
     mut prepare: impl FnMut(
         &zephium_agentic::SemanticObservation,
@@ -459,7 +482,10 @@ pub(crate) fn run_model_workflow(
 
 fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
     let full_probe = matches!(&mode, ProbeMode::Full);
-    let rendering_probe = matches!(&mode, ProbeMode::Rendering(_));
+    let rendering_probe = matches!(
+        &mode,
+        ProbeMode::Rendering(_) | ProbeMode::RenderingOpportunity { .. }
+    );
     let public_fill_probe = matches!(
         &mode,
         ProbeMode::ModelPublicFill(_)
@@ -594,6 +620,24 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
     let mut next_invocation = 1_u64;
     let mut successful_snapshots = 0_u8;
     let execution = (|| {
+        if let ProbeMode::RenderingOpportunity {
+            opportunity,
+            report,
+        } = &mut mode
+        {
+            let url = server.url(FixtureRoute::SemanticRendering);
+            let (context, operation) =
+                navigate_with_receipt(&mut view, &mut registry, identity.id(), 2, &url, &runtime)?;
+            **report = Some(rendering_opportunity::measure(
+                &view,
+                context,
+                operation,
+                &url,
+                &runtime,
+                *opportunity,
+            )?);
+            return Ok(None);
+        }
         if let ProbeMode::Rendering(report) = &mut mode {
             let url = server.url(FixtureRoute::SemanticRendering);
             let (context, operation) =
@@ -706,9 +750,9 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
             return Err("workflow_action_limit");
         }
         let pending_click = match &mut mode {
-            ProbeMode::ModelWorkflow { .. } | ProbeMode::Rendering(_) => {
-                return Err("workflow_state")
-            }
+            ProbeMode::ModelWorkflow { .. }
+            | ProbeMode::Rendering(_)
+            | ProbeMode::RenderingOpportunity { .. } => return Err("workflow_state"),
             ProbeMode::Full => PendingInitialClick::Fixed(Box::new(execute_primary_click(
                 &view,
                 &first_observation,
@@ -848,9 +892,10 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
                         .map_err(|()| "model_final_verify")?;
                         return Ok(None);
                     }
-                    ProbeMode::Full | ProbeMode::ModelWorkflow { .. } | ProbeMode::Rendering(_) => {
-                        return Err("model_mode_state")
-                    }
+                    ProbeMode::Full
+                    | ProbeMode::ModelWorkflow { .. }
+                    | ProbeMode::Rendering(_)
+                    | ProbeMode::RenderingOpportunity { .. } => return Err("model_mode_state"),
                 }
             }
         }

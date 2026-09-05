@@ -105,6 +105,8 @@ const ENGINE_MACOS_SEMANTIC_PROBE: &str =
     "crates/zephium-engine/src/platform/macos/agentic_semantic_probe.rs";
 const ENGINE_MACOS_RENDERING_PROBE: &str =
     "crates/zephium-engine/src/platform/macos/agentic_rendering_probe.rs";
+const ENGINE_MACOS_RENDERING_OPPORTUNITY_PROBE: &str =
+    "crates/zephium-engine/src/platform/macos/agentic_rendering_opportunity_probe.rs";
 const ENGINE_WINDOWS_MODULE: &str = "crates/zephium-engine/src/platform/windows/mod.rs";
 const ENGINE_WINDOWS_AGENT_CONTEXT: &str =
     "crates/zephium-engine/src/platform/windows/agent_context.rs";
@@ -485,6 +487,11 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(ENGINE_MACOS_SEMANTIC_PROBE))?,
         &read(repository.join(ENGINE_MACOS_SEMANTIC_PROBE_BINARY))?,
         &read(repository.join(AGENTIC_FIXTURE_SERVER))?,
+    )?;
+    validate_macos_rendering_opportunity_probe(
+        &read(repository.join(ENGINE_MACOS_RENDERING_OPPORTUNITY_PROBE))?,
+        &read(repository.join(ENGINE_MACOS_SEMANTIC_PROBE))?,
+        &read(repository.join(ENGINE_MACOS_SEMANTIC_PROBE_BINARY))?,
     )?;
     let windows_module = read(repository.join(ENGINE_WINDOWS_MODULE))?;
     validate_engine_platform_module(&windows_module, "Windows")?;
@@ -2557,6 +2564,97 @@ fn validate_engine_platform_module(source: &str, platform: &str) -> Result<(), S
             return Err(format!(
                 "{platform} agentic probe module escaped or drifted from its feature gate"
             ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_macos_rendering_opportunity_probe(
+    source: &str,
+    parent: &str,
+    binary: &str,
+) -> Result<(), String> {
+    let source = compact(source);
+    for required in [
+        "constSNAPSHOT_OPPORTUNITY_TIMEOUT:Duration=Duration::from_secs(1);",
+        "original!=WKInactiveSchedulingPolicy::Throttle",
+        "scope.policy()?!=WKInactiveSchedulingPolicy::None",
+        "self.policy()?!=WKInactiveSchedulingPolicy::Throttle",
+        "implDropforSchedulingScope",
+        "scope.restore()?",
+        "snapshot.attest()?",
+        "NSSize::new(1.0,1.0)",
+        "setSnapshotWidth(Some(&NSNumber::new_f64(1.0)))",
+        "setAfterScreenUpdates(true)",
+        "Instant::now()>=deadline",
+        "operation.context()!=context",
+        "document_finished_for_audit(operation)",
+        "rendering::measure(view,context,operation,url,runtime)",
+        "runtime.native_guard.sample()",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "rendering opportunity lost closed contract {required}"
+            ));
+        }
+    }
+    if source.matches(".setInactiveSchedulingPolicy(").count() != 2
+        || source
+            .matches(".takeSnapshotWithConfiguration_completionHandler(")
+            .count()
+            != 1
+    {
+        return Err("rendering opportunity acquired extra native dispatch".into());
+    }
+    for forbidden in [
+        "setHidden",
+        "setVisible",
+        "setAlphaValue",
+        "orderFront",
+        "orderWindow",
+        "setIgnoresMouseEvents",
+        "evaluateJavaScript",
+        "evaluate_script",
+        "setValue_forKey",
+        "dispatch_semantic_action",
+        "setBackgroundThrottling",
+        "std::env",
+        "std::net",
+        "reqwest",
+        "Keychain",
+        "AgentBrowserSession",
+        "std::thread",
+        "png",
+        "CGImage",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "rendering opportunity acquired forbidden authority {forbidden}"
+            ));
+        }
+    }
+    let parent = compact(parent);
+    for required in [
+        "#[path=\"agentic_rendering_opportunity_probe.rs\"]modrendering_opportunity;",
+        "begin(ProbeMode::RenderingOpportunity{opportunity,report:&mutreport,})",
+        "iffinish(pending)?.is_some()",
+        "report.ok_or(\"rendering_opportunity_report_missing\")",
+        "rendering_opportunity::measure(&view,context,operation,&url,&runtime,*opportunity,)",
+    ] {
+        if !parent.contains(required) {
+            return Err(format!(
+                "rendering opportunity escaped original ownership {required}"
+            ));
+        }
+    }
+    let binary = compact(binary);
+    for required in [
+        "arguments.as_slice()==[\"--ci-hidden-rendering-unthrottled\"]",
+        "arguments.as_slice()==[\"--ci-hidden-rendering-snapshot\"]",
+        "run_macos_agentic_rendering_opportunity_probe(opportunity)",
+    ] {
+        if !binary.contains(required) {
+            return Err("rendering opportunity lost closed CLI".into());
         }
     }
     Ok(())
@@ -12584,6 +12682,69 @@ mod tests {
             "\"Win32_System_ProcessStatus\"",
             "\"Win32_System_Threading\""
         ))
+        .is_err());
+    }
+
+    #[test]
+    fn rendering_opportunity_rejects_policy_leaks_extra_dispatch_and_presentation_changes() {
+        let source = include_str!(
+            "../../crates/zephium-engine/src/platform/macos/agentic_rendering_opportunity_probe.rs"
+        );
+        let parent = include_str!(
+            "../../crates/zephium-engine/src/platform/macos/agentic_semantic_probe.rs"
+        );
+        let binary =
+            include_str!("../../crates/zephium-engine/src/bin/macos_agentic_semantic_probe.rs");
+        validate_macos_rendering_opportunity_probe(source, parent, binary).unwrap();
+        for required in [
+            "Duration::from_secs(1)",
+            "original != WKInactiveSchedulingPolicy::Throttle",
+            "scope.policy()? != WKInactiveSchedulingPolicy::None",
+            "self.policy()? != WKInactiveSchedulingPolicy::Throttle",
+            "scope.restore()?",
+            "snapshot.attest()?",
+            "NSSize::new(1.0, 1.0)",
+            "operation.context() != context",
+            "document_finished_for_audit(operation)",
+            "runtime.native_guard.sample()",
+        ] {
+            assert!(source.contains(required));
+            assert!(validate_macos_rendering_opportunity_probe(
+                &source.replace(required, "removed"),
+                parent,
+                binary
+            )
+            .is_err());
+        }
+        for forbidden in [
+            "page.setHidden(false)",
+            "window.orderFront(None)",
+            "preferences.setValue_forKey()",
+            "page.evaluateJavaScript()",
+            "reqwest::get(url)",
+            "std::env::var(\"KEY\")",
+            "CGImage",
+            "page.takeSnapshotWithConfiguration_completionHandler()",
+            "preferences.setInactiveSchedulingPolicy()",
+        ] {
+            assert!(validate_macos_rendering_opportunity_probe(
+                &format!("{source}\n{forbidden}"),
+                parent,
+                binary
+            )
+            .is_err());
+        }
+        assert!(validate_macos_rendering_opportunity_probe(
+            source,
+            &parent.replace("finish(pending)?", "Ok(None)?"),
+            binary
+        )
+        .is_err());
+        assert!(validate_macos_rendering_opportunity_probe(
+            source,
+            parent,
+            &binary.replace("--ci-hidden-rendering-snapshot", "--arbitrary-url")
+        )
         .is_err());
     }
 

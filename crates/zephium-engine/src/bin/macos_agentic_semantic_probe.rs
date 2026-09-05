@@ -9,6 +9,23 @@ fn main() {
 #[cfg(target_os = "macos")]
 fn main() {
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let opportunity = if arguments.as_slice() == ["--ci-hidden-rendering-unthrottled"] {
+        Some(zephium_engine::RenderingOpportunity::Unthrottled)
+    } else if arguments.as_slice() == ["--ci-hidden-rendering-snapshot"] {
+        Some(zephium_engine::RenderingOpportunity::NativeSnapshot)
+    } else {
+        None
+    };
+    if let Some(opportunity) = opportunity {
+        match zephium_engine::run_macos_agentic_rendering_opportunity_probe(opportunity) {
+            Ok(report) => eprintln!("macos-agentic-rendering-opportunity-probe: {report:?}; fixture=loopback-only; provider=absent; profile=ephemeral; presentation=hidden; original_scheduling=throttle; scheduling_restored=verified; original_native_teardown=verified"),
+            Err(stage) => {
+                eprintln!("macos-agentic-rendering-opportunity-probe: failed; stage={stage}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if arguments.as_slice() == ["--ci-hidden-rendering-readiness"] {
         match zephium_engine::run_macos_agentic_rendering_probe() {
             Ok(report) => eprintln!("macos-agentic-rendering-probe: {report:?}; fixture=loopback-only; provider=absent; profile=ephemeral; presentation=hidden; scheduling=throttle; original_native_teardown=verified"),

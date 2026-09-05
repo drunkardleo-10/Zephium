@@ -168,3 +168,52 @@ The next decision is a separately reviewed runtime-policy investigation of
 hidden-view rendering liveness with resource, privacy and lifecycle bounds.
 No production change or further public/provider attempt is authorized by
 this result alone.
+
+## Closed public-native opportunity comparison
+
+The follow-up remains release-excluded and provider-free. It evaluates two
+supported native APIs on the same exact production-owned hidden view and
+semantic adapter, without changing the production constructor or runtime:
+
+```sh
+target/debug/macos-agentic-semantic-probe --ci-hidden-rendering-unthrottled
+target/debug/macos-agentic-semantic-probe --ci-hidden-rendering-snapshot
+```
+
+Each command creates its own fresh ephemeral/loopback lifetime and commits the
+same fixed fixture. `unthrottled` checks the original public scheduling policy,
+temporarily sets `WKInactiveSchedulingPolicy::None`, checks the applied value,
+then runs the original at-most-eight/five-second measurement. Explicit checked
+restoration to `Throttle` occurs before any report, including measurement
+refusal; a scoped destructor also attempts restoration on early refusal or
+unwind. The original complete owned-view attestation and teardown must still
+pass. There is no shared policy guard or new production request capability.
+
+`snapshot` leaves `Throttle` unchanged and requests exactly one fixed 1×1
+logical-pixel native snapshot with `afterScreenUpdates=true` and output width
+one. It allows at most one second for the exact callback, refuses a missing,
+failed or duplicate terminal, and retains that terminal through measurement.
+It never dereferences, encodes, retains or exports the returned image. This is
+an excluded rendering experiment, not admission through the product screenshot
+policy or proof of screenshot provenance. It then runs the unchanged bounded
+semantic measurement. In both comparison reports, sample offsets start after
+opportunity acquisition; acquisition time is separately reported. No capture
+or model ceiling increases, navigation replay or page-content criterion changes.
+
+The public API comparison is deliberately separate from a production fix.
+[WebKit's preference implementation](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/API/Cocoa/WKPreferences.mm)
+maps scheduling policy to process assertions/throttling, while its
+[page visibility implementation](https://github.com/WebKit/WebKit/blob/main/Source/WebCore/page/Page.cpp)
+separately suspends and resumes scripted animations. This source supports
+testing rather than assuming that normal process scheduling supplies RAF.
+Neither API requests visibility, foreground focus or input activation. The
+existing native guard remains unchanged and is sampled throughout each run.
+No private SPI, arbitrary script, framework scheduler replacement, public
+network target, provider or keychain access is introduced.
+
+Deterministic tests guard missing/failed/duplicate snapshot callbacks and
+sticky refusal; source mutations guard restoration and attestation, the exact
+single dispatch and fixed size/deadline, original navigation/teardown joins,
+closed CLI and absence of presentation/script/provider authority. Native
+outcomes must be recorded against a pinned commit before selecting any
+production-policy correction.
