@@ -21,9 +21,10 @@ integer and flat text lists. Schema identity `1` is scoped to this run; the mode
 cannot register a schema or substitute an executable task. The existing approved
 objective describes the mapping requested by the user. It is not effect authority.
 
-The actor restricts the generic extraction task to one advertised tool: `extract` with the initial
-scope and exact schema identity. Native actions, navigation and observation
-expansion are not advertised or admitted by this task. After a fresh actual
+By default the actor restricts the generic extraction task to one advertised
+tool: `extract` with the initial scope and exact schema identity. Native actions
+and navigation are never admitted by this task; subtree capture requires the
+separate trusted opt-in described below. After a fresh actual
 native observation, the session validates the current frame cohort and consumes
 the exact provider tool continuation. The read uses `PublicOnly` sensitivity,
 at most 128 readable fragments and 32 KiB of read content, further restricted by
@@ -90,15 +91,48 @@ the same model-call budget; they cannot dispatch an action after readiness.
 The extraction proposal and mapping call consume the same bounded session, policy,
 transport, accounting and audit owners as the actions. The eight-call ceiling
 includes locate, actions, the extraction proposal and mapping; no budget resets
-at the phase boundary. Premature extraction, late actions, scope expansion and
+at the phase boundary. Premature extraction, late actions, unauthorized scope expansion and
 schema mismatch are typed refusals with no retry. Mapping is bound to the exact
 current observation, its frame cohort and refreshed capture timestamp, not the
 pre-action baseline. `accept_extraction` must then explicitly accept the validated
 result before the original closure/publication path can expose it.
 
 This enables a useful action-to-result workflow without a second controller,
-worker, result queue or native authority. It does not enable navigation, richer
-read scopes, another extraction round, mutation replay or model-authored tasks.
+worker, result queue or native authority. It does not enable navigation, another
+extraction round, mutation replay or model-authored tasks.
+
+## One fresh native subtree read
+
+`AgentWorkExtractionTask::with_subtree_extraction()` or the trusted task's
+`allows_subtree_extraction()` explicitly enables initial scope or one subtree
+capture. The flag is frozen alongside the schema and action mode. Both provider
+serializers advertise only initial/subtree extraction with schema 1 and canonical
+opaque refs; scoped read-only tasks also advertise locate, never act.
+
+The exact settled extraction continuation validates the selected ref against its
+committed predecessor observation and current frame cohort. Rust constructs the
+existing bounded native subtree request, then the same runtime/browser port
+captures it once. Native correlation, context/frame/origin, anchor, parent,
+observation and snapshot generations must all join. A result rooted at another
+private stable node key cannot be mapped. Callback refusal, stale capture,
+takeover or renderer loss cannot fall back to the initial read or retry.
+
+The native runtime traverses that anchored subtree, including rendered content
+omitted by initial viewport filtering, under the unchanged 128-node/16-KiB text
+budget. Read and schema encoding retain their existing bounds. The read guard
+binds the fresh source plus exact acknowledged predecessor and target. The sealed
+provider draft carries that target through policy admission: its original
+committed taint cohort must exist and match the account and origin; fresh source
+taint is keyed by the read guard. No full-observation acknowledgement is minted,
+and mapping cannot create another browser-tool continuation or action authority.
+
+Combined tasks must first satisfy their existing trusted action-readiness
+contract. The scoped result cites the additional capture, not the last action
+snapshot. `accept_extraction` still decides whether that evidence satisfies the
+product task. There is one mapping/result, no separate read worker, no larger
+budget, and no persistence/publication bypass. Table/frame/region expansion,
+multi-page collection and cross-document navigation remain unimplemented host
+adapters.
 
 ## Publication, cancellation and recovery
 
@@ -140,7 +174,8 @@ post-action native source. It adds no production scenario or special authority.
 
 The artifact vertical adds bounded typed private bodies and exact immutable
 publication on the same Store actor, separate from content-free journal/audit
-rows. User-facing task authoring, initial-scope expansion,
+rows. The scoped public qualifier adds targeted native read evidence described
+in M6; it does not qualify off-viewport discovery on public sites. User-facing task authoring,
 navigation, multi-page research and parallel runs remain separate authorities.
 Explicit sequential native lifetimes require the original predecessor's exact
 closure and a newly admitted run, not result references. Default Browse dependencies and scheduling are unchanged;

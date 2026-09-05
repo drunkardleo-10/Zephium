@@ -24,8 +24,12 @@ struct PublicPreparedResultTask {
     actions: Task,
     extraction: AgentWorkExtractionTask,
     ready: Option<SemanticObservationId>,
+    subtree: bool,
 }
 impl AgentWorkTask for PublicPreparedResultTask {
+    fn allows_subtree_extraction(&self) -> bool {
+        self.subtree
+    }
     fn allows_actions_before_extraction(&self) -> bool {
         true
     }
@@ -63,7 +67,12 @@ impl AgentWorkTask for PublicPreparedResultTask {
         &mut self,
         result: &SemanticExtractionResult<'_>,
     ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
-        if Some(result.observation()) != self.ready {
+        let wrong_observation = if self.subtree {
+            self.ready.is_none() || Some(result.observation()) == self.ready
+        } else {
+            Some(result.observation()) != self.ready
+        };
+        if wrong_observation {
             return Err(AgentWorkFailure::Contract);
         }
         let [field] = result.fields() else {
@@ -99,6 +108,7 @@ enum PublicWorkInput {
     Extraction,
     Artifact,
     ActionsAndExtraction,
+    ActionsAndScopedExtraction,
 }
 // The public test's completion contract runs before successful actor closure;
 // application delivery checks the owned result again independently afterward.
@@ -276,6 +286,19 @@ pub(super) fn combined_input(
     input_mode(started, PublicWorkInput::ActionsAndExtraction)
 }
 
+pub(super) fn scoped_input(
+    started: Instant,
+) -> Result<
+    (
+        zephium_core::ids::ProfileId,
+        AgentWorkRunInput,
+        Box<dyn AgentWorkTask>,
+    ),
+    super::ProbeFailure,
+> {
+    input_mode(started, PublicWorkInput::ActionsAndScopedExtraction)
+}
+
 fn input_mode(
     started: Instant,
     mode: PublicWorkInput,
@@ -293,7 +316,11 @@ fn input_mode(
         PublicWorkInput::Extraction | PublicWorkInput::Artifact
     );
     let durable = matches!(mode, PublicWorkInput::Artifact);
-    let combined = matches!(mode, PublicWorkInput::ActionsAndExtraction);
+    let subtree = matches!(mode, PublicWorkInput::ActionsAndScopedExtraction);
+    let combined = matches!(
+        mode,
+        PublicWorkInput::ActionsAndExtraction | PublicWorkInput::ActionsAndScopedExtraction
+    );
     let profile = if durable {
         zephium_core::ids::ProfileId::generate()
     } else {
@@ -347,7 +374,9 @@ fn input_mode(
     )
     .map_err(|_| Error::Authority)?;
     let objective = "Prepare a public Wikipedia search without submitting or navigating. Fill the search with exactly Zephium browser and choose Deutsch in the search language selector, in either order. Once both are verified, refine the search text to exactly Zephium open source browser. Use one local_write act action per turn. Locate option references when needed. For each action use mutation_quiet=100 ms, settle_budget=2000 ms, and exact value or exact selected-option verification. Do not click links or submit. The host checks the exact milestones and stops when the final prepared search is verified.";
-    let objective = if combined {
+    let objective = if subtree {
+        "Prepare a public Wikipedia search without submitting or navigating. Fill the search with exactly Zephium browser and choose Deutsch in the search language selector, in either order. Once both are verified, refine the search text to exactly Zephium open source browser. Use one local_write act action per turn; locate option references when needed. Each action must use mutation_quiet=100 ms, settle_budget=2000 ms, and exact value or exact selected-option verification. Do not click links or submit. After all three milestones are verified, call extract with subtree scope targeting the current search text field's opaque ref and trusted schema 1. The host will freshly read only that subtree. Return prepared_query as the complete exact current search field value with its exact value-preview citation. Do not use initial extraction scope, extract early or perform further actions after the final query is verified."
+    } else if combined {
         "Prepare a public Wikipedia search without submitting or navigating. Fill the search with exactly Zephium browser and choose Deutsch in the search language selector, in either order. Once both are verified, refine the search text to exactly Zephium open source browser. Use one local_write act action per turn; locate option references when needed. Each action must use mutation_quiet=100 ms, settle_budget=2000 ms, and exact value or exact selected-option verification. Do not click links or submit. After all three milestones are verified, call extract with initial scope and trusted schema 1. Return prepared_query as the complete exact current search field value with its exact value-preview citation. Do not extract early or perform further actions after the final query is verified."
     } else if extraction {
         "Extract an inventory of the ten prominent Wikipedia language-edition links. Use the trusted schema 1, initial scope. Return language_links as ten complete, exact accessible link names copied from the delivered evidence, including article-count text where it is part of a name. Do not paraphrase, translate, truncate or invent link names. Cite the exact source fragment for each item. Do not navigate or modify anything."
@@ -396,6 +425,7 @@ fn input_mode(
             )
             .map_err(|_| Error::Authority)?,
             ready: None,
+            subtree,
         })
     } else if extraction {
         Box::new(PublicExtractionTask(

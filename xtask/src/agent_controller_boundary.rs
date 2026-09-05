@@ -11,6 +11,9 @@ const PROBE: &str = "crates/zephium-agent-controller/src/probe.rs";
 const TERRA: &str = "crates/zephium-agent-controller/src/terra.rs";
 const ACTION: &str = "crates/zephium-agent-controller/src/action.rs";
 const WORK: &str = "crates/zephium-agent-controller/src/work.rs";
+const READ: &str = "crates/zephium-agentic/src/semantic_read.rs";
+const CONTINUATION: &str = "crates/zephium-agentic/src/agent_provider/continuation.rs";
+const POLICY: &str = "crates/zephium-agentic/src/agent_policy.rs";
 const QUALIFIER: &str = "crates/zephium-terra-macos-probe/src/main.rs";
 const WORK_QUALIFIER: &str = "crates/zephium-terra-macos-probe/src/work_actor.rs";
 const ALLOWED_DEPENDENCIES: [&str; 6] = [
@@ -51,6 +54,11 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_terra(&terra)?;
     validate_action(&action)?;
     validate_work(&read(repository.join(WORK))?)?;
+    validate_scoped_extraction(
+        &read(repository.join(READ))?,
+        &read(repository.join(CONTINUATION))?,
+        &read(repository.join(POLICY))?,
+    )?;
     validate_workflow_qualifier(&read(repository.join(QUALIFIER))?)?;
     validate_work_actor_qualifier(&read(repository.join(WORK_QUALIFIER))?)?;
     validate_inventory(&repository.join("crates/zephium-agent-controller"))?;
@@ -61,6 +69,49 @@ fn read(path: impl AsRef<Path>) -> Result<String, String> {
     let path = path.as_ref();
     std::fs::read_to_string(path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))
+}
+
+fn validate_scoped_extraction(read: &str, continuation: &str, policy: &str) -> Result<(), String> {
+    for (source, required) in [
+        (
+            read,
+            &[
+                "struct SemanticReadSubtreeProof",
+                "predecessor: SemanticObservationAcknowledgement",
+                "if &exact != request",
+                "frame.generation() <= anchor.snapshot_generation()",
+                "root.key() != anchor.capability().node_key()",
+                "ZEPHIUM-SEMANTIC-SUBTREE-READ-GUARD-1",
+            ][..],
+        ),
+        (
+            continuation,
+            &[
+                "pub fn begin_extraction_subtree(",
+                "read.matches_subtree(&self.baseline, *target)",
+                "subtree_target: Option<crate::SemanticReferenceId>",
+                "self.correlation.extraction_schema != Some(schema.id())",
+            ][..],
+        ),
+        (
+            policy,
+            &[
+                "fn provider_subtree_read_taints(",
+                "!read.matches_subtree(baseline, target)",
+                "cohort.source_guard == baseline.guard()",
+                "cohort.contains_reference(target)",
+                "fragment.provenance().origin() != anchor.origin()",
+                "read_taints(read, account)",
+            ][..],
+        ),
+    ] {
+        for boundary in required {
+            if !source.contains(boundary) {
+                return Err(format!("scoped extraction lost proof boundary: {boundary}"));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_manifest(source: &str) -> Result<(), String> {
@@ -284,6 +335,7 @@ fn validate_inventory(crate_root: &Path) -> Result<(), String> {
             "work.rs".to_owned(),
             "work_tests.rs".to_owned(),
             "work_combined_tests.rs".to_owned(),
+            "work_scoped_tests.rs".to_owned(),
         ])
     {
         return Err("controller source inventory drifted".to_owned());
@@ -380,13 +432,21 @@ fn validate_work(source: &str) -> Result<(), String> {
         "let progress = self.task.evaluate(observation)?;",
         "self.task.extraction_schema() != self.extraction_schema.as_ref()",
         "self.task.allows_actions_before_extraction() != self.actions_before_extraction",
-        "(input.durable_result || actions_before_extraction) && extraction_schema.is_none()",
+        "(input.durable_result || actions_before_extraction || subtree_extraction)",
+        "&& extraction_schema.is_none()",
+        "self.task.allows_subtree_extraction() != self.subtree_extraction",
+        ".begin_extraction_subtree(",
+        "Self::capture_once(state, worker, browser, request, frame).await?",
+        "expanded.as_ref().map(|_| observation)",
+        "session.config.restrict_to_scoped_extraction()",
+        "session.config.restrict_to_actions_and_scoped_extraction()",
         "progress == AgentWorkTaskProgress::Complete && self.actions_before_extraction",
         "progress != AgentWorkTaskProgress::ReadyForExtraction",
         "progress == AgentWorkTaskProgress::ReadyForExtraction",
         "session.config.restrict_to_actions_and_extraction()",
         "captured_at = SemanticCaptureInstant::from_millis(now.millis());",
-        "session.extract(turn, observation, &frames, captured_at, schema)",
+        "session.extract_from(",
+        "if session.turns >= super::MAX_BROWSER_MODEL_TURNS",
         "state.task.accept_extraction(&result)? != AgentWorkTaskProgress::Complete",
         "state.native.revoke(browser)",
         ".begin_action_settlement(",
@@ -467,6 +527,7 @@ fn validate_work_actor_qualifier(source: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use super::validate_scoped_extraction;
     use super::{
         validate_action, validate_manifest, validate_probe, validate_root, validate_terra,
         validate_work, validate_work_actor_qualifier, validate_workflow_qualifier,
@@ -478,6 +539,10 @@ mod tests {
     const TERRA: &str = include_str!("../../crates/zephium-agent-controller/src/terra.rs");
     const ACTION: &str = include_str!("../../crates/zephium-agent-controller/src/action.rs");
     const WORK: &str = include_str!("../../crates/zephium-agent-controller/src/work.rs");
+    const READ: &str = include_str!("../../crates/zephium-agentic/src/semantic_read.rs");
+    const CONTINUATION: &str =
+        include_str!("../../crates/zephium-agentic/src/agent_provider/continuation.rs");
+    const POLICY: &str = include_str!("../../crates/zephium-agentic/src/agent_policy.rs");
     const QUALIFIER: &str = include_str!("../../crates/zephium-terra-macos-probe/src/main.rs");
     const WORK_QUALIFIER: &str =
         include_str!("../../crates/zephium-terra-macos-probe/src/work_actor.rs");
@@ -490,9 +555,50 @@ mod tests {
         validate_terra(TERRA).expect("controller Terra path");
         validate_action(ACTION).expect("controller native action path");
         validate_work(WORK).expect("production Work actor");
+        validate_scoped_extraction(READ, CONTINUATION, POLICY).expect("scoped extraction proof");
         validate_workflow_qualifier(QUALIFIER).expect("same-driver native qualification path");
         validate_work_actor_qualifier(WORK_QUALIFIER)
             .expect("actual actor/native/store qualification path");
+    }
+
+    #[test]
+    fn scoped_read_cannot_lose_anchor_delivery_or_fresh_read_taint_binding() {
+        for boundary in [
+            "if &exact != request",
+            "frame.generation() <= anchor.snapshot_generation()",
+            "root.key() != anchor.capability().node_key()",
+            "ZEPHIUM-SEMANTIC-SUBTREE-READ-GUARD-1",
+        ] {
+            assert!(validate_scoped_extraction(
+                &READ.replace(boundary, "removed_boundary"),
+                CONTINUATION,
+                POLICY
+            )
+            .is_err());
+        }
+        for boundary in [
+            "read.matches_subtree(&self.baseline, *target)",
+            "subtree_target: Option<crate::SemanticReferenceId>",
+        ] {
+            assert!(validate_scoped_extraction(
+                READ,
+                &CONTINUATION.replace(boundary, "removed_boundary"),
+                POLICY
+            )
+            .is_err());
+        }
+        for boundary in [
+            "!read.matches_subtree(baseline, target)",
+            "cohort.contains_reference(target)",
+            "fragment.provenance().origin() != anchor.origin()",
+        ] {
+            assert!(validate_scoped_extraction(
+                READ,
+                CONTINUATION,
+                &POLICY.replace(boundary, "removed_boundary")
+            )
+            .is_err());
+        }
     }
 
     #[test]
@@ -559,13 +665,21 @@ mod tests {
         for boundary in [
             "self.task.extraction_schema() != self.extraction_schema.as_ref()",
             "self.task.allows_actions_before_extraction() != self.actions_before_extraction",
-            "(input.durable_result || actions_before_extraction) && extraction_schema.is_none()",
+            "(input.durable_result || actions_before_extraction || subtree_extraction)",
+            "&& extraction_schema.is_none()",
+            "self.task.allows_subtree_extraction() != self.subtree_extraction",
+            ".begin_extraction_subtree(",
+            "Self::capture_once(state, worker, browser, request, frame).await?",
+            "expanded.as_ref().map(|_| observation)",
+            "session.config.restrict_to_scoped_extraction()",
+            "session.config.restrict_to_actions_and_scoped_extraction()",
             "progress == AgentWorkTaskProgress::Complete && self.actions_before_extraction",
             "progress != AgentWorkTaskProgress::ReadyForExtraction",
             "progress == AgentWorkTaskProgress::ReadyForExtraction",
             "session.config.restrict_to_actions_and_extraction()",
             "captured_at = SemanticCaptureInstant::from_millis(now.millis());",
-            "session.extract(turn, observation, &frames, captured_at, schema)",
+            "session.extract_from(",
+            "if session.turns >= super::MAX_BROWSER_MODEL_TURNS",
             "state.task.accept_extraction(&result)? != AgentWorkTaskProgress::Complete",
         ] {
             assert!(validate_work(&WORK.replace(boundary, "removed_boundary")).is_err());

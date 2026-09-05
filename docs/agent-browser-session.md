@@ -90,6 +90,14 @@ No extra action allocation, worker or native port is introduced. The frozen
 locate/act/extract profile is continuation-bound; both action and result phases
 share all existing ceilings. Read-only schema tasks remain read-only by default.
 
+Trusted tasks may separately opt into one native subtree read for extraction.
+`extract` then accepts initial scope or an opaque ref from the exact acknowledged
+observation; read-only scoped tasks also permit bounded locate. The actor binds
+the terminal tool call to one fresh native expansion, and mapping binds both its
+predecessor acknowledgement and selected target. Expanded content acquires only
+read taint and historical citations, never a fabricated full-observation
+acknowledgement or another action continuation. See [scoped results](agent-work-results.md#one-fresh-native-subtree-read).
+
 - Snapshot-verifiable actions only. Navigation, dialog and scroll evidence
   require distinct host adapters and are explicitly refused.
 - Immediate and mutation-quiet waits only. State/navigation/dialog/scroll waits
@@ -101,8 +109,9 @@ share all existing ceilings. Read-only schema tasks remain read-only by default.
 - Model selection is centralized in the trusted catalog: the supplied transport
   adapters are currently GPT-5.6 Terra and Luna. Both use the same semantic
   loop. Local/other hosted adapters and the Work UI wiring remain outstanding.
-- Action sessions advertise only locate and act; read-only result tasks advertise
-  extract, and explicitly combined tasks advertise their closed union. These
+- Action sessions advertise only locate and act; initial-only result tasks
+  advertise extract, scoped result tasks add locate, and combined tasks advertise
+  their closed union. These
   profiles apply equally to every OpenAI/Anthropic request serializer.
   Capability restriction is part of continuation config
   equality. Advertising support does not replace Rust tool/action validation.

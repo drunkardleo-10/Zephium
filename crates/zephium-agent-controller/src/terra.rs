@@ -2239,6 +2239,19 @@ impl AgentBrowserSession {
         captured_at: zephium_agentic::SemanticCaptureInstant,
         schema: &zephium_agentic::SemanticExtractionSchema,
     ) -> Result<zephium_agentic::SemanticExtractionResult<'a>, AgentBrowserProviderError> {
+        self.extract_from(turn, observation, None, frames, captured_at, schema)
+            .await
+    }
+
+    async fn extract_from<'a>(
+        &mut self,
+        turn: AgentBrowserProviderTurn,
+        observation: &'a zephium_agentic::SemanticObservation,
+        previous: Option<&zephium_agentic::SemanticObservation>,
+        frames: &[zephium_agentic::SemanticFrameJoin],
+        captured_at: zephium_agentic::SemanticCaptureInstant,
+        schema: &zephium_agentic::SemanticExtractionSchema,
+    ) -> Result<zephium_agentic::SemanticExtractionResult<'a>, AgentBrowserProviderError> {
         use zephium_agentic::*;
         self.check_live()?;
         if self.turns >= MAX_BROWSER_MODEL_TURNS {
@@ -2254,8 +2267,24 @@ impl AgentBrowserSession {
             return Err(AgentBrowserProviderError::Authority);
         }
         let (proposal, continuation) = turn.into_tool_turn().into_parts();
-        if !matches!(proposal, AgentBrowserToolProposal::Extract { scope: AgentBrowserScopeProposal::Initial, schema: id } if id == schema.id())
-        {
+        let permitted = match (&proposal, previous) {
+            (
+                AgentBrowserToolProposal::Extract {
+                    scope: AgentBrowserScopeProposal::Initial,
+                    schema: id,
+                },
+                None,
+            ) => *id == schema.id(),
+            (
+                AgentBrowserToolProposal::Extract {
+                    scope: AgentBrowserScopeProposal::Subtree(_),
+                    schema: id,
+                },
+                Some(_),
+            ) => *id == schema.id(),
+            _ => false,
+        };
+        if !permitted {
             return Err(AgentBrowserProviderError::UnsupportedTool(proposal.kind()));
         }
         if let Some(journal) = &self.journal {
@@ -2267,12 +2296,18 @@ impl AgentBrowserSession {
         }
         let read = read_semantic_observation(
             observation,
-            SemanticReadAuthority::Initial,
+            match previous {
+                Some(previous) => SemanticReadAuthority::AcknowledgedExpansion {
+                    previous,
+                    acknowledgement: continuation.baseline(),
+                },
+                None => SemanticReadAuthority::Initial,
+            },
             captured_at,
             SemanticReadSensitivityLimit::PublicOnly,
             SemanticReadBudget::STANDARD,
         )
-        .map_err(|_| AgentBrowserProviderError::Authority)?;
+        .map_err(AgentBrowserProviderError::Read)?;
         let payload = encode_semantic_extraction_request(
             schema,
             &read,
@@ -3226,6 +3261,9 @@ impl fmt::Debug for AgentBrowserProviderTurn {
 /// Closed content-free session refusal. No variant authorizes a blind retry.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum AgentBrowserProviderError {
+    /// Fresh bounded read did not join its exact source authority.
+    #[error("browser semantic read authority was refused")]
+    Read(zephium_agentic::SemanticReadError),
     /// Purpose-bound output or its exact delivered sources were refused.
     #[error("browser extraction output was refused")]
     Extraction(zephium_agentic::AgentProviderExtractionOutputError),

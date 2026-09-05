@@ -56,6 +56,10 @@ pub(super) fn run_combined() -> Result<(), super::ProbeFailure> {
     run_mode(Qualification::ActionsAndExtraction)
 }
 
+pub(super) fn run_scoped() -> Result<(), super::ProbeFailure> {
+    run_mode(Qualification::ActionsAndScopedExtraction)
+}
+
 #[derive(Clone, Copy)]
 enum Qualification {
     Actions,
@@ -64,6 +68,7 @@ enum Qualification {
     CancelExtraction,
     Sequential,
     ActionsAndExtraction,
+    ActionsAndScopedExtraction,
 }
 
 fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
@@ -71,13 +76,19 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
     let extraction = !matches!(mode, Qualification::Actions);
     let durable = matches!(mode, Qualification::Artifact);
     let sequential = matches!(mode, Qualification::Sequential);
-    let combined = matches!(mode, Qualification::ActionsAndExtraction);
+    let scoped = matches!(mode, Qualification::ActionsAndScopedExtraction);
+    let combined = matches!(
+        mode,
+        Qualification::ActionsAndExtraction | Qualification::ActionsAndScopedExtraction
+    );
     let cancel_after_turn = matches!(
         mode,
         Qualification::CancelExtraction | Qualification::Sequential
     );
     let started = Instant::now();
-    let (profile, input, task) = if combined {
+    let (profile, input, task) = if scoped {
+        super::work_actor::scoped_input(started)?
+    } else if combined {
         super::work_actor::combined_input(started)?
     } else if durable {
         super::work_actor::artifact_input(started)?

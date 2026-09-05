@@ -40,6 +40,12 @@ pub enum AgentWorkTaskProgress {
 /// page instructions, or a model-authored predicate. The UI does not receive
 /// this port; it receives only the content-free handle below.
 pub trait AgentWorkTask: Send {
+    /// Explicitly permits one terminal native subtree read anchored to the
+    /// exact model-acknowledged observation. Frozen at admission; default is
+    /// initial-scope only. This grants no action or navigation authority.
+    fn allows_subtree_extraction(&self) -> bool {
+        false
+    }
     /// Explicitly enables verified snapshot actions before extraction. Default
     /// schema tasks remain read-only. This setting and the schema are frozen at
     /// admission; it grants no effect permission beyond the original policy.
@@ -320,11 +326,13 @@ impl AgentWorkSuccess {
     }
 }
 
-/// Trusted public-data extraction task over one initial observation. The
-/// product supplies the schema before admission; no native action is allowed.
+/// Trusted public-data extraction task, initially limited to the initial read.
+/// The product may opt into one acknowledged-ref subtree capture. The schema
+/// is frozen before admission; no native action is allowed.
 pub struct AgentWorkExtractionTask {
     schema: SemanticExtractionSchema,
     account: AgentAccountScope,
+    subtree: bool,
 }
 impl AgentWorkExtractionTask {
     /// Registers one run-local schema and explicitly trusted account scope.
@@ -335,10 +343,24 @@ impl AgentWorkExtractionTask {
         let id = SemanticExtractionSchemaId::new(1).ok_or(AgentWorkFailure::Contract)?;
         let schema = SemanticExtractionSchema::try_new(id, fields)
             .map_err(|_| AgentWorkFailure::Contract)?;
-        Ok(Self { schema, account })
+        Ok(Self {
+            schema,
+            account,
+            subtree: false,
+        })
+    }
+
+    /// Allows initial scope or one exact acknowledged-ref native subtree read.
+    /// Field, sensitivity, read and provider ceilings remain unchanged.
+    pub fn with_subtree_extraction(mut self) -> Self {
+        self.subtree = true;
+        self
     }
 }
 impl AgentWorkTask for AgentWorkExtractionTask {
+    fn allows_subtree_extraction(&self) -> bool {
+        self.subtree
+    }
     fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
         Some(&self.schema)
     }
@@ -576,7 +598,9 @@ impl AgentWorkController {
     ) -> Result<(Self, AgentWorkHandle), AgentWorkFailure> {
         let extraction_schema = task.extraction_schema().cloned();
         let actions_before_extraction = task.allows_actions_before_extraction();
-        if ((input.durable_result || actions_before_extraction) && extraction_schema.is_none())
+        let subtree_extraction = task.allows_subtree_extraction();
+        if ((input.durable_result || actions_before_extraction || subtree_extraction)
+            && extraction_schema.is_none())
             || task
                 .extraction_schema()
                 .is_some_and(|schema| schema.id().get() != 1)
@@ -613,6 +637,7 @@ impl AgentWorkController {
                     task,
                     extraction_schema,
                     actions_before_extraction,
+                    subtree_extraction,
                     extraction: None,
                     failure: None,
                     observation: None,
@@ -628,6 +653,7 @@ impl AgentWorkController {
 struct WorkState {
     extraction_schema: Option<SemanticExtractionSchema>,
     actions_before_extraction: bool,
+    subtree_extraction: bool,
     extraction: Option<SemanticOwnedExtractionResult>,
     input: Option<AgentWorkRunInput>,
     session: Option<AgentBrowserSession>,
@@ -664,6 +690,7 @@ impl WorkState {
     fn check_task_contract(&self) -> Result<(), AgentWorkFailure> {
         if self.task.extraction_schema() != self.extraction_schema.as_ref()
             || self.task.allows_actions_before_extraction() != self.actions_before_extraction
+            || self.task.allows_subtree_extraction() != self.subtree_extraction
         {
             return Err(AgentWorkFailure::Contract);
         }
@@ -1153,10 +1180,11 @@ impl AgentWorkController {
         .map_err(AgentWorkFailure::Browser)?;
         session.journal = state.journal.take();
         if state.extraction_schema.is_some() {
-            session.config = if state.actions_before_extraction {
-                session.config.restrict_to_actions_and_extraction()
-            } else {
-                session.config.restrict_to_extraction()
+            session.config = match (state.actions_before_extraction, state.subtree_extraction) {
+                (true, true) => session.config.restrict_to_actions_and_scoped_extraction(),
+                (false, true) => session.config.restrict_to_scoped_extraction(),
+                (true, false) => session.config.restrict_to_actions_and_extraction(),
+                (false, false) => session.config.restrict_to_extraction(),
             };
         }
         state.session = Some(session);
@@ -1214,6 +1242,34 @@ impl AgentWorkController {
         )
         .map_err(|_| AgentWorkFailure::Context)?;
         let next = state.native.id()?;
+        let request = SemanticObservationRequest::initial(
+            SemanticObservationId::new(next).ok_or(AgentWorkFailure::Contract)?,
+            context,
+            SemanticObservationBudget::INITIAL_FILTERED,
+        );
+        Self::capture_once(state, worker, browser, request, frame).await
+    }
+
+    async fn capture_once(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &AgentRuntimeBrowser,
+        request: SemanticObservationRequest,
+        frame: SemanticFrameJoin,
+    ) -> Result<SemanticObservation, AgentWorkFailure> {
+        let id = state.native.identity.id();
+        let context = state
+            .native
+            .contexts()?
+            .join(id)
+            .map_err(|_| AgentWorkFailure::Context)?;
+        if context != request.context()
+            || frame.context() != context
+            || frame.origin() != &state.native.origin
+        {
+            return Err(AgentWorkFailure::Context);
+        }
+        let next = state.native.id()?;
         let generation = state
             .native
             .snapshot_generation
@@ -1222,11 +1278,6 @@ impl AgentWorkController {
                 SemanticSnapshotGeneration::next,
             )
             .ok_or(AgentWorkFailure::Contract)?;
-        let request = SemanticObservationRequest::initial(
-            SemanticObservationId::new(next).ok_or(AgentWorkFailure::Contract)?,
-            context,
-            SemanticObservationBudget::INITIAL_FILTERED,
-        );
         let invocation = encode_semantic_runtime_invocation(
             &request,
             frame,
@@ -1314,7 +1365,10 @@ impl AgentWorkController {
             session.start_initial(&observation),
         )
         .await?;
-        if state.extraction_schema.is_some() && !state.actions_before_extraction {
+        if state.extraction_schema.is_some()
+            && !state.actions_before_extraction
+            && !state.subtree_extraction
+        {
             Self::extract_current(state, worker, browser, turn, &observation, captured_at).await?;
             state.observation = Some(observation);
             return Ok(());
@@ -1335,14 +1389,16 @@ impl AgentWorkController {
                     turn,
                     &observation,
                     &frames,
-                    state.actions_before_extraction,
+                    state.actions_before_extraction || state.subtree_extraction,
                     |_, _, _| {},
                 ),
             )
             .await?;
             let proposal = match step.turn.proposal().kind() {
                 AgentBrowserToolKind::Extract => {
-                    if progress != AgentWorkTaskProgress::ReadyForExtraction {
+                    if state.actions_before_extraction
+                        && progress != AgentWorkTaskProgress::ReadyForExtraction
+                    {
                         return Err(AgentWorkFailure::TaskPhase {
                             expected: progress,
                             proposed: AgentBrowserToolKind::Extract,
@@ -1354,6 +1410,9 @@ impl AgentWorkController {
                     return Ok(());
                 }
                 AgentBrowserToolKind::Act => {
+                    if state.extraction_schema.is_some() && !state.actions_before_extraction {
+                        return Err(AgentWorkFailure::Contract);
+                    }
                     if progress == AgentWorkTaskProgress::ReadyForExtraction {
                         return Err(AgentWorkFailure::TaskPhase {
                             expected: progress,
@@ -1480,7 +1539,76 @@ impl AgentWorkController {
         captured_at: SemanticCaptureInstant,
     ) -> Result<(), AgentWorkFailure> {
         state.check_task_contract()?;
-        let frames = observation
+        let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+        session.check_live().map_err(AgentWorkFailure::Browser)?;
+        if session.turns >= super::MAX_BROWSER_MODEL_TURNS {
+            // Do not capture data when no mapping call can be admitted.
+            return Err(AgentWorkFailure::Browser(
+                AgentBrowserProviderError::TurnLimit,
+            ));
+        }
+        let expanded = if matches!(
+            turn.turn.proposal(),
+            AgentBrowserToolProposal::Extract {
+                scope: AgentBrowserScopeProposal::Subtree(_),
+                ..
+            }
+        ) {
+            if !state.subtree_extraction {
+                return Err(AgentWorkFailure::Browser(
+                    AgentBrowserProviderError::UnsupportedTool(AgentBrowserToolKind::Extract),
+                ));
+            }
+            let frames = observation
+                .frames()
+                .iter()
+                .map(|frame| frame.frame().clone())
+                .collect::<Vec<_>>();
+            let schema = state
+                .extraction_schema
+                .as_ref()
+                .ok_or(AgentWorkFailure::Contract)?;
+            let next = state.native.id()?;
+            let request = turn
+                .turn
+                .continuation()
+                .begin_extraction_subtree(
+                    observation,
+                    &frames,
+                    SemanticObservationId::new(next).ok_or(AgentWorkFailure::Contract)?,
+                    schema,
+                    SemanticObservationBudget::INITIAL_FILTERED,
+                )
+                .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation))?;
+            let frame = request
+                .scope()
+                .anchor()
+                .ok_or(AgentWorkFailure::Contract)?
+                .frame()
+                .clone();
+            state.journal_mut()?.emit(AgentWorkEventKind::Observing)?;
+            // Exactly one requested capture, not an observation/mutation retry.
+            Some(Self::capture_once(state, worker, browser, request, frame).await?)
+        } else {
+            None
+        };
+        state.check_task_contract()?;
+        let (source, captured_at) = if let Some(expanded) = &expanded {
+            (
+                expanded,
+                SemanticCaptureInstant::from_millis(
+                    state
+                        .journal_mut()?
+                        .clock
+                        .now()
+                        .map_err(|_| AgentWorkFailure::Contract)?
+                        .millis(),
+                ),
+            )
+        } else {
+            (observation, captured_at)
+        };
+        let frames = source
             .frames()
             .iter()
             .map(|snapshot| snapshot.frame().clone())
@@ -1495,7 +1623,14 @@ impl AgentWorkController {
             worker,
             browser,
             session.cancellation.clone(),
-            session.extract(turn, observation, &frames, captured_at, schema),
+            session.extract_from(
+                turn,
+                source,
+                expanded.as_ref().map(|_| observation),
+                &frames,
+                captured_at,
+                schema,
+            ),
         )
         .await?;
         if state.task.accept_extraction(&result)? != AgentWorkTaskProgress::Complete {

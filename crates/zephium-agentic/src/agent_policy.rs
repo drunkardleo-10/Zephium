@@ -5689,7 +5689,13 @@ mod tests {
             .expect("continuation seed")
             .join_terminal_tool_for_test(completion, tool.into_continuation_parts_for_test().0)
             .expect("extract terminal join");
-        let current = actionable_observation(context, source, 2);
+        let current = self::observation(
+            context,
+            source,
+            2,
+            vec![json!({"k": 2, "r": "button", "n": "Save draft", "o": 9,
+                "b": {"x": 10, "y": 10, "w": 100, "h": 30}})],
+        );
         let expanded = if scoped {
             let request = observation
                 .begin_expansion(

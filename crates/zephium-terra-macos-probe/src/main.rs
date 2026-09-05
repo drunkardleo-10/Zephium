@@ -77,6 +77,9 @@ fn main() {
         [argument] if argument == "--live-public-luna-work-combined-inspectable" => {
             work_application::run_combined()
         }
+        [argument] if argument == "--live-public-luna-work-scoped-inspectable" => {
+            work_application::run_scoped()
+        }
         [argument, directory] if argument == "--cleanup-public-work-artifact" => {
             work_artifact_cleanup::recover(std::path::Path::new(directory))
         }
@@ -151,6 +154,7 @@ impl ProbeFailure {
         use zephium_agentic::{AgentProviderFailureClass, AgentProviderProtocolError};
 
         match self {
+            Self::Provider(TerraProbeProviderError::Read(_)) => "semantic_read_authority",
             Self::Provider(zephium_agent_controller::TerraProbeProviderError::Extraction(_)) => {
                 "extraction_output"
             }

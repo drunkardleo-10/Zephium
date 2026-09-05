@@ -725,6 +725,10 @@ fn validate_authority(
                 };
                 if frame.frame() != anchor.frame()
                     || frame.generation() <= anchor.snapshot_generation()
+                    || frame
+                        .nodes()
+                        .first()
+                        .is_none_or(|root| root.key() != anchor.capability().node_key())
                 {
                     return Err(SemanticReadError::ExpansionMismatch);
                 }
@@ -1388,9 +1392,8 @@ mod tests {
             2,
             "complete",
             json!([
-                {"k": 1, "r": "document", "o": 16},
-                {"k": 2, "p": 0, "r": "group", "n": "Public region"},
-                {"k": 3, "p": 1, "r": "paragraph", "t": "Expanded public text"}
+                {"k": 2, "r": "group", "n": "Public region"},
+                {"k": 3, "p": 0, "r": "paragraph", "t": "Expanded public text"}
             ]),
         );
         let expanded = SemanticObservationAssembler::new(expansion_request, expanded_snapshot)

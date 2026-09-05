@@ -12,12 +12,31 @@ static SERIAL: Mutex<()> = Mutex::new(());
 mod combined_tests;
 #[cfg(feature = "probe-harness")]
 use combined_tests::{CombinedFault, CombinedTask};
+#[cfg(feature = "probe-harness")]
+#[path = "work_scoped_tests.rs"]
+mod scoped_tests;
+#[cfg(feature = "probe-harness")]
+use scoped_tests::{ScopedFault, ScopedTask};
 const FIXTURE_POLICY_NOW_MILLIS: u64 = 2;
 
 #[test]
 fn missing_schema_cannot_admit_combined_mode_or_certify_result_readiness() {
-    struct MissingSchema(bool);
+    let extraction = AgentWorkExtractionTask::try_new(
+        vec![SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap()],
+        AgentAccountScope::Anonymous,
+    )
+    .unwrap();
+    assert!(!extraction.allows_subtree_extraction());
+    let schema = extraction.extraction_schema().cloned();
+    let extraction = extraction.with_subtree_extraction();
+    assert!(extraction.allows_subtree_extraction());
+    assert!(!extraction.allows_actions_before_extraction());
+    assert_eq!(extraction.extraction_schema(), schema.as_ref());
+    struct MissingSchema(bool, bool);
     impl AgentWorkTask for MissingSchema {
+        fn allows_subtree_extraction(&self) -> bool {
+            self.1
+        }
         fn allows_actions_before_extraction(&self) -> bool {
             self.0
         }
@@ -42,7 +61,7 @@ fn missing_schema_cannot_admit_combined_mode_or_certify_result_readiness() {
         }
     }
     let _serial = lock(&SERIAL);
-    for combined in [true, false] {
+    for (combined, subtree) in [(true, false), (false, true), (false, false)] {
         let admitted = AgentWorkController::try_new(
             input(),
             AgentProviderTransportConfig::STANDARD,
@@ -52,9 +71,9 @@ fn missing_schema_cannot_admit_combined_mode_or_certify_result_readiness() {
             )
             .unwrap(),
             Arc::new(Audit(Fault::None)),
-            Box::new(MissingSchema(combined)),
+            Box::new(MissingSchema(combined, subtree)),
         );
-        if combined {
+        if combined || subtree {
             assert!(matches!(admitted, Err(AgentWorkFailure::Contract)));
         } else {
             let (controller, handle) = admitted.unwrap();
@@ -255,6 +274,8 @@ fn input_with_effects(allowed: &[SemanticEffectClass]) -> AgentWorkRunInput {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Fault {
+    #[cfg(feature = "probe-harness")]
+    Scoped(ScopedFault),
     None,
     ConstructDispatch,
     ConstructCallback,
@@ -415,6 +436,10 @@ impl AgentBrowserPort for Port {
 
     fn invoke_semantic(&self, invocation: SemanticRuntimeInvocation) -> ContextDispatch {
         lock(&self.calls).push(3);
+        #[cfg(feature = "probe-harness")]
+        if let Fault::Scoped(fault) = self.fault {
+            return scoped_tests::capture(self, invocation, fault);
+        }
         let correlation = invocation.correlation();
         assert_eq!(
             correlation.snapshot_generation().get(),
@@ -568,7 +593,9 @@ impl AgentBrowserPort for Port {
         match self.fault {
             Fault::ActionDispatch => return ContextDispatch::Unsupported,
             Fault::ActionCallback => {}
-            Fault::ActionVerification | Fault::ActionApplied => {
+            Fault::ActionVerification
+            | Fault::ActionApplied
+            | Fault::Scoped(ScopedFault::Combined) => {
                 let now = request.requested_at();
                 let geometry = request.expected_geometry();
                 completion(request.complete(
@@ -697,7 +724,11 @@ fn drive_with_control(
                 .take_outcome()
                 .expect("controller stopped without recovery ownership");
         }
-        assert!(Instant::now() < wait_deadline, "actor fixture deadline");
+        assert!(
+            Instant::now() < wait_deadline,
+            "actor fixture deadline: {fault:?}, calls={:?}",
+            lock(&port.calls)
+        );
         std::thread::sleep(Duration::from_millis(2));
     };
     let shutdown = requested_shutdown.unwrap_or_else(|| {
@@ -753,6 +784,7 @@ fn variable_provider_turns_use_real_worker_io_and_stop_at_the_exact_ceiling() {
 #[cfg(feature = "probe-harness")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProviderFault {
+    Scoped(ScopedFault),
     Combined(CombinedFault),
     Ceiling,
     CountRefused,
@@ -863,6 +895,7 @@ fn provider_fixture(fault: ProviderFault) {
     let control = Arc::new(Mutex::new(None::<AgentRuntimeHandle>));
     let server_control = control.clone();
     let requests = match fault {
+        ProviderFault::Scoped(fault) => fault.requests(),
         ProviderFault::Combined(
             CombinedFault::Premature
             | CombinedFault::SchemaMutation
@@ -932,10 +965,12 @@ fn provider_fixture(fault: ProviderFault) {
                 request.extend_from_slice(&bytes[..count]);
             }
             let is_count = request.starts_with(b"POST /v1/responses/input_tokens ");
-            let cancelled = (turns == 2
-                && ((is_count && fault == ProviderFault::Combined(CombinedFault::CancelMapCount))
-                    || (!is_count
-                        && fault == ProviderFault::Combined(CombinedFault::CancelMapStream))))
+            let cancelled = matches!(fault, ProviderFault::Scoped(fault) if fault.cancelled(turns, is_count))
+                || (turns == 2
+                    && ((is_count
+                        && fault == ProviderFault::Combined(CombinedFault::CancelMapCount))
+                        || (!is_count
+                            && fault == ProviderFault::Combined(CombinedFault::CancelMapStream))))
                 || (is_count && fault == ProviderFault::CancelCount)
                 || (!is_count && fault == ProviderFault::CancelStream)
                 || (turns == 1
@@ -963,7 +998,9 @@ fn provider_fixture(fault: ProviderFault) {
                 turns += 1;
                 (
                     "text/event-stream",
-                    if let ProviderFault::Combined(fault) = fault {
+                    if let ProviderFault::Scoped(fault) = fault {
+                        fault.stream(turns)
+                    } else if let ProviderFault::Combined(fault) = fault {
                         if fault == CombinedFault::Ceiling && turns < 7 {
                             tool_stream(turns, false)
                         } else if fault == CombinedFault::Ceiling && turns == 7 {
@@ -1049,7 +1086,9 @@ fn provider_fixture(fault: ProviderFault) {
     } else {
         input()
     };
-    let task: Box<dyn AgentWorkTask> = if let ProviderFault::Combined(fault) = fault {
+    let task: Box<dyn AgentWorkTask> = if let ProviderFault::Scoped(fault) = fault {
+        Box::new(ScopedTask::new(fault))
+    } else if let ProviderFault::Combined(fault) = fault {
         Box::new(CombinedTask {
             extraction: AgentWorkExtractionTask::try_new(
                 vec![SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap()],
@@ -1074,6 +1113,7 @@ fn provider_fixture(fault: ProviderFault) {
         fault,
         ProviderFault::Extraction(ExtractionFault::AuditLost)
             | ProviderFault::Combined(CombinedFault::AuditLost)
+            | ProviderFault::Scoped(ScopedFault::AuditLost)
     ) {
         Fault::AuditLost
     } else {
@@ -1096,7 +1136,9 @@ fn provider_fixture(fault: ProviderFault) {
         state.input.as_mut().unwrap().settings.deadline = deadline;
         state.native.deadline = deadline;
     }
-    let native_fault = if fault == ProviderFault::Combined(CombinedFault::ActionLost) {
+    let native_fault = if let ProviderFault::Scoped(fault) = fault {
+        Fault::Scoped(fault)
+    } else if fault == ProviderFault::Combined(CombinedFault::ActionLost) {
         Fault::ActionLost
     } else if matches!(fault, ProviderFault::Combined(_)) {
         Fault::ActionApplied
@@ -1107,6 +1149,11 @@ fn provider_fixture(fault: ProviderFault) {
     };
     let (outcome, shutdown, calls, events) =
         drive_with_control(controller, handle, native_fault, control);
+    if let ProviderFault::Scoped(fault) = fault {
+        assert_eq!(server.join().expect("scoped fixture server"), requests / 2);
+        scoped_tests::assert_outcome(fault, outcome, shutdown, &calls, &events);
+        return;
+    }
     if let ProviderFault::Combined(fault) = fault {
         assert_eq!(
             server.join().expect("combined fixture server"),

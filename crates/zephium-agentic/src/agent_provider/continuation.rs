@@ -1875,11 +1875,33 @@ mod tests {
                 )
                 .unwrap();
             let current = observation(context, 2, 2, 2, "synthetic newly captured content");
-            let expanded =
+            let widened =
                 SemanticObservationAssembler::new(request.clone(), current.frames()[0].clone())
                     .unwrap()
                     .finish()
                     .unwrap();
+            assert_eq!(
+                read_semantic_observation(
+                    &widened,
+                    SemanticReadAuthority::AcknowledgedExpansion {
+                        previous: &observed,
+                        acknowledgement: &acknowledgement
+                    },
+                    SemanticCaptureInstant::from_millis(1_551),
+                    SemanticReadSensitivityLimit::PublicOnly,
+                    SemanticReadBudget::STANDARD,
+                )
+                .unwrap_err(),
+                crate::SemanticReadError::ExpansionMismatch
+            );
+            let scoped_snapshot = decode_semantic_snapshot(
+                SemanticDecodeContext::new(SemanticInvocationId::new(2).unwrap(), frames[0].clone(), SemanticSnapshotGeneration::new(2).unwrap()),
+                br#"{"v":1,"i":2,"g":2,"c":"complete","n":[{"k":2,"r":"status","n":"synthetic newly captured content"}]}"#,
+            ).unwrap();
+            let expanded = SemanticObservationAssembler::new(request.clone(), scoped_snapshot)
+                .unwrap()
+                .finish()
+                .unwrap();
             let read = read_semantic_observation(
                 &expanded,
                 SemanticReadAuthority::AcknowledgedExpansion {
