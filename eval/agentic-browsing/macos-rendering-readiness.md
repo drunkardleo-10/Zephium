@@ -399,3 +399,12 @@ The one geometry-refined attempt used clean
 window frame requested before presentation; it does not establish rounding,
 extent, or origin as the changed component. No RAF measurement exists.
 The later child-size and parent-window checks were not reached in that sample.
+
+The corrected geometry admission treats centering as a host request, not a
+native fact. After presentation it requires the actual window to retain the
+exact 1280×800 extent and lie completely within the selected screen's visible
+frame, then freezes that actual native frame for every subsequent sample.
+This accommodates native origin alignment without permitting a smaller,
+larger, clipped, off-screen or later-repositioned surface. Exact page size and
+parent-window identity remain independently checked. Deterministic cases cover
+native alignment, all four screen edges, size changes and non-finite geometry.

@@ -229,6 +229,31 @@ fn centered_frame(visible: NSRect) -> Result<NSRect, &'static str> {
     Ok(frame)
 }
 
+fn admit_actual_frame(actual: NSRect, screen: NSRect) -> Result<NSRect, &'static str> {
+    centered_frame(screen)?;
+    if actual.size != NSSize::new(1280.0, 800.0) {
+        return Err("presented_window_extent_changed");
+    }
+    let max_x = screen.origin.x + screen.size.width;
+    let max_y = screen.origin.y + screen.size.height;
+    let right = actual.origin.x + actual.size.width;
+    let top = actual.origin.y + actual.size.height;
+    if !actual.origin.x.is_finite()
+        || !actual.origin.y.is_finite()
+        || !max_x.is_finite()
+        || !max_y.is_finite()
+        || !right.is_finite()
+        || !top.is_finite()
+        || actual.origin.x < screen.origin.x
+        || actual.origin.y < screen.origin.y
+        || right > max_x
+        || top > max_y
+    {
+        return Err("presented_window_outside_screen");
+    }
+    Ok(actual)
+}
+
 pub(super) fn measure(
     view: &AgentOwnedView,
     context: zephium_agentic::ContextJoin,
@@ -255,7 +280,8 @@ pub(super) fn measure(
     }
     let mtm = MainThreadMarker::new().ok_or("presented_main_thread")?;
     let screen = NSScreen::mainScreen(mtm).ok_or("presented_screen_unavailable")?;
-    let frame = centered_frame(screen.visibleFrame())?;
+    let visible_screen = screen.visibleFrame();
+    let frame = centered_frame(visible_screen)?;
     let started = Instant::now();
     let deadline = started
         .checked_add(PRESENTED_TIMEOUT)
@@ -280,12 +306,15 @@ pub(super) fn measure(
         // Publicly documented to preserve key and main windows even when this
         // application is inactive. This is real presentation, never disguised.
         scope.window.orderFrontRegardless();
+        // AppKit may choose a native screen-aligned origin. Admit only the
+        // exact fixed extent fully on this screen, then freeze the actual frame.
+        let presented_frame = admit_actual_frame(scope.window.frame(), visible_screen)?;
         let presented = ProbeNativeState::Presented(PresentedStateGuard {
             app: original.app,
             window: original.window,
             page: original.page,
             first_responder: original.first_responder,
-            expected_window_frame: frame,
+            expected_window_frame: presented_frame,
             deadline,
             require_visible_pixels: Cell::new(false),
             exact_page_responder_observed: Cell::new(false),
@@ -419,5 +448,37 @@ mod tests {
             assert!(centered_frame(NSRect::new(NSPoint::new(0.0, 0.0), size)).is_err());
         }
         assert!(centered_frame(NSRect::new(NSPoint::new(f64::NAN, 0.0), visible.size)).is_err());
+    }
+
+    #[test]
+    fn presented_actual_frame_allows_native_alignment_but_not_scaling_clipping_or_offscreen_position(
+    ) {
+        let screen = NSRect::new(NSPoint::new(-1440.0, 30.0), NSSize::new(1440.0, 901.0));
+        let centered = centered_frame(screen).unwrap();
+        let aligned = NSRect::new(NSPoint::new(-1360.0, 81.0), centered.size);
+        assert_eq!(admit_actual_frame(aligned, screen).unwrap(), aligned);
+        for size in [
+            NSSize::new(1279.0, 800.0),
+            NSSize::new(1280.0, 801.0),
+            NSSize::new(f64::NAN, 800.0),
+        ] {
+            assert_eq!(
+                admit_actual_frame(NSRect::new(aligned.origin, size), screen),
+                Err("presented_window_extent_changed")
+            );
+        }
+        for origin in [
+            NSPoint::new(-1441.0, 30.0),
+            NSPoint::new(-1440.0, 29.0),
+            NSPoint::new(-1279.0, 30.0),
+            NSPoint::new(-1440.0, 132.0),
+            NSPoint::new(f64::NAN, 30.0),
+            NSPoint::new(-1440.0, f64::INFINITY),
+        ] {
+            assert_eq!(
+                admit_actual_frame(NSRect::new(origin, aligned.size), screen),
+                Err("presented_window_outside_screen")
+            );
+        }
     }
 }
