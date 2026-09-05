@@ -14,6 +14,7 @@ mod extension_lab;
 mod extension_release;
 mod extension_runtime_acquisition_boundary;
 mod extension_tree;
+mod foreground_rendering_boundary;
 mod macos_extension_compatibility;
 mod macos_process_family;
 mod webview2_extension_boundary;

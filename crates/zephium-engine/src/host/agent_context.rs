@@ -12,6 +12,10 @@
 //! this owner retains every native and profile obligation until exact close
 //! or process shutdown.
 
+#[cfg(all(target_os = "macos", feature = "native-agentic-foreground-probe"))]
+#[path = "agent_foreground_probe.rs"]
+mod foreground_probe;
+
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -148,11 +152,17 @@ struct AgentContextRetirement {
     navigation_clean: bool,
     content_policy_clean: bool,
     semantic_clean: bool,
+    #[cfg(feature = "native-agentic-foreground-probe")]
+    rendering_clean: bool,
 }
 
 #[cfg(target_os = "macos")]
 impl AgentContextRetirement {
     const fn is_clean(&self) -> bool {
+        #[cfg(feature = "native-agentic-foreground-probe")]
+        if !self.rendering_clean {
+            return false;
+        }
         self.navigation_clean && self.content_policy_clean && self.semantic_clean
     }
 }
@@ -215,6 +225,10 @@ pub(super) struct AgentOwnedContext {
     semantic_snapshot_generation: Option<SemanticSnapshotGeneration>,
     content_policy_registration: Option<crate::platform::imp::ContentPolicyRegistration>,
     event_emitter: crate::agent_context_port::AgentContextCallbackGuard,
+    #[cfg(feature = "native-agentic-foreground-probe")]
+    rendering_probe: Option<foreground_probe::AgentForegroundRendering>,
+    #[cfg(feature = "native-agentic-foreground-probe")]
+    rendering_probe_attempted: bool,
     view: crate::platform::imp::AgentOwnedView,
     native_resource: Option<NativeResourceLease>,
 }
@@ -247,6 +261,10 @@ impl AgentOwnedContext {
             semantic_snapshot_generation: None,
             content_policy_registration: Some(content_policy_registration),
             event_emitter,
+            #[cfg(feature = "native-agentic-foreground-probe")]
+            rendering_probe: None,
+            #[cfg(feature = "native-agentic-foreground-probe")]
+            rendering_probe_attempted: false,
             view,
             native_resource: Some(native_resource),
         }
@@ -379,6 +397,8 @@ impl AgentOwnedContext {
     }
 
     fn retire(mut self, pending_failure: ContextPortFailure) -> AgentContextRetirement {
+        #[cfg(feature = "native-agentic-foreground-probe")]
+        let rendering_clean = self.retire_foreground_probe();
         crate::platform::imp::stop_loading(self.view.view());
         let mut navigation_clean = true;
         if let Some(pending) = self.pending_navigation.take() {
@@ -415,6 +435,8 @@ impl AgentOwnedContext {
             navigation_clean,
             content_policy_clean,
             semantic_clean,
+            #[cfg(feature = "native-agentic-foreground-probe")]
+            rendering_clean,
         }
     }
 }
@@ -981,6 +1003,11 @@ impl EngineHost {
             task.refuse(ContextPortFailure::NativeRefused);
             return;
         };
+        #[cfg(all(target_os = "macos", feature = "native-agentic-foreground-probe"))]
+        if !self.foreground_probe_allows_lifecycle(&request) {
+            task.refuse(ContextPortFailure::Unsupported);
+            return;
+        }
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         match request {
             ContextNativeRequest::Construct(request) => {
@@ -1095,6 +1122,14 @@ impl EngineHost {
         let suspended_view_count = Some(0);
 
         let admission_counts = task.admission_counts();
+        #[cfg(all(target_os = "macos", feature = "native-agentic-foreground-probe"))]
+        let visible_surfaces = self
+            .agent_contexts
+            .values()
+            .filter(|binding| binding.foreground_probe_visible())
+            .count();
+        #[cfg(not(all(target_os = "macos", feature = "native-agentic-foreground-probe")))]
+        let visible_surfaces = 0usize;
         let queued_request_tasks = admission_counts
             .map(|(pending, _)| pending)
             .and_then(|pending| pending.checked_sub(1))
@@ -1194,7 +1229,9 @@ impl EngineHost {
                     resident_views: resident_view_count,
                     owned_reservations: binding_count,
                     borrowed_leases: 0,
-                    visible_surfaces: 0,
+                    visible_surfaces: u8::try_from(visible_surfaces)
+                        .map_err(|_| ContextPortFailure::NativeRefused)
+                        .unwrap_or(u8::MAX),
                     suspended_views: suspended_view_count,
                     pending_operations,
                     pending_captures,
@@ -1404,6 +1441,10 @@ impl EngineHost {
         };
         let failure = match self.agent_contexts.get(&id) {
             None => Some(SemanticRuntimePortFailure::Stale),
+            #[cfg(feature = "native-agentic-foreground-probe")]
+            Some(binding) if !binding.foreground_probe_semantic_ready(context) => {
+                Some(SemanticRuntimePortFailure::NotReady)
+            }
             Some(binding) if binding.join != context => Some(SemanticRuntimePortFailure::Stale),
             Some(binding) if binding.renderer_lost => {
                 Some(SemanticRuntimePortFailure::RendererLost)
@@ -1507,13 +1548,29 @@ impl EngineHost {
             task.refuse(ContextPortFailure::Stale);
             return;
         };
+        #[cfg(feature = "native-agentic-foreground-probe")]
+        if !binding.admit_foreground_probe_semantic(&invocation) {
+            task.refuse(ContextPortFailure::ResourceExhausted);
+            return;
+        }
         let result_navigation = binding.view.navigation().clone();
+        #[cfg(feature = "native-agentic-foreground-probe")]
+        let result_rendering = binding
+            .rendering_probe
+            .as_ref()
+            .map(|probe| probe.lease.clone());
         let dispatched = binding.view.dispatch_semantic(invocation, move |outcome| {
             drop(watchdog);
             let outcome = if result_navigation.location_stable_for_result() {
                 outcome
             } else {
                 Err(SemanticRuntimePortFailure::DocumentReplaced)
+            };
+            #[cfg(feature = "native-agentic-foreground-probe")]
+            let outcome = if foreground_probe::semantic_ready(result_rendering.as_ref(), context) {
+                outcome
+            } else {
+                Err(SemanticRuntimePortFailure::NotReady)
             };
             match SemanticRuntimeSettlement::try_new(callback_correlation, outcome) {
                 Ok(settlement) => task.complete(ContextNativeEvent::SemanticRuntimeSettled(
@@ -2578,6 +2635,14 @@ impl EngineHost {
             .filter(|matches| *matches)
             .ok_or(ContextPortFailure::Stale)
             .and_then(|_| {
+                #[cfg(feature = "native-agentic-foreground-probe")]
+                if !self
+                    .agent_contexts
+                    .get_mut(&id)
+                    .is_some_and(AgentOwnedContext::retire_foreground_probe)
+                {
+                    return Err(ContextPortFailure::ResourceExhausted);
+                }
                 let binding = self
                     .agent_contexts
                     .remove(&id)
@@ -2623,6 +2688,8 @@ impl EngineHost {
             if !rejoins {
                 return Err(ContextPortFailure::Stale);
             }
+            #[cfg(feature = "native-agentic-foreground-probe")]
+            let _ = binding.retire_foreground_probe();
             let location_sealed = binding.view.navigation().seal_location_observation();
             crate::platform::imp::stop_loading(binding.view.view());
             binding
@@ -2723,6 +2790,10 @@ impl EngineHost {
 
     #[cfg(target_os = "macos")]
     fn record_agent_context_retirement(&mut self, retirement: AgentContextRetirement) -> bool {
+        #[cfg(feature = "native-agentic-foreground-probe")]
+        if !retirement.rendering_clean {
+            self.fail_agent_context_invariant("agent-context rendering owner did not drain");
+        }
         if !retirement.content_policy_clean {
             self.fail_content_policy_retirement();
         } else if !retirement.semantic_clean {
@@ -2757,7 +2828,18 @@ impl EngineHost {
         let shell_was_quiescent = self.agent_contexts.is_empty();
         let contexts = std::mem::take(&mut self.agent_contexts);
         let mut native_clean = true;
-        for (_, binding) in contexts {
+        for (_id, binding) in contexts {
+            #[cfg(feature = "native-agentic-foreground-probe")]
+            let mut binding = binding;
+            #[cfg(feature = "native-agentic-foreground-probe")]
+            if !binding.retire_foreground_probe() {
+                // A forced shutdown never proves clean shell closure. Keep
+                // the exact undrained presentation/context capacity owned
+                // until process teardown rather than reporting a false zero.
+                self.agent_contexts.insert(_id, binding);
+                native_clean = false;
+                continue;
+            }
             let retirement = binding.retire(ContextPortFailure::Shutdown);
             native_clean &= self.record_agent_context_retirement(retirement);
         }

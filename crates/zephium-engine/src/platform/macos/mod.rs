@@ -1,9 +1,13 @@
 #[cfg(feature = "agentic-browser")]
 mod agent_context;
+#[cfg(feature = "native-agentic-foreground-probe")]
+mod agentic_foreground_probe;
 #[cfg(feature = "native-agentic-input-probe")]
 mod agentic_input_probe;
 #[cfg(feature = "native-agentic-semantic-probe")]
 mod agentic_semantic_probe;
+#[cfg(feature = "native-agentic-foreground-probe")]
+pub(crate) use agentic_foreground_probe::ForegroundRenderingLease;
 mod content_filter;
 mod credentials;
 #[cfg(feature = "agentic-browser")]

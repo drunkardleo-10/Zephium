@@ -975,6 +975,17 @@ pub type SemanticActionNativeCompletion =
 /// never project owned contexts into tab/session/extension inventories and
 /// must retain no queue, worker, timer, or page when no contexts exist.
 pub trait AgentBrowserPort: Send + Sync {
+    /// Release-excluded fixed native diagnostic, unsupported by default.
+    /// This is not a production rendering API or model-visible tool.
+    #[cfg(feature = "probe-harness")]
+    fn probe_foreground_rendering(
+        &self,
+        _request: crate::ForegroundRenderingProbeRequest,
+        _completion: crate::ForegroundRenderingProbeCompletion,
+    ) -> ContextDispatch {
+        ContextDispatch::Unsupported
+    }
+
     /// Attempts to admit one exact lifecycle request to the owning native executor.
     fn dispatch(&self, request: ContextNativeRequest) -> ContextDispatch;
 

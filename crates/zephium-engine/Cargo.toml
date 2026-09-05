@@ -64,6 +64,8 @@ native-agentic-semantic-probe = [
     "dep:windows-probe-sys",
     "zephium-agentic/probe-harness",
 ]
+# Actual desktop-lifecycle evidence only; never a product rendering capability.
+native-agentic-foreground-probe = ["native-agentic-semantic-probe"]
 # Compiles the production, zero-idle agent-browser native port. The feature is
 # intentionally separate from the release-excluded probe vocabulary.
 agentic-browser = ["dep:zephium-agentic", "dep:zeroize"]

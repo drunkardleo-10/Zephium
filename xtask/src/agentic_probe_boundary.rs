@@ -213,6 +213,7 @@ const ENGINE_SEMANTIC_PROBE_RELEASE_REFUSAL: &str = concat!(
 );
 
 pub(crate) fn check(repository: &Path) -> Result<(), String> {
+    crate::foreground_rendering_boundary::check(repository)?;
     crate::agentic_evidence::check(repository)?;
     validate_manifest(&read(repository.join(AGENTIC_MANIFEST))?)?;
     validate_probe_evidence_path(&read(repository.join(AGENTIC_PROBE_EVIDENCE_PATH))?)?;

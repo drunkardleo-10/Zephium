@@ -31,6 +31,12 @@ use zephium_agentic::{SemanticScreenshotNativeCapture, SemanticScreenshotNativeF
 
 use crate::MainThreadDispatch;
 
+#[cfg(all(target_os = "macos", feature = "native-agentic-foreground-probe"))]
+#[path = "agent_foreground_probe_port.rs"]
+mod foreground_probe;
+#[cfg(all(target_os = "macos", feature = "native-agentic-foreground-probe"))]
+pub(crate) use foreground_probe::AgentForegroundProbeTask;
+
 pub(crate) type AgentContextEventSink = Arc<dyn Fn(ContextNativeEvent) + Send + Sync>;
 
 /// Cloneable fail-stop authority retained by bounded native callbacks.
@@ -1420,6 +1426,15 @@ impl EngineAgentBrowserPort {
 }
 
 impl AgentBrowserPort for EngineAgentBrowserPort {
+    #[cfg(all(target_os = "macos", feature = "native-agentic-foreground-probe"))]
+    fn probe_foreground_rendering(
+        &self,
+        request: zephium_agentic::ForegroundRenderingProbeRequest,
+        completion: zephium_agentic::ForegroundRenderingProbeCompletion,
+    ) -> ContextDispatch {
+        self.schedule_foreground_probe(request, completion)
+    }
+
     fn dispatch(&self, request: ContextNativeRequest) -> ContextDispatch {
         if !supports_native_request(&request) {
             return ContextDispatch::Unsupported;

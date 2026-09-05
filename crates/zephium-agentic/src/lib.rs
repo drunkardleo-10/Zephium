@@ -55,6 +55,13 @@ mod evidence;
 #[cfg(feature = "probe-harness")]
 mod fixture_server;
 #[cfg(feature = "probe-harness")]
+mod foreground_rendering_probe;
+#[cfg(feature = "probe-harness")]
+pub use foreground_rendering_probe::{
+    ForegroundRenderingProbeCompletion, ForegroundRenderingProbeOperation,
+    ForegroundRenderingProbeRequest, ForegroundRenderingState,
+};
+#[cfg(feature = "probe-harness")]
 mod probe_evidence_path;
 #[cfg(feature = "probe-harness")]
 mod probe_qualification;
