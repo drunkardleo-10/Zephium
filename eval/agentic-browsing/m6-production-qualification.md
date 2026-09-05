@@ -2135,6 +2135,66 @@ policy-derived developer checkpoint while retaining exact authority, original
 budgets and full retirement of old page/provider replay. Its deterministic
 tests are implementation evidence only; no live retry is implied by that fix.
 
+## 2026-09-05 — trusted-progress three-document route witness (succeeded)
+
+After independent review of the trusted-progress correction and all gates,
+one separately cleared attempt used clean HEAD
+`a2349294d754dfe28b794744579d7c795e52260c` and the same exact command:
+`target/debug/macos-terra-agentic-probe --live-public-luna-work-site-inspectable react-route`.
+The exact UTC start time was not emitted locally and is unavailable in this
+record; no timestamp is inferred. The tree remained clean before and after.
+This is one successful attempt after an explicit fix/review boundary, not an
+automatic retry and not a repeatability or latency comparison.
+
+The host independently verified Quick Start (59 nodes), Your First Component
+plus its distinct departure predicate (64 nodes), and Importing and Exporting
+Components (72 nodes), all with `Complete` main-document snapshots. Luna
+proposed both exact ordered destinations and then initial-scope extraction.
+Each hop used the original typed navigation owner, exact no-redirect native
+terminal, fresh document observation and isolated anonymous account sample.
+Old refs and provider replay were retired. The new host-authored checkpoint
+supplied current route progress separately from the unchanged objective and
+untrusted page evidence; it never replaced policy or task validation.
+
+| Call / stage | Semantic bytes | Full request bytes | Input / output tokens | Charged micro-USD | Turn ms | Wall ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 / first exact navigation | 4,389 | 10,317 | 2,550 / 38 | 675 | 2,902 | 3,451 |
+| 2 / second exact navigation | 4,738 | 10,687 | 2,690 / 63 | 740 | 2,275 | 5,915 |
+| 3 / final-document extraction proposal | 5,676 | 11,599 | 2,955 / 65 | 810 | 2,632 | 8,671 |
+| 4 / exact current heading mapping | 887 | 12,290 | 2,861 / 90 | 824 | 2,590 | 11,263 |
+
+All calls reported `PricedCeiling`; totals were 4 Luna calls, 11,056 input
+tokens, 256 output tokens and 3,049 charged micro-USD. The application terminal
+at 11,282 ms was `Succeeded`, with `durable_success=true`,
+`cancelled_closed=false` and `shell_clean=true`. Exact original closure took
+11,445 ms; qualification/focus isolation/application-owned teardown reported
+11,446 ms. Tool counters were two navigation proposals, zero baseline reads,
+zero native actions and zero verified effects. The task returned one field,
+one value and one source edge with `independently_verified=true`: the exact
+final document heading equalled its one current Heading-text citation.
+`artifact_promised=false`; durable success means the original terminal journal
+committed, not publication of a reusable artifact.
+
+Pre-live deterministic proof and independent review covered 548 core tests
+plus 3 and 5 evidence-binary tests, 41 controller tests, 13 qualifier tests,
+strict core/controller/qualifier Clippy, both architecture gates, hostile
+immutable-runtime JavaScript smoke, 13 architecture mutation tests, the
+qualifier build, non-probe controller compilation, formatting and clean-tree
+checks. The trusted-progress tests include stale/forged/reordered receipt
+prefixes, old-context replay and old progress paired with a fresh successor
+account, secret-shaped target refusal, unchanged no-route encoding, exact
+request/count/transcript accounting and hostile page-authored progress.
+Repeated-hop proposals remain deterministic refusals even with that guidance.
+
+This proves one bounded public three-document read workflow on the current
+macOS/Luna path. It does not qualify general React SPA interaction, commercial
+transactions, dynamic destination discovery, cross-origin or redirects,
+authenticated sessions, multiple simultaneous contexts, cross-document
+synthesis, the six-site release matrix, endurance or visible Work readiness.
+The run used the existing explicitly public provider-retained qualifier;
+production/BYOK retention remains false. No raw page/provider bodies, secrets
+or private account data were added to this ledger.
+
 ## Remaining release blockers
 
 - authorized named-device macOS native-input routes beyond fixed DOM;
