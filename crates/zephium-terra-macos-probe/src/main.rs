@@ -170,6 +170,9 @@ impl ProbeFailure {
             Self::Keychain => "keychain",
             Self::Authority => "authority",
             Self::Provider(TerraProbeProviderError::Authority) => "provider_authority",
+            Self::Provider(TerraProbeProviderError::Account(_)) => {
+                "controller_account_reattestation"
+            }
             Self::Provider(TerraProbeProviderError::Cancelled) => "controller_cancelled",
             Self::Provider(TerraProbeProviderError::ActionPending) => "controller_action_pending",
             Self::Provider(TerraProbeProviderError::ActionLimit) => "controller_action_limit",

@@ -73,6 +73,10 @@ const MAX_DEFERRED_RUNTIME_EVENTS: usize =
     MAX_AGENT_RUNTIME_TERMINAL_CAPACITY + MAX_AGENT_RUNTIME_SIGNAL_CAPACITY;
 const MAX_BROWSER_MODEL_TURNS: u8 = 8;
 const MAX_BROWSER_ACTIONS: u64 = 8;
+// Initial sample plus one per bounded model/effect admission. Cache hits do
+// not consume a slot; a host cannot turn refresh into an unbounded side loop.
+const MAX_BROWSER_ACCOUNT_ATTESTATIONS: usize =
+    1 + MAX_BROWSER_MODEL_TURNS as usize + MAX_BROWSER_ACTIONS as usize;
 const LUNA_PROVIDER_EXACT_RESERVATION_COST_MICRO_USD: u64 = 77_830;
 
 const _: () = {
@@ -1921,6 +1925,7 @@ pub struct AgentBrowserSession {
     model: AgentBrowserModel,
     lease: AgentPlanLeaseBinding,
     account: AgentContextAccountBinding,
+    account_attestations: Vec<zephium_agentic::AgentAccountAttestationId>,
     next_call: u64,
     clock: Arc<dyn TerraControllerClock>,
     last_policy_at: AgentPolicyInstant,
@@ -1940,6 +1945,69 @@ pub struct AgentBrowserSession {
 }
 
 impl AgentBrowserSession {
+    /// Accepts a new independently sourced account sample at an idle boundary.
+    /// The caller must use its trusted account adapter, never update a previous
+    /// sample's timestamp. This grants no account/context switch, retry, renewed
+    /// deadline, observation or policy budget. A refusal permanently stops new
+    /// work while preserving every existing provider/native/accounting owner.
+    pub fn refresh_account(
+        &mut self,
+        account: AgentContextAccountBinding,
+    ) -> Result<(), AgentBrowserProviderError> {
+        self.check_live()?;
+        let result = self.validate_account_refresh(account);
+        if let Err(error) = result {
+            self.failure = Some(error);
+            return Err(error);
+        }
+        if account != self.account {
+            self.account_attestations.push(account.attestation());
+        }
+        self.account = account;
+        Ok(())
+    }
+
+    fn validate_account_refresh(
+        &mut self,
+        account: AgentContextAccountBinding,
+    ) -> Result<(), AgentBrowserProviderError> {
+        use zephium_agentic::MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS;
+        let refusal = AgentBrowserProviderError::Account;
+        if self.attempt.is_some()
+            || self.retained_terminal.is_some()
+            || self.action.is_some()
+            || self.policy.accounting().reserved_operations() != 0
+        {
+            return Err(refusal(AgentBrowserAccountError::Pending));
+        }
+        if account.context() != self.account.context() {
+            return Err(refusal(AgentBrowserAccountError::ContextChanged));
+        }
+        if account.account() != self.account.account() {
+            return Err(refusal(AgentBrowserAccountError::AccountChanged));
+        }
+        let now = self.policy_now()?;
+        if account.observed_at() > now || account.observed_at() < self.account.observed_at() {
+            return Err(refusal(AgentBrowserAccountError::Clock));
+        }
+        if now.millis() - account.observed_at().millis() > MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS
+        {
+            return Err(refusal(AgentBrowserAccountError::Stale));
+        }
+        if account.attestation() == self.account.attestation() && account != self.account {
+            return Err(refusal(AgentBrowserAccountError::Rewritten));
+        }
+        if account != self.account {
+            if self.account_attestations.contains(&account.attestation()) {
+                return Err(refusal(AgentBrowserAccountError::Replayed));
+            }
+            if self.account_attestations.len() >= MAX_BROWSER_ACCOUNT_ATTESTATIONS {
+                return Err(refusal(AgentBrowserAccountError::Limit));
+            }
+        }
+        Ok(())
+    }
+
     /// Starts one session and returns its first settled tool proposal.
     #[cfg(feature = "probe-harness")]
     pub async fn start(
@@ -2041,6 +2109,8 @@ impl AgentBrowserSession {
         let policy = AgentRunPolicy::try_new(manifest, vec![lease])
             .map_err(|_| AgentBrowserProviderError::Authority)?;
         let next_call = ids.model_call().get();
+        let mut account_attestations = Vec::with_capacity(MAX_BROWSER_ACCOUNT_ATTESTATIONS);
+        account_attestations.push(account.attestation());
         Ok(Self {
             policy,
             journal: None,
@@ -2056,6 +2126,7 @@ impl AgentBrowserSession {
             model,
             lease,
             account,
+            account_attestations,
             next_call,
             clock,
             last_policy_at: now,
@@ -2745,41 +2816,55 @@ impl AgentBrowserSession {
                 return Ok(turn);
             }
             let tool = turn.into_tool_turn();
-            if let Some(journal) = self.journal.as_ref() {
-                journal
-                    .emit(work::AgentWorkEventKind::ToolProposed(
-                        tool.proposal().kind(),
-                    ))
-                    .map_err(|_| AgentBrowserProviderError::Journal)?;
-            }
-            match tool.proposal().kind() {
-                zephium_agentic::AgentBrowserToolKind::Locate
-                | zephium_agentic::AgentBrowserToolKind::Read => {
-                    // Locate is observation-bound, and its ref inventory must
-                    // also remain current at the caller's registry boundary.
-                    if current_frames.len() != observation.frames().len()
-                        || observation
-                            .frames()
-                            .iter()
-                            .any(|frame| !current_frames.contains(frame.frame()))
-                    {
-                        return Err(AgentBrowserProviderError::Authority);
-                    }
-                    turn = if tool.proposal().kind() == zephium_agentic::AgentBrowserToolKind::Read
-                    {
-                        self.continue_after_read(
-                            tool,
-                            observation,
-                            captured_at.ok_or(AgentBrowserProviderError::Authority)?,
-                        )
-                        .await?
-                    } else {
-                        self.continue_after_locate(tool, observation, self.next_call)
-                            .await?
-                    };
+            turn = self
+                .continue_inspection(tool, observation, current_frames, captured_at)
+                .await?;
+        }
+    }
+
+    // Exactly one non-native inspection turn. Work owns the outer turn loop so
+    // it can resample trusted account authority before every provider admission.
+    async fn continue_inspection(
+        &mut self,
+        tool: AgentProviderSettledToolTurn,
+        observation: &zephium_agentic::SemanticObservation,
+        current_frames: &[zephium_agentic::SemanticFrameJoin],
+        captured_at: Option<zephium_agentic::SemanticCaptureInstant>,
+    ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
+        self.check_live()?;
+        if let Some(journal) = self.journal.as_ref() {
+            journal
+                .emit(work::AgentWorkEventKind::ToolProposed(
+                    tool.proposal().kind(),
+                ))
+                .map_err(|_| AgentBrowserProviderError::Journal)?;
+        }
+        match tool.proposal().kind() {
+            zephium_agentic::AgentBrowserToolKind::Locate
+            | zephium_agentic::AgentBrowserToolKind::Read => {
+                // Locate is observation-bound, and its ref inventory must
+                // also remain current at the caller's registry boundary.
+                if current_frames.len() != observation.frames().len()
+                    || observation
+                        .frames()
+                        .iter()
+                        .any(|frame| !current_frames.contains(frame.frame()))
+                {
+                    return Err(AgentBrowserProviderError::Authority);
                 }
-                kind => return Err(AgentBrowserProviderError::UnsupportedTool(kind)),
+                if tool.proposal().kind() == zephium_agentic::AgentBrowserToolKind::Read {
+                    self.continue_after_read(
+                        tool,
+                        observation,
+                        captured_at.ok_or(AgentBrowserProviderError::Authority)?,
+                    )
+                    .await
+                } else {
+                    self.continue_after_locate(tool, observation, self.next_call)
+                        .await
+                }
             }
+            kind => Err(AgentBrowserProviderError::UnsupportedTool(kind)),
         }
     }
 
@@ -3322,9 +3407,33 @@ impl fmt::Debug for AgentBrowserProviderTurn {
     }
 }
 
+/// Closed refusal of a trusted account sample; no account data is retained.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentBrowserAccountError {
+    /// An original provider/effect reservation still owns its frozen sample.
+    Pending,
+    /// A sample attempted to replace the exact document/context authority.
+    ContextChanged,
+    /// A sample attempted to switch the admitted account, even within scope.
+    AccountChanged,
+    /// The sample predates its predecessor or is ahead of trusted policy time.
+    Clock,
+    /// The account sample exceeded the existing policy freshness ceiling.
+    Stale,
+    /// An existing attestation identity was reused with different facts.
+    Rewritten,
+    /// A prior sample identity was replayed after a newer sample was accepted.
+    Replayed,
+    /// The fixed model/effect-derived sample inventory was exhausted.
+    Limit,
+}
+
 /// Closed content-free session refusal. No variant authorizes a blind retry.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum AgentBrowserProviderError {
+    /// The trusted host could not maintain exact fresh account authority.
+    #[error("browser account re-attestation was refused")]
+    Account(AgentBrowserAccountError),
     /// A bounded read exceeded its encoding/admission ceiling.
     #[error("browser semantic read encoding was refused")]
     ReadEncoding(zephium_agentic::SemanticModelEncodingError),
@@ -3617,6 +3726,167 @@ mod tests {
         )
         .expect("prepare")
         .into_transport_input()
+    }
+
+    #[test]
+    fn account_refresh_preserves_exact_identity_time_replay_and_bounded_storage() {
+        use zephium_agentic::{AgentAccountAttestationId, AgentAccountId, AgentAccountScope};
+        for (case, expected) in [
+            (0, AgentBrowserAccountError::Stale),
+            (1, AgentBrowserAccountError::Clock),
+            (2, AgentBrowserAccountError::Clock),
+            (3, AgentBrowserAccountError::AccountChanged),
+            (4, AgentBrowserAccountError::ContextChanged),
+            (5, AgentBrowserAccountError::Rewritten),
+            (6, AgentBrowserAccountError::Replayed),
+            (7, AgentBrowserAccountError::Limit),
+        ] {
+            let (mut session, _) = browser_fixture();
+            let original = session.account;
+            session.clock = Arc::new(FixedBrowserClock(32_000));
+            let mut account = AgentContextAccountBinding::new(
+                AgentAccountAttestationId::generate(),
+                original.context(),
+                original.account(),
+                AgentPolicyInstant::from_millis(32_000),
+            );
+            match case {
+                0 => account = original,
+                1 => {
+                    account = AgentContextAccountBinding::new(
+                        account.attestation(),
+                        account.context(),
+                        account.account(),
+                        AgentPolicyInstant::from_millis(32_001),
+                    )
+                }
+                2 => {
+                    account = AgentContextAccountBinding::new(
+                        account.attestation(),
+                        account.context(),
+                        account.account(),
+                        AgentPolicyInstant::from_millis(999),
+                    )
+                }
+                3 => {
+                    account = AgentContextAccountBinding::new(
+                        account.attestation(),
+                        account.context(),
+                        AgentAccountScope::Authenticated(AgentAccountId::generate()),
+                        account.observed_at(),
+                    )
+                }
+                4 => {
+                    let (other, _) = browser_fixture();
+                    account = AgentContextAccountBinding::new(
+                        account.attestation(),
+                        other.account.context(),
+                        account.account(),
+                        account.observed_at(),
+                    );
+                }
+                5 => {
+                    account = AgentContextAccountBinding::new(
+                        original.attestation(),
+                        account.context(),
+                        account.account(),
+                        account.observed_at(),
+                    )
+                }
+                6 => {
+                    session.refresh_account(account).unwrap();
+                    account = AgentContextAccountBinding::new(
+                        original.attestation(),
+                        original.context(),
+                        original.account(),
+                        account.observed_at(),
+                    );
+                }
+                7 => {
+                    for _ in 1..MAX_BROWSER_ACCOUNT_ATTESTATIONS {
+                        session
+                            .refresh_account(AgentContextAccountBinding::new(
+                                AgentAccountAttestationId::generate(),
+                                original.context(),
+                                original.account(),
+                                account.observed_at(),
+                            ))
+                            .unwrap();
+                    }
+                    let current = session.account;
+                    session.refresh_account(current).unwrap();
+                    assert_eq!(
+                        session.account_attestations.len(),
+                        MAX_BROWSER_ACCOUNT_ATTESTATIONS
+                    );
+                }
+                _ => unreachable!(),
+            }
+            let retained = session.account;
+            assert_eq!(
+                session.refresh_account(account),
+                Err(AgentBrowserProviderError::Account(expected)),
+                "case {case}"
+            );
+            assert_eq!(session.account, retained);
+            assert_eq!(
+                session.refresh_account(retained),
+                Err(AgentBrowserProviderError::Account(expected)),
+                "refusal cannot be retried"
+            );
+            assert_eq!(session.policy.pending_model_calls(), 0);
+            assert_eq!(session.next_action, 1);
+            assert!(session.try_finish_unsuccessful().is_ok());
+        }
+    }
+
+    #[test]
+    fn account_refresh_does_not_rebind_or_discard_an_original_provider_reservation() {
+        let (mut session, observation) = browser_fixture();
+        let input = reserved_browser_input(&mut session, &observation);
+        let original = session.account;
+        assert_eq!(
+            session.refresh_account(original),
+            Err(AgentBrowserProviderError::Account(
+                AgentBrowserAccountError::Pending
+            ))
+        );
+        assert_eq!(session.account, original);
+        assert_eq!(session.policy.pending_model_calls(), 1);
+        let refusal = session.try_finish_unsuccessful().unwrap_err();
+        let mut session = refusal.into_session();
+        assert_eq!(session.policy.pending_model_calls(), 1);
+        let _outcome = input.cancel(&mut session.policy).unwrap();
+        assert!(session.try_finish_unsuccessful().is_ok());
+    }
+
+    #[test]
+    fn startup_account_expiry_remains_enforced_without_a_new_trusted_sample() {
+        let (mut session, observation) = browser_fixture();
+        session.clock = Arc::new(FixedBrowserClock(32_000));
+        let request = session.next_model_call_request().unwrap();
+        let payload = encode_semantic_observation(
+            &observation,
+            SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .unwrap()
+        .admit_conservative_utf8(session.config.tokenizer())
+        .unwrap();
+        let result = AgentPreparedObservationRequest::try_openai_for_provider_exact_count(
+            &mut session.policy,
+            request,
+            &observation,
+            payload,
+            session.objective.as_ref().unwrap(),
+            session.config.clone(),
+        );
+        assert!(matches!(
+            result,
+            Err(zephium_agentic::AgentProviderRequestError::Policy(
+                zephium_agentic::AgentPolicyError::AccountStale
+            ))
+        ));
+        assert_eq!(session.policy.pending_model_calls(), 0);
     }
 
     #[test]
