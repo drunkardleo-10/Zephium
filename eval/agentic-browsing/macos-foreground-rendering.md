@@ -1,7 +1,8 @@
 # Actual-application foreground rendering qualification
 
 Status: native ownership seam and isolated actual-desktop driver implemented;
-native witness remains pending. No RAF, foreground preservation or commercial-site
+the first actual-app launch deferred before Work allocation. A foreground
+rendering measurement remains pending. No RAF, foreground preservation or commercial-site
 success is claimed by this document yet. The prior standalone evidence and its
 event-loop limitations remain in [macos-rendering-readiness.md](macos-rendering-readiness.md).
 
@@ -181,4 +182,32 @@ Correction gates pass: all 492 engine library tests, strict all-target
 foreground-feature desktop/engine Clippy, ordinary `agentic-browser` engine
 check, both architecture commands/hostile JavaScript smoke, both foreground
 architecture adversaries, normal isolated desktop bundle, workspace fmt and diff
-checks. There has still been no native launch.
+checks. No native launch had occurred at this correction checkpoint.
+
+## First actual-application launch: clean foreground deferral
+
+The first independently run application witness used committed source
+`8c4e1fd5cfc040867bcc1a2c4975225c4c7edcc8` and executable SHA-256
+`fc41c33e082eeb618407271a715b8e354bb9f178013fadc94489bf34b7f29635`.
+Recorded date: 2026-09-06; exact UTC start and total process duration were not
+provided and are not inferred from the driver clock. The process exited **0**
+with these complete diagnostic lines:
+
+```text
+work-rendering-provisional: outcome=DeferredForeground cleanup_failure=None native_cohort_clean=true human_ownership_preserved=true fixture_clean=true elapsed_ms=0
+work-rendering-closure: qualified=false normal_shutdown_clean=true exact_native_weak_drain=None
+```
+
+At the first eligible MainEventsCleared callback, the exact foreground admission
+was unavailable. The application therefore deferred before allocating the Work
+context, loopback fixture or rendering owner. The zero driver time is not a
+measurement of application launch latency. `exact_native_weak_drain=None` is
+expected without that native cohort; it is not successful native rendering
+teardown evidence. There were no semantic/RAF samples and no provider call.
+The successful normal shutdown establishes clean deferral, not rendering
+viability or preservation of an admitted foreground rendering lease.
+
+This exposes an admission-timing issue: trusted chrome becoming eligible does
+not itself prove that Launch Services/user foreground ownership is already
+established on that first event-loop callback. A bounded normal-loop foreground
+waiting phase is required; programmatic activation or a blind delay is not.
