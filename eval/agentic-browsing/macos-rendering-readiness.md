@@ -302,7 +302,8 @@ view/window beyond the original exact owned-page probe cohort.
 After the original hidden construction and exact fixture navigation, the
 closed scope uses a borderless window which cannot become key or main,
 sets mouse-event exclusion before presenting, keeps the application inactive,
-and forbids any first-responder change. Public
+and confines the internal first responder to its original identity or the
+exact owned WKWebView (see the measured refinement below). Public
 [`orderFrontRegardless`](https://developer.apple.com/documentation/appkit/nswindow/orderfrontregardless%28%29)
 is documented to preserve key/main windows while presenting an inactive app's
 surface. There is no app activation, focus request, injected input, private
@@ -353,7 +354,7 @@ request occurred and no success is claimed. Diagnosis must distinguish an
 internal non-key-window responder transition from user-input/focus authority,
 without removing the independent native isolation checks.
 
-The follow-up diagnostic refines only this refusal into absent, exact-window,
+The follow-up diagnostic at `51adfbd` refines only this refusal into absent, exact-window,
 exact-page, exact-owned-page-descendant or foreign responder. It classifies
 the same retained native responder used for the comparison, exports no class
 name, pointer or page data, and still refuses every changed responder. It
@@ -370,3 +371,14 @@ No semantic measurement or RAF outcome exists for this attempt. This evidence
 supports evaluating a narrowly identity-bound internal-responder contract,
 not permitting general focus changes or declaring the page input-safe from
 its responder relationship alone.
+
+The identity-bound correction admits only the unchanged original responder
+or the exact retained WKWebView during the explicit presentation scope. An
+absent replacement, arbitrary descendant, foreign native responder or invalid
+page identity remains refused. All independent app-inactive, non-key/non-main,
+mouse exclusion, visible geometry and deadline facts must still hold; native
+responder ownership by itself grants no input authority. A report records
+whether the exact page responder was observed. Hiding must restore the original
+strict hidden guard, including its original responder, before reporting.
+No responder is assigned by the probe, no keyboard event is synthesized, and
+no `makeFirstResponder`, focus, key-window or app-activation API is introduced.

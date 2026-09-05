@@ -13,6 +13,8 @@ pub struct MacosAgenticPresentedRenderingReport {
     pub presented_elapsed_ms: u64,
     /// Time to public native evidence that the surface has visible screen pixels.
     pub opportunity_elapsed_ms: u64,
+    /// Internal responder changed to the exact owned page while input stayed excluded.
+    pub exact_page_responder_observed: bool,
     /// Bounded fresh semantic samples, with offsets from opportunity acquisition.
     pub measurement: MacosAgenticRenderingProbeReport,
 }
@@ -26,6 +28,7 @@ pub(super) struct PresentedStateGuard<'a> {
     expected_window_frame: NSRect,
     deadline: Instant,
     require_visible_pixels: Cell<bool>,
+    exact_page_responder_observed: Cell<bool>,
     failure: Cell<Option<&'static str>>,
 }
 
@@ -36,7 +39,7 @@ struct PresentedFacts {
     no_key_authority: bool,
     no_main_authority: bool,
     mouse_ignored: bool,
-    responder_unchanged: bool,
+    responder_owned: bool,
     surface_visible: bool,
     surface_opaque: bool,
     exact_geometry: bool,
@@ -50,7 +53,7 @@ fn reject_facts(facts: PresentedFacts, require_visible_pixels: bool) -> Option<&
         (facts.no_key_authority, "presented_key_authority"),
         (facts.no_main_authority, "presented_main_authority"),
         (facts.mouse_ignored, "presented_mouse_authority"),
-        (facts.responder_unchanged, "presented_responder_changed"),
+        (facts.responder_owned, "presented_responder_changed"),
         (facts.surface_visible, "presented_surface_not_visible"),
         (facts.surface_opaque, "presented_surface_not_opaque"),
         (facts.exact_geometry, "presented_surface_geometry"),
@@ -69,16 +72,21 @@ fn reject_facts(facts: PresentedFacts, require_visible_pixels: bool) -> Option<&
 impl PresentedStateGuard<'_> {
     pub(super) fn sample(&self) {
         let responder = self.window.firstResponder();
+        let responder_identity = responder
+            .as_ref()
+            .map(|value| Retained::as_ptr(value).addr());
+        let exact_page = std::ptr::from_ref(self.page).addr();
         let facts = PresentedFacts {
             within_deadline: Instant::now() < self.deadline,
             app_inactive: !self.app.isActive(),
             no_key_authority: !self.window.isKeyWindow() && !self.window.canBecomeKeyWindow(),
             no_main_authority: !self.window.isMainWindow() && !self.window.canBecomeMainWindow(),
             mouse_ignored: self.window.ignoresMouseEvents(),
-            responder_unchanged: responder
-                .as_ref()
-                .map(|value| Retained::as_ptr(value).addr())
-                == self.first_responder,
+            responder_owned: responder_is_owned(
+                responder_identity,
+                self.first_responder,
+                exact_page,
+            ),
             surface_visible: self.window.isVisible() && !self.page.isHiddenOrHasHiddenAncestor(),
             surface_opaque: self.window.alphaValue() == 1.0
                 && self.window.isOpaque()
@@ -97,6 +105,9 @@ impl PresentedStateGuard<'_> {
                 Some("presented_responder_changed") => Some(self.responder_refusal(responder)),
                 other => other,
             });
+            if failure.is_none() && responder_identity == Some(exact_page) {
+                self.exact_page_responder_observed.set(true);
+            }
         }
     }
 
@@ -138,6 +149,11 @@ impl PresentedStateGuard<'_> {
     pub(super) fn failure_stage(&self) -> Option<&'static str> {
         self.failure.get()
     }
+}
+
+fn responder_is_owned(actual: Option<usize>, original: Option<usize>, exact_page: usize) -> bool {
+    // Native identities only: no class/descendant inference grants permission.
+    exact_page != 0 && (actual == original || actual == Some(exact_page))
 }
 
 struct PresentedScope<'a> {
@@ -263,6 +279,7 @@ pub(super) fn measure(
             expected_window_frame: frame,
             deadline,
             require_visible_pixels: Cell::new(false),
+            exact_page_responder_observed: Cell::new(false),
             failure: Cell::new(None),
         });
         let presented_runtime = ProbeRuntime {
@@ -299,7 +316,11 @@ pub(super) fn measure(
                 .failure_stage()
                 .unwrap_or("presented_native_state"));
         }
-        Ok((opportunity_elapsed_ms, measurement))
+        Ok((
+            opportunity_elapsed_ms,
+            guard.exact_page_responder_observed.get(),
+            measurement,
+        ))
     })();
     scope.hide()?;
     original.sample();
@@ -308,10 +329,11 @@ pub(super) fn measure(
     }
     let presented_elapsed_ms =
         u64::try_from(started.elapsed().as_millis()).map_err(|_| "presented_clock")?;
-    let (opportunity_elapsed_ms, measurement) = outcome?;
+    let (opportunity_elapsed_ms, exact_page_responder_observed, measurement) = outcome?;
     Ok(MacosAgenticPresentedRenderingReport {
         presented_elapsed_ms,
         opportunity_elapsed_ms,
+        exact_page_responder_observed,
         measurement,
     })
 }
@@ -328,7 +350,7 @@ mod tests {
             no_key_authority: true,
             no_main_authority: true,
             mouse_ignored: true,
-            responder_unchanged: true,
+            responder_owned: true,
             surface_visible: true,
             surface_opaque: true,
             exact_geometry: true,
@@ -341,7 +363,7 @@ mod tests {
             |f: &mut PresentedFacts| f.no_key_authority = false,
             |f: &mut PresentedFacts| f.no_main_authority = false,
             |f: &mut PresentedFacts| f.mouse_ignored = false,
-            |f: &mut PresentedFacts| f.responder_unchanged = false,
+            |f: &mut PresentedFacts| f.responder_owned = false,
             |f: &mut PresentedFacts| f.surface_visible = false,
             |f: &mut PresentedFacts| f.surface_opaque = false,
             |f: &mut PresentedFacts| f.exact_geometry = false,
@@ -356,6 +378,20 @@ mod tests {
         assert_eq!(reject_facts(pending, false), None);
         pending.app_inactive = false;
         assert!(reject_facts(pending, false).is_some());
+    }
+
+    #[test]
+    fn presented_responder_is_bound_only_to_original_or_exact_native_page() {
+        assert!(responder_is_owned(Some(10), Some(10), 20));
+        assert!(responder_is_owned(Some(20), Some(10), 20));
+        assert!(responder_is_owned(None, None, 20));
+        assert!(responder_is_owned(Some(20), None, 20));
+        assert!(!responder_is_owned(None, Some(10), 20));
+        for foreign in [0, 1, 11, 19, 21, usize::MAX] {
+            assert!(!responder_is_owned(Some(foreign), Some(10), 20));
+        }
+        assert!(!responder_is_owned(Some(10), Some(10), 0));
+        assert!(!responder_is_owned(Some(0), Some(10), 0));
     }
 
     #[test]
