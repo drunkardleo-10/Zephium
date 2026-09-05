@@ -1522,6 +1522,94 @@ authorization, settlement and new-document continuation proof; bare lifecycle
 navigation is not a safe substitute. Task authoring, richer read scopes and
 parallel runs remain separate work.
 
+## Trusted local form task qualification (2026-09-05)
+
+Implementation `54d70c0` replaces the public application qualifier's bespoke
+action predicate with the shipping `AgentWorkFormTask`. Explicit trusted
+field/value phases now supply completion and fresh-target assessment through
+the same durable application coordinator, shared Engine/Store identities,
+owned extension-free page, controller, policy, native verification and terminal
+owners. There is no new browser/orchestration path. The local-only effect
+attestation is explicit: this contract does not infer that arbitrary Fill or
+Select controls lack autosave or other remote effects. See
+[trusted form contracts](../../docs/agent-work-forms.md).
+
+Two final-build public macOS/WKWebView application paths passed with
+`gpt-5.6-luna`, explicit retained-public OpenAI logging and content-free local
+diagnostics. They used ephemeral isolated profiles, non-submitted public
+Wikipedia form preparation and memory-only result content:
+
+| Final path | Turns | Verified effects | Cited results | Input/output tokens | Cost µUSD | Provider-turn ms | Wall ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Action-only | 4 | 3/3 | Not requested | 11,272 / 396 | 1,426 | 11,422 | 12,859 |
+| Action → exact subtree result | 6 | 3/3 | 1/1 | 17,941 / 524 | 1,747 | 17,249 | 18,377 |
+
+Both reached immutable durable `Succeeded`, original application-owned clean
+teardown and passing focus isolation. The result path's separate trusted
+consumer independently checked the exact cited current field value. The
+aggregate is 29,213 input and 920 output tokens, $0.003173, 28,671 ms provider
+turn time and 31,236 ms wall time. These are two distinct path samples, not
+repeatability/latency-distribution, broad-site or resource/battery qualification.
+No retries, navigation, submission or external writes occurred. Production/BYOK
+requests remain `store:false`.
+
+Final per-turn provider-boundary measurements:
+
+| Path/turn | Tool | Input | Output | Request bytes | Semantic bytes | µUSD | Turn ms |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Actions 1 | Act | 2,516 | 128 | 12,012 | 3,116 | 783 | 3,970 |
+| Actions 2 | Locate | 2,742 | 52 | 14,483 | 287 | 170 | 2,284 |
+| Actions 3 | Act | 2,876 | 111 | 16,524 | 302 | 223 | 2,657 |
+| Actions 4 | Act | 3,138 | 105 | 18,965 | 408 | 250 | 2,511 |
+| Result 1 | Act | 2,705 | 114 | 13,280 | 3,116 | 192 | 3,575 |
+| Result 2 | Locate | 2,917 | 71 | 15,647 | 287 | 193 | 2,528 |
+| Result 3 | Act | 3,048 | 93 | 17,748 | 208 | 204 | 3,070 |
+| Result 4 | Act | 3,292 | 94 | 20,081 | 408 | 236 | 3,585 |
+| Result 5 | Extract | 3,486 | 52 | 22,320 | 299 | 178 | 1,940 |
+| Result 6 | Mapping | 2,493 | 100 | 17,505 | 586 | 744 | 2,551 |
+
+An earlier development result-path run also passed 3/3 effects and 1/1 result
+with durable success, clean teardown and focus isolation: 17,889 input / 507
+output tokens, 1,725 µUSD, 15,745 ms provider turn time and 18,286 ms wall. It
+preceded the explicit initial-scope admission guard and constructor naming;
+it is not included in the final-build aggregate above. Development fixture
+errors were impossible operation masks/already-satisfied action construction
+and a source-gate test import; production checks were not relaxed to fix them.
+
+Deterministic contract coverage includes both action orders, skipped phases,
+wrong values/options/targets/effects, stale observation IDs/generations,
+foreign context/origin, exact value truncation, ambiguous/missing fields and
+options, secret/disabled/read-only controls, incomplete and partial scopes,
+bounded/overlapping configuration, explicit clear and zero-action completion.
+Any evidence refusal clears retained bindings and prevents reuse. Thirteen
+existing-worker/loopback/native fault schedules exercise success, wrong-value
+refusal before native dispatch, approval-required policy refusal, insufficient
+settle budget, dispatch/callback/verification failure, human takeover, lost
+native callback, provider count/stream failure and count/stream cancellation.
+They assert the original pending/failed action, policy, callback and recovery
+owners. Two shipping-worker cases prove initial completion/missing-field refusal
+uses zero provider calls and zero native effects with honest clean closure.
+
+Validation: 22 shipping and 29 probe controller tests; 524 core tests plus three
+native-action and five semantic-runtime integration tests; 339 Work application
+and 343 all-feature application; 264 Store plus four doctests; 37 runtime;
+97 opt-in desktop; two qualifier; 179 xtask. Ignored subprocess helpers remain
+parent-exercised. Strict controller/application/Store/composition/xtask,
+qualifier and opt-in desktop Clippy pass. Controller, runtime, model-catalog,
+semantic/native, composition and persistence architecture gates pass, including
+the new exact form value/ref/freshness and content-sink mutation gates.
+Optimized default and opt-in desktop checks pass; optimized probe compilation
+is refused. The default desktop dependency tree excludes Work composition,
+controller, runtime, provider transport and reqwest. No manifest, lockfile,
+native scheduling, provider schema, persistence format, queue or idle polling
+changed. No page/provider body, objective, credential or raw trace was recorded
+in this local evidence.
+
+Trusted general plan admission, reviewed site/effect contracts and richer
+cross-document work remain separate product seams. This task does not restore
+goals/phase position/refs after restart or authorize mutation replay. The
+existing interrupted-run/recovery and new-admission barriers remain unchanged.
+
 ## Remaining release blockers
 
 - authorized named-device macOS native-input routes beyond fixed DOM;
