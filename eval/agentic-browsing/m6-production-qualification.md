@@ -1690,6 +1690,100 @@ site/effect contracts, cross-document tools, concurrency and resource/battery
 qualification remain separate seams; this is not default-desktop enablement
 or production-wide readiness.
 
+## Nonterminal baseline inspection through the application (2026-09-05)
+
+Commits `ea19096` and `74d7c8d` add the opt-in shipping
+[baseline inspection contract](../../docs/agent-work-inspection.md). This pass
+selected bounded read→decision before navigation: it reuses the existing exact
+read/taint/transport authority and makes collapsed semantic detail available
+before an action, without inventing destination authority or a second native
+automation stack. A read proposal now binds its requested initial scope as well
+as config, lineage, baseline fingerprint and payload. Other read scopes fail
+closed; a read receipt still cannot manufacture a fresh observation ack.
+
+The excluded command is
+`macos-terra-agentic-probe --live-public-luna-work-read-inspectable`. Both runs
+used the actual macOS composition, shell admission, one-shot owned native port,
+Work actor, production local-form predicate and exact same SQLite Store/audit
+owner. The public test requests initial read before selecting the collapsed
+language option and preparing/refining a non-submitted Wikipedia search. The
+model selected one read and three actions in each run; no locate was needed.
+Rust independently verified all three local field effects and trusted task
+milestones. No submission, link navigation or external write occurred.
+
+Only explicit public qualification enabled retained provider logging. Local
+output contains typed phases and counts, not provider/page content. Production
+and BYOK remain `store:false`; optimized qualification compilation is refused.
+Run 1 was the development integration build; run 2 used the final code/schema
+build. Their per-turn provider-boundary accounting is:
+
+| Run | Turn/proposal | Input tokens | Output tokens | Request bytes | Semantic bytes | Provider ms | Cost ceiling µUSD |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 1 Read | 2,632 | 31 | 12,851 | 3,116 | 2,856 | 696 |
+| 1 | 2 Act | 6,549 | 115 | 27,928 | 13,159 | 3,051 | 1,171 |
+| 1 | 3 Act | 6,762 | 105 | 30,271 | 287 | 3,026 | 311 |
+| 1 | 4 Act | 7,018 | 108 | 32,692 | 408 | 2,699 | 330 |
+| 2 | 1 Read | 2,632 | 31 | 12,851 | 3,116 | 2,063 | 91 |
+| 2 | 2 Act | 6,549 | 102 | 27,928 | 13,159 | 2,414 | 1,155 |
+| 2 | 3 Act | 6,749 | 96 | 30,187 | 287 | 2,821 | 297 |
+| 2 | 4 Act | 6,996 | 91 | 32,584 | 408 | 3,158 | 307 |
+
+Run 1: 22,961 input / 359 output tokens, 2,508 µUSD, 11,632 ms provider,
+12,957 ms wall. Run 2: 22,926 / 320 tokens, 1,850 µUSD, 10,456 ms provider,
+11,840 ms wall. Aggregate: **2/2 full application successes, 6/6 verified
+effects, 45,887 input + 679 output tokens, 4,358 µUSD, 22,088 ms provider and
+24,797 ms wall**. Both durable terminals were `Succeeded`, application-owned
+teardown was clean, and focus isolation passed. No failed live read run is
+excluded from this aggregate.
+
+The read disclosed 13,159 bytes of existing semantic detail, versus 3,116 bytes
+in the compact initial projection. It did not perform another native capture
+or mint new refs. This is intentionally opt-in: enumerating unknown options is
+more expensive than locating a known label. These two samples are capability
+evidence, not a latency distribution, token-efficiency improvement, battery
+measurement, broad-site qualification or general production-readiness claim.
+
+Deterministic validation includes 13 read actor schedules: repeated reads to a
+verified form action; read-only extraction; verified action→read→cited result;
+disabled read and wrong-scope refusal; exact eight-turn exhaustion; count and
+generation refusal; cancel/count, takeover/generation and suspend/count races;
+lost native callback; and lost audit delivery. A separate shipping test changes
+the frozen task capability and proves zero provider calls or native actions.
+Success/failure schedules assert exact capture/effect counts, and uncertain
+callbacks/audit retain the original recovery owners. Existing full fault suites
+also cover shutdown, renderer/navigation loss, mailbox pressure, accounting and
+durable/review races; no native/lifecycle/durability implementation changed.
+
+Validation on this pass:
+
+- Core: 428 default unit tests; 526 all-feature tests plus 3 native-action and
+  5 semantic-runtime integration tests; exact read tests repeated after the
+  final scope restriction.
+- Controller: 23 shipping tests and 31 excluded-fixture tests; all read
+  schedules repeated with exact stop-reason assertions.
+- App: 347 all-feature tests passed, 1 intentionally ignored.
+- Store: 245 default tests; 265 Work-enabled tests passed, 1 intentionally
+  ignored; 4 documentation tests. Desktop: 97 opt-in Work tests passed,
+  1 intentionally ignored.
+- Runtime: 37 tests. Source gates: 180 tests. Excluded qualifier: 2 tests.
+- Strict Clippy: core all-features; controller/App/composition/xtask; live
+  qualifier; opt-in macOS desktop, all with `-D warnings`.
+- All four agent controller/runtime/model-catalog/probe boundary commands
+  passed, including fixed native-JS smoke checks. The source inventory gate was
+  extended for the new test module and exact read-scope correlation, without
+  removing the prior extraction-correlation requirement.
+- Optimized `cargo check` passed for default desktop and `macos-work` desktop.
+  The optimized live qualifier failed at its expected core `compile_error!`.
+- The default desktop normal dependency graph contains no controller, runtime,
+  provider transport, Work composition or reqwest. No manifest/lockfile,
+  native scheduling, ordinary Browse behavior, worker or queue changed.
+
+The remaining capability seam is a separately proven nonterminal fresh scoped
+observation/rebase, or destination-bound cross-document navigation—not treating
+this read as either. Existing subtree extraction remains terminal. No UI,
+concurrent native lifetime, richer native tool, cloud, account integration,
+resource/battery qualification or extension authority was added.
+
 ## Remaining release blockers
 
 - authorized named-device macOS native-input routes beyond fixed DOM;
