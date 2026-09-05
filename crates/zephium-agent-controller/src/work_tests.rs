@@ -7,6 +7,7 @@ use zephium_agent_runtime::{
 };
 
 static SERIAL: Mutex<()> = Mutex::new(());
+const FIXTURE_POLICY_NOW_MILLIS: u64 = 2;
 
 #[test]
 fn dormant_refusal_retains_original_identity_and_reconciles_only_exact_audit() {
@@ -126,6 +127,8 @@ fn input_with_effects(allowed: &[SemanticEffectClass]) -> AgentWorkRunInput {
     let effects = AgentEffectScope::try_new(allowed).expect("effects");
     let budget = AgentRunBudget::try_new(24, 1_000_000, 1_000_000, 1).expect("budget");
     let node = AgentPlanNodeId::generate();
+    let policy_expires = FIXTURE_POLICY_NOW_MILLIS
+        + zephium_agent_provider_transport::MAX_AGENT_PROVIDER_REQUEST_TIMEOUT_MILLIS;
     let manifest = AgentRunManifest::try_new(
         AgentRunManifestId::generate(),
         context.owner(),
@@ -140,7 +143,7 @@ fn input_with_effects(allowed: &[SemanticEffectClass]) -> AgentWorkRunInput {
         .expect("scope"),
         budget,
         AgentPolicyInstant::from_millis(1),
-        AgentPolicyInstant::from_millis(100_000),
+        AgentPolicyInstant::from_millis(policy_expires),
         vec![AgentPlanNodeScope::new(
             node,
             AgentPlanNodeAuthority::try_new(
@@ -152,7 +155,7 @@ fn input_with_effects(allowed: &[SemanticEffectClass]) -> AgentWorkRunInput {
             )
             .expect("authority"),
             budget,
-            AgentPolicyInstant::from_millis(99_999),
+            AgentPolicyInstant::from_millis(policy_expires),
         )],
     )
     .expect("manifest");
@@ -178,8 +181,11 @@ fn input_with_effects(allowed: &[SemanticEffectClass]) -> AgentWorkRunInput {
         AgentWorkRunSettings::new(
             AgentBrowserModel::Luna,
             ids,
-            Arc::new(Clock(AtomicU64::new(2))),
-            Instant::now() + Duration::from_secs(10),
+            Arc::new(Clock(AtomicU64::new(FIXTURE_POLICY_NOW_MILLIS))),
+            // Client construction can compete with other suites' TLS/client
+            // setup. Use the production hard horizon for non-deadline fixtures;
+            // explicit expiry cases install their own deadline after construction.
+            Instant::now() + super::super::MAX_TERRA_CONTROLLER_HARD_DEADLINE,
         ),
     )
     .expect("input")
@@ -638,7 +644,10 @@ fn drive_with_control(
 fn explicit_readiness_preserves_snapshot_generation_and_stop_reasons_are_first_wins() {
     let _guard = lock(&SERIAL);
     let (outcome, shutdown, calls, _) = run(Fault::Readiness);
-    assert!(matches!(outcome, AgentWorkOutcome::Succeeded(_)));
+    assert!(
+        matches!(outcome, AgentWorkOutcome::Succeeded(_)),
+        "{outcome:?}"
+    );
     assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
     assert_eq!(calls, [1, 2, 3, 3, 3, 4, 5, 6]);
     for (fault, expected) in [
@@ -933,7 +942,7 @@ fn provider_fixture(fault: ProviderFault) {
     } else {
         Fault::None
     };
-    let (controller, handle) = AgentWorkController::try_new_for_probe(
+    let (mut controller, handle) = AgentWorkController::try_new_for_probe(
         approved,
         transport,
         credential,
@@ -942,6 +951,14 @@ fn provider_fixture(fault: ProviderFault) {
         AgentBrowserRetention::Stateless,
     )
     .expect("actor");
+    if audit_fault == Fault::AuditLost {
+        // This case deliberately waits for missing audit delivery. Preserve its
+        // original ten-second timeout, starting after all client construction.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let state = controller.state.as_mut().unwrap();
+        state.input.as_mut().unwrap().settings.deadline = deadline;
+        state.native.deadline = deadline;
+    }
     let native_fault = if let ProviderFault::Native(fault) = fault {
         fault
     } else {
