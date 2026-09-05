@@ -76,6 +76,19 @@ impl PresentedStateGuard<'_> {
             .as_ref()
             .map(|value| Retained::as_ptr(value).addr());
         let exact_page = std::ptr::from_ref(self.page).addr();
+        let geometry_failure = if self.window.frame() != self.expected_window_frame {
+            Some("presented_window_frame_mismatch")
+        } else if self.page.frame().size != NSSize::new(1280.0, 800.0) {
+            Some("presented_page_viewport_mismatch")
+        } else if !self
+            .page
+            .window()
+            .is_some_and(|window| std::ptr::eq(&*window, self.window))
+        {
+            Some("presented_parent_window_mismatch")
+        } else {
+            None
+        };
         let facts = PresentedFacts {
             within_deadline: Instant::now() < self.deadline,
             app_inactive: !self.app.isActive(),
@@ -91,18 +104,14 @@ impl PresentedStateGuard<'_> {
             surface_opaque: self.window.alphaValue() == 1.0
                 && self.window.isOpaque()
                 && self.page.alphaValue() == 1.0,
-            exact_geometry: self.window.frame() == self.expected_window_frame
-                && self.page.frame().size == NSSize::new(1280.0, 800.0)
-                && self
-                    .page
-                    .window()
-                    .is_some_and(|window| std::ptr::eq(&*window, self.window)),
+            exact_geometry: geometry_failure.is_none(),
             visible_pixels: self.has_visible_pixels(),
         };
         if self.failure.get().is_none() {
             let failure = reject_facts(facts, self.require_visible_pixels.get());
             self.failure.set(match failure {
                 Some("presented_responder_changed") => Some(self.responder_refusal(responder)),
+                Some("presented_surface_geometry") => geometry_failure,
                 other => other,
             });
             if failure.is_none() && responder_identity == Some(exact_page) {
