@@ -23,14 +23,17 @@ pub(super) fn initialize_inactive(app: &NSApplication) -> Result<(), &'static st
     // finishLaunching is documented to activate an ordinary/accessory app.
     // Complete it before any window exists, under the public prohibition on
     // both activation and window creation; only then permit accessory windows.
-    if !app.setActivationPolicy(NSApplicationActivationPolicy::Prohibited)
-        || !launch_policy_valid(
-            app.activationPolicy(),
-            NSApplicationActivationPolicy::Prohibited,
-            app.isActive(),
-            app.windows().len(),
-        )
+    if app.activationPolicy() != NSApplicationActivationPolicy::Prohibited
+        && !app.setActivationPolicy(NSApplicationActivationPolicy::Prohibited)
     {
+        return Err("presented_launch_prohibition_transition");
+    }
+    if !launch_policy_valid(
+        app.activationPolicy(),
+        NSApplicationActivationPolicy::Prohibited,
+        app.isActive(),
+        app.windows().len(),
+    ) {
         return Err("presented_launch_prohibition");
     }
     app.finishLaunching();
@@ -42,14 +45,17 @@ pub(super) fn initialize_inactive(app: &NSApplication) -> Result<(), &'static st
     ) {
         return Err("presented_launch_activated");
     }
-    if !app.setActivationPolicy(NSApplicationActivationPolicy::Accessory)
-        || !launch_policy_valid(
-            app.activationPolicy(),
-            NSApplicationActivationPolicy::Accessory,
-            app.isActive(),
-            app.windows().len(),
-        )
+    if app.activationPolicy() != NSApplicationActivationPolicy::Accessory
+        && !app.setActivationPolicy(NSApplicationActivationPolicy::Accessory)
     {
+        return Err("presented_launch_accessory_transition");
+    }
+    if !launch_policy_valid(
+        app.activationPolicy(),
+        NSApplicationActivationPolicy::Accessory,
+        app.isActive(),
+        app.windows().len(),
+    ) {
         return Err("presented_launch_accessory");
     }
     Ok(())
