@@ -69,9 +69,13 @@ pub(crate) use agentic_semantic_probe::run_model_two_action as run_agentic_seman
 #[cfg(feature = "native-agentic-semantic-probe")]
 pub(crate) use agentic_semantic_probe::run_model_workflow as run_agentic_semantic_model_workflow_probe;
 #[cfg(feature = "native-agentic-semantic-probe")]
+pub(crate) use agentic_semantic_probe::run_rendering as run_agentic_rendering_probe;
+#[cfg(feature = "native-agentic-semantic-probe")]
 pub(crate) use agentic_semantic_probe::run_work_actor as run_agentic_work_actor_probe;
 #[cfg(feature = "native-agentic-semantic-probe")]
 pub(crate) use agentic_semantic_probe::run_work_application as run_agentic_work_application_probe;
+#[cfg(feature = "native-agentic-semantic-probe")]
+pub use agentic_semantic_probe::MacosAgenticRenderingProbeReport;
 #[cfg(feature = "native-agentic-semantic-probe")]
 pub use agentic_semantic_probe::{
     MacosAgenticSemanticModelActionTerminal, MacosAgenticSemanticModelClickTerminal,

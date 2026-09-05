@@ -1,5 +1,9 @@
 //! Release-excluded live qualification for the production semantic adapter.
 
+#[path = "agentic_rendering_probe.rs"]
+mod rendering;
+pub use rendering::MacosAgenticRenderingProbeReport;
+
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -255,6 +259,7 @@ pub enum MacosAgenticSemanticTwoActionScenario {
 
 enum ProbeMode<'a> {
     Full,
+    Rendering(&'a mut Option<MacosAgenticRenderingProbeReport>),
     ModelClick(&'a mut ModelInitialCallback<'a>),
     ModelPublicFill(&'a mut ModelInitialCallback<'a>),
     ModelWorkflow {
@@ -361,6 +366,17 @@ pub(crate) fn run() -> Result<(), &'static str> {
     }
 }
 
+pub(crate) fn run_rendering() -> Result<MacosAgenticRenderingProbeReport, &'static str> {
+    let mut report = None;
+    let pending = objc2::rc::autoreleasepool(|_| begin(ProbeMode::Rendering(&mut report)))?;
+    if finish(pending)?.is_some() {
+        return Err("unexpected_model_terminal");
+    }
+    // A measurement is returned only after the same original native owners,
+    // policy/runtime registrations and loopback worker have drained.
+    report.ok_or("rendering_report_missing")
+}
+
 pub(crate) fn run_model_click(
     mut prepare: impl FnMut(
         &zephium_agentic::SemanticObservation,
@@ -443,6 +459,7 @@ pub(crate) fn run_model_workflow(
 
 fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
     let full_probe = matches!(&mode, ProbeMode::Full);
+    let rendering_probe = matches!(&mode, ProbeMode::Rendering(_));
     let public_fill_probe = matches!(
         &mode,
         ProbeMode::ModelPublicFill(_)
@@ -494,11 +511,15 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
     );
     let capabilities = ContextCapabilities::try_new(
         ContextKind::Owned,
-        &[
-            ContextCapability::Observe,
-            ContextCapability::Navigate,
-            ContextCapability::Act,
-        ],
+        if rendering_probe {
+            &[ContextCapability::Observe, ContextCapability::Navigate]
+        } else {
+            &[
+                ContextCapability::Observe,
+                ContextCapability::Navigate,
+                ContextCapability::Act,
+            ]
+        },
     )
     .map_err(|_| "context_construct")?;
     registry
@@ -573,6 +594,15 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
     let mut next_invocation = 1_u64;
     let mut successful_snapshots = 0_u8;
     let execution = (|| {
+        if let ProbeMode::Rendering(report) = &mut mode {
+            let url = server.url(FixtureRoute::SemanticRendering);
+            let (context, operation) =
+                navigate_with_receipt(&mut view, &mut registry, identity.id(), 2, &url, &runtime)?;
+            **report = Some(rendering::measure(
+                &view, context, operation, &url, &runtime,
+            )?);
+            return Ok(None);
+        }
         let first_url = if public_fill_probe {
             PUBLIC_DISCOVERY_PROBE_URL.to_owned()
         } else {
@@ -676,7 +706,9 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
             return Err("workflow_action_limit");
         }
         let pending_click = match &mut mode {
-            ProbeMode::ModelWorkflow { .. } => return Err("workflow_state"),
+            ProbeMode::ModelWorkflow { .. } | ProbeMode::Rendering(_) => {
+                return Err("workflow_state")
+            }
             ProbeMode::Full => PendingInitialClick::Fixed(Box::new(execute_primary_click(
                 &view,
                 &first_observation,
@@ -816,7 +848,7 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
                         .map_err(|()| "model_final_verify")?;
                         return Ok(None);
                     }
-                    ProbeMode::Full | ProbeMode::ModelWorkflow { .. } => {
+                    ProbeMode::Full | ProbeMode::ModelWorkflow { .. } | ProbeMode::Rendering(_) => {
                         return Err("model_mode_state")
                     }
                 }
@@ -1283,6 +1315,24 @@ fn navigate(
     url: &str,
     runtime: &ProbeRuntime<'_, '_>,
 ) -> Result<zephium_agentic::ContextJoin, &'static str> {
+    navigate_with_receipt(view, registry, id, operation_id, url, runtime)
+        .map(|(context, _)| context)
+}
+
+fn navigate_with_receipt(
+    view: &mut AgentOwnedView,
+    registry: &mut ContextRegistry,
+    id: ContextId,
+    operation_id: u64,
+    url: &str,
+    runtime: &ProbeRuntime<'_, '_>,
+) -> Result<
+    (
+        zephium_agentic::ContextJoin,
+        zephium_agentic::ContextOperationJoin,
+    ),
+    &'static str,
+> {
     if runtime.failed() || runtime.callbacks.navigation.borrow().is_some() {
         return Err("navigation_state");
     }
@@ -1354,7 +1404,10 @@ fn navigate(
     if !applied || !disarmed || runtime.failed() || !terminal_claimed.load(Ordering::Acquire) {
         return Err("navigation_terminal");
     }
-    registry.join(id).map_err(|_| "navigation_settle")
+    registry
+        .join(id)
+        .map(|context| (context, operation))
+        .map_err(|_| "navigation_settle")
 }
 
 fn assemble_observation(

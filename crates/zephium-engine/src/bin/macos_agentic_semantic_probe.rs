@@ -9,6 +9,16 @@ fn main() {
 #[cfg(target_os = "macos")]
 fn main() {
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if arguments.as_slice() == ["--ci-hidden-rendering-readiness"] {
+        match zephium_engine::run_macos_agentic_rendering_probe() {
+            Ok(report) => eprintln!("macos-agentic-rendering-probe: {report:?}; fixture=loopback-only; provider=absent; profile=ephemeral; presentation=hidden; scheduling=throttle; original_native_teardown=verified"),
+            Err(stage) => {
+                eprintln!("macos-agentic-rendering-probe: failed; stage={stage}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if arguments.as_slice() != ["--ci-hidden-fixed-dom"] {
         eprintln!("macos-agentic-semantic-probe: expected exactly --ci-hidden-fixed-dom");
         std::process::exit(2);

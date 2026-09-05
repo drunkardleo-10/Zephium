@@ -58,6 +58,20 @@ pub fn run_macos_agentic_semantic_probe() -> Result<(), &'static str> {
     platform::macos::run_agentic_semantic_probe()
 }
 
+/// Provider-free fixed loopback diagnostic under the unchanged hidden,
+/// throttled owned-view policy. Returns content-free observations only after
+/// original native teardown, never success/failure of a public Work task.
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[doc(hidden)]
+pub fn run_macos_agentic_rendering_probe() -> Result<MacosAgenticRenderingProbeReport, &'static str>
+{
+    platform::macos::run_agentic_rendering_probe()
+}
+
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[doc(hidden)]
+pub use platform::macos::MacosAgenticRenderingProbeReport;
+
 /// Runs one fixed-fixture semantic session using a caller-supplied model action.
 ///
 /// The callback receives the initial production semantic observation and must

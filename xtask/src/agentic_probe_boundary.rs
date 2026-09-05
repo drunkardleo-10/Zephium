@@ -103,6 +103,8 @@ const ENGINE_MACOS_SEMANTIC_SCREENSHOT: &str =
     "crates/zephium-engine/src/platform/macos/semantic_screenshot.rs";
 const ENGINE_MACOS_SEMANTIC_PROBE: &str =
     "crates/zephium-engine/src/platform/macos/agentic_semantic_probe.rs";
+const ENGINE_MACOS_RENDERING_PROBE: &str =
+    "crates/zephium-engine/src/platform/macos/agentic_rendering_probe.rs";
 const ENGINE_WINDOWS_MODULE: &str = "crates/zephium-engine/src/platform/windows/mod.rs";
 const ENGINE_WINDOWS_AGENT_CONTEXT: &str =
     "crates/zephium-engine/src/platform/windows/agent_context.rs";
@@ -474,6 +476,12 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_engine_platform_module(&macos_module, "macOS")?;
     validate_macos_semantic_probe(
         &macos_module,
+        &read(repository.join(ENGINE_MACOS_SEMANTIC_PROBE))?,
+        &read(repository.join(ENGINE_MACOS_SEMANTIC_PROBE_BINARY))?,
+        &read(repository.join(AGENTIC_FIXTURE_SERVER))?,
+    )?;
+    validate_macos_rendering_probe(
+        &read(repository.join(ENGINE_MACOS_RENDERING_PROBE))?,
         &read(repository.join(ENGINE_MACOS_SEMANTIC_PROBE))?,
         &read(repository.join(ENGINE_MACOS_SEMANTIC_PROBE_BINARY))?,
         &read(repository.join(AGENTIC_FIXTURE_SERVER))?,
@@ -2548,6 +2556,114 @@ fn validate_engine_platform_module(source: &str, platform: &str) -> Result<(), S
         if !source.contains(required) {
             return Err(format!(
                 "{platform} agentic probe module escaped or drifted from its feature gate"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_macos_rendering_probe(
+    source: &str,
+    parent: &str,
+    binary: &str,
+    fixture: &str,
+) -> Result<(), String> {
+    let source = compact(source);
+    for required in [
+        "constSAMPLE_OFFSETS_MS:[u64;8]=[0,50,100,200,400,800,1_600,3_200];",
+        "constMEASUREMENT_TIMEOUT:Duration=Duration::from_secs(5);",
+        "operation.context()!=context",
+        "document_finished_for_audit(operation)",
+        "dispatch_invocation(view,invocation,runtime,deadline)",
+        "snapshot.frame().context()!=context",
+        "snapshot.frame().origin()!=origin",
+        "snapshot.completeness()!=SemanticCompleteness::Complete",
+        "SemanticRuntimeFault::DocumentLoading",
+        "AnimationFrameNotObservedWithinWindow",
+        "ControlsIncomplete",
+        "sample.elapsed_ms>=SAMPLE_OFFSETS_MS[7]",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "rendering diagnostic lost bounded evidence contract {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "unsafe{",
+        "evaluate_script",
+        "evaluateJavaScript",
+        "dispatch_semantic_action",
+        "setHidden",
+        "setVisible",
+        "setInactiveSchedulingPolicy",
+        "BackgroundThrottlingPolicy",
+        "std::env",
+        "std::net",
+        "reqwest",
+        "Keychain",
+        "AgentBrowserSession",
+        "std::thread::spawn",
+        "setInterval",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "rendering diagnostic acquired forbidden authority {forbidden}"
+            ));
+        }
+    }
+    let parent = compact(parent);
+    for required in [
+        "#[path=\"agentic_rendering_probe.rs\"]modrendering;",
+        "begin(ProbeMode::Rendering(&mutreport))",
+        "iffinish(pending)?.is_some()",
+        "report.ok_or(\"rendering_report_missing\")",
+        "ifrendering_probe{&[ContextCapability::Observe,ContextCapability::Navigate]}",
+        "server.url(FixtureRoute::SemanticRendering)",
+        "rendering::measure(&view,context,operation,&url,&runtime,)",
+    ] {
+        if !parent.contains(required) {
+            return Err(format!(
+                "rendering diagnostic escaped original ownership {required}"
+            ));
+        }
+    }
+    let binary = compact(binary);
+    if !binary.contains("arguments.as_slice()==[\"--ci-hidden-rendering-readiness\"]")
+        || !binary.contains("run_macos_agentic_rendering_probe()")
+    {
+        return Err("rendering diagnostic lost its closed provider-free CLI".into());
+    }
+    let fixture = fixture
+        .split("const SEMANTIC_RENDERING_HTML:")
+        .nth(1)
+        .and_then(|source| source.split("const SEMANTIC_RUNTIME_HTML:").next())
+        .ok_or("rendering fixture boundary missing")?;
+    for required in [
+        "Promise.resolve().then(",
+        "setTimeout(",
+        "requestAnimationFrame(",
+        "window.addEventListener('load'",
+        "document.addEventListener('readystatechange'",
+        "id=\"animation\" hidden",
+    ] {
+        if !fixture.contains(required) {
+            return Err(format!(
+                "rendering diagnostic lost independent fixture control {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "fetch(",
+        "src=",
+        "https://",
+        "messageHandlers",
+        "setInterval(",
+        "focus(",
+    ] {
+        if fixture.contains(forbidden) {
+            return Err(format!(
+                "rendering fixture acquired external work {forbidden}"
             ));
         }
     }
@@ -12468,6 +12584,74 @@ mod tests {
             "\"Win32_System_ProcessStatus\"",
             "\"Win32_System_Threading\""
         ))
+        .is_err());
+    }
+
+    #[test]
+    fn rendering_diagnostic_rejects_unbounded_sampling_policy_changes_and_false_evidence() {
+        let source = include_str!(
+            "../../crates/zephium-engine/src/platform/macos/agentic_rendering_probe.rs"
+        );
+        let parent = include_str!(
+            "../../crates/zephium-engine/src/platform/macos/agentic_semantic_probe.rs"
+        );
+        let binary =
+            include_str!("../../crates/zephium-engine/src/bin/macos_agentic_semantic_probe.rs");
+        let fixture = include_str!("../../crates/zephium-agentic/src/fixture_server.rs");
+        validate_macos_rendering_probe(source, parent, binary, fixture).unwrap();
+        for required in [
+            "Duration::from_secs(5)",
+            "document_finished_for_audit(operation)",
+            "snapshot.frame().context() != context",
+            "snapshot.frame().origin() != origin",
+            "snapshot.completeness() != SemanticCompleteness::Complete",
+            "sample.elapsed_ms >= SAMPLE_OFFSETS_MS[7]",
+        ] {
+            assert!(source.contains(required));
+            assert!(validate_macos_rendering_probe(
+                &source.replace(required, "removed"),
+                parent,
+                binary,
+                fixture
+            )
+            .is_err());
+        }
+        for forbidden in [
+            "view.setHidden(false)",
+            "view.setInactiveSchedulingPolicy(None)",
+            "evaluateJavaScript()",
+            "dispatch_semantic_action()",
+            "std::env::var(\"KEY\")",
+            "reqwest::get(url)",
+        ] {
+            assert!(validate_macos_rendering_probe(
+                &format!("{source}\n{forbidden}"),
+                parent,
+                binary,
+                fixture
+            )
+            .is_err());
+        }
+        assert!(validate_macos_rendering_probe(
+            source,
+            &parent.replace("finish(pending)?", "Ok(None)?"),
+            binary,
+            fixture
+        )
+        .is_err());
+        assert!(validate_macos_rendering_probe(
+            source,
+            parent,
+            &binary.replace("--ci-hidden-rendering-readiness", "--arbitrary-url"),
+            fixture
+        )
+        .is_err());
+        assert!(validate_macos_rendering_probe(
+            source,
+            parent,
+            binary,
+            &fixture.replace("requestAnimationFrame(() =>", "setTimeout(() =>")
+        )
         .is_err());
     }
 

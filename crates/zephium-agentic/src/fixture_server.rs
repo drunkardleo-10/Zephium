@@ -65,6 +65,8 @@ pub enum FixtureRoute {
     SameOriginFrame,
     /// First fixed document for production semantic-runtime qualification.
     SemanticRuntime,
+    /// Provider-free hidden-view rendering readiness diagnostic.
+    SemanticRendering,
     /// Controlled-input document for the release-excluded page-world relay proof.
     SemanticRuntimeRelay,
     /// Real-WebKit adversarial page-world relay qualification document.
@@ -96,6 +98,7 @@ impl FixtureRoute {
             Self::HostilePage => "/hostile-v1.html",
             Self::SameOriginFrame => "/frame-v1.html",
             Self::SemanticRuntime => "/semantic-runtime-v1.html",
+            Self::SemanticRendering => "/semantic-rendering-v1.html",
             Self::SemanticRuntimeRelay => "/semantic-runtime-relay-v1.html",
             Self::SemanticRuntimeRelayHostile => "/semantic-runtime-relay-hostile-v1.html",
             Self::SemanticRuntimeReplacement => "/semantic-runtime-replacement-v1.html",
@@ -525,6 +528,13 @@ fn handle(
             200,
             "text/html; charset=utf-8",
             SEMANTIC_RUNTIME_HTML.as_bytes(),
+            FixtureScriptPolicy::InlineOnly,
+        ),
+        b"GET /semantic-rendering-v1.html HTTP/1.1"
+        | b"GET /semantic-rendering-v1.html HTTP/1.0" => (
+            200,
+            "text/html; charset=utf-8",
+            SEMANTIC_RENDERING_HTML.as_bytes(),
             FixtureScriptPolicy::InlineOnly,
         ),
         b"GET /semantic-runtime-relay-v1.html HTTP/1.1"
@@ -1007,6 +1017,29 @@ document.getElementById('frame-button').addEventListener('click', (event) => {
 document.documentElement.dataset.fixtureReady = 'frame-v1';
 </script></body></html>"###;
 
+const SEMANTIC_RENDERING_HTML: &str = r###"<!doctype html>
+<meta charset="utf-8">
+<title>Rendering readiness fixture</title>
+<style>body { margin: 16px; font: 16px sans-serif; } p { margin: 8px; }</style>
+<h1>Rendering readiness fixture</h1>
+<p id="document">Document loading</p><p id="load">Load pending</p>
+<div id="microtask" hidden><p>Microtask ready</p></div>
+<div id="timer" hidden><p>Timer ready</p></div>
+<div id="animation" hidden><p>Animation frame ready</p></div>
+<script>
+(() => {
+  'use strict';
+  const state = document.getElementById('document');
+  const update = () => { state.textContent = 'Document ' + document.readyState; };
+  document.addEventListener('readystatechange', update);
+  update();
+  window.addEventListener('load', () => { document.getElementById('load').textContent = 'Load ready'; }, { once: true });
+  Promise.resolve().then(() => { document.getElementById('microtask').hidden = false; });
+  setTimeout(() => { document.getElementById('timer').hidden = false; }, 0);
+  requestAnimationFrame(() => { document.getElementById('animation').hidden = false; });
+})();
+</script>"###;
+
 const SEMANTIC_RUNTIME_HTML: &str = r###"<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'self'">
@@ -1434,6 +1467,47 @@ mod tests {
         let mut response = String::new();
         stream.read_to_string(&mut response).expect("response");
         response
+    }
+
+    #[test]
+    fn rendering_fixture_is_closed_provider_free_and_keeps_independent_async_controls() {
+        let server = FixtureServer::start().expect("server");
+        let response = fetch(&server, FixtureRoute::SemanticRendering);
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("connect-src 'none'"));
+        assert!(response.contains("script-src 'unsafe-inline'"));
+        for expected in [
+            "Promise.resolve().then(",
+            "setTimeout(",
+            "requestAnimationFrame(",
+            "window.addEventListener('load'",
+            "document.addEventListener('readystatechange'",
+            "id=\"microtask\" hidden",
+            "id=\"timer\" hidden",
+            "id=\"animation\" hidden",
+        ] {
+            assert!(SEMANTIC_RENDERING_HTML.contains(expected));
+        }
+        for forbidden in [
+            "fetch(",
+            "src=",
+            "https://",
+            "messageHandlers",
+            "visibilityState=",
+            "setInterval(",
+            "requestAnimationFrame=",
+            "focus(",
+        ] {
+            assert!(!SEMANTIC_RENDERING_HTML.contains(forbidden));
+        }
+        assert_eq!(
+            SEMANTIC_RENDERING_HTML
+                .matches("requestAnimationFrame(")
+                .count(),
+            1
+        );
+        assert_eq!(SEMANTIC_RENDERING_HTML.matches("setTimeout(").count(), 1);
+        server.shutdown().expect("teardown");
     }
 
     #[test]
