@@ -1,6 +1,28 @@
 use super::*;
 use zephium_agentic::{AgentWorkDebt, AgentWorkJournalMutation};
 
+static SERIAL: Mutex<()> = Mutex::new(());
+pub(crate) struct WorkTestGuard {
+    _serial: std::sync::MutexGuard<'static, ()>,
+}
+pub(crate) fn work_test_guard() -> WorkTestGuard {
+    WorkTestGuard {
+        _serial: SERIAL.lock().unwrap_or_else(|error| error.into_inner()),
+    }
+}
+impl Drop for WorkTestGuard {
+    fn drop(&mut self) {
+        simulate_process_exit();
+    }
+}
+fn simulate_process_exit() {
+    let mut fence = PROCESS_WORK_FENCE.lock().unwrap();
+    if let Some(owner) = fence.as_ref() {
+        assert_eq!(Arc::strong_count(owner), 1, "fixture still owns a live Hub");
+    }
+    fence.take();
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum Fault {
     BeforeWrite,
@@ -59,14 +81,20 @@ fn transition(
 }
 
 #[test]
-fn namespace_fences_two_live_owners_and_releases_only_on_drop() {
+fn namespace_fences_live_and_replaced_store_owners_until_process_exit() {
+    let _process = work_test_guard();
     let (directory, first, owner) = open();
     let mut second = Hub::open(directory.path().into()).unwrap();
     assert!(matches!(
         second.agent_work(Request::Claim),
-        Err(Error::Unavailable)
+        Err(Error::Fenced)
     ));
     drop(first);
+    assert!(matches!(
+        second.agent_work(Request::Claim),
+        Err(Error::Fenced)
+    ));
+    simulate_process_exit();
     let Reply::Claimed {
         owner: second_owner,
         ..
@@ -86,6 +114,7 @@ fn namespace_fences_two_live_owners_and_releases_only_on_drop() {
 
 #[test]
 fn crash_restart_classifies_every_incomplete_stage_without_replay() {
+    let _process = work_test_guard();
     let (directory, mut hub, owner) = open();
     let mut old = Vec::new();
     for (key, disposition) in [
@@ -109,6 +138,7 @@ fn crash_restart_classifies_every_incomplete_stage_without_replay() {
         old.push(record);
     }
     drop(hub);
+    simulate_process_exit();
     let mut reopened = Hub::open(directory.path().into()).unwrap();
     let Reply::Claimed {
         owner: new_owner,
@@ -139,12 +169,14 @@ fn crash_restart_classifies_every_incomplete_stage_without_replay() {
 
 #[test]
 fn partial_restart_transaction_rolls_back_every_record_and_fence() {
+    let _process = work_test_guard();
     let (directory, mut hub, owner) = open();
     let first = initial(owner, 1);
     let second = initial(owner, 2);
     put(&mut hub, first);
     put(&mut hub, second);
     drop(hub);
+    simulate_process_exit();
     let mut reopened = Hub::open(directory.path().into()).unwrap();
     FAULT.with(|fault| fault.set(Some(Fault::RestartPartial)));
     assert!(matches!(
@@ -160,6 +192,7 @@ fn partial_restart_transaction_rolls_back_every_record_and_fence() {
 
 #[test]
 fn partial_writes_and_lost_acknowledgement_reconcile_only_exact_cas() {
+    let _process = work_test_guard();
     for injected in [Fault::BeforeWrite, Fault::AfterWrite, Fault::AfterCommit] {
         let (_directory, mut hub, owner) = open();
         let admitted = initial(owner, 1);
@@ -181,11 +214,14 @@ fn partial_writes_and_lost_acknowledgement_reconcile_only_exact_cas() {
             matches!(hub.agent_work(Request::CompareAndSet(mutation)), Ok(Reply::Record(Some(record))) if record == mutation.next())
         );
         assert_eq!(inventory(&hub.meta).unwrap(), vec![mutation.next()]);
+        drop(hub);
+        simulate_process_exit();
     }
 }
 
 #[test]
 fn approval_accept_reject_stale_replay_and_cancellation_races_are_exact() {
+    let _process = work_test_guard();
     for winner in [
         AgentWorkDisposition::FreshAdmissionRequired,
         AgentWorkDisposition::Rejected,
@@ -214,11 +250,14 @@ fn approval_accept_reject_stale_replay_and_cancellation_races_are_exact() {
                 assert_eq!(transition(&mut hub, review, loser), Err(Error::Conflict));
             }
         }
+        drop(hub);
+        simulate_process_exit();
     }
 }
 
 #[test]
 fn terminal_persistence_is_immutable_across_restart_and_sql_update() {
+    let _process = work_test_guard();
     let (directory, mut hub, owner) = open();
     let admitted = initial(owner, 1);
     put(&mut hub, admitted);
@@ -229,6 +268,7 @@ fn terminal_persistence_is_immutable_across_restart_and_sql_update() {
         .is_err());
     assert!(hub.meta.execute("DELETE FROM agent_work_runs", []).is_err());
     drop(hub);
+    simulate_process_exit();
     let mut reopened = Hub::open(directory.path().into()).unwrap();
     assert!(
         matches!(reopened.agent_work(Request::Claim), Ok(Reply::Claimed { records, .. }) if records == vec![terminal])
@@ -237,6 +277,7 @@ fn terminal_persistence_is_immutable_across_restart_and_sql_update() {
 
 #[test]
 fn transient_store_cannot_claim_durable_admission() {
+    let _process = work_test_guard();
     let mut hub = Hub::in_memory().unwrap();
     assert!(matches!(
         hub.agent_work(Request::Claim),
@@ -246,6 +287,7 @@ fn transient_store_cannot_claim_durable_admission() {
 
 #[test]
 fn corrupt_record_fails_closed() {
+    let _process = work_test_guard();
     let (_directory, mut hub, owner) = open();
     let admitted = initial(owner, 1);
     put(&mut hub, admitted);
@@ -266,6 +308,7 @@ fn corrupt_record_fails_closed() {
 
 #[test]
 fn retention_capacity_refuses_admission_without_evicting_debt() {
+    let _process = work_test_guard();
     let (_directory, mut hub, owner) = open();
     let transaction = hub.meta.transaction().unwrap();
     for key in 1..=1024 {
@@ -285,4 +328,50 @@ fn retention_capacity_refuses_admission_without_evicting_debt() {
     assert_eq!(inventory(&hub.meta).unwrap().len(), 1024);
     let first = initial(owner, 1);
     assert!(transition(&mut hub, first, AgentWorkDisposition::FailedClosed).is_ok());
+}
+
+#[test]
+fn process_fence_outlives_store_and_is_released_by_real_child_process_exit() {
+    let _process = work_test_guard();
+    let (directory, hub, _) = open();
+    let child = |expected: &str| {
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "hub::agent_work::tests::process_fence_child",
+                "--ignored",
+            ])
+            .env("ZEPHIUM_TEST_WORK_DIRECTORY", directory.path())
+            .env("ZEPHIUM_TEST_WORK_EXPECTED", expected)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "bounded process-fence fixture failed"
+        );
+    };
+    child("unavailable");
+    drop(hub);
+    child("unavailable");
+    simulate_process_exit();
+    child("claimed");
+    // The child retained its production static fence until actual OS exit.
+    child("claimed");
+}
+
+#[test]
+#[ignore = "executed only by the process-fence parent fixture"]
+fn process_fence_child() {
+    let directory =
+        std::path::PathBuf::from(std::env::var_os("ZEPHIUM_TEST_WORK_DIRECTORY").unwrap());
+    let mut hub = Hub::open(directory).unwrap();
+    let result = hub.agent_work(Request::Claim);
+    match std::env::var("ZEPHIUM_TEST_WORK_EXPECTED")
+        .unwrap()
+        .as_str()
+    {
+        "unavailable" => assert!(matches!(result, Err(Error::Unavailable))),
+        "claimed" => assert!(matches!(result, Ok(Reply::Claimed { .. }))),
+        _ => panic!("invalid process fixture expectation"),
+    }
 }

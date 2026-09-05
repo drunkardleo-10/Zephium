@@ -11,8 +11,10 @@ namespace or lock is created until explicit claim.
 
 A claim acquires the existing `LockedPrivateNamespace` authority under the
 application data directory. Store mints a fresh incarnation itself; callers
-cannot restore an old incarnation. The exclusive lease remains held until the
-Store owner closes, including after uncertain transactions. Every operation
+cannot restore an old incarnation. The exclusive lease remains held until OS
+process exit, including after uncertain transactions and Store shutdown. A
+bounded process-static owner prevents replacing a Store from reopening Work
+admission while an unclean native engine teardown may still be running. Every operation
 revalidates that exact lease. This currently admits macOS/Linux; unsupported
 platforms and transient in-memory stores fail closed.
 
@@ -48,6 +50,9 @@ Deterministic tests cover the complete disposition-pair grammar, malformed
 records, overflow, live-owner exclusion, restart classification, partial restart
 and write rollback, lost commit acknowledgements, approval/reject/cancel races,
 terminal immutability, retention pressure, callback loss/panic and bounded Store
-mailbox admission. These are persistence proofs, not native/application workflow
+mailbox admission. A real subprocess fixture additionally proves exclusion
+before and after Store drop, and lock release after actual child-process exit.
+Unit restart injection releases only a test-owned fence with no live Hub;
+production has no fence-release operation. These are persistence proofs, not native/application workflow
 qualification. Application admission and retained-controller reconciliation are
 the next integration layer.

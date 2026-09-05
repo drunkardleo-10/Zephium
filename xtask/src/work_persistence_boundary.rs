@@ -23,6 +23,7 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
         .map_err(|_| "missing Work hub")?;
     for required in [
         "LockedPrivateNamespace::open_or_create",
+        "static PROCESS_WORK_FENCE: Mutex<Option<Arc<WorkOwnership>>>",
         "with_verified_path",
         "AgentWorkIncarnation::generate()",
         "record.interrupted(owner)?",

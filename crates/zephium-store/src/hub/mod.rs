@@ -42,6 +42,12 @@ use zephium_core::session::{
 use crate::{bounded_json, migrations};
 
 pub(crate) use agent_audit::{AgentAuditAppendOutcome, MAX_DURABLE_AGENT_AUDIT_EVENTS};
+#[cfg(all(
+    test,
+    feature = "work-execution",
+    any(target_os = "macos", target_os = "linux")
+))]
+pub(crate) use agent_work::work_test_guard;
 use compatibility::remove_legacy_source;
 pub(crate) use compatibility::LEGACY_IMPORT_STATE_KEY;
 #[cfg(test)]
@@ -64,7 +70,7 @@ pub(crate) const MAX_NAME_BYTES: usize = MAX_SESSION_NAME_CHARS * 4;
 
 pub struct Hub {
     #[cfg(feature = "work-execution")]
-    work: Option<agent_work::WorkOwnership>,
+    work: Option<std::sync::Arc<agent_work::WorkOwnership>>,
     dir: Option<PathBuf>,
     meta: Connection,
     profiles: HashMap<ProfileId, Connection>,

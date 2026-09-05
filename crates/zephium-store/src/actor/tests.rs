@@ -142,9 +142,13 @@ fn work_journal_mailbox_is_lazy_bounded_and_refusal_never_calls_completion() {
     );
 }
 
-#[cfg(feature = "work-execution")]
+#[cfg(all(
+    feature = "work-execution",
+    any(target_os = "macos", target_os = "linux")
+))]
 #[test]
 fn work_journal_callback_loss_and_panic_do_not_reclaim_process_identity_or_kill_store() {
+    let _process = crate::hub::work_test_guard();
     use zephium_agentic::{AgentWorkJournalPort, AgentWorkJournalReply, AgentWorkJournalRequest};
     let directory = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(directory.path()).unwrap();
@@ -184,6 +188,10 @@ fn work_journal_callback_loss_and_panic_do_not_reclaim_process_identity_or_kill_
         .unwrap();
     assert!(
         matches!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Ok(AgentWorkJournalReply::Claimed { owner: again, .. }) if again == owner)
+    );
+    assert_eq!(
+        store.shutdown_until(Instant::now() + Duration::from_secs(2)),
+        zephium_core::ports::store::StoreShutdownOutcome::Clean
     );
 }
 

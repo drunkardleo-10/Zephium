@@ -8,6 +8,7 @@
 )]
 
 use rusqlite::{params, Connection, OptionalExtension};
+use std::sync::{Arc, Mutex};
 use zephium_agentic::{
     AgentWorkDisposition, AgentWorkIncarnation, AgentWorkJournalError as Error,
     AgentWorkJournalReply as Reply, AgentWorkJournalRequest as Request, AgentWorkRecord,
@@ -17,7 +18,7 @@ use zephium_private_fs::LockedPrivateNamespace;
 
 use super::Hub;
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 #[path = "agent_work_tests.rs"]
 mod tests;
 
@@ -28,6 +29,14 @@ pub(super) struct WorkOwnership {
     namespace: LockedPrivateNamespace,
     incarnation: AgentWorkIncarnation,
 }
+
+// Engine teardown follows Store, and unacknowledged native work may survive
+// Store shutdown. Keep this original lock until OS process exit, even when
+// the Hub/Store actor has gone. Store replacement cannot reopen admission.
+static PROCESS_WORK_FENCE: Mutex<Option<Arc<WorkOwnership>>> = Mutex::new(None);
+
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+pub(crate) use tests::work_test_guard;
 
 impl Hub {
     pub(crate) fn agent_work(&mut self, request: Request) -> Result<Reply, Error> {
@@ -67,16 +76,24 @@ impl Hub {
 
     fn claim_work(&mut self) -> Result<Reply, Error> {
         if self.work.is_none() {
+            let mut process = PROCESS_WORK_FENCE
+                .try_lock()
+                .map_err(|_| Error::Unavailable)?;
+            if process.is_some() {
+                return Err(Error::Fenced);
+            }
             // In-memory/transient stores cannot claim durable product admission.
             let dir = self.dir.as_ref().ok_or(Error::Unavailable)?;
             let namespace = LockedPrivateNamespace::open_or_create(dir.join("work-execution"))
                 .map_err(|_| Error::Unavailable)?;
             // Keep the exclusive lock even after an ambiguous transaction. A
             // retry may reconcile this exact owner; another owner cannot race it.
-            self.work = Some(WorkOwnership {
+            let ownership = Arc::new(WorkOwnership {
                 namespace,
                 incarnation: AgentWorkIncarnation::generate(),
             });
+            *process = Some(ownership.clone());
+            self.work = Some(ownership);
         }
         let held = self.work.as_ref().ok_or(Error::Fenced)?;
         let owner = held.incarnation;
@@ -92,7 +109,7 @@ impl Hub {
                     ).map_err(|_| Error::Uncertain)?;
                     if changed != 1 { return Err(Error::Conflict); }
                     *record = next;
-                    #[cfg(test)]
+                    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
                     if tests::fault(tests::Fault::RestartPartial) { return Err(Error::Uncertain); }
                 }
             }
@@ -183,7 +200,7 @@ fn compare_and_set(
         return Err(Error::Transition);
     }
     let transaction = connection.transaction().map_err(|_| Error::Unavailable)?;
-    #[cfg(test)]
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
     if tests::fault(tests::Fault::BeforeWrite) {
         return Err(Error::Uncertain);
     }
@@ -210,12 +227,12 @@ fn compare_and_set(
     if changed != 1 {
         return Err(Error::Conflict);
     }
-    #[cfg(test)]
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
     if tests::fault(tests::Fault::AfterWrite) {
         return Err(Error::Uncertain);
     }
     transaction.commit().map_err(|_| Error::Uncertain)?;
-    #[cfg(test)]
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
     if tests::fault(tests::Fault::AfterCommit) {
         return Err(Error::Uncertain);
     }
