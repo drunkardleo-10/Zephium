@@ -103,18 +103,19 @@ requires fresh admission and never executes an old proposal.
 
 ## Evidence and remaining product seams
 
-The excluded public Luna qualifier now composes this actor with the actual
+The excluded public Luna qualifiers compose this actor with the actual
 EngineHost context port, runtime mailbox and `SqliteStore` audit implementation.
-It requires trusted task completion, durable closure, focus isolation and clean
-native/store teardown. See the [M6 record](../eval/agentic-browsing/m6-production-qualification.md).
+The application qualifier additionally uses the [trusted macOS composition](agent-work-composition.md),
+actual shell admission, journal and application shutdown. It requires trusted
+task completion, durable success, focus isolation and clean native/store/worker
+teardown. See the [M6 record](../eval/agentic-browsing/m6-production-qualification.md).
 Only explicit public qualification can enable retained provider logs;
 production/BYOK remains `store:false`. Local diagnostics contain only closed
 states, correlations, counters and timings; no page/provider data or secrets.
 
-Next: trusted desktop composition over the implemented application admission
-and recovery port. The current desktop does not yet start this actor from a user
-Work command, and the new application path has deterministic shell/SQLite
-evidence rather than a new live-native qualification. Local/hosted model
+Next: trusted product task/plan authoring and a user-facing Work command over
+the opt-in Rust desktop admission port. No UI/IPC authority is added, and the
+full Tauri window/bootstrap path is not live-qualified. Local/hosted model
 transport adapters must share the same session semantics. Native macOS
 suspend/resume, authenticated/public multi-site qualification, concurrent Browse
 interaction, navigation and richer tool adapters remain open. A suspension

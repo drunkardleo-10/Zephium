@@ -52,7 +52,8 @@ trusted observation.
 `zephium-app/work-execution` provides `CallbackHandle::attach_work`,
 `PreparedAgentWork` and the content-free `AgentWorkApplicationHandle`. The
 composition root supplies the same `Arc<SqliteStore>` allocation for ordinary
-Store, Work journal and audit ports. The shell rejects a different Store owner,
+Store, Work journal and audit ports, and the same engine owner for ordinary
+Shell, attachment and prepared execution. The shell rejects a different owner,
 a second coordinator, or an already-owned legacy agent lifecycle. Attachment
 claims the durable recovery inventory, but creates no runtime or native page.
 
@@ -112,9 +113,11 @@ fault matrix covers approval acceptance/rejection/replay, cancellation/takeover,
 lost native callbacks, uncertain admission/terminal acknowledgements, runtime and
 native-factory refusal, bounded wake pressure and exact audit redelivery.
 
-This pass does not claim a new real-site/native application qualification. The
-prior excluded Luna actor qualifier remains separate evidence. Remaining seams
-are a trusted desktop composition adapter supplying the native factory and task
-contract, plus user-facing Work state; persisted facts deliberately cannot
-automatically resume execution. No new UI, site tools, platform suspend support
-or battery qualification is included.
+The optional [macOS composition adapter](agent-work-composition.md) now supplies
+the actual deferred EngineHost factory and explicit trusted task contract. Two
+public Luna runs through that adapter, actual shell and native engine completed
+with durable success and clean shutdown; the [M6 record](../eval/agentic-browsing/m6-production-qualification.md)
+separates that evidence from full desktop UI/bootstrap qualification. Remaining
+seams are trusted product task/plan authoring and user-facing Work state;
+persisted facts deliberately cannot automatically resume execution. No new UI,
+site tools, platform suspend support or battery qualification is included.

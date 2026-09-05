@@ -1507,7 +1507,9 @@ Do not build during the isolated proof:
 - the Work spatial UI or design system;
 - Work tasks, notes, memory, or knowledge; the subsequently authorized
   [application admission/recovery foundation](agent-work-persistence.md) stores
-  only bounded content-free facts, not executable session or content persistence;
+  only bounded content-free facts, not executable session or content persistence.
+  Its opt-in [trusted macOS composition](agent-work-composition.md) accepts an
+  already-approved typed task contract, not UI/model-authored authority;
 - the hosted AI service or cloud browser execution;
 - mobile, collaboration, teams, or synchronization;
 - arbitrary JavaScript, CSS selectors, XPath, raw DOM, or a model-facing CDP;

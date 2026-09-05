@@ -252,6 +252,8 @@ Single Cargo workspace monorepo, frontend included. Per-platform native code is
 │   ├── zephium-agent-model-catalog
 │   │                            product-owned immutable Terra provider model,
 │   │                            tokenizer, and standard-rate pricing entry.
+│   ├── zephium-work-composition optional trusted macOS engine/Store adapter to
+│   │                            durable Work admission; no UI or task authority.
 │   ├── zephium-ipc              DTOs + specta/tauri-specta TS codegen.
 │   ├── zephium-engine           Wry adapter + native stage per platform
 │   │                            (stage_macos / stage_windows / stage_linux,

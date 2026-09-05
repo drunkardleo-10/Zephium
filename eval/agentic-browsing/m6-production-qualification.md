@@ -872,6 +872,71 @@ Store/controller/default-desktop builds, content-free/source boundaries and
 default-desktop dependency checks pass. Optimized probe enablement remains
 compile-refused. No new live-provider or battery claim is made.
 
+## Trusted macOS application composition evidence
+
+The subsequent 2026-09-05 slice adds opt-in
+`zephium-work-composition/macos-work` and `zephium-desktop/macos-work`. The
+production factory takes the actual sealed EngineHost port only after the
+existing application's two durable admission acknowledgements. Ordinary Store,
+Work journal and audit share one exact `Arc<SqliteStore>`; the shell also checks
+the exact engine allocation at attachment and prepared admission.
+
+The excluded `--live-public-luna-work-application-inspectable` qualifier uses
+that same composition with the actual shell, native engine, SQLite Store,
+blocker/extension lifecycle owners and application shutdown. Only the provider
+retention constructor is different. The explicit public Wikipedia task sets a
+search value and Deutsch in either order, then refines the search value without
+submitting. Trusted fresh-observation predicates determine completion; action
+counts and model text do not. No ordinary tab or synthetic browser port is used.
+
+Two corrected runs completed 2/2 tasks and 6/6 independently verified native
+effects, with exact durable `Succeeded`, `ShutdownOutcome::Clean`, joined shell
+and service owners, zero focus theft and exit 0:
+
+| Run | Model turns | Verified effects | Input / output tokens | Priced ceiling (micro-USD) | Provider-turn time | Total elapsed |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 4 | 3 | 11,151 / 357 | 785 | 10.182 s | 12.364 s |
+| 2 (final build) | 4 | 3 | 11,228 / 398 | 846 | 10.938 s | 12.397 s |
+
+The final build's four turns, in order (local counters only):
+
+| Turn | Tool | Request bytes | New semantic bytes | Input / output tokens | Provider-turn time |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 | Act | 12,000 | 3,116 | 2,512 / 122 | 3.813 s |
+| 2 | Locate | 14,387 | 287 | 2,732 / 51 | 2.196 s |
+| 3 | Act | 16,432 | 302 | 2,865 / 103 | 2.613 s |
+| 4 | Act | 18,809 | 408 | 3,119 / 122 | 2.316 s |
+
+An earlier run completed the task, durable success and clean application
+shutdown but failed overall because the old qualifier wrapper attempted a
+second one-shot engine shutdown. It is excluded from the passing count. The
+wrapper now leaves successful application-owned teardown with the actual
+application; host-only and failure paths retain bounded host cleanup. No
+production shutdown proof or timeout was weakened. A four-case deterministic
+ownership test covers that distinction.
+
+Validation: 335 application, 459 native-probe engine, 257 Store, 417 default
+functional-core, 13 production-feature controller, 37 runtime and 170 xtask
+tests pass. The Store subprocess helper remains marked ignored for direct
+invocation and is exercised by its parent test. The application fault matrix
+now also rejects both foreign attached
+engine owners and swapped prepared engine owners before native acquisition,
+alongside its existing Store-identity, durable-write, mailbox, cancellation,
+takeover, callback-loss and audit tests. Strict all-target Clippy passes for
+application, native-probe engine, composition, desktop feature, qualifier and xtask; explicit
+production-library Clippy and optimized desktop feature checks pass. Default
+desktop optimized/dependency gates and semantic/controller/runtime source gates
+pass. Enabling retained qualification in an optimized build is compile-refused.
+
+This is the full shared application/native execution path, not a full Tauri
+window/bootstrap or user-facing Work qualification. The qualifier's chrome
+adapter refuses ordinary presentation; the selected isolated public profile has
+explicit content policy and no user extensions. There is no UI/IPC task source
+or new product task semantics. Production/BYOK remains `store:false`; only
+these authorized public runs retain provider logs. No credentials, objectives,
+page/provider contents, profiles or raw traces are committed. These small
+repeats are not a latency benchmark, production readiness or battery claim.
+
 ## Remaining release blockers
 
 - authorized named-device macOS native-input routes beyond fixed DOM;
