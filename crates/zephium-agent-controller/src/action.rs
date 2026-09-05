@@ -39,6 +39,24 @@ pub struct AgentBrowserActionProposal {
     batch: SemanticActionBatchExecution,
 }
 
+/// Original refused proposal, including its non-replayable continuation. Only
+/// the exact policy branch before permit/dispatch can mark it unissued.
+pub(crate) struct AgentBrowserActionProposalRefusal {
+    proposal: AgentBrowserActionProposal,
+    human_review: Option<AgentNeedsHumanTransition>,
+}
+
+impl AgentBrowserActionProposalRefusal {
+    pub(crate) const fn human_review(&self) -> Option<AgentNeedsHumanTransition> {
+        self.human_review
+    }
+
+    pub(crate) fn discard_after_closure(self) -> Option<AgentNeedsHumanTransition> {
+        drop(self.proposal);
+        self.human_review
+    }
+}
+
 impl AgentBrowserActionProposal {
     pub(crate) fn bind(
         turn: AgentProviderSettledToolTurn,
@@ -117,8 +135,9 @@ impl AgentBrowserActionProposal {
         execution: &mut SemanticActionExecutionCoordinator,
         mut journal: Option<&mut crate::terra::work::WorkJournal>,
         admission_failure: &mut Option<AgentFailedSemanticEffect>,
-        proposal_failure: &mut Option<AgentBrowserActionProposal>,
+        proposal_failure: &mut Option<AgentBrowserActionProposalRefusal>,
     ) -> Result<AgentBrowserAction, AgentBrowserActionError> {
+        let mut human_review = None;
         let admission = (|| {
             let permit = match policy
                 .authorize_semantic_effect(request, &self.action, assessment)
@@ -130,6 +149,7 @@ impl AgentBrowserActionProposal {
                         journal
                             .needs_human(transition)
                             .map_err(|_| AgentBrowserActionError::State)?;
+                        human_review = Some(transition);
                     }
                     return Err(AgentBrowserActionError::NeedsHuman(transition.reason()));
                 }
@@ -157,7 +177,10 @@ impl AgentBrowserActionProposal {
             Err(error) => {
                 // Keep the original batch and prepared action alongside any
                 // charged failure; recovery must not fabricate a new batch.
-                *proposal_failure = Some(self);
+                *proposal_failure = Some(AgentBrowserActionProposalRefusal {
+                    proposal: self,
+                    human_review,
+                });
                 return Err(error);
             }
         };

@@ -166,6 +166,10 @@ fn validate_application(source: &str) -> Result<(), String> {
         "AgentWorkJournalMutation::completed(record, policy.policy_settlement(), native)",
         "Some(AgentWorkOutcome::ClosedUnsuccessfully(closed))",
         "AgentWorkJournalMutation::closed_unsuccessfully(",
+        "AgentWorkJournalMutation::needs_approval_closed(",
+        "closed.human_review().filter(|_| !self.stopping)",
+        "closed.human_review().is_some() => AgentWorkApplicationPhase::Reviewed",
+        "self.stopping && record.disposition() == AgentWorkDisposition::NeedsApproval",
         "closed.policy_settlement()",
         "self.unstarted = handle.take_outcome()",
         "recovery.settle_audit_reconciliation(settlement)",
@@ -227,6 +231,10 @@ fn validate_terminal_records(source: &str) -> Result<(), String> {
         "match policy.closure().outcome()",
         "AgentRunProgressOutcome::Failed(_) => AgentWorkDisposition::Failed",
         "AgentRunProgressOutcome::Cancelled(_) => AgentWorkDisposition::Cancelled",
+        "pub fn needs_approval_closed(",
+        "review.matches_manifest_revision(closure.manifest(), closure.manifest_guard())",
+        "self.0[48..64] != review.context().identity().owner().bytes()",
+        "AgentRunProgressOutcome::Failed(AgentSupervisorFailure::PolicyDenied)",
     ] {
         if !source.contains(boundary) {
             return Err(format!(
@@ -335,6 +343,9 @@ mod tests {
         for boundary in [
             "Some(AgentWorkOutcome::ClosedUnsuccessfully(closed))",
             "AgentWorkJournalMutation::closed_unsuccessfully(",
+            "AgentWorkJournalMutation::needs_approval_closed(",
+            "closed.human_review().filter(|_| !self.stopping)",
+            "closed.human_review().is_some() => AgentWorkApplicationPhase::Reviewed",
             "projection.snapshot.phase != AgentWorkApplicationPhase::Succeeded",
             "if record.disposition() == AgentWorkDisposition::Succeeded",
             "lock(&self.projection).extraction = success.take_extraction()",

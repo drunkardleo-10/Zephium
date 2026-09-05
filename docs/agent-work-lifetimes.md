@@ -39,8 +39,11 @@ Fresh run input must still carry newly approved task/profile/manifest authority.
 
 `CallbackHandle::attach_successor_work` joins the exact predecessor projection
 and immutable record to the Shell's retained original owners. Ordinary second
-attachment stays refused. Only `Succeeded`, `Failed` or `Cancelled` with zero
-debt and matching original outcome can qualify. An active runtime, recovery
+attachment stays refused. `Succeeded`, `Failed` or `Cancelled` with zero
+debt and matching original outcome can qualify. A [proof-closed review](agent-work-review.md)
+can additionally qualify only after its exact decision ACK and retained original
+failed-review/native/lifecycle proof join; review never resumes an old action.
+An active runtime, recovery
 audit, uncertain durable write, staged input, undelivered event or unconsumed
 result blocks replacement. The new coordinator reloads the same fenced Store;
 it never restores a task or releases/reacquires the process fence. Old handles

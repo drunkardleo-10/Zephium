@@ -7,13 +7,19 @@ use zephium_agent_controller::{AgentBrowserRetention, AgentWorkExtractionTask};
 use zephium_agent_provider_transport::AgentProviderTransport;
 
 fn fixture_provider() -> (AgentProviderTransport, std::thread::JoinHandle<usize>) {
+    fixture_provider_responses(vec![response_stream(1), response_stream(2)])
+}
+
+pub(super) fn fixture_provider_responses(
+    responses: Vec<String>,
+) -> (AgentProviderTransport, std::thread::JoinHandle<usize>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let endpoint = format!("http://{}/v1/responses", listener.local_addr().unwrap());
     let server = std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(8);
         let mut turns = 0;
-        for _ in 0..4 {
+        for _ in 0..responses.len() * 2 {
             let mut socket = loop {
                 match listener.accept() {
                     Ok((socket, _)) => break socket,
@@ -62,7 +68,7 @@ fn fixture_provider() -> (AgentProviderTransport, std::thread::JoinHandle<usize>
                 )
             } else {
                 turns += 1;
-                ("text/event-stream", response_stream(turns))
+                ("text/event-stream", responses[turns - 1].clone())
             };
             write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
         }
@@ -79,7 +85,7 @@ fn fixture_provider() -> (AgentProviderTransport, std::thread::JoinHandle<usize>
     )
 }
 
-fn response_stream(turn: usize) -> String {
+pub(super) fn response_stream(turn: usize) -> String {
     let created = format!(
         r#"{{"type":"response.created","response":{{"id":"resp_{turn}","status":"in_progress","model":"gpt-5.6-luna","service_tier":"default"}}}}"#
     );

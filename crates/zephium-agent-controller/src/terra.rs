@@ -1931,7 +1931,7 @@ pub struct AgentBrowserSession {
     action_settlements: zephium_agentic::SemanticActionSettlementCoordinator,
     action_refusal: Option<crate::AgentBrowserActionFinalizationRefusal>,
     action_admission_failure: Option<zephium_agentic::AgentFailedSemanticEffect>,
-    action_proposal_failure: Option<crate::AgentBrowserActionProposal>,
+    action_proposal_failure: Option<crate::action::AgentBrowserActionProposalRefusal>,
     action_terminal: Option<zephium_agentic::SemanticActionBatchResult>,
     failure: Option<AgentBrowserProviderError>,
     deadline: Instant,
@@ -2555,7 +2555,10 @@ impl AgentBrowserSession {
             || self.action_settlements.status().pending() != 0
             || self.action_refusal.is_some()
             || self.action_admission_failure.is_some()
-            || self.action_proposal_failure.is_some()
+            || self
+                .action_proposal_failure
+                .as_ref()
+                .is_some_and(|refusal| !unsuccessful || refusal.human_review().is_none())
             || self.action_terminal.is_some()
             || self.retained_terminal.is_some()
             || self.policy.is_sealed()

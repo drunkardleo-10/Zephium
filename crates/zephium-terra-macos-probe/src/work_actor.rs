@@ -105,6 +105,7 @@ impl AgentWorkTask for PublicPreparedResultTask {
 
 enum PublicWorkInput {
     Actions,
+    ReviewActions,
     Extraction,
     Artifact,
     ActionsAndExtraction,
@@ -185,6 +186,19 @@ pub(super) fn input(
     super::ProbeFailure,
 > {
     input_mode(started, PublicWorkInput::Actions)
+}
+
+pub(super) fn review_input(
+    started: Instant,
+) -> Result<
+    (
+        zephium_core::ids::ProfileId,
+        AgentWorkRunInput,
+        Box<dyn AgentWorkTask>,
+    ),
+    super::ProbeFailure,
+> {
+    input_mode(started, PublicWorkInput::ReviewActions)
 }
 
 pub(super) fn extraction_input(
@@ -292,11 +306,13 @@ fn input_mode(
         )
     };
     let form_task = form_task().map_err(|_| Error::Authority)?;
-    let effects = AgentEffectScope::try_new(if extraction {
-        &[SemanticEffectClass::Read]
-    } else {
-        &[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite]
-    })
+    let effects = AgentEffectScope::try_new(
+        if extraction || matches!(mode, PublicWorkInput::ReviewActions) {
+            &[SemanticEffectClass::Read]
+        } else {
+            &[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite]
+        },
+    )
     .map_err(|_| Error::Authority)?;
     let budget =
         AgentRunBudget::try_new(24, 1_000_000, 1_000_000, 1).map_err(|_| Error::Authority)?;

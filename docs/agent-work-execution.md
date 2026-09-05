@@ -115,10 +115,16 @@ fact grants another execution or reopens the sealed native port.
 This path consumes only exact read-only and successful revocation callbacks;
 foreign, duplicate, refused and lost receipts remain recovery debt. It shares
 the existing cleanup deadline, including any shorter shutdown deadline, and
-never retries an action. A retained native action/proposal/accounting owner,
+never retries an action. A retained native action/accounting owner,
 audit refusal, or a previously started terminal-resource close cannot be
 reclassified as clean. Failure during an already-started success close remains
 recovery even when the page has physically closed.
+
+An exact never-dispatched policy `NeedsHuman` proposal is separately typed and
+retained through original unsuccessful closure, then discarded without replay.
+It keeps the original supervisor token for drain instead of yielding it away.
+The application can then require [explicit durable review and fresh admission](agent-work-review.md).
+Other proposal/admission failures remain conservative recovery owners.
 
 Recovery retains the sealed session, policy, journal, native owners and retained
 callbacks without credentials or objective data. It deliberately grants no

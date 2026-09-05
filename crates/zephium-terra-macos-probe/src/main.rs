@@ -80,6 +80,9 @@ fn main() {
         [argument] if argument == "--live-public-luna-work-scoped-inspectable" => {
             work_application::run_scoped()
         }
+        [argument] if argument == "--live-public-luna-work-review-inspectable" => {
+            work_application::run_review()
+        }
         [argument, directory] if argument == "--cleanup-public-work-artifact" => {
             work_artifact_cleanup::recover(std::path::Path::new(directory))
         }

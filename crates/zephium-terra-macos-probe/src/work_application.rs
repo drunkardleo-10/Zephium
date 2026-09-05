@@ -60,6 +60,10 @@ pub(super) fn run_scoped() -> Result<(), super::ProbeFailure> {
     run_mode(Qualification::ActionsAndScopedExtraction)
 }
 
+pub(super) fn run_review() -> Result<(), super::ProbeFailure> {
+    run_mode(Qualification::ReviewAndFreshActions)
+}
+
 #[derive(Clone, Copy)]
 enum Qualification {
     Actions,
@@ -69,13 +73,21 @@ enum Qualification {
     Sequential,
     ActionsAndExtraction,
     ActionsAndScopedExtraction,
+    ReviewAndFreshActions,
 }
 
 fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
     use super::ProbeFailure as Error;
-    let extraction = !matches!(mode, Qualification::Actions);
+    let review = matches!(mode, Qualification::ReviewAndFreshActions);
+    let extraction = !matches!(
+        mode,
+        Qualification::Actions | Qualification::ReviewAndFreshActions
+    );
     let durable = matches!(mode, Qualification::Artifact);
-    let sequential = matches!(mode, Qualification::Sequential);
+    let sequential = matches!(
+        mode,
+        Qualification::Sequential | Qualification::ReviewAndFreshActions
+    );
     let scoped = matches!(mode, Qualification::ActionsAndScopedExtraction);
     let combined = matches!(
         mode,
@@ -86,7 +98,9 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
         Qualification::CancelExtraction | Qualification::Sequential
     );
     let started = Instant::now();
-    let (profile, input, task) = if scoped {
+    let (profile, input, task) = if review {
+        super::work_actor::review_input(started)?
+    } else if scoped {
         super::work_actor::scoped_input(started)?
     } else if combined {
         super::work_actor::combined_input(started)?
@@ -165,6 +179,8 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
         let mut terminal_success = false;
         let mut terminal_cancelled = false;
         let mut cancellation_requested = false;
+        let mut review_requested = false;
+        let mut terminal_reviewed = false;
         let mut lifetime = 1_u8;
         let mut predecessor: Option<(
             zephium_app::AgentWorkApplicationHandle,
@@ -229,6 +245,38 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
                     failed.store(true, Ordering::Release);
                 }
             }
+            if review
+                && lifetime == 1
+                && snapshot.phase == AgentWorkApplicationPhase::NeedsReview
+                && !native_failed
+                && !failed.load(Ordering::Acquire)
+            {
+                if !review_requested {
+                    let Some(record) = view.records().into_iter().find(|record| {
+                        record.disposition() == zephium_agentic::AgentWorkDisposition::NeedsApproval
+                            && record.debt() == zephium_agentic::AgentWorkDebt::NONE
+                    }) else {
+                        return Some(Err("review_debt"));
+                    };
+                    if turns == 0
+                        || native_actions != 0
+                        || effects != 0
+                        || snapshot.persistence_failure.is_some()
+                    {
+                        return Some(Err("review_unissued"));
+                    }
+                    // Explicit public fixture decision through the application
+                    // review port. It never executes the refused proposal.
+                    review_requested = view.review(
+                        record,
+                        zephium_app::AgentWorkReviewDecision::AcceptFreshAdmission,
+                    );
+                    if !review_requested {
+                        return Some(Err("review_mailbox"));
+                    }
+                }
+                return None;
+            }
             if lifetime == 2
                 && snapshot.phase == AgentWorkApplicationPhase::Running
                 && !stale_control_sent
@@ -251,6 +299,7 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
                         | AgentWorkApplicationPhase::Cancelled
                         | AgentWorkApplicationPhase::Recovery
                         | AgentWorkApplicationPhase::NeedsReview
+                        | AgentWorkApplicationPhase::Reviewed
                         | AgentWorkApplicationPhase::PersistenceUncertain
                 ) || native_failed
                     || failed.load(Ordering::Acquire))
@@ -277,6 +326,18 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
                             record.disposition() == zephium_agentic::AgentWorkDisposition::Cancelled
                                 && record.debt() == zephium_agentic::AgentWorkDebt::NONE
                         });
+                    terminal_reviewed = review
+                        && lifetime == 1
+                        && review_requested
+                        && snapshot.phase == AgentWorkApplicationPhase::Reviewed
+                        && snapshot.persistence_failure.is_none()
+                        && matches!(snapshot.last_review, Some(Ok(record)) if record.disposition() == zephium_agentic::AgentWorkDisposition::FreshAdmissionRequired && record.debt() == zephium_agentic::AgentWorkDebt::NONE)
+                        && turns > 0
+                        && native_actions == 0
+                        && effects == 0;
+                    if review && lifetime == 2 {
+                        terminal_success &= effects == 3 && native_actions == 3;
+                    }
                     if extraction && terminal_success {
                         terminal_success = view.take_extraction().is_some_and(|result| {
                         let verified = if combined {
@@ -292,18 +353,25 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
                 }
                 if sequential
                     && lifetime == 1
-                    && terminal_cancelled
+                    && (terminal_cancelled || terminal_reviewed)
                     && !native_failed
                     && !failed.load(Ordering::Acquire)
                 {
                     let Some(record) = view.records().into_iter().find(|record| {
-                        record.disposition() == zephium_agentic::AgentWorkDisposition::Cancelled
+                        record.disposition()
+                            == if review {
+                                zephium_agentic::AgentWorkDisposition::FreshAdmissionRequired
+                            } else {
+                                zephium_agentic::AgentWorkDisposition::Cancelled
+                            }
                     }) else {
                         return Some(Err("successor_prior_record"));
                     };
-                    let Ok((next_profile, input, task)) =
+                    let Ok((next_profile, input, task)) = (if review {
+                        super::work_actor::input(Instant::now())
+                    } else {
                         super::work_actor::extraction_input(Instant::now())
-                    else {
+                    }) else {
                         return Some(Err("successor_input"));
                     };
                     if next_profile != profile {
@@ -331,11 +399,12 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
                     if next.admit(prepared).is_err() {
                         return Some(Err("successor_admit"));
                     }
-                    let _ = writeln!(std::io::stdout().lock(), "work-application-predecessor: lifetime={lifetime}; cancelled_closed=true; turns={turns}; input_tokens={tokens_in}; output_tokens={tokens_out}; cost_micro_usd={cost}; native_actions={native_actions}; verified_effects={effects}; wall_ms={}; content=redacted", started.elapsed().as_millis());
+                    let _ = writeln!(std::io::stdout().lock(), "work-application-predecessor: lifetime={lifetime}; cancelled_closed={terminal_cancelled}; reviewed_closed={terminal_reviewed}; turns={turns}; input_tokens={tokens_in}; output_tokens={tokens_out}; cost_micro_usd={cost}; native_actions={native_actions}; verified_effects={effects}; wall_ms={}; content=redacted", started.elapsed().as_millis());
                     predecessor = Some((std::mem::replace(&mut view, next), record));
                     lifetime = 2;
                     terminal_observed = false;
                     terminal_cancelled = false;
+                    terminal_reviewed = false;
                     terminal_success = false;
                     (turns, effects, tokens_in, tokens_out, cost) = (0, 0, 0, 0, 0);
                     return None;
@@ -379,11 +448,13 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
                     terminal_success &= lifetime == 2
                         && stale_control_sent
                         && predecessor.as_ref().is_some_and(|(old, record)| {
-                            old.snapshot().phase == AgentWorkApplicationPhase::Cancelled
-                                && old.snapshot().failure
-                                    == Some(
-                                        zephium_agent_controller::AgentWorkFailure::HumanTakeover,
-                                    )
+                            (if review {
+                                old.snapshot().phase == AgentWorkApplicationPhase::Reviewed
+                                    && matches!(old.snapshot().last_review, Some(Ok(reviewed)) if reviewed == *record)
+                            } else {
+                                old.snapshot().phase == AgentWorkApplicationPhase::Cancelled
+                                    && old.snapshot().failure == Some(zephium_agent_controller::AgentWorkFailure::HumanTakeover)
+                            })
                                 && old.snapshot().run != snapshot.run
                                 && old.records() == [*record]
                                 && view.records().len() == 2

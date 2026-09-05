@@ -71,6 +71,9 @@ preserves a failed/cancelled task outcome while joining the original provider,
 action, policy and audit owners with the native/runtime terminal proof. It is
 not an alternative public successful `try_finish`, and cannot discard retained
 action or callback debt. See [Work execution](agent-work-execution.md).
+An exact pre-dispatch human refusal retains its original non-executing proposal
+through that closure; only then may the actor discard it and publish a
+[content-free review classification](agent-work-review.md), never a replay token.
 
 ## Current limits
 

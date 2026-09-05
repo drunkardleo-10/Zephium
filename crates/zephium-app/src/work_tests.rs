@@ -23,6 +23,10 @@ const FIXTURE_POLICY_NOW_MILLIS: u64 = 2;
 #[path = "work_artifact_tests.rs"]
 mod artifact_tests;
 
+#[cfg(feature = "work-execution-probe")]
+#[path = "work_review_tests.rs"]
+mod review_tests;
+
 // Synthetic content fixture built by the same public read/extraction validator;
 // it carries no provider, policy, runtime or successful execution authority.
 fn owned_result() -> SemanticOwnedExtractionResult {
@@ -366,6 +370,8 @@ fn input_with_storage(deadline: Instant, storage: ContextProfileStorageClass) ->
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Fault {
     None,
+    #[cfg(feature = "work-execution-probe")]
+    Form,
     ObservationLost,
     CloseLost,
     ObservationRefused,
@@ -427,6 +433,15 @@ impl AgentBrowserPort for NativeFixture {
         }
         let correlation = invocation.correlation();
         let wire = format!("{{\"v\":1,\"i\":{},\"g\":{},\"c\":\"complete\",\"n\":[{{\"k\":1,\"r\":\"document\",\"o\":16}},{{\"k\":2,\"p\":0,\"r\":\"paragraph\",\"t\":\"Fixture result\"}}]}}", correlation.invocation().get(), correlation.snapshot_generation().get());
+        #[cfg(feature = "work-execution-probe")]
+        let wire = if self.fault == Fault::Form {
+            wire.replace(
+                "\"r\":\"paragraph\",\"t\":\"Fixture result\"",
+                "\"r\":\"textbox\",\"n\":\"Field\",\"s\":64,\"o\":2,\"v\":{\"k\":\"text\",\"value\":\"\"},\"b\":{\"x\":10,\"y\":20,\"w\":120,\"h\":30}",
+            )
+        } else {
+            wire
+        };
         let snapshot = decode_semantic_snapshot(
             SemanticDecodeContext::new(
                 correlation.invocation(),

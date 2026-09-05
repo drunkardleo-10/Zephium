@@ -294,6 +294,7 @@ pub struct AgentWorkSuccess {
 pub struct AgentWorkClosedUnsuccessfully {
     settlement: AgentRunPolicySettlement,
     failure: AgentWorkFailure,
+    human_review: Option<AgentNeedsHumanTransition>,
 }
 
 impl AgentWorkClosedUnsuccessfully {
@@ -304,6 +305,11 @@ impl AgentWorkClosedUnsuccessfully {
     /// Exact failed/cancelled policy closure, never a replacement proof.
     pub const fn policy_settlement(&self) -> AgentRunPolicySettlement {
         self.settlement
+    }
+    /// Exact never-dispatched refusal after original resource/policy closure.
+    /// This classifies review; it grants no action or continuation authority.
+    pub const fn human_review(&self) -> Option<AgentNeedsHumanTransition> {
+        self.human_review
     }
 }
 impl AgentWorkSuccess {
@@ -708,6 +714,7 @@ impl WorkState {
 }
 
 struct WorkDrained {
+    proposal_refusal: Option<crate::action::AgentBrowserActionProposalRefusal>,
     policy: Option<AgentRunPolicy>,
     journal: Option<WorkJournal>,
     provider: Option<AgentProviderShutdownProof>,
@@ -1874,6 +1881,7 @@ impl AgentWorkController {
         let AgentBrowserSession {
             policy,
             journal,
+            action_proposal_failure,
             action_executions,
             action_settlements,
             ..
@@ -1882,6 +1890,7 @@ impl AgentWorkController {
         // These exact original owners, never replacement empty coordinators,
         // enter the constructor-closed native shutdown cohort.
         state.drained = Some(WorkDrained {
+            proposal_refusal: action_proposal_failure,
             policy: Some(policy),
             journal,
             provider: Some(provider),
@@ -1979,6 +1988,9 @@ impl AgentWorkController {
                     journal.record()?;
                 }
                 AgentSupervisorCompletion::Failed(match failure {
+                    AgentWorkFailure::Browser(AgentBrowserProviderError::Action(
+                        crate::AgentBrowserActionError::NeedsHuman(_),
+                    )) => AgentSupervisorFailure::PolicyDenied,
                     AgentWorkFailure::Browser(_) => AgentSupervisorFailure::ProviderFailed,
                     _ => AgentSupervisorFailure::PolicyDenied,
                 })
@@ -2149,6 +2161,14 @@ impl AgentWorkController {
         let proof = drained.proof.take().ok_or(AgentWorkFailure::Shutdown)?;
         let provider = drained.provider.take().ok_or(AgentWorkFailure::Shutdown)?;
         claim.commit_with_shutdown(proof, settlement, provider);
+        let human_review = drained
+            .proposal_refusal
+            .take()
+            .and_then(crate::action::AgentBrowserActionProposalRefusal::discard_after_closure)
+            .filter(|_| {
+                closure.outcome()
+                    == AgentRunProgressOutcome::Failed(AgentSupervisorFailure::PolicyDenied)
+            });
         // Completion is separate from the bounded progress lane: saturation
         // cannot discard an already-consumed clean terminal owner.
         let _ = lock(&journal.events).publish(AgentWorkEventKind::Terminal);
@@ -2157,6 +2177,7 @@ impl AgentWorkController {
                 AgentWorkOutcome::ClosedUnsuccessfully(AgentWorkClosedUnsuccessfully {
                     settlement,
                     failure,
+                    human_review,
                 })
             }
             None => AgentWorkOutcome::Succeeded(AgentWorkSuccess {
@@ -2628,12 +2649,11 @@ impl WorkJournal {
         transition: AgentNeedsHumanTransition,
     ) -> Result<(), AgentWorkFailure> {
         self.supervisor
-            .wait_for_human(
+            .record_human_refusal(
                 self.execution.as_ref().ok_or(AgentWorkFailure::Contract)?,
                 transition,
             )
             .map_err(|_| AgentWorkFailure::Accounting)?;
-        self.execution.take();
         self.record()?;
         self.emit(AgentWorkEventKind::NeedsHuman(transition.reason()))
     }

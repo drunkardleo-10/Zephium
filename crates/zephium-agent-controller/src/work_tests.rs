@@ -368,6 +368,14 @@ enum Fault {
     ActionLost,
     #[cfg(feature = "probe-harness")]
     ActionNeedsHuman,
+    #[cfg(feature = "probe-harness")]
+    ActionNeedsHumanAuditLost,
+    #[cfg(feature = "probe-harness")]
+    ActionNeedsHumanAuditRefused,
+    #[cfg(feature = "probe-harness")]
+    ActionNeedsHumanNativeLost,
+    #[cfg(feature = "probe-harness")]
+    ActionNeedsHumanTakeover,
     CancelObservation,
     TakeoverObservation,
     SuspendObservation,
@@ -375,6 +383,20 @@ enum Fault {
     Readiness,
     RendererObservation,
     MailboxPressure,
+}
+
+#[cfg(feature = "probe-harness")]
+impl Fault {
+    fn unissued_human(self) -> bool {
+        matches!(
+            self,
+            Self::ActionNeedsHuman
+                | Self::ActionNeedsHumanAuditLost
+                | Self::ActionNeedsHumanAuditRefused
+                | Self::ActionNeedsHumanNativeLost
+                | Self::ActionNeedsHumanTakeover
+        )
+    }
 }
 
 struct Audit(Fault);
@@ -591,6 +613,17 @@ impl AgentBrowserPort for Port {
 
     fn seal_for_shutdown(&self, audit: ContextResourceAuditId) -> ContextShutdownDispatch {
         lock(&self.calls).push(6);
+        #[cfg(feature = "probe-harness")]
+        if self.fault == Fault::ActionNeedsHumanNativeLost {
+            return ContextShutdownDispatch::AuditScheduled;
+        }
+        #[cfg(feature = "probe-harness")]
+        if self.fault == Fault::ActionNeedsHumanTakeover {
+            lock(&self.control)
+                .as_ref()
+                .unwrap()
+                .stop_and_seal(AgentRuntimeStopReason::HumanTakeover);
+        }
         if self.fault == Fault::CleanupAuditLost {
             return ContextShutdownDispatch::AuditScheduled;
         }
@@ -892,6 +925,10 @@ fn native_action_refusal_takeover_and_callback_loss_keep_the_original_effect_own
         Fault::ActionCancel,
         Fault::ActionLost,
         Fault::ActionNeedsHuman,
+        Fault::ActionNeedsHumanAuditLost,
+        Fault::ActionNeedsHumanAuditRefused,
+        Fault::ActionNeedsHumanNativeLost,
+        Fault::ActionNeedsHumanTakeover,
     ] {
         provider_fixture(ProviderFault::Native(fault));
     }
@@ -1166,7 +1203,7 @@ fn provider_fixture_with_form(fault: ProviderFault, form: Option<&str>) {
         "fixture-not-a-secret".to_owned(),
     )
     .expect("credential");
-    let approved = if fault == ProviderFault::Native(Fault::ActionNeedsHuman) {
+    let approved = if matches!(fault, ProviderFault::Native(native) if native.unissued_human()) {
         input_with_effects(&[SemanticEffectClass::Read])
     } else {
         input()
@@ -1216,8 +1253,11 @@ fn provider_fixture_with_form(fault: ProviderFault, form: Option<&str>) {
         ProviderFault::Extraction(ExtractionFault::AuditLost)
             | ProviderFault::Combined(CombinedFault::AuditLost)
             | ProviderFault::Scoped(ScopedFault::AuditLost)
+            | ProviderFault::Native(Fault::ActionNeedsHumanAuditLost)
     ) {
         Fault::AuditLost
+    } else if fault == ProviderFault::Native(Fault::ActionNeedsHumanAuditRefused) {
+        Fault::AuditRefused
     } else {
         Fault::None
     };
@@ -1385,7 +1425,46 @@ fn provider_fixture_with_form(fault: ProviderFault, form: Option<&str>) {
         }
         return;
     }
-    if !matches!(fault, ProviderFault::Native(native) if native != Fault::ActionBudget) {
+    if matches!(
+        fault,
+        ProviderFault::Native(
+            Fault::ActionNeedsHumanAuditLost
+                | Fault::ActionNeedsHumanAuditRefused
+                | Fault::ActionNeedsHumanNativeLost
+        )
+    ) {
+        let AgentWorkOutcome::Recovery(recovery) = outcome else {
+            panic!("unsettled refusal closure: {outcome:?}")
+        };
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Unclean));
+        assert_eq!(calls, [1, 2, 3, 4, 5, 6]);
+        let drained = recovery
+            .state
+            .drained
+            .as_ref()
+            .expect("original drained cohort");
+        assert!(drained
+            .proposal_refusal
+            .as_ref()
+            .unwrap()
+            .human_review()
+            .is_some());
+        assert!(
+            drained.policy.is_some() && drained.journal.is_some() && drained.provider.is_some()
+        );
+        assert_eq!(
+            drained.proof.is_none(),
+            fault == ProviderFault::Native(Fault::ActionNeedsHumanNativeLost)
+        );
+        assert!(!events.iter().any(|event| matches!(
+            event.kind(),
+            AgentWorkEventKind::Verified | AgentWorkEventKind::Terminal
+        )));
+        assert_eq!(server.join().unwrap(), 1);
+        return;
+    }
+    if !matches!(fault, ProviderFault::Native(native) if !matches!(native, Fault::ActionBudget | Fault::ActionNeedsHuman | Fault::ActionNeedsHumanTakeover))
+    {
         let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
             panic!("settled provider refusal must close: {fault:?}: {outcome:?}");
         };
@@ -1393,6 +1472,29 @@ fn provider_fixture_with_form(fault: ProviderFault, form: Option<&str>) {
         assert_eq!(calls, [1, 2, 3, 4, 5, 6]);
         let closure = closed.policy_settlement().closure();
         assert_eq!(closure.effects(), 0);
+        if fault == ProviderFault::Native(Fault::ActionNeedsHuman) {
+            assert_eq!(
+                closure.outcome(),
+                AgentRunProgressOutcome::Failed(AgentSupervisorFailure::PolicyDenied)
+            );
+            assert_eq!(
+                closed
+                    .human_review()
+                    .expect("exact unissued refusal")
+                    .reason(),
+                AgentNeedsHumanReason::ScopeExpansion
+            );
+            assert!(events.iter().any(|event| event.kind()
+                == AgentWorkEventKind::NeedsHuman(AgentNeedsHumanReason::ScopeExpansion)));
+        } else {
+            assert!(closed.human_review().is_none());
+        }
+        if fault == ProviderFault::Native(Fault::ActionNeedsHumanTakeover) {
+            assert!(matches!(
+                closure.outcome(),
+                AgentRunProgressOutcome::Cancelled(_)
+            ));
+        }
         assert_eq!(
             closure.model_calls(),
             if fault == ProviderFault::Ceiling {
@@ -1458,20 +1560,6 @@ fn provider_fixture_with_form(fault: ProviderFault, form: Option<&str>) {
             assert_eq!(calls, [1, 2, 3, 4, 5]);
             assert!(session.action.is_none());
             assert_eq!(session.policy.pending_effects(), 0);
-        } else if fault == Fault::ActionNeedsHuman {
-            assert_eq!(calls, [1, 2, 3, 4, 5]);
-            assert!(session.action.is_none());
-            assert!(
-                session.action_proposal_failure.is_some(),
-                "original prepared batch survives authorization refusal"
-            );
-            assert!(
-                session.failure.is_some(),
-                "authorization refusal cannot admit another action"
-            );
-            assert_eq!(session.policy.pending_effects(), 0);
-            assert!(events.iter().any(|event| event.kind()
-                == AgentWorkEventKind::NeedsHuman(AgentNeedsHumanReason::ScopeExpansion)));
         } else {
             if fault == Fault::ActionVerification {
                 assert_eq!(calls, [1, 2, 3, 7, 3, 4, 5]);

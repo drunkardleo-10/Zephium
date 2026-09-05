@@ -147,6 +147,9 @@ pub enum AgentWorkApplicationPhase {
     Running,
     Closing,
     NeedsReview,
+    /// Exact review/cancellation CAS acknowledged after original failed-run
+    /// drain. Only a separately admitted task/context may execute next.
+    Reviewed,
     Recovery,
     PersistenceUncertain,
     Succeeded,
@@ -346,6 +349,7 @@ impl CallbackHandle {
             AgentWorkApplicationPhase::Succeeded
                 | AgentWorkApplicationPhase::Failed
                 | AgentWorkApplicationPhase::Cancelled
+                | AgentWorkApplicationPhase::Reviewed
         ) {
             return None;
         }
@@ -582,6 +586,12 @@ impl ApplicationWork {
             {
                 AgentWorkApplicationPhase::Cancelled
             }
+            (
+                Some(AgentWorkOutcome::ClosedUnsuccessfully(closed)),
+                AgentWorkDisposition::FreshAdmissionRequired
+                | AgentWorkDisposition::Rejected
+                | AgentWorkDisposition::FailedClosed,
+            ) if closed.human_review().is_some() => AgentWorkApplicationPhase::Reviewed,
             _ => return false,
         };
         let projection = lock(&previous.projection);
@@ -813,6 +823,13 @@ impl ApplicationWork {
             AgentWorkDisposition::Failed => AgentWorkApplicationPhase::Failed,
             AgentWorkDisposition::Cancelled => AgentWorkApplicationPhase::Cancelled,
             AgentWorkDisposition::NeedsApproval => AgentWorkApplicationPhase::NeedsReview,
+            AgentWorkDisposition::FreshAdmissionRequired
+            | AgentWorkDisposition::Rejected
+            | AgentWorkDisposition::FailedClosed
+                if record.debt() == AgentWorkDebt::NONE =>
+            {
+                AgentWorkApplicationPhase::Reviewed
+            }
             _ => AgentWorkApplicationPhase::Recovery,
         };
         self.abort_staged();
@@ -886,6 +903,7 @@ impl ApplicationWork {
                     DurablePurpose::Review => {
                         if self.record.is_some_and(|prior| prior.key() == record.key()) {
                             self.record = Some(record);
+                            self.finish_terminal(record);
                         }
                         lock(&self.projection).snapshot.last_review = Some(Ok(record));
                     }
@@ -1116,6 +1134,22 @@ impl ApplicationWork {
         let Some(record) = self.record else {
             return;
         };
+        // Stop/shutdown may race either side of the nonterminal review ACK.
+        // This poll runs only with no durable flight; reconcile the exact ACK
+        // first, then close review without rewriting the failed policy outcome.
+        if self.stopping && record.disposition() == AgentWorkDisposition::NeedsApproval {
+            if let Ok(mutation) =
+                AgentWorkJournalMutation::transition(record, AgentWorkDisposition::FailedClosed)
+            {
+                lock(&self.projection).snapshot.phase = AgentWorkApplicationPhase::Closing;
+                self.dispatch(
+                    AgentWorkJournalRequest::CompareAndSet(mutation),
+                    DurablePurpose::Terminal,
+                    0,
+                );
+            }
+            return;
+        }
         if record.disposition() != AgentWorkDisposition::Running {
             return;
         }
@@ -1133,11 +1167,19 @@ impl ApplicationWork {
                     Some(AgentWorkOutcome::ClosedUnsuccessfully(closed)),
                     Some(native),
                     Some(true),
-                ) => AgentWorkJournalMutation::closed_unsuccessfully(
-                    record,
-                    closed.policy_settlement(),
-                    native,
-                ),
+                ) => match closed.human_review().filter(|_| !self.stopping) {
+                    Some(review) => AgentWorkJournalMutation::needs_approval_closed(
+                        record,
+                        closed.policy_settlement(),
+                        native,
+                        review,
+                    ),
+                    None => AgentWorkJournalMutation::closed_unsuccessfully(
+                        record,
+                        closed.policy_settlement(),
+                        native,
+                    ),
+                },
                 _ => AgentWorkJournalMutation::transition(
                     record,
                     if active.needs_review && !self.stopping {
@@ -1312,6 +1354,9 @@ impl ApplicationWork {
                                 AgentWorkDisposition::Succeeded
                                     | AgentWorkDisposition::Failed
                                     | AgentWorkDisposition::Cancelled
+                                    | AgentWorkDisposition::FreshAdmissionRequired
+                                    | AgentWorkDisposition::Rejected
+                                    | AgentWorkDisposition::FailedClosed
                             ),
                             DurableRequest::Artifact(AgentWorkArtifactRequest::Publish(_)) => true,
                             _ => false,
@@ -1338,20 +1383,7 @@ impl ApplicationWork {
                             });
                     }
                     if self.flight.is_none() {
-                        if let Some(record) = self.record.filter(|record| {
-                            record.disposition() == AgentWorkDisposition::NeedsApproval
-                        }) {
-                            if let Ok(mutation) = AgentWorkJournalMutation::transition(
-                                record,
-                                AgentWorkDisposition::FailedClosed,
-                            ) {
-                                self.dispatch(
-                                    AgentWorkJournalRequest::CompareAndSet(mutation),
-                                    DurablePurpose::Terminal,
-                                    0,
-                                );
-                            }
-                        }
+                        self.persist_execution_end();
                     }
                 }
             }

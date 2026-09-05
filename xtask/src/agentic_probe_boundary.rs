@@ -7382,9 +7382,9 @@ fn validate_progress_manifest_revision_contract(
 
     let progress = compact(progress);
     let join = "matches_manifest_revision(self.topology.manifest(),self.topology.manifest_guard())";
-    if progress.matches(join).count() != 6 {
+    if progress.matches(join).count() != 7 {
         return Err(
-            "all six supervisor progress admissions must join the exact manifest revision"
+            "all seven supervisor progress admissions must join the exact manifest revision"
                 .to_owned(),
         );
     }
@@ -10998,7 +10998,7 @@ mod tests {
                 self.topology.manifest_guard()
             );
         "#;
-        let progress = join.repeat(6);
+        let progress = join.repeat(7);
         let audit = r#"
             if !supervisor
                 .topology()

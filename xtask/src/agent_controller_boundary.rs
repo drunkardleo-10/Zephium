@@ -320,6 +320,7 @@ fn validate_terra(source: &str) -> Result<(), String> {
         "else if !unsuccessful",
         "self.retained_terminal.is_some()",
         "self.action_admission_failure.is_some()",
+        "!unsuccessful || refusal.human_review().is_none()",
         "AgentBrowserSessionFinishRefusal",
         "self.policy.accounting().reserved_model_tokens() != 0",
         "action_executions: zephium_agentic::SemanticActionExecutionCoordinator::new()",
@@ -440,6 +441,17 @@ fn validate_workflow_qualifier(source: &str) -> Result<(), String> {
 }
 
 fn validate_action(source: &str) -> Result<(), String> {
+    let refusal_branch = source
+        .split("AgentEffectAuthorization::NeedsHuman(transition) =>")
+        .nth(1)
+        .and_then(|tail| tail.split("dispatch_semantic_effect").next())
+        .ok_or("controller lost exact pre-dispatch refusal branch")?;
+    if source.matches("human_review = Some(transition)").count() != 1
+        || !refusal_branch.contains("human_review = Some(transition)")
+        || !refusal_branch.contains(".needs_human(transition)")
+    {
+        return Err("controller review classification escaped exact unissued policy branch".into());
+    }
     for required in [
         "SemanticActionBatch::bind",
         "authorize_semantic_effect",
@@ -453,7 +465,11 @@ fn validate_action(source: &str) -> Result<(), String> {
         "finalize_accounted_semantic_action_result",
         "self.pending = Some",
         "self.terminal = Some",
-        "*proposal_failure = Some(self)",
+        "*proposal_failure = Some(AgentBrowserActionProposalRefusal",
+        "proposal: self",
+        "let mut human_review = None",
+        "human_review = Some(transition)",
+        "drop(self.proposal)",
         "AgentBrowserActionFinalizationRefusal",
         "action.settle_budget().millis() < MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS",
         "self.retain_failure(failed);",
@@ -477,6 +493,23 @@ fn validate_action(source: &str) -> Result<(), String> {
 }
 
 fn validate_work(source: &str) -> Result<(), String> {
+    let human = source
+        .split("pub(crate) fn needs_human(")
+        .nth(1)
+        .and_then(|tail| tail.split("pub(super) fn model_settled(").next())
+        .ok_or("Work actor lost human-refusal ownership boundary")?;
+    if human.contains("execution.take()") || human.contains("wait_for_human(") {
+        return Err("Work refusal yielded or discarded its original execution token".into());
+    }
+    let committed = source
+        .find("claim.commit_with_shutdown(proof, settlement, provider)")
+        .ok_or("Work actor lost original closure commit")?;
+    let discarded = source
+        .find("AgentBrowserActionProposalRefusal::discard_after_closure")
+        .ok_or("Work actor lost original unissued proposal owner")?;
+    if discarded < committed {
+        return Err("Work actor discarded refusal owner before original closure commit".into());
+    }
     for required in [
         "impl AgentRuntimeController for AgentWorkController",
         "AgentRunSupervisor",
@@ -517,6 +550,10 @@ fn validate_work(source: &str) -> Result<(), String> {
         "state.drained.is_some()",
         "(closure.outcome() == AgentRunProgressOutcome::Succeeded) == unsuccessful",
         "self.publish_terminal(worker, cleanup.is_some()).await",
+        ".record_human_refusal(",
+        "proposal_refusal: action_proposal_failure",
+        "AgentBrowserActionProposalRefusal::discard_after_closure",
+        "AgentRunProgressOutcome::Failed(AgentSupervisorFailure::PolicyDenied)",
     ] {
         if !source.contains(required) {
             return Err(format!("Work actor lost boundary: {required}"));
@@ -730,6 +767,7 @@ mod tests {
         for boundary in [
             "self.retained_terminal.is_some()",
             "self.action_admission_failure.is_some()",
+            "!unsuccessful || refusal.human_review().is_none()",
             "else if !unsuccessful",
         ] {
             assert!(validate_terra(&TERRA.replace(boundary, "removed_boundary")).is_err());
@@ -739,6 +777,9 @@ mod tests {
             "state.drained.is_some()",
             "(closure.outcome() == AgentRunProgressOutcome::Succeeded) == unsuccessful",
             "claim.commit_with_shutdown(proof, settlement, provider)",
+            ".record_human_refusal(",
+            "proposal_refusal: action_proposal_failure",
+            "AgentBrowserActionProposalRefusal::discard_after_closure",
         ] {
             assert!(validate_work(&WORK.replace(boundary, "removed_boundary")).is_err());
         }
