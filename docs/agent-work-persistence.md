@@ -65,15 +65,23 @@ trusted observation.
 composition root supplies the same `Arc<SqliteStore>` allocation for ordinary
 Store, Work journal and audit ports, and the same engine owner for ordinary
 Shell, attachment and prepared execution. The shell rejects a different owner,
-a second coordinator, or an already-owned legacy agent lifecycle. Attachment
+an ordinary second coordinator, or an already-owned legacy agent lifecycle. Attachment
 claims the durable recovery inventory, but creates no runtime or native page.
 
 Preparation owns the existing stateless `AgentWorkController`, trusted manifest,
 task predicate and provider configuration. The one-shot native factory must
-transfer the actual `EngineHost::take_agent_browser_port`; it is not a reset or
+transfer a port from the actual engine's unique native authority; it is not a reset or
 reopen operation. Only after exact durable `Admitted` and `Running`
 acknowledgements does the shell create the original runtime, invoke that factory
 and start the controller. Original deadlines include all persistence waits.
+
+An explicit `attach_successor_work` may replace only the exact previous fully
+closed coordinator, joining original lifecycle/native/policy/audit owners to
+its acknowledged immutable terminal. Pending outputs/events or any uncertain
+owner refuse replacement. The same engine/Store and process fence persist;
+the new projection/record/runtime/native lifetime are distinct. See
+[sequential lifetimes](agent-work-lifetimes.md). Terminal facts alone, including
+decoded historical facts, never authorize this replacement.
 
 The shell retains the runtime lifecycle and move-only outcome. `Succeeded` is
 published only after the original controller policy/audit closure, native proof,
@@ -117,10 +125,10 @@ inventory contain no objective, page/model content, secrets or native handles.
 Review is an exact incarnation/revision CAS, not a model tool approval. Accept
 records `FreshAdmissionRequired`; reject records `Rejected`. Cancellation and
 review are ordered by the first retained CAS. A replay, stale revision or foreign
-application handle cannot admit work. At present the sealed engine port and
-process fence allow one execution attempt per application/process lifetime.
-Fresh approved execution therefore requires a newly admitted native lifetime,
-not continuation on this consumed coordinator. Restart never recovers a
+application handle cannot admit work. Each coordinator and native port admits
+one execution attempt. Fresh approved execution requires an explicitly joined,
+fully closed predecessor and a distinct native lifetime, not continuation on
+the consumed coordinator or release of the process fence. Restart never recovers a
 credential, task predicate, observation/ref or mutation permission.
 
 Deterministic tests cover the complete disposition-pair grammar, malformed

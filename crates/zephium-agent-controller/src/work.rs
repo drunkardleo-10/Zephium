@@ -243,6 +243,11 @@ impl AgentWorkHandle {
     pub fn take_event(&self) -> Option<AgentWorkEvent> {
         lock(&self.events).queue.pop_front()
     }
+    /// Read-only drain status. This is not terminal proof; the application
+    /// also retains the original outcome and joined runtime lifecycle.
+    pub fn has_pending_events(&self) -> bool {
+        !lock(&self.events).queue.is_empty()
+    }
     /// Moves the sole terminal/recovery owner out exactly once.
     pub fn take_outcome(&mut self) -> Option<AgentWorkOutcome> {
         lock(&self.terminal).take()

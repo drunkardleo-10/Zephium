@@ -248,9 +248,47 @@ fn publication_refusal_loss_conflict_cancel_and_takeover_preserve_exact_result_o
         assert_eq!(view.snapshot().phase, AgentWorkApplicationPhase::Succeeded);
         assert!(view.snapshot().failure.is_none());
         assert_eq!(view.snapshot().artifact, Some(original.descriptor()));
+        let (mut successor, _successor_owner, _) = coordinator(Arc::new(Journal::default()));
+        successor.predecessor = Some(WorkPredecessor {
+            projection: actor.projection.clone(),
+            record: actor.record.unwrap(),
+        });
+        assert!(!successor.accepts_predecessor(Some(&actor)));
+        while view.take_event().is_some() {}
+        assert!(
+            !successor.accepts_predecessor(Some(&actor)),
+            "published but unconsumed output still belongs to the predecessor"
+        );
         let result = view.take_extraction().unwrap();
         assert_eq!(result.stats().values(), 1);
         assert!(view.take_extraction().is_none());
+        assert!(successor.accepts_predecessor(Some(&actor)));
+        actor.control(WorkCommand {
+            projection: actor.projection.clone(),
+            control: WorkControl::ReadArtifact {
+                record: actor.record.unwrap(),
+                profile: original.descriptor().profile(),
+            },
+        });
+        assert!(
+            !successor.accepts_predecessor(Some(&actor)),
+            "pending archive read"
+        );
+        let (_, read) = lock(&journal.artifacts).pop_front().unwrap();
+        read(Ok(AgentWorkArtifactReply::Read(Some(
+            zephium_agentic::AgentWorkArchivedExtraction::decode(
+                original.descriptor(),
+                original.body(),
+            )
+            .unwrap(),
+        ))));
+        actor.poll();
+        assert!(
+            !successor.accepts_predecessor(Some(&actor)),
+            "undelivered historical result"
+        );
+        assert!(view.take_archived_extraction().is_some());
+        assert!(successor.accepts_predecessor(Some(&actor)));
         assert_eq!(*lock(&calls), [1, 2, 3, 4, 5, 6]);
         assert!(actor.shutdown_until(Instant::now() + Duration::from_secs(1)));
     }

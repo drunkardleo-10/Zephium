@@ -529,11 +529,14 @@ impl Shell {
                 if let Some(mut work) = crate::work::ApplicationWork::take_attachment(&attachment) {
                     if !work.belongs_to_store(&self.store)
                         || !work.belongs_to_engine(&self.engine)
-                        || self.work.is_some()
+                        || !work.accepts_predecessor(self.work.as_deref())
                         || !matches!(self.agent_lifecycle, AgentLifecycleOwner::Absent)
                     {
                         work.refuse_attachment();
                     } else {
+                        if let Some(previous) = &self.work {
+                            previous.retire_projection();
+                        }
                         work.initialize();
                         self.work = Some(Box::new(work));
                     }

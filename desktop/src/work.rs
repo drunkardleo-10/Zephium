@@ -5,16 +5,22 @@ use tauri::Manager;
 use zephium_app::{AgentWorkApplicationHandle, PreparedAgentWork};
 use zephium_work_composition::{MacosWorkComposition, TrustedWorkRequest};
 
-pub(crate) struct WorkCompositionState(Mutex<Option<MacosWorkComposition>>);
+pub(crate) struct WorkCompositionState(Mutex<CompositionAdmission>);
+
+struct CompositionAdmission {
+    composition: Option<MacosWorkComposition>,
+    initial_attached: bool,
+}
 
 pub(crate) fn install(
     app: &tauri::AppHandle,
     engine: Arc<zephium_engine::WebviewEngine>,
     store: Arc<zephium_store::SqliteStore>,
 ) -> bool {
-    app.manage(WorkCompositionState(Mutex::new(Some(
-        MacosWorkComposition::new(engine, store),
-    ))))
+    app.manage(WorkCompositionState(Mutex::new(CompositionAdmission {
+        composition: Some(MacosWorkComposition::new(engine, store)),
+        initial_attached: false,
+    })))
 }
 
 /// Typed local admission refusal. No native authority has been recreated.
@@ -62,29 +68,59 @@ pub fn admit_trusted_work(
     app: &tauri::AppHandle,
     request: TrustedWorkRequest,
 ) -> Result<AgentWorkApplicationHandle, WorkAdmissionFailure> {
+    admit_after(app, request, None)
+}
+
+/// Explicit fresh trusted work after an exact completed predecessor. This is
+/// not resume/retry permission; the Shell and native factory independently
+/// retain all original closure, output-drain and lifetime checks.
+pub fn admit_successor_trusted_work(
+    app: &tauri::AppHandle,
+    predecessor: &AgentWorkApplicationHandle,
+    request: TrustedWorkRequest,
+) -> Result<AgentWorkApplicationHandle, WorkAdmissionFailure> {
+    admit_after(app, request, Some(predecessor))
+}
+
+fn admit_after(
+    app: &tauri::AppHandle,
+    request: TrustedWorkRequest,
+    predecessor: Option<&AgentWorkApplicationHandle>,
+) -> Result<AgentWorkApplicationHandle, WorkAdmissionFailure> {
     let shell = app
         .try_state::<zephium_app::Handle>()
         .ok_or(WorkAdmissionFailure::Unavailable)?;
     let state = app
         .try_state::<WorkCompositionState>()
         .ok_or(WorkAdmissionFailure::Unavailable)?;
-    let (composition, prepared) = prepare_owned(
-        &mut *state
-            .0
-            .lock()
-            .map_err(|_| WorkAdmissionFailure::Unavailable)?,
-        |composition| composition.prepare(request),
-    )
+    let mut owner = state
+        .0
+        .lock()
+        .map_err(|_| WorkAdmissionFailure::Unavailable)?;
+    if predecessor.is_some() != owner.initial_attached {
+        return Err(WorkAdmissionFailure::Unavailable);
+    }
+    let (composition, prepared) = prepare_owned(&mut owner.composition, |composition| {
+        composition.prepare(request)
+    })
     .map_err(|error| match error {
         PreparationFailure::Unavailable => WorkAdmissionFailure::Unavailable,
         PreparationFailure::Contract(error) => WorkAdmissionFailure::Contract(error),
     })?;
-    let Some(view) = composition.attach(&shell.callback_handle()) else {
+    let view = match predecessor {
+        Some(predecessor) => composition.attach_successor(&shell.callback_handle(), predecessor),
+        None => composition.attach(&shell.callback_handle()),
+    };
+    let Some(view) = view else {
         return Err(WorkAdmissionFailure::AttachmentMailbox {
             prepared: Box::new(prepared),
             composition,
         });
     };
+    // Retain the exact process-unique factory owner for an explicit successor;
+    // initial admission remains one-shot and failed preparation changes neither.
+    owner.composition = Some(composition);
+    owner.initial_attached = true;
     if let Err(prepared) = view.admit(prepared) {
         return Err(WorkAdmissionFailure::Mailbox {
             prepared,

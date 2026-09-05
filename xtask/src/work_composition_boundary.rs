@@ -76,10 +76,20 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
             "pub fn prepare(&self, request: TrustedWorkRequest",
             "PreparedAgentWork::try_new(",
             "AgentWorkApplicationPorts::new(engine.clone(), self.store.clone(), Box::new(move |sink|",
-            "engine.take_agent_browser_port(move |event|",
+            "native: Arc<Mutex<NativeLifetimeOwner>>",
+            "NativeLifetimeOwner::Dormant",
+            "engine.take_agent_browser_lifetime_factory()",
+            "let NativeLifetimeOwner::Factory(factory) = &mut *native else { return None; };",
+            "factory.begin(move |event|",
+            "shell.attach_successor_work(self.store.clone(), self.engine.clone(), predecessor)",
         ],
     )?;
-    if native.matches("take_agent_browser_port(").count() != 1 {
+    if native
+        .matches("take_agent_browser_lifetime_factory(")
+        .count()
+        != 1
+        || native.contains("take_agent_browser_port(")
+    {
         return Err("native factory must have one exact take site".into());
     }
     let desktop = read("desktop/src/work.rs")?;
@@ -89,6 +99,10 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
         &[
             "MacosWorkComposition::new(engine, store)",
             "pub fn admit_trusted_work(",
+            "pub fn admit_successor_trusted_work(",
+            "if predecessor.is_some() != owner.initial_attached",
+            "composition.attach_successor(&shell.callback_handle(), predecessor)",
+            "owner.composition = Some(composition)",
             "composition.prepare(request)",
             "view.admit(prepared)",
             "Mailbox { prepared, handle: view, }",
@@ -138,7 +152,11 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
     )?;
     require(
         &read("crates/zephium-app/src/shell/mod.rs")?,
-        &["!work.belongs_to_engine(&self.engine)"],
+        &[
+            "!work.belongs_to_engine(&self.engine)",
+            "!work.accepts_predecessor(self.work.as_deref())",
+            "previous.retire_projection()",
+        ],
     )?;
     require(&read("crates/zephium-app/Cargo.toml")?, &["work-execution-probe = [\"work-execution\", \"zephium-agent-controller/probe-harness\"]"])?;
     require(

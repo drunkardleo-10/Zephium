@@ -365,22 +365,39 @@ impl AgentPortAdmission {
             && !self.lineage_failed()
             && state.pending == 1
             && state.physical_screenshots == 0
-            && matches!(
-                snapshot.counts(),
-                zephium_agentic::ContextNativeResourceCounts {
-                    known_bindings: 0,
-                    resident_views: 0,
-                    owned_reservations: 0,
-                    borrowed_leases: 0,
-                    visible_surfaces: 0,
-                    suspended_views: 0,
-                    pending_operations: 0,
-                    pending_captures: 0,
-                    queued_tasks: 0,
-                }
-            )
+            && Self::native_resources_are_empty(snapshot)
         {
             state.native_shutdown_verified = true;
+        }
+    }
+
+    fn native_resources_are_empty(snapshot: ContextNativeResourceSnapshot) -> bool {
+        matches!(
+            snapshot.counts(),
+            zephium_agentic::ContextNativeResourceCounts {
+                known_bindings: 0,
+                resident_views: 0,
+                owned_reservations: 0,
+                borrowed_leases: 0,
+                visible_surfaces: 0,
+                suspended_views: 0,
+                pending_operations: 0,
+                pending_captures: 0,
+                queued_tasks: 0,
+            }
+        )
+    }
+
+    // A later failed/lost/nonempty read-only audit cannot certify retirement
+    // using an earlier empty receipt. Invalidate before releasing its permit;
+    // ordinary audit retries may reconcile debt but never mint a new receipt.
+    fn invalidate_retirement_audit(&self) {
+        match self.state.lock() {
+            Ok(mut state) => state.native_shutdown_verified = false,
+            Err(poisoned) => {
+                drop(poisoned.into_inner());
+                self.report_fatal_once();
+            }
         }
     }
 
@@ -816,6 +833,14 @@ impl AgentContextTask {
                 self.permit.admission.verify_native_shutdown(snapshot);
             }
         }
+        if let ContextNativeEvent::ResourceAuditSettled(settlement) = &event {
+            if !settlement
+                .outcome()
+                .is_ok_and(AgentPortAdmission::native_resources_are_empty)
+            {
+                self.permit.admission.invalidate_retirement_audit();
+            }
+        }
         self.request = None;
         self.permit.release();
         emit_event(&self.sink, &self.permit.admission, event);
@@ -826,6 +851,9 @@ impl AgentContextTask {
             self.permit.admission.fail_invariant();
             return;
         };
+        if matches!(&request, AgentPendingRequest::Audit(_)) {
+            self.permit.admission.invalidate_retirement_audit();
+        }
         let event = refusal_event(request, failure);
         self.permit.release();
         match event {
@@ -835,6 +863,9 @@ impl AgentContextTask {
     }
 
     fn cancel_without_event(mut self) {
+        if matches!(self.request, Some(AgentPendingRequest::Audit(_))) {
+            self.permit.admission.invalidate_retirement_audit();
+        }
         self.request = None;
         self.permit.release();
     }
@@ -883,6 +914,9 @@ impl Drop for AgentContextTask {
         let Some(request) = self.request.take() else {
             return;
         };
+        if matches!(&request, AgentPendingRequest::Audit(_)) {
+            self.permit.admission.invalidate_retirement_audit();
+        }
         let event = refusal_event(request, ContextPortFailure::NativeRefused);
         self.permit.release();
         match event {
@@ -2119,6 +2153,55 @@ mod tests {
                 factory.begin(|_| {}),
                 Err(ContextPortFailure::ProfileBusy)
             ));
+        }
+    }
+
+    #[test]
+    fn later_audit_uncertainty_revokes_retirement_before_its_permit_releases() {
+        for fault in 0..7 {
+            let slot = AgentContextPortSlot::new(Arc::new(|_| false), Arc::new(|_| {}));
+            let mut factory = slot.take_factory().unwrap();
+            let _port = factory.begin(|_| {}).unwrap();
+            settle_factory_native_shutdown(&factory);
+            let old = factory_admission(&factory);
+            let task = AgentContextTask::new(
+                AgentPendingRequest::Audit(ContextResourceAuditId::new(2).unwrap()),
+                old.reserve_audit().unwrap(),
+                Arc::new(|_| {}),
+            );
+            assert!(factory.begin(|_| {}).is_err());
+            match fault {
+                0 => task.complete_audit(Ok(zero_native_snapshot())),
+                1 => task.complete_audit(Err(ContextPortFailure::NativeRefused)),
+                2 => task.refuse(ContextPortFailure::NativeRefused),
+                3 => drop(task),
+                4 => task.cancel_without_event(),
+                5 => {
+                    let mut counts = zero_native_snapshot().counts();
+                    counts.queued_tasks = 1;
+                    task.complete_audit(
+                        Ok(ContextNativeResourceSnapshot::try_new(counts).unwrap()),
+                    );
+                }
+                6 => task.complete(ContextNativeEvent::ResourceAuditSettled(
+                    ContextResourceAuditSettlement::new(
+                        ContextResourceAuditId::new(3).unwrap(),
+                        Ok(zero_native_snapshot()),
+                    ),
+                )),
+                _ => unreachable!(),
+            }
+            assert_eq!(factory.begin(|_| {}).is_ok(), fault == 0, "fault {fault}");
+            if (1..6).contains(&fault) {
+                // An ordinary retry cannot manufacture the missing shutdown receipt.
+                AgentContextTask::new(
+                    AgentPendingRequest::Audit(ContextResourceAuditId::new(4).unwrap()),
+                    old.reserve_audit().unwrap(),
+                    Arc::new(|_| {}),
+                )
+                .complete_audit(Ok(zero_native_snapshot()));
+                assert!(factory.begin(|_| {}).is_err());
+            }
         }
     }
 

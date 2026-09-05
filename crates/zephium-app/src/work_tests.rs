@@ -766,7 +766,7 @@ fn lost_native_callbacks_and_takeover_persist_recovery_without_success_or_replay
     let _serial = lock(&SERIAL);
     for fault in [Fault::ObservationLost, Fault::CloseLost] {
         let journal = Arc::new(Journal::default());
-        let (mut actor, _owner, _) = coordinator(journal.clone());
+        let (mut actor, _owner, view) = coordinator(journal.clone());
         let calls = Arc::new(Mutex::new(Vec::new()));
         let factories = Arc::new(AtomicUsize::new(0));
         let staged = prepared(journal.clone(), fault, calls.clone(), factories.clone());
@@ -788,6 +788,13 @@ fn lost_native_callbacks_and_takeover_persist_recovery_without_success_or_replay
             AgentWorkDisposition::RecoveryRequired
         );
         assert_eq!(actor.record.unwrap().debt(), AgentWorkDebt::UNKNOWN);
+        let (mut successor, _successor_owner, _) = coordinator(Arc::new(Journal::default()));
+        successor.predecessor = Some(WorkPredecessor {
+            projection: actor.projection.clone(),
+            record: actor.record.unwrap(),
+        });
+        while view.take_event().is_some() {}
+        assert!(!successor.accepts_predecessor(Some(&actor)));
         assert_eq!(factories.load(Ordering::Acquire), 1);
         assert!(matches!(
             actor.active.as_ref().unwrap().outcome,
@@ -829,6 +836,10 @@ fn lost_native_callbacks_and_takeover_persist_recovery_without_success_or_replay
         );
         assert_eq!(*lock(&calls), native_before);
         drop(proofs);
+        assert!(
+            !successor.accepts_predecessor(Some(&actor)),
+            "read-only audit recovery cannot replace missing native/lifecycle closure"
+        );
         assert!(!actor.shutdown_until(Instant::now() + Duration::from_secs(1)));
     }
 }
@@ -862,6 +873,15 @@ fn settled_failure_keeps_exact_terminal_through_lost_ack_and_late_takeover() {
         };
         let running = mutation.expected().unwrap();
         let terminal = mutation.next();
+        let (mut successor, _successor_owner, _) = coordinator(Arc::new(Journal::default()));
+        successor.predecessor = Some(WorkPredecessor {
+            projection: actor.projection.clone(),
+            record: terminal,
+        });
+        assert!(
+            !successor.accepts_predecessor(Some(&actor)),
+            "pending terminal ACK"
+        );
         assert_eq!(terminal.disposition(), AgentWorkDisposition::Failed);
         assert_eq!(terminal.debt(), AgentWorkDebt::NONE);
         assert_eq!(view.snapshot().phase, AgentWorkApplicationPhase::Closing);
@@ -952,6 +972,29 @@ fn settled_failure_keeps_exact_terminal_through_lost_ack_and_late_takeover() {
         assert_eq!(view.snapshot().artifact_read, Some(Ok(false)));
         assert_eq!(view.snapshot().phase, AgentWorkApplicationPhase::Failed);
         assert_eq!(actor.record, Some(terminal));
+        assert!(
+            !successor.accepts_predecessor(Some(&actor)),
+            "undelivered events"
+        );
+        let events: Vec<_> = std::iter::from_fn(|| view.take_event()).collect();
+        assert!(!events.is_empty());
+        assert!(successor.accepts_predecessor(Some(&actor)));
+        let native = actor.active.as_mut().unwrap().native.take();
+        assert!(!successor.accepts_predecessor(Some(&actor)));
+        actor.active.as_mut().unwrap().native = native;
+        actor.active.as_mut().unwrap().lifecycle_clean = Some(false);
+        assert!(!successor.accepts_predecessor(Some(&actor)));
+        actor.active.as_mut().unwrap().lifecycle_clean = Some(true);
+        let outcome = actor.active.as_mut().unwrap().outcome.take();
+        assert!(!successor.accepts_predecessor(Some(&actor)));
+        actor.active.as_mut().unwrap().outcome = outcome;
+        actor.active.as_mut().unwrap().pending_event = Some(events[0]);
+        assert!(!successor.accepts_predecessor(Some(&actor)));
+        actor.active.as_mut().unwrap().pending_event = None;
+        actor.record = Some(running);
+        assert!(!successor.accepts_predecessor(Some(&actor)));
+        actor.record = Some(terminal);
+        assert!(successor.accepts_predecessor(Some(&actor)));
         assert!(actor.shutdown_until(Instant::now() + Duration::from_secs(1)));
         assert_eq!(factories.load(Ordering::Acquire), 1);
         assert_eq!(*lock(&calls), [1, 2, 3, 4, 5, 6]);
@@ -1103,6 +1146,107 @@ fn actual_shell_command_path_closes_the_same_sqlite_store_after_durable_terminal
     }
     assert_eq!(second_factories.load(Ordering::Acquire), 0);
     assert_eq!(view.snapshot().phase, phase);
+    let original = view.records()[0];
+    let undrained = owner
+        .callback_handle()
+        .attach_successor_work(store.clone(), fixture_engine(), &view)
+        .unwrap();
+    while undrained.snapshot().phase == AgentWorkApplicationPhase::Loading {
+        shell.handle(queue.try_recv().unwrap());
+    }
+    assert_eq!(
+        undrained.snapshot().phase,
+        AgentWorkApplicationPhase::Recovery
+    );
+    assert_eq!(view.records(), [original]);
+    while view.take_event().is_some() {}
+    let full_queue = crate::actor::CommandQueue::new();
+    let full_owner = crate::actor::Handle::new(full_queue.clone());
+    while full_queue.try_push(Command::Open).is_ok() {}
+    assert!(full_owner
+        .callback_handle()
+        .attach_successor_work(store.clone(), fixture_engine(), &view)
+        .is_none());
+    assert_eq!(view.records(), [original]);
+    assert_eq!(factories.load(Ordering::Acquire), 1);
+    drop(full_owner);
+    drop(full_queue);
+    let wrong_store = owner
+        .callback_handle()
+        .attach_successor_work(Arc::new(Journal::default()), fixture_engine(), &view)
+        .unwrap();
+    while wrong_store.snapshot().phase == AgentWorkApplicationPhase::Loading {
+        shell.handle(queue.try_recv().unwrap());
+    }
+    assert_eq!(
+        wrong_store.snapshot().failure,
+        Some(AgentWorkFailure::Contract)
+    );
+    let wrong_successor = owner
+        .callback_handle()
+        .attach_successor_work(
+            store.clone(),
+            Arc::new(crate::shell::tests::FakeEngine::default()),
+            &view,
+        )
+        .unwrap();
+    while wrong_successor.snapshot().phase == AgentWorkApplicationPhase::Loading {
+        shell.handle(queue.try_recv().unwrap());
+    }
+    assert_eq!(
+        wrong_successor.snapshot().failure,
+        Some(AgentWorkFailure::Contract)
+    );
+    assert_eq!(view.records(), [original]);
+    let successor = owner
+        .callback_handle()
+        .attach_successor_work(store.clone(), fixture_engine(), &view)
+        .unwrap();
+    let next_calls = Arc::new(Mutex::new(Vec::new()));
+    successor
+        .admit(prepared(
+            store.clone(),
+            Fault::None,
+            next_calls.clone(),
+            factories.clone(),
+        ))
+        .unwrap();
+    assert!(view.stop(
+        view.snapshot().run.unwrap(),
+        AgentRuntimeStopReason::HumanTakeover
+    ));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while successor.snapshot().phase != AgentWorkApplicationPhase::Succeeded {
+        if let Some(command) = queue.try_recv() {
+            shell.handle(command);
+        } else {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            Instant::now() < deadline,
+            "successor deadline: {:?}",
+            successor.snapshot()
+        );
+    }
+    assert_eq!(factories.load(Ordering::Acquire), 2);
+    assert_eq!(*lock(&next_calls), [1, 2, 3, 4, 5, 6]);
+    assert_eq!(view.snapshot().phase, phase);
+    assert_eq!(view.records(), [original]);
+    assert_eq!(successor.records().len(), 2);
+    assert!(successor.records().contains(&original));
+    assert_ne!(successor.snapshot().run, view.snapshot().run);
+    let stale = owner
+        .callback_handle()
+        .attach_successor_work(store.clone(), fixture_engine(), &view)
+        .unwrap();
+    while stale.snapshot().phase == AgentWorkApplicationPhase::Loading {
+        shell.handle(queue.try_recv().unwrap());
+    }
+    assert_eq!(stale.snapshot().phase, AgentWorkApplicationPhase::Recovery);
+    assert_eq!(
+        successor.snapshot().phase,
+        AgentWorkApplicationPhase::Succeeded
+    );
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     shell.handle(Command::Shutdown {
         deadline: Instant::now() + Duration::from_secs(2),

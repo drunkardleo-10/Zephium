@@ -1,12 +1,12 @@
 # Sequential Work native lifetimes
 
-Status: native factory prerequisite; application successor admission is not yet
-wired or qualified. This ownership decision extends the Work foundation without
-changing Browse or allowing concurrent native lifetimes.
+Status: shipping opt-in native/application/composition boundary, exercised by
+the real macOS Shell/SQLite/Luna path. This ownership decision extends the Work
+foundation without changing Browse or allowing concurrent native lifetimes.
 
 ## Context and decision
 
-A Work run currently consumes the process's unique native port. Its terminal
+A Work run consumes a unique native port. Its terminal
 proof requires that port to be permanently sealed, so constructing a second
 controller cannot legitimately reuse it. Ordinary tabs, a replacement Store,
 resetting a seal or starting another hidden engine are not successor authority.
@@ -25,14 +25,40 @@ a successor's resources. Native invariant failure is sticky across the entire
 factory lineage, and whole-engine shutdown permanently seals the factory and
 its current port. The factory retains one current admission owner, not a growing
 history, and permits at most 1,024 lifetimes per process.
+An intervening refused, lost, mismatched or nonempty ordinary audit cannot use
+the earlier shutdown receipt to admit a successor. Invalidation occurs before
+that audit releases its permit; retrying an ordinary audit cannot mint a receipt.
 
 Native emptiness alone is not task, policy or restart permission. The application
-must separately require the original clean runtime join, provider/policy/audit
+separately requires the original clean runtime join, provider/policy/audit
 closure, exact immutable durable terminal acknowledgement, and delivery of
 retained output/events before replacing its coordinator. That application
-boundary must preserve the old handle as terminal, keep the exact engine/Store
+boundary preserves the old handle as terminal, keeps the exact engine/Store
 identity and process fence, and reject uncertain or unfinished predecessors.
 Fresh run input must still carry newly approved task/profile/manifest authority.
+
+`CallbackHandle::attach_successor_work` joins the exact predecessor projection
+and immutable record to the Shell's retained original owners. Ordinary second
+attachment stays refused. Only `Succeeded`, `Failed` or `Cancelled` with zero
+debt and matching original outcome can qualify. An active runtime, recovery
+audit, uncertain durable write, staged input, undelivered event or unconsumed
+result blocks replacement. The new coordinator reloads the same fenced Store;
+it never restores a task or releases/reacquires the process fence. Old handles
+remain terminal and retain their own immutable record, not quadratic copies of
+later history. Their controls cannot target a new projection. No automatic run
+queue, retry, background continuation or parallel execution is introduced.
+
+The same dormant `MacosWorkComposition` lazily takes the process factory once.
+Each prepared run still has a deferred `FnOnce`; the application invokes it only
+after exact durable Admitted/Running acknowledgements. The opt-in desktop Rust
+port `admit_successor_trusted_work` requires the exact prior handle and fresh
+trusted input. Invalid preparation leaves the original composition intact;
+mailbox refusal preserves the original prepared owner. Neither port is UI/IPC.
+
+See [M6](../eval/agentic-browsing/m6-production-qualification.md) for the narrow
+public native evidence. Deterministic coverage additionally checks successful
+and failed predecessors, pending terminal ACK/result/event/native owners, stale
+handles, wrong engine identity, lost callbacks and audit/retirement/shutdown races.
 
 ## Alternatives and consequences
 

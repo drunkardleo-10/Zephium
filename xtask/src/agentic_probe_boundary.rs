@@ -894,6 +894,9 @@ fn validate_engine_agent_lifetime_boundary(source: &str) -> Result<(), String> {
         "state.retired=true;",
         "state.retired||self.lineage_failed()",
         "self.permit.admission.verify_native_shutdown(snapshot)",
+        "self.permit.admission.invalidate_retirement_audit()",
+        "Self::native_resources_are_empty(snapshot)",
+        "settlement.outcome().is_ok_and(AgentPortAdmission::native_resources_are_empty)",
         "ContextNativeEvent::ShutdownAuditSettled(settlement)",
         "state.pending==1",
         "known_bindings:0,resident_views:0,owned_reservations:0,borrowed_leases:0,visible_surfaces:0,suspended_views:0,pending_operations:0,pending_captures:0,queued_tasks:0,",
@@ -8689,6 +8692,7 @@ mod tests {
         for boundary in [
             "active.retire_for_successor()",
             "!state.native_shutdown_verified",
+            "self.permit.admission.invalidate_retirement_audit()",
             "state.retired = true;",
             "self.permit.admission.verify_native_shutdown(snapshot)",
             "state.issued >= MAX_AGENT_BROWSER_LIFETIMES",

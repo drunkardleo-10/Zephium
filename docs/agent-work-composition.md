@@ -25,7 +25,8 @@ Preparation first borrows the exact engine/Store owners under the desktop
 admission mutex, without attachment, persistence claim or native acquisition.
 It rechecks the original absolute deadline. Validation failure leaves the
 desktop slot intact for a new valid request; no restart or recreated native
-authority is required. Only successful preparation consumes the slot.
+authority is required. Only successful preparation takes the slot for attachment;
+successful attachment restores the exact composition for explicit successors.
 Attachment then binds the ordinary
 shell's exact engine and Store owners; preparation binds that same engine and
 Store's audit port. The shell checks both allocation identities, then checks
@@ -34,8 +35,10 @@ factory call or runtime creation. The original `Arc<SqliteStore>` serves all
 three roles: ordinary Store, Work journal and audit.
 
 The deferred `FnOnce` factory calls the actual
-`WebviewEngine::take_agent_browser_port` only after the application's exact
-durable `Admitted` and `Running` acknowledgements. No ordinary tab is supplied,
+`WebviewEngine::take_agent_browser_lifetime_factory` once, then issues one fresh
+port only after each application's exact durable `Admitted` and `Running`
+acknowledgements. The process factory is mutually exclusive with legacy direct
+port acquisition. No ordinary tab is supplied,
 and no sealed port is reopened. Native events enter the existing bounded
 runtime event sink; publication failure remains runtime recovery debt.
 Attachment-mailbox refusal returns the original prepared owner and exact
@@ -46,8 +49,12 @@ application handle. Neither recreates the task or native factory.
 The application's existing incarnation fence, immutable terminal CAS,
 cancellation, audit reconciliation, worker join and shutdown proofs remain the
 only execution authorities. See [persistence](agent-work-persistence.md) and
-[execution](agent-work-execution.md). One execution attempt is currently possible
-per process/native lifetime. Review does not replay an action, and restart does
+[execution](agent-work-execution.md). Each native lifetime remains single-use.
+`admit_successor_trusted_work` accepts fresh trusted input and the exact completed
+predecessor handle; independent application/native proof barriers allow serial
+[new lifetimes](agent-work-lifetimes.md), never reopening old ports. Undelivered
+events/results and all unknown cleanup/persistence debt block replacement.
+Review does not replay an action, and restart does
 not restore a credential, task predicate, observation/ref or approval authority.
 
 Trusted extraction inputs may explicitly request [profile-owned durable
@@ -77,6 +84,6 @@ No user-facing task/plan authoring or approval authority is invented here. A
 future trusted product layer must supply the typed task/effect/account contract
 before calling this Rust port. The full Tauri window/bootstrap/IPC path has not
 been live-qualified; the shared production composition and shell/native path
-have. The desktop feature remains opt-in. Richer tools, new native lifetimes,
+have. The desktop feature remains opt-in. Richer tools, concurrent native lifetimes,
 native suspend/resume, concurrent Browse, other platforms and battery/resource
 qualification remain separate work.

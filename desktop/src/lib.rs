@@ -6,7 +6,7 @@ pub use zephium_work_composition::{MacosWorkComposition, TrustedWorkRequest};
 #[cfg(feature = "macos-work")]
 mod work;
 #[cfg(feature = "macos-work")]
-pub use work::{admit_trusted_work, WorkAdmissionFailure};
+pub use work::{admit_successor_trusted_work, admit_trusted_work, WorkAdmissionFailure};
 
 #[cfg(zephium_internal_repository_e2e)]
 compile_error!("the internal repository E2E authority may not link into the Zephium desktop");

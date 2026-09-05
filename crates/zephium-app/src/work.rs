@@ -328,6 +328,50 @@ impl CallbackHandle {
         journal: Arc<dyn AgentWorkJournalPort>,
         engine: crate::SharedEngine,
     ) -> Option<AgentWorkApplicationHandle> {
+        self.attach_work_after(journal, engine, None)
+    }
+
+    /// Requests a new coordinator after an exact completed predecessor. The
+    /// Shell independently checks original lifecycle/durable proof and all
+    /// retained output/event lanes before replacing anything. No port reopens.
+    pub fn attach_successor_work(
+        &self,
+        journal: Arc<dyn AgentWorkJournalPort>,
+        engine: crate::SharedEngine,
+        predecessor: &AgentWorkApplicationHandle,
+    ) -> Option<AgentWorkApplicationHandle> {
+        let projection = lock(&predecessor.projection);
+        if !matches!(
+            projection.snapshot.phase,
+            AgentWorkApplicationPhase::Succeeded
+                | AgentWorkApplicationPhase::Failed
+                | AgentWorkApplicationPhase::Cancelled
+        ) {
+            return None;
+        }
+        let run = projection.snapshot.run?;
+        let record = projection
+            .records
+            .iter()
+            .copied()
+            .find(|record| record.key()[16..32] == run.bytes())?;
+        drop(projection);
+        self.attach_work_after(
+            journal,
+            engine,
+            Some(WorkPredecessor {
+                projection: predecessor.projection.clone(),
+                record,
+            }),
+        )
+    }
+
+    fn attach_work_after(
+        &self,
+        journal: Arc<dyn AgentWorkJournalPort>,
+        engine: crate::SharedEngine,
+        predecessor: Option<WorkPredecessor>,
+    ) -> Option<AgentWorkApplicationHandle> {
         let projection = Arc::new(Mutex::new(Projection {
             archived: None,
             extraction: None,
@@ -349,7 +393,8 @@ impl CallbackHandle {
             projection: projection.clone(),
             admission: Arc::new(AtomicBool::new(false)),
         };
-        let actor = ApplicationWork::new(journal, engine, projection, self.clone());
+        let mut actor = ApplicationWork::new(journal, engine, projection, self.clone());
+        actor.predecessor = predecessor;
         if self.dispatch(Command::AttachWork(WorkAttachment(Arc::new(Mutex::new(
             Some(actor),
         ))))) {
@@ -358,6 +403,11 @@ impl CallbackHandle {
             None
         }
     }
+}
+
+struct WorkPredecessor {
+    projection: Arc<Mutex<Projection>>,
+    record: AgentWorkRecord,
 }
 
 struct ApplicationWake(CallbackHandle);
@@ -453,6 +503,7 @@ enum DurablePurpose {
 }
 
 pub(crate) struct ApplicationWork {
+    predecessor: Option<WorkPredecessor>,
     engine: crate::SharedEngine,
     audit: Option<Arc<dyn AgentAuditPort>>,
     unstarted: Option<AgentWorkOutcome>,
@@ -472,6 +523,81 @@ pub(crate) struct ApplicationWork {
 }
 
 impl ApplicationWork {
+    /// A new coordinator can only replace the exact preceding closed owner.
+    /// Decoded facts, a business-only outcome or a zero native count alone do
+    /// not authorize replacement. The Shell also checks exact Engine/Store.
+    pub(crate) fn accepts_predecessor(&self, previous: Option<&Self>) -> bool {
+        let Some(expected) = &self.predecessor else {
+            return previous.is_none();
+        };
+        let Some(previous) = previous else {
+            return false;
+        };
+        if !Arc::ptr_eq(&expected.projection, &previous.projection)
+            || previous.record != Some(expected.record)
+            || expected.record.debt() != AgentWorkDebt::NONE
+            || previous.flight.is_some()
+            || previous.staged.is_some()
+            || previous.unstarted.is_some()
+            || previous.recovery_audit.is_some()
+            || previous.artifact_preparation_failed
+        {
+            return false;
+        }
+        let Some(active) = &previous.active else {
+            return false;
+        };
+        if active.lifecycle_clean != Some(true)
+            || active.native.is_none()
+            || active.lifecycle.is_some()
+            || !active.completion.is_stopped()
+            || active.pending_event.is_some()
+            || active.handle.has_pending_events()
+        {
+            return false;
+        }
+        let expected_phase = match (&active.outcome, expected.record.disposition()) {
+            (Some(AgentWorkOutcome::Succeeded(success)), AgentWorkDisposition::Succeeded)
+                if success.extraction().is_none() =>
+            {
+                AgentWorkApplicationPhase::Succeeded
+            }
+            (
+                Some(AgentWorkOutcome::ClosedUnsuccessfully(closed)),
+                AgentWorkDisposition::Failed,
+            ) if matches!(
+                closed.policy_settlement().closure().outcome(),
+                AgentRunProgressOutcome::Failed(_)
+            ) =>
+            {
+                AgentWorkApplicationPhase::Failed
+            }
+            (
+                Some(AgentWorkOutcome::ClosedUnsuccessfully(closed)),
+                AgentWorkDisposition::Cancelled,
+            ) if matches!(
+                closed.policy_settlement().closure().outcome(),
+                AgentRunProgressOutcome::Cancelled(_)
+            ) =>
+            {
+                AgentWorkApplicationPhase::Cancelled
+            }
+            _ => return false,
+        };
+        let projection = lock(&previous.projection);
+        projection.snapshot.phase == expected_phase
+            && projection.snapshot.persistence_failure.is_none()
+            && projection.events.is_empty()
+            && projection.extraction.is_none()
+            && projection.archived.is_none()
+    }
+
+    /// Old handles remain terminal, but cannot retain quadratic copies of the
+    /// process inventory. The new coordinator reloads the same durable Store;
+    /// no execution or uncertain persistence owner is discarded here.
+    pub(crate) fn retire_projection(&self) {
+        lock(&self.projection).records = self.record.into_iter().collect();
+    }
     pub(crate) fn belongs_to_engine(&self, engine: &crate::SharedEngine) -> bool {
         Arc::ptr_eq(&self.engine, engine)
     }
@@ -485,6 +611,7 @@ impl ApplicationWork {
         callback: CallbackHandle,
     ) -> Self {
         Self {
+            predecessor: None,
             engine,
             audit: None,
             unstarted: None,
@@ -509,6 +636,8 @@ impl ApplicationWork {
     }
 
     pub(crate) fn initialize(&mut self) {
+        // Do not retain a chain of old handles after the exact Shell join.
+        self.predecessor.take();
         self.dispatch(AgentWorkJournalRequest::Claim, DurablePurpose::Claim, 0);
     }
 
