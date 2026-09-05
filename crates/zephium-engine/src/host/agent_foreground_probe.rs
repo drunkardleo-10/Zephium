@@ -173,6 +173,15 @@ impl EngineHost {
                 task.complete(state);
             }
             Operation::Poll | Operation::Retire => {
+                if request.operation() == Operation::Retire
+                    && binding.rendering_probe_attempted
+                    && binding.rendering_probe.is_none()
+                {
+                    // Exact acquisition was consumed but refused before any
+                    // auxiliary owner existed (including normal deferral).
+                    task.complete(State::Retired);
+                    return;
+                }
                 let state = binding
                     .rendering_probe
                     .as_mut()

@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+# Provider-free actual-application rendering witness; never optimized or ordinary Browse.
+macos-work-rendering-probe = [
+    "zephium-engine/native-agentic-foreground-probe",
+    "tauri/custom-protocol",
+]
 # Explicit, non-UI Work composition. Default desktop remains unchanged.
 macos-work = ["dep:zephium-work-composition", "zephium-work-composition/macos-work"]
 # Explicit release-gate forwarding only. Default product builds remain

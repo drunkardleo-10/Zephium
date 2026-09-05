@@ -1,6 +1,8 @@
 //! Release-excluded rendering ownership in the real foreground application.
 //! No application bootstrap, event pump, provider or page-authored capability.
 
+#![deny(unsafe_op_in_unsafe_fn, clippy::undocumented_unsafe_blocks)]
+
 use std::time::{Duration, Instant};
 
 use objc2::rc::{Retained, Weak};
@@ -10,10 +12,36 @@ use objc2_app_kit::{
     NSWindowStyleMask,
 };
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
-use objc2_web_kit::WKWebView;
+use objc2_web_kit::{WKWebView, WKWebsiteDataStore};
 use zephium_agentic::{ContextJoin, ForegroundRenderingState};
 
 const RENDERING_BUDGET: Duration = Duration::from_secs(5);
+
+struct WeakNativeWitness {
+    context: ContextJoin,
+    page: Weak<WKWebView>,
+    surface: Weak<NSWindow>,
+    store: Weak<WKWebsiteDataStore>,
+}
+thread_local! { static WEAK_WITNESS: std::cell::RefCell<Option<WeakNativeWitness>> = const { std::cell::RefCell::new(None) }; }
+
+/// Weak observations own no native resource. The normal application shutdown
+/// must release the cached ephemeral store before the final drain can pass.
+pub(crate) fn native_witness_drained(context: ContextJoin) -> Option<bool> {
+    MainThreadMarker::new()?;
+    WEAK_WITNESS.with(|slot| {
+        slot.try_borrow().ok().and_then(|witness| {
+            witness
+                .as_ref()
+                .filter(|witness| witness.context == context)
+                .map(|witness| {
+                    witness.page.load().is_none()
+                        && witness.surface.load().is_none()
+                        && witness.store.load().is_none()
+                })
+        })
+    })
+}
 
 #[derive(Clone, Copy)]
 struct ForegroundFacts {
@@ -142,6 +170,8 @@ impl ForegroundRenderingLease {
         let deadline = Instant::now()
             .checked_add(RENDERING_BUDGET)
             .ok_or(ForegroundRenderingState::Failed)?;
+        // SAFETY: the main-thread marker owns AppKit allocation; all frame
+        // components are finite and the retained window remains Rust-owned.
         let surface = unsafe {
             NSWindow::initWithContentRect_styleMask_backing_defer(
                 NSWindow::alloc(mtm),
@@ -155,6 +185,18 @@ impl ForegroundRenderingLease {
         unsafe { surface.setReleasedWhenClosed(false) };
         surface.setIgnoresMouseEvents(true);
         surface.setOpaque(true);
+        // SAFETY: exact retained page/configuration are read on the main thread.
+        let store = unsafe { page.configuration().websiteDataStore() };
+        WEAK_WITNESS.with(|slot| {
+            if let Ok(mut slot) = slot.try_borrow_mut() {
+                *slot = Some(WeakNativeWitness {
+                    context,
+                    page: Weak::from_retained(&page),
+                    surface: Weak::from_retained(&surface),
+                    store: Weak::from_retained(&store),
+                });
+            }
+        });
         Ok(Self {
             context,
             app,
@@ -396,6 +438,33 @@ fn foreground(app: &NSApplication, main: &NSWindow, responder: &NSResponder) -> 
         exact_responder: main
             .firstResponder()
             .is_some_and(|current| std::ptr::eq(&*current, responder)),
+    }
+}
+
+/// Captured before Work construction, so construction itself cannot silently
+/// redefine the human ownership baseline later used by the rendering lease.
+pub(crate) struct HumanForegroundGuard {
+    app: Retained<NSApplication>,
+    main: Retained<NSWindow>,
+    responder: Retained<NSResponder>,
+}
+
+impl HumanForegroundGuard {
+    pub(crate) fn capture() -> Option<Self> {
+        let app = NSApplication::sharedApplication(MainThreadMarker::new()?);
+        let main = app.mainWindow()?;
+        let responder = main.firstResponder()?;
+        foreground(&app, &main, &responder)
+            .admitted()
+            .then_some(Self {
+                app,
+                main,
+                responder,
+            })
+    }
+
+    pub(crate) fn is_current(&self) -> bool {
+        foreground(&self.app, &self.main, &self.responder).admitted()
     }
 }
 

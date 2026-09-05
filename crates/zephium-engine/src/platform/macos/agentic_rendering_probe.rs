@@ -111,7 +111,7 @@ fn marker(
     }
 }
 
-fn sample_snapshot(
+pub(crate) fn sample_snapshot(
     snapshot: &SemanticSnapshot,
     context: zephium_agentic::ContextJoin,
     origin: &SemanticOrigin,

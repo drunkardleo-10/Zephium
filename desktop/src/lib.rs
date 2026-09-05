@@ -1,6 +1,14 @@
 //! Composition root: the only crate that knows Tauri. Wires the dependency graph
 //! (window -> chrome positioning, engine, shell) and the command surface.
 
+#[cfg(all(
+    feature = "macos-work-rendering-probe",
+    any(not(debug_assertions), not(target_os = "macos"))
+))]
+compile_error!("the actual-lifecycle rendering witness is macOS debug-only");
+#[cfg(all(feature = "macos-work-rendering-probe", target_os = "macos"))]
+mod foreground_rendering_probe;
+
 #[cfg(feature = "macos-work")]
 pub use zephium_work_composition::{MacosWorkComposition, TrustedWorkRequest};
 #[cfg(feature = "macos-work")]
@@ -3792,6 +3800,10 @@ fn build_profile_menu(
 }
 
 fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
+    #[cfg(all(feature = "macos-work-rendering-probe", target_os = "macos"))]
+    if foreground_rendering_probe::on_run_event(app, &event) {
+        return;
+    }
     #[cfg(target_os = "linux")]
     if matches!(
         &event,
@@ -3968,6 +3980,8 @@ pub fn run() {
                 shutdown.prepare_hard_exit_watchdog()?;
                 specta.mount_events(app);
                 let data_dir = app.path().app_data_dir()?;
+                #[cfg(all(feature = "macos-work-rendering-probe", target_os = "macos"))]
+                foreground_rendering_probe::validate_data_root(&data_dir)?;
                 std::fs::create_dir_all(&data_dir)?;
                 #[cfg(unix)]
                 {
@@ -4180,6 +4194,8 @@ pub fn run() {
                     },
                 ),
                 move |event| {
+                    #[cfg(all(feature = "macos-work-rendering-probe", target_os = "macos"))]
+                    if zephium_engine::foreground_rendering_policy_event(&event) { return; }
                     if let zephium_core::ports::engine::EngineEvent::ShortcutPressed {
                         command,
                         ..
@@ -4515,6 +4531,10 @@ pub fn run() {
                     TerminalStartupResources { shell: Some(shell), ..TerminalStartupResources::default() },
                 );
                 return Err(error.into());
+            }
+            #[cfg(all(feature = "macos-work-rendering-probe", target_os = "macos"))]
+            if !foreground_rendering_probe::install(app.handle(), engine.clone()) {
+                return Err(std::io::Error::other("rendering probe owner already installed").into());
             }
             #[cfg(feature = "curated-extension-distribution")]
             if let Some(extension_distribution) =

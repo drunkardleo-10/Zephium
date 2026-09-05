@@ -3,6 +3,9 @@ use std::{env, error::Error, fs, io, path::Path};
 use serde_json::Value;
 use tauri_utils::platform::Target;
 
+#[allow(dead_code)]
+mod foreground_probe_config;
+
 const MAIN_LABEL: &str = "main";
 const LINUX_APP_ID: &str = "app.zephium";
 const EXTENSIONS_STAGING_PRODUCT_NAME: &str = "Zephium Extensions Staging";
@@ -58,6 +61,22 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
     };
     let extensions_staging = env::var_os("CARGO_FEATURE_STAGING_EXTENSION_CATALOG").is_some();
     let extension_lab = env::var_os("CARGO_FEATURE_LOCAL_EXTENSION_LAB").is_some();
+    let rendering_probe = env::var_os("CARGO_FEATURE_MACOS_WORK_RENDERING_PROBE").is_some();
+    if rendering_probe {
+        if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
+            || env::var("PROFILE").as_deref() != Ok("debug")
+            || extensions_staging
+            || extension_lab
+            || env::var_os("CARGO_FEATURE_MACOS_WORK").is_some()
+        {
+            return Err("the rendering probe is an isolated macOS debug-only application".into());
+        }
+        foreground_probe_config::validate(
+            config_override
+                .as_ref()
+                .ok_or("the rendering probe requires its isolated configuration override")?,
+        )?;
+    }
     if extensions_staging && extension_lab {
         return Err("the extension staging catalog and private lab are mutually exclusive".into());
     }
@@ -95,7 +114,11 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
             json_patch::merge(&mut config, config_override);
             validate_target_window(target, "effective", &config)?;
             validate_legal_resources("effective", &config, &root)?;
-            if matches!(target, Target::Linux) && !extensions_staging && !extension_lab {
+            if matches!(target, Target::Linux)
+                && !extensions_staging
+                && !extension_lab
+                && !rendering_probe
+            {
                 validate_linux_identity("effective", &config, &root)?;
             }
         }

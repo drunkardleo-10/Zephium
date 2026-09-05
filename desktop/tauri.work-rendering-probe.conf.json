@@ -1,0 +1,21 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Zephium Work Rendering Probe",
+  "identifier": "app.zephium.work-rendering-probe",
+  "build": { "devUrl": null },
+  "app": {
+    "windows": [{
+      "label": "main",
+      "create": false,
+      "title": "Zephium Work Rendering Probe",
+      "width": 1200,
+      "height": 800,
+      "minWidth": 680,
+      "minHeight": 480,
+      "hiddenTitle": true,
+      "titleBarStyle": "Overlay",
+      "transparent": true,
+      "trafficLightPosition": { "x": 7, "y": 22 }
+    }]
+  }
+}

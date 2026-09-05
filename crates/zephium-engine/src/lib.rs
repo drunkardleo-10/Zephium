@@ -10,6 +10,14 @@ mod navigation_epoch;
 mod pane_geometry;
 mod platform;
 
+#[cfg(all(target_os = "macos", feature = "native-agentic-foreground-probe"))]
+#[doc(hidden)]
+pub use platform::macos::agentic_foreground_driver::{
+    cancel_foreground_rendering_witness, foreground_rendering_native_drain,
+    foreground_rendering_policy_event, start_foreground_rendering_witness,
+    ForegroundRenderingWitnessReport,
+};
+
 #[cfg(all(feature = "native-agentic-input-probe", not(debug_assertions)))]
 compile_error!("the native agentic input probe is forbidden in optimized builds");
 

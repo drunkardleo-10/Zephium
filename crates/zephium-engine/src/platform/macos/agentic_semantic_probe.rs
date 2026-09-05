@@ -3,6 +3,8 @@
 #[path = "agentic_rendering_probe.rs"]
 mod rendering;
 pub use rendering::MacosAgenticRenderingProbeReport;
+#[cfg(feature = "native-agentic-foreground-probe")]
+pub(crate) use rendering::{sample_snapshot as sample_foreground_snapshot, RenderingDocumentState};
 #[path = "agentic_rendering_opportunity_probe.rs"]
 mod rendering_opportunity;
 pub use rendering_opportunity::{MacosAgenticRenderingOpportunityReport, RenderingOpportunity};
