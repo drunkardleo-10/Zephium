@@ -2195,6 +2195,82 @@ The run used the existing explicitly public provider-retained qualifier;
 production/BYOK retention remains false. No raw page/provider bodies, secrets
 or private account data were added to this ledger.
 
+## 2026-09-05 — prepared commercial two-document read (not yet run)
+
+After the successful trusted three-document React witness, the next bounded
+milestone moves to heterogeneous commercial product evidence rather than
+adding arbitrary hops. The release-excluded `commerce-product` qualifier uses
+the existing explicit one-hop manifest/task route, trusted route progress,
+fresh document/account samples, original run policy/counters/deadline and
+provider transcript retirement. No shipping core/controller/runtime code,
+default Browse dependency, resource ceiling or authority contract changes.
+
+The fixed public route is [Vercel demo catalog](https://demo.vercel.store/) →
+[Acme Circles T-Shirt product](https://demo.vercel.store/product/acme-geometric-circles-t-shirt).
+Read-only public-web inspection on 2026-09-05 found the target link and product
+title, USD price and material paragraph. The template assumptions were also
+read from immutable upstream revision
+`3761e52e60df9c6a316e067dbfd7032e494d3634`:
+[catalog label](https://github.com/vercel/commerce/blob/3761e52e60df9c6a316e067dbfd7032e494d3634/components/label.tsx),
+[product description](https://github.com/vercel/commerce/blob/3761e52e60df9c6a316e067dbfd7032e494d3634/components/product/product-description.tsx),
+and [price](https://github.com/vercel/commerce/blob/3761e52e60df9c6a316e067dbfd7032e494d3634/components/price.tsx).
+This pins the reviewed source assumptions, not a claim that the public
+deployment runs that exact revision. No native capture or Luna call was made
+for this commercial route during preparation.
+
+The catalog predicate is one exact public Link accessible name,
+`Acme Circles T-Shirt $20.00 USD`. The separating spaces follow the current
+immutable semantic runtime's bounded text-chunk append contract, independently
+covered by the existing nested-heading/price-link hostile smoke; crawler
+rendering and the older permissive catalog-slot fixture are not native text
+evidence. The product page must independently contain all three exact sources:
+
+| Field | Required current source | Frozen exact-copy value |
+| --- | --- | --- |
+| `product_name` | Heading / accessible name | `Acme Circles T-Shirt` |
+| `displayed_price` | Paragraph / visible text | `$20.00 USD` |
+| `material_description` | Paragraph / visible text | `60% combed ringspun cotton/40% polyester jersey tee.` |
+
+The source template renders title as `h1`, price as `p` with a currency `span`,
+and product description through HTML prose. Variant/cart controls remain
+outside task authority. The qualifier deliberately fails closed if public
+data, layout, visibility, roles or bounded completeness no longer satisfy
+these exact assumptions. It requires one complete bounded initial main-frame
+snapshot with no frame boundary at each checkpoint; that is not an assertion
+of complete off-viewport page coverage. Final extraction selects only the
+admission-frozen Heading/Paragraph roles under existing limits, with truthful
+intentional role omission. Each of the three bounded fields must copy one
+distinct, exact, public, page-derived arrival reference, field and value.
+Catalog/old/foreign document sources cannot substitute. No baseline read,
+subtree, action, redirect, account import, site-specific production logic or
+automatic retry is admitted.
+
+The 21 deterministic qualifier tests include eight new commercial tests for
+closed admission, changed/missing/duplicate facts, wrong roles/fields,
+incomplete captures, wrong origin/document/epoch, skipped and cancelled
+continuation, fresh-once account sampling, early extraction, stale/forged
+reference substitution, invented values, multiple/reordered citations,
+replacement-observation revocation and one-shot exact completion. They prove
+the fixture's guards, not the deployed site's current semantic projection.
+Preparation gates passed: the complete qualifier test suite, strict
+all-target qualifier Clippy, the `live-probe` native executable build,
+`cargo xtask check-agentic-probe-boundary` (including hostile immutable-runtime
+JavaScript smoke), `cargo xtask check-agent-controller-boundary`, formatting
+and diff-whitespace checks. Predicate diagnostics are content-free booleans
+plus node/completeness/frame-boundary counts even when a checkpoint refuses.
+
+Recommended next witness, **only after independent review and explicit live
+clearance**, is one attempt on a clean pinned source commit:
+`target/debug/macos-terra-agentic-probe --live-public-luna-work-site-inspectable commerce-product`.
+Retain only content-free call/request/token/cost/accounting metrics, both
+checkpoint node/completeness records, one exact navigation proposal, the
+three-field/three-value/three-source-edge independently verified result, and
+durable terminal/cleanup/focus-isolation closure. An early refusal is useful
+evidence; it must not trigger automatic target/value/role/ceiling relaxation.
+This is not yet a successful commercial witness, the six-site matrix, SPA
+interaction, stock/availability truth, a transaction, multi-page synthesis,
+authenticated continuity, cross-origin support or visible Work readiness.
+
 ## Remaining release blockers
 
 - authorized named-device macOS native-input routes beyond fixed DOM;

@@ -13,6 +13,7 @@ mod work_actor;
 mod work_application;
 #[cfg(target_os = "macos")]
 mod work_artifact_cleanup;
+mod work_commerce;
 mod work_navigation;
 mod work_route;
 mod work_sites;

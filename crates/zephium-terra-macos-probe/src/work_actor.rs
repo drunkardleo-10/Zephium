@@ -364,9 +364,14 @@ fn input_mode(
         effects,
     )
     .map_err(|_| Error::Authority)?;
-    let authority = if matches!(site, Some(super::work_sites::Site::ReactRoute)) {
+    let route = match site {
+        Some(super::work_sites::Site::ReactRoute) => Some(super::work_route::route()),
+        Some(super::work_sites::Site::CommerceProduct) => Some(super::work_commerce::route()),
+        _ => None,
+    };
+    let authority = if let Some(route) = route {
         authority
-            .with_navigation_route(super::work_route::route().map_err(|_| Error::Authority)?)
+            .with_navigation_route(route.map_err(|_| Error::Authority)?)
             .map_err(|_| Error::Authority)?
     } else {
         authority

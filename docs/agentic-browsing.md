@@ -1227,6 +1227,25 @@ profile, and admits no actions/read/subtree/redirect/cross-origin/auth claims.
 Its deterministic guards and build are distinct from a separately recorded
 live Luna outcome; the mere presence of this qualifier is not qualification.
 
+The release-excluded `commerce-product` qualifier reuses an explicit one-hop
+manifest/task route from the Vercel demo catalog to one frozen product URL.
+Departure requires a unique exact public price-bearing product Link accessible
+name. Arrival requires three distinct unique current sources: product Heading
+accessible name, displayed-price Paragraph visible text, and material-description
+Paragraph visible text. All three values are task-authored source-pinned
+constants, not model-inferred acceptance criteria. Both checkpoints require a
+complete bounded initial snapshot with no frame boundary; no subtree, role
+fallback, recapture, ceiling increase, action, redirect or cross-origin scope is
+admitted. Heading/Paragraph extraction selection is immutable at admission and
+still reports intentional role omission separately from source incompleteness.
+Each returned field must exactly copy its one independently verified arrival
+reference in the same current document and isolated anonymous account sample.
+The owned-result check repeats exact field/value/role/public-source checks; it
+does not replace the current-document task gate. This tests a commercial
+multi-field read, not availability, variant selection, cart, checkout or
+cross-document synthesis. Public-source inspection and deterministic tests are
+not native/provider evidence; the ledger records those boundaries separately.
+
 The release-excluded `react-navigation` public qualifier fixes Quick Start as
 departure and `/learn/your-first-component` as the only successor, then requires
 one exact `Your First Component` heading citation. It runs in the existing
