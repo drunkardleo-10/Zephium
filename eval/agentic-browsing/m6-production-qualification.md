@@ -1401,6 +1401,127 @@ navigation vocabulary alone does not supply that host adapter. Trusted task
 authoring, richer read scopes, parallel runs and UI remain separate product work;
 this pass neither enables nor emulates them.
 
+## Exact native subtree extraction (2026-09-05)
+
+The accepted action-to-result path disclosed 13,365 semantic bytes for one
+field. The next bounded vertical adds actual native subtree capture, not a
+filtered copy of the initial observation. Trusted tasks explicitly enable it;
+default schema tasks remain initial-only and read-only. The same actor, runtime,
+browser/context port, provider session, policy, audit, Store and publication
+owners remain in control. No new worker, queue, native program or default
+dependency is introduced.
+
+The settled extraction proposal's opaque target is validated against its exact
+model-acknowledged predecessor and frame cohort. The native expansion runs once
+under the existing capture bounds. Read admission independently requires the
+returned root's private stable node key to match the selected anchor, rejecting
+an accidentally widened full-frame result. A distinct read guard binds predecessor,
+target and fresh source; policy requires the original committed anchor taint
+cohort and adds only fresh read-guard taint. It never acknowledges the expanded
+observation to the model as an action baseline, and terminal mapping cannot
+create another tool continuation. Scope/config/schema substitutions, stale
+native capture and uncertain original owners fail closed without replay.
+
+The excluded `--live-public-luna-work-scoped-inspectable` command uses the full
+application composition, real EngineHost-owned page and exact shared SQLite
+Store. It performs the existing three unsubmitted public Wikipedia form-state
+milestones, then extracts the final value from a fresh subtree rooted at the
+acknowledged search field. Both task acceptance and application delivery
+independently compare that value with its untruncated native citation. No
+production task, probe authority, private account or external write is added.
+
+The first attempt verified all three effects and captured the subtree, then
+failed before mapping with `Browser(Authority)`: extraction policy still
+required an initial-read acknowledgement and baseline-only taints. It correctly
+persisted failure, withheld output and reached original Shell Clean teardown.
+That attempt used 15,482 input / 479 output tokens, 1,704 accounted µUSD and
+18,721 ms. The fix carries the exact selected target through the sealed draft
+and checks fresh read provenance at policy admission; it does not waive the
+initial-read boundary or mint action authority. This failed attempt is not
+included in successful-run aggregates.
+
+Three corrected runs passed, including the final exact-root build. All used
+Fill → Locate → Select → Fill → scoped Extract → mapping, reached durable
+Succeeded, returned one result once, passed focus isolation and completed
+application-owned Shell Clean teardown. No action/provider/native retry occurred.
+
+| Run | Input / output tokens | Accounted µUSD | Provider-turn ms | Total wall ms | Verified effects / results |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 17,854 / 482 | 1,685 | 16,391 | 18,650 | 3 / 1 |
+| 2, rebuilt repeat | 17,904 / 469 | 1,677 | 13,805 | 15,487 | 3 / 1 |
+| 3, final exact-root build | 17,947 / 507 | 1,736 | 15,903 | 17,678 | 3 / 1 |
+| Aggregate | 53,705 / 1,458 | 5,098 | 46,099 | 51,815 | 9 / 3 |
+
+Final-build boundary receipts (`PricedCeiling` accounting):
+
+| Turn | Kind | Input / output tokens | Request bytes | Semantic bytes | Provider-turn ms | µUSD |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | Fill | 2,705 / 99 | 13,280 | 3,116 | 3,662 | 174 |
+| 2 | Locate | 2,902 / 55 | 15,539 | 287 | 2,422 | 170 |
+| 3 | Select | 3,039 / 89 | 17,614 | 302 | 2,644 | 200 |
+| 4 | Fill | 3,279 / 125 | 19,927 | 408 | 2,779 | 272 |
+| 5 | Scoped extract proposal | 3,504 / 59 | 22,382 | 299 | 2,079 | 194 |
+| 6 | Schema mapping | 2,518 / 80 | 17,611 | 586 | 2,317 | 726 |
+
+All scoped mappings disclosed 586 semantic bytes, 95.6% below the previous
+initial-scope mapping's 13,365 bytes. Final mapping input was 2,518 versus 6,263
+tokens (59.8% lower). These are measured disclosure/input differences, not a
+controlled provider-latency or cost benchmark; caching and generation vary.
+The extra native capture completed in 3–5 ms across the corrected runs.
+
+Eighteen controller schedules use the actual worker and synthetic provider/native
+ports: read-only and combined success with newly captured content absent from
+initial observations; unknown ref, wrong schema, absent grant, refused/stale/lost
+capture, widened/wrong-root response, takeover, renderer loss, mapping count/stream
+cancellation, foreign citation, audit loss, contract mutation, unauthorized action
+and exhausted mapping budget. The final budget precheck refuses an extra capture
+when no mapping turn remains; it is covered deterministically and does not change
+the six-call live path. Core tests cover exact predecessor, frame, generation,
+target, config, schema, policy anchor/origin and committed
+source/output bindings for both provider protocols. Lost capture retains its
+original correlation; audit loss retains unpublished output; renderer loss
+retains recovery. No fixture manufactures a clean closure. Source mutation gates
+protect those proof joins and the frozen product capability.
+
+Broader feature-unified tests also exposed two old transport-fixture assertions
+that prohibited the literal `title` anywhere in the output schema. Trusted field
+binding intentionally includes that field-name enum. The assertions now verify
+the exact trusted schema, closed field, type and bounds for both transports;
+no production output format changed for this repair.
+
+Public runs used ephemeral profiles and memory-only result bodies with durable
+terminal facts. They qualify targeted fresh capture and disclosure reduction,
+not public off-viewport discovery, artifact restart, multi-page research,
+parallel execution or full desktop bootstrap. Newly disclosed subtree content
+is covered deterministically, not claimed from these public search-field reads.
+No battery/CPU/RAM/endurance or broad-site/platform claim is added. Production
+and BYOK stay `store:false`; only explicit public probes retain provider logs.
+Local evidence contains no page/provider bodies, objectives or credentials.
+
+Validation: 426 no-transport core tests; 524 feature-enabled core tests plus
+three native-action and five semantic-runtime integration tests; 15 shipping
+and 21 probe controller tests (the scoped matrix contains eighteen schedules);
+37 runtime; 339 Work application and 343 all-feature application; 264 Store
+plus four doctests; 465 engine; 97 opt-in desktop; two qualifier; 178 xtask.
+Ignored subprocess helpers remain parent-exercised. Strict Clippy, controller,
+runtime, catalog, semantic/native, composition and persistence source gates pass.
+Optimized default and opt-in desktop checks pass; optimized probe compilation
+is refused. The default desktop dependency tree still excludes Work composition,
+controller, runtime, provider transport and reqwest. No manifests, dependencies,
+lockfile, native scheduling or idle polling changed.
+
+One overlapping build/test validation run hit the existing twelve-second actor
+fixture watchdog in the lost-callback group. The old diagnostic did not identify
+the individual fault. That watchdog now includes only typed fault/callback codes;
+the isolated group and two successive full actor sweeps passed without changing
+the watchdog or any production deadline. This observation is not claimed as a
+root-caused runtime repair or endurance qualification.
+
+Cross-document navigation still needs its own trusted effect subject,
+authorization, settlement and new-document continuation proof; bare lifecycle
+navigation is not a safe substitute. Task authoring, richer read scopes and
+parallel runs remain separate work.
+
 ## Remaining release blockers
 
 - authorized named-device macOS native-input routes beyond fixed DOM;
