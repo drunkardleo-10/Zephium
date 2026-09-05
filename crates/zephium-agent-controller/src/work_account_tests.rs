@@ -162,6 +162,7 @@ fn slow_provider_turns_resample_each_shipping_inspection_action_and_mapping_boun
         (ProviderFault::Read(ReadFault::AfterActionExtraction), None),
         (ProviderFault::Combined(CombinedFault::None), None),
         (ProviderFault::Scoped(ScopedFault::None), None),
+        (ProviderFault::Scoped(ScopedFault::ParagraphSelection), None),
         (ProviderFault::Ceiling, None),
         (ProviderFault::Read(ReadFault::ActionLost), None),
         (ProviderFault::Combined(CombinedFault::AuditLost), None),
@@ -204,6 +205,17 @@ fn fresh_account_refusal_or_control_during_sampling_cannot_dispatch_an_action() 
         None,
         Some(AccountFault::ChangedAfterAction),
     );
+    for fault in [
+        AccountFault::Changed,
+        AccountFault::Cancel,
+        AccountFault::Revoke,
+    ] {
+        provider_fixture_with_account(
+            ProviderFault::Scoped(ScopedFault::ParagraphSelection),
+            None,
+            Some(fault),
+        );
+    }
 }
 
 pub(super) fn assert_refusal(
@@ -211,6 +223,7 @@ pub(super) fn assert_refusal(
     outcome: AgentWorkOutcome,
     shutdown: AgentBrowserShutdownOutcome,
     calls: &[u8],
+    subtree: bool,
 ) {
     let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
         panic!("{fault:?}: {outcome:?}")
@@ -251,7 +264,11 @@ pub(super) fn assert_refusal(
         assert_eq!(calls, [1, 2, 3, 7, 3, 4, 5, 6]);
     } else {
         assert_eq!(closed.policy_settlement().closure().effects(), 0);
-        assert_eq!(calls, [1, 2, 3, 4, 5, 6]);
+        if subtree {
+            assert_eq!(calls, [1, 2, 3, 3, 8, 4, 5, 6]);
+        } else {
+            assert_eq!(calls, [1, 2, 3, 4, 5, 6]);
+        }
     }
     assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
 }

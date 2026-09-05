@@ -36,6 +36,24 @@ at most 128 readable fragments and 32 KiB of read content, further restricted by
 the 16 KiB combined encoded schema/read preflight. Insufficient evidence or a
 budget refusal fails closed; it does not trigger a larger disclosure or retry.
 
+Trusted tasks may narrow evidence with `with_source_roles`, a nonempty closed
+set of semantic roles in the extraction schema. The default remains all roles.
+Selection is frozen at admission with the full schema and is rechecked around
+task evaluation, account sampling and result acceptance. It applies to either
+initial or explicitly authorized subtree extraction, not baseline inspection
+or native capture. No role, selector or selection parameter is added to model
+tools, and page/model content cannot replace the task-authored set.
+
+For example, a heading inventory can map only captured heading fields without
+also delivering captured paragraphs and links to the mapping call. All original
+capture/read/provider ceilings remain in force, so selection cannot recover a
+heading that native capture omitted. `selected_roles` labels that narrowing in
+the bounded evidence header; `role_selection` counts otherwise-readable excluded
+fields without claiming source incompleteness. Native omissions, unobserved
+frame boundaries and secret/sensitivity withholding retain their own classes.
+Schema/read fingerprints and exact citation resolution prevent substitution,
+including a different role set that happens to yield the same source fragments.
+
 The mapping call binds the provider's strict output schema to the exact trusted
 field names, types, schema identity and bounds. The same projection semantics
 apply to the existing provider protocol adapters; provider constraints improve

@@ -6,6 +6,10 @@ pub(super) enum ScopedFault {
     Ceiling,
     UnexpectedAction,
     None,
+    ParagraphSelection,
+    RoleMutation,
+    AccountRoleMutation,
+    ResultRoleMutation,
     EmbeddedFrame,
     Combined,
     UnknownRef,
@@ -29,7 +33,8 @@ impl ScopedFault {
         match self {
             Self::Ceiling => 16,
             Self::UnexpectedAction => 2,
-            Self::ModeMutation => 0,
+            Self::ModeMutation | Self::RoleMutation => 0,
+            Self::AccountRoleMutation => 2,
             Self::Combined => 6,
             Self::UnknownRef
             | Self::WrongSchema
@@ -77,7 +82,14 @@ impl ScopedFault {
             ExtractionFault::None
         })
         .replace("Field", "Expanded fixture result")
-        .replace("@r1", "@r2")
+        .replace(
+            "@r1",
+            if self == Self::ParagraphSelection {
+                "@r1"
+            } else {
+                "@r2"
+            },
+        )
         .replace("resp_2", &format!("resp_{turns}"))
         .replace("msg_2", &format!("msg_{turns}"))
     }
@@ -88,18 +100,36 @@ pub(super) struct ScopedTask {
     fault: ScopedFault,
     observed: bool,
     ready: Option<SemanticObservationId>,
+    account_samples: std::cell::Cell<u8>,
+    alternate_schema: SemanticExtractionSchema,
 }
 impl ScopedTask {
     pub(super) fn new(fault: ScopedFault) -> Self {
+        let mut extraction = AgentWorkExtractionTask::try_new(
+            vec![SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap()],
+            AgentAccountScope::Anonymous,
+        )
+        .unwrap();
+        let alternate_schema = extraction.schema.clone();
+        // Keep one default-all schedule. Exercise the remaining adversarial
+        // actor paths with a frozen selection, including existing debt owners.
+        if fault != ScopedFault::None {
+            extraction = extraction.with_source_roles(
+                SemanticReadRoleSelection::try_new(if fault == ScopedFault::ParagraphSelection {
+                    &[SemanticRole::Paragraph]
+                } else {
+                    &[SemanticRole::Group, SemanticRole::Paragraph]
+                })
+                .unwrap(),
+            );
+        }
         Self {
-            extraction: AgentWorkExtractionTask::try_new(
-                vec![SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap()],
-                AgentAccountScope::Anonymous,
-            )
-            .unwrap(),
+            extraction,
             fault,
             observed: false,
             ready: None,
+            account_samples: std::cell::Cell::new(0),
+            alternate_schema,
         }
     }
 }
@@ -112,13 +142,20 @@ impl AgentWorkTask for ScopedTask {
         self.fault == ScopedFault::Combined
     }
     fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
-        self.extraction.extraction_schema()
+        if self.fault == ScopedFault::AccountRoleMutation && self.account_samples.get() >= 3 {
+            Some(&self.alternate_schema)
+        } else {
+            self.extraction.extraction_schema()
+        }
     }
     fn evaluate(
         &mut self,
         observation: &SemanticObservation,
     ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
         self.observed = true;
+        if self.fault == ScopedFault::RoleMutation {
+            self.extraction.schema = self.alternate_schema.clone();
+        }
         assert!(
             !observation
                 .frames()
@@ -156,6 +193,7 @@ impl AgentWorkTask for ScopedTask {
         context: ContextJoin,
         now: AgentPolicyInstant,
     ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
+        self.account_samples.set(self.account_samples.get() + 1);
         Task.attest_account(context, now)
     }
     fn accept_extraction(
@@ -164,6 +202,9 @@ impl AgentWorkTask for ScopedTask {
     ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
         assert!(self.ready.is_some());
         assert_ne!(Some(result.observation()), self.ready);
+        if self.fault == ScopedFault::ResultRoleMutation {
+            self.extraction.schema = self.alternate_schema.clone();
+        }
         self.extraction.accept_extraction(result)
     }
 }
@@ -248,6 +289,10 @@ fn scoped_mapping_retains_exact_source_capture_and_all_original_failure_owners()
         ScopedFault::Ceiling,
         ScopedFault::UnexpectedAction,
         ScopedFault::None,
+        ScopedFault::ParagraphSelection,
+        ScopedFault::RoleMutation,
+        ScopedFault::AccountRoleMutation,
+        ScopedFault::ResultRoleMutation,
         ScopedFault::EmbeddedFrame,
         ScopedFault::Combined,
         ScopedFault::UnknownRef,
@@ -279,6 +324,7 @@ pub(super) fn assert_outcome(
     let captures = usize::from(!matches!(
         fault,
         ScopedFault::ModeMutation
+            | ScopedFault::RoleMutation
             | ScopedFault::Ceiling
             | ScopedFault::UnexpectedAction
             | ScopedFault::NoGrant
@@ -298,7 +344,10 @@ pub(super) fn assert_outcome(
         AgentWorkOutcome::Succeeded(mut success) => {
             assert!(matches!(
                 fault,
-                ScopedFault::None | ScopedFault::Combined | ScopedFault::EmbeddedFrame
+                ScopedFault::None
+                    | ScopedFault::ParagraphSelection
+                    | ScopedFault::Combined
+                    | ScopedFault::EmbeddedFrame
             ));
             assert_eq!(
                 success.closure().model_calls(),
@@ -354,6 +403,7 @@ pub(super) fn assert_outcome(
                 !matches!(
                     fault,
                     ScopedFault::None
+                        | ScopedFault::ParagraphSelection
                         | ScopedFault::EmbeddedFrame
                         | ScopedFault::Combined
                         | ScopedFault::LostCapture
@@ -404,7 +454,10 @@ pub(super) fn assert_outcome(
                     closed.failure(),
                     AgentWorkFailure::Observation(SemanticRuntimePortFailure::Stale)
                 ),
-                ScopedFault::ModeMutation => {
+                ScopedFault::ModeMutation
+                | ScopedFault::RoleMutation
+                | ScopedFault::AccountRoleMutation
+                | ScopedFault::ResultRoleMutation => {
                     assert_eq!(closed.failure(), AgentWorkFailure::Contract)
                 }
                 ScopedFault::ForeignSource => assert!(matches!(

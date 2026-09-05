@@ -13,6 +13,7 @@ pub(super) enum CombinedFault {
     CancelMapStream,
     AuditLost,
     SchemaMutation,
+    RoleMutation,
     ModeMutation,
     CompleteWithoutResult,
     Ceiling,
@@ -51,6 +52,13 @@ impl AgentWorkTask for CombinedTask {
                 AgentAccountScope::Anonymous,
             )
             .unwrap();
+        }
+        if self.fault == CombinedFault::RoleMutation {
+            // Same schema identity and fields, changed only after the verified
+            // action. A fresh task phase cannot widen/narrow admitted evidence.
+            self.extraction.schema = self.extraction.schema.clone().with_source_roles(
+                SemanticReadRoleSelection::try_new(&[SemanticRole::Textbox]).unwrap(),
+            );
         }
         self.ready = Some(observation.request().id());
         if self.fault == CombinedFault::CompleteWithoutResult {
@@ -103,6 +111,7 @@ fn combined_actions_and_results_keep_fresh_phase_and_original_failure_owners() {
         CombinedFault::CancelMapStream,
         CombinedFault::AuditLost,
         CombinedFault::SchemaMutation,
+        CombinedFault::RoleMutation,
         CombinedFault::ModeMutation,
         CombinedFault::CompleteWithoutResult,
         CombinedFault::Ceiling,
@@ -193,6 +202,7 @@ pub(super) fn assert_outcome(
                 }
             ),
             CombinedFault::SchemaMutation
+            | CombinedFault::RoleMutation
             | CombinedFault::ModeMutation
             | CombinedFault::CompleteWithoutResult
             | CombinedFault::ResultRefused => {

@@ -18,8 +18,8 @@ use crate::semantic_wire::looks_like_secret_value;
 use crate::{
     SemanticCaptureInstant, SemanticContractError, SemanticExtractionDeliveryReceipt,
     SemanticObservationGeneration, SemanticObservationId, SemanticReadDeliveryReceipt,
-    SemanticReadFragment, SemanticReadFragmentId, SemanticReadResult, SemanticReadSensitivityLimit,
-    SemanticSensitivity, SemanticText,
+    SemanticReadFragment, SemanticReadFragmentId, SemanticReadResult, SemanticReadRoleSelection,
+    SemanticReadSensitivityLimit, SemanticSensitivity, SemanticText,
 };
 
 /// Exact version of the model-output extraction grammar.
@@ -246,6 +246,7 @@ impl fmt::Debug for SemanticExtractionFieldSchema {
 pub struct SemanticExtractionSchema {
     id: SemanticExtractionSchemaId,
     fields: Vec<SemanticExtractionFieldSchema>,
+    source_roles: SemanticReadRoleSelection,
 }
 
 impl SemanticExtractionSchema {
@@ -271,7 +272,24 @@ impl SemanticExtractionSchema {
                 return Err(SemanticExtractionSchemaError::NameLimit);
             }
         }
-        Ok(Self { id, fields })
+        Ok(Self {
+            id,
+            fields,
+            source_roles: SemanticReadRoleSelection::ALL,
+        })
+    }
+
+    /// Selects trusted source roles from the already-authorized capture before
+    /// mapping. This narrows evidence, not capture, privacy, or action authority.
+    /// The selection is part of the exact schema contract; default is all roles.
+    pub fn with_source_roles(mut self, roles: SemanticReadRoleSelection) -> Self {
+        self.source_roles = roles;
+        self
+    }
+
+    /// Immutable trusted evidence selection bound to this schema.
+    pub const fn source_roles(&self) -> SemanticReadRoleSelection {
+        self.source_roles
     }
 
     /// Exact trusted schema identity expected in model output.
@@ -291,6 +309,7 @@ impl fmt::Debug for SemanticExtractionSchema {
             .debug_struct("SemanticExtractionSchema")
             .field("id", &self.id)
             .field("fields", &self.fields.len())
+            .field("source_roles", &self.source_roles)
             .finish()
     }
 }
@@ -895,7 +914,8 @@ pub enum SemanticExtractionError {
     /// Model-output grammar version did not exactly match.
     #[error("semantic extraction version mismatch")]
     VersionMismatch,
-    /// Model output named a different trusted schema identity.
+    /// Model output named a different schema, or source roles differed from
+    /// the immutable trusted schema selection.
     #[error("semantic extraction schema identity mismatch")]
     SchemaMismatch,
     /// Output exceeded the fixed field ceiling.
@@ -991,6 +1011,9 @@ fn extract_semantic_read_inner<'a>(
     sensitivity_limit: SemanticReadSensitivityLimit,
     model_output: &[u8],
 ) -> Result<SemanticExtractionResult<'a>, SemanticExtractionError> {
+    if schema.source_roles() != read.source_roles() {
+        return Err(SemanticExtractionError::SchemaMismatch);
+    }
     if model_output.len() > MAX_SEMANTIC_EXTRACTION_INPUT_BYTES {
         return Err(SemanticExtractionError::InputLimit);
     }
@@ -1550,6 +1573,63 @@ mod tests {
             &serde_json::to_vec(output).expect("output"),
         )
         .expect_err("output must fail")
+    }
+
+    #[test]
+    fn selected_sources_cannot_use_unselected_read_tokens_or_different_schema_roles() {
+        use crate::{read_selected_semantic_observation, SemanticRole};
+        let observation = observation();
+        let roles = SemanticReadRoleSelection::try_new(&[SemanticRole::Paragraph]).unwrap();
+        let read = read_selected_semantic_observation(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(31),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+            roles,
+        )
+        .unwrap();
+        let delivery = delivered(&read);
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(29).unwrap(),
+            vec![SemanticExtractionFieldSchema::try_text("title".into(), true, 64).unwrap()],
+        )
+        .unwrap()
+        .with_source_roles(roles);
+        let mut output = json!({"v":1,"schema":29,"fields":[{"name":"title","value":{"k":"text","value":"Quarterly summary","sources":["@r1"]}}]});
+        let encode = |output: &Value| serde_json::to_vec(output).unwrap();
+        assert!(extract_semantic_read(
+            &schema,
+            &read,
+            &delivery,
+            SemanticReadSensitivityLimit::PublicOnly,
+            &encode(&output)
+        )
+        .is_ok());
+        output["fields"][0]["value"]["sources"] = json!(["@r3"]);
+        assert_eq!(
+            extract_semantic_read(
+                &schema,
+                &read,
+                &delivery,
+                SemanticReadSensitivityLimit::PublicOnly,
+                &encode(&output)
+            )
+            .unwrap_err(),
+            SemanticExtractionError::SourceMissing
+        );
+        let all_schema = schema.with_source_roles(SemanticReadRoleSelection::ALL);
+        assert_eq!(
+            extract_semantic_read(
+                &all_schema,
+                &read,
+                &delivery,
+                SemanticReadSensitivityLimit::PublicOnly,
+                &encode(&output)
+            )
+            .unwrap_err(),
+            SemanticExtractionError::SchemaMismatch
+        );
     }
 
     #[test]

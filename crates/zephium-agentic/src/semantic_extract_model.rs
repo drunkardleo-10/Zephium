@@ -408,6 +408,9 @@ pub fn encode_semantic_extraction_request(
     read: &SemanticReadResult<'_>,
     budget: SemanticModelEncodingBudget,
 ) -> Result<SemanticEncodedExtractionRequest, SemanticModelEncodingError> {
+    if schema.source_roles() != read.source_roles() {
+        return Err(SemanticModelEncodingError::Invariant);
+    }
     let read = encode_semantic_read(read, budget)?.into_extraction_parts();
     let capacity = usize::try_from(budget.max_bytes().min(16 * 1024))
         .map_err(|_| SemanticModelEncodingError::Budget)?;
@@ -507,8 +510,9 @@ fn extraction_kind_label(kind: SemanticExtractionValueKind) -> &'static str {
 
 fn extraction_schema_guard(schema: &SemanticExtractionSchema) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"zephium.semantic-extraction-schema.v1\0");
+    hasher.update(b"zephium.semantic-extraction-schema.v2\0");
     hasher.update(schema.id().get().to_be_bytes());
+    hasher.update(schema.source_roles().bits().to_be_bytes());
     hasher.update((schema.fields().len() as u64).to_be_bytes());
     for field in schema.fields() {
         hasher.update((field.name().len() as u64).to_be_bytes());
@@ -662,6 +666,73 @@ mod tests {
         )
         .expect("schema");
         (observation, schema)
+    }
+
+    #[test]
+    fn selected_source_contract_is_encoded_budgeted_and_bound_at_every_delivery_stage() {
+        use crate::{read_selected_semantic_observation, SemanticReadRoleSelection, SemanticRole};
+        let (observation, schema) = fixture();
+        let roles = SemanticReadRoleSelection::try_new(&[SemanticRole::Paragraph]).unwrap();
+        let selected_schema = schema.clone().with_source_roles(roles);
+        let alternative = schema.clone().with_source_roles(
+            SemanticReadRoleSelection::try_new(&[SemanticRole::Heading, SemanticRole::Paragraph])
+                .unwrap(),
+        );
+        let read = |roles| {
+            read_selected_semantic_observation(
+                &observation,
+                SemanticReadAuthority::Initial,
+                SemanticCaptureInstant::from_millis(45),
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::STANDARD,
+                roles,
+            )
+            .unwrap()
+        };
+        let selected = read(roles);
+        let same_fragments = read(alternative.source_roles());
+        let all = read(SemanticReadRoleSelection::ALL);
+        assert_eq!(selected.fragments(), same_fragments.fragments());
+        let budget = SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE;
+        for (schema, read) in [
+            (&schema, &selected),
+            (&selected_schema, &all),
+            (&alternative, &selected),
+        ] {
+            assert_eq!(
+                encode_semantic_extraction_request(schema, read, budget).unwrap_err(),
+                SemanticModelEncodingError::Invariant
+            );
+        }
+        let encoded =
+            encode_semantic_extraction_request(&selected_schema, &selected, budget).unwrap();
+        assert!(encoded
+            .content
+            .contains("role_selection selected_roles=paragraph\n"));
+        assert!(!encoded.content.contains("Active"));
+        let exact_bytes = encoded.stats().bytes();
+        let small = SemanticModelEncodingBudget::try_new(
+            exact_bytes - 1,
+            32768,
+            SemanticTokenCountRequirement::ConservativeAllowed,
+        )
+        .unwrap();
+        assert_eq!(
+            encode_semantic_extraction_request(&selected_schema, &selected, small).unwrap_err(),
+            SemanticModelEncodingError::OutputLimit
+        );
+        let revision = SemanticTokenizerRevision::try_new("selected-extract-v1".into()).unwrap();
+        let payload = encoded.admit_conservative_utf8(&revision).unwrap();
+        assert!(payload.matches(&selected_schema, &selected));
+        assert!(!payload.matches(&alternative, &same_fragments));
+        assert!(!payload.matches(&selected_schema, &same_fragments));
+        let (_, _, delivery) = payload.into_provider_parts();
+        assert!(delivery.matches(&selected_schema, &selected));
+        assert!(!delivery.matches(&alternative, &same_fragments));
+        let receipt = delivery.commit();
+        assert!(receipt.matches(&selected_schema, &selected));
+        assert!(!receipt.matches(&alternative, &same_fragments));
+        assert!(!receipt.matches(&schema, &all));
     }
 
     #[test]

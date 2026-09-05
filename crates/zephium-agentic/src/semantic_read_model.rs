@@ -430,6 +430,15 @@ pub fn encode_semantic_read(
         ),
     )?;
     write_omissions(&mut output, read)?;
+    if read.source_roles() != crate::SemanticReadRoleSelection::ALL {
+        checked_write(&mut output, format_args!(" selected_roles="))?;
+        for (index, role) in read.source_roles().roles().enumerate() {
+            if index > 0 {
+                checked_write(&mut output, format_args!(","))?;
+            }
+            checked_write(&mut output, format_args!("{}", role_label(role)))?;
+        }
+    }
     checked_write(&mut output, format_args!("\n"))?;
 
     for (index, frame) in frames.iter().enumerate() {
@@ -523,6 +532,7 @@ fn validate_read(read: &SemanticReadResult<'_>) -> Result<(), SemanticModelEncod
             || provenance.observation_generation() != read.observation_generation()
             || provenance.captured_at() != read.captured_at()
             || provenance.sensitivity() == SemanticSensitivity::Secret
+            || !read.source_roles().contains(fragment.role())
             || !field_matches_content(fragment.field(), fragment.content())
         {
             return Err(SemanticModelEncodingError::Invariant);
@@ -553,6 +563,7 @@ fn write_omissions(
         (SemanticReadOmission::Secret, "secret"),
         (SemanticReadOmission::ItemLimit, "item_limit"),
         (SemanticReadOmission::ByteLimit, "byte_limit"),
+        (SemanticReadOmission::RoleSelection, "role_selection"),
         (
             SemanticReadOmission::ValuePreviewLimit,
             "value_preview_limit",

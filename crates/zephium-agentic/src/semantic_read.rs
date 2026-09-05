@@ -25,6 +25,92 @@ pub const MAX_SEMANTIC_READ_ITEMS: u16 = 256;
 /// Process-wide maximum page-derived UTF-8 bytes retained by one read result.
 pub const MAX_SEMANTIC_READ_BYTES: u32 = 64 * 1024;
 
+/// Trusted selection of source roles, separate from sensitivity and scope.
+/// It only removes readable fields from an already-authorized observation.
+/// Page/model strings cannot construct it, and it grants no native authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SemanticReadRoleSelection(u32);
+
+impl SemanticReadRoleSelection {
+    /// The unchanged default: project every policy-admitted source role.
+    pub const ALL: Self = Self((1 << 30) - 1);
+
+    /// Constructs a nonempty closed set; duplicate roles are rejected.
+    pub fn try_new(roles: &[SemanticRole]) -> Result<Self, SemanticReadRoleSelectionError> {
+        if roles.is_empty() || roles.len() > 30 {
+            return Err(SemanticReadRoleSelectionError);
+        }
+        let mut bits = 0_u32;
+        for role in roles {
+            let bit = 1 << (role_code(*role) - 1);
+            if bits & bit != 0 {
+                return Err(SemanticReadRoleSelectionError);
+            }
+            bits |= bit;
+        }
+        Ok(Self(bits))
+    }
+
+    /// Whether this source role may contribute readable fields.
+    pub const fn contains(self, role: SemanticRole) -> bool {
+        self.0 & (1 << (role_code(role) - 1)) != 0
+    }
+
+    /// Stable closed-role mask for internal receipt fingerprints.
+    pub(crate) const fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// Deterministic role order used by the bounded model projection.
+    pub(crate) fn roles(self) -> impl Iterator<Item = SemanticRole> {
+        [
+            SemanticRole::Group,
+            SemanticRole::Document,
+            SemanticRole::Landmark,
+            SemanticRole::Heading,
+            SemanticRole::Paragraph,
+            SemanticRole::Link,
+            SemanticRole::Button,
+            SemanticRole::Textbox,
+            SemanticRole::Password,
+            SemanticRole::Searchbox,
+            SemanticRole::Checkbox,
+            SemanticRole::Radio,
+            SemanticRole::Combobox,
+            SemanticRole::Listbox,
+            SemanticRole::Option,
+            SemanticRole::Spinbutton,
+            SemanticRole::Slider,
+            SemanticRole::Tab,
+            SemanticRole::MenuItem,
+            SemanticRole::Dialog,
+            SemanticRole::List,
+            SemanticRole::ListItem,
+            SemanticRole::Table,
+            SemanticRole::Row,
+            SemanticRole::CellHeader,
+            SemanticRole::Cell,
+            SemanticRole::Image,
+            SemanticRole::Progress,
+            SemanticRole::Status,
+            SemanticRole::FrameBoundary,
+        ]
+        .into_iter()
+        .filter(move |role| self.contains(*role))
+    }
+}
+
+impl Default for SemanticReadRoleSelection {
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
+/// A source-role set was empty, duplicated or larger than the closed vocabulary.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("semantic source-role selection is invalid")]
+pub struct SemanticReadRoleSelectionError;
+
 /// Process-local monotonic capture time supplied by the trusted shell.
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 pub struct SemanticCaptureInstant(u64);
@@ -150,6 +236,8 @@ pub enum SemanticReadOmission {
     ByteLimit,
     /// An exact safe value was represented by its bounded model-facing prefix.
     ValuePreviewLimit,
+    /// Trusted source-role selection excluded otherwise readable fields.
+    RoleSelection,
 }
 
 impl SemanticReadOmission {
@@ -495,7 +583,7 @@ impl SemanticReadStats {
         self.sensitive_items
     }
 
-    /// Available values omitted by sensitivity, secrecy, or resource bounds.
+    /// Available values omitted by sensitivity, secrecy, roles or resource bounds.
     pub const fn omitted_items(self) -> u16 {
         self.omitted_items
     }
@@ -524,6 +612,7 @@ impl SemanticReadStats {
 
 /// Bounded borrowed readable projection of one exact semantic observation.
 pub struct SemanticReadResult<'a> {
+    roles: SemanticReadRoleSelection,
     scope: &'a crate::SemanticScope,
     observation: SemanticObservationId,
     observation_generation: SemanticObservationGeneration,
@@ -546,6 +635,10 @@ struct SemanticReadSubtreeProof {
 }
 
 impl<'a> SemanticReadResult<'a> {
+    /// Exact trusted role selection used by this projection and its guard.
+    pub const fn source_roles(&self) -> SemanticReadRoleSelection {
+        self.roles
+    }
     pub(crate) const fn scope(&self) -> &crate::SemanticScope {
         self.scope
     }
@@ -660,8 +753,29 @@ pub fn read_semantic_observation<'a>(
     sensitivity: SemanticReadSensitivityLimit,
     budget: SemanticReadBudget,
 ) -> Result<SemanticReadResult<'a>, SemanticReadError> {
+    read_selected_semantic_observation(
+        observation,
+        authority,
+        captured_at,
+        sensitivity,
+        budget,
+        SemanticReadRoleSelection::ALL,
+    )
+}
+
+/// Projects only selected roles from the same bounded authorized observation.
+/// Scope, sensitivity, native capture and observation authority are unchanged.
+/// Excluded fields are explicitly counted and the selection is receipt-bound.
+pub fn read_selected_semantic_observation<'a>(
+    observation: &'a SemanticObservation,
+    authority: SemanticReadAuthority<'_>,
+    captured_at: SemanticCaptureInstant,
+    sensitivity: SemanticReadSensitivityLimit,
+    budget: SemanticReadBudget,
+    roles: SemanticReadRoleSelection,
+) -> Result<SemanticReadResult<'a>, SemanticReadError> {
     let subtree = validate_authority(observation, authority)?;
-    let mut builder = SemanticReadBuilder::new(observation, captured_at, budget);
+    let mut builder = SemanticReadBuilder::new(observation, captured_at, budget, roles);
     for snapshot in observation.frames() {
         let omitted_child = observation.frame_boundaries().iter().any(|boundary| {
             boundary.parent_frame() == snapshot.frame().frame()
@@ -757,6 +871,7 @@ fn validate_authority(
 }
 
 struct SemanticReadBuilder<'a> {
+    roles: SemanticReadRoleSelection,
     observation: &'a SemanticObservation,
     captured_at: SemanticCaptureInstant,
     budget: SemanticReadBudget,
@@ -770,8 +885,10 @@ impl<'a> SemanticReadBuilder<'a> {
         observation: &'a SemanticObservation,
         captured_at: SemanticCaptureInstant,
         budget: SemanticReadBudget,
+        roles: SemanticReadRoleSelection,
     ) -> Self {
         Self {
+            roles,
             observation,
             captured_at,
             budget,
@@ -819,6 +936,14 @@ impl<'a> SemanticReadBuilder<'a> {
             self.stats.withheld_sensitive_nodes =
                 self.stats.withheld_sensitive_nodes.saturating_add(1);
             self.stats.omitted_items = self.stats.omitted_items.saturating_add(available);
+            return;
+        }
+
+        if !self.roles.contains(node.role()) {
+            if available > 0 {
+                self.omissions.insert(SemanticReadOmission::RoleSelection);
+                self.stats.omitted_items = self.stats.omitted_items.saturating_add(available);
+            }
             return;
         }
 
@@ -947,6 +1072,7 @@ impl<'a> SemanticReadBuilder<'a> {
             &self.fragments,
             self.omissions,
             self.stats,
+            self.roles,
         );
         if let Some(proof) = &subtree {
             let mut hasher = Sha256::new();
@@ -957,6 +1083,7 @@ impl<'a> SemanticReadBuilder<'a> {
             guard = hasher.finalize().into();
         }
         SemanticReadResult {
+            roles: self.roles,
             scope: self.observation.request().scope(),
             observation: self.observation.request().id(),
             observation_generation: self.observation.request().generation(),
@@ -992,9 +1119,11 @@ fn read_guard(
     fragments: &[SemanticReadFragment<'_>],
     omissions: SemanticReadOmissions,
     stats: SemanticReadStats,
+    roles: SemanticReadRoleSelection,
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"ZEPHIUM-SEMANTIC-READ-GUARD-1\0");
+    hasher.update(b"ZEPHIUM-SEMANTIC-READ-GUARD-2\0");
+    hasher.update(roles.bits().to_be_bytes());
     hasher.update(fingerprint.digest());
     hasher.update(captured_at.millis().to_be_bytes());
     hasher.update([omissions.bits()]);
@@ -1215,6 +1344,111 @@ mod tests {
         SemanticObservationAcknowledgement::from_fingerprint(
             SemanticObservationFingerprint::from_observation(observation),
         )
+    }
+
+    #[test]
+    fn role_selection_is_closed_canonical_and_defaults_to_all() {
+        let all: Vec<_> = SemanticReadRoleSelection::ALL.roles().collect();
+        assert_eq!(all.len(), 30);
+        assert_eq!(
+            SemanticReadRoleSelection::try_new(&all).unwrap(),
+            SemanticReadRoleSelection::default()
+        );
+        assert!(SemanticReadRoleSelection::try_new(&[]).is_err());
+        assert!(SemanticReadRoleSelection::try_new(&[SemanticRole::Heading; 2]).is_err());
+        assert!(SemanticReadRoleSelection::try_new(&[SemanticRole::Heading; 31]).is_err());
+        assert_eq!(
+            SemanticReadRoleSelection::try_new(&[SemanticRole::Link, SemanticRole::Heading])
+                .unwrap(),
+            SemanticReadRoleSelection::try_new(&[SemanticRole::Heading, SemanticRole::Link])
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn selected_read_retains_exact_borrowed_sources_and_separate_privacy_omissions() {
+        for completeness in ["complete", "node_limit"] {
+            let observation = initial_observation(completeness);
+            let roles = SemanticReadRoleSelection::try_new(&[
+                SemanticRole::Heading,
+                SemanticRole::Password,
+            ])
+            .unwrap();
+            let read = read_selected_semantic_observation(
+                &observation,
+                SemanticReadAuthority::Initial,
+                SemanticCaptureInstant::from_millis(42),
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::STANDARD,
+                roles,
+            )
+            .unwrap();
+            assert_eq!(read.source_roles(), roles);
+            assert_eq!(read.fragments().len(), 2);
+            assert_eq!(read.stats().omitted_items(), 6);
+            assert_eq!(read.stats().secret_nodes(), 1);
+            assert_eq!(read.stats().withheld_sensitive_nodes(), 1);
+            assert!(read
+                .omissions()
+                .contains(SemanticReadOmission::RoleSelection));
+            assert!(read.omissions().contains(SemanticReadOmission::Secret));
+            assert!(read
+                .omissions()
+                .contains(SemanticReadOmission::SensitivityLimit));
+            assert_eq!(
+                read.omissions()
+                    .contains(SemanticReadOmission::SourceIncomplete),
+                completeness != "complete"
+            );
+            for fragment in read.fragments() {
+                assert_eq!(fragment.role(), SemanticRole::Heading);
+                assert_eq!(fragment.provenance().reference().get(), 2);
+            }
+            let original = observation.frames()[0].nodes()[1].name().unwrap();
+            let borrowed = read.fragments()[0].content().text().unwrap();
+            assert!(std::ptr::eq(
+                original.as_str().as_ptr(),
+                borrowed.as_str().as_ptr()
+            ));
+            let limited = read_selected_semantic_observation(
+                &observation,
+                SemanticReadAuthority::Initial,
+                SemanticCaptureInstant::from_millis(42),
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::try_new(1, 64).unwrap(),
+                roles,
+            )
+            .unwrap();
+            assert_eq!(limited.fragments().len(), 1);
+            assert!(limited
+                .omissions()
+                .contains(SemanticReadOmission::ItemLimit));
+            assert!(limited
+                .omissions()
+                .contains(SemanticReadOmission::RoleSelection));
+        }
+    }
+
+    #[test]
+    fn different_role_contracts_cannot_share_a_read_guard_even_with_identical_fragments() {
+        let observation = initial_observation("complete");
+        let read = |roles: &[SemanticRole]| {
+            read_selected_semantic_observation(
+                &observation,
+                SemanticReadAuthority::Initial,
+                SemanticCaptureInstant::from_millis(42),
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::STANDARD,
+                SemanticReadRoleSelection::try_new(roles).unwrap(),
+            )
+            .unwrap()
+        };
+        let heading = read(&[SemanticRole::Heading]);
+        let heading_link = read(&[SemanticRole::Heading, SemanticRole::Link]);
+        assert_eq!(heading.stats(), heading_link.stats());
+        assert_eq!(heading.omissions(), heading_link.omissions());
+        assert_eq!(heading.fragments(), heading_link.fragments());
+        assert_ne!(heading.guard(), heading_link.guard());
     }
 
     #[test]

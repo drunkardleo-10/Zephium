@@ -378,6 +378,14 @@ impl AgentWorkExtractionTask {
         self
     }
 
+    /// Narrows extraction evidence to trusted semantic roles after the existing
+    /// native capture. Frozen with the schema; all privacy and byte ceilings
+    /// remain unchanged. Baseline inspection and native scope are unaffected.
+    pub fn with_source_roles(mut self, roles: SemanticReadRoleSelection) -> Self {
+        self.schema = self.schema.with_source_roles(roles);
+        self
+    }
+
     /// Allows nonterminal public inspection of the existing initial baseline
     /// before selecting the terminal extraction scope. No fresh capture or
     /// mapping result is implied by a read.

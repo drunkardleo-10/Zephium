@@ -90,6 +90,14 @@ unobserved child boundaries `source_incomplete` even when the native main-frame
 snapshot itself completed. The task must be satisfied by the actual cited
 main-page evidence; embedded content remains outside this controller's scope.
 
+Trusted extraction schemas can also narrow mapping evidence to a frozen closed
+set of semantic source roles. This filters the already-authorized bounded
+capture after privacy checks, not the native traversal or initial inspection.
+It introduces no model tool option, new account/origin/frame authority, retry or
+larger ceiling. `role_selection` distinguishes intentionally excluded readable
+fields from `source_incomplete`; the exact selection is schema/read/citation
+bound. The default remains all roles. See [results](agent-work-results.md).
+
 Account evidence is sampled through the trusted task before each provider or
 effect admission, including locate/read continuations, verified-action diffs
 and extraction mapping. The actor owns that outer inspection loop; several

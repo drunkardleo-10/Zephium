@@ -1030,6 +1030,7 @@ enum ProviderFault {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExtractionFault {
     None,
+    RoleSelection,
     WrongSchema,
     ExpandedScope,
     WrongKind,
@@ -1045,6 +1046,7 @@ fn extraction_uses_the_same_worker_and_never_publishes_failed_or_unsettled_outpu
     let _guard = lock(&SERIAL);
     for fault in [
         ExtractionFault::None,
+        ExtractionFault::RoleSelection,
         ExtractionFault::WrongSchema,
         ExtractionFault::ExpandedScope,
         ExtractionFault::WrongKind,
@@ -1180,6 +1182,7 @@ fn provider_fixture_with_account(
             ProviderFault::Combined(
                 CombinedFault::Premature
                 | CombinedFault::SchemaMutation
+                | CombinedFault::RoleMutation
                 | CombinedFault::ModeMutation
                 | CombinedFault::CompleteWithoutResult
                 | CombinedFault::ActionLost,
@@ -1423,14 +1426,19 @@ fn provider_fixture_with_account(
             fault,
             ready: None,
         })
-    } else if matches!(fault, ProviderFault::Extraction(_)) {
-        Box::new(
-            AgentWorkExtractionTask::try_new(
-                vec![SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap()],
-                AgentAccountScope::Anonymous,
-            )
-            .unwrap(),
+    } else if let ProviderFault::Extraction(extraction_fault) = fault {
+        let extraction = AgentWorkExtractionTask::try_new(
+            vec![SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap()],
+            AgentAccountScope::Anonymous,
         )
+        .unwrap();
+        Box::new(if extraction_fault == ExtractionFault::RoleSelection {
+            extraction.with_source_roles(
+                SemanticReadRoleSelection::try_new(&[SemanticRole::Textbox]).unwrap(),
+            )
+        } else {
+            extraction
+        })
     } else {
         Box::new(Continue)
     };
@@ -1491,7 +1499,13 @@ fn provider_fixture_with_account(
         drive_with_control(controller, handle, native_fault, control);
     if let Some(account) = account.filter(|fault| *fault != AccountFault::Slow) {
         assert_eq!(server.join().expect("account fixture server"), 1);
-        account_tests::assert_refusal(account, outcome, shutdown, &calls);
+        account_tests::assert_refusal(
+            account,
+            outcome,
+            shutdown,
+            &calls,
+            matches!(fault, ProviderFault::Scoped(_)),
+        );
         return;
     }
     if let ProviderFault::Read(fault) = fault {
@@ -1555,7 +1569,10 @@ fn provider_fixture_with_account(
                 2
             }
         );
-        if fault == ExtractionFault::None {
+        if matches!(
+            fault,
+            ExtractionFault::None | ExtractionFault::RoleSelection
+        ) {
             let AgentWorkOutcome::Succeeded(mut success) = outcome else {
                 panic!("{outcome:?}");
             };

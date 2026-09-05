@@ -454,6 +454,19 @@ then authenticated-exact-count path, before model generation. Policy rejoins
 the unchanged committed baseline taint without adding origins, references,
 authority, or a new observation acknowledgement.
 
+A trusted extraction schema may carry a nonempty, duplicate-free closed set of
+semantic source roles. Its default is all roles. Selection removes readable
+fields only after the same bounded native capture and sensitivity/secret
+checks; it is not a DOM selector, capture expansion, native call, or permission.
+Nondefault `ZREAD2` headers name the canonical `selected_roles`; excluded
+otherwise-readable fields report `role_selection`, separately from
+`source_incomplete` and privacy/byte/item omissions. The added metadata consumes
+the same combined encoding budget. Both schema and read guards bind the exact
+selection even when two role sets happen to produce identical fragments.
+Encoding and output admission reject mismatched schema/read selections; only
+fragments in the exact delivered projection can be cited. Default all-role
+model bytes and baseline-read behavior are unchanged.
+
 The mapping call exposes no browser tools. OpenAI uses strict Responses
 `text.format` JSON Schema and Anthropic uses stable Messages
 `output_config.format`, following their current
