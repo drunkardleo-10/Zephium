@@ -2,9 +2,14 @@
 //! This module is release-excluded; it is not a product presentation policy.
 use super::*;
 
-use objc2_app_kit::{NSScreen, NSWindowOcclusionState};
+use objc2_app_kit::{NSEventMask, NSEventType, NSScreen, NSWindowOcclusionState};
 
 const PRESENTED_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_APPKIT_EVENTS: usize = 32;
+
+fn appkit_event_permitted(event_type: NSEventType, dispatched: usize) -> bool {
+    event_type == NSEventType::AppKitDefined && dispatched < MAX_APPKIT_EVENTS
+}
 
 fn viewport_frame() -> NSRect {
     NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1280.0, 800.0))
@@ -28,6 +33,8 @@ pub struct MacosAgenticPresentedRenderingReport {
     pub opportunity_elapsed_ms: u64,
     /// Internal responder changed to the exact owned page while input stayed excluded.
     pub exact_page_responder_observed: bool,
+    /// Exact already-queued non-input native lifecycle events dispatched once.
+    pub appkit_events_dispatched: usize,
     /// Bounded fresh semantic samples, with offsets from opportunity acquisition.
     pub measurement: MacosAgenticRenderingProbeReport,
 }
@@ -42,6 +49,7 @@ pub(super) struct PresentedStateGuard<'a> {
     deadline: Instant,
     require_visible_pixels: Cell<bool>,
     exact_page_responder_observed: Cell<bool>,
+    appkit_events_dispatched: Cell<usize>,
     failure: Cell<Option<&'static str>>,
 }
 
@@ -83,6 +91,41 @@ fn reject_facts(facts: PresentedFacts, require_visible_pixels: bool) -> Option<&
 }
 
 impl PresentedStateGuard<'_> {
+    pub(super) fn pump_appkit_event(&self) {
+        self.sample();
+        if self.failed() {
+            return;
+        }
+        if self.appkit_events_dispatched.get() >= MAX_APPKIT_EVENTS {
+            self.failure.set(Some("presented_appkit_event_capacity"));
+            return;
+        }
+        // NSRunLoop services ports/timers, not NSApplication's queued events.
+        // Immediate expiry, one native lifecycle event at most per bounded
+        // slice. Unmatched input events remain queued; no event is constructed.
+        let event = self.app.nextEventMatchingMask_untilDate_inMode_dequeue(
+            NSEventMask::AppKitDefined,
+            None,
+            objc2_foundation::ns_string!("NSDefaultRunLoopMode"),
+            true,
+        );
+        self.sample();
+        if self.failed() {
+            return;
+        }
+        let Some(event) = event else {
+            return;
+        };
+        if !appkit_event_permitted(event.r#type(), self.appkit_events_dispatched.get()) {
+            self.failure.set(Some("presented_appkit_event_contract"));
+            return;
+        }
+        self.appkit_events_dispatched
+            .set(self.appkit_events_dispatched.get() + 1);
+        self.app.sendEvent(&event);
+        self.sample();
+    }
+
     pub(super) fn sample(&self) {
         let responder = self.window.firstResponder();
         let responder_identity = responder
@@ -350,6 +393,7 @@ pub(super) fn measure(
             deadline,
             require_visible_pixels: Cell::new(false),
             exact_page_responder_observed: Cell::new(false),
+            appkit_events_dispatched: Cell::new(0),
             failure: Cell::new(None),
         });
         let presented_runtime = ProbeRuntime {
@@ -389,6 +433,7 @@ pub(super) fn measure(
         Ok((
             opportunity_elapsed_ms,
             guard.exact_page_responder_observed.get(),
+            guard.appkit_events_dispatched.get(),
             measurement,
         ))
     })();
@@ -399,11 +444,17 @@ pub(super) fn measure(
     }
     let presented_elapsed_ms =
         u64::try_from(started.elapsed().as_millis()).map_err(|_| "presented_clock")?;
-    let (opportunity_elapsed_ms, exact_page_responder_observed, measurement) = outcome?;
+    let (
+        opportunity_elapsed_ms,
+        exact_page_responder_observed,
+        appkit_events_dispatched,
+        measurement,
+    ) = outcome?;
     Ok(MacosAgenticPresentedRenderingReport {
         presented_elapsed_ms,
         opportunity_elapsed_ms,
         exact_page_responder_observed,
+        appkit_events_dispatched,
         measurement,
     })
 }
@@ -411,6 +462,27 @@ pub(super) fn measure(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presented_appkit_pump_excludes_input_unknown_types_and_capacity_overflow() {
+        assert_eq!(
+            NSEventMask::AppKitDefined.bits(),
+            1 << NSEventType::AppKitDefined.0
+        );
+        for event_type in 0..=64 {
+            assert_eq!(
+                appkit_event_permitted(NSEventType(event_type), 0),
+                event_type == NSEventType::AppKitDefined.0
+            );
+        }
+        assert!(appkit_event_permitted(
+            NSEventType::AppKitDefined,
+            MAX_APPKIT_EVENTS - 1
+        ));
+        for count in [MAX_APPKIT_EVENTS, MAX_APPKIT_EVENTS + 1, usize::MAX] {
+            assert!(!appkit_event_permitted(NSEventType::AppKitDefined, count));
+        }
+    }
 
     #[test]
     fn presented_opportunity_distinguishes_occlusion_from_parent_clipping() {

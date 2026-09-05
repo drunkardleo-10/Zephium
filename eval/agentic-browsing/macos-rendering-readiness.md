@@ -442,3 +442,26 @@ full page-visible rectangle was present; the public window-visible bit was
 absent. No semantic or RAF sample exists. The original isolation, restoration
 and teardown path retained this specific failure. This resolves the clipping
 ambiguity without establishing why AppKit's occlusion bit remained absent.
+
+### Bounded AppKit lifecycle queue service
+
+The standalone diagnostic had serviced `NSRunLoop` only. Apple's
+[event architecture](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/EventOverview/EventArchitecture/EventArchitecture.html)
+distinguishes native port delivery from `NSApplication`'s queued event
+fetch/dispatch. The next diagnostic change services at most one already-queued
+`AppKitDefined` event per original run-loop slice, with immediate request expiry
+and a total cap of 32. The returned type is independently checked before that
+exact event is dispatched once. Other event masks, event construction and
+reposting remain absent; unmatched events remain queued under the documented
+[event-retrieval contract](https://developer.apple.com/documentation/appkit/nsapplication/nextevent(matching:until:inmode:dequeue:)).
+This is not an input capability. All native isolation/time guards are sampled
+before retrieval, after retrieval and after dispatch. AppKit lifecycle events
+can affect activation; any such change still refuses rather than authorizing
+focus as a rendering prerequisite. The report counts dispatched events.
+
+Only the explicit presented diagnostic uses this service. Hidden probes and
+production event-loop code are unchanged. The public occlusion bit, exact
+unclipped viewport, unchanged five-second deadline, original semantic samples
+and strict restoration/teardown remain required. This corrects a plausible
+standalone-harness prerequisite; a pinned native measurement must establish
+whether it changes the outcome.

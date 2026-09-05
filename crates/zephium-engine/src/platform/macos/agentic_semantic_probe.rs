@@ -232,6 +232,12 @@ impl ProbeRuntime<'_, '_> {
 
     fn pump(&self) {
         pump_once(self.run_loop, Some(self.native_guard));
+        if self.callbacks.failed() {
+            return;
+        }
+        if let ProbeNativeState::Presented(guard) = self.native_guard {
+            guard.pump_appkit_event();
+        }
     }
 
     fn failure_stage(&self) -> Option<&'static str> {

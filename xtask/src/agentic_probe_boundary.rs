@@ -2584,6 +2584,11 @@ fn validate_macos_rendering_presented_probe(
     let source = compact(source);
     for required in [
         "constPRESENTED_TIMEOUT:Duration=Duration::from_secs(5);",
+        "constMAX_APPKIT_EVENTS:usize=32;",
+        "event_type==NSEventType::AppKitDefined&&dispatched<MAX_APPKIT_EVENTS",
+        "NSEventMask::AppKitDefined,None,objc2_foundation::ns_string!(\"NSDefaultRunLoopMode\"),true,",
+        "!appkit_event_permitted(event.r#type(),self.appkit_events_dispatched.get())",
+        "self.app.sendEvent(&event);self.sample();",
         "operation.context()!=context",
         "document_finished_for_audit(operation)",
         "original.window.canBecomeKeyWindow()",
@@ -2633,8 +2638,13 @@ fn validate_macos_rendering_presented_probe(
     }
     if source.matches(".orderFrontRegardless()").count() != 1
         || source.matches(".setHidden(false)").count() != 1
+        || source
+            .matches(".nextEventMatchingMask_untilDate_inMode_dequeue(")
+            .count()
+            != 1
+        || source.matches(".sendEvent(").count() != 1
     {
-        return Err("presented rendering acquired repeated presentation".into());
+        return Err("presented rendering acquired repeated presentation or event dispatch".into());
     }
     for forbidden in [
         "makeKey",
@@ -2647,7 +2657,14 @@ fn validate_macos_rendering_presented_probe(
         "evaluate_script",
         "dispatch_semantic_action",
         "CGEvent",
-        "NSEvent",
+        "NSEvent::",
+        "NSEventMask::Any",
+        "NSEventMask::Key",
+        "NSEventMask::Left",
+        "NSEventMask::Right",
+        "NSEventMask::System",
+        "NSEventMask::Application",
+        "postEvent",
         "AXUIElement",
         "std::env",
         "std::net",
@@ -2671,6 +2688,7 @@ fn validate_macos_rendering_presented_probe(
         "report.ok_or(\"rendering_presented_report_missing\")",
         "letnative_guard=ProbeNativeState::Hidden(NativeStateGuard{",
         "Self::Hidden(guard)=>guard.sample()",
+        "ifletProbeNativeState::Presented(guard)=self.native_guard{guard.pump_appkit_event();}",
         "Self::Presented(guard)=>guard.sample()",
         "rendering_presented::measure(&view,context,operation,&url,&runtime,&host.view,)",
     ] {
@@ -12816,6 +12834,10 @@ mod tests {
         validate_macos_rendering_presented_probe(source, parent, binary).unwrap();
         for required in [
             "Duration::from_secs(5)",
+            "const MAX_APPKIT_EVENTS: usize = 32;",
+            "event_type == NSEventType::AppKitDefined && dispatched < MAX_APPKIT_EVENTS",
+            "NSEventMask::AppKitDefined,",
+            "self.app.sendEvent(&event);",
             "operation.context() != context",
             "original.window.canBecomeKeyWindow()",
             "original.window.canBecomeMainWindow()",
@@ -12857,7 +12879,11 @@ mod tests {
             "preferences.setValue_forKey()",
             "page.evaluateJavaScript()",
             "CGEvent",
-            "NSEvent",
+            "NSEvent::",
+            "NSEventMask::Any",
+            "NSEventMask::KeyDown",
+            "NSEventMask::SystemDefined",
+            "app.postEvent()",
             "window.setLevel()",
             "window.orderFrontRegardless()",
             "page.setHidden(false)",
