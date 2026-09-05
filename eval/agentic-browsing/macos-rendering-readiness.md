@@ -408,3 +408,14 @@ This accommodates native origin alignment without permitting a smaller,
 larger, clipped, off-screen or later-repositioned surface. Exact page size and
 parent-window identity remain independently checked. Deterministic cases cover
 native alignment, all four screen edges, size changes and non-finite geometry.
+
+The one actual-frame-admitted attempt used clean
+`c321053e41c785f3ba22bcc1284af85f28860164`, with pre-invocation host clock
+`2026-09-05 21:04:21 UTC` (not exact process start). It exited 1 with
+`stage=presented_rendering_deadline` during the five-second native rendering
+opportunity acquisition, before any semantic or RAF sample. The earlier
+geometry, app, key/main, mouse, responder and opacity checks did not refuse.
+The public window-visible bit and full child-visible rectangle did not jointly
+converge; this output does not distinguish which was absent. Original
+hide/restore and teardown did not replace the failure. This is an acquisition
+failure, not a negative RAF result or permission to enlarge the deadline.
