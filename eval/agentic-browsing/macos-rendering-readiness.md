@@ -391,3 +391,11 @@ measurement. It therefore supplies no RAF result. The compound geometry
 refusal does not yet identify window-frame, exact child-size or parent-window
 identity mismatch; diagnosis must distinguish those rather than relax them.
 The original hide/restore and teardown did not replace that refusal.
+
+The one geometry-refined attempt used clean
+`35d3f1fc210a473bff73bcaaec50017a22a13c39`, with pre-invocation host clock
+`2026-09-05 21:01:40 UTC` (not exact process start), and exited 1 with
+`stage=presented_window_frame_mismatch`. This localizes the mismatch to the
+window frame requested before presentation; it does not establish rounding,
+extent, or origin as the changed component. No RAF measurement exists.
+The later child-size and parent-window checks were not reached in that sample.
