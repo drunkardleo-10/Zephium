@@ -66,6 +66,12 @@ all charged model receipts (including failed terminals) and the policy owner;
 it deliberately does not manufacture an `AgentRunMetricClosure` or a durable
 audit acknowledgement.
 
+Only the owning Work actor has a private unsuccessful resource-drain path. It
+preserves a failed/cancelled task outcome while joining the original provider,
+action, policy and audit owners with the native/runtime terminal proof. It is
+not an alternative public successful `try_finish`, and cannot discard retained
+action or callback debt. See [Work execution](agent-work-execution.md).
+
 ## Current limits
 
 An explicit trusted extraction task can instead select the initial-scope,
@@ -73,8 +79,9 @@ extract-only path. `extract` consumes the same session's provider continuation,
 charges a purpose-bound mapping call and returns validated, cited model-mapped
 data. It does not turn model text into a native effect or completion proof.
 The actor and application gate the one-shot result on their original closure
-and durable terminal ACK. See [Work results](agent-work-results.md) for bounds,
-trust and the memory-only delivery limitation.
+and durable terminal ACK. See [Work results](agent-work-results.md) for bounds
+and trust, and [Work artifacts](agent-work-artifacts.md) for explicit private
+durable-profile publication.
 
 - Snapshot-verifiable actions only. Navigation, dialog and scroll evidence
   require distinct host adapters and are explicitly refused.

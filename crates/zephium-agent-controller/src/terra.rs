@@ -55,10 +55,10 @@ use crate::action::AgentBrowserVerifiedTransition;
 #[path = "work.rs"]
 pub(crate) mod work;
 pub use work::{
-    AgentWorkContextSpec, AgentWorkController, AgentWorkEvent, AgentWorkEventKind,
-    AgentWorkExtractionTask, AgentWorkFailure, AgentWorkHandle, AgentWorkOutcome,
-    AgentWorkRecovery, AgentWorkRunInput, AgentWorkRunSettings, AgentWorkSuccess, AgentWorkTask,
-    AgentWorkTaskProgress, MAX_AGENT_WORK_EVENTS,
+    AgentWorkClosedUnsuccessfully, AgentWorkContextSpec, AgentWorkController, AgentWorkEvent,
+    AgentWorkEventKind, AgentWorkExtractionTask, AgentWorkFailure, AgentWorkHandle,
+    AgentWorkOutcome, AgentWorkRecovery, AgentWorkRunInput, AgentWorkRunSettings, AgentWorkSuccess,
+    AgentWorkTask, AgentWorkTaskProgress, MAX_AGENT_WORK_EVENTS,
 };
 
 /// This text-only/discarding vertical never needs Terra's catalog-wide 128k
@@ -2458,7 +2458,23 @@ impl AgentBrowserSession {
     /// This terminal is not durable-audit or application shutdown proof.
     /// The application must keep it until its own run/audit lifecycle closes.
     pub fn try_finish(
+        self,
+    ) -> Result<AgentBrowserSessionTerminal, AgentBrowserSessionFinishRefusal> {
+        self.seal_terminal(false)
+    }
+
+    // Resource drain is independent of the task outcome. This private actor
+    // path preserves every original owner and failure; it cannot manufacture
+    // successful completion or bypass the later policy/metric/audit closure.
+    fn try_finish_unsuccessful(
+        self,
+    ) -> Result<AgentBrowserSessionTerminal, AgentBrowserSessionFinishRefusal> {
+        self.seal_terminal(true)
+    }
+
+    fn seal_terminal(
         mut self,
+        unsuccessful: bool,
     ) -> Result<AgentBrowserSessionTerminal, AgentBrowserSessionFinishRefusal> {
         // Partial model mappings are never recovery artifacts. Their attempt
         // and policy/accounting owners remain in the normal close path.
@@ -2469,6 +2485,7 @@ impl AgentBrowserSession {
         self.action_settlements.seal();
         drop(self.credential.take());
         drop(self.objective.take());
+        let mut close_failure = None;
         if let Some(attempt) = self.attempt.take() {
             match attempt.abort(AgentProviderAbortReason::ControllerFault) {
                 Ok(result) => {
@@ -2484,11 +2501,16 @@ impl AgentBrowserSession {
                         &mut self.model_receipts,
                     );
                 }
-                Err(_) => self.failure = Some(AgentBrowserProviderError::Transport),
+                Err(_) => close_failure = Some(AgentBrowserProviderError::Transport),
             }
         }
         if self.record_model_receipts().is_err() {
-            self.failure = Some(AgentBrowserProviderError::Journal);
+            close_failure = Some(AgentBrowserProviderError::Journal);
+        }
+        if let Some(failure) = close_failure {
+            // A refused drain keeps the same sticky failure on its returned
+            // session; a later public finish cannot forget the close error.
+            self.failure = Some(failure);
         }
         let provider = self.transport.try_prove_shutdown();
         let error = if provider.is_err() {
@@ -2509,8 +2531,12 @@ impl AgentBrowserSession {
             || self.policy.accounting().reserved_cost_micro_usd() != 0
         {
             Some(AgentBrowserProviderError::ActionPending)
-        } else {
+        } else if close_failure.is_some() {
+            close_failure
+        } else if !unsuccessful {
             self.failure
+        } else {
+            None
         };
         self.finished = true;
         match (error, provider) {

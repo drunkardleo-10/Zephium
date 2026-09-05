@@ -187,6 +187,13 @@ fn validate_probe(source: &str) -> Result<(), String> {
 }
 
 fn validate_terra(source: &str) -> Result<(), String> {
+    let compact: String = source.split_whitespace().collect();
+    if compact.contains("pubfntry_finish_unsuccessful(")
+        || compact.contains("pub(crate)fntry_finish_unsuccessful(")
+        || compact.contains("pub(super)fntry_finish_unsuccessful(")
+    {
+        return Err("unsuccessful resource closure must stay private to the Work actor".into());
+    }
     for required in [
         "impl AgentRuntimeController for TerraTextOnlyController",
         "try_terra_provider_exact_call_config",
@@ -203,6 +210,11 @@ fn validate_terra(source: &str) -> Result<(), String> {
         "restrict_to_locate_and_act()",
         "pub async fn start_initial(",
         "pub fn try_finish(",
+        "fn try_finish_unsuccessful(",
+        "self.seal_terminal(false)",
+        "else if !unsuccessful",
+        "self.retained_terminal.is_some()",
+        "self.action_admission_failure.is_some()",
         "AgentBrowserSessionFinishRefusal",
         "self.policy.accounting().reserved_model_tokens() != 0",
         "action_executions: zephium_agentic::SemanticActionExecutionCoordinator::new()",
@@ -371,6 +383,12 @@ fn validate_work(source: &str) -> Result<(), String> {
         "worker.try_drain_terminal_claim_refusal_event()",
         "recovery_close: Option<ContextOperationJoin>",
         "Self::begin_recovery_close(state, browser)",
+        "AgentWorkOutcome::ClosedUnsuccessfully",
+        "session.try_finish_unsuccessful()",
+        "state.native.deferred.is_empty()",
+        "state.drained.is_some()",
+        "(closure.outcome() == AgentRunProgressOutcome::Succeeded) == unsuccessful",
+        "self.publish_terminal(worker, cleanup.is_some()).await",
     ] {
         if !source.contains(required) {
             return Err(format!("Work actor lost boundary: {required}"));
@@ -486,6 +504,32 @@ mod tests {
         )
         .is_err());
         assert!(validate_terra(&format!("{TERRA}\nlet _ = delta.as_str();")).is_err());
+    }
+
+    #[test]
+    fn unsuccessful_drain_cannot_bypass_original_debt_or_claim_business_success() {
+        for visibility in ["pub ", "pub(crate) ", "pub(super) "] {
+            assert!(validate_terra(&TERRA.replace(
+                "fn try_finish_unsuccessful(",
+                &format!("{visibility}fn try_finish_unsuccessful("),
+            ))
+            .is_err());
+        }
+        for boundary in [
+            "self.retained_terminal.is_some()",
+            "self.action_admission_failure.is_some()",
+            "else if !unsuccessful",
+        ] {
+            assert!(validate_terra(&TERRA.replace(boundary, "removed_boundary")).is_err());
+        }
+        for boundary in [
+            "state.native.deferred.is_empty()",
+            "state.drained.is_some()",
+            "(closure.outcome() == AgentRunProgressOutcome::Succeeded) == unsuccessful",
+            "claim.commit_with_shutdown(proof, settlement, provider)",
+        ] {
+            assert!(validate_work(&WORK.replace(boundary, "removed_boundary")).is_err());
+        }
     }
 
     #[test]

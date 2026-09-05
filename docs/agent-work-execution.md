@@ -95,6 +95,22 @@ requires normal controller return and successful worker join. A business-only
 commit, nonzero native audit, missing provider proof or lost audit callback can
 never establish Clean.
 
+Task success is separate from resource cleanliness. The actor can now publish
+`ClosedUnsuccessfully` after a fully accounted provider/task refusal or stop,
+using those same original resource, metric, policy, audit and runtime proofs.
+The exact typed cause remains visible and no extraction result is returned.
+The application publishes distinct immutable `Failed` or `Cancelled` only
+after the original clean lifecycle join and exact durable terminal ACK. Neither
+fact grants another execution or reopens the sealed native port.
+
+This path consumes only exact read-only and successful revocation callbacks;
+foreign, duplicate, refused and lost receipts remain recovery debt. It shares
+the existing cleanup deadline, including any shorter shutdown deadline, and
+never retries an action. A retained native action/proposal/accounting owner,
+audit refusal, or a previously started terminal-resource close cannot be
+reclassified as clean. Failure during an already-started success close remains
+recovery even when the page has physically closed.
+
 Recovery retains the sealed session, policy, journal, native owners and retained
 callbacks without credentials or objective data. It deliberately grants no
 replay permission. The application may now explicitly reconcile the original
@@ -122,9 +138,12 @@ full Tauri window/bootstrap path is not live-qualified. Local/hosted model
 transport adapters must share the same session semantics. Native macOS
 suspend/resume, authenticated/public multi-site qualification, concurrent Browse
 interaction, navigation and richer tool adapters remain open. A suspension
-request currently revokes and closes into recovery; it does not falsely claim
-that an unimplemented native suspend operation succeeded.
+request currently revokes and closes: it is `Cancelled` only if all original
+owners drain, otherwise recovery. It does not claim an unimplemented native
+suspend operation succeeded or retain resumable execution.
 
 The production extraction result is delivered once in memory after durable
-terminal acknowledgement. Durable artifact bodies and crash-safe result delivery
-are the next persistence seam; content never enters the existing audit/journal.
+terminal acknowledgement. Explicit durable-profile tasks can additionally
+publish an atomic private [artifact](agent-work-artifacts.md); historical reads
+never change a prior execution disposition. Content never enters the existing
+audit/journal, and unsuccessful closed runs publish no artifact.

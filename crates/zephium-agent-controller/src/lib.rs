@@ -32,10 +32,10 @@ pub use action::{
 pub use terra::{
     AgentBrowserModel, AgentBrowserProviderError, AgentBrowserProviderTurn, AgentBrowserRetention,
     AgentBrowserSession, AgentBrowserSessionFinishRefusal, AgentBrowserSessionTerminal,
-    AgentWorkContextSpec, AgentWorkController, AgentWorkEvent, AgentWorkEventKind,
-    AgentWorkExtractionTask, AgentWorkFailure, AgentWorkHandle, AgentWorkOutcome,
-    AgentWorkRecovery, AgentWorkRunInput, AgentWorkRunSettings, AgentWorkSuccess, AgentWorkTask,
-    AgentWorkTaskProgress, MAX_AGENT_WORK_EVENTS,
+    AgentWorkClosedUnsuccessfully, AgentWorkContextSpec, AgentWorkController, AgentWorkEvent,
+    AgentWorkEventKind, AgentWorkExtractionTask, AgentWorkFailure, AgentWorkHandle,
+    AgentWorkOutcome, AgentWorkRecovery, AgentWorkRunInput, AgentWorkRunSettings, AgentWorkSuccess,
+    AgentWorkTask, AgentWorkTaskProgress, MAX_AGENT_WORK_EVENTS,
 };
 
 #[cfg(feature = "probe-harness")]

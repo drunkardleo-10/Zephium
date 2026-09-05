@@ -85,6 +85,13 @@ If a bounded unclean lifecycle join precedes the worker's final Drop, the
 completion wake still transfers that original late recovery outcome into the
 application. The earlier unclean result remains unclean.
 
+A fully settled unsuccessful actor outcome uses the same lifecycle/native
+join, publishing `Failed` or `Cancelled` only after its exact immutable terminal
+write is acknowledged. A lost ACK retains that original CAS for bounded
+explicit reconciliation; a late cancellation cannot change its disposition.
+No result is released or artifact published for this outcome. Historical
+artifact reads are independent of the current run's terminal phase.
+
 The application uses one durable request slot and one recovery audit slot, each
 with a two-second acknowledgement deadline and at most four explicit
 reconciliation dispatches. Reconciliation can retransmit only the identical

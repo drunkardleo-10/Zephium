@@ -39,6 +39,10 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
     let application = fs::read_to_string(root.join("crates/zephium-app/src/work.rs"))
         .map_err(|_| "missing Work application")?;
     validate_application(&application)?;
+    validate_terminal_records(
+        &fs::read_to_string(root.join("crates/zephium-agentic/src/agent_work_journal.rs"))
+            .map_err(|_| "missing Work journal")?,
+    )?;
     let artifact =
         fs::read_to_string(root.join("crates/zephium-agentic/src/agent_work_artifact.rs"))
             .map_err(|_| "missing bounded Work artifact codec")?;
@@ -160,6 +164,9 @@ fn validate_application(source: &str) -> Result<(), String> {
         "pending.bind_browser_port(browser).into_parts()",
         "std::ptr::addr_eq(Arc::as_ptr(&run.audit), Arc::as_ptr(&self.journal))",
         "AgentWorkJournalMutation::completed(record, policy.policy_settlement(), native)",
+        "Some(AgentWorkOutcome::ClosedUnsuccessfully(closed))",
+        "AgentWorkJournalMutation::closed_unsuccessfully(",
+        "closed.policy_settlement()",
         "self.unstarted = handle.take_outcome()",
         "recovery.settle_audit_reconciliation(settlement)",
         "flight.reconciliations < 4",
@@ -181,6 +188,30 @@ fn validate_application(source: &str) -> Result<(), String> {
         if !source.contains(required) {
             return Err(format!(
                 "Work application lost original-owner boundary: {required}"
+            ));
+        }
+    }
+    let compact: String = source.split_whitespace().collect();
+    if !compact.contains(
+        "(Some(AgentWorkOutcome::ClosedUnsuccessfully(closed)),Some(native),Some(true),)=>",
+    ) {
+        return Err("unsuccessful terminal lost the exact clean native/lifecycle join".into());
+    }
+    Ok(())
+}
+
+fn validate_terminal_records(source: &str) -> Result<(), String> {
+    for boundary in [
+        "pub fn closed_unsuccessfully(",
+        "_native: &AgentNativeShutdownProof",
+        "policy.closure().manifest_guard()",
+        "match policy.closure().outcome()",
+        "AgentRunProgressOutcome::Failed(_) => AgentWorkDisposition::Failed",
+        "AgentRunProgressOutcome::Cancelled(_) => AgentWorkDisposition::Cancelled",
+    ] {
+        if !source.contains(boundary) {
+            return Err(format!(
+                "Work terminal lost original closure proof: {boundary}"
             ));
         }
     }
@@ -283,6 +314,8 @@ mod tests {
             validate_application(&source.replace("flight.reconciliations < 4", "true")).is_err()
         );
         for boundary in [
+            "Some(AgentWorkOutcome::ClosedUnsuccessfully(closed))",
+            "AgentWorkJournalMutation::closed_unsuccessfully(",
             "projection.snapshot.phase != AgentWorkApplicationPhase::Succeeded",
             "if record.disposition() == AgentWorkDisposition::Succeeded",
             "lock(&self.projection).extraction = success.take_extraction()",
@@ -291,6 +324,21 @@ mod tests {
             "lock(&self.projection).archived.is_some()",
         ] {
             assert!(validate_application(&source.replace(boundary, "removed_boundary")).is_err());
+        }
+    }
+
+    #[test]
+    fn unsuccessful_terminal_facts_require_native_and_exact_policy_outcome() {
+        let source = include_str!("../../crates/zephium-agentic/src/agent_work_journal.rs");
+        validate_terminal_records(source).unwrap();
+        for boundary in [
+            "_native: &AgentNativeShutdownProof",
+            "policy.closure().manifest_guard()",
+            "match policy.closure().outcome()",
+        ] {
+            assert!(
+                validate_terminal_records(&source.replace(boundary, "removed_boundary")).is_err()
+            );
         }
     }
 }

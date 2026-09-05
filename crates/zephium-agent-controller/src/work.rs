@@ -255,6 +255,9 @@ pub enum AgentWorkOutcome {
     /// Trusted task completion with durable policy/accounting closure. Native
     /// and provider shutdown proofs are consumed by the runtime lifecycle.
     Succeeded(AgentWorkSuccess),
+    /// Task failed or was cancelled, but all original execution owners drained.
+    /// This never carries an extraction result or authorizes another run.
+    ClosedUnsuccessfully(AgentWorkClosedUnsuccessfully),
     /// Execution stopped without enough evidence for clean closure.
     Recovery(AgentWorkRecovery),
 }
@@ -264,6 +267,24 @@ pub enum AgentWorkOutcome {
 pub struct AgentWorkSuccess {
     settlement: AgentRunPolicySettlement,
     extraction: Option<Box<SemanticOwnedExtractionResult>>,
+}
+
+/// Unsuccessful business outcome with original policy/audit closure. Native
+/// and provider proofs remain owned by the exact runtime lifecycle join.
+pub struct AgentWorkClosedUnsuccessfully {
+    settlement: AgentRunPolicySettlement,
+    failure: AgentWorkFailure,
+}
+
+impl AgentWorkClosedUnsuccessfully {
+    /// Original typed cause; clean resource drain does not mean task success.
+    pub const fn failure(&self) -> AgentWorkFailure {
+        self.failure
+    }
+    /// Exact failed/cancelled policy closure, never a replacement proof.
+    pub const fn policy_settlement(&self) -> AgentRunPolicySettlement {
+        self.settlement
+    }
 }
 impl AgentWorkSuccess {
     /// Borrowed private result for exact terminal/artifact publication only.
@@ -422,6 +443,10 @@ impl fmt::Debug for AgentWorkOutcome {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Succeeded(_) => formatter.write_str("AgentWorkOutcome::Succeeded"),
+            Self::ClosedUnsuccessfully(value) => formatter
+                .debug_tuple("AgentWorkOutcome::ClosedUnsuccessfully")
+                .field(&value.failure)
+                .finish(),
             Self::Recovery(value) => formatter
                 .debug_tuple("AgentWorkOutcome::Recovery")
                 .field(&value.failure)
@@ -547,6 +572,7 @@ impl AgentWorkController {
             &input.manifest,
             input.lease.node(),
             input.settings.ids.supervisor,
+            input.settings.ids.cancellation,
             Arc::clone(&input.settings.clock),
             Arc::clone(&events),
         )?;
@@ -810,6 +836,9 @@ impl WorkNative {
         deadline: Instant,
     ) -> Result<AgentRuntimeEvent, AgentWorkFailure> {
         loop {
+            let deadline = worker
+                .shutdown_deadline()
+                .map_or(deadline, |at| at.min(deadline));
             if Instant::now() >= deadline {
                 return Err(AgentWorkFailure::Deadline);
             }
@@ -825,6 +854,18 @@ impl WorkNative {
             ) {
                 return Ok(event);
             }
+        }
+    }
+
+    async fn terminal_event(
+        &mut self,
+        worker: &mut AgentRuntimeWorker,
+        browser: &AgentRuntimeBrowser,
+        cleanup: Option<Instant>,
+    ) -> Result<AgentRuntimeEvent, AgentWorkFailure> {
+        match cleanup {
+            Some(deadline) => Self::cleanup_event(worker, deadline).await,
+            None => self.next_event(worker, browser).await,
         }
     }
 }
@@ -844,7 +885,10 @@ impl AgentRuntimeController for AgentWorkController {
                     if let Some(session) = state.session.as_ref() {
                         session.cancel();
                     }
-                    controller.drain_recovery(&mut worker, &browser).await;
+                    let deadline = controller.drain_recovery(&mut worker, &browser).await;
+                    let _ = controller
+                        .close_unsuccessful(&mut worker, &browser, deadline)
+                        .await;
                 }
             }
         })
@@ -1379,6 +1423,9 @@ impl AgentWorkController {
                 )) if settlement.current() == expected => {
                     state.native.cancellation = None;
                     if settlement.outcome().is_err() {
+                        state.native.retain(AgentRuntimeEvent::NativeTerminal(
+                            ContextNativeEvent::CancellationSettled(settlement),
+                        ))?;
                         return Err(AgentWorkFailure::Context);
                     }
                 }
@@ -1507,6 +1554,46 @@ impl AgentWorkController {
     ) -> Result<(), AgentWorkFailure> {
         let state = self.state.as_mut().ok_or(AgentWorkFailure::Contract)?;
         Self::close_context(state, worker, browser).await?;
+        self.close_resources(worker, browser, None).await
+    }
+
+    async fn close_unsuccessful(
+        &mut self,
+        worker: &mut AgentRuntimeWorker,
+        browser: &AgentRuntimeBrowser,
+        deadline: Instant,
+    ) -> Result<(), AgentWorkFailure> {
+        let state = self.state.as_ref().ok_or(AgentWorkFailure::Contract)?;
+        // This is a terminal resource join, not an alternative interpretation
+        // of a previous failed close or an acknowledged successful task.
+        if state.failure.is_none()
+            || state.session.is_none()
+            || state.drained.is_some()
+            || state.native.profile.is_some()
+            || !state.native.revoked
+            || !state.native.close_attempted
+            || !state.native.deferred.is_empty()
+            || state.native.operation.is_some()
+            || state.native.recovery_close.is_some()
+            || state.native.observation.is_some()
+            || state.native.action_pending
+            || state.native.cancellation.is_some()
+            || state.native.shutdown_audit.is_some()
+            || state.native_terminal.is_some()
+            || Instant::now() >= deadline
+        {
+            return Err(AgentWorkFailure::Shutdown);
+        }
+        self.close_resources(worker, browser, Some(deadline)).await
+    }
+
+    async fn close_resources(
+        &mut self,
+        worker: &mut AgentRuntimeWorker,
+        browser: &AgentRuntimeBrowser,
+        cleanup: Option<Instant>,
+    ) -> Result<(), AgentWorkFailure> {
+        let state = self.state.as_mut().ok_or(AgentWorkFailure::Contract)?;
         let resources = state
             .native
             .resources
@@ -1526,7 +1613,12 @@ impl AgentWorkController {
             .map_err(|_| AgentWorkFailure::Shutdown)?;
         resources.screenshots.seal_for_shutdown();
         let session = state.session.take().ok_or(AgentWorkFailure::Contract)?;
-        let terminal = match session.try_finish() {
+        let finished = if cleanup.is_some() {
+            session.try_finish_unsuccessful()
+        } else {
+            session.try_finish()
+        };
+        let terminal = match finished {
             Ok(terminal) => terminal,
             Err(refusal) => {
                 let failure = refusal.error();
@@ -1592,7 +1684,11 @@ impl AgentWorkController {
             state.native.shutdown_audit = None;
             return Err(AgentWorkFailure::Shutdown);
         }
-        match state.native.next_event(worker, browser).await? {
+        match state
+            .native
+            .terminal_event(worker, browser, cleanup)
+            .await?
+        {
             AgentRuntimeEvent::NativeTerminal(ContextNativeEvent::ShutdownAuditSettled(
                 settlement,
             )) if settlement.audit() == audit => {
@@ -1615,24 +1711,61 @@ impl AgentWorkController {
             }
         }
         let journal = drained.journal.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let completion = match state.failure.filter(|_| cleanup.is_some()) {
+            Some(failure) => {
+                let cancellation = match worker.stop_reason() {
+                    Some(AgentRuntimeStopReason::HumanTakeover) => {
+                        Some(AgentSupervisorCancellationReason::HumanTakeover)
+                    }
+                    Some(AgentRuntimeStopReason::PolicyRevoked) => {
+                        Some(AgentSupervisorCancellationReason::PolicyRevoked)
+                    }
+                    Some(AgentRuntimeStopReason::Cancelled | AgentRuntimeStopReason::Suspend) => {
+                        Some(AgentSupervisorCancellationReason::UserRequested)
+                    }
+                    None if failure == AgentWorkFailure::Deadline => {
+                        Some(AgentSupervisorCancellationReason::DeadlineExceeded)
+                    }
+                    None => None,
+                };
+                let cancellation = if worker.shutdown_deadline().is_some() {
+                    Some(AgentSupervisorCancellationReason::Shutdown)
+                } else {
+                    cancellation
+                };
+                if let Some(reason) = cancellation {
+                    let _ = journal
+                        .supervisor
+                        .cancel_subtree(journal.root, journal.cancellation, reason)
+                        .map_err(|_| AgentWorkFailure::Accounting)?;
+                    journal.record()?;
+                }
+                AgentSupervisorCompletion::Failed(match failure {
+                    AgentWorkFailure::Browser(_) => AgentSupervisorFailure::ProviderFailed,
+                    _ => AgentSupervisorFailure::PolicyDenied,
+                })
+            }
+            None => AgentSupervisorCompletion::Succeeded,
+        };
         let execution = journal.execution.take().ok_or(AgentWorkFailure::Contract)?;
         journal
             .supervisor
-            .complete(execution, AgentSupervisorCompletion::Succeeded)
+            .complete(execution, completion)
             .map_err(|_| AgentWorkFailure::Accounting)?;
         journal.record()?;
         journal
             .audit
             .seal_for_shutdown()
             .map_err(|_| AgentWorkFailure::Audit)?;
-        self.deliver_audit(worker, browser).await?;
-        self.publish_success(worker).await
+        self.deliver_audit(worker, browser, cleanup).await?;
+        self.publish_terminal(worker, cleanup.is_some()).await
     }
 
     async fn deliver_audit(
         &mut self,
         worker: &mut AgentRuntimeWorker,
         browser: &AgentRuntimeBrowser,
+        cleanup: Option<Instant>,
     ) -> Result<(), AgentWorkFailure> {
         let state = self.state.as_mut().ok_or(AgentWorkFailure::Contract)?;
         for raw in 1..=4 {
@@ -1656,7 +1789,11 @@ impl AgentWorkController {
                     settlement
                 }
                 AgentAuditDispatch::Accepted(proof) if proof == expected => {
-                    match state.native.next_event(worker, browser).await? {
+                    match state
+                        .native
+                        .terminal_event(worker, browser, cleanup)
+                        .await?
+                    {
                         AgentRuntimeEvent::AuditTerminal(settlement)
                             if settlement.proof() == expected =>
                         {
@@ -1694,9 +1831,10 @@ impl AgentWorkController {
             .ok_or(AgentWorkFailure::Audit)
     }
 
-    async fn publish_success(
+    async fn publish_terminal(
         &mut self,
         worker: &mut AgentRuntimeWorker,
+        unsuccessful: bool,
     ) -> Result<(), AgentWorkFailure> {
         let state = self.state.as_mut().ok_or(AgentWorkFailure::Contract)?;
         if !state.native.deferred.is_empty()
@@ -1728,10 +1866,22 @@ impl AgentWorkController {
             &journal.inputs,
         )
         .map_err(|_| AgentWorkFailure::Accounting)?;
-        let claim = match worker
-            .try_claim_controller_terminal(AgentRuntimeControllerTerminalClass::Ordinary)
-            .await
-        {
+        let class = if unsuccessful && worker.shutdown_deadline().is_some() {
+            AgentRuntimeControllerTerminalClass::Shutdown
+        } else if unsuccessful && worker.stop_reason().is_some() {
+            AgentRuntimeControllerTerminalClass::Cancelled
+        } else {
+            AgentRuntimeControllerTerminalClass::Ordinary
+        };
+        let failure = if unsuccessful {
+            Some(state.failure.ok_or(AgentWorkFailure::Contract)?)
+        } else {
+            None
+        };
+        if (closure.outcome() == AgentRunProgressOutcome::Succeeded) == unsuccessful {
+            return Err(AgentWorkFailure::Accounting);
+        }
+        let claim = match worker.try_claim_controller_terminal(class).await {
             Ok(claim) => claim,
             Err(refusal) => {
                 while let Some(event) = worker.try_drain_terminal_claim_refusal_event() {
@@ -1764,10 +1914,18 @@ impl AgentWorkController {
         // Completion is separate from the bounded progress lane: saturation
         // cannot discard an already-consumed clean terminal owner.
         let _ = lock(&journal.events).publish(AgentWorkEventKind::Terminal);
-        *lock(&self.terminal) = Some(AgentWorkOutcome::Succeeded(AgentWorkSuccess {
-            settlement,
-            extraction: state.extraction.take().map(Box::new),
-        }));
+        *lock(&self.terminal) = Some(match failure {
+            Some(failure) => {
+                AgentWorkOutcome::ClosedUnsuccessfully(AgentWorkClosedUnsuccessfully {
+                    settlement,
+                    failure,
+                })
+            }
+            None => AgentWorkOutcome::Succeeded(AgentWorkSuccess {
+                settlement,
+                extraction: state.extraction.take().map(Box::new),
+            }),
+        });
         self.state.take();
         Ok(())
     }
@@ -1776,13 +1934,13 @@ impl AgentWorkController {
         &mut self,
         worker: &mut AgentRuntimeWorker,
         browser: &AgentRuntimeBrowser,
-    ) {
-        let Some(state) = self.state.as_mut() else {
-            return;
-        };
+    ) -> Instant {
         let deadline = worker
             .shutdown_deadline()
             .unwrap_or_else(|| Instant::now() + Duration::from_secs(1));
+        let Some(state) = self.state.as_mut() else {
+            return deadline;
+        };
         if Instant::now() < deadline {
             Self::begin_recovery_close(state, browser);
         }
@@ -1817,16 +1975,6 @@ impl AgentWorkController {
                 {
                     state.native.operation = None
                 }
-                AgentRuntimeEvent::NativeTerminal(ContextNativeEvent::SemanticRuntimeSettled(
-                    value,
-                )) if state.native.observation.as_ref() == Some(value.correlation()) => {
-                    state.native.observation = None
-                }
-                AgentRuntimeEvent::NativeTerminal(ContextNativeEvent::CancellationSettled(
-                    value,
-                )) if state.native.cancellation == Some(value.current()) => {
-                    state.native.cancellation = None
-                }
                 AgentRuntimeEvent::SemanticActionTerminal(value)
                     if state.session.as_ref().is_some_and(|session| {
                         session.action.as_ref().is_some_and(|action| {
@@ -1839,6 +1987,20 @@ impl AgentWorkController {
                 _ => {}
             }
             let accounted = match &event {
+                // These exact callbacks settle read-only/cancellation owners,
+                // never a dispatched action or a replacement observation.
+                AgentRuntimeEvent::NativeTerminal(ContextNativeEvent::SemanticRuntimeSettled(
+                    value,
+                )) if state.native.observation.as_ref() == Some(value.correlation()) => {
+                    state.native.observation = None;
+                    true
+                }
+                AgentRuntimeEvent::NativeTerminal(ContextNativeEvent::CancellationSettled(
+                    value,
+                )) if state.native.cancellation == Some(value.current()) => {
+                    state.native.cancellation = None;
+                    value.outcome().is_ok()
+                }
                 AgentRuntimeEvent::NativeTerminal(ContextNativeEvent::TransitionSettled(value))
                     if state.native.recovery_close == Some(value.operation()) =>
                 {
@@ -1886,6 +2048,7 @@ impl AgentWorkController {
                 break;
             }
         }
+        deadline
     }
 }
 
@@ -1962,7 +2125,8 @@ pub enum AgentWorkEventKind {
     Verified,
     /// An explicit policy/human boundary stopped execution.
     NeedsHuman(AgentNeedsHumanReason),
-    /// All trusted task, accounting, audit and native obligations closed.
+    /// Execution owners closed; the separate outcome distinguishes task
+    /// success from a fully drained failure/cancellation.
     Terminal,
     /// Exact retained ownership needs reconciliation; this is not success.
     Recovery,
@@ -2105,6 +2269,7 @@ pub(crate) struct WorkJournal {
     model_started: Option<Instant>,
     pub(super) supervisor: AgentRunSupervisor,
     pub(super) execution: Option<AgentNodeExecution>,
+    cancellation: AgentSupervisorCancellationId,
     pub(super) audit: AgentAuditLedger,
     pub(super) accounting: AgentRunAccountingMetrics,
     pub(super) progress: AgentRunProgressMetrics,
@@ -2122,6 +2287,7 @@ impl WorkJournal {
         manifest: &AgentRunManifest,
         root: AgentPlanNodeId,
         id: AgentSupervisorId,
+        cancellation: AgentSupervisorCancellationId,
         clock: Arc<dyn TerraControllerClock>,
         events: Arc<Mutex<WorkEvents>>,
     ) -> Result<Self, AgentWorkFailure> {
@@ -2143,6 +2309,7 @@ impl WorkJournal {
             supervisor,
             model_started: None,
             execution: None,
+            cancellation,
             audit,
             accounting,
             progress,

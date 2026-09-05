@@ -764,11 +764,7 @@ fn uncertain_admission_retains_exact_intent_and_never_starts_without_explicit_re
 #[test]
 fn lost_native_callbacks_and_takeover_persist_recovery_without_success_or_replay() {
     let _serial = lock(&SERIAL);
-    for fault in [
-        Fault::ObservationLost,
-        Fault::CloseLost,
-        Fault::ObservationRefused,
-    ] {
+    for fault in [Fault::ObservationLost, Fault::CloseLost] {
         let journal = Arc::new(Journal::default());
         let (mut actor, _owner, _) = coordinator(journal.clone());
         let calls = Arc::new(Mutex::new(Vec::new()));
@@ -838,6 +834,131 @@ fn lost_native_callbacks_and_takeover_persist_recovery_without_success_or_replay
 }
 
 #[test]
+fn settled_failure_keeps_exact_terminal_through_lost_ack_and_late_takeover() {
+    let _serial = lock(&SERIAL);
+    for lose_ack in [false, true] {
+        let journal = Arc::new(Journal::default());
+        let (mut actor, _owner, view) = coordinator(journal.clone());
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let factories = Arc::new(AtomicUsize::new(0));
+        let staged = prepared(
+            journal.clone(),
+            Fault::ObservationRefused,
+            calls.clone(),
+            factories.clone(),
+        );
+        let run = staged.run;
+        start(&mut actor, &journal, staged);
+        pump(&mut actor, |actor| {
+            actor
+                .flight
+                .as_ref()
+                .is_some_and(|flight| matches!(flight.purpose, DurablePurpose::Terminal))
+        });
+        let (AgentWorkJournalRequest::CompareAndSet(mutation), callback) =
+            lock(&journal.pending).pop_front().unwrap()
+        else {
+            panic!()
+        };
+        let running = mutation.expected().unwrap();
+        let terminal = mutation.next();
+        assert_eq!(terminal.disposition(), AgentWorkDisposition::Failed);
+        assert_eq!(terminal.debt(), AgentWorkDebt::NONE);
+        assert_eq!(view.snapshot().phase, AgentWorkApplicationPhase::Closing);
+        assert!(view.take_extraction().is_none());
+        let active = actor.active.as_ref().unwrap();
+        let Some(AgentWorkOutcome::ClosedUnsuccessfully(closed)) = active.outcome.as_ref() else {
+            panic!()
+        };
+        let native = active.native.as_ref().unwrap();
+        assert_eq!(active.lifecycle_clean, Some(true));
+        assert!(
+            AgentWorkJournalMutation::completed(running, closed.policy_settlement(), native)
+                .is_err()
+        );
+        let mut foreign = *running.as_bytes();
+        foreign[64] ^= 1;
+        assert!(AgentWorkJournalMutation::closed_unsuccessfully(
+            AgentWorkRecord::decode(foreign).unwrap(),
+            closed.policy_settlement(),
+            native
+        )
+        .is_err());
+        assert!(
+            AgentWorkJournalMutation::transition(running, AgentWorkDisposition::Failed).is_err()
+        );
+        if lose_ack {
+            actor.flight.as_mut().unwrap().deadline = Instant::now();
+            actor.poll();
+            assert_eq!(
+                view.snapshot().phase,
+                AgentWorkApplicationPhase::PersistenceUncertain
+            );
+        }
+        actor.control(WorkCommand {
+            projection: actor.projection.clone(),
+            control: WorkControl::Stop {
+                run,
+                reason: AgentRuntimeStopReason::HumanTakeover,
+            },
+        });
+        assert!(
+            !actor.stopping,
+            "closed terminal intent is immutable before its ACK"
+        );
+        if lose_ack {
+            actor.control(WorkCommand {
+                projection: actor.projection.clone(),
+                control: WorkControl::Reconcile,
+            });
+            let (AgentWorkJournalRequest::CompareAndSet(repeated), fresh) =
+                lock(&journal.pending).pop_front().unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(repeated.expected(), mutation.expected());
+            assert_eq!(repeated.next(), terminal);
+            callback(Ok(AgentWorkJournalReply::Record(Some(terminal))));
+            actor.poll();
+            assert_ne!(
+                view.snapshot().phase,
+                AgentWorkApplicationPhase::Failed,
+                "old ACK cannot fill the replacement slot"
+            );
+            fresh(Ok(AgentWorkJournalReply::Record(Some(terminal))));
+        } else {
+            callback(Ok(AgentWorkJournalReply::Record(Some(terminal))));
+        }
+        actor.poll();
+        assert_eq!(view.snapshot().phase, AgentWorkApplicationPhase::Failed);
+        assert_eq!(actor.record, Some(terminal));
+        assert!(view.take_extraction().is_none());
+        let historical_success = historical(
+            actor.owner.unwrap(),
+            ContextRunId::generate(),
+            AgentWorkDisposition::Succeeded,
+        );
+        lock(&actor.projection).records.push(historical_success);
+        actor.control(WorkCommand {
+            projection: actor.projection.clone(),
+            control: WorkControl::ReadArtifact {
+                record: historical_success,
+                profile: 1_u128.into(),
+            },
+        });
+        let (_, read) = lock(&journal.artifacts).pop_front().unwrap();
+        read(Ok(AgentWorkArtifactReply::Read(None)));
+        actor.poll();
+        assert_eq!(view.snapshot().artifact_read, Some(Ok(false)));
+        assert_eq!(view.snapshot().phase, AgentWorkApplicationPhase::Failed);
+        assert_eq!(actor.record, Some(terminal));
+        assert!(actor.shutdown_until(Instant::now() + Duration::from_secs(1)));
+        assert_eq!(factories.load(Ordering::Acquire), 1);
+        assert_eq!(*lock(&calls), [1, 2, 3, 4, 5, 6]);
+    }
+}
+
+#[test]
 fn unclean_lifecycle_handoff_consumes_the_original_late_worker_outcome() {
     let _serial = lock(&SERIAL);
     let journal = Arc::new(Journal::default());
@@ -879,8 +1000,35 @@ fn unclean_lifecycle_handoff_consumes_the_original_late_worker_outcome() {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
-fn actual_shell_command_path_closes_the_same_sqlite_store_after_durable_success() {
+fn actual_shell_command_path_closes_the_same_sqlite_store_after_durable_terminal() {
     let _serial = lock(&SERIAL);
+    // A fresh process is mandatory for a second Store: the real process fence
+    // intentionally outlives clean Shell/Store shutdown. Do not reset it here.
+    let (fault, phase, disposition) = if std::env::var_os("ZEPHIUM_WORK_CLOSED_FAILURE_FIXTURE")
+        .is_some()
+    {
+        (
+            Fault::ObservationRefused,
+            AgentWorkApplicationPhase::Failed,
+            AgentWorkDisposition::Failed,
+        )
+    } else {
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "work::tests::actual_shell_command_path_closes_the_same_sqlite_store_after_durable_terminal",
+                "--nocapture",
+            ])
+            .env("ZEPHIUM_WORK_CLOSED_FAILURE_FIXTURE", "1")
+            .output()
+            .unwrap();
+        assert!(child.status.success(), "failed-close child: {child:?}");
+        (
+            Fault::None,
+            AgentWorkApplicationPhase::Succeeded,
+            AgentWorkDisposition::Succeeded,
+        )
+    };
     let directory = tempfile::tempdir().unwrap();
     let store = Arc::new(zephium_store::SqliteStore::open(directory.path()).unwrap());
     let queue = crate::actor::CommandQueue::new();
@@ -910,13 +1058,13 @@ fn actual_shell_command_path_closes_the_same_sqlite_store_after_durable_success(
     let factories = Arc::new(AtomicUsize::new(0));
     view.admit(prepared(
         store.clone(),
-        Fault::None,
+        fault,
         calls.clone(),
         factories.clone(),
     ))
     .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
-    while view.snapshot().phase != AgentWorkApplicationPhase::Succeeded {
+    while view.snapshot().phase != phase {
         if let Some(command) = queue.try_recv() {
             shell.handle(command);
         } else {
@@ -929,10 +1077,8 @@ fn actual_shell_command_path_closes_the_same_sqlite_store_after_durable_success(
         );
     }
     assert_eq!(view.records().len(), 1);
-    assert_eq!(
-        view.records()[0].disposition(),
-        AgentWorkDisposition::Succeeded
-    );
+    assert_eq!(view.records()[0].disposition(), disposition);
+    assert_eq!(view.records()[0].debt(), AgentWorkDebt::NONE);
     assert_eq!(factories.load(Ordering::Acquire), 1);
     assert_eq!(*lock(&calls), [1, 2, 3, 4, 5, 6]);
     let second = owner
@@ -956,7 +1102,7 @@ fn actual_shell_command_path_closes_the_same_sqlite_store_after_durable_success(
         shell.handle(command);
     }
     assert_eq!(second_factories.load(Ordering::Acquire), 0);
-    assert_eq!(view.snapshot().phase, AgentWorkApplicationPhase::Succeeded);
+    assert_eq!(view.snapshot().phase, phase);
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     shell.handle(Command::Shutdown {
         deadline: Instant::now() + Duration::from_secs(2),

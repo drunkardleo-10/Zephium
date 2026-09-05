@@ -198,6 +198,13 @@ enum Fault {
     AuditLost,
     ObservationLost,
     CancellationLost,
+    CancellationRefused,
+    CancellationDuplicate,
+    CleanupAuditRefused,
+    CleanupAuditLost,
+    CleanupAuditDuplicate,
+    CleanupDeliveryRefused,
+    CleanupDeliveryLost,
     CloseLost,
     CloseRefused,
     DeadlineObservation,
@@ -233,12 +240,12 @@ impl AgentAuditPort for Audit {
         completion: AgentAuditCompletion,
     ) -> AgentAuditDispatch {
         let proof = batch.proof();
-        if self.0 == Fault::AuditRefused {
+        if matches!(self.0, Fault::AuditRefused | Fault::CleanupDeliveryRefused) {
             return AgentAuditDispatch::Refused(proof.settle(AgentAuditDeliveryOutcome::Refused(
                 AgentAuditSinkFailure::AppendFailed,
             )));
         }
-        if self.0 != Fault::AuditLost {
+        if !matches!(self.0, Fault::AuditLost | Fault::CleanupDeliveryLost) {
             completion(proof.settle(AgentAuditDeliveryOutcome::Committed));
         }
         AgentAuditDispatch::Accepted(proof)
@@ -299,9 +306,18 @@ impl AgentBrowserPort for Port {
                 if self.fault == Fault::CancellationLost {
                     return ContextDispatch::Scheduled;
                 }
+                if self.fault == Fault::CancellationDuplicate {
+                    self.send(ContextNativeEvent::CancellationSettled(
+                        ContextCancellationSettlement::new(request.current(), Ok(())),
+                    ));
+                }
                 ContextNativeEvent::CancellationSettled(ContextCancellationSettlement::new(
                     request.current(),
-                    Ok(()),
+                    if self.fault == Fault::CancellationRefused {
+                        Err(ContextPortFailure::NativeRefused)
+                    } else {
+                        Ok(())
+                    },
                 ))
             }
             ContextNativeRequest::Transition(request) => {
@@ -349,6 +365,8 @@ impl AgentBrowserPort for Port {
             Fault::CancelObservation
                 | Fault::ObservationLost
                 | Fault::CancellationLost
+                | Fault::CancellationRefused
+                | Fault::CancellationDuplicate
                 | Fault::CloseLost
                 | Fault::CloseRefused
         ) {
@@ -393,7 +411,15 @@ impl AgentBrowserPort for Port {
         self.send(ContextNativeEvent::SemanticRuntimeSettled(Box::new(
             SemanticRuntimeSettlement::try_new(
                 correlation,
-                if self.fault == Fault::Observe {
+                if matches!(
+                    self.fault,
+                    Fault::Observe
+                        | Fault::CleanupAuditRefused
+                        | Fault::CleanupAuditLost
+                        | Fault::CleanupAuditDuplicate
+                        | Fault::CleanupDeliveryRefused
+                        | Fault::CleanupDeliveryLost
+                ) {
                     Err(SemanticRuntimePortFailure::Transport)
                 } else if self.fault == Fault::Readiness
                     && lock(&self.calls).iter().filter(|call| **call == 3).count() < 3
@@ -410,6 +436,9 @@ impl AgentBrowserPort for Port {
 
     fn seal_for_shutdown(&self, audit: ContextResourceAuditId) -> ContextShutdownDispatch {
         lock(&self.calls).push(6);
+        if self.fault == Fault::CleanupAuditLost {
+            return ContextShutdownDispatch::AuditScheduled;
+        }
         let snapshot = ContextNativeResourceSnapshot::try_new(ContextNativeResourceCounts {
             known_bindings: 0,
             resident_views: 0,
@@ -422,8 +451,20 @@ impl AgentBrowserPort for Port {
             queued_tasks: u8::from(self.fault == Fault::NativeNonzero),
         })
         .expect("counts");
+        if self.fault == Fault::CleanupAuditDuplicate {
+            self.send(ContextNativeEvent::ShutdownAuditSettled(
+                ContextShutdownAuditSettlement::new(audit, Ok(snapshot)),
+            ));
+        }
         self.send(ContextNativeEvent::ShutdownAuditSettled(
-            ContextShutdownAuditSettlement::new(audit, Ok(snapshot)),
+            ContextShutdownAuditSettlement::new(
+                audit,
+                if self.fault == Fault::CleanupAuditRefused {
+                    Err(ContextPortFailure::NativeRefused)
+                } else {
+                    Ok(snapshot)
+                },
+            ),
         ));
         ContextShutdownDispatch::AuditScheduled
     }
@@ -496,16 +537,13 @@ fn run(
     Vec<u8>,
     Vec<AgentWorkEvent>,
 ) {
-    let mut input = input();
-    if matches!(fault, Fault::AuditLost | Fault::DeadlineObservation) {
-        input.settings.deadline = Instant::now() + Duration::from_millis(200);
-    }
+    let input = input();
     let credential = AgentProviderCredential::try_new(
         AgentProviderKind::OpenAiResponses,
         "fixture-not-a-secret".to_owned(),
     )
     .expect("credential");
-    let (controller, handle) = AgentWorkController::try_new(
+    let (mut controller, handle) = AgentWorkController::try_new(
         input,
         AgentProviderTransportConfig::STANDARD,
         credential,
@@ -513,6 +551,13 @@ fn run(
         Box::new(Task),
     )
     .expect("actor");
+    if matches!(fault, Fault::AuditLost | Fault::DeadlineObservation) {
+        // These test runtime callback expiry, not HTTP-client construction.
+        let deadline = Instant::now() + Duration::from_millis(200);
+        let state = controller.state.as_mut().unwrap();
+        state.input.as_mut().unwrap().settings.deadline = deadline;
+        state.native.deadline = deadline;
+    }
     drive(controller, handle, fault)
 }
 
@@ -605,11 +650,15 @@ fn explicit_readiness_preserves_snapshot_generation_and_stop_reasons_are_first_w
         (Fault::RevokeObservation, AgentWorkFailure::PolicyRevoked),
     ] {
         let (outcome, shutdown, calls, _) = run(fault);
-        let AgentWorkOutcome::Recovery(recovery) = outcome else {
-            panic!("stop cannot complete");
+        let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+            panic!("settled stop must close unsuccessfully: {outcome:?}");
         };
-        assert_eq!(recovery.failure(), expected);
-        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Unclean));
+        assert_eq!(closed.failure(), expected);
+        assert!(matches!(
+            closed.policy_settlement().closure().outcome(),
+            AgentRunProgressOutcome::Cancelled(_)
+        ));
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
         assert_eq!(calls.iter().filter(|call| **call == 4).count(), 1);
         assert_eq!(calls.iter().filter(|call| **call == 5).count(), 1);
     }
@@ -684,7 +733,7 @@ fn native_action_refusal_takeover_and_callback_loss_keep_the_original_effect_own
 
 #[cfg(feature = "probe-harness")]
 #[test]
-fn provider_refusals_and_count_stream_cancellation_races_retain_exact_debt() {
+fn settled_provider_refusals_and_count_stream_cancellation_close_without_success() {
     let _guard = lock(&SERIAL);
     for fault in [
         ProviderFault::CountRefused,
@@ -934,9 +983,9 @@ fn provider_fixture(fault: ProviderFault) {
             );
             assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
             assert_eq!(calls, [1, 2, 3, 4, 5, 6]);
-        } else {
+        } else if fault == ExtractionFault::AuditLost {
             let AgentWorkOutcome::Recovery(recovery) = outcome else {
-                panic!("invalid/unsettled result cannot succeed");
+                panic!("audit debt cannot close: {outcome:?}");
             };
             if let Some(session) = recovery.state.session.as_ref() {
                 assert!(session.credential.is_none());
@@ -956,17 +1005,28 @@ fn provider_fixture(fault: ProviderFault) {
             assert!(!events
                 .iter()
                 .any(|event| event.kind() == AgentWorkEventKind::Terminal));
+        } else {
+            let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+                panic!("settled invalid result must close without publication: {outcome:?}");
+            };
+            assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+            assert_eq!(calls, [1, 2, 3, 4, 5, 6]);
+            assert_eq!(closed.policy_settlement().closure().effects(), 0);
             if matches!(
                 fault,
                 ExtractionFault::CancelCount | ExtractionFault::CancelStream
             ) {
-                assert_eq!(recovery.failure(), AgentWorkFailure::HumanTakeover);
+                assert_eq!(closed.failure(), AgentWorkFailure::HumanTakeover);
+                assert!(matches!(
+                    closed.policy_settlement().closure().outcome(),
+                    AgentRunProgressOutcome::Cancelled(_)
+                ));
             } else if matches!(
                 fault,
                 ExtractionFault::WrongKind | ExtractionFault::ForeignSource
             ) {
                 assert!(matches!(
-                    recovery.failure(),
+                    closed.failure(),
                     AgentWorkFailure::Browser(AgentBrowserProviderError::Extraction(_))
                 ));
             } else if matches!(
@@ -974,18 +1034,56 @@ fn provider_fixture(fault: ProviderFault) {
                 ExtractionFault::WrongSchema | ExtractionFault::ExpandedScope
             ) {
                 assert_eq!(
-                    recovery.failure(),
+                    closed.failure(),
                     AgentWorkFailure::Browser(AgentBrowserProviderError::UnsupportedTool(
                         AgentBrowserToolKind::Extract
                     ))
                 );
-                assert_eq!(calls, [1, 2, 3, 4, 5]);
             }
         }
         return;
     }
+    if !matches!(fault, ProviderFault::Native(native) if native != Fault::ActionBudget) {
+        let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+            panic!("settled provider refusal must close: {fault:?}: {outcome:?}");
+        };
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        assert_eq!(calls, [1, 2, 3, 4, 5, 6]);
+        let closure = closed.policy_settlement().closure();
+        assert_eq!(closure.effects(), 0);
+        assert_eq!(
+            closure.model_calls(),
+            if fault == ProviderFault::Ceiling {
+                8
+            } else {
+                1
+            }
+        );
+        match fault {
+            ProviderFault::Ceiling => assert_eq!(
+                closed.failure(),
+                AgentWorkFailure::Browser(AgentBrowserProviderError::TurnLimit)
+            ),
+            ProviderFault::CancelCount | ProviderFault::CancelStream => {
+                assert_eq!(closed.failure(), AgentWorkFailure::HumanTakeover);
+                assert!(matches!(
+                    closure.outcome(),
+                    AgentRunProgressOutcome::Cancelled(_)
+                ));
+            }
+            ProviderFault::Native(Fault::ActionBudget) => assert_eq!(
+                closed.failure(),
+                AgentWorkFailure::Browser(AgentBrowserProviderError::Action(
+                    crate::AgentBrowserActionError::SettleBudget
+                ))
+            ),
+            _ => assert!(matches!(closed.failure(), AgentWorkFailure::Browser(_))),
+        }
+        assert_eq!(server.join().expect("fixture server"), requests / 2);
+        return;
+    }
     let AgentWorkOutcome::Recovery(recovery) = outcome else {
-        panic!("model never satisfies trusted predicate");
+        panic!("native debt cannot close: {fault:?}: {outcome:?}");
     };
     if fault == ProviderFault::Ceiling {
         assert_eq!(
@@ -1168,6 +1266,49 @@ fn trusted_completion_closes_original_context_audit_policy_provider_and_runtime(
     }
 }
 
+#[test]
+fn unsuccessful_cleanup_refuses_lost_duplicate_and_refused_native_receipts() {
+    let _guard = lock(&SERIAL);
+    for fault in [
+        Fault::CancellationRefused,
+        Fault::CancellationDuplicate,
+        Fault::CleanupAuditRefused,
+        Fault::CleanupAuditLost,
+        Fault::CleanupAuditDuplicate,
+        Fault::CleanupDeliveryRefused,
+        Fault::CleanupDeliveryLost,
+    ] {
+        let (outcome, shutdown, calls, _) = run(fault);
+        let AgentWorkOutcome::Recovery(recovery) = outcome else {
+            panic!("{fault:?}: {outcome:?}")
+        };
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Unclean));
+        assert_eq!(calls.iter().filter(|call| **call == 4).count(), 1);
+        assert_eq!(calls.iter().filter(|call| **call == 5).count(), 1);
+        assert!(recovery.state.extraction.is_none());
+        if matches!(
+            fault,
+            Fault::CancellationRefused | Fault::CancellationDuplicate
+        ) {
+            assert!(recovery.retained_callbacks() > 0);
+            assert!(!calls.contains(&6));
+        } else {
+            assert_eq!(calls.iter().filter(|call| **call == 6).count(), 1);
+            assert!(recovery.state.drained.is_some());
+            if matches!(
+                fault,
+                Fault::CleanupDeliveryRefused | Fault::CleanupDeliveryLost
+            ) {
+                let drained = recovery.state.drained.as_ref().unwrap();
+                assert!(drained.proof.is_some());
+                assert!(!drained.journal.as_ref().unwrap().audit.is_quiescent());
+                assert!(drained.policy.is_some());
+                assert!(drained.provider.is_some());
+            }
+        }
+    }
+}
+
 #[cfg(feature = "probe-harness")]
 fn extraction_stream(fault: ExtractionFault) -> String {
     let source = if fault == ExtractionFault::ForeignSource {
@@ -1217,6 +1358,16 @@ fn native_audit_cancellation_renderer_and_mailbox_faults_never_claim_success() {
         Fault::MailboxPressure,
     ] {
         let (outcome, shutdown, calls, _) = run(fault);
+        if matches!(fault, Fault::Observe | Fault::CancelObservation) {
+            let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+                panic!("settled read/refusal must close: {fault:?}: {outcome:?}");
+            };
+            assert_eq!(closed.policy_settlement().closure().model_calls(), 0);
+            assert_eq!(closed.policy_settlement().closure().effects(), 0);
+            assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+            assert_eq!(calls, [1, 2, 3, 4, 5, 6]);
+            continue;
+        }
         assert!(
             matches!(outcome, AgentWorkOutcome::Recovery(_)),
             "{fault:?}: {outcome:?}"

@@ -150,6 +150,10 @@ pub enum AgentWorkApplicationPhase {
     Recovery,
     PersistenceUncertain,
     Succeeded,
+    /// Task failed after its original execution/lifecycle owners proved drain.
+    Failed,
+    /// Task was cancelled with all original execution/lifecycle owners drained.
+    Cancelled,
 }
 
 /// Human review never resumes an old proposal or clears execution debt.
@@ -657,16 +661,8 @@ impl ApplicationWork {
                 projection.snapshot.artifact = result.as_ref().map(|result| result.descriptor());
                 projection.snapshot.artifact_read = Some(Ok(result.is_some()));
                 projection.archived = result;
-                projection.snapshot.phase = if self.stopping {
-                    AgentWorkApplicationPhase::Recovery
-                } else if self
-                    .record
-                    .is_some_and(|record| record.disposition() == AgentWorkDisposition::Succeeded)
-                {
-                    AgentWorkApplicationPhase::Succeeded
-                } else {
-                    AgentWorkApplicationPhase::Ready
-                };
+                // A historical read changes only its own result lane, never
+                // a prior failed/cancelled/successful execution disposition.
                 Ok(())
             }
             _ => Err(AgentWorkJournalError::Conflict),
@@ -685,6 +681,8 @@ impl ApplicationWork {
         }
         lock(&self.projection).snapshot.phase = match record.disposition() {
             AgentWorkDisposition::Succeeded => AgentWorkApplicationPhase::Succeeded,
+            AgentWorkDisposition::Failed => AgentWorkApplicationPhase::Failed,
+            AgentWorkDisposition::Cancelled => AgentWorkApplicationPhase::Cancelled,
             AgentWorkDisposition::NeedsApproval => AgentWorkApplicationPhase::NeedsReview,
             _ => AgentWorkApplicationPhase::Recovery,
         };
@@ -881,6 +879,9 @@ impl ApplicationWork {
                 active.outcome = active.handle.take_outcome();
                 if let Some(AgentWorkOutcome::Recovery(recovery)) = &active.outcome {
                     lock(&self.projection).snapshot.failure = Some(recovery.failure());
+                } else if let Some(AgentWorkOutcome::ClosedUnsuccessfully(closed)) = &active.outcome
+                {
+                    lock(&self.projection).snapshot.failure = Some(closed.failure());
                 }
             }
         }
@@ -999,6 +1000,15 @@ impl ApplicationWork {
                 {
                     AgentWorkJournalMutation::completed(record, policy.policy_settlement(), native)
                 }
+                (
+                    Some(AgentWorkOutcome::ClosedUnsuccessfully(closed)),
+                    Some(native),
+                    Some(true),
+                ) => AgentWorkJournalMutation::closed_unsuccessfully(
+                    record,
+                    closed.policy_settlement(),
+                    native,
+                ),
                 _ => AgentWorkJournalMutation::transition(
                     record,
                     if active.needs_review && !self.stopping {
@@ -1129,7 +1139,10 @@ impl ApplicationWork {
                     Some(AgentWorkJournalError::Capacity)
                 } else if !matches!(
                     lock(&self.projection).snapshot.phase,
-                    AgentWorkApplicationPhase::Ready | AgentWorkApplicationPhase::Succeeded
+                    AgentWorkApplicationPhase::Ready
+                        | AgentWorkApplicationPhase::Succeeded
+                        | AgentWorkApplicationPhase::Failed
+                        | AgentWorkApplicationPhase::Cancelled
                 ) || record.disposition() != AgentWorkDisposition::Succeeded
                     || !lock(&self.projection).records.contains(&record)
                 {
@@ -1153,7 +1166,7 @@ impl ApplicationWork {
                 }
             }
             WorkControl::Stop { run, reason } => {
-                // The first retained successful terminal CAS owns publication.
+                // The first retained proof-bearing terminal CAS owns publication.
                 // Its native/runtime/provider owners are already clean; a late
                 // stop cannot rewrite that immutable outcome or disable reads.
                 let terminal_owned = self
@@ -1165,7 +1178,12 @@ impl ApplicationWork {
                         .is_some_and(|flight| match &flight.request {
                             DurableRequest::Journal(AgentWorkJournalRequest::CompareAndSet(
                                 mutation,
-                            )) => mutation.next().disposition() == AgentWorkDisposition::Succeeded,
+                            )) => matches!(
+                                mutation.next().disposition(),
+                                AgentWorkDisposition::Succeeded
+                                    | AgentWorkDisposition::Failed
+                                    | AgentWorkDisposition::Cancelled
+                            ),
                             DurableRequest::Artifact(AgentWorkArtifactRequest::Publish(_)) => true,
                             _ => false,
                         });
