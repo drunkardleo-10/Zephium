@@ -283,3 +283,54 @@ The task-authored route qualifiers prove the kernel's exact transitions; they
 do not prove general objective interpretation or model-selected plans. A
 rendering solution should make bounded real-page evidence available to that
 future decision loop, not replace it with more site-specific task predicates.
+
+## Honest presented-surface viability contract
+
+The next closed experiment separates actual rendering presentation from focus
+and input instead of treating a permanently hidden view as a rendered page:
+
+```sh
+target/debug/macos-agentic-semantic-probe --ci-presented-rendering-readiness
+```
+
+This command intentionally presents the fixed public-domain synthetic fixture
+on screen for at most a five-second deadline. It is **not hidden presentation**
+and may briefly cover other content. No real website, provider, keychain,
+personal page, user data or OS-wide input is involved. It creates no additional
+view/window beyond the original exact owned-page probe cohort.
+
+After the original hidden construction and exact fixture navigation, the
+closed scope uses a borderless window which cannot become key or main,
+sets mouse-event exclusion before presenting, keeps the application inactive,
+and forbids any first-responder change. Public
+[`orderFrontRegardless`](https://developer.apple.com/documentation/appkit/nswindow/orderfrontregardless%28%29)
+is documented to preserve key/main windows while presenting an inactive app's
+surface. There is no app activation, focus request, injected input, private
+SPI, transparency/offscreen trick, scheduling override or JavaScript shim.
+`Throttle` remains the native policy.
+
+The full unchanged 1280×800 logical viewport must fit within the selected
+screen's visible frame; a smaller screen refuses rather than scaling or
+clipping the task viewport. The window is genuinely opaque and on-screen,
+and the exact child view/parent/window geometry is attested. AppKit's public
+occlusion `Visible` bit must show that the window has visible screen pixels;
+this is **not** proof that every pixel is uncovered. The child visible
+rectangle separately proves absence of parent clipping. Loss of these facts
+after initial convergence refuses; acquisition and the unchanged at-most-eight
+semantic sampling schedule share the outer five-second presented deadline.
+The native guard is checked around every existing run-loop slice.
+
+Presented and hidden native guards are separate closed variants. None of the
+existing hidden modes may ignore visibility violations. Both guards preserve
+sticky failure and exact input/focus isolation. The scope hides the page and
+window before restoring geometry and input policy on every normal/refusal
+path, with a destructor backstop. Successful reporting additionally requires
+checked restoration, original hidden-view/profile/runtime attestation and
+exact native/store/listener teardown. Missing render opportunity, an expired
+deadline or a focus/isolation change is not a success or permission to retry.
+
+This is a provider-free native viability experiment, not a production lease,
+new model capability, Work UI or proof of open-objective behavior. If it proves
+RAF progress, production admission still needs explicit rendered-resource
+ownership, deadline/cancellation/revocation, observation freshness and truthful
+native accounting, distinct from visibility, human takeover and suspension.

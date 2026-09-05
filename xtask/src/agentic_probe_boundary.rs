@@ -107,6 +107,8 @@ const ENGINE_MACOS_RENDERING_PROBE: &str =
     "crates/zephium-engine/src/platform/macos/agentic_rendering_probe.rs";
 const ENGINE_MACOS_RENDERING_OPPORTUNITY_PROBE: &str =
     "crates/zephium-engine/src/platform/macos/agentic_rendering_opportunity_probe.rs";
+const ENGINE_MACOS_RENDERING_PRESENTED_PROBE: &str =
+    "crates/zephium-engine/src/platform/macos/agentic_rendering_presented_probe.rs";
 const ENGINE_WINDOWS_MODULE: &str = "crates/zephium-engine/src/platform/windows/mod.rs";
 const ENGINE_WINDOWS_AGENT_CONTEXT: &str =
     "crates/zephium-engine/src/platform/windows/agent_context.rs";
@@ -490,6 +492,11 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     )?;
     validate_macos_rendering_opportunity_probe(
         &read(repository.join(ENGINE_MACOS_RENDERING_OPPORTUNITY_PROBE))?,
+        &read(repository.join(ENGINE_MACOS_SEMANTIC_PROBE))?,
+        &read(repository.join(ENGINE_MACOS_SEMANTIC_PROBE_BINARY))?,
+    )?;
+    validate_macos_rendering_presented_probe(
+        &read(repository.join(ENGINE_MACOS_RENDERING_PRESENTED_PROBE))?,
         &read(repository.join(ENGINE_MACOS_SEMANTIC_PROBE))?,
         &read(repository.join(ENGINE_MACOS_SEMANTIC_PROBE_BINARY))?,
     )?;
@@ -2565,6 +2572,102 @@ fn validate_engine_platform_module(source: &str, platform: &str) -> Result<(), S
                 "{platform} agentic probe module escaped or drifted from its feature gate"
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_macos_rendering_presented_probe(
+    source: &str,
+    parent: &str,
+    binary: &str,
+) -> Result<(), String> {
+    let source = compact(source);
+    for required in [
+        "constPRESENTED_TIMEOUT:Duration=Duration::from_secs(5);",
+        "operation.context()!=context",
+        "document_finished_for_audit(operation)",
+        "original.window.canBecomeKeyWindow()",
+        "original.window.canBecomeMainWindow()",
+        "!self.app.isActive()",
+        "!self.window.isKeyWindow()&&!self.window.canBecomeKeyWindow()",
+        "!self.window.isMainWindow()&&!self.window.canBecomeMainWindow()",
+        "self.window.ignoresMouseEvents()",
+        "self.first_responder",
+        "!self.page.isHiddenOrHasHiddenAncestor()",
+        "self.window.alphaValue()==1.0",
+        "self.page.alphaValue()==1.0",
+        "std::ptr::eq(&*window,self.window)",
+        "NSWindowOcclusionState::Visible",
+        "self.page.visibleRect().size==NSSize::new(1280.0,800.0)",
+        "visible.size.width<1280.0||visible.size.height<800.0",
+        "Instant::now()<self.deadline",
+        "scope.window.setIgnoresMouseEvents(true)",
+        "scope.window.setOpaque(true)",
+        "scope.window.orderFrontRegardless()",
+        "guard.require_visible_pixels.set(true)",
+        "rendering::measure(view,context,operation,url,&presented_runtime)",
+        "scope.hide()?",
+        "self.page.setHidden(true)",
+        "self.window.orderOut(None)",
+        "implDropforPresentedScope",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "presented rendering lost isolated lease contract {required}"
+            ));
+        }
+    }
+    if source.matches(".orderFrontRegardless()").count() != 1
+        || source.matches(".setHidden(false)").count() != 1
+    {
+        return Err("presented rendering acquired repeated presentation".into());
+    }
+    for forbidden in [
+        "makeKey",
+        "activateIgnoringOtherApps",
+        "activateWithOptions",
+        "setAlphaValue",
+        "setInactiveSchedulingPolicy",
+        "setValue_forKey",
+        "evaluateJavaScript",
+        "evaluate_script",
+        "dispatch_semantic_action",
+        "CGEvent",
+        "NSEvent",
+        "AXUIElement",
+        "std::env",
+        "std::net",
+        "reqwest",
+        "Keychain",
+        "AgentBrowserSession",
+        "std::thread",
+        "setLevel",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "presented rendering acquired forbidden authority {forbidden}"
+            ));
+        }
+    }
+    let parent = compact(parent);
+    for required in [
+        "#[path=\"agentic_rendering_presented_probe.rs\"]modrendering_presented;",
+        "begin(ProbeMode::RenderingPresented(&mutreport))",
+        "iffinish(pending)?.is_some()",
+        "report.ok_or(\"rendering_presented_report_missing\")",
+        "letnative_guard=ProbeNativeState::Hidden(NativeStateGuard{",
+        "Self::Hidden(guard)=>guard.sample()",
+        "Self::Presented(guard)=>guard.sample()",
+        "rendering_presented::measure(&view,context,operation,&url,&runtime,&host.view,)",
+    ] {
+        if !parent.contains(required) {
+            return Err(format!(
+                "presented rendering escaped original cohort {required}"
+            ));
+        }
+    }
+    if !compact(binary).contains("arguments.as_slice()==[\"--ci-presented-rendering-readiness\"]") {
+        return Err("presented rendering lost closed CLI".into());
     }
     Ok(())
 }
@@ -12682,6 +12785,77 @@ mod tests {
             "\"Win32_System_ProcessStatus\"",
             "\"Win32_System_Threading\""
         ))
+        .is_err());
+    }
+
+    #[test]
+    fn presented_rendering_rejects_input_authority_hidden_hacks_unbounded_leases_and_missing_restore(
+    ) {
+        let source = include_str!(
+            "../../crates/zephium-engine/src/platform/macos/agentic_rendering_presented_probe.rs"
+        );
+        let parent = include_str!(
+            "../../crates/zephium-engine/src/platform/macos/agentic_semantic_probe.rs"
+        );
+        let binary =
+            include_str!("../../crates/zephium-engine/src/bin/macos_agentic_semantic_probe.rs");
+        validate_macos_rendering_presented_probe(source, parent, binary).unwrap();
+        for required in [
+            "Duration::from_secs(5)",
+            "operation.context() != context",
+            "original.window.canBecomeKeyWindow()",
+            "original.window.canBecomeMainWindow()",
+            "!self.app.isActive()",
+            "self.window.ignoresMouseEvents()",
+            "self.first_responder",
+            "self.window.alphaValue() == 1.0",
+            "NSWindowOcclusionState::Visible",
+            "scope.window.setIgnoresMouseEvents(true)",
+            "guard.require_visible_pixels.set(true)",
+            "scope.hide()?",
+            "self.window.orderOut(None)",
+            "impl Drop for PresentedScope",
+        ] {
+            assert!(source.contains(required));
+            assert!(validate_macos_rendering_presented_probe(
+                &source.replace(required, "removed"),
+                parent,
+                binary
+            )
+            .is_err());
+        }
+        for forbidden in [
+            "window.makeKeyWindow()",
+            "app.activateIgnoringOtherApps()",
+            "window.setAlphaValue(0.0)",
+            "preferences.setValue_forKey()",
+            "page.evaluateJavaScript()",
+            "CGEvent",
+            "NSEvent",
+            "window.setLevel()",
+            "window.orderFrontRegardless()",
+            "page.setHidden(false)",
+            "std::env::var(\"KEY\")",
+            "reqwest::get(url)",
+        ] {
+            assert!(validate_macos_rendering_presented_probe(
+                &format!("{source}\n{forbidden}"),
+                parent,
+                binary
+            )
+            .is_err());
+        }
+        assert!(validate_macos_rendering_presented_probe(
+            source,
+            &parent.replace("finish(pending)?", "Ok(None)?"),
+            binary
+        )
+        .is_err());
+        assert!(validate_macos_rendering_presented_probe(
+            source,
+            parent,
+            &binary.replace("--ci-presented-rendering-readiness", "--arbitrary-url")
+        )
         .is_err());
     }
 

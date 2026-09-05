@@ -6,6 +6,9 @@ pub use rendering::MacosAgenticRenderingProbeReport;
 #[path = "agentic_rendering_opportunity_probe.rs"]
 mod rendering_opportunity;
 pub use rendering_opportunity::{MacosAgenticRenderingOpportunityReport, RenderingOpportunity};
+#[path = "agentic_rendering_presented_probe.rs"]
+mod rendering_presented;
+pub use rendering_presented::MacosAgenticPresentedRenderingReport;
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -188,10 +191,38 @@ impl NativeStateGuard<'_> {
     }
 }
 
+enum ProbeNativeState<'native> {
+    Hidden(NativeStateGuard<'native>),
+    Presented(rendering_presented::PresentedStateGuard<'native>),
+}
+
+impl ProbeNativeState<'_> {
+    fn sample(&self) {
+        match self {
+            Self::Hidden(guard) => guard.sample(),
+            Self::Presented(guard) => guard.sample(),
+        }
+    }
+
+    fn failed(&self) -> bool {
+        match self {
+            Self::Hidden(guard) => guard.failed(),
+            Self::Presented(guard) => guard.failed(),
+        }
+    }
+
+    fn failure_stage(&self) -> Option<&'static str> {
+        match self {
+            Self::Hidden(guard) => guard.failure_stage(),
+            Self::Presented(guard) => guard.failure_stage(),
+        }
+    }
+}
+
 struct ProbeRuntime<'a, 'native> {
     callbacks: &'a CallbackState,
     run_loop: &'a NSRunLoop,
-    native_guard: &'a NativeStateGuard<'native>,
+    native_guard: &'a ProbeNativeState<'native>,
 }
 
 impl ProbeRuntime<'_, '_> {
@@ -263,6 +294,7 @@ pub enum MacosAgenticSemanticTwoActionScenario {
 enum ProbeMode<'a> {
     Full,
     Rendering(&'a mut Option<MacosAgenticRenderingProbeReport>),
+    RenderingPresented(&'a mut Option<MacosAgenticPresentedRenderingReport>),
     RenderingOpportunity {
         opportunity: RenderingOpportunity,
         report: &'a mut Option<MacosAgenticRenderingOpportunityReport>,
@@ -400,6 +432,17 @@ pub(crate) fn run_rendering_opportunity(
     report.ok_or("rendering_opportunity_report_missing")
 }
 
+pub(crate) fn run_rendering_presented() -> Result<MacosAgenticPresentedRenderingReport, &'static str>
+{
+    let mut report = None;
+    let pending =
+        objc2::rc::autoreleasepool(|_| begin(ProbeMode::RenderingPresented(&mut report)))?;
+    if finish(pending)?.is_some() {
+        return Err("unexpected_model_terminal");
+    }
+    report.ok_or("rendering_presented_report_missing")
+}
+
 pub(crate) fn run_model_click(
     mut prepare: impl FnMut(
         &zephium_agentic::SemanticObservation,
@@ -484,7 +527,9 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
     let full_probe = matches!(&mode, ProbeMode::Full);
     let rendering_probe = matches!(
         &mode,
-        ProbeMode::Rendering(_) | ProbeMode::RenderingOpportunity { .. }
+        ProbeMode::Rendering(_)
+            | ProbeMode::RenderingOpportunity { .. }
+            | ProbeMode::RenderingPresented(_)
     );
     let public_fill_probe = matches!(
         &mode,
@@ -596,7 +641,7 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
         .map_err(|_| "context_construct")?;
 
     let page = super::native_webview(view.view());
-    let native_guard = NativeStateGuard {
+    let native_guard = ProbeNativeState::Hidden(NativeStateGuard {
         app: &app,
         window: &window,
         page: &page,
@@ -609,7 +654,7 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
         // key-window, main-window, and application activation remain strict.
         allow_hidden_responder_change: public_fill_probe,
         failure: Cell::new(None),
-    };
+    });
     native_guard.sample();
     let run_loop = NSRunLoop::mainRunLoop();
     let runtime = ProbeRuntime {
@@ -620,6 +665,15 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
     let mut next_invocation = 1_u64;
     let mut successful_snapshots = 0_u8;
     let execution = (|| {
+        if let ProbeMode::RenderingPresented(report) = &mut mode {
+            let url = server.url(FixtureRoute::SemanticRendering);
+            let (context, operation) =
+                navigate_with_receipt(&mut view, &mut registry, identity.id(), 2, &url, &runtime)?;
+            **report = Some(rendering_presented::measure(
+                &view, context, operation, &url, &runtime, &host.view,
+            )?);
+            return Ok(None);
+        }
         if let ProbeMode::RenderingOpportunity {
             opportunity,
             report,
@@ -752,6 +806,7 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
         let pending_click = match &mut mode {
             ProbeMode::ModelWorkflow { .. }
             | ProbeMode::Rendering(_)
+            | ProbeMode::RenderingPresented(_)
             | ProbeMode::RenderingOpportunity { .. } => return Err("workflow_state"),
             ProbeMode::Full => PendingInitialClick::Fixed(Box::new(execute_primary_click(
                 &view,
@@ -895,6 +950,7 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
                     ProbeMode::Full
                     | ProbeMode::ModelWorkflow { .. }
                     | ProbeMode::Rendering(_)
+                    | ProbeMode::RenderingPresented(_)
                     | ProbeMode::RenderingOpportunity { .. } => return Err("model_mode_state"),
                 }
             }
@@ -2523,7 +2579,8 @@ fn snapshot_contains(snapshot: &SemanticSnapshot, needle: &str) -> bool {
 
 fn new_window(mtm: MainThreadMarker) -> Result<Retained<NSWindow>, &'static str> {
     // SAFETY: the marker proves AppKit main-thread affinity. The window is
-    // never ordered front and cannot release itself while the child exists.
+    // initially ordered out and cannot release itself while the child exists.
+    // Only the closed presented-rendering probe may temporarily present it.
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
@@ -2766,7 +2823,7 @@ fn work_host_drains_native_dispatch_autoreleases_in_every_phase() {
     assert!(!host.contains("operation();"));
 }
 
-fn pump_once(run_loop: &NSRunLoop, native_guard: Option<&NativeStateGuard<'_>>) {
+fn pump_once(run_loop: &NSRunLoop, native_guard: Option<&ProbeNativeState<'_>>) {
     if let Some(native_guard) = native_guard {
         native_guard.sample();
     }

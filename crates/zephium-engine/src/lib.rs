@@ -72,6 +72,18 @@ pub fn run_macos_agentic_rendering_probe() -> Result<MacosAgenticRenderingProbeR
 #[doc(hidden)]
 pub use platform::macos::MacosAgenticRenderingProbeReport;
 
+/// Fixed synthetic on-screen rendering proof, structurally unable to take key/input control.
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[doc(hidden)]
+pub fn run_macos_agentic_presented_rendering_probe(
+) -> Result<MacosAgenticPresentedRenderingReport, &'static str> {
+    platform::macos::run_agentic_rendering_presented_probe()
+}
+
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[doc(hidden)]
+pub use platform::macos::MacosAgenticPresentedRenderingReport;
+
 /// Closed provider-free public-native rendering comparison; no production policy.
 #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
 #[doc(hidden)]
