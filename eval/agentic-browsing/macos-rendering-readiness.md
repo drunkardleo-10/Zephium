@@ -513,3 +513,12 @@ inactivity. This does not intentionally activate then deactivate the app,
 skip launch completion, or permit windows under Prohibited policy. Other
 hidden diagnostics and the product app bootstrap remain unchanged. Native
 qualification must still prove that no delayed activation occurs.
+
+One invocation on clean `ed30f9a545f6d8a968ffbee68252fe9f3c2d4bee`
+(pre-invocation host clock `2026-09-05 21:27:17 UTC`, not exact start) exited 1
+at `presented_launch_prohibition`, with no prior refusal or provisional
+measurement, before window construction. No presentation or RAF claim follows.
+The then-compound refusal did not distinguish a false policy-setter result
+from failed native policy/inactivity/no-window attestation. Subsequent admission
+must accept an already-attested exact policy without demanding a redundant
+transition; the setter is necessary only when native policy actually differs.
