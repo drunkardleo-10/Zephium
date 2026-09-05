@@ -1,6 +1,112 @@
 #[path = "../foreground_probe_config.rs"]
 mod contract;
 
+#[path = "../foreground_probe_admission.rs"]
+mod admission;
+
+use admission::{AdmissionDecision, AdmissionGate, ForegroundCheck};
+use std::time::{Duration, Instant};
+
+fn sample(gate: &mut AdmissionGate, now: Instant, exact: bool) -> Option<AdmissionDecision> {
+    match gate.begin_check(now)? {
+        ForegroundCheck::Capture => gate.poll(now, exact),
+        ForegroundCheck::DeferredForeground => Some(AdmissionDecision::DeferredForeground),
+    }
+}
+
+#[test]
+fn foreground_wait_allocates_no_admission_before_chrome_and_consumes_once() {
+    let now = Instant::now();
+    let mut gate = AdmissionGate::default();
+    assert!(gate.waiting_chrome());
+    assert_eq!(gate.poll(now, true), None);
+    assert_eq!(gate.counts(now), (0, 0));
+    assert!(gate.begin(now));
+    assert_eq!(sample(&mut gate, now, false), Some(AdmissionDecision::Wait));
+    assert_eq!(
+        sample(&mut gate, now + Duration::from_millis(50), true),
+        Some(AdmissionDecision::Admit)
+    );
+    assert_eq!(
+        sample(&mut gate, now + Duration::from_millis(100), true),
+        None
+    );
+    assert!(!gate.begin(now + Duration::from_millis(100)));
+}
+
+#[test]
+fn foreground_wait_never_extends_its_deadline_or_accepts_late_focus() {
+    let now = Instant::now();
+    let mut gate = AdmissionGate::default();
+    assert!(gate.begin(now));
+    assert!(!gate.begin(now + Duration::from_secs(4)));
+    assert_eq!(
+        sample(&mut gate, now + Duration::from_secs(4), false),
+        Some(AdmissionDecision::Wait)
+    );
+    assert_eq!(
+        sample(&mut gate, now + Duration::from_secs(5), true),
+        Some(AdmissionDecision::DeferredForeground)
+    );
+    assert_eq!(sample(&mut gate, now + Duration::from_secs(6), true), None);
+}
+
+#[test]
+fn foreground_wait_cancelled_or_expired_wakes_never_reopen_admission() {
+    let now = Instant::now();
+    for begun in [false, true] {
+        let mut gate = AdmissionGate::default();
+        if begun {
+            assert!(gate.begin(now));
+        }
+        gate.close();
+        assert_eq!(sample(&mut gate, now, true), None);
+        assert!(!gate.begin(now));
+        assert!(!gate.awaiting_foreground());
+        assert_eq!(gate.counts(now).1, 0);
+    }
+}
+
+#[test]
+fn foreground_wait_has_a_check_ceiling_even_without_clock_progress() {
+    let now = Instant::now();
+    let mut gate = AdmissionGate::default();
+    assert!(gate.begin(now));
+    for _ in 0..101 {
+        assert_eq!(sample(&mut gate, now, false), Some(AdmissionDecision::Wait));
+    }
+    assert_eq!(
+        sample(&mut gate, now, true),
+        Some(AdmissionDecision::DeferredForeground)
+    );
+    assert_eq!(gate.counts(now).1, 101);
+}
+
+#[test]
+fn foreground_check_must_be_reserved_and_cannot_cross_deadline_or_cancellation() {
+    let now = Instant::now();
+    for cancelled in [false, true] {
+        let mut gate = AdmissionGate::default();
+        assert!(gate.begin(now));
+        assert_eq!(gate.poll(now, true), None);
+        assert_eq!(
+            gate.begin_check(now + Duration::from_secs(4)),
+            Some(ForegroundCheck::Capture)
+        );
+        assert_eq!(gate.begin_check(now + Duration::from_secs(4)), None);
+        if cancelled {
+            gate.close();
+            assert_eq!(gate.poll(now + Duration::from_secs(4), true), None);
+        } else {
+            assert_eq!(
+                gate.poll(now + Duration::from_secs(5), true),
+                Some(AdmissionDecision::DeferredForeground)
+            );
+        }
+        assert_eq!(gate.counts(now + Duration::from_secs(5)).1, 1);
+    }
+}
+
 #[test]
 fn rendering_probe_cannot_use_real_application_identity_or_a_development_server() {
     let valid: serde_json::Value =

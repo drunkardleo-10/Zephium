@@ -31,6 +31,20 @@ const CLEANUP_BUDGET: Duration = Duration::from_secs(5);
 /// Captured by the desktop for its exact trusted main window, not ambient focus.
 pub struct ForegroundRenderingAdmission(HumanForegroundGuard);
 
+/// One cancellable normal-main-queue admission wake; not a Work/native context.
+pub struct ForegroundAdmissionWake {
+    _timer: ContentPolicyTimeout,
+}
+
+/// Fixed coalesced predicate-check opportunity; dropping the owner cancels it.
+pub fn schedule_foreground_admission_wake(
+    callback: impl FnOnce() + Send + 'static,
+) -> Option<ForegroundAdmissionWake> {
+    MainThreadMarker::new()?;
+    super::schedule_content_policy_timeout(Duration::from_millis(50), callback)
+        .map(|timer| ForegroundAdmissionWake { _timer: timer })
+}
+
 /// Binds the composition root's exact window and current responder once.
 pub fn capture_foreground_rendering_admission(
     expected_main: &NSWindow,

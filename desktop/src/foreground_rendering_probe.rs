@@ -7,10 +7,16 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
+use std::time::Instant;
 use tauri::Manager;
 use zephium_engine::{
-    ForegroundRenderingAdmission, ForegroundRenderingWitnessReport, WebviewEngine,
+    ForegroundAdmissionWake, ForegroundRenderingAdmission, ForegroundRenderingWitnessReport,
+    WebviewEngine,
 };
+
+#[path = "../foreground_probe_admission.rs"]
+mod admission;
+use admission::{AdmissionDecision, AdmissionGate, ForegroundCheck};
 
 #[path = "../foreground_probe_config.rs"]
 mod configuration;
@@ -24,15 +30,21 @@ pub(super) fn validate_data_root(root: &std::path::Path) -> std::io::Result<()> 
 
 struct State {
     engine: Mutex<Option<Arc<WebviewEngine>>>,
-    started: AtomicBool,
+    admission: Mutex<AdmissionWait>,
     active: AtomicBool,
     report: Mutex<Option<ForegroundRenderingWitnessReport>>,
+}
+
+#[derive(Default)]
+struct AdmissionWait {
+    gate: AdmissionGate,
+    wake: Option<ForegroundAdmissionWake>,
 }
 
 pub(super) fn install(app: &tauri::AppHandle, engine: Arc<WebviewEngine>) -> bool {
     app.manage(State {
         engine: Mutex::new(Some(engine)),
-        started: AtomicBool::new(false),
+        admission: Mutex::new(AdmissionWait::default()),
         active: AtomicBool::new(false),
         report: Mutex::new(None),
     })
@@ -48,42 +60,20 @@ pub(super) fn on_run_event(app: &tauri::AppHandle, event: &tauri::RunEvent) -> b
             if !app
                 .try_state::<super::UiStartupGate>()
                 .is_some_and(|gate| gate.is_visible())
-                || state.started.swap(true, Ordering::AcqRel)
             {
                 return false;
             }
-            let engine = state
-                .engine
+            // Only the first eligible callback starts the clock. Later checks
+            // are coalesced by one owned main-queue timer, not event frequency.
+            let begin = state
+                .admission
                 .lock()
-                .ok()
-                .and_then(|mut engine| engine.take());
-            let Some(engine) = engine else {
-                finish_unavailable(app, "engine_owner");
-                return false;
-            };
-            let Some(admission) = exact_foreground_main(app) else {
-                finish(
-                    app,
-                    ForegroundRenderingWitnessReport {
-                        outcome: "DeferredForeground",
-                        cleanup_failure: None,
-                        samples: Vec::new(),
-                        native_cohort_clean: true,
-                        human_ownership_preserved: true,
-                        fixture_clean: true,
-                        elapsed_ms: 0,
-                    },
-                );
-                return false;
-            };
-            state.active.store(true, Ordering::Release);
-            let completion_app = app.clone();
-            if let Err(reason) = zephium_engine::start_foreground_rendering_witness(
-                engine,
-                admission,
-                move |report| finish(&completion_app, report),
-            ) {
-                finish_unavailable(app, reason);
+                .map(|mut waiting| waiting.gate.begin(Instant::now()))
+                .map_err(|_| ());
+            match begin {
+                Ok(true) => advance_admission(app),
+                Ok(false) => {}
+                Err(()) => finish_unavailable(app, "admission_owner"),
             }
         }
         tauri::RunEvent::ExitRequested { api, .. } if state.active.load(Ordering::Acquire) => {
@@ -94,6 +84,17 @@ pub(super) fn on_run_event(app: &tauri::AppHandle, event: &tauri::RunEvent) -> b
                 finish_unavailable(app, "cancellation_owner");
             }
             return true;
+        }
+        tauri::RunEvent::ExitRequested { .. } => {
+            let waiting = state.admission.lock().ok().is_some_and(|waiting| {
+                waiting.gate.waiting_chrome() || waiting.gate.awaiting_foreground()
+            });
+            if waiting {
+                log_admission(app, "Cancelled");
+                // No Work exists: cancel the timer and allow this original
+                // ordinary exit request, without minting another exit request.
+                record_report(app, deferred_report(), false);
+            }
         }
         tauri::RunEvent::Exit => {
             let shutdown_clean = app
@@ -133,6 +134,147 @@ fn exact_foreground_main(app: &tauri::AppHandle) -> Option<ForegroundRenderingAd
     zephium_engine::capture_foreground_rendering_admission(expected_main)
 }
 
+fn advance_admission(app: &tauri::AppHandle) {
+    let Some(state) = app.try_state::<State>() else {
+        return;
+    };
+    let awaiting = state
+        .admission
+        .lock()
+        .map(|waiting| waiting.gate.awaiting_foreground())
+        .map_err(|_| ());
+    match awaiting {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(()) => {
+            finish_unavailable(app, "admission_owner");
+            return;
+        }
+    }
+    let check = state
+        .admission
+        .lock()
+        .map(|mut waiting| waiting.gate.begin_check(Instant::now()))
+        .map_err(|_| ());
+    match check {
+        Ok(Some(ForegroundCheck::Capture)) => {}
+        Ok(Some(ForegroundCheck::DeferredForeground)) => {
+            log_admission(app, "DeferredForeground");
+            finish(app, deferred_report());
+            return;
+        }
+        Ok(None) => return,
+        Err(()) => {
+            finish_unavailable(app, "admission_owner");
+            return;
+        }
+    }
+    // No native calls occur under the admission mutex. A token is checked again
+    // against the original deadline after capture and by the engine on consume.
+    let admission = exact_foreground_main(app);
+    let polled = state
+        .admission
+        .lock()
+        .map(|mut waiting| waiting.gate.poll(Instant::now(), admission.is_some()))
+        .map_err(|_| ());
+    let decision = match polled {
+        Ok(decision) => decision,
+        Err(()) => {
+            finish_unavailable(app, "admission_owner");
+            return;
+        }
+    };
+    match decision {
+        Some(AdmissionDecision::Admit) => {
+            log_admission(app, "Admitted");
+            close_admission_wait(app);
+            let Some(admission) = admission else {
+                finish_unavailable(app, "admission_token");
+                return;
+            };
+            let engine = state
+                .engine
+                .lock()
+                .ok()
+                .and_then(|mut engine| engine.take());
+            let Some(engine) = engine else {
+                finish_unavailable(app, "engine_owner");
+                return;
+            };
+            state.active.store(true, Ordering::Release);
+            let completion_app = app.clone();
+            if let Err(reason) = zephium_engine::start_foreground_rendering_witness(
+                engine,
+                admission,
+                move |report| finish(&completion_app, report),
+            ) {
+                finish_unavailable(app, reason);
+            }
+        }
+        Some(AdmissionDecision::DeferredForeground) => {
+            log_admission(app, "DeferredForeground");
+            finish(app, deferred_report());
+        }
+        Some(AdmissionDecision::Wait) => {
+            let wake_app = app.clone();
+            let scheduled = state.admission.lock().ok().is_some_and(|mut waiting| {
+                if waiting.wake.is_some() {
+                    return true;
+                }
+                waiting.wake = zephium_engine::schedule_foreground_admission_wake(move || {
+                    if let Some(state) = wake_app.try_state::<State>() {
+                        if let Ok(mut waiting) = state.admission.lock() {
+                            waiting.wake.take();
+                        }
+                    }
+                    advance_admission(&wake_app);
+                });
+                waiting.wake.is_some()
+            });
+            if !scheduled {
+                finish_unavailable(app, "admission_wake");
+            }
+        }
+        None => {}
+    }
+}
+
+fn log_admission(app: &tauri::AppHandle, outcome: &'static str) {
+    if let Some(state) = app.try_state::<State>() {
+        if let Ok(waiting) = state.admission.lock() {
+            let (waited_ms, checks) = waiting.gate.counts(Instant::now());
+            super::write_diagnostic(format_args!(
+                "work-rendering-admission: outcome={outcome} waited_ms={waited_ms} checks={checks}"
+            ));
+        }
+    }
+}
+
+fn close_admission_wait(app: &tauri::AppHandle) {
+    if let Some(state) = app.try_state::<State>() {
+        // Poison recovery is cleanup-only: it cannot grant admission or reopen
+        // the phase, and must not leave the timer retaining the application.
+        let mut waiting = state
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        waiting.gate.close();
+        waiting.wake.take();
+    }
+}
+
+fn deferred_report() -> ForegroundRenderingWitnessReport {
+    ForegroundRenderingWitnessReport {
+        outcome: "DeferredForeground",
+        cleanup_failure: None,
+        samples: Vec::new(),
+        native_cohort_clean: true,
+        human_ownership_preserved: true,
+        fixture_clean: true,
+        elapsed_ms: 0,
+    }
+}
+
 fn finish_unavailable(app: &tauri::AppHandle, reason: &'static str) {
     finish(
         app,
@@ -149,10 +291,25 @@ fn finish_unavailable(app: &tauri::AppHandle, reason: &'static str) {
 }
 
 fn finish(app: &tauri::AppHandle, report: ForegroundRenderingWitnessReport) {
+    record_report(app, report, true);
+}
+
+fn record_report(
+    app: &tauri::AppHandle,
+    report: ForegroundRenderingWitnessReport,
+    request_exit: bool,
+) {
     let Some(state) = app.try_state::<State>() else {
         app.exit(1);
         return;
     };
+    close_admission_wait(app);
+    // The waiting phase never took this owner. Do not retain it past shutdown.
+    state
+        .engine
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
     state.active.store(false, Ordering::Release);
     for (index, sample) in report.samples.iter().enumerate() {
         super::write_diagnostic(format_args!("work-rendering-sample: index={index} elapsed_ms={} nodes={} controls={} animation_frame={}", sample.elapsed_ms, sample.nodes, sample.controls, sample.animation_frame));
@@ -177,5 +334,7 @@ fn finish(app: &tauri::AppHandle, report: ForegroundRenderingWitnessReport) {
             shutdown.terminal_failure.store(true, Ordering::Release);
         }
     }
-    app.exit(if acceptable { 0 } else { 1 });
+    if request_exit {
+        app.exit(if acceptable { 0 } else { 1 });
+    }
 }

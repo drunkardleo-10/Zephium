@@ -74,7 +74,8 @@ event loop with bundled assets, no provider or external site, and no implicit
 application activation. Admission without actual user-owned foreground is
 DeferredForeground, not a failed rendering measurement. A successful measurement
 must additionally prove exact current-document markers and native/profile/
-listener/port/application cleanup. No native attempt has run on this seam yet.
+listener/port/application cleanup. No native attempt had run at this ownership
+checkpoint.
 
 ## Actual desktop driver checkpoint
 
@@ -161,7 +162,8 @@ Info.plist identifies `app.zephium.work-rendering-probe` and executable
 `zephium-desktop`. The first, now-superseded executable SHA-256 was
 `c12bda7274a9cf75caf002c7f4cc338eac080f06a1595e2dfeb22d187736a74d`.
 This local unsigned development bundle is not a signing/notarization or
-distribution qualification. No native launch has occurred.
+distribution qualification. No native launch had occurred at this bundle
+checkpoint.
 
 ## Pre-launch exact-admission correction
 
@@ -211,3 +213,54 @@ This exposes an admission-timing issue: trusted chrome becoming eligible does
 not itself prove that Launch Services/user foreground ownership is already
 established on that first event-loop callback. A bounded normal-loop foreground
 waiting phase is required; programmatic activation or a blind delay is not.
+
+## Bounded AwaitingForeground correction
+
+The release-excluded desktop now starts one original five-second admission clock
+after trusted chrome first becomes eligible. A failed first exact-foreground
+predicate does not immediately terminate the application. One retained,
+cancellable public main-queue dispatch timer provides coalesced 50 ms predicate
+opportunities on the normal Tauri/AppKit lifecycle. The existing dispatch timer's
+100 ms leeway and normal event servicing still apply; this is not a hard
+realtime five-second shutdown promise. There is no worker, alternate event loop,
+programmatic activation, focus command, or blind sleep.
+
+Before each native focus inspection, a pure admission state machine reserves and
+counts one of at most 101 checks under that unchanged deadline. Capturing an
+exact token across the deadline cannot authorize Work: the deadline is checked
+again when the reserved check settles. Unreserved/repeated settlement,
+cancellation, late foreground and a non-progressing clock cannot reopen or
+extend admission. The token still retains the exact Tauri `main` window and
+responder across the engine boundary and is revalidated on consume. Only this
+admitted branch may take the Work engine owner or construct the fixture/context.
+
+The admission timer is a separate bounded pre-Work owner, not a hidden renderer
+or native Work cohort. Timeout closes the waiter and reports normal
+DeferredForeground without Work allocation. User exit while waiting cancels the
+timer and allows the original normal shutdown request; it does not create a
+second exit request. An already queued wake observes the closed phase and cannot
+start Work. The wait owner and unused engine reference are released before
+shutdown. Existing active-Work cancellation/close/weak-drain behavior is unchanged.
+
+The extra content-free `work-rendering-admission` line reports outcome, elapsed
+admission-wait milliseconds and reserved check count. These are distinct from
+the rendering driver's elapsed time. No waiting-phase outcome constitutes RAF,
+public-site or provider evidence. The fresh-data-root refusal also remains:
+prior isolated diagnostic data must be preserved separately before any newly
+authorized launch; the harness never erases or reuses it automatically.
+
+Deterministic tests now include pre-chrome refusal, eventual exact admission,
+one-shot consumption, original-deadline preservation, deadline-wins-over-focus,
+cancelled/stale wakes, fixed check exhaustion, unreserved settlements and capture
+crossing the deadline. Mechanical adversaries reject raised time/check bounds,
+unconditional admission, early engine ownership, dropped timer cancellation,
+duplicate exit requests and changed wake cadence. The normal isolated debug
+bundle rebuilt successfully with the same pinned Node/pnpm/Tauri flow and exact
+Info.plist identity. Its new executable SHA-256 is
+`482e9682f08fea751a706ffa5665f388ce985dd55f4d10a07e55ba5b42b05721`.
+All final gates pass: seven isolated configuration/admission tests, all 492
+engine library tests, strict all-target foreground-feature desktop/engine
+Clippy, three foreground architecture adversaries, both architecture commands
+and hostile JavaScript smoke, ordinary non-probe `agentic-browser` engine check,
+normal isolated application bundle, workspace fmt and diff checks. There has
+been no second actual-application launch.

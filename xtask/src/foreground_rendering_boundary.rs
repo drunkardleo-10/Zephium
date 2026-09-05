@@ -15,6 +15,11 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
         &read("crates/zephium-engine/src/platform/macos/agentic_foreground_driver.rs")?,
         &read("desktop/src/foreground_rendering_probe.rs")?,
     )?;
+    validate_admission(
+        &read("desktop/foreground_probe_admission.rs")?,
+        &read("desktop/src/foreground_rendering_probe.rs")?,
+        &read("crates/zephium-engine/src/platform/macos/agentic_foreground_driver.rs")?,
+    )?;
     for (path, needle) in [
         ("crates/zephium-engine/Cargo.toml", "native-agentic-foreground-probe=[\"native-agentic-semantic-probe\"]"),
         ("crates/zephium-engine/src/platform/macos/mod.rs", "#[cfg(feature=\"native-agentic-foreground-probe\")]modagentic_foreground_probe;"),
@@ -24,6 +29,62 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
         ("desktop/src/lib.rs", "#[cfg(all(feature=\"macos-work-rendering-probe\",target_os=\"macos\"))]modforeground_rendering_probe;"),
         ("desktop/Cargo.toml", "macos-work-rendering-probe=[\"zephium-engine/native-agentic-foreground-probe\",\"tauri/custom-protocol\",]"),
     ] { require(&compact(&read(path)?), needle)?; }
+    Ok(())
+}
+
+fn validate_admission(admission: &str, desktop: &str, driver: &str) -> Result<(), String> {
+    let admission = compact(admission);
+    let desktop = compact(desktop);
+    let driver = compact(driver);
+    for required in [
+        "FOREGROUND_WAIT_BUDGET:Duration=Duration::from_secs(5)",
+        "MAX_FOREGROUND_CHECKS:u16=101",
+        "now.checked_add(FOREGROUND_WAIT_BUDGET)",
+        "now>=deadline",
+        "self.checks>=MAX_FOREGROUND_CHECKS",
+        "self.phase=Phase::Consumed",
+        "self.phase=Phase::Closed",
+        "if!self.waiting_chrome()",
+        "self.phase!=Phase::AwaitingForeground",
+        "self.phase!=Phase::CheckingForeground",
+    ] {
+        require(&admission, required)?;
+    }
+    for forbidden in ["std::thread", "NSRunLoop", "activateIgnoringOtherApps"] {
+        if admission.contains(forbidden) {
+            return Err(format!("foreground admission forbids {forbidden}"));
+        }
+    }
+    for required in [
+        "admission:Mutex<AdmissionWait>",
+        "wake:Option<ForegroundAdmissionWake>",
+        "waiting.gate.begin(Instant::now())",
+        "waiting.gate.begin_check(Instant::now())",
+        "waiting.gate.poll(Instant::now(),admission.is_some())",
+        "Some(AdmissionDecision::Admit)",
+        "waiting.wake.take()",
+        "waiting.gate.close()",
+        "record_report(app,deferred_report(),false)",
+        "close_admission_wait(app)",
+        "work-rendering-admission:",
+    ] {
+        require(&desktop, required)?;
+    }
+    if desktop.find("Some(AdmissionDecision::Admit)")
+        >= desktop.find("letengine=state.engine.lock()")
+    {
+        return Err("foreground admission must precede taking the Work engine owner".into());
+    }
+    if desktop.find("waiting.gate.begin_check(Instant::now())")
+        >= desktop.find("letadmission=exact_foreground_main(app)")
+    {
+        return Err("foreground check reservation must precede native inspection".into());
+    }
+    require(
+        &driver,
+        "super::schedule_content_policy_timeout(Duration::from_millis(50),callback)",
+    )?;
+    require(&driver, "_timer:ContentPolicyTimeout")?;
     Ok(())
 }
 
@@ -183,6 +244,45 @@ mod tests {
     const DRIVER: &str =
         include_str!("../../crates/zephium-engine/src/platform/macos/agentic_foreground_driver.rs");
     const DESKTOP: &str = include_str!("../../desktop/src/foreground_rendering_probe.rs");
+    const ADMISSION: &str = include_str!("../../desktop/foreground_probe_admission.rs");
+
+    #[test]
+    fn foreground_wait_rejects_extended_deadlines_ungated_start_and_uncancelled_wakes() {
+        validate_admission(ADMISSION, DESKTOP, DRIVER).unwrap();
+        for changed in [
+            ADMISSION.replace("Duration::from_secs(5)", "Duration::from_secs(6)"),
+            ADMISSION.replace(
+                "MAX_FOREGROUND_CHECKS: u16 = 101",
+                "MAX_FOREGROUND_CHECKS: u16 = 102",
+            ),
+            ADMISSION.replace("now >= deadline", "false"),
+        ] {
+            assert!(validate_admission(&changed, DESKTOP, DRIVER).is_err());
+        }
+        for changed in [
+            DESKTOP.replace("admission.is_some()", "true"),
+            DESKTOP.replace("waiting.wake.take()", "untracked()"),
+            DESKTOP.replace(
+                "Some(AdmissionDecision::Admit)",
+                "Some(AdmissionDecision::Wait)",
+            ),
+            DESKTOP.replace(
+                "record_report(app, deferred_report(), false)",
+                "record_report(app, deferred_report(), true)",
+            ),
+        ] {
+            assert!(validate_admission(ADMISSION, &changed, DRIVER).is_err());
+        }
+        assert!(validate_admission(
+            ADMISSION,
+            DESKTOP,
+            &DRIVER.replace(
+                "Duration::from_millis(50), callback",
+                "Duration::from_millis(1), callback"
+            )
+        )
+        .is_err());
+    }
 
     #[test]
     fn foreground_driver_rejects_custom_loops_raised_queues_and_unproven_closure() {
