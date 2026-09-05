@@ -5,6 +5,9 @@
 
 use crate::{CallbackHandle, Command};
 
+#[cfg(feature = "work-execution-probe")]
+#[path = "work_probe.rs"]
+mod probe;
 #[cfg(test)]
 #[path = "work_tests.rs"]
 mod tests;
@@ -37,14 +40,23 @@ pub type AgentWorkNativeFactory =
 
 /// Trusted non-UI execution ports; native factory is move-only.
 pub struct AgentWorkApplicationPorts {
+    engine: crate::SharedEngine,
     audit: Arc<dyn AgentAuditPort>,
     native: AgentWorkNativeFactory,
 }
 
 impl AgentWorkApplicationPorts {
     /// Binds the existing durable audit adapter and actual engine-port factory.
-    pub fn new(audit: Arc<dyn AgentAuditPort>, native: AgentWorkNativeFactory) -> Self {
-        Self { audit, native }
+    pub fn new(
+        engine: crate::SharedEngine,
+        audit: Arc<dyn AgentAuditPort>,
+        native: AgentWorkNativeFactory,
+    ) -> Self {
+        Self {
+            engine,
+            audit,
+            native,
+        }
     }
 }
 
@@ -64,6 +76,7 @@ impl AgentWorkApplicationConfig {
 /// Dormant controller ownership. Preparation starts no runtime or browser.
 #[must_use]
 pub struct PreparedAgentWork {
+    engine: crate::SharedEngine,
     audit: Arc<dyn AgentAuditPort>,
     controller: Box<AgentWorkController>,
     handle: AgentWorkHandle,
@@ -89,13 +102,23 @@ impl PreparedAgentWork {
             ports.audit.clone(),
             task,
         )?;
+        Self::from_controller(controller, handle, config.runtime, ports)
+    }
+
+    fn from_controller(
+        controller: AgentWorkController,
+        handle: AgentWorkHandle,
+        runtime: AgentRuntimeConfig,
+        ports: AgentWorkApplicationPorts,
+    ) -> Result<Self, AgentWorkFailure> {
         let deadline = controller.deadline()?;
         let run = controller.run_identity()?;
         Ok(Self {
+            engine: ports.engine,
             audit: ports.audit,
             controller: Box::new(controller),
             handle,
-            runtime: config.runtime,
+            runtime,
             native: ports.native,
             deadline,
             run,
@@ -260,6 +283,7 @@ impl CallbackHandle {
     pub fn attach_work(
         &self,
         journal: Arc<dyn AgentWorkJournalPort>,
+        engine: crate::SharedEngine,
     ) -> Option<AgentWorkApplicationHandle> {
         let projection = Arc::new(Mutex::new(Projection {
             snapshot: AgentWorkApplicationSnapshot {
@@ -278,7 +302,7 @@ impl CallbackHandle {
             projection: projection.clone(),
             admission: Arc::new(AtomicBool::new(false)),
         };
-        let actor = ApplicationWork::new(journal, projection, self.clone());
+        let actor = ApplicationWork::new(journal, engine, projection, self.clone());
         if self.dispatch(Command::AttachWork(WorkAttachment(Arc::new(Mutex::new(
             Some(actor),
         ))))) {
@@ -370,6 +394,7 @@ enum DurablePurpose {
 }
 
 pub(crate) struct ApplicationWork {
+    engine: crate::SharedEngine,
     audit: Option<Arc<dyn AgentAuditPort>>,
     unstarted: Option<AgentWorkOutcome>,
     recovery_audit: Option<RecoveryAuditFlight>,
@@ -387,15 +412,20 @@ pub(crate) struct ApplicationWork {
 }
 
 impl ApplicationWork {
+    pub(crate) fn belongs_to_engine(&self, engine: &crate::SharedEngine) -> bool {
+        Arc::ptr_eq(&self.engine, engine)
+    }
     pub(crate) fn belongs_to_store(&self, store: &crate::SharedStore) -> bool {
         std::ptr::addr_eq(Arc::as_ptr(&self.journal), Arc::as_ptr(store))
     }
     fn new(
         journal: Arc<dyn AgentWorkJournalPort>,
+        engine: crate::SharedEngine,
         projection: Arc<Mutex<Projection>>,
         callback: CallbackHandle,
     ) -> Self {
         Self {
+            engine,
             audit: None,
             unstarted: None,
             recovery_audit: None,
@@ -432,7 +462,9 @@ impl ApplicationWork {
         let Some(run) = lock(&submission.0).take() else {
             return;
         };
-        if !std::ptr::addr_eq(Arc::as_ptr(&run.audit), Arc::as_ptr(&self.journal)) {
+        if !Arc::ptr_eq(&run.engine, &self.engine)
+            || !std::ptr::addr_eq(Arc::as_ptr(&run.audit), Arc::as_ptr(&self.journal))
+        {
             self.fail(AgentWorkFailure::Contract);
             return;
         }

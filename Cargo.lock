@@ -6354,6 +6354,7 @@ dependencies = [
  "zephium-extension-updater",
  "zephium-ipc",
  "zephium-store",
+ "zephium-work-composition",
 ]
 
 [[package]]
@@ -6572,9 +6573,14 @@ dependencies = [
  "zephium-agent-provider-transport",
  "zephium-agent-runtime",
  "zephium-agentic",
+ "zephium-app",
+ "zephium-blocker",
+ "zephium-blocker-service",
  "zephium-core",
  "zephium-engine",
+ "zephium-extension-service",
  "zephium-store",
+ "zephium-work-composition",
 ]
 
 [[package]]
@@ -6587,6 +6593,17 @@ dependencies = [
  "thiserror 2.0.18",
  "tough",
  "url",
+]
+
+[[package]]
+name = "zephium-work-composition"
+version = "0.1.0"
+dependencies = [
+ "zephium-agent-controller",
+ "zephium-agent-provider-transport",
+ "zephium-app",
+ "zephium-engine",
+ "zephium-store",
 ]
 
 [[package]]

@@ -528,6 +528,7 @@ impl Shell {
             Command::AttachWork(attachment) => {
                 if let Some(mut work) = crate::work::ApplicationWork::take_attachment(&attachment) {
                     if !work.belongs_to_store(&self.store)
+                        || !work.belongs_to_engine(&self.engine)
                         || self.work.is_some()
                         || !matches!(self.agent_lifecycle, AgentLifecycleOwner::Absent)
                     {

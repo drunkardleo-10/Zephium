@@ -1,6 +1,13 @@
 //! Composition root: the only crate that knows Tauri. Wires the dependency graph
 //! (window -> chrome positioning, engine, shell) and the command surface.
 
+#[cfg(feature = "macos-work")]
+pub use zephium_work_composition::{MacosWorkComposition, TrustedWorkRequest};
+#[cfg(feature = "macos-work")]
+mod work;
+#[cfg(feature = "macos-work")]
+pub use work::{admit_trusted_work, WorkAdmissionFailure};
+
 #[cfg(zephium_internal_repository_e2e)]
 compile_error!("the internal repository E2E authority may not link into the Zephium desktop");
 #[cfg(all(feature = "staging-extension-catalog", not(target_os = "macos")))]
@@ -4497,6 +4504,15 @@ pub fn run() {
                         shell: Some(shell),
                         ..TerminalStartupResources::default()
                     },
+                );
+                return Err(error.into());
+            }
+            #[cfg(feature = "macos-work")]
+            if !work::install(app.handle(), engine.clone(), store.clone()) {
+                let error = std::io::Error::other("Work composition owner is already installed");
+                shutdown.request_terminal_startup_failure(
+                    app.handle().clone(),
+                    TerminalStartupResources { shell: Some(shell), ..TerminalStartupResources::default() },
                 );
                 return Err(error.into());
             }

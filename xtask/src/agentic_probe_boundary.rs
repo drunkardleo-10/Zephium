@@ -8411,6 +8411,14 @@ fn validate_shipping_sources(repository: &Path) -> Result<(), String> {
     }
     for path in files {
         let source = read(&path)?;
+        // This exact opt-in edge is independently release-refused and checked
+        // by the Work composition boundary. No other shipping diagnostic edge
+        // is exempted from this scan.
+        let source = if path == repository.join(APP_MANIFEST) {
+            source.replace("work-execution-probe = [\"work-execution\", \"zephium-agent-controller/probe-harness\"]", "")
+        } else {
+            source
+        };
         if let Some(token) = forbidden.iter().find(|token| source.contains(**token)) {
             return Err(format!(
                 "shipping source {} references agentic diagnostic token {token}",

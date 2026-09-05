@@ -9,9 +9,11 @@ build = false
 [features]
 default = []
 live-probe = [
+    "dep:zephium-app",
     "zephium-agent-controller/probe-harness",
     "zephium-agent-provider-transport/probe-harness",
     "zephium-engine/native-agentic-semantic-probe",
+    "zephium-work-composition/public-qualification",
 ]
 
 [[bin]]
@@ -27,5 +29,10 @@ zephium-engine.workspace = true
 zephium-agent-runtime.workspace = true
 zephium-store.workspace = true
 zephium-core.workspace = true
+zephium-app = { workspace = true, optional = true }
+zephium-work-composition.workspace = true
+zephium-blocker = { workspace = true, features = ["webkit"] }
+zephium-blocker-service.workspace = true
+zephium-extension-service.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "time"] }

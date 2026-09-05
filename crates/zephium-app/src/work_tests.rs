@@ -263,6 +263,7 @@ fn prepared(
         .unwrap(),
         Box::new(Task),
         AgentWorkApplicationPorts::new(
+            fixture_engine(),
             audit,
             Box::new(move |sink| {
                 factories.fetch_add(1, Ordering::AcqRel);
@@ -322,6 +323,14 @@ impl Journal {
     }
 }
 
+fn fixture_engine() -> Arc<crate::shell::tests::FakeEngine> {
+    static ENGINE: std::sync::OnceLock<Arc<crate::shell::tests::FakeEngine>> =
+        std::sync::OnceLock::new();
+    ENGINE
+        .get_or_init(|| Arc::new(crate::shell::tests::FakeEngine::default()))
+        .clone()
+}
+
 fn coordinator(
     journal: Arc<Journal>,
 ) -> (
@@ -331,7 +340,10 @@ fn coordinator(
 ) {
     let queue = crate::actor::CommandQueue::new();
     let owner = crate::actor::Handle::new(queue.clone());
-    let handle = owner.callback_handle().attach_work(journal).unwrap();
+    let handle = owner
+        .callback_handle()
+        .attach_work(journal, fixture_engine())
+        .unwrap();
     let Command::AttachWork(attachment) = queue.try_recv().unwrap() else {
         panic!()
     };
@@ -613,14 +625,27 @@ fn actual_shell_command_path_closes_the_same_sqlite_store_after_durable_success(
     let store = Arc::new(zephium_store::SqliteStore::open(directory.path()).unwrap());
     let queue = crate::actor::CommandQueue::new();
     let owner = crate::actor::Handle::new(queue.clone());
+    let engine = fixture_engine();
     let mut shell = crate::Shell::new(
-        Arc::new(crate::shell::tests::FakeEngine::default()),
+        engine.clone(),
         store.clone(),
         Arc::new(crate::shell::tests::FakeChrome),
         Box::new(|_| {}),
     );
     shell.attach_queue(queue.clone());
-    let view = owner.callback_handle().attach_work(store.clone()).unwrap();
+    let wrong = owner
+        .callback_handle()
+        .attach_work(
+            store.clone(),
+            Arc::new(crate::shell::tests::FakeEngine::default()),
+        )
+        .unwrap();
+    shell.handle(queue.try_recv().unwrap());
+    assert_eq!(wrong.snapshot().failure, Some(AgentWorkFailure::Contract));
+    let view = owner
+        .callback_handle()
+        .attach_work(store.clone(), engine.clone())
+        .unwrap();
     let calls = Arc::new(Mutex::new(Vec::new()));
     let factories = Arc::new(AtomicUsize::new(0));
     view.admit(prepared(
@@ -650,7 +675,10 @@ fn actual_shell_command_path_closes_the_same_sqlite_store_after_durable_success(
     );
     assert_eq!(factories.load(Ordering::Acquire), 1);
     assert_eq!(*lock(&calls), [1, 2, 3, 4, 5, 6]);
-    let second = owner.callback_handle().attach_work(store.clone()).unwrap();
+    let second = owner
+        .callback_handle()
+        .attach_work(store.clone(), engine)
+        .unwrap();
     while second.snapshot().phase == AgentWorkApplicationPhase::Loading {
         shell.handle(queue.try_recv().unwrap());
     }
@@ -1030,24 +1058,34 @@ fn callback_deadline_and_shutdown_keep_uncertain_admission_owned() {
 
 #[test]
 fn mismatched_durable_and_audit_owners_are_refused_before_runtime_creation() {
-    let journal = Arc::new(Journal::default());
-    let (mut actor, _owner, _) = coordinator(journal.clone());
-    let other = Arc::new(Journal::default());
-    let factories = Arc::new(AtomicUsize::new(0));
-    actor.admit(WorkSubmission(
-        Arc::new(Mutex::new(Some(prepared(
+    for foreign_engine in [false, true] {
+        let journal = Arc::new(Journal::default());
+        let (mut actor, _owner, _) = coordinator(journal.clone());
+        let other = if foreign_engine {
+            journal.clone()
+        } else {
+            Arc::new(Journal::default())
+        };
+        let factories = Arc::new(AtomicUsize::new(0));
+        let mut staged = prepared(
             other,
             Fault::None,
             Arc::new(Mutex::new(Vec::new())),
             factories.clone(),
-        )))),
-        actor.projection.clone(),
-    ));
-    assert_eq!(
-        lock(&actor.projection).snapshot.failure,
-        Some(AgentWorkFailure::Contract)
-    );
-    assert!(actor.active.is_none());
-    assert_eq!(factories.load(Ordering::Acquire), 0);
-    assert!(lock(&journal.pending).is_empty());
+        );
+        if foreign_engine {
+            staged.engine = Arc::new(crate::shell::tests::FakeEngine::default());
+        }
+        actor.admit(WorkSubmission(
+            Arc::new(Mutex::new(Some(staged))),
+            actor.projection.clone(),
+        ));
+        assert_eq!(
+            lock(&actor.projection).snapshot.failure,
+            Some(AgentWorkFailure::Contract)
+        );
+        assert!(actor.active.is_none());
+        assert_eq!(factories.load(Ordering::Acquire), 0);
+        assert!(lock(&journal.pending).is_empty());
+    }
 }

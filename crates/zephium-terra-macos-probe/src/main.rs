@@ -9,6 +9,8 @@
 
 #[cfg(target_os = "macos")]
 mod work_actor;
+#[cfg(target_os = "macos")]
+mod work_application;
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -55,6 +57,9 @@ fn main() {
             run_variable_workflow()
         }
         [argument] if argument == "--live-public-luna-work-actor-inspectable" => work_actor::run(),
+        [argument] if argument == "--live-public-luna-work-application-inspectable" => {
+            work_application::run()
+        }
         _ => std::process::exit(2),
     };
     if let Err(error) = result {

@@ -1,0 +1,17 @@
+[package]
+name = "zephium-work-composition"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+macos-work = ["dep:zephium-app", "dep:zephium-engine", "dep:zephium-store", "dep:zephium-agent-controller", "dep:zephium-agent-provider-transport"]
+public-qualification = ["macos-work", "zephium-app/work-execution-probe"]
+
+[dependencies]
+zephium-app = { workspace = true, optional = true, features = ["work-execution"] }
+zephium-engine = { workspace = true, optional = true, features = ["agentic-browser"] }
+zephium-store = { workspace = true, optional = true, features = ["work-execution"] }
+zephium-agent-controller = { workspace = true, optional = true, features = ["provider-transport"] }
+zephium-agent-provider-transport = { workspace = true, optional = true }

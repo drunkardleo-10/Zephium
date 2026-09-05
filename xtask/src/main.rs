@@ -17,6 +17,7 @@ mod extension_tree;
 mod macos_extension_compatibility;
 mod macos_process_family;
 mod webview2_extension_boundary;
+mod work_composition_boundary;
 mod work_persistence_boundary;
 
 use std::process::{exit, Command};
@@ -994,6 +995,38 @@ fn ci() {
             ],
         );
     }
+    #[cfg(target_os = "macos")]
+    for package in ["zephium-work-composition", "zephium-desktop"] {
+        for target in ["--all-targets", "--lib"] {
+            run(
+                "cargo",
+                &[
+                    "clippy",
+                    "--locked",
+                    "-p",
+                    package,
+                    "--features",
+                    "macos-work",
+                    target,
+                    "--",
+                    "-D",
+                    "warnings",
+                ],
+            );
+        }
+        run(
+            "cargo",
+            &[
+                "check",
+                "--locked",
+                "--release",
+                "-p",
+                package,
+                "--features",
+                "macos-work",
+            ],
+        );
+    }
     // `--all-targets` enables test-only references while linting library
     // artifacts, which can hide dead production paths behind cfg(test).
     run(
@@ -1047,6 +1080,7 @@ fn ci() {
 fn check_agentic_probe_boundary() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     if let Err(error) = agentic_probe_boundary::check(&repository)
+        .and_then(|()| work_composition_boundary::check(&repository))
         .and_then(|()| work_persistence_boundary::check(&repository))
     {
         eprintln!("agentic diagnostic release boundary failed: {error}");

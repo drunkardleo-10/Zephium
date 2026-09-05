@@ -2451,6 +2451,53 @@ pub(crate) fn run_work_actor(
         Arc<dyn zephium_agentic::AgentBrowserPort>,
     ) -> Result<crate::MacosAgentWorkProbePoll, &'static str>,
 ) -> Result<(), &'static str> {
+    run_work_host(profile, WorkProbeTeardown::Host, move |engine| {
+        let port = engine
+            .take_agent_browser_port(sink)
+            .ok_or("actor_port_taken")?;
+        start(port)
+    })
+}
+
+/// Excluded native host for the real application composition. It hands over
+/// the actual engine owner without consuming its one-shot agent port.
+pub(crate) fn run_work_application(
+    profile: ProfileId,
+    start: impl FnOnce(
+        Arc<crate::WebviewEngine>,
+    ) -> Result<crate::MacosAgentWorkProbePoll, &'static str>,
+) -> Result<(), &'static str> {
+    run_work_host(profile, WorkProbeTeardown::Application, start)
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum WorkProbeTeardown {
+    Host,
+    Application,
+}
+
+impl WorkProbeTeardown {
+    fn host_required(self, application_succeeded: bool) -> bool {
+        self == Self::Host || !application_succeeded
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn work_probe_teardown_keeps_exactly_one_success_owner_and_failure_cleanup() {
+    assert!(WorkProbeTeardown::Host.host_required(true));
+    assert!(WorkProbeTeardown::Host.host_required(false));
+    assert!(!WorkProbeTeardown::Application.host_required(true));
+    assert!(WorkProbeTeardown::Application.host_required(false));
+}
+
+fn run_work_host(
+    profile: ProfileId,
+    teardown: WorkProbeTeardown,
+    start: impl FnOnce(
+        Arc<crate::WebviewEngine>,
+    ) -> Result<crate::MacosAgentWorkProbePoll, &'static str>,
+) -> Result<(), &'static str> {
     use zephium_core::ports::engine::Engine as _;
     let mtm = MainThreadMarker::new().ok_or("actor_main_thread")?;
     let app = NSApplication::sharedApplication(mtm);
@@ -2473,44 +2520,47 @@ pub(crate) fn run_work_actor(
     let policy_sink = policy.clone();
     let generation =
         zephium_core::blocker::ContentPolicyGeneration::new(1).ok_or("actor_policy_generation")?;
-    let engine = crate::install(
-        parent,
-        dispatch,
-        data.path().to_owned(),
-        zephium_core::runtime_security::RuntimeSecurityAdvisories::new(),
-        crate::InitialUserContent::new(
-            zephium_core::ports::engine::UserContentGeneration::new(1).ok_or("actor_generation")?,
-            Default::default(),
-        ),
-        move |event| {
-            if let crate::EngineEvent::ContentRulesSettled {
-                profile: settled,
-                requested,
-                settlement,
-            } = event
-            {
-                if settled == profile && requested == generation {
-                    policy_sink.store(
-                        if matches!(
-                            settlement,
-                            zephium_core::ports::engine::ContentRuleSettlement::Applied { .. }
-                        ) {
-                            1
-                        } else {
-                            2
-                        },
-                        Ordering::Release,
-                    );
+    let engine = Arc::new(
+        crate::install(
+            parent,
+            dispatch,
+            data.path().to_owned(),
+            zephium_core::runtime_security::RuntimeSecurityAdvisories::new(),
+            crate::InitialUserContent::new(
+                zephium_core::ports::engine::UserContentGeneration::new(1)
+                    .ok_or("actor_generation")?,
+                Default::default(),
+            ),
+            move |event| {
+                if let crate::EngineEvent::ContentRulesSettled {
+                    profile: settled,
+                    requested,
+                    settlement,
+                } = event
+                {
+                    if settled == profile && requested == generation {
+                        policy_sink.store(
+                            if matches!(
+                                settlement,
+                                zephium_core::ports::engine::ContentRuleSettlement::Applied { .. }
+                            ) {
+                                1
+                            } else {
+                                2
+                            },
+                            Ordering::Release,
+                        );
+                    }
                 }
-            }
-        },
-        move |reason| {
-            *fatal_sink
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reason);
-        },
-    )
-    .map_err(|_| "actor_engine_install")?;
+            },
+            move |reason| {
+                *fatal_sink
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reason);
+            },
+        )
+        .map_err(|_| "actor_engine_install")?,
+    );
     let active = app.isActive();
     let main = window.isMainWindow();
     let run_loop = NSRunLoop::currentRunLoop();
@@ -2538,10 +2588,7 @@ pub(crate) fn run_work_actor(
         if policy.load(Ordering::Acquire) != 1 {
             return Err("actor_profile_policy");
         }
-        let port = engine
-            .take_agent_browser_port(sink)
-            .ok_or("actor_port_taken")?;
-        let mut poll = start(port)?;
+        let mut poll = start(engine.clone())?;
         let deadline = Instant::now() + Duration::from_secs(180);
         loop {
             for _ in 0..256 {
@@ -2569,6 +2616,13 @@ pub(crate) fn run_work_actor(
             pump_once(&run_loop, None);
         }
     })();
+    if !teardown.host_required(result.is_ok()) {
+        // The full application's success callback requires ShellShutdown
+        // Clean, which already consumed this exact engine barrier and joined
+        // its workers. Reissuing that one-shot barrier is a protocol error.
+        window.close();
+        return result;
+    }
     let shutdown = Arc::new(std::sync::atomic::AtomicU8::new(0));
     let callback = shutdown.clone();
     engine.shutdown(Box::new(move |clean| {

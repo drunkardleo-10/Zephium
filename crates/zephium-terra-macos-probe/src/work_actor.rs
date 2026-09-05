@@ -78,9 +78,17 @@ impl AgentWorkTask for Task {
     }
 }
 
-pub(super) fn run() -> Result<(), super::ProbeFailure> {
+pub(super) fn input(
+    started: Instant,
+) -> Result<
+    (
+        zephium_core::ids::ProfileId,
+        AgentWorkRunInput,
+        Box<dyn AgentWorkTask>,
+    ),
+    super::ProbeFailure,
+> {
     use super::ProbeFailure as Error;
-    let started = Instant::now();
     let profile = 1_u128.into();
     let context = ContextIdentity::new(
         ContextId::generate(),
@@ -146,6 +154,13 @@ pub(super) fn run() -> Result<(), super::ProbeFailure> {
         ),
     )
     .map_err(|_| Error::Authority)?;
+    Ok((profile, input, Box::new(Task(Default::default()))))
+}
+
+pub(super) fn run() -> Result<(), super::ProbeFailure> {
+    use super::ProbeFailure as Error;
+    let started = Instant::now();
+    let (profile, input, task) = input(started)?;
     let data = tempfile::tempdir().map_err(|_| Error::Runtime)?;
     let store =
         Arc::new(zephium_store::SqliteStore::open(data.path()).map_err(|_| Error::Runtime)?);
@@ -157,7 +172,7 @@ pub(super) fn run() -> Result<(), super::ProbeFailure> {
         transport,
         credential,
         store.clone(),
-        Box::new(Task(Default::default())),
+        task,
         AgentBrowserRetention::InspectablePublicData,
     )
     .map_err(|_| Error::Authority)?;

@@ -37,6 +37,7 @@ zephium-private-fs = { path = "crates/zephium-private-fs", version = "=0.1.0" }
 zephium-store = { path = "crates/zephium-store", version = "=0.1.0" }
 zephium-update-transport = { path = "crates/zephium-update-transport", version = "=0.1.0", default-features = false }
 zephium-app = { path = "crates/zephium-app", version = "=0.1.0" }
+zephium-work-composition = { path = "crates/zephium-work-composition", version = "=0.1.0" }
 
 tauri = { version = "=2.11.3", features = ["macos-private-api"] }
 tauri-build = "2"
