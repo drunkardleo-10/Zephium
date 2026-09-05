@@ -33,19 +33,34 @@ impl zephium_app::PresentationChrome for NoChrome {
 }
 
 pub(super) fn run() -> Result<(), super::ProbeFailure> {
-    run_mode(false, false)
+    run_mode(Qualification::Actions)
 }
 
 pub(super) fn run_extraction() -> Result<(), super::ProbeFailure> {
-    run_mode(true, false)
+    run_mode(Qualification::Extraction)
 }
 
 pub(super) fn run_artifact() -> Result<(), super::ProbeFailure> {
-    run_mode(true, true)
+    run_mode(Qualification::Artifact)
 }
 
-fn run_mode(extraction: bool, durable: bool) -> Result<(), super::ProbeFailure> {
+pub(super) fn run_cancellation() -> Result<(), super::ProbeFailure> {
+    run_mode(Qualification::CancelExtraction)
+}
+
+#[derive(Clone, Copy)]
+enum Qualification {
+    Actions,
+    Extraction,
+    Artifact,
+    CancelExtraction,
+}
+
+fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
     use super::ProbeFailure as Error;
+    let extraction = !matches!(mode, Qualification::Actions);
+    let durable = matches!(mode, Qualification::Artifact);
+    let cancel_after_turn = matches!(mode, Qualification::CancelExtraction);
     let started = Instant::now();
     let (profile, input, task) = if durable {
         super::work_actor::artifact_input(started)?
@@ -120,6 +135,9 @@ fn run_mode(extraction: bool, durable: bool) -> Result<(), super::ProbeFailure> 
             std::thread::JoinHandle<Result<ShutdownOutcome, std::sync::mpsc::RecvTimeoutError>>,
         > = None;
         let mut terminal_success = false;
+        let mut terminal_cancelled = false;
+        let mut cancellation_requested = false;
+        let mut native_actions = 0_u32;
         let mut terminal_observed = false;
         let mut archive_requested = false;
         let mut archive_verified = false;
@@ -153,6 +171,9 @@ fn run_mode(extraction: bool, durable: bool) -> Result<(), super::ProbeFailure> 
                         writeln!(output, "work-application-turn: call={}; input_tokens={input_tokens}; output_tokens={output_tokens}; request_bytes={request_bytes}; semantic_bytes={semantic_bytes}; cost_micro_usd={cost_micro_usd}; accounting={accounting:?}; turn_ms={elapsed_millis}; wall_ms={}; content=redacted", call.get(), event.elapsed_millis())
                     }
                     kind => {
+                        if matches!(kind, AgentWorkEventKind::ActionActive) {
+                            native_actions += 1;
+                        }
                         if matches!(kind, AgentWorkEventKind::Verified) {
                             effects += 1;
                         }
@@ -163,10 +184,23 @@ fn run_mode(extraction: bool, durable: bool) -> Result<(), super::ProbeFailure> 
                     failed.store(true, Ordering::Release);
                 }
             }
+            // Explicit trusted test control after one real settled Luna turn.
+            // This is the same application stop port as a human takeover; no
+            // provider or native fault is synthesized and no request is retried.
+            if cancel_after_turn && turns > 0 && !cancellation_requested {
+                cancellation_requested = snapshot
+                    .run
+                    .is_some_and(|run| view.stop(run, AgentRuntimeStopReason::HumanTakeover));
+                if !cancellation_requested {
+                    failed.store(true, Ordering::Release);
+                }
+            }
             if shutdown.is_none()
                 && (matches!(
                     snapshot.phase,
                     AgentWorkApplicationPhase::Succeeded
+                        | AgentWorkApplicationPhase::Failed
+                        | AgentWorkApplicationPhase::Cancelled
                         | AgentWorkApplicationPhase::Recovery
                         | AgentWorkApplicationPhase::NeedsReview
                         | AgentWorkApplicationPhase::PersistenceUncertain
@@ -179,6 +213,20 @@ fn run_mode(extraction: bool, durable: bool) -> Result<(), super::ProbeFailure> 
                         && snapshot.failure.is_none()
                         && view.records().iter().any(|record| {
                             record.disposition() == zephium_agentic::AgentWorkDisposition::Succeeded
+                        });
+                    terminal_cancelled = cancel_after_turn
+                        && cancellation_requested
+                        && snapshot.phase == AgentWorkApplicationPhase::Cancelled
+                        && snapshot.failure
+                            == Some(zephium_agent_controller::AgentWorkFailure::HumanTakeover)
+                        && snapshot.persistence_failure.is_none()
+                        && turns > 0
+                        && native_actions == 0
+                        && effects == 0
+                        && view.take_extraction().is_none()
+                        && view.records().iter().any(|record| {
+                            record.disposition() == zephium_agentic::AgentWorkDisposition::Cancelled
+                                && record.debt() == zephium_agentic::AgentWorkDebt::NONE
                         });
                     if extraction && terminal_success {
                         terminal_success = view.take_extraction().is_some_and(|result| {
@@ -224,7 +272,7 @@ fn run_mode(extraction: bool, durable: bool) -> Result<(), super::ProbeFailure> 
                     let erased = cleanup.as_mut().and_then(|cleanup| cleanup.poll())?;
                     terminal_success &= archive_verified && erased;
                 }
-                let _ = writeln!(std::io::stdout().lock(), "work-application-terminal: phase={:?}; failure={:?}; persistence={:?}; durable_success={terminal_success}; content=redacted", snapshot.phase, snapshot.failure, snapshot.persistence_failure);
+                let _ = writeln!(std::io::stdout().lock(), "work-application-terminal: phase={:?}; failure={:?}; persistence={:?}; durable_success={terminal_success}; cancelled_closed={terminal_cancelled}; content=redacted", snapshot.phase, snapshot.failure, snapshot.persistence_failure);
                 let request = shell.shutdown_with_deadline(Instant::now() + Duration::from_secs(8));
                 shutdown = std::thread::Builder::new()
                     .name("work-qualifier-join".into())
@@ -238,9 +286,16 @@ fn run_mode(extraction: bool, durable: bool) -> Result<(), super::ProbeFailure> 
                 let clean = shutdown
                     .take()
                     .is_some_and(|join| matches!(join.join(), Ok(Ok(ShutdownOutcome::Clean))));
-                let _ = writeln!(std::io::stdout().lock(), "work-application-closure: model=gpt-5.6-luna; durable_success={terminal_success}; shell_clean={clean}; turns={turns}; verified_effects={effects}; input_tokens={tokens_in}; output_tokens={tokens_out}; cost_micro_usd={cost}; elapsed_ms={}; content=redacted", started.elapsed().as_millis());
+                let _ = writeln!(std::io::stdout().lock(), "work-application-closure: model=gpt-5.6-luna; durable_success={terminal_success}; cancelled_closed={terminal_cancelled}; shell_clean={clean}; turns={turns}; native_actions={native_actions}; verified_effects={effects}; input_tokens={tokens_in}; output_tokens={tokens_out}; cost_micro_usd={cost}; elapsed_ms={}; content=redacted", started.elapsed().as_millis());
                 return Some(
-                    if clean && terminal_success && !failed.load(Ordering::Acquire) {
+                    if clean
+                        && (if cancel_after_turn {
+                            terminal_cancelled
+                        } else {
+                            terminal_success
+                        })
+                        && !failed.load(Ordering::Acquire)
+                    {
                         Ok(())
                     } else {
                         Err("application_closure")

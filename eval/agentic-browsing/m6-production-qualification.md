@@ -1157,6 +1157,80 @@ shipping/all-feature Clippy, 172 xtask tests, all four agent architecture gates,
 optimized default/`macos-work` desktop checks and the default dependency
 exclusions passed. No live provider rerun was needed for this test-only fix.
 
+## Fully settled unsuccessful Work closure — 2026-09-05
+
+The actor now separates task failure/cancellation from resource drain. A
+fully accounted refusal or stop can produce `ClosedUnsuccessfully`, then an
+immutable zero-debt `Failed` or `Cancelled` fact after the original runtime
+join and exact SQLite ACK. This removes needless unclean application shutdown
+for ordinary settled failures without reopening the single-use native port.
+Unknown callbacks, retained action/policy owners, mailbox faults and undelivered
+audit still require recovery. No mutation is retried and no unsuccessful
+result/artifact is published.
+
+The excluded `--live-public-luna-work-cancellation-inspectable` mode uses the
+same trusted macOS composition, actual Shell/SQLite application coordinator,
+extension-free native context and Luna session as successful extraction. After
+the first settled public tool turn it requests `HumanTakeover` through the
+shipping application control port. It does not synthesize a provider/native
+failure. Two runs passed, including the final rebuilt actor; the intervening
+ordinary extraction regression also passed.
+
+| Public application run | Charged input / output tokens | Priced ceiling µUSD | Wall ms | Exact full outcome |
+| --- | ---: | ---: | ---: | --- |
+| Human takeover | 1,480 / 37 | 415 | 3,402 | Cancelled, zero debt, Shell Clean |
+| Successful extraction regression | 6,879 / 382 | 1,839 | 7,564 | Succeeded, verified result, Shell Clean |
+| Human takeover, final build | 1,480 / 38 | 76 | 2,549 | Cancelled, zero debt, Shell Clean |
+
+Each takeover run settled the first model turn (2,668/1,916 ms respectively),
+then aborted and accounted the next extraction attempt (7/6 ms, zero charged
+tokens). Request/semantic byte counts were 5,658/3,116 for the first turn and
+21,184/13,330 for the aborted attempt. Both retained the exact `HumanTakeover`
+cause, had no persistence error, returned no result and independently required
+the durable `Cancelled`/zero-debt fact. They are not successful task completions.
+The success regression used two completed turns (1,986/4,956 ms;
+5,658/21,160 request bytes; 3,116/13,330 semantic bytes) and independently checked
+ten native-cited values with fourteen source edges. All three runs had zero
+native mutations/action effects, zero focus theft and clean application-owned
+teardown. OpenAI retention was enabled only for this explicit public mode;
+production/BYOK remains `store:false`. No content, credential, trace or profile
+is committed.
+
+Deterministic coverage includes settled provider count/stream refusal and
+cancellation, the exact variable-turn ceiling, extraction contract refusal,
+read/takeover/suspend/revocation races, refused/duplicate/lost native cancellation
+and shutdown-audit receipts, and lost/refused durable audit delivery after native
+drain. Original action refusal/callback/verification/charged-effect owners remain
+in recovery. Failed terminal CAS tests cover foreign guards, lost ACKs, immutable
+retransmission, late takeover and historical-read phase isolation. Actual
+Shell/SQLite success and failure cases use separate processes: the real process
+fence remains held even after clean shutdown. Core/Store tests cover immutable
+failed/cancelled records, partial writes, rollback, post-commit uncertainty and
+restart without executable restoration.
+
+Passing final suites: 425 core; 14 shipping / 18 probe controller; 37 runtime;
+339 shipping application and 343 all-feature application (the existing
+subprocess helper is ignored directly and exercised by its parent), both
+full-suite commands repeated; 264 Store plus four doctests (one similarly
+parent-exercised helper); 461 semantic-native engine plus three probe tests;
+97 desktop plus one existing ignored test; and 174 xtask tests. Strict Clippy
+passes on shipping/probe controller and application, core, runtime, Store,
+composition, qualifier, desktop and xtask, including shipping `--lib` checks.
+Both optimized default and `macos-work` desktop checks pass. Controller,
+runtime, catalog, composition/persistence and semantic source gates pass;
+optimized qualifier enablement is compile-refused. The default desktop graph
+still excludes controller/runtime/provider transport, Work composition and
+reqwest. No dependency/lockfile, native scheduling, action protocol or idle
+worker change was introduced; no new resource/battery measurement is claimed.
+
+The single-attempt process/engine lifetime remains unchanged. Admission failure,
+lost native action settlement and failure during an already-started terminal
+resource close remain explicit recovery; this pass does not fabricate a second
+close or a native resume operation. Task authoring, repeatable newly authorized
+native lifetimes, richer navigation/tools, concurrent Browse and device-resource
+qualification remain open. This is narrow full-application closure evidence,
+not broad production qualification.
+
 ## Remaining release blockers
 
 - authorized named-device macOS native-input routes beyond fixed DOM;

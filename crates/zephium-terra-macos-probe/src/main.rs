@@ -68,6 +68,9 @@ fn main() {
         [argument] if argument == "--live-public-luna-work-artifact-inspectable" => {
             work_application::run_artifact()
         }
+        [argument] if argument == "--live-public-luna-work-cancellation-inspectable" => {
+            work_application::run_cancellation()
+        }
         [argument, directory] if argument == "--cleanup-public-work-artifact" => {
             work_artifact_cleanup::recover(std::path::Path::new(directory))
         }
