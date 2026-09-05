@@ -2349,6 +2349,7 @@ pub struct AgentProviderExtractionRequestDraft {
     semantic_stats: SemanticExtractionEncodingStats,
     continuation_transcript: AgentProviderTranscript,
     schema: crate::SemanticExtractionSchemaId,
+    subtree_target: Option<crate::SemanticReferenceId>,
 }
 
 impl AgentProviderExtractionRequestDraft {
@@ -2373,6 +2374,7 @@ impl AgentProviderExtractionRequestDraft {
             )?,
         };
         let schema = continuation.schema();
+        let subtree_target = continuation.subtree_target();
         let (call, config, baseline, continuation_transcript, semantic_stats, delivery) =
             continuation.into_request_parts();
         Ok(Self {
@@ -2387,6 +2389,7 @@ impl AgentProviderExtractionRequestDraft {
             semantic_stats,
             continuation_transcript,
             schema,
+            subtree_target,
         })
     }
 
@@ -2450,6 +2453,7 @@ impl AgentProviderExtractionRequestDraft {
             AgentModelCallExpectation::new(call.manifest(), call.call(), call.lease(), call.node()),
             AgentProviderExtractionInput::new(
                 &self.baseline,
+                self.subtree_target,
                 schema,
                 read,
                 &self.delivery,
@@ -2491,6 +2495,7 @@ impl AgentProviderExtractionRequestDraft {
             AgentModelCallExpectation::new(call.manifest(), call.call(), call.lease(), call.node()),
             AgentProviderExtractionInput::new(
                 &self.baseline,
+                self.subtree_target,
                 schema,
                 read,
                 &self.delivery,
@@ -4280,6 +4285,48 @@ static ANTHROPIC_LOCATE_ACT_EXTRACTION_TOOL_DEFINITIONS: LazyLock<
         .collect()
 });
 
+fn scoped_extraction_tools(actions: bool) -> Vec<BrowserToolDefinition> {
+    let mut tools = build_browser_tool_definitions(true);
+    if !actions {
+        tools.retain(|tool| tool.kind == AgentBrowserToolKind::Locate);
+    }
+    tools.push(BrowserToolDefinition {
+        kind: AgentBrowserToolKind::Extract,
+        description: "Extract the approved fields with trusted schema 1. Use initial for the delivered observation, or subtree with one current opaque target ref for a fresh bounded native read of that subtree. Prefer the smallest relevant subtree; locate its ref if needed. Only extract after the approved task postcondition holds. This is terminal mapping, not action or navigation authority.",
+        parameters: strict_object(vec![
+            ("scope", json!({"anyOf":[tagged_object("initial", vec![]), tagged_object("subtree", vec![("target", reference_schema())])]})),
+            ("schema_id", json!({"type":"integer","enum":[1]})),
+        ]),
+    });
+    tools
+}
+
+static SCOPED_EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolDefinition>> =
+    LazyLock::new(|| scoped_extraction_tools(false));
+static LOCATE_ACT_SCOPED_EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolDefinition>> =
+    LazyLock::new(|| scoped_extraction_tools(true));
+
+fn anthropic_scoped_extraction_tools(actions: bool) -> Vec<AnthropicBrowserToolDefinition> {
+    let tools = if actions {
+        &LOCATE_ACT_SCOPED_EXTRACTION_TOOL_DEFINITIONS
+    } else {
+        &SCOPED_EXTRACTION_TOOL_DEFINITIONS
+    };
+    tools
+        .iter()
+        .map(|tool| AnthropicBrowserToolDefinition {
+            kind: tool.kind,
+            description: tool.description,
+            input_schema: project_anthropic_schema(&tool.parameters),
+        })
+        .collect()
+}
+static ANTHROPIC_SCOPED_EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<AnthropicBrowserToolDefinition>> =
+    LazyLock::new(|| anthropic_scoped_extraction_tools(false));
+static ANTHROPIC_LOCATE_ACT_SCOPED_EXTRACTION_TOOL_DEFINITIONS: LazyLock<
+    Vec<AnthropicBrowserToolDefinition>,
+> = LazyLock::new(|| anthropic_scoped_extraction_tools(true));
+
 static ANTHROPIC_EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<AnthropicBrowserToolDefinition>> =
     LazyLock::new(|| {
         EXTRACTION_TOOL_DEFINITIONS
@@ -4329,6 +4376,10 @@ fn browser_tool_definitions_for(
         super::BrowserToolProfile::Extraction => &EXTRACTION_TOOL_DEFINITIONS,
         super::BrowserToolProfile::LocateAct => &LOCATE_ACT_TOOL_DEFINITIONS,
         super::BrowserToolProfile::LocateActExtraction => &LOCATE_ACT_EXTRACTION_TOOL_DEFINITIONS,
+        super::BrowserToolProfile::ScopedExtraction => &SCOPED_EXTRACTION_TOOL_DEFINITIONS,
+        super::BrowserToolProfile::LocateActScopedExtraction => {
+            &LOCATE_ACT_SCOPED_EXTRACTION_TOOL_DEFINITIONS
+        }
         super::BrowserToolProfile::Full => browser_tool_definitions(),
     }
 }
@@ -4341,6 +4392,12 @@ fn anthropic_browser_tool_definitions(
         super::BrowserToolProfile::LocateAct => &ANTHROPIC_LOCATE_ACT_TOOL_DEFINITIONS,
         super::BrowserToolProfile::LocateActExtraction => {
             &ANTHROPIC_LOCATE_ACT_EXTRACTION_TOOL_DEFINITIONS
+        }
+        super::BrowserToolProfile::ScopedExtraction => {
+            &ANTHROPIC_SCOPED_EXTRACTION_TOOL_DEFINITIONS
+        }
+        super::BrowserToolProfile::LocateActScopedExtraction => {
+            &ANTHROPIC_LOCATE_ACT_SCOPED_EXTRACTION_TOOL_DEFINITIONS
         }
         super::BrowserToolProfile::Full => &ANTHROPIC_BROWSER_TOOL_DEFINITIONS,
     }
@@ -5062,6 +5119,56 @@ mod tests {
             let restricted = config.clone().restrict_to_locate_and_act();
             let extraction = config.clone().restrict_to_extraction();
             let combined = config.clone().restrict_to_actions_and_extraction();
+            for actions in [false, true] {
+                let scoped = if actions {
+                    config.clone().restrict_to_actions_and_scoped_extraction()
+                } else {
+                    config.clone().restrict_to_scoped_extraction()
+                };
+                assert_ne!(scoped, combined);
+                assert_ne!(scoped, extraction);
+                assert_eq!(scoped.clone().restrict_to_extraction(), extraction);
+                for kind in AgentBrowserToolKind::ALL {
+                    assert_eq!(
+                        scoped.permits_tool(kind),
+                        matches!(
+                            kind,
+                            AgentBrowserToolKind::Locate | AgentBrowserToolKind::Extract
+                        ) || actions && kind == AgentBrowserToolKind::Act
+                    );
+                }
+                let body = match provider {
+                    AgentProviderKind::OpenAiResponses => {
+                        encode_openai_body(&scoped, "fixture", "fixture")
+                    }
+                    AgentProviderKind::AnthropicMessages => {
+                        encode_anthropic_body(&scoped, "fixture", "fixture")
+                    }
+                }
+                .unwrap();
+                let wire: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(
+                    wire["tools"].as_array().unwrap().len(),
+                    if actions { 3 } else { 2 }
+                );
+                let extraction = browser_tool_definitions_for(&scoped)
+                    .iter()
+                    .find(|tool| tool.kind == AgentBrowserToolKind::Extract)
+                    .unwrap();
+                let scopes = extraction.parameters["properties"]["scope"]["anyOf"]
+                    .as_array()
+                    .unwrap();
+                assert_eq!(scopes.len(), 2);
+                assert_eq!(scopes[0]["properties"]["kind"]["enum"], json!(["initial"]));
+                assert_eq!(scopes[1]["properties"]["kind"]["enum"], json!(["subtree"]));
+                assert_eq!(scopes[1]["properties"]["target"], reference_schema());
+                assert_eq!(scopes[1]["required"], json!(["kind", "target"]));
+                assert_eq!(scopes[1]["additionalProperties"], false);
+                assert_eq!(
+                    extraction.parameters["properties"]["schema_id"]["enum"],
+                    json!([1])
+                );
+            }
             assert_ne!(combined, config);
             assert_ne!(combined, restricted);
             assert_ne!(combined, extraction);

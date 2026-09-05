@@ -736,6 +736,8 @@ enum BrowserToolProfile {
     LocateAct,
     Extraction,
     LocateActExtraction,
+    ScopedExtraction,
+    LocateActScopedExtraction,
 }
 
 impl AgentProviderCallConfig {
@@ -802,15 +804,44 @@ impl AgentProviderCallConfig {
         self
     }
 
+    /// Enables bounded locate and schema-1 extraction from either the exact
+    /// current baseline or one freshly captured, acknowledged-ref subtree.
+    /// No native action, navigation or standalone snapshot is enabled.
+    pub fn restrict_to_scoped_extraction(mut self) -> Self {
+        self.tools = BrowserToolProfile::ScopedExtraction;
+        self
+    }
+
+    /// Enables the same verified snapshot actions and terminal scoped read.
+    /// The trusted host must gate both task readiness and scope admission.
+    pub fn restrict_to_actions_and_scoped_extraction(mut self) -> Self {
+        self.tools = BrowserToolProfile::LocateActScopedExtraction;
+        self
+    }
+
+    pub(super) fn permits_subtree_extraction(&self) -> bool {
+        matches!(
+            self.tools,
+            BrowserToolProfile::Full
+                | BrowserToolProfile::ScopedExtraction
+                | BrowserToolProfile::LocateActScopedExtraction
+        )
+    }
+
     pub(super) fn permits_tool(&self, kind: AgentBrowserToolKind) -> bool {
         match self.tools {
             BrowserToolProfile::Full => true,
             BrowserToolProfile::Extraction => kind == AgentBrowserToolKind::Extract,
+            BrowserToolProfile::ScopedExtraction => matches!(
+                kind,
+                AgentBrowserToolKind::Locate | AgentBrowserToolKind::Extract
+            ),
             BrowserToolProfile::LocateAct => matches!(
                 kind,
                 AgentBrowserToolKind::Locate | AgentBrowserToolKind::Act
             ),
-            BrowserToolProfile::LocateActExtraction => matches!(
+            BrowserToolProfile::LocateActExtraction
+            | BrowserToolProfile::LocateActScopedExtraction => matches!(
                 kind,
                 AgentBrowserToolKind::Locate
                     | AgentBrowserToolKind::Act

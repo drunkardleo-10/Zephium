@@ -712,12 +712,17 @@ impl AgentBrowserToolCall {
             AgentBrowserToolProposal::Extract { schema, .. } => Some(*schema),
             _ => None,
         };
+        let extraction_scope = match self.proposal.as_ref() {
+            AgentBrowserToolProposal::Extract { scope, .. } => Some(scope.clone()),
+            _ => None,
+        };
         (
             AgentProviderToolCallCorrelation {
                 source_call: self.source_call,
                 id: self.id,
                 kind: self.proposal.kind(),
                 extraction_schema,
+                extraction_scope,
                 provider_item_id: self.provider_item_id,
                 arguments: self.arguments,
                 openai_replay: self.openai_replay,
@@ -755,6 +760,7 @@ pub(crate) struct AgentProviderToolCallCorrelation {
     pub(super) id: AgentBrowserToolCallId,
     pub(super) kind: AgentBrowserToolKind,
     pub(super) extraction_schema: Option<SemanticExtractionSchemaId>,
+    pub(super) extraction_scope: Option<AgentBrowserScopeProposal>,
     pub(super) provider_item_id: Option<String>,
     pub(super) arguments: String,
     pub(super) openai_replay: Option<Box<OpenAiResponseReplay>>,

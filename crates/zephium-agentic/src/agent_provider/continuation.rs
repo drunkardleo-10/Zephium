@@ -604,12 +604,59 @@ impl AgentProviderContinuation {
         })
     }
 
+    /// Binds one requested subtree capture to the exact delivered predecessor.
+    /// This read-only request grants neither native dispatch nor new model-visible
+    /// baseline authority. The eventual mapping must rejoin the same scope proof.
+    pub fn begin_extraction_subtree(
+        &self,
+        observation: &crate::SemanticObservation,
+        frames: &[crate::SemanticFrameJoin],
+        id: SemanticObservationId,
+        schema: &SemanticExtractionSchema,
+        budget: crate::SemanticObservationBudget,
+    ) -> Result<crate::SemanticObservationRequest, AgentProviderContinuationError> {
+        if !self.config.permits_subtree_extraction()
+            || self.correlation.kind() != AgentBrowserToolKind::Extract
+            || self.correlation.extraction_schema != Some(schema.id())
+        {
+            return Err(AgentProviderContinuationError::ToolKind);
+        }
+        let Some(super::AgentBrowserScopeProposal::Subtree(target)) =
+            self.correlation.extraction_scope
+        else {
+            return Err(AgentProviderContinuationError::ToolKind);
+        };
+        if !self.baseline.matches(observation)
+            || frames.len() != observation.frames().len()
+            || observation
+                .frames()
+                .iter()
+                .any(|frame| !frames.contains(frame.frame()))
+        {
+            return Err(AgentProviderContinuationError::Baseline);
+        }
+        let frame = observation
+            .frames()
+            .iter()
+            .find(|frame| frame.nodes().iter().any(|node| node.reference() == target))
+            .ok_or(AgentProviderContinuationError::Baseline)?;
+        observation
+            .begin_expansion(
+                id,
+                target,
+                frame.frame(),
+                crate::SemanticExpansionKind::Subtree,
+                budget,
+            )
+            .map_err(|_| AgentProviderContinuationError::Baseline)
+    }
+
     /// Binds one provisional same-plan request to an exact extraction mapping input.
     ///
     /// Only a prior `extract` call selecting this exact trusted schema may
-    /// enter the path. The bounded read must derive from the already-committed
-    /// provider baseline; progressive replacements require their own delivered
-    /// observation first.
+    /// enter the path. The read must derive from the committed baseline, or
+    /// from the exact requested native subtree with its validated predecessor
+    /// proof. Scoped extraction never acknowledges a new actionable baseline.
     pub fn bind_extraction_request(
         self,
         request: AgentModelCallRequest,
@@ -654,9 +701,24 @@ impl AgentProviderContinuation {
         {
             return Err(AgentProviderContinuationError::ToolKind);
         }
-        if !read.matches_acknowledgement(&self.baseline) {
+        let matches_scope = match &self.correlation.extraction_scope {
+            Some(super::AgentBrowserScopeProposal::Initial) => {
+                read.matches_acknowledgement(&self.baseline)
+            }
+            Some(super::AgentBrowserScopeProposal::Subtree(target))
+                if self.config.permits_subtree_extraction() =>
+            {
+                read.matches_subtree(&self.baseline, *target)
+            }
+            _ => false,
+        };
+        if !matches_scope {
             return Err(AgentProviderContinuationError::Baseline);
         }
+        let subtree_target = match self.correlation.extraction_scope {
+            Some(super::AgentBrowserScopeProposal::Subtree(target)) => Some(target),
+            _ => None,
+        };
         if !payload.matches(schema, read) {
             return Err(AgentProviderContinuationError::Payload);
         }
@@ -673,6 +735,7 @@ impl AgentProviderContinuation {
             delivery,
             schema: schema.id(),
             output_schema: super::request::bound_extraction_output_schema(schema),
+            subtree_target,
             observation: read.observation(),
             observation_generation: read.observation_generation(),
         })
@@ -1136,11 +1199,15 @@ pub struct AgentProviderBoundExtractionContinuation {
     delivery: SemanticExtractionDeliveryAuthority,
     schema: crate::SemanticExtractionSchemaId,
     output_schema: serde_json::Value,
+    subtree_target: Option<crate::SemanticReferenceId>,
     observation: SemanticObservationId,
     observation_generation: SemanticObservationGeneration,
 }
 
 impl AgentProviderBoundExtractionContinuation {
+    pub(super) const fn subtree_target(&self) -> Option<crate::SemanticReferenceId> {
+        self.subtree_target
+    }
     /// Exact completed provider call awaiting extraction evidence.
     pub const fn prior_call(&self) -> AgentProviderCallIdentity {
         self.prior_call
@@ -1559,11 +1626,24 @@ mod tests {
         baseline: SemanticObservationAcknowledgement,
         schema: SemanticExtractionSchemaId,
     ) -> AgentProviderContinuation {
+        extraction_continuation_with_scope(
+            provider,
+            baseline,
+            schema,
+            json!({"kind":"initial"}),
+            config(provider),
+        )
+    }
+
+    fn extraction_continuation_with_scope(
+        provider: AgentProviderKind,
+        baseline: SemanticObservationAcknowledgement,
+        schema: SemanticExtractionSchemaId,
+        scope: serde_json::Value,
+        config: AgentProviderCallConfig,
+    ) -> AgentProviderContinuation {
         let prior = call(1);
-        let arguments = format!(
-            r#"{{"scope":{{"kind":"initial"}},"schema_id":{}}}"#,
-            schema.get()
-        );
+        let arguments = json!({"scope":scope,"schema_id":schema.get()}).to_string();
         let tool = match provider {
             AgentProviderKind::OpenAiResponses => {
                 super::super::AgentBrowserToolCall::decode_openai(
@@ -1586,7 +1666,7 @@ mod tests {
         let correlation = tool.into_continuation_parts().0;
         AgentProviderContinuationSeed {
             call: prior,
-            config: config(provider),
+            config,
             baseline,
             transcript: transcript(),
         }
@@ -1727,6 +1807,148 @@ mod tests {
         }
         .join_terminal_tool(completion(prior, 2), correlation)
         .expect("screenshot terminal join")
+    }
+
+    #[test]
+    fn subtree_extraction_binds_fresh_native_scope_without_promoting_model_acknowledgement() {
+        for provider in [
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderKind::AnthropicMessages,
+        ] {
+            let context = context();
+            let observed = observation(context, 1, 1, 1, "synthetic initial content");
+            let acknowledgement = SemanticObservationAcknowledgement::from_fingerprint(
+                SemanticObservationFingerprint::from_observation(&observed),
+            );
+            let schema = extraction_schema(1);
+            let config = config(provider).restrict_to_scoped_extraction();
+            let continuation = |target: u16| {
+                extraction_continuation_with_scope(
+                    provider,
+                    acknowledgement.clone(),
+                    schema.id(),
+                    json!({"kind":"subtree","target":format!("@a{target}")}),
+                    config.clone(),
+                )
+            };
+            let frames = observed
+                .frames()
+                .iter()
+                .map(|frame| frame.frame().clone())
+                .collect::<Vec<_>>();
+            let id = SemanticObservationId::new(2).unwrap();
+            assert!(continuation(2)
+                .begin_extraction_subtree(
+                    &observed,
+                    &[],
+                    id,
+                    &schema,
+                    SemanticObservationBudget::INITIAL_FILTERED
+                )
+                .is_err());
+            assert!(continuation(99)
+                .begin_extraction_subtree(
+                    &observed,
+                    &frames,
+                    id,
+                    &schema,
+                    SemanticObservationBudget::INITIAL_FILTERED
+                )
+                .is_err());
+            let altered = observation(context, 1, 1, 1, "synthetic substituted predecessor");
+            assert!(continuation(2)
+                .begin_extraction_subtree(
+                    &altered,
+                    &frames,
+                    id,
+                    &schema,
+                    SemanticObservationBudget::INITIAL_FILTERED
+                )
+                .is_err());
+            let request = continuation(2)
+                .begin_extraction_subtree(
+                    &observed,
+                    &frames,
+                    id,
+                    &schema,
+                    SemanticObservationBudget::INITIAL_FILTERED,
+                )
+                .unwrap();
+            let current = observation(context, 2, 2, 2, "synthetic newly captured content");
+            let expanded =
+                SemanticObservationAssembler::new(request.clone(), current.frames()[0].clone())
+                    .unwrap()
+                    .finish()
+                    .unwrap();
+            let read = read_semantic_observation(
+                &expanded,
+                SemanticReadAuthority::AcknowledgedExpansion {
+                    previous: &observed,
+                    acknowledgement: &acknowledgement,
+                },
+                SemanticCaptureInstant::from_millis(1_551),
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::STANDARD,
+            )
+            .unwrap();
+            assert!(!read.matches_acknowledgement(&acknowledgement));
+            assert!(read.matches_subtree(
+                &acknowledgement,
+                crate::SemanticReferenceId::new(2).unwrap()
+            ));
+            assert!(matches!(
+                SemanticObservationAssembler::new(request, observed.frames()[0].clone())
+                    .unwrap()
+                    .finish(),
+                Err(crate::SemanticObservationError::ScopeGenerationMismatch)
+            ));
+            let payload = || {
+                encode_semantic_extraction_request(
+                    &schema,
+                    &read,
+                    SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
+                )
+                .unwrap()
+                .admit_conservative_utf8(config.tokenizer())
+                .unwrap()
+            };
+            assert!(matches!(
+                continuation(1).bind_extraction(call(2), &config, &schema, &read, payload()),
+                Err(AgentProviderContinuationError::Baseline)
+            ));
+            assert!(matches!(
+                continuation(2).bind_extraction(
+                    call(2),
+                    &config.clone().restrict_to_extraction(),
+                    &schema,
+                    &read,
+                    payload()
+                ),
+                Err(AgentProviderContinuationError::Config)
+            ));
+            let initial = extraction_continuation_with_scope(
+                provider,
+                acknowledgement.clone(),
+                schema.id(),
+                json!({"kind":"initial"}),
+                config.clone(),
+            );
+            assert!(matches!(
+                initial.bind_extraction(call(2), &config, &schema, &read, payload()),
+                Err(AgentProviderContinuationError::Baseline)
+            ));
+            let bound = continuation(2)
+                .bind_extraction(call(2), &config, &schema, &read, payload())
+                .unwrap();
+            assert_eq!(bound.observation(), expanded.request().id());
+            let draft = super::super::AgentProviderExtractionRequestDraft::try_new(bound).unwrap();
+            let wire: serde_json::Value = serde_json::from_slice(draft.request().body()).unwrap();
+            assert!(wire.get("tools").is_none());
+            assert!(serde_json::to_string(&wire)
+                .unwrap()
+                .contains("synthetic newly captured content"));
+            assert!(!format!("{draft:?}").contains("synthetic newly captured content"));
+        }
     }
 
     #[test]

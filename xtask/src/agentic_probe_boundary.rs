@@ -6274,7 +6274,7 @@ fn validate_semantic_extraction_provider_contract(
     for required in [
         "AgentBrowserToolProposal::Extract{schema,..}=>Some(*schema)",
         "extraction_schema:Option<SemanticExtractionSchemaId>",
-        "extraction_schema,provider_item_id:self.provider_item_id",
+        "extraction_schema,extraction_scope,provider_item_id:self.provider_item_id",
     ] {
         if !provider_tool.contains(required) {
             return Err(format!(
@@ -6391,7 +6391,9 @@ fn validate_semantic_extraction_provider_contract(
         "pub(crate)structAgentProviderExtractionInput<'a,'read>",
         "pub(crate)fnprepare_provider_extraction_input(",
         "!input.delivery.matches(input.schema,input.read)",
-        "!input.read.matches_acknowledgement(input.baseline)",
+        "matchinput.subtree_target",
+        "None=>{provider_read_taints(",
+        "Some(target)=>provider_subtree_read_taints(",
         "provider_read_taints(input.read,input.baseline,request.account(),&self.taints)?",
         "ModelInputKind::Extraction",
         "pubfncommit_extraction_input(",
@@ -9873,7 +9875,7 @@ mod tests {
             continuation,
             provider_request,
             provider_extraction,
-            &policy.replace("|| !input.read.matches_acknowledgement(input.baseline)", "",),
+            &policy.replace("match input.subtree_target", "removed_boundary"),
         )
         .is_err());
     }

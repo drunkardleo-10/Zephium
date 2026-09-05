@@ -6473,9 +6473,39 @@ mod tests {
                 &body["output_config"]["format"]["schema"]
             }
         };
-        assert!(!serde_json::to_string(format_schema)
-            .expect("fixed output schema")
-            .contains("title"));
+        // Trusted field names are intentionally bound into the schema; they
+        // are values, not schema metadata or an unbounded output contract.
+        assert_eq!(
+            format_schema["properties"]["schema"]["enum"],
+            serde_json::json!([71])
+        );
+        let fields = &format_schema["properties"]["fields"];
+        let variants = fields["items"]["anyOf"].as_array().expect("bound fields");
+        assert_eq!(variants.len(), 1);
+        assert_eq!(variants[0]["additionalProperties"], false);
+        assert_eq!(
+            variants[0]["properties"]["name"]["enum"],
+            serde_json::json!(["title"])
+        );
+        assert_eq!(
+            variants[0]["properties"]["value"]["properties"]["k"]["enum"],
+            serde_json::json!(["text"])
+        );
+        let maximum = &variants[0]["properties"]["value"]["properties"]["value"]["maxLength"];
+        match provider {
+            AgentProviderKind::OpenAiResponses => {
+                assert_eq!(fields["minItems"], 1);
+                assert_eq!(fields["maxItems"], 1);
+                assert_eq!(maximum, 64);
+            }
+            AgentProviderKind::AnthropicMessages => {
+                // The existing Anthropic projection omits unsupported numeric
+                // schema bounds; the same Rust result admission enforces them.
+                assert!(fields.get("minItems").is_none());
+                assert!(fields.get("maxItems").is_none());
+                assert!(maximum.is_null());
+            }
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

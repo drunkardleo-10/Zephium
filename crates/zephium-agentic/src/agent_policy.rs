@@ -589,6 +589,7 @@ impl AgentModelCallExpectation {
 /// Exact purpose-bound extraction evidence awaiting policy reservation.
 pub(crate) struct AgentProviderExtractionInput<'a, 'read> {
     baseline: &'a SemanticObservationAcknowledgement,
+    subtree_target: Option<SemanticReferenceId>,
     schema: &'a SemanticExtractionSchema,
     read: &'a SemanticReadResult<'read>,
     delivery: &'a SemanticExtractionDeliveryAuthority,
@@ -598,6 +599,7 @@ pub(crate) struct AgentProviderExtractionInput<'a, 'read> {
 impl<'a, 'read> AgentProviderExtractionInput<'a, 'read> {
     pub(crate) const fn new(
         baseline: &'a SemanticObservationAcknowledgement,
+        subtree_target: Option<SemanticReferenceId>,
         schema: &'a SemanticExtractionSchema,
         read: &'a SemanticReadResult<'read>,
         delivery: &'a SemanticExtractionDeliveryAuthority,
@@ -605,6 +607,7 @@ impl<'a, 'read> AgentProviderExtractionInput<'a, 'read> {
     ) -> Self {
         Self {
             baseline,
+            subtree_target,
             schema,
             read,
             delivery,
@@ -1413,7 +1416,8 @@ impl AgentRunPolicy {
     ///
     /// The schema and bounded read must match the exact move-only delivery
     /// authority, and the read must still derive from the committed provider
-    /// baseline. Candidate taint remains the unchanged baseline projection.
+    /// baseline, or the exact fresh subtree selected by its terminal tool call.
+    /// Subtree data adds bounded read taint, never action-reference authority.
     pub(crate) fn prepare_provider_extraction_input(
         &mut self,
         request: AgentModelCallRequest,
@@ -1430,13 +1434,21 @@ impl AgentRunPolicy {
         {
             return Err(AgentPolicyError::Authority);
         }
-        if !input.delivery.matches(input.schema, input.read)
-            || !input.read.matches_acknowledgement(input.baseline)
-        {
+        if !input.delivery.matches(input.schema, input.read) {
             return Err(AgentPolicyError::PayloadMismatch);
         }
-        let candidates =
-            provider_read_taints(input.read, input.baseline, request.account(), &self.taints)?;
+        let candidates = match input.subtree_target {
+            None => {
+                provider_read_taints(input.read, input.baseline, request.account(), &self.taints)?
+            }
+            Some(target) => provider_subtree_read_taints(
+                input.read,
+                input.baseline,
+                target,
+                request.account(),
+                &self.taints,
+            )?,
+        };
         self.prepare_model_input(
             request,
             input.delivery.context(),
@@ -2522,6 +2534,40 @@ fn provider_read_taints(
         }
     }
     Ok(candidates)
+}
+
+fn provider_subtree_read_taints(
+    read: &SemanticReadResult<'_>,
+    baseline: &SemanticObservationAcknowledgement,
+    target: SemanticReferenceId,
+    account: AgentContextAccountBinding,
+    retained: &[AgentTaintCohort],
+) -> Result<Vec<AgentTaintCohort>, AgentPolicyError> {
+    if account.context() != read.context() || !read.matches_subtree(baseline, target) {
+        return Err(AgentPolicyError::Authority);
+    }
+    let mut anchors = retained.iter().filter(|cohort| {
+        cohort.context == baseline.context()
+            && cohort.observation == baseline.observation()
+            && cohort.observation_generation == baseline.generation()
+            && cohort.source_guard == baseline.guard()
+            && cohort.account == account.account()
+            && cohort.contains_reference(target)
+    });
+    let Some(anchor) = anchors.next() else {
+        return Err(AgentPolicyError::ReadBaselineMissing);
+    };
+    if anchors.next().is_some()
+        || read
+            .fragments()
+            .iter()
+            .any(|fragment| fragment.provenance().origin() != anchor.origin())
+    {
+        return Err(AgentPolicyError::ReadBaselineMissing);
+    }
+    // Existing transcript taint remains retained by the policy. These fresh
+    // cohorts are keyed by the read guard, not an observation acknowledgement.
+    read_taints(read, account)
 }
 
 fn read_taints(
@@ -5560,6 +5606,12 @@ mod tests {
 
     #[test]
     fn extraction_mapping_commits_exact_input_and_admits_only_its_bound_output() {
+        for scoped in [false, true] {
+            extraction_mapping_admission(scoped);
+        }
+    }
+
+    fn extraction_mapping_admission(scoped: bool) {
         let source = origin("provider-extraction-request");
         let context = make_context(9_271, 9_272, 9_273);
         let observation = actionable_observation(context, source.clone(), 1);
@@ -5577,7 +5629,7 @@ mod tests {
         let mut fixture = policy_fixture(
             9_271,
             9_272,
-            source,
+            source.clone(),
             SemanticSensitivity::Public,
             &[SemanticEffectClass::Read],
             run_budget(10, 5_000, 10_000),
@@ -5607,7 +5659,11 @@ mod tests {
             .expect("initial settlement");
         let initial_reference_count = fixture.policy.taints()[0].reference_count();
 
-        let arguments = r#"{"schema_id":71}"#;
+        let arguments = if scoped {
+            r#"{"scope":{"kind":"subtree","target":"@a2"},"schema_id":71}"#
+        } else {
+            r#"{"schema_id":71}"#
+        };
         let tool = crate::AgentBrowserToolCall::decode_openai(
             initial_request.call(),
             "fc_extract_request_1".to_owned(),
@@ -5633,15 +5689,77 @@ mod tests {
             .expect("continuation seed")
             .join_terminal_tool_for_test(completion, tool.into_continuation_parts_for_test().0)
             .expect("extract terminal join");
+        let current = actionable_observation(context, source, 2);
+        let expanded = if scoped {
+            let request = observation
+                .begin_expansion(
+                    SemanticObservationId::new(99).unwrap(),
+                    SemanticReferenceId::new(2).unwrap(),
+                    observation.frames()[0].frame(),
+                    crate::SemanticExpansionKind::Subtree,
+                    SemanticObservationBudget::INITIAL_FILTERED,
+                )
+                .unwrap();
+            Some(
+                crate::SemanticObservationAssembler::new(request, current.frames()[0].clone())
+                    .unwrap()
+                    .finish()
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
         let read = read_semantic_observation(
-            &observation,
-            SemanticReadAuthority::Initial,
+            expanded.as_ref().unwrap_or(&observation),
+            if scoped {
+                SemanticReadAuthority::AcknowledgedExpansion {
+                    previous: &observation,
+                    acknowledgement: &baseline,
+                }
+            } else {
+                SemanticReadAuthority::Initial
+            },
             SemanticCaptureInstant::from_millis(NOW - 2),
             SemanticReadSensitivityLimit::PublicOnly,
             SemanticReadBudget::STANDARD,
         )
         .expect("read result");
-        assert!(read.matches_acknowledgement(&baseline));
+        assert_eq!(read.matches_acknowledgement(&baseline), !scoped);
+        if scoped {
+            assert!(provider_read_taints(
+                &read,
+                &baseline,
+                account_binding,
+                fixture.policy.taints()
+            )
+            .is_err());
+            assert!(provider_subtree_read_taints(
+                &read,
+                &baseline,
+                SemanticReferenceId::new(1).unwrap(),
+                account_binding,
+                fixture.policy.taints()
+            )
+            .is_err());
+            assert!(provider_subtree_read_taints(
+                &read,
+                &baseline,
+                SemanticReferenceId::new(2).unwrap(),
+                account_binding,
+                &[]
+            )
+            .is_err());
+            let mut substituted = fixture.policy.taints().to_vec();
+            substituted[0].origin = origin("foreign-subtree-origin");
+            assert!(provider_subtree_read_taints(
+                &read,
+                &baseline,
+                SemanticReferenceId::new(2).unwrap(),
+                account_binding,
+                &substituted
+            )
+            .is_err());
+        }
         let schema = SemanticExtractionSchema::try_new(
             SemanticExtractionSchemaId::new(71).expect("schema id"),
             vec![
@@ -5723,7 +5841,7 @@ mod tests {
             .input_evidence()
             .observation_acknowledgement()
             .is_none());
-        assert_eq!(fixture.policy.taints().len(), 1);
+        assert_eq!(fixture.policy.taints().len(), if scoped { 2 } else { 1 });
         assert_eq!(
             fixture.policy.taints()[0].reference_count(),
             initial_reference_count

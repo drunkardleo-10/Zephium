@@ -527,11 +527,20 @@ pub struct SemanticReadResult<'a> {
     observation_generation: SemanticObservationGeneration,
     context: ContextJoin,
     observation_fingerprint: SemanticObservationFingerprint,
+    subtree: Option<SemanticReadSubtreeProof>,
     captured_at: SemanticCaptureInstant,
     fragments: Vec<SemanticReadFragment<'a>>,
     omissions: SemanticReadOmissions,
     stats: SemanticReadStats,
     guard: [u8; 32],
+}
+
+// Evidence for one terminal scoped mapping, not an acknowledgement that the
+// expanded observation itself reached the model. Only validated read admission
+// can retain it; a read receipt must never mint fresh action/ref authority.
+struct SemanticReadSubtreeProof {
+    predecessor: SemanticObservationAcknowledgement,
+    target: SemanticReferenceId,
 }
 
 impl<'a> SemanticReadResult<'a> {
@@ -593,6 +602,16 @@ impl<'a> SemanticReadResult<'a> {
             && acknowledgement.context() == self.context
             && acknowledgement.guard() == self.observation_fingerprint.digest()
     }
+
+    pub(crate) fn matches_subtree(
+        &self,
+        acknowledgement: &SemanticObservationAcknowledgement,
+        target: SemanticReferenceId,
+    ) -> bool {
+        self.subtree
+            .as_ref()
+            .is_some_and(|proof| &proof.predecessor == acknowledgement && proof.target == target)
+    }
 }
 
 impl fmt::Debug for SemanticReadResult<'_> {
@@ -636,7 +655,7 @@ pub fn read_semantic_observation<'a>(
     sensitivity: SemanticReadSensitivityLimit,
     budget: SemanticReadBudget,
 ) -> Result<SemanticReadResult<'a>, SemanticReadError> {
-    validate_authority(observation, authority)?;
+    let subtree = validate_authority(observation, authority)?;
     let mut builder = SemanticReadBuilder::new(observation, captured_at, budget);
     for snapshot in observation.frames() {
         if snapshot.completeness() != SemanticCompleteness::Complete {
@@ -649,16 +668,16 @@ pub fn read_semantic_observation<'a>(
             builder.read_node(snapshot, node, sensitivity);
         }
     }
-    Ok(builder.finish())
+    Ok(builder.finish(subtree))
 }
 
 fn validate_authority(
     observation: &SemanticObservation,
     authority: SemanticReadAuthority<'_>,
-) -> Result<(), SemanticReadError> {
+) -> Result<Option<SemanticReadSubtreeProof>, SemanticReadError> {
     let request = observation.request();
     match (request.parent(), request.scope().anchor(), authority) {
-        (None, None, SemanticReadAuthority::Initial) => Ok(()),
+        (None, None, SemanticReadAuthority::Initial) => Ok(None),
         (
             Some(parent),
             Some(anchor),
@@ -678,7 +697,44 @@ fn validate_authority(
             if !acknowledgement.matches(previous) {
                 return Err(SemanticReadError::BaselineNotAcknowledged);
             }
-            Ok(())
+            let kind = match request.scope() {
+                crate::SemanticScope::Region(_) => crate::SemanticExpansionKind::Region,
+                crate::SemanticScope::Subtree(_) => crate::SemanticExpansionKind::Subtree,
+                crate::SemanticScope::Table(_) => crate::SemanticExpansionKind::Table,
+                crate::SemanticScope::Frame(_) => crate::SemanticExpansionKind::Frame,
+                crate::SemanticScope::SurroundingText { window, .. } => {
+                    crate::SemanticExpansionKind::SurroundingText(*window)
+                }
+                crate::SemanticScope::Initial => return Err(SemanticReadError::AuthorityMismatch),
+            };
+            let exact = previous
+                .begin_expansion(
+                    request.id(),
+                    anchor.reference(),
+                    anchor.frame(),
+                    kind,
+                    request.budget(),
+                )
+                .map_err(|_| SemanticReadError::ExpansionMismatch)?;
+            if &exact != request {
+                return Err(SemanticReadError::ExpansionMismatch);
+            }
+            if kind == crate::SemanticExpansionKind::Subtree {
+                let [frame] = observation.frames() else {
+                    return Err(SemanticReadError::ExpansionMismatch);
+                };
+                if frame.frame() != anchor.frame()
+                    || frame.generation() <= anchor.snapshot_generation()
+                {
+                    return Err(SemanticReadError::ExpansionMismatch);
+                }
+                Ok(Some(SemanticReadSubtreeProof {
+                    predecessor: acknowledgement.clone(),
+                    target: anchor.reference(),
+                }))
+            } else {
+                Ok(None)
+            }
         }
         _ => Err(SemanticReadError::AuthorityMismatch),
     }
@@ -867,20 +923,29 @@ impl<'a> SemanticReadBuilder<'a> {
         }
     }
 
-    fn finish(self) -> SemanticReadResult<'a> {
+    fn finish(self, subtree: Option<SemanticReadSubtreeProof>) -> SemanticReadResult<'a> {
         let fingerprint = SemanticObservationFingerprint::from_observation(self.observation);
-        let guard = read_guard(
+        let mut guard = read_guard(
             &fingerprint,
             self.captured_at,
             &self.fragments,
             self.omissions,
             self.stats,
         );
+        if let Some(proof) = &subtree {
+            let mut hasher = Sha256::new();
+            hasher.update(b"ZEPHIUM-SEMANTIC-SUBTREE-READ-GUARD-1\0");
+            hasher.update(guard);
+            hasher.update(proof.predecessor.guard());
+            hasher.update(proof.target.get().to_be_bytes());
+            guard = hasher.finalize().into();
+        }
         SemanticReadResult {
             observation: self.observation.request().id(),
             observation_generation: self.observation.request().generation(),
             context: self.observation.request().context(),
             observation_fingerprint: fingerprint,
+            subtree,
             captured_at: self.captured_at,
             fragments: self.fragments,
             omissions: self.omissions,
