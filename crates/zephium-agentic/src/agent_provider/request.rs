@@ -4254,6 +4254,32 @@ static EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolDefinition>> = LazyL
     }]
 });
 
+static LOCATE_ACT_EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolDefinition>> = LazyLock::new(
+    || {
+        let mut tools = build_browser_tool_definitions(true);
+        let extraction = BrowserToolDefinition {
+            kind: AgentBrowserToolKind::Extract,
+            description: "After satisfying the approved task's action postcondition, extract the approved fields with trusted schema 1 from the current initial observation. Rust independently verifies readiness; premature extraction is refused without retry.",
+            parameters: EXTRACTION_TOOL_DEFINITIONS[0].parameters.clone(),
+        };
+        tools.push(extraction);
+        tools
+    },
+);
+
+static ANTHROPIC_LOCATE_ACT_EXTRACTION_TOOL_DEFINITIONS: LazyLock<
+    Vec<AnthropicBrowserToolDefinition>,
+> = LazyLock::new(|| {
+    LOCATE_ACT_EXTRACTION_TOOL_DEFINITIONS
+        .iter()
+        .map(|tool| AnthropicBrowserToolDefinition {
+            kind: tool.kind,
+            description: tool.description,
+            input_schema: project_anthropic_schema(&tool.parameters),
+        })
+        .collect()
+});
+
 static ANTHROPIC_EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<AnthropicBrowserToolDefinition>> =
     LazyLock::new(|| {
         EXTRACTION_TOOL_DEFINITIONS
@@ -4299,24 +4325,24 @@ pub(super) fn browser_tool_definitions() -> &'static [BrowserToolDefinition] {
 fn browser_tool_definitions_for(
     config: &AgentProviderCallConfig,
 ) -> &'static [BrowserToolDefinition] {
-    if config.extraction_only {
-        &EXTRACTION_TOOL_DEFINITIONS
-    } else if config.locate_act_only {
-        &LOCATE_ACT_TOOL_DEFINITIONS
-    } else {
-        browser_tool_definitions()
+    match config.tools {
+        super::BrowserToolProfile::Extraction => &EXTRACTION_TOOL_DEFINITIONS,
+        super::BrowserToolProfile::LocateAct => &LOCATE_ACT_TOOL_DEFINITIONS,
+        super::BrowserToolProfile::LocateActExtraction => &LOCATE_ACT_EXTRACTION_TOOL_DEFINITIONS,
+        super::BrowserToolProfile::Full => browser_tool_definitions(),
     }
 }
 
 fn anthropic_browser_tool_definitions(
     config: &AgentProviderCallConfig,
 ) -> &'static [AnthropicBrowserToolDefinition] {
-    if config.extraction_only {
-        &ANTHROPIC_EXTRACTION_TOOL_DEFINITIONS
-    } else if config.locate_act_only {
-        &ANTHROPIC_LOCATE_ACT_TOOL_DEFINITIONS
-    } else {
-        &ANTHROPIC_BROWSER_TOOL_DEFINITIONS
+    match config.tools {
+        super::BrowserToolProfile::Extraction => &ANTHROPIC_EXTRACTION_TOOL_DEFINITIONS,
+        super::BrowserToolProfile::LocateAct => &ANTHROPIC_LOCATE_ACT_TOOL_DEFINITIONS,
+        super::BrowserToolProfile::LocateActExtraction => {
+            &ANTHROPIC_LOCATE_ACT_EXTRACTION_TOOL_DEFINITIONS
+        }
+        super::BrowserToolProfile::Full => &ANTHROPIC_BROWSER_TOOL_DEFINITIONS,
     }
 }
 
@@ -5035,6 +5061,54 @@ mod tests {
             .expect("config");
             let restricted = config.clone().restrict_to_locate_and_act();
             let extraction = config.clone().restrict_to_extraction();
+            let combined = config.clone().restrict_to_actions_and_extraction();
+            assert_ne!(combined, config);
+            assert_ne!(combined, restricted);
+            assert_ne!(combined, extraction);
+            assert_eq!(combined.clone().restrict_to_locate_and_act(), restricted);
+            assert_eq!(combined.clone().restrict_to_extraction(), extraction);
+            let combined_tools = browser_tool_definitions_for(&combined);
+            assert_eq!(combined_tools.len(), 3);
+            assert_eq!(
+                combined_tools[2].parameters,
+                browser_tool_definitions_for(&extraction)[0].parameters
+            );
+            assert_eq!(
+                combined_tools[0].parameters,
+                browser_tool_definitions_for(&restricted)[0].parameters
+            );
+            assert_eq!(
+                combined_tools[1].parameters,
+                browser_tool_definitions_for(&restricted)[1].parameters
+            );
+            for kind in AgentBrowserToolKind::ALL {
+                assert_eq!(
+                    combined.permits_tool(kind),
+                    matches!(
+                        kind,
+                        AgentBrowserToolKind::Locate
+                            | AgentBrowserToolKind::Act
+                            | AgentBrowserToolKind::Extract
+                    )
+                );
+            }
+            let body = match provider {
+                AgentProviderKind::OpenAiResponses => {
+                    encode_openai_body(&combined, "fixture", "fixture")
+                }
+                AgentProviderKind::AnthropicMessages => {
+                    encode_anthropic_body(&combined, "fixture", "fixture")
+                }
+            }
+            .unwrap();
+            let wire: Value = serde_json::from_slice(&body).unwrap();
+            let names = wire["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(names, BTreeSet::from(["act", "extract", "locate"]));
             assert_ne!(extraction, restricted);
             let extraction_tools = browser_tool_definitions_for(&extraction);
             assert_eq!(extraction_tools.len(), 1);

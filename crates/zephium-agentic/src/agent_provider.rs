@@ -727,8 +727,15 @@ pub struct AgentProviderCallConfig {
     max_output_tokens: u32,
     stream: AgentProviderStreamBudget,
     store_response: bool,
-    locate_act_only: bool,
-    extraction_only: bool,
+    tools: BrowserToolProfile,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BrowserToolProfile {
+    Full,
+    LocateAct,
+    Extraction,
+    LocateActExtraction,
 }
 
 impl AgentProviderCallConfig {
@@ -764,8 +771,7 @@ impl AgentProviderCallConfig {
             max_output_tokens,
             stream,
             store_response: false,
-            locate_act_only: false,
-            extraction_only: false,
+            tools: BrowserToolProfile::Full,
         })
     }
 
@@ -775,8 +781,7 @@ impl AgentProviderCallConfig {
     /// This trusted host setting is bound into continuation configuration and
     /// applies equally to every provider protocol and request turn.
     pub fn restrict_to_locate_and_act(mut self) -> Self {
-        self.locate_act_only = true;
-        self.extraction_only = false;
+        self.tools = BrowserToolProfile::LocateAct;
         self
     }
 
@@ -784,20 +789,34 @@ impl AgentProviderCallConfig {
     /// schema (identity 1), using only the current initial observation.
     /// This enables no native action, navigation or scope expansion.
     pub fn restrict_to_extraction(mut self) -> Self {
-        self.locate_act_only = false;
-        self.extraction_only = true;
+        self.tools = BrowserToolProfile::Extraction;
+        self
+    }
+
+    /// Restricts a trusted combined task to snapshot actions, bounded locate
+    /// and schema-1 extraction from the current initial observation. The host
+    /// must independently gate extraction on its fresh task postcondition.
+    /// This profile never changes within a continuation lineage.
+    pub fn restrict_to_actions_and_extraction(mut self) -> Self {
+        self.tools = BrowserToolProfile::LocateActExtraction;
         self
     }
 
     pub(super) fn permits_tool(&self, kind: AgentBrowserToolKind) -> bool {
-        if self.extraction_only {
-            return kind == AgentBrowserToolKind::Extract;
-        }
-        !self.locate_act_only
-            || matches!(
+        match self.tools {
+            BrowserToolProfile::Full => true,
+            BrowserToolProfile::Extraction => kind == AgentBrowserToolKind::Extract,
+            BrowserToolProfile::LocateAct => matches!(
                 kind,
                 AgentBrowserToolKind::Locate | AgentBrowserToolKind::Act
-            )
+            ),
+            BrowserToolProfile::LocateActExtraction => matches!(
+                kind,
+                AgentBrowserToolKind::Locate
+                    | AgentBrowserToolKind::Act
+                    | AgentBrowserToolKind::Extract
+            ),
+        }
     }
 
     /// Enables provider-side response retention for an inspectable public-data probe.
