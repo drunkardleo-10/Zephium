@@ -86,7 +86,12 @@ impl Site {
                 .map_err(|_| AgentWorkFailure::Contract)?],
                 AgentAccountScope::Anonymous,
             )?
-            .with_subtree_extraction(),
+            .with_subtree_extraction()
+            .with_source_roles(match self {
+                Self::React => SemanticReadRoleSelection::try_new(&[SemanticRole::Heading])
+                    .map_err(|_| AgentWorkFailure::Contract)?,
+                Self::Commerce => SemanticReadRoleSelection::ALL,
+            }),
         }))
     }
 
@@ -249,6 +254,24 @@ impl AgentWorkTask for SiteTask {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_selection_is_fixed_task_authority_not_a_site_or_model_parameter() {
+        let react = Site::React.task().unwrap();
+        let commerce = Site::Commerce.task().unwrap();
+        assert_eq!(
+            react.extraction_schema().unwrap().source_roles(),
+            SemanticReadRoleSelection::try_new(&[SemanticRole::Heading]).unwrap()
+        );
+        assert_eq!(
+            commerce.extraction_schema().unwrap().source_roles(),
+            SemanticReadRoleSelection::ALL
+        );
+        assert!(react.allows_subtree_extraction());
+        assert!(!commerce.allows_subtree_extraction());
+        assert!(!react.allows_actions_before_extraction());
+        assert!(!react.allows_baseline_read());
+    }
 
     #[test]
     fn public_retention_has_no_arbitrary_target_or_silent_fallback() {
