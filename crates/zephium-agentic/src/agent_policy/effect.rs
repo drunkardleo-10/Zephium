@@ -964,6 +964,9 @@ impl AgentRunPolicy {
         action: &SemanticPreparedAction,
         assessment: &AgentEffectAssessment,
     ) -> Result<AgentEffectAuthorization, AgentPolicyError> {
+        if self.navigation.is_some() {
+            return Err(AgentPolicyError::Navigation);
+        }
         if self.sealed {
             return Err(AgentPolicyError::Sealed);
         }

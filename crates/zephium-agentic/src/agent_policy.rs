@@ -15,12 +15,19 @@ use thiserror::Error;
 use zephium_core::ids::ProfileId;
 
 mod effect;
+mod navigation;
 use effect::AgentEffectRow;
 pub use effect::{
     AgentActiveEffect, AgentEffectAssessment, AgentEffectAuthorization, AgentEffectCancellation,
     AgentEffectDispatchRequest, AgentEffectId, AgentEffectPermit, AgentEffectReceipt,
     AgentEffectRequest, AgentEffectSettlement, AgentFailedSemanticEffect, AgentNeedsHumanReason,
     AgentNeedsHumanTransition, AgentVerifiedSemanticEffect, MAX_AGENT_PENDING_EFFECTS,
+};
+pub(crate) use navigation::is_document_successor;
+use navigation::AgentNavigationRow;
+pub use navigation::{
+    AgentActiveNavigation, AgentNavigationAuthorizationRequest, AgentNavigationPermit,
+    AgentNavigationProgressId, AgentNavigationReceipt, AgentNavigationSettlement,
 };
 
 use crate::semantic_diff::SemanticObservationFingerprint;
@@ -1032,6 +1039,9 @@ pub struct AgentRunPolicy {
     taints: Vec<AgentTaintCohort>,
     calls: Vec<ModelCallRow>,
     effects: Vec<AgentEffectRow>,
+    navigation: Option<AgentNavigationRow>,
+    navigation_receipt: Option<AgentNavigationReceipt>,
+    navigation_used: bool,
     last_call: Option<AgentModelCallId>,
     last_effect: Option<AgentEffectId>,
     last_action_attempt: Option<SemanticActionAttemptId>,
@@ -1080,6 +1090,9 @@ impl AgentRunPolicy {
             taints: Vec::new(),
             calls: Vec::with_capacity(MAX_AGENT_PENDING_MODEL_CALLS),
             effects: Vec::with_capacity(MAX_AGENT_PENDING_EFFECTS),
+            navigation: None,
+            navigation_receipt: None,
+            navigation_used: false,
             last_call: None,
             last_effect: None,
             last_action_attempt: None,
@@ -1127,7 +1140,12 @@ impl AgentRunPolicy {
 
     /// Consumed and reserved run-wide accounting.
     pub fn accounting(&self) -> AgentPolicyAccounting {
-        accounting(self.consumed, self.calls.iter(), self.effects.iter())
+        accounting(
+            self.consumed,
+            self.calls.iter(),
+            self.effects.iter(),
+            self.navigation.as_ref(),
+        )
     }
 
     /// Consumed and reserved accounting for one exact plan lease.
@@ -1140,6 +1158,9 @@ impl AgentRunPolicy {
             state.consumed,
             self.calls.iter().filter(|call| call.lease == lease),
             self.effects.iter().filter(|effect| effect.lease() == lease),
+            self.navigation
+                .as_ref()
+                .filter(|navigation| navigation.lease() == lease),
         ))
     }
 
@@ -1820,6 +1841,9 @@ impl AgentRunPolicy {
         if !self.effects.is_empty() {
             return Err(AgentPolicyError::EffectPending);
         }
+        if self.navigation.is_some() {
+            return Err(AgentPolicyError::Navigation);
+        }
         if self.calls.len() >= MAX_AGENT_PENDING_MODEL_CALLS {
             return Err(AgentPolicyError::PendingCallLimit);
         }
@@ -1967,6 +1991,7 @@ impl fmt::Debug for AgentRunPolicy {
             .field("taints", &self.taints.len())
             .field("pending_model_calls", &self.calls.len())
             .field("pending_effects", &self.pending_effects())
+            .field("pending_navigations", &self.pending_navigations())
             .field("sealed", &self.sealed)
             .field("content", &"[redacted]")
             .finish()
@@ -1991,6 +2016,8 @@ fn validate_metric_settlement(
     if snapshot.operations() != closure.operations()
         || snapshot.model().calls() != closure.model_calls()
         || snapshot.effects().attempts() != closure.effects()
+        || snapshot.navigations() != closure.navigations()
+        || snapshot.navigation() != policy.navigation_receipt
     {
         return Err(AgentRunPolicySettlementError::Authority);
     }
@@ -2057,6 +2084,9 @@ fn validate_metric_settlement(
 /// Closed refusal from mutable plan-lease/model-input policy.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum AgentPolicyError {
+    /// The one-hop exact document-navigation contract did not join or is pending.
+    #[error("agent policy document navigation contract refused")]
+    Navigation,
     /// Lease set did not name every approved node exactly once.
     #[error("agent policy plan-lease set is invalid")]
     LeaseSet,
@@ -2721,6 +2751,7 @@ fn accounting<'a>(
     consumed: ConsumedUsage,
     calls: impl Iterator<Item = &'a ModelCallRow>,
     effects: impl Iterator<Item = &'a AgentEffectRow>,
+    navigation: Option<&AgentNavigationRow>,
 ) -> AgentPolicyAccounting {
     let mut value = AgentPolicyAccounting {
         consumed_operations: consumed.operations,
@@ -2741,6 +2772,9 @@ fn accounting<'a>(
             .saturating_add(call.cost_limit);
     }
     for _effect in effects {
+        value.reserved_operations = value.reserved_operations.saturating_add(1);
+    }
+    if navigation.is_some() {
         value.reserved_operations = value.reserved_operations.saturating_add(1);
     }
     value
@@ -2854,6 +2888,7 @@ fn hash_context(hasher: &mut Sha256, context: ContextJoin) {
 
 #[cfg(test)]
 mod tests {
+    mod navigation_tests;
     use super::*;
     use crate::semantic_screenshot::admitted_test_screenshot;
     use crate::{
@@ -2917,7 +2952,11 @@ mod tests {
         );
         let capabilities = ContextCapabilities::try_new(
             ContextKind::Owned,
-            &[ContextCapability::Observe, ContextCapability::Act],
+            &[
+                ContextCapability::Observe,
+                ContextCapability::Act,
+                ContextCapability::Navigate,
+            ],
         )
         .expect("capabilities");
         let mut registry = ContextRegistry::new();
@@ -2948,7 +2987,7 @@ mod tests {
         let frame = SemanticFrameJoin::try_new(
             context,
             FrameId::MAIN,
-            FrameGeneration::INITIAL,
+            context.frame_generation(),
             source,
             SemanticFrameTrust::SameOrigin,
         )

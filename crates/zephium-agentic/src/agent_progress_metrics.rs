@@ -142,6 +142,11 @@ pub struct AgentRunProgressSnapshot {
     queue_wait: AgentDurationMetrics,
     model: AgentDurationMetrics,
     effect: AgentDurationMetrics,
+    navigation: AgentDurationMetrics,
+    navigation_terminal: Option<(
+        crate::AgentNavigationProgressId,
+        crate::AgentNavigationSettlement,
+    )>,
     human_wait: AgentDurationMetrics,
     outcome: Option<AgentRunProgressOutcome>,
     total_elapsed_millis: Option<u64>,
@@ -198,6 +203,19 @@ impl AgentRunProgressSnapshot {
         self.effect.observed()
     }
 
+    /// Observed exact navigation active-to-terminal duration, separate from actions.
+    pub const fn navigation(self) -> Option<AgentDurationMetrics> {
+        self.navigation.observed()
+    }
+    pub(crate) const fn navigation_terminal(
+        self,
+    ) -> Option<(
+        crate::AgentNavigationProgressId,
+        crate::AgentNavigationSettlement,
+    )> {
+        self.navigation_terminal
+    }
+
     /// Observed `NeedsHuman` wait durations, or `None` while absent or open.
     pub const fn human_wait(self) -> Option<AgentDurationMetrics> {
         self.human_wait.observed()
@@ -246,6 +264,11 @@ enum ProjectionKind {
     ModelTerminal(AgentModelCallId),
     EffectActive(AgentEffectId),
     EffectTerminal(AgentEffectId),
+    NavigationActive(crate::AgentNavigationProgressId),
+    NavigationTerminal(
+        crate::AgentNavigationProgressId,
+        crate::AgentNavigationSettlement,
+    ),
     NeedsHuman(AgentNeedsHumanReason),
     HumanRefusal(AgentNeedsHumanReason),
     SupervisorWait,
@@ -272,6 +295,15 @@ pub struct AgentRunProgressMetrics {
     nodes: Vec<NodeProgressMetricRow>,
     active_models: Vec<ActiveModelMetric>,
     active_effects: Vec<ActiveEffectMetric>,
+    active_navigation: Option<(
+        crate::AgentNavigationProgressId,
+        AgentPlanNodeId,
+        AgentPolicyInstant,
+    )>,
+    navigation_terminal: Option<(
+        crate::AgentNavigationProgressId,
+        crate::AgentNavigationSettlement,
+    )>,
     takeover_cancellations: Vec<AgentSupervisorCancellationId>,
     last_event: Option<AgentAuditEventId>,
     last_recorded_at: Option<AgentPolicyInstant>,
@@ -283,6 +315,7 @@ pub struct AgentRunProgressMetrics {
     queue_wait: AgentDurationMetrics,
     model: AgentDurationMetrics,
     effect: AgentDurationMetrics,
+    navigation: AgentDurationMetrics,
     human_wait: AgentDurationMetrics,
     outcome: Option<AgentRunProgressOutcome>,
     total_elapsed_millis: Option<u64>,
@@ -331,6 +364,8 @@ impl AgentRunProgressMetrics {
             nodes,
             active_models: Vec::new(),
             active_effects: Vec::new(),
+            active_navigation: None,
+            navigation_terminal: None,
             takeover_cancellations: Vec::new(),
             last_event: None,
             last_recorded_at: None,
@@ -342,6 +377,7 @@ impl AgentRunProgressMetrics {
             queue_wait: AgentDurationMetrics::empty(),
             model: AgentDurationMetrics::empty(),
             effect: AgentDurationMetrics::empty(),
+            navigation: AgentDurationMetrics::empty(),
             human_wait: AgentDurationMetrics::empty(),
             outcome: None,
             total_elapsed_millis: None,
@@ -406,6 +442,9 @@ impl AgentRunProgressMetrics {
         let mut next_queue_wait = self.queue_wait;
         let mut next_model = self.model;
         let mut next_effect = self.effect;
+        let mut next_navigation = self.navigation;
+        let mut next_active_navigation = self.active_navigation;
+        let mut next_navigation_terminal = self.navigation_terminal;
         let mut next_human_wait = self.human_wait;
         let mut next_root_queued_at = self.root_queued_at;
         let mut next_outcome = self.outcome;
@@ -440,6 +479,24 @@ impl AgentRunProgressMetrics {
         }
 
         match projection {
+            ProjectionKind::NavigationActive(id) => {
+                if self.active_navigation.is_some() || self.navigation_terminal.is_some() {
+                    return Err(AgentProgressMetricError::OperationSequence);
+                }
+                next_active_navigation = Some((id, node, recorded_at));
+            }
+            ProjectionKind::NavigationTerminal(id, settlement) => {
+                let Some((active_id, active_node, started_at)) = self.active_navigation else {
+                    return Err(AgentProgressMetricError::OperationSequence);
+                };
+                if id != active_id || node != active_node {
+                    return Err(AgentProgressMetricError::OperationSequence);
+                }
+                next_navigation =
+                    next_navigation.checked_record(duration_millis(recorded_at, started_at)?)?;
+                next_active_navigation = None;
+                next_navigation_terminal = Some((id, settlement));
+            }
             ProjectionKind::ModelActive(id) => {
                 let index = self
                     .active_models
@@ -518,6 +575,9 @@ impl AgentRunProgressMetrics {
             ProjectionKind::SupervisorTerminal(outcome) => {
                 if self.active_models.iter().any(|active| active.node == node)
                     || self.active_effects.iter().any(|active| active.node == node)
+                    || self
+                        .active_navigation
+                        .is_some_and(|(_, active_node, _)| active_node == node)
                 {
                     return Err(AgentProgressMetricError::OperationSequence);
                 }
@@ -599,6 +659,9 @@ impl AgentRunProgressMetrics {
         self.queue_wait = next_queue_wait;
         self.model = next_model;
         self.effect = next_effect;
+        self.navigation = next_navigation;
+        self.active_navigation = next_active_navigation;
+        self.navigation_terminal = next_navigation_terminal;
         self.human_wait = next_human_wait;
         self.outcome = next_outcome;
         self.total_elapsed_millis = next_total_elapsed_millis;
@@ -618,6 +681,8 @@ impl AgentRunProgressMetrics {
             queue_wait: self.queue_wait,
             model: self.model,
             effect: self.effect,
+            navigation: self.navigation,
+            navigation_terminal: self.navigation_terminal,
             human_wait: self.human_wait,
             outcome: self.outcome,
             total_elapsed_millis: self.total_elapsed_millis,
@@ -701,6 +766,24 @@ fn classify_projection(
     let blocker = progress.blocker();
 
     match result {
+        Some(AgentProgressResult::Navigation(settlement)) => {
+            let Some(AgentProgressResource::Navigation(id)) = resource else {
+                return Err(AgentProgressMetricError::Projection);
+            };
+            let valid = match settlement {
+                crate::AgentNavigationSettlement::Committed => {
+                    state == AgentProgressState::Succeeded && blocker.is_none()
+                }
+                crate::AgentNavigationSettlement::Failed(failure) => {
+                    state == AgentProgressState::Failed
+                        && blocker == Some(AgentProgressBlocker::Navigation(failure))
+                }
+            };
+            if operation != AgentProgressOperation::Navigation || !valid {
+                return Err(AgentProgressMetricError::Projection);
+            }
+            Ok(ProjectionKind::NavigationTerminal(id, settlement))
+        }
         Some(AgentProgressResult::Model(settlement)) => {
             let Some(AgentProgressResource::ModelCall(id)) = resource else {
                 return Err(AgentProgressMetricError::Projection);
@@ -784,6 +867,12 @@ fn classify_projection(
                 AgentProgressState::Active,
                 None,
             ) => Ok(ProjectionKind::EffectActive(id)),
+            (
+                AgentProgressOperation::Navigation,
+                Some(AgentProgressResource::Navigation(id)),
+                AgentProgressState::Active,
+                None,
+            ) => Ok(ProjectionKind::NavigationActive(id)),
             (_, _, AgentProgressState::Active, None) => Ok(ProjectionKind::Other),
             (_, _, AgentProgressState::Waiting, Some(AgentProgressBlocker::Cancellation(_))) => {
                 Ok(ProjectionKind::Other)

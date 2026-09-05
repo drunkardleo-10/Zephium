@@ -37,6 +37,7 @@ pub struct AgentRunMetricClosure {
     model_calls: u32,
     provider_inputs: u32,
     effects: u32,
+    navigations: u32,
     actions: u32,
     batches: u32,
     needs_human: u32,
@@ -143,8 +144,23 @@ impl AgentRunMetricClosure {
         require_equal_sum(effects.attempts(), &[effects.verified(), effects.failed()])?;
         require_equal_sum(
             accounting_snapshot.operations(),
-            &[model.calls(), effects.attempts()],
+            &[
+                model.calls(),
+                effects.attempts(),
+                accounting_snapshot.navigations(),
+            ],
         )?;
+        if accounting_snapshot
+            .navigation()
+            .map(|receipt| (receipt.progress_id(), receipt.settlement()))
+            != progress_snapshot.navigation_terminal()
+            || progress_snapshot
+                .navigation()
+                .map_or(0, |duration| duration.samples())
+                != accounting_snapshot.navigations()
+        {
+            return Err(AgentRunMetricClosureError::NavigationCoverage);
+        }
         require_equal_sum(
             action_snapshot.batches(),
             &[
@@ -211,6 +227,7 @@ impl AgentRunMetricClosure {
             model_calls: model.calls(),
             provider_inputs: input_snapshot.calls(),
             effects: effects.attempts(),
+            navigations: accounting_snapshot.navigations(),
             actions: action_snapshot.actions(),
             batches: action_snapshot.batches(),
             needs_human: progress_snapshot.needs_human().total(),
@@ -266,6 +283,11 @@ impl AgentRunMetricClosure {
     /// Exact dispatched-effect receipts cross-checked against action terminals.
     pub const fn effects(self) -> u32 {
         self.effects
+    }
+
+    /// Exact native document-navigation terminals; not semantic actions.
+    pub const fn navigations(self) -> u32 {
+        self.navigations
     }
 
     /// Exact action terminals cross-checked against effect receipts.
@@ -326,6 +348,9 @@ impl fmt::Debug for AgentRunMetricClosure {
 /// Closed refusal while cross-checking terminal run-local metric coverage.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum AgentRunMetricClosureError {
+    /// Policy-accounted navigation did not match its exact audit terminal.
+    #[error("navigation metric coverage is incomplete")]
+    NavigationCoverage,
     /// Manifest revision, topology, supervisor, or reducer scope did not match.
     #[error("agent metric closure authority mismatched")]
     Authority,
@@ -413,6 +438,7 @@ fn require_accounting_node_totals(
     let mut operations = 0_u32;
     let mut model_calls = 0_u32;
     let mut effects = 0_u32;
+    let mut navigations = 0_u32;
     for node in accounting.nodes() {
         operations = operations
             .checked_add(node.operations())
@@ -422,6 +448,9 @@ fn require_accounting_node_totals(
             .ok_or(AgentRunMetricClosureError::Overflow)?;
         effects = effects
             .checked_add(node.effects())
+            .ok_or(AgentRunMetricClosureError::Overflow)?;
+        navigations = navigations
+            .checked_add(node.navigations())
             .ok_or(AgentRunMetricClosureError::Overflow)?;
     }
     let mut priced_calls = 0_u32;
@@ -433,6 +462,7 @@ fn require_accounting_node_totals(
     if operations != snapshot.operations()
         || model_calls != snapshot.model().calls()
         || effects != snapshot.effects().attempts()
+        || navigations != snapshot.navigations()
         || priced_calls != snapshot.model().priced_ceiling()
     {
         return Err(AgentRunMetricClosureError::Invariant);

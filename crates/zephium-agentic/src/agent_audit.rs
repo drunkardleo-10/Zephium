@@ -870,6 +870,7 @@ fn encode_activity(encoder: &mut AuditRecordEncoder, progress: AgentSemanticProg
             encoder.update([10, effect_code(effect)]);
         }
         AgentProgressOperation::Persistence => encoder.update([11]),
+        AgentProgressOperation::Navigation => encoder.update([12]),
     }
     match activity.resource() {
         None => encoder.update([0]),
@@ -892,6 +893,10 @@ fn encode_activity(encoder: &mut AuditRecordEncoder, progress: AgentSemanticProg
         Some(AgentProgressResource::Effect(value)) => {
             encoder.update([5]);
             encoder.update(value.get().to_be_bytes());
+        }
+        Some(AgentProgressResource::Navigation(value)) => {
+            encoder.update([6]);
+            encoder.update(value.bytes());
         }
     }
     encoder.update([match progress.state() {
@@ -940,6 +945,15 @@ fn encode_result(encoder: &mut AuditRecordEncoder, result: Option<AgentProgressR
                 }
                 crate::AgentSupervisorContextReleaseOutcome::Retired { terminal, resource } => {
                     encoder.update([2, context_terminal_code(terminal), resource_code(resource)]);
+                }
+            }
+        }
+        Some(AgentProgressResult::Navigation(outcome)) => {
+            encoder.update([5]);
+            match outcome {
+                crate::AgentNavigationSettlement::Committed => encoder.update([1]),
+                crate::AgentNavigationSettlement::Failed(failure) => {
+                    encoder.update([2, navigation_failure_code(failure)])
                 }
             }
         }
@@ -993,6 +1007,26 @@ fn encode_blocker(encoder: &mut AuditRecordEncoder, blocker: Option<AgentProgres
             encoder.update([7, cancellation_reason_code(reason)]);
         }
         Some(AgentProgressBlocker::ContextCancelled) => encoder.update([8]),
+        Some(AgentProgressBlocker::Navigation(failure)) => {
+            encoder.update([9, navigation_failure_code(failure)])
+        }
+    }
+}
+
+fn navigation_failure_code(failure: crate::ContextPortFailure) -> u8 {
+    use crate::ContextPortFailure::*;
+    match failure {
+        Unsupported => 1,
+        ResourceExhausted => 2,
+        ProfileUnavailable => 3,
+        ProfileBusy => 4,
+        ExtensionIsolationUnproven => 5,
+        CookieTransferFailed => 6,
+        NativeRefused => 7,
+        Cancelled => 8,
+        TimedOut => 9,
+        Stale => 10,
+        Shutdown => 11,
     }
 }
 

@@ -4402,6 +4402,39 @@ static ANTHROPIC_BROWSER_TOOL_DEFINITIONS: LazyLock<Vec<AnthropicBrowserToolDefi
 
 static EXTRACTION_OUTPUT_SCHEMA: LazyLock<Value> = LazyLock::new(build_extraction_output_schema);
 
+static NAVIGATION_EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolDefinition>> = LazyLock::new(
+    || {
+        let mut tools: Vec<_> = build_browser_tool_definitions(false)
+            .into_iter()
+            .filter(|tool| {
+                matches!(
+                    tool.kind,
+                    AgentBrowserToolKind::Locate | AgentBrowserToolKind::Navigate
+                )
+            })
+            .collect();
+        tools.push(BrowserToolDefinition {
+        kind: AgentBrowserToolKind::Extract,
+        description: "After the one approved exact navigation commits and the destination task predicate holds, extract the approved fields with trusted schema 1 from the fresh current initial observation. Earlier document references are revoked. No actions, redirects, history or repeated navigation are available.",
+        parameters: EXTRACTION_TOOL_DEFINITIONS[0].parameters.clone(),
+    });
+        tools
+    },
+);
+
+static ANTHROPIC_NAVIGATION_EXTRACTION_TOOL_DEFINITIONS: LazyLock<
+    Vec<AnthropicBrowserToolDefinition>,
+> = LazyLock::new(|| {
+    NAVIGATION_EXTRACTION_TOOL_DEFINITIONS
+        .iter()
+        .map(|tool| AnthropicBrowserToolDefinition {
+            kind: tool.kind,
+            description: tool.description,
+            input_schema: project_anthropic_schema(&tool.parameters),
+        })
+        .collect()
+});
+
 pub(super) fn browser_tool_definitions() -> &'static [BrowserToolDefinition] {
     &BROWSER_TOOL_DEFINITIONS
 }
@@ -4410,6 +4443,7 @@ fn browser_tool_definitions_for(
     config: &AgentProviderCallConfig,
 ) -> &'static [BrowserToolDefinition] {
     match config.tools {
+        super::BrowserToolProfile::NavigationExtraction => &NAVIGATION_EXTRACTION_TOOL_DEFINITIONS,
         super::BrowserToolProfile::Extraction => &EXTRACTION_TOOL_DEFINITIONS,
         super::BrowserToolProfile::LocateAct => &LOCATE_ACT_TOOL_DEFINITIONS,
         super::BrowserToolProfile::LocateActExtraction => &LOCATE_ACT_EXTRACTION_TOOL_DEFINITIONS,
@@ -4425,6 +4459,9 @@ fn anthropic_browser_tool_definitions(
     config: &AgentProviderCallConfig,
 ) -> &'static [AnthropicBrowserToolDefinition] {
     match config.tools {
+        super::BrowserToolProfile::NavigationExtraction => {
+            &ANTHROPIC_NAVIGATION_EXTRACTION_TOOL_DEFINITIONS
+        }
         super::BrowserToolProfile::Extraction => &ANTHROPIC_EXTRACTION_TOOL_DEFINITIONS,
         super::BrowserToolProfile::LocateAct => &ANTHROPIC_LOCATE_ACT_TOOL_DEFINITIONS,
         super::BrowserToolProfile::LocateActExtraction => {

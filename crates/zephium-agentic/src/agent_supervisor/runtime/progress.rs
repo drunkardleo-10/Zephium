@@ -29,6 +29,8 @@ pub enum AgentProgressOperation {
     Read,
     /// One browser-context lifecycle operation.
     Context,
+    /// One exact task/policy-authorized native document transition.
+    Navigation,
     /// One independently classified semantic effect.
     Effect(SemanticEffectClass),
     /// Independent post-effect verification.
@@ -50,6 +52,8 @@ pub enum AgentProgressResource {
     ModelCall(crate::AgentModelCallId),
     /// Exact browser-context identity.
     Context(ContextId),
+    /// Exact native navigation operation, not a semantic action attempt.
+    Navigation(crate::AgentNavigationProgressId),
     /// Exact semantic-effect correlation identity.
     Effect(crate::AgentEffectId),
 }
@@ -82,6 +86,8 @@ pub enum AgentProgressResult {
     Effect(crate::AgentEffectSettlement),
     /// Registry-proven browser-context release class.
     Context(AgentSupervisorContextReleaseOutcome),
+    /// Policy-accounted native document-transition terminal.
+    Navigation(crate::AgentNavigationSettlement),
 }
 
 /// Closed blocker for waiting, failed, or cancelled semantic progress.
@@ -103,6 +109,8 @@ pub enum AgentProgressBlocker {
     Cancellation(AgentSupervisorCancellationReason),
     /// A queued context was cancelled before native construction.
     ContextCancelled,
+    /// Exact native navigation refusal or failure.
+    Navigation(crate::ContextPortFailure),
 }
 
 /// Validated active operation/resource pair supplied by the trusted shell.
@@ -346,6 +354,61 @@ impl AgentRunSupervisor {
         self.record_progress_activity(execution, activity)
     }
 
+    /// Records the original active navigation owner without granting task success.
+    pub fn record_active_navigation(
+        &mut self,
+        execution: &AgentNodeExecution,
+        active: &crate::AgentActiveNavigation,
+    ) -> Result<AgentSemanticProgress, AgentSupervisorRuntimeError> {
+        if !active
+            .matches_manifest_revision(self.topology.manifest(), self.topology.manifest_guard())
+            || active.node() != execution.node()
+        {
+            return Err(AgentSupervisorRuntimeError::ProgressAuthority);
+        }
+        self.record_progress_activity(
+            execution,
+            AgentProgressActivity::try_new(
+                AgentProgressOperation::Navigation,
+                Some(AgentProgressResource::Navigation(active.progress_id())),
+            )?,
+        )
+    }
+
+    /// Records one exact policy-accounted navigation terminal without action proof.
+    pub fn record_navigation_result(
+        &mut self,
+        execution: &AgentNodeExecution,
+        receipt: crate::AgentNavigationReceipt,
+    ) -> Result<AgentSemanticProgress, AgentSupervisorRuntimeError> {
+        let index = self.require_running_execution(execution)?;
+        if !receipt
+            .matches_manifest_revision(self.topology.manifest(), self.topology.manifest_guard())
+            || receipt.node() != execution.node()
+        {
+            return Err(AgentSupervisorRuntimeError::ProgressAuthority);
+        }
+        let (state, blocker) = match receipt.settlement() {
+            crate::AgentNavigationSettlement::Committed => (AgentProgressState::Succeeded, None),
+            crate::AgentNavigationSettlement::Failed(failure) => (
+                AgentProgressState::Failed,
+                Some(AgentProgressBlocker::Navigation(failure)),
+            ),
+        };
+        let progress = self.progress(
+            execution.node(),
+            AgentProgressActivity::try_new(
+                AgentProgressOperation::Navigation,
+                Some(AgentProgressResource::Navigation(receipt.progress_id())),
+            )?,
+            state,
+            Some(AgentProgressResult::Navigation(receipt.settlement())),
+            blocker,
+        );
+        self.nodes[index].progress = progress;
+        Ok(progress)
+    }
+
     /// Records one exact terminal semantic-effect receipt.
     pub fn record_effect_result(
         &mut self,
@@ -519,6 +582,10 @@ const fn activity_resource_matches(
             | (
                 AgentProgressOperation::Context,
                 Some(AgentProgressResource::Context(_))
+            )
+            | (
+                AgentProgressOperation::Navigation,
+                Some(AgentProgressResource::Navigation(_))
             )
             | (
                 AgentProgressOperation::Effect(_),

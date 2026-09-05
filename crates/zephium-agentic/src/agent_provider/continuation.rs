@@ -384,7 +384,100 @@ pub struct AgentProviderContinuation {
     transcript: AgentProviderTranscript,
 }
 
+/// One-shot exact Navigate correlation after old provider replay is retired.
+/// It retains no page strings or actionable transcript and grants no native
+/// dispatch, provider budget, account switch or task-completion authority.
+#[must_use]
+pub struct AgentProviderNavigationCheckpoint {
+    prior_call: AgentProviderCallIdentity,
+    config: AgentProviderCallConfig,
+    baseline: SemanticObservationAcknowledgement,
+    target: crate::ContextNavigationTarget,
+}
+
+impl AgentProviderNavigationCheckpoint {
+    /// Committed source acknowledgement for the separate navigation policy gate.
+    pub const fn baseline(&self) -> &SemanticObservationAcknowledgement {
+        &self.baseline
+    }
+
+    /// Consumes the checkpoint only against its exact policy/native commit,
+    /// same-plan newer call, fresh successor account and bounded new document.
+    pub fn validate_successor(
+        self,
+        receipt: crate::AgentNavigationReceipt,
+        observation: &crate::SemanticObservation,
+        request: AgentModelCallRequest,
+        config: &AgentProviderCallConfig,
+    ) -> Result<(), AgentProviderContinuationError> {
+        if config != &self.config {
+            return Err(AgentProviderContinuationError::Config);
+        }
+        if request.id() <= self.prior_call.call()
+            || request.lease() != self.prior_call.lease()
+            || receipt.lease() != self.prior_call.lease()
+            || receipt.node() != self.prior_call.node()
+            || !receipt.matches_manifest_revision(
+                self.prior_call.manifest(),
+                self.prior_call.manifest_guard_for_continuation(),
+            )
+        {
+            return Err(AgentProviderContinuationError::Lineage);
+        }
+        let successor = receipt.operation().context();
+        let target_origin = crate::SemanticOrigin::parse(self.target.as_url().as_str())
+            .map_err(|_| AgentProviderContinuationError::Scope)?;
+        if !receipt.matches_source(&self.baseline, &self.target)
+            || !crate::agent_policy::is_document_successor(self.baseline.context(), successor)
+            || observation.request().context() != successor
+            || !matches!(observation.request().scope(), crate::SemanticScope::Initial)
+            || observation.request().id() == self.baseline.observation()
+            || observation.frames().len() != 1
+            || request.account().context() != successor
+            || request.account().account() != receipt.account()
+            || request.account().observed_at() < receipt.settled_at()
+            || observation.frames()[0].frame().origin() != &target_origin
+        {
+            return Err(AgentProviderContinuationError::Baseline);
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for AgentProviderNavigationCheckpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("AgentProviderNavigationCheckpoint([owned, redacted])")
+    }
+}
+
 impl AgentProviderContinuation {
+    /// Consumes the exact Navigate proposal and retires all old provider replay.
+    /// The target must be the immutable trusted task destination, not a selector
+    /// or a value inferred from page/model content by the host.
+    pub fn retire_for_navigation(
+        self,
+        observation: &crate::SemanticObservation,
+        target: &crate::ContextNavigationTarget,
+        config: &AgentProviderCallConfig,
+    ) -> Result<AgentProviderNavigationCheckpoint, AgentProviderContinuationError> {
+        if config != &self.config {
+            return Err(AgentProviderContinuationError::Config);
+        }
+        if self.correlation.kind() != AgentBrowserToolKind::Navigate
+            || self.correlation.navigation_target.as_ref() != Some(target)
+        {
+            return Err(AgentProviderContinuationError::ToolKind);
+        }
+        if !self.baseline.matches(observation) {
+            return Err(AgentProviderContinuationError::Baseline);
+        }
+        Ok(AgentProviderNavigationCheckpoint {
+            prior_call: self.prior_call,
+            config: self.config,
+            baseline: self.baseline,
+            target: target.clone(),
+        })
+    }
     /// Exact completed provider call that produced the pending tool result.
     pub const fn prior_call(&self) -> AgentProviderCallIdentity {
         self.prior_call

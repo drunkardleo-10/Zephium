@@ -36,7 +36,8 @@ pub use continuation::{
     AgentProviderBoundDiffContinuation, AgentProviderBoundExtractionContinuation,
     AgentProviderBoundLocateContinuation, AgentProviderBoundReadContinuation,
     AgentProviderBoundScreenshotContinuation, AgentProviderContinuation,
-    AgentProviderContinuationError, MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES,
+    AgentProviderContinuationError, AgentProviderNavigationCheckpoint,
+    MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES,
     MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES, MAX_AGENT_PROVIDER_CONTINUATION_TURNS,
 };
 pub use extraction::{
@@ -739,6 +740,7 @@ enum BrowserToolProfile {
     LocateActExtraction,
     ScopedExtraction,
     LocateActScopedExtraction,
+    NavigationExtraction,
 }
 
 impl AgentProviderCallConfig {
@@ -814,6 +816,13 @@ impl AgentProviderCallConfig {
         self
     }
 
+    /// Advertises only locate, one task-authorized exact navigation and terminal
+    /// initial-scope extraction. This grants no native action or destination authority.
+    pub fn restrict_to_navigation_and_extraction(mut self) -> Self {
+        self.tools = BrowserToolProfile::NavigationExtraction;
+        self
+    }
+
     /// Restricts a trusted combined task to snapshot actions, bounded locate
     /// and schema-1 extraction from the current initial observation. The host
     /// must independently gate extraction on its fresh task postcondition.
@@ -854,6 +863,12 @@ impl AgentProviderCallConfig {
         match self.tools {
             BrowserToolProfile::Full => true,
             BrowserToolProfile::Extraction => kind == AgentBrowserToolKind::Extract,
+            BrowserToolProfile::NavigationExtraction => matches!(
+                kind,
+                AgentBrowserToolKind::Locate
+                    | AgentBrowserToolKind::Navigate
+                    | AgentBrowserToolKind::Extract
+            ),
             BrowserToolProfile::ScopedExtraction => matches!(
                 kind,
                 AgentBrowserToolKind::Locate | AgentBrowserToolKind::Extract

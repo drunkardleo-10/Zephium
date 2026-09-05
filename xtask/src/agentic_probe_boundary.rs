@@ -6277,7 +6277,7 @@ fn validate_semantic_extraction_provider_contract(
     for required in [
         "AgentBrowserToolProposal::Extract{schema,..}=>Some(*schema)",
         "extraction_schema:Option<SemanticExtractionSchemaId>",
-        "extraction_schema,extraction_scope,read_scope,provider_item_id:self.provider_item_id",
+        "extraction_schema,extraction_scope,read_scope,navigation_target,provider_item_id:self.provider_item_id",
         "AgentBrowserToolProposal::Read(scope)=>Some(scope.clone())",
     ] {
         if !provider_tool.contains(required) {
@@ -7386,9 +7386,9 @@ fn validate_progress_manifest_revision_contract(
 
     let progress = compact(progress);
     let join = "matches_manifest_revision(self.topology.manifest(),self.topology.manifest_guard())";
-    if progress.matches(join).count() != 7 {
+    if progress.matches(join).count() != 9 {
         return Err(
-            "all seven supervisor progress admissions must join the exact manifest revision"
+            "all nine supervisor progress admissions must join the exact manifest revision"
                 .to_owned(),
         );
     }

@@ -292,6 +292,7 @@ pub struct AgentNodeAccountingMetrics {
     operations: u32,
     model_calls: u32,
     effects: u32,
+    navigations: u32,
     model_tokens: u64,
     cost_micro_usd: u64,
 }
@@ -315,6 +316,11 @@ impl AgentNodeAccountingMetrics {
     /// Terminal dispatched semantic effects.
     pub const fn effects(self) -> u32 {
         self.effects
+    }
+
+    /// Terminal native document-navigation attempts, separate from actions.
+    pub const fn navigations(self) -> u32 {
+        self.navigations
     }
 
     /// Provider-accounted or conservatively charged model tokens.
@@ -547,6 +553,7 @@ pub struct AgentRunAccountingSnapshot {
     operations: u32,
     model: AgentModelAccountingMetrics,
     effects: AgentEffectAccountingMetrics,
+    navigation: Option<crate::AgentNavigationReceipt>,
 }
 
 impl AgentRunAccountingSnapshot {
@@ -573,6 +580,20 @@ impl AgentRunAccountingSnapshot {
     /// Aggregate effect/proof/failure accounting.
     pub const fn effects(self) -> AgentEffectAccountingMetrics {
         self.effects
+    }
+
+    /// The run's one policy-accounted navigation, when terminal.
+    pub const fn navigation(self) -> Option<crate::AgentNavigationReceipt> {
+        self.navigation
+    }
+
+    /// Terminal native document-navigation attempt count, never action count.
+    pub const fn navigations(self) -> u32 {
+        if self.navigation.is_some() {
+            1
+        } else {
+            0
+        }
     }
 }
 
@@ -617,6 +638,7 @@ pub struct AgentRunAccountingMetrics {
     operations: u32,
     model: AgentModelAccountingMetrics,
     effects: AgentEffectAccountingMetrics,
+    navigation: Option<crate::AgentNavigationReceipt>,
     nodes: Vec<AgentNodeAccountingRow>,
     model_receipts: Vec<AgentModelCallId>,
     effect_receipts: Vec<AgentEffectId>,
@@ -661,6 +683,7 @@ impl AgentRunAccountingMetrics {
                     operations: 0,
                     model_calls: 0,
                     effects: 0,
+                    navigations: 0,
                     model_tokens: 0,
                     cost_micro_usd: 0,
                 },
@@ -680,6 +703,7 @@ impl AgentRunAccountingMetrics {
             operations: 0,
             model: AgentModelAccountingMetrics::default(),
             effects: AgentEffectAccountingMetrics::default(),
+            navigation: None,
             nodes,
             model_receipts: Vec::new(),
             effect_receipts: Vec::new(),
@@ -791,6 +815,32 @@ impl AgentRunAccountingMetrics {
         Ok(())
     }
 
+    /// Records the run's one exact native navigation terminal, never an action.
+    pub fn record_navigation_receipt(
+        &mut self,
+        receipt: crate::AgentNavigationReceipt,
+    ) -> Result<(), AgentMetricError> {
+        if !receipt.matches_manifest_revision(self.manifest, self.manifest_guard) {
+            return Err(AgentMetricError::Authority);
+        }
+        if self.navigation.is_some() {
+            return Err(AgentMetricError::ReceiptReplay);
+        }
+        let index = self.node_index(receipt.node())?;
+        let operations = add_u32(self.operations, 1)?;
+        if operations > self.operation_limit {
+            return Err(AgentMetricError::Budget);
+        }
+        let mut node = self.nodes[index];
+        node.metrics.operations = add_u32(node.metrics.operations, 1)?;
+        node.metrics.navigations = add_u32(node.metrics.navigations, 1)?;
+        node.validate()?;
+        self.operations = operations;
+        self.nodes[index] = node;
+        self.navigation = Some(receipt);
+        Ok(())
+    }
+
     /// Current exact content-free run accounting.
     pub const fn snapshot(&self) -> AgentRunAccountingSnapshot {
         AgentRunAccountingSnapshot {
@@ -799,6 +849,7 @@ impl AgentRunAccountingMetrics {
             operations: self.operations,
             model: self.model,
             effects: self.effects,
+            navigation: self.navigation,
         }
     }
 
