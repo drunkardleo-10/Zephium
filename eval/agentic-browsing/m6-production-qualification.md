@@ -2003,6 +2003,93 @@ React interaction/routing, complete the six-site matrix or demonstrate a genuine
 multi-page workflow. Explicit destination/redirect authority, document-epoch
 continuation and task-level navigation/account semantics remain subsequent work.
 
+## One exact public document continuation (2026-09-05)
+
+Core/controller commits `7c2f7d9`, `f68814f`, `79e694c`, and `c08a7dd` add
+one distinct typed navigation phase through the original policy, native,
+provider, accounting, audit and lifecycle owners. The first two ordering
+reviews found and fixed fallible proposal/audit publication before dispatch
+and lost synchronous-refusal evidence during settlement-clock failure.
+Saturation now refuses before reservation/ref revocation; a scheduled dispatch
+retains its real callback, and a synchronous refusal retains its exact
+operation/failure independently of time. Cleanup can account that same refusal
+without dispatching again; audit/time ambiguity remains retained debt.
+
+Qualifier code was committed at `84aceaa` before one authorized attempt:
+
+```text
+target/debug/macos-terra-agentic-probe --live-public-luna-work-site-inspectable react-navigation
+```
+
+The attempt ran at 17:14 UTC on 2026-09-05 and exited successfully. No source
+changes, retry, broader site run, or scope adjustment occurred during the
+witness. Its task-authored route was exactly
+`https://react.dev/learn` → `https://react.dev/learn/your-first-component`.
+The existing isolated ephemeral, extension-free Work profile began with an
+independently matched `Quick Start` heading in a 59-node initial observation.
+After the exact no-redirect native navigation, a new 64-node initial
+observation independently matched `Your First Component` under the immediate
+successor document/context join. Both bounded snapshots reported `Complete`;
+this is not a claim that either initial projection contained the whole page.
+
+Luna proposed navigation, then initial-scope extraction on the successor,
+then mapped one `destination_heading` text value. The task checked exact
+arrival observation/context, role, origin and source text; the owned-result
+check also required the exact heading value and one Heading text citation.
+Source-role selection remained fixed to Heading under the original ceilings.
+No action, baseline read, subtree capture or page-authored destination authority
+was admitted. Old document refs and the prior provider transcript were not
+continuation authority: the trusted objective and original run owners survived,
+while the successor provider turn received only its fresh bounded observation.
+
+| Call / stage | Semantic bytes | Full request bytes | Input / output tokens | Charged micro-USD | Turn ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 / exact navigation proposal | 4,389 | 9,284 | 2,359 / 53 | 654 | 3,685 |
+| 2 / successor extraction proposal | 4,738 | 9,640 | 2,497 / 74 | 713 | 1,991 |
+| 3 / current heading mapping | 880 | 10,368 | 2,410 / 91 | 712 | 2,024 |
+
+The closed totals were 3 Luna calls, 7,266 input tokens, 218 output tokens,
+2,079 micro-USD, and 8,693 ms. Each call reported `PricedCeiling` accounting.
+The application reported `Succeeded`, `durable_success=true`,
+`shell_clean=true`, and passed focus isolation/application-owned teardown.
+The result had 1 field, 1 value and 1 citation edge;
+`independently_verified=true`, with `artifact_promised=false`. Durable success
+here means the original terminal journal was committed, not that a reusable
+artifact was published. There was one navigation proposal and zero baseline
+reads, native actions or verified effects. The proposal counter alone is not
+a native commit receipt: arrival/result acceptance and clean closure were
+reachable only through the exact shipping navigation terminal and original
+policy/accounting joins.
+
+Account evidence is deliberately limited to this new isolated anonymous
+profile. The closed qualifier caches one original sample per document and
+issues a distinct successor sample only after the fresh arrival predicate;
+cached samples never renew their identity/time. This does not detect logged-in
+accounts, import existing sessions, or qualify authenticated-session continuity.
+The existing explicit public provider-retained mode was used; production/BYOK
+retention remains false. Logs contain counts and closed outcomes, not raw
+page/provider bodies, credentials or private account data.
+
+Deterministic pre-live proof: 539 all-feature core tests plus 3 and 5
+evidence-binary tests, and 39 controller tests including 35 navigation
+schedules; independent acceptance repeated the core/controller boundary.
+The schedules cover target/redirect/operation substitution, departure/arrival
+and mutable task contracts, account/epoch/lifecycle revocation, old citations,
+provider transcript retirement, original budgets/deadline/taints, lost native
+callbacks, event saturation, audit refusal, and transient/persistent/regressed
+settlement clocks. The qualifier adds four tests with closed-target,
+departure/arrival, account-cache and citation-substitution matrices (9 total
+qualifier tests). The macOS binary build, strict qualifier Clippy, both
+architecture gates, hostile immutable-runtime JavaScript smoke, formatting
+and diff checks passed before the attempt.
+
+This is one genuine bounded two-document read workflow on the macOS/Luna
+production path. It is not the six-site matrix, arbitrary React SPA routing,
+redirect or cross-origin support, browser history, multi-source synthesis,
+authenticated work, endurance evidence, comparative performance, or visible
+Work UI readiness. No shipping app/engine composition, default Browse
+dependency or ceiling changed for this qualifier.
+
 ## Remaining release blockers
 
 - authorized named-device macOS native-input routes beyond fixed DOM;
