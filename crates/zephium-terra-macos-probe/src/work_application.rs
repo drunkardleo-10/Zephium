@@ -48,19 +48,28 @@ pub(super) fn run_cancellation() -> Result<(), super::ProbeFailure> {
     run_mode(Qualification::CancelExtraction)
 }
 
+pub(super) fn run_sequential() -> Result<(), super::ProbeFailure> {
+    run_mode(Qualification::Sequential)
+}
+
 #[derive(Clone, Copy)]
 enum Qualification {
     Actions,
     Extraction,
     Artifact,
     CancelExtraction,
+    Sequential,
 }
 
 fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
     use super::ProbeFailure as Error;
     let extraction = !matches!(mode, Qualification::Actions);
     let durable = matches!(mode, Qualification::Artifact);
-    let cancel_after_turn = matches!(mode, Qualification::CancelExtraction);
+    let sequential = matches!(mode, Qualification::Sequential);
+    let cancel_after_turn = matches!(
+        mode,
+        Qualification::CancelExtraction | Qualification::Sequential
+    );
     let started = Instant::now();
     let (profile, input, task) = if durable {
         super::work_actor::artifact_input(started)?
@@ -124,7 +133,7 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
         let prepared = composition
             .prepare_public_qualification(request)
             .map_err(|_| "application_prepare")?;
-        let view = composition
+        let mut view = composition
             .attach(&shell.callback_handle())
             .ok_or("application_attach")?;
         view.admit(prepared).map_err(|_| "application_admit")?;
@@ -137,6 +146,12 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
         let mut terminal_success = false;
         let mut terminal_cancelled = false;
         let mut cancellation_requested = false;
+        let mut lifetime = 1_u8;
+        let mut predecessor: Option<(
+            zephium_app::AgentWorkApplicationHandle,
+            zephium_agentic::AgentWorkRecord,
+        )> = None;
+        let mut stale_control_sent = false;
         let mut native_actions = 0_u32;
         let mut terminal_observed = false;
         let mut archive_requested = false;
@@ -187,11 +202,25 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
             // Explicit trusted test control after one real settled Luna turn.
             // This is the same application stop port as a human takeover; no
             // provider or native fault is synthesized and no request is retried.
-            if cancel_after_turn && turns > 0 && !cancellation_requested {
+            if cancel_after_turn && lifetime == 1 && turns > 0 && !cancellation_requested {
                 cancellation_requested = snapshot
                     .run
                     .is_some_and(|run| view.stop(run, AgentRuntimeStopReason::HumanTakeover));
                 if !cancellation_requested {
+                    failed.store(true, Ordering::Release);
+                }
+            }
+            if lifetime == 2
+                && snapshot.phase == AgentWorkApplicationPhase::Running
+                && !stale_control_sent
+            {
+                stale_control_sent = predecessor.as_ref().is_some_and(|(old, record)| {
+                    old.snapshot().run.is_some_and(|run| {
+                        old.records().contains(record)
+                            && old.stop(run, AgentRuntimeStopReason::HumanTakeover)
+                    })
+                });
+                if !stale_control_sent {
                     failed.store(true, Ordering::Release);
                 }
             }
@@ -215,6 +244,7 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
                             record.disposition() == zephium_agentic::AgentWorkDisposition::Succeeded
                         });
                     terminal_cancelled = cancel_after_turn
+                        && lifetime == 1
                         && cancellation_requested
                         && snapshot.phase == AgentWorkApplicationPhase::Cancelled
                         && snapshot.failure
@@ -236,6 +266,56 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
                         verified && view.take_extraction().is_none()
                     });
                     }
+                }
+                if sequential
+                    && lifetime == 1
+                    && terminal_cancelled
+                    && !native_failed
+                    && !failed.load(Ordering::Acquire)
+                {
+                    let Some(record) = view.records().into_iter().find(|record| {
+                        record.disposition() == zephium_agentic::AgentWorkDisposition::Cancelled
+                    }) else {
+                        return Some(Err("successor_prior_record"));
+                    };
+                    let Ok((next_profile, input, task)) =
+                        super::work_actor::extraction_input(Instant::now())
+                    else {
+                        return Some(Err("successor_input"));
+                    };
+                    if next_profile != profile {
+                        return Some(Err("successor_profile"));
+                    }
+                    let Ok(credential) = load_macos_probe_openai_credential() else {
+                        return Some(Err("successor_keychain"));
+                    };
+                    let request = TrustedWorkRequest::new(
+                        input,
+                        AgentWorkApplicationConfig::new(
+                            AgentRuntimeConfig::STANDARD,
+                            AgentProviderTransportConfig::STANDARD,
+                        ),
+                        credential,
+                        task,
+                    );
+                    let Ok(prepared) = composition.prepare_public_qualification(request) else {
+                        return Some(Err("successor_prepare"));
+                    };
+                    let Some(next) = composition.attach_successor(&shell.callback_handle(), &view)
+                    else {
+                        return Some(Err("successor_attachment"));
+                    };
+                    if next.admit(prepared).is_err() {
+                        return Some(Err("successor_admit"));
+                    }
+                    let _ = writeln!(std::io::stdout().lock(), "work-application-predecessor: lifetime={lifetime}; cancelled_closed=true; turns={turns}; input_tokens={tokens_in}; output_tokens={tokens_out}; cost_micro_usd={cost}; native_actions={native_actions}; verified_effects={effects}; wall_ms={}; content=redacted", started.elapsed().as_millis());
+                    predecessor = Some((std::mem::replace(&mut view, next), record));
+                    lifetime = 2;
+                    terminal_observed = false;
+                    terminal_cancelled = false;
+                    terminal_success = false;
+                    (turns, effects, tokens_in, tokens_out, cost) = (0, 0, 0, 0, 0);
+                    return None;
                 }
                 if durable && terminal_success && !archive_verified {
                     if !archive_requested {
@@ -272,6 +352,24 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
                     let erased = cleanup.as_mut().and_then(|cleanup| cleanup.poll())?;
                     terminal_success &= archive_verified && erased;
                 }
+                if sequential {
+                    terminal_success &= lifetime == 2
+                        && stale_control_sent
+                        && predecessor.as_ref().is_some_and(|(old, record)| {
+                            old.snapshot().phase == AgentWorkApplicationPhase::Cancelled
+                                && old.snapshot().failure
+                                    == Some(
+                                        zephium_agent_controller::AgentWorkFailure::HumanTakeover,
+                                    )
+                                && old.snapshot().run != snapshot.run
+                                && old.records() == [*record]
+                                && view.records().len() == 2
+                                && view.records().contains(record)
+                                && view.take_extraction().is_none()
+                        });
+                    let stale_control_ignored = terminal_success && stale_control_sent;
+                    let _ = writeln!(std::io::stdout().lock(), "work-application-successor: lifetimes={lifetime}; exact_predecessor_preserved={terminal_success}; stale_control_ignored={stale_control_ignored}; content=redacted");
+                }
                 let _ = writeln!(std::io::stdout().lock(), "work-application-terminal: phase={:?}; failure={:?}; persistence={:?}; durable_success={terminal_success}; cancelled_closed={terminal_cancelled}; content=redacted", snapshot.phase, snapshot.failure, snapshot.persistence_failure);
                 let request = shell.shutdown_with_deadline(Instant::now() + Duration::from_secs(8));
                 shutdown = std::thread::Builder::new()
@@ -289,7 +387,9 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
                 let _ = writeln!(std::io::stdout().lock(), "work-application-closure: model=gpt-5.6-luna; durable_success={terminal_success}; cancelled_closed={terminal_cancelled}; shell_clean={clean}; turns={turns}; native_actions={native_actions}; verified_effects={effects}; input_tokens={tokens_in}; output_tokens={tokens_out}; cost_micro_usd={cost}; elapsed_ms={}; content=redacted", started.elapsed().as_millis());
                 return Some(
                     if clean
-                        && (if cancel_after_turn {
+                        && (if sequential {
+                            lifetime == 2 && terminal_success
+                        } else if cancel_after_turn {
                             terminal_cancelled
                         } else {
                             terminal_success

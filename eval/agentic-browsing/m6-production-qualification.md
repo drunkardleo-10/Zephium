@@ -1231,6 +1231,86 @@ native lifetimes, richer navigation/tools, concurrent Browse and device-resource
 qualification remain open. This is narrow full-application closure evidence,
 not broad production qualification.
 
+## Proof-gated sequential application/native lifetimes
+
+The opt-in shipping composition now owns the process-unique native lifetime
+factory. Each port permanently seals its own gate and sink. An explicit fresh
+application admission may replace only its exact fully closed predecessor,
+with the same engine/Store/process fence, original runtime/native/policy/audit
+proofs, acknowledged immutable terminal and drained result/event lanes. Neither
+a historical record nor an empty native audit alone grants a successor. See
+[the ownership decision](../../docs/agent-work-lifetimes.md). This supersedes the
+single-attempt process limitation above; uncertain predecessors still block.
+
+The excluded `--live-public-luna-work-sequential-inspectable` qualifier exercises
+two newly authorized public Wikipedia runs in one actual native engine,
+application Shell and SQLite Store. Human takeover closes the first run after
+one real Luna tool turn. A fresh task/context/manifest then extracts a result
+using the original composition's newly issued native lifetime. The qualifier
+sends a stale takeover through the old handle while the successor is Running;
+the old projection cannot control the new run. Both sequences passed, including
+the rebuilt native audit-invalidation boundary.
+
+| Sequence | Cancelled predecessor input / output | Successful successor input / output | Total priced ceiling µUSD | Whole sequence ms | Independently checked successor |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Initial | 1,480 / 36 | 6,883 / 461 | 2,349 | 11,331 | 10 values / 14 source edges |
+| Audit-invalidation build | 1,480 / 36 | 6,879 / 375 | 1,905 | 8,966 | 10 values / 11 source edges |
+
+Each predecessor retained exact `HumanTakeover`, immutable `Cancelled`, zero
+debt and no result; its closure took 3,211/2,438 ms. Successor records were
+distinct, the original terminal remained unchanged and the stale control was
+ignored. Both successors required the trusted extraction predicate and exact
+native source validation; neither relied on model completion text. All four
+lifetimes had zero native mutations/action effects. Both sequences had zero
+focus theft and one final application-owned Clean Shell shutdown. This proves
+serial native reuse by new ports, not concurrent execution, mutation replay,
+normal-tab borrowing or automatic recovery.
+
+The completed predecessor model turns took 2,489/1,778 ms; the next attempts
+were aborted and accounted in 9/10 ms with zero charged tokens. Successor turns
+took 1,688/6,126 ms and 1,601/4,620 ms. Every first turn used 5,658 request bytes
+and 3,116 semantic bytes. Second attempts used 13,330 semantic bytes and
+21,160 request bytes, except the initial successful successor's 21,204 bytes.
+Aggregate charged usage was 16,722 input / 908 output tokens, 4,254 µUSD priced
+ceiling, and 20,297 ms whole-sequence wall time. Explicit public qualification
+alone retained OpenAI logs; production/BYOK remains stateless. No page, model,
+credential, profile, screenshot or raw trace is committed.
+
+Deterministic native tests cover exclusive legacy/factory acquisition, distinct
+ports, permanent old seals/sinks, the 1,024-lifetime ceiling, pending task and
+physical capture ownership, mismatched/refused/lost/nonempty audit receipts,
+sticky lineage failure, and retirement versus audit/global-shutdown races.
+Read-only audit uncertainty invalidates an earlier shutdown certificate before
+permit release; a subsequent ordinary audit cannot manufacture another one.
+Application fixtures drive actual Shell/SQLite success→success and settled
+failure→success without releasing the process fence. They reject stale/wrong
+engine/Store predecessors, pending terminal ACK/event/result/archive owners,
+ordinary second attachment, saturated mailbox and missing original proofs.
+Lost callback and recovered audit debt remains non-replaceable. Existing
+partial-write/restart/approval-CAS tests remain unchanged.
+
+Validation: 425 core; 14 shipping and 18 probe controller; 37 runtime; 339
+shipping and 343 all-feature application; 264 Store plus four doctests; 465
+shipping native engine and 467 semantic-native engine plus three probe tests;
+97 desktop; 175 xtask tests. Existing ignored subprocess helpers remain
+parent-exercised. Full application and controller suites were repeated. The
+broader concurrent sweep exposed the controller fixture's old ten-second
+healthy deadline including synchronous client construction. Healthy fixture
+input and synthetic policy expiry now use the existing ten-minute hard ceiling;
+explicit missing-audit/observation expiry retains its short post-construction
+deadline, and worker/pump waits are unchanged. No production deadline changed.
+
+Strict Clippy, source/semantic/controller/runtime/catalog gates, optimized
+default and opt-in desktop checks pass; optimized qualifier builds are refused.
+The default desktop graph still excludes Work composition, controller, runtime,
+provider transport and reqwest. No default feature, dependency, native scheduling,
+worker, idle poll or lockfile change was added. This is structural evidence,
+not a new resource/battery/endurance benchmark. Unknown action/callback/audit
+debt, failed admission and failed already-started resource close still require
+explicit recovery; parallel contexts/runs need a future scoped proof design.
+Trusted task authoring, richer tools, full desktop bootstrap and broader
+platform/site/resource qualification remain open.
+
 ## Remaining release blockers
 
 - authorized named-device macOS native-input routes beyond fixed DOM;
