@@ -1140,6 +1140,11 @@ retains a real callback obligation or an explicit refusal, not a never-issued
 navigation. Once policy accounts an exact terminal, a later journal refusal
 retains that receipt as audit debt without pretending a native reservation is
 still pending; it grants neither further provider work nor clean closure.
+An explicit synchronous refusal is retained with its original operation before
+any fallible audit or settlement clock read. Cleanup can account that same
+known refusal once time is valid without reminting authority or dispatching
+again. Unavailable or regressed time retains the refusal and policy reservation;
+it cannot become a successful navigation or a clean audit/time claim.
 
 After a commit, Work requires a fresh successor initial observation, an
 independent arrival predicate, and a newly sampled same-account attestation

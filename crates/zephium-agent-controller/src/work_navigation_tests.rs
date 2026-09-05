@@ -6,6 +6,7 @@ use std::sync::atomic::AtomicBool;
 pub(super) struct NavigationSchedule {
     pub(super) events: Mutex<Option<Arc<Mutex<WorkEvents>>>>,
     native_started: AtomicBool,
+    native_clock_calls: AtomicU64,
     audit_faulted: AtomicBool,
     fault: NavigationFault,
 }
@@ -14,6 +15,7 @@ impl NavigationSchedule {
         Self {
             events: Mutex::new(None),
             native_started: AtomicBool::new(false),
+            native_clock_calls: AtomicU64::new(0),
             audit_faulted: AtomicBool::new(false),
             fault,
         }
@@ -33,6 +35,30 @@ impl NavigationClock {
 }
 impl TerraControllerClock for NavigationClock {
     fn now(&self) -> Result<AgentPolicyInstant, super::super::super::TerraControllerClockError> {
+        if self.schedule.native_started.load(Ordering::Relaxed) {
+            let call = self
+                .schedule
+                .native_clock_calls
+                .fetch_add(1, Ordering::Relaxed)
+                + 1;
+            match self.schedule.fault {
+                NavigationFault::RefusalClock if call == 2 => {
+                    return Err(super::super::super::TerraControllerClockError::Invalid);
+                }
+                NavigationFault::RefusalClockStuck if call >= 2 => {
+                    return Err(super::super::super::TerraControllerClockError::Invalid);
+                }
+                NavigationFault::AuditRefusedClock if call <= 2 => {
+                    return Err(super::super::super::TerraControllerClockError::Invalid);
+                }
+                NavigationFault::RefusalClockRegressed if call >= 2 => {
+                    return Ok(AgentPolicyInstant::from_millis(
+                        FIXTURE_POLICY_NOW_MILLIS - 1,
+                    ));
+                }
+                _ => {}
+            }
+        }
         if matches!(
             self.schedule.fault,
             NavigationFault::AuditActive | NavigationFault::AuditRefused
@@ -78,6 +104,10 @@ pub(super) enum NavigationFault {
     Backpressure,
     AuditActive,
     AuditRefused,
+    RefusalClock,
+    RefusalClockStuck,
+    RefusalClockRegressed,
+    AuditRefusedClock,
 }
 
 impl NavigationFault {
@@ -330,7 +360,12 @@ pub(super) fn navigate(
     assert!(request.redirect_policy().is_none());
     if matches!(
         fault,
-        NavigationFault::Dispatch | NavigationFault::AuditRefused
+        NavigationFault::Dispatch
+            | NavigationFault::AuditRefused
+            | NavigationFault::RefusalClock
+            | NavigationFault::RefusalClockStuck
+            | NavigationFault::RefusalClockRegressed
+            | NavigationFault::AuditRefusedClock
     ) {
         return ContextDispatch::Rejected(ContextPortFailure::NativeRefused);
     }
@@ -455,6 +490,10 @@ fn two_document_workflow_retires_provider_replay_and_preserves_original_run_owne
         NavigationFault::Backpressure,
         NavigationFault::AuditActive,
         NavigationFault::AuditRefused,
+        NavigationFault::RefusalClock,
+        NavigationFault::RefusalClockStuck,
+        NavigationFault::RefusalClockRegressed,
+        NavigationFault::AuditRefusedClock,
     ] {
         provider_fixture(ProviderFault::Navigation(fault));
     }
@@ -509,6 +548,9 @@ pub(super) fn assert_outcome(
             | NavigationFault::AuditLost
             | NavigationFault::AuditActive
             | NavigationFault::AuditRefused
+            | NavigationFault::RefusalClockStuck
+            | NavigationFault::RefusalClockRegressed
+            | NavigationFault::AuditRefusedClock
     ) {
         let AgentWorkOutcome::Recovery(recovery) = outcome else {
             panic!("{fault:?} must retain debt: {outcome:?}");
@@ -521,17 +563,36 @@ pub(super) fn assert_outcome(
             assert!(session.credential.is_none());
             assert_eq!(session.policy.pending_effects(), 0);
             assert_eq!(session.policy.pending_model_calls(), 0);
+            if matches!(
+                fault,
+                NavigationFault::RefusalClockStuck | NavigationFault::RefusalClockRegressed
+            ) {
+                assert_eq!(calls.iter().filter(|call| **call == 9).count(), 1);
+                assert_eq!(session.policy.pending_navigations(), 1);
+                assert_eq!(session.policy.accounting().reserved_operations(), 1);
+                let active = session.navigation.as_ref().expect("original policy owner");
+                let refusal = session
+                    .navigation_refusal
+                    .expect("exact native refusal survives");
+                assert_eq!(refusal.operation, active.operation());
+                assert_eq!(refusal.failure, ContextPortFailure::NativeRefused);
+                assert!(session.navigation_receipt.is_none());
+                assert!(recovery.state.native.operation.is_none());
+            }
             if matches!(fault, NavigationFault::Redirect | NavigationFault::Lost) {
                 assert_eq!(session.policy.pending_navigations(), 1);
                 assert!(session.navigation.is_some());
             }
             if matches!(
                 fault,
-                NavigationFault::AuditActive | NavigationFault::AuditRefused
+                NavigationFault::AuditActive
+                    | NavigationFault::AuditRefused
+                    | NavigationFault::AuditRefusedClock
             ) {
                 assert!(calls.contains(&9));
                 assert_eq!(session.policy.pending_navigations(), 0);
                 assert!(session.navigation.is_none());
+                assert!(session.navigation_refusal.is_none());
                 let receipt = session
                     .navigation_receipt
                     .expect("accounted terminal retains audit debt, not a native reservation");
@@ -544,6 +605,9 @@ pub(super) fn assert_outcome(
                     }
                 );
                 assert!(recovery.state.native.operation.is_none());
+                if fault == NavigationFault::AuditRefusedClock {
+                    assert_eq!(recovery.failure, AgentWorkFailure::Contract);
+                }
             }
         }
     } else {
@@ -552,6 +616,22 @@ pub(super) fn assert_outcome(
         };
         assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
         let closure = closed.policy_settlement().closure();
+        if fault == NavigationFault::RefusalClock {
+            assert_eq!(
+                closed.failure(),
+                AgentWorkFailure::Browser(AgentBrowserProviderError::Clock)
+            );
+            assert_eq!(calls.iter().filter(|call| **call == 9).count(), 1);
+            assert_eq!(
+                closed
+                    .policy_settlement()
+                    .accounting()
+                    .reserved_operations(),
+                0
+            );
+            assert_eq!(closure.model_calls(), 1);
+            assert_eq!(closure.navigations(), 1);
+        }
         if fault == NavigationFault::Backpressure {
             assert_eq!(closed.failure(), AgentWorkFailure::Backpressure);
             assert!(!calls.contains(&9));

@@ -1900,6 +1900,13 @@ impl fmt::Debug for TerraControllerRecovery {
     }
 }
 
+/// Exact synchronous terminal evidence, retained independently of policy time.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AgentBrowserNavigationDispatchRefusal {
+    operation: zephium_agentic::ContextOperationJoin,
+    failure: zephium_agentic::ContextPortFailure,
+}
+
 /// Bounded locate/act session sharing the production policy and provider ports.
 ///
 /// The host owns this session before polling any provider work. Dropping a
@@ -1909,6 +1916,7 @@ impl fmt::Debug for TerraControllerRecovery {
 #[must_use]
 pub struct AgentBrowserSession {
     navigation: Option<zephium_agentic::AgentActiveNavigation>,
+    navigation_refusal: Option<AgentBrowserNavigationDispatchRefusal>,
     navigation_receipt: Option<zephium_agentic::AgentNavigationReceipt>,
     journal: Option<work::WorkJournal>,
     journal_receipts: usize,
@@ -2124,6 +2132,7 @@ impl AgentBrowserSession {
         Ok(Self {
             policy,
             navigation: None,
+            navigation_refusal: None,
             navigation_receipt: None,
             journal: None,
             journal_receipts: 0,
@@ -2686,6 +2695,7 @@ impl AgentBrowserSession {
             Some(AgentBrowserProviderError::Transport)
         } else if self.action.is_some()
             || self.navigation.is_some()
+            || self.navigation_refusal.is_some()
             || self.navigation_receipt.is_some()
             || self.action_executions.status().pending() != 0
             || self.action_settlements.status().pending() != 0

@@ -134,6 +134,17 @@ impl AgentWorkController {
             .map_err(|_| AgentWorkFailure::Contract)?;
         state.native.operation = Some(operation);
         let dispatch = browser.dispatch(ContextNativeRequest::Navigate(request));
+        let refusal = match dispatch {
+            ContextDispatch::Rejected(failure) => Some(failure),
+            ContextDispatch::Unsupported => Some(ContextPortFailure::Unsupported),
+            ContextDispatch::Scheduled => None,
+        };
+        if let Some(failure) = refusal {
+            // The port's exact decision is terminal evidence even when a later
+            // clock/audit operation fails. It is not a callback or new permit.
+            session.navigation_refusal =
+                Some(super::super::AgentBrowserNavigationDispatchRefusal { operation, failure });
+        }
         // Both original owners exist before dispatch. Audit/progress recording
         // is fallible, so do it before processing callbacks, but only after the
         // port has either accepted a real callback debt or explicitly refused.
@@ -144,11 +155,6 @@ impl AgentWorkController {
             .ok_or(AgentWorkFailure::Contract)
             .and_then(|journal| journal.navigation_active(active))
             .err();
-        let refusal = match dispatch {
-            ContextDispatch::Rejected(failure) => Some(failure),
-            ContextDispatch::Unsupported => Some(ContextPortFailure::Unsupported),
-            ContextDispatch::Scheduled => None,
-        };
         if let Some(failure) = refusal {
             state.native.operation = None;
             state
@@ -160,7 +166,11 @@ impl AgentWorkController {
                 .session
                 .as_mut()
                 .ok_or(AgentWorkFailure::Contract)?
-                .settle_navigation_refusal(failure)?;
+                .settle_navigation_refusal();
+            let terminal = match terminal {
+                Ok(terminal) => terminal,
+                Err(failure) => return Err(journal_failure.unwrap_or(failure)),
+            };
             return Err(journal_failure
                 .or(terminal.journal_failure)
                 .unwrap_or(AgentWorkFailure::Native(failure)));
@@ -255,6 +265,9 @@ impl AgentBrowserSession {
         &mut self,
         terminal: &ContextNavigationSettlement,
     ) -> Result<NavigationTerminal, AgentWorkFailure> {
+        if self.navigation_refusal.is_some() {
+            return Err(AgentWorkFailure::Contract);
+        }
         let now = self.policy_now().map_err(AgentWorkFailure::Browser)?;
         let active = self.navigation.as_ref().ok_or(AgentWorkFailure::Contract)?;
         let receipt = self
@@ -266,18 +279,27 @@ impl AgentBrowserSession {
         Ok(self.record_navigation_terminal(receipt))
     }
 
-    fn settle_navigation_refusal(
+    pub(super) fn settle_navigation_refusal(
         &mut self,
-        failure: ContextPortFailure,
     ) -> Result<NavigationTerminal, AgentWorkFailure> {
+        let refusal = self.navigation_refusal.ok_or(AgentWorkFailure::Contract)?;
+        if self
+            .navigation
+            .as_ref()
+            .map(AgentActiveNavigation::operation)
+            != Some(refusal.operation)
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
         let now = self.policy_now().map_err(AgentWorkFailure::Browser)?;
         let active = self.navigation.as_ref().ok_or(AgentWorkFailure::Contract)?;
         let receipt = self
             .policy
-            .refuse_navigation_dispatch(active, failure, now)
+            .refuse_navigation_dispatch(active, refusal.failure, now)
             .map_err(|error| {
                 AgentWorkFailure::Browser(AgentBrowserProviderError::Navigation(error))
             })?;
+        self.navigation_refusal.take();
         Ok(self.record_navigation_terminal(receipt))
     }
 

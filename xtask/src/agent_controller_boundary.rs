@@ -254,6 +254,8 @@ fn validate_navigation(actor: &str, policy: &str, continuation: &str) -> Result<
             ".begin_navigation(id, op)", "state.native.snapshot_generation = None;",
             "session.navigation = Some(active);", "ContextNativeRequest::Navigate(request)",
             "terminal.operation() == operation", ".settle_navigation_terminal(&terminal)",
+            "AgentBrowserNavigationDispatchRefusal", "self.navigation_refusal.ok_or(AgentWorkFailure::Contract)?",
+            "!= Some(refusal.operation)", ".refuse_navigation_dispatch(active, refusal.failure, now)",
             "Self::observe(state, worker, browser).await?", "state.task_progress(&fresh)?",
             "state.task.attest_account(operation.context(), now)",
             "account.observed_at() < receipt.settled_at()", "account.attestation() == self.account.attestation()",
@@ -330,6 +332,12 @@ fn validate_navigation(actor: &str, policy: &str, continuation: &str) -> Result<
         .ok_or("navigation lost active audit recording")?;
     if proposal >= authorize || dispatch >= audit {
         return Err("fallible navigation event/audit work can strand an undispatched owner".into());
+    }
+    let refusal = actor
+        .find("session.navigation_refusal =")
+        .ok_or("navigation lost exact synchronous refusal evidence")?;
+    if refusal <= dispatch || refusal >= audit {
+        return Err("synchronous refusal is not retained before fallible audit work".into());
     }
     Ok(())
 }
@@ -523,6 +531,7 @@ fn validate_terra(source: &str) -> Result<(), String> {
         "self.seal_terminal(false)",
         "else if !unsuccessful",
         "self.retained_terminal.is_some()",
+        "self.navigation_refusal.is_some()",
         "self.action_admission_failure.is_some()",
         "!unsuccessful || refusal.human_review().is_none()",
         "AgentBrowserSessionFinishRefusal",
@@ -755,6 +764,7 @@ fn validate_work(source: &str) -> Result<(), String> {
         "worker.try_drain_terminal_claim_refusal_event()",
         "recovery_close: Option<ContextOperationJoin>",
         "Self::begin_recovery_close(state, browser)",
+        "let _ = session.settle_navigation_refusal();",
         "AgentWorkOutcome::ClosedUnsuccessfully",
         "session.try_finish_unsuccessful()",
         "state.native.deferred.is_empty()",
@@ -885,6 +895,8 @@ mod tests {
             ".begin_navigation(id, op)",
             "state.task_progress(&fresh)?",
             "account.observed_at() < receipt.settled_at()",
+            "self.navigation_refusal.ok_or(AgentWorkFailure::Contract)?",
+            "!= Some(refusal.operation)",
         ] {
             assert!(validate_navigation(
                 &NAVIGATION.replace(removed, "removed"),
@@ -1107,6 +1119,7 @@ mod tests {
         }
         for boundary in [
             "self.retained_terminal.is_some()",
+            "self.navigation_refusal.is_some()",
             "self.action_admission_failure.is_some()",
             "!unsuccessful || refusal.human_review().is_none()",
             "else if !unsuccessful",
@@ -1115,6 +1128,7 @@ mod tests {
         }
         for boundary in [
             "state.native.deferred.is_empty()",
+            "let _ = session.settle_navigation_refusal();",
             "state.drained.is_some()",
             "(closure.outcome() == AgentRunProgressOutcome::Succeeded) == unsuccessful",
             "claim.commit_with_shutdown(proof, settlement, provider)",

@@ -2448,6 +2448,13 @@ impl AgentWorkController {
             return deadline;
         };
         if Instant::now() < deadline {
+            // Reconcile one already-known synchronous terminal, never reissue
+            // native work. Time/audit refusal retains its exact original owner.
+            if let Some(session) = state.session.as_mut() {
+                if session.navigation_refusal.is_some() {
+                    let _ = session.settle_navigation_refusal();
+                }
+            }
             Self::begin_recovery_close(state, browser);
         }
         // Drain already-dispatched callbacks only; no action or provider retry.
