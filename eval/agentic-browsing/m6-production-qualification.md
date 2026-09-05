@@ -2305,6 +2305,11 @@ task facts, roles and completeness contract; no fixed sleep, blind retry or
 automatic criterion/ceiling relaxation is justified by this failed witness.
 No raw page/provider bodies or private data were added to this record.
 
+The subsequent [provider-free hidden rendering diagnostic](macos-rendering-readiness.md)
+records a pinned loopback witness separating native/load completion and
+microtask/timer reveal from animation-frame reveal. It changes no production
+scheduling policy and does not retrospectively prove this public-site cause.
+
 ## Remaining release blockers
 
 - authorized named-device macOS native-input routes beyond fixed DOM;

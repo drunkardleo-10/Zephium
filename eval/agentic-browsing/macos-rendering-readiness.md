@@ -93,3 +93,78 @@ Even a confirmed hidden-view RAF stall on this fixture is not proof that a
 particular scheduling change fixes the public commerce site. Any production
 policy change requires separate design, lifecycle/resource review and native
 qualification; this diagnostic never changes policy to force a result.
+
+## 2026-09-05 — pinned provider-free native witness
+
+One invocation of `--ci-hidden-rendering-readiness` used clean source HEAD
+`cc74d293ee3a0f151454a0bad21b7f3f8ebbf484` and exited 0. The tree was clean
+before and after the invocation. A host clock reading immediately before
+launch was `2026-09-05 19:34:51 UTC`; the exact native process start was not
+emitted and is not inferred from that reading.
+
+All eight successful semantic captures contained six nodes, with the fixed
+document marker `Complete` and load, microtask and timer reveal controls true.
+The exact original navigation's native-finish fact changed from false before
+to true after the first capture. It was true before and after every later
+capture. The animation-frame reveal marker was absent in every capture.
+
+| Elapsed from committed-navigation return (ms) | Native finished before / after | Nodes | Document / load / microtask / timer | RAF reveal |
+| --- | --- | --- | --- | --- |
+| 44 | false / true | 6 | Complete / true / true / true | false |
+| 64 | true / true | 6 | Complete / true / true / true | false |
+| 108 | true / true | 6 | Complete / true / true / true | false |
+| 208 | true / true | 6 | Complete / true / true / true | false |
+| 408 | true / true | 6 | Complete / true / true / true | false |
+| 808 | true / true | 6 | Complete / true / true / true | false |
+| 1608 | true / true | 6 | Complete / true / true / true | false |
+| 3280 | true / true | 6 | Complete / true / true / true | false |
+
+The returned disposition was `AnimationFrameNotObservedWithinWindow`.
+Closure reported `fixture=loopback-only`, `provider=absent`,
+`profile=ephemeral`, `presentation=hidden`, `scheduling=throttle` and
+`original_native_teardown=verified`. No provider/keychain/public-site request,
+native action, runtime-policy change or content-bearing output was involved.
+
+This demonstrates a bounded hidden-view animation-frame liveness gap on the
+fixed fixture even after independently observed native finish, document
+complete and load. It rules out treating load completion alone as sufficient
+for this fixture's semantic reveal. It does not prove permanent RAF starvation,
+identify the 17 nodes from the failed commerce run, establish that site's
+root cause, or show that a scheduling-policy change would fix it.
+
+The existing `--ci-hidden-fixed-dom` native regression then also exited 0 on
+the same source pin: ten snapshots, four world epochs, verified fixed click
+and expanded postcondition, exact-value page-world compatibility fill across
+text input/search input/textarea, stale-anchor refusal and mutation recovery,
+epoch-rotation fill, redacted secrets, zero user activation, admitted popups,
+focus theft and retained views. Its synthetic event trust remains `untrusted`;
+this is not an OS-native typing or trusted-activation claim.
+
+### Gates and known unrelated failure
+
+Passed on the diagnostic source pin:
+
+- all 469 engine library tests with `native-agentic-semantic-probe`;
+- all eight `probe-harness` fixture-server tests, including the new closed
+  rendering fixture;
+- strict all-target engine Clippy with the native probe feature, the debug
+  native semantic-probe build and the non-probe `agentic-browser` engine check;
+- both actual architecture gates (`check-agentic-probe-boundary`, including
+  hostile immutable-runtime JavaScript smoke, and
+  `check-agent-controller-boundary`);
+- the new rendering diagnostic architecture-mutation test; and
+- formatting and diff-whitespace checks, plus both native invocations above.
+
+An additional complete `xtask` unit run had **183 passed, one failed**:
+`agentic_probe_boundary::tests::supervisor_progress_requires_exact_manifest_revision_provenance`.
+Its synthetic positive fixture repeats the exact revision join seven times,
+while its validator requires nine. Both the seven-join fixture and nine-join
+validator are already present in `cc74d29^` (`cdf7742`); the diagnostic does
+not edit either. The actual production architecture gate passes. This
+unrelated unit-fixture mismatch is reported, not repaired or represented as
+a green full gate in this diagnostic checkpoint.
+
+The next decision is a separately reviewed runtime-policy investigation of
+hidden-view rendering liveness with resource, privacy and lifecycle bounds.
+No production change or further public/provider attempt is authorized by
+this result alone.
