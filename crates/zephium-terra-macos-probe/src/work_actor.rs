@@ -19,7 +19,7 @@ impl TerraControllerClock for Clock {
     }
 }
 
-struct Task(super::PreparedSearchProgress);
+type Task = AgentWorkFormTask;
 struct PublicPreparedResultTask {
     actions: Task,
     extraction: AgentWorkExtractionTask,
@@ -174,66 +174,6 @@ impl AgentWorkTask for PublicExtractionTask {
         self.0.accept_extraction(result)
     }
 }
-impl AgentWorkTask for Task {
-    fn evaluate(
-        &mut self,
-        observation: &SemanticObservation,
-    ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
-        let (mut initial, mut final_query, mut language) = (false, false, false);
-        for node in observation.frames().iter().flat_map(|frame| frame.nodes()) {
-            if matches!(node.role(), SemanticRole::Searchbox | SemanticRole::Textbox) {
-                if let Some(SemanticValueSummary::Text(value)) = node.value() {
-                    let value = value.preview();
-                    initial |= !value.truncated()
-                        && value.source_bytes() == "Zephium browser".len()
-                        && value.text() == "Zephium browser";
-                    final_query |= !value.truncated()
-                        && value.source_bytes() == "Zephium open source browser".len()
-                        && value.text() == "Zephium open source browser";
-                }
-            }
-            language |= node.role() == SemanticRole::Option
-                && node.name().is_some_and(|name| name.as_str() == "Deutsch")
-                && node.states().contains(SemanticState::Selected);
-        }
-        let _ = writeln!(std::io::stdout().lock(), "work-task-observed: initial={initial}; final_query={final_query}; language={language}; content=redacted");
-        Ok(if self.0.observe(initial, final_query, language) {
-            AgentWorkTaskProgress::Complete
-        } else {
-            AgentWorkTaskProgress::Continue
-        })
-    }
-    fn assess(
-        &self,
-        action: &SemanticPreparedAction,
-    ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
-        let _ = writeln!(std::io::stdout().lock(), "work-task-action: kind={:?}; wait={:?}; verification={:?}; settle_millis={}; content=redacted", action.kind(), action.wait(), action.verification(), action.settle_budget().millis());
-        if !matches!(
-            action.kind(),
-            SemanticActionKind::Fill | SemanticActionKind::Select
-        ) {
-            return Err(AgentWorkFailure::Contract);
-        }
-        Ok(AgentEffectAssessment::new(
-            action,
-            action.frame().origin().clone(),
-            SemanticEffectClass::LocalWrite,
-        ))
-    }
-    fn attest_account(
-        &self,
-        context: ContextJoin,
-        now: AgentPolicyInstant,
-    ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
-        Ok(AgentContextAccountBinding::new(
-            AgentAccountAttestationId::generate(),
-            context,
-            AgentAccountScope::Anonymous,
-            now,
-        ))
-    }
-}
-
 pub(super) fn input(
     started: Instant,
 ) -> Result<
@@ -334,6 +274,24 @@ fn input_mode(
     );
     let origin =
         SemanticOrigin::parse("https://www.wikipedia.org/").map_err(|_| Error::Authority)?;
+    let form_task = || {
+        AgentWorkFormTask::try_new_local_preparation(
+            context,
+            origin.clone(),
+            AgentAccountScope::Anonymous,
+            vec![
+                AgentWorkFormPhase::try_new(vec![
+                    AgentWorkFormGoal::fill(None, "Zephium browser".into())?,
+                    AgentWorkFormGoal::select(None, "Deutsch".into())?,
+                ])?,
+                AgentWorkFormPhase::try_new(vec![
+                    AgentWorkFormGoal::fill(None, "Zephium open source browser".into())?,
+                    AgentWorkFormGoal::select(None, "Deutsch".into())?,
+                ])?,
+            ],
+        )
+    };
+    let form_task = form_task().map_err(|_| Error::Authority)?;
     let effects = AgentEffectScope::try_new(if extraction {
         &[SemanticEffectClass::Read]
     } else {
@@ -415,7 +373,7 @@ fn input_mode(
     };
     let task: Box<dyn AgentWorkTask> = if combined {
         Box::new(PublicPreparedResultTask {
-            actions: Task(Default::default()),
+            actions: form_task,
             extraction: AgentWorkExtractionTask::try_new(
                 vec![
                     SemanticExtractionFieldSchema::try_text("prepared_query".into(), true, 64)
@@ -442,7 +400,7 @@ fn input_mode(
             .map_err(|_| Error::Authority)?,
         ))
     } else {
-        Box::new(Task(Default::default()))
+        Box::new(form_task)
     };
     Ok((profile, input, task))
 }

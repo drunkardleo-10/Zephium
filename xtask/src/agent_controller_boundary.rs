@@ -11,6 +11,7 @@ const PROBE: &str = "crates/zephium-agent-controller/src/probe.rs";
 const TERRA: &str = "crates/zephium-agent-controller/src/terra.rs";
 const ACTION: &str = "crates/zephium-agent-controller/src/action.rs";
 const WORK: &str = "crates/zephium-agent-controller/src/work.rs";
+const FORM: &str = "crates/zephium-agent-controller/src/work_form.rs";
 const READ: &str = "crates/zephium-agentic/src/semantic_read.rs";
 const CONTINUATION: &str = "crates/zephium-agentic/src/agent_provider/continuation.rs";
 const POLICY: &str = "crates/zephium-agentic/src/agent_policy.rs";
@@ -54,6 +55,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_terra(&terra)?;
     validate_action(&action)?;
     validate_work(&read(repository.join(WORK))?)?;
+    validate_form(&read(repository.join(FORM))?)?;
     validate_scoped_extraction(
         &read(repository.join(READ))?,
         &read(repository.join(CONTINUATION))?,
@@ -69,6 +71,58 @@ fn read(path: impl AsRef<Path>) -> Result<String, String> {
     let path = path.as_ref();
     std::fs::read_to_string(path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))
+}
+
+fn validate_form(source: &str) -> Result<(), String> {
+    for required in [
+        "impl AgentWorkTask for AgentWorkFormTask",
+        "pub fn try_new_local_preparation(",
+        "const MAX_GOALS: usize = 8;",
+        "MAX_SEMANTIC_VALUE_PREVIEW_BYTES",
+        "SemanticScope::Initial",
+        "snapshot.completeness() != SemanticCompleteness::Complete",
+        "snapshot.generation() <= last.snapshot",
+        "matches.next().is_some()",
+        "descendant(snapshot, option_index, target_index)",
+        "preview.source_bytes() == goal.value.len()",
+        "action.source_observation() != baseline.observation",
+        "action.source_observation_generation() != baseline.generation",
+        "action.frame() != &baseline.frame",
+        "action.bound_action().snapshot_generation() != baseline.snapshot",
+        "action.bound_action().option_reference() != binding.option",
+        "action.fill_text() != Some(&goal.value)",
+        "self.bindings.clear();",
+        "self.refused = true;",
+    ] {
+        if !source.contains(required) {
+            return Err(format!("trusted form contract lost boundary: {required}"));
+        }
+    }
+    for forbidden in [
+        "println!",
+        "eprintln!",
+        "tracing::",
+        "log::",
+        "serde",
+        "derive(Debug",
+        "derive(Clone, Debug",
+        "AgentWorkController::",
+        "AgentRunPolicy",
+        "AgentRuntimeBrowser",
+        "AgentProviderTransport",
+        "tokio::",
+        "std::thread",
+        "fn accept_extraction",
+        "fn allows_actions_before_extraction",
+        "fn allows_subtree_extraction",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "trusted form contract acquired extra authority or content sink: {forbidden}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_scoped_extraction(read: &str, continuation: &str, policy: &str) -> Result<(), String> {
@@ -336,6 +390,8 @@ fn validate_inventory(crate_root: &Path) -> Result<(), String> {
             "work_tests.rs".to_owned(),
             "work_combined_tests.rs".to_owned(),
             "work_scoped_tests.rs".to_owned(),
+            "work_form.rs".to_owned(),
+            "work_form_tests.rs".to_owned(),
         ])
     {
         return Err("controller source inventory drifted".to_owned());
@@ -482,7 +538,11 @@ fn validate_work(source: &str) -> Result<(), String> {
 
 fn validate_work_actor_qualifier(source: &str) -> Result<(), String> {
     for required in [
-        "impl AgentWorkTask for Task",
+        "type Task = AgentWorkFormTask;",
+        "AgentWorkFormTask::try_new_local_preparation(",
+        "AgentWorkFormPhase::try_new(vec![",
+        "AgentWorkFormGoal::fill(",
+        "AgentWorkFormGoal::select(",
         "AgentWorkController::try_new_for_probe(",
         "PendingAgentRuntime::spawn_suspended_with_controller(",
         "pending.bind_browser_port(port)",
@@ -529,8 +589,8 @@ fn validate_work_actor_qualifier(source: &str) -> Result<(), String> {
 mod tests {
     use super::validate_scoped_extraction;
     use super::{
-        validate_action, validate_manifest, validate_probe, validate_root, validate_terra,
-        validate_work, validate_work_actor_qualifier, validate_workflow_qualifier,
+        validate_action, validate_form, validate_manifest, validate_probe, validate_root,
+        validate_terra, validate_work, validate_work_actor_qualifier, validate_workflow_qualifier,
     };
 
     const MANIFEST: &str = include_str!("../../crates/zephium-agent-controller/Cargo.toml");
@@ -546,6 +606,7 @@ mod tests {
     const QUALIFIER: &str = include_str!("../../crates/zephium-terra-macos-probe/src/main.rs");
     const WORK_QUALIFIER: &str =
         include_str!("../../crates/zephium-terra-macos-probe/src/work_actor.rs");
+    const FORM: &str = include_str!("../../crates/zephium-agent-controller/src/work_form.rs");
 
     #[test]
     fn current_controller_boundary_is_valid() {
@@ -555,10 +616,33 @@ mod tests {
         validate_terra(TERRA).expect("controller Terra path");
         validate_action(ACTION).expect("controller native action path");
         validate_work(WORK).expect("production Work actor");
+        validate_form(FORM).expect("production trusted form contract");
         validate_scoped_extraction(READ, CONTINUATION, POLICY).expect("scoped extraction proof");
         validate_workflow_qualifier(QUALIFIER).expect("same-driver native qualification path");
         validate_work_actor_qualifier(WORK_QUALIFIER)
             .expect("actual actor/native/store qualification path");
+    }
+
+    #[test]
+    fn form_task_cannot_lose_value_ref_or_freshness_binding_or_gain_content_sinks() {
+        for boundary in [
+            "action.fill_text() != Some(&goal.value)",
+            "action.bound_action().option_reference() != binding.option",
+            "snapshot.generation() <= last.snapshot",
+            "self.refused = true;",
+            "SemanticScope::Initial",
+        ] {
+            assert!(validate_form(&FORM.replace(boundary, "removed_boundary")).is_err());
+        }
+        for forbidden in [
+            "tracing::info!",
+            "serde::Serialize",
+            "AgentRuntimeBrowser",
+            "AgentRunPolicy",
+            "tokio::spawn",
+        ] {
+            assert!(validate_form(&format!("{FORM}\n{forbidden}")).is_err());
+        }
     }
 
     #[test]

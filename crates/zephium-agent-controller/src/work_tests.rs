@@ -7,6 +7,60 @@ use zephium_agent_runtime::{
 };
 
 static SERIAL: Mutex<()> = Mutex::new(());
+
+#[test]
+fn production_form_initial_completion_or_missing_field_never_calls_provider() {
+    let _serial = lock(&SERIAL);
+    for name in ["Field", "Missing"] {
+        let input = input();
+        let task = crate::AgentWorkFormTask::try_new_local_preparation(
+            input.context.identity,
+            input.context.origin.clone(),
+            AgentAccountScope::Anonymous,
+            vec![
+                crate::AgentWorkFormPhase::try_new(vec![crate::AgentWorkFormGoal::fill(
+                    Some(name.into()),
+                    String::new(),
+                )
+                .unwrap()])
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let (controller, handle) = AgentWorkController::try_new(
+            input,
+            AgentProviderTransportConfig::STANDARD,
+            AgentProviderCredential::try_new(
+                AgentProviderKind::OpenAiResponses,
+                "fixture-not-a-secret".into(),
+            )
+            .unwrap(),
+            Arc::new(Audit(Fault::None)),
+            Box::new(task),
+        )
+        .unwrap();
+        let (outcome, shutdown, calls, events) = drive(controller, handle, Fault::None);
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        assert_eq!(calls, [1, 2, 3, 4, 5, 6]);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event.kind(), AgentWorkEventKind::ModelActive)));
+        let closure = if name == "Field" {
+            let AgentWorkOutcome::Succeeded(success) = outcome else {
+                panic!("already satisfied: {outcome:?}")
+            };
+            success.closure()
+        } else {
+            let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+                panic!("missing field: {outcome:?}")
+            };
+            assert_eq!(closed.failure(), AgentWorkFailure::Contract);
+            closed.policy_settlement().closure()
+        };
+        assert_eq!(closure.effects(), 0);
+        assert_eq!(closure.model_calls(), 0);
+    }
+}
 #[cfg(feature = "probe-harness")]
 #[path = "work_combined_tests.rs"]
 mod combined_tests;
@@ -859,6 +913,37 @@ fn settled_provider_refusals_and_count_stream_cancellation_close_without_success
 
 #[cfg(feature = "probe-harness")]
 fn provider_fixture(fault: ProviderFault) {
+    provider_fixture_with_form(fault, None);
+}
+
+#[cfg(feature = "probe-harness")]
+#[test]
+fn production_form_task_keeps_actor_refusal_and_callback_owners() {
+    let _serial = lock(&SERIAL);
+    for fault in [
+        ProviderFault::Native(Fault::ActionApplied),
+        ProviderFault::Native(Fault::ActionDispatch),
+        ProviderFault::Native(Fault::ActionCallback),
+        ProviderFault::Native(Fault::ActionVerification),
+        ProviderFault::Native(Fault::ActionCancel),
+        ProviderFault::Native(Fault::ActionLost),
+        ProviderFault::Native(Fault::ActionNeedsHuman),
+        ProviderFault::Native(Fault::ActionBudget),
+        ProviderFault::CountRefused,
+        ProviderFault::StreamRefused,
+        ProviderFault::CancelCount,
+        ProviderFault::CancelStream,
+    ] {
+        provider_fixture_with_form(fault, Some("fixture value"));
+    }
+    provider_fixture_with_form(
+        ProviderFault::Native(Fault::ActionApplied),
+        Some("not authorized"),
+    );
+}
+
+#[cfg(feature = "probe-harness")]
+fn provider_fixture_with_form(fault: ProviderFault, form: Option<&str>) {
     use std::io::{Read as _, Write as _};
     struct Continue;
     impl AgentWorkTask for Continue {
@@ -1086,7 +1171,24 @@ fn provider_fixture(fault: ProviderFault) {
     } else {
         input()
     };
-    let task: Box<dyn AgentWorkTask> = if let ProviderFault::Scoped(fault) = fault {
+    let task: Box<dyn AgentWorkTask> = if let Some(value) = form {
+        Box::new(
+            crate::AgentWorkFormTask::try_new_local_preparation(
+                approved.context.identity,
+                approved.context.origin.clone(),
+                AgentAccountScope::Anonymous,
+                vec![
+                    crate::AgentWorkFormPhase::try_new(vec![crate::AgentWorkFormGoal::fill(
+                        Some("Field".into()),
+                        value.into(),
+                    )
+                    .unwrap()])
+                    .unwrap(),
+                ],
+            )
+            .unwrap(),
+        )
+    } else if let ProviderFault::Scoped(fault) = fault {
         Box::new(ScopedTask::new(fault))
     } else if let ProviderFault::Combined(fault) = fault {
         Box::new(CombinedTask {
@@ -1149,6 +1251,33 @@ fn provider_fixture(fault: ProviderFault) {
     };
     let (outcome, shutdown, calls, events) =
         drive_with_control(controller, handle, native_fault, control);
+    if form.is_some() && fault == ProviderFault::Native(Fault::ActionApplied) {
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        if form == Some("fixture value") {
+            let AgentWorkOutcome::Succeeded(success) = outcome else {
+                panic!("form must succeed: {outcome:?}")
+            };
+            assert_eq!(success.closure().effects(), 1);
+            assert_eq!(success.closure().model_calls(), 1);
+            assert_eq!(calls, [1, 2, 3, 7, 3, 4, 5, 6]);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event.kind() == AgentWorkEventKind::Verified)
+                    .count(),
+                1
+            );
+        } else {
+            let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+                panic!("unapproved form value must close: {outcome:?}")
+            };
+            assert_eq!(closed.failure(), AgentWorkFailure::Contract);
+            assert_eq!(closed.policy_settlement().closure().effects(), 0);
+            assert_eq!(calls, [1, 2, 3, 4, 5, 6]);
+        }
+        assert_eq!(server.join().unwrap(), 1);
+        return;
+    }
     if let ProviderFault::Scoped(fault) = fault {
         assert_eq!(server.join().expect("scoped fixture server"), requests / 2);
         scoped_tests::assert_outcome(fault, outcome, shutdown, &calls, &events);

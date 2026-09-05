@@ -16,6 +16,11 @@ classification and exact account attestation. Neither a model response nor
 hostile page text may implement these authorities. Model text and action counts
 cannot terminate a task successfully.
 
+For independently classified local form preparation, the production
+[`AgentWorkFormTask`](agent-work-forms.md) supplies bounded trusted field/value
+phases and exact fresh-target assessment without a bespoke Rust predicate.
+It is not an automatic effect classifier for arbitrary forms.
+
 The optional [application admission boundary](agent-work-persistence.md) now
 owns durable admission and the complete runtime lifecycle. The composition root
 prepares `PreparedAgentWork`, attaches the same Store's journal port to the

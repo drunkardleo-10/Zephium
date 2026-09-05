@@ -21,6 +21,11 @@ credential and `AgentWorkTask`. The trusted task supplies both task-level
 completion and independent effect/account assessment. There is no default task
 and no interpretation of model text as product authority.
 
+Trusted local-only form workflows can supply
+[`AgentWorkFormTask`](agent-work-forms.md) with explicit bounded goals. The
+product must independently attest local effect semantics for those fields;
+the task cannot infer that an arbitrary form is non-submitting or non-autosaving.
+
 Preparation first borrows the exact engine/Store owners under the desktop
 admission mutex, without attachment, persistence claim or native acquisition.
 It rechecks the original absolute deadline. Validation failure leaves the

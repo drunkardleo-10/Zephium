@@ -23,6 +23,11 @@ mod terra;
 mod action;
 
 #[cfg(feature = "provider-transport")]
+mod work_form;
+#[cfg(feature = "provider-transport")]
+pub use work_form::{AgentWorkFormGoal, AgentWorkFormPhase, AgentWorkFormTask};
+
+#[cfg(feature = "provider-transport")]
 pub use action::{
     AgentBrowserAction, AgentBrowserActionError, AgentBrowserActionFinalizationRefusal,
     AgentBrowserActionProposal, AgentBrowserVerifiedTransition,
