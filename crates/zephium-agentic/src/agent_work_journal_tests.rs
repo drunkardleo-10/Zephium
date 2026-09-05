@@ -76,6 +76,54 @@ fn review_is_one_use_and_never_clears_execution_debt() {
 }
 
 #[test]
+fn proof_closed_review_preserves_debt_and_terminal_cas_without_replay() {
+    let running = initial().transition(AgentWorkDisposition::Running).unwrap();
+    // Decoding tests persisted grammar only, never mints proof-bearing mutation.
+    let mut bytes = *running.as_bytes();
+    bytes[1] = AgentWorkDisposition::NeedsApproval as u8;
+    bytes[2] = 0;
+    bytes[8..16].copy_from_slice(&(running.revision() + 1).to_be_bytes());
+    let review = AgentWorkRecord::decode(bytes).unwrap();
+    assert!(review.is_successor_of(running));
+    assert!(!review.is_successor_of(initial()));
+    assert_ne!(
+        AgentWorkJournalMutation::transition(running, AgentWorkDisposition::NeedsApproval)
+            .unwrap()
+            .next(),
+        review
+    );
+    for decision in [
+        AgentWorkDisposition::FreshAdmissionRequired,
+        AgentWorkDisposition::Rejected,
+        AgentWorkDisposition::FailedClosed,
+    ] {
+        let terminal = AgentWorkJournalMutation::transition(review, decision)
+            .unwrap()
+            .next();
+        assert_eq!(terminal.debt(), AgentWorkDebt::NONE);
+        assert_eq!(
+            AgentWorkRecord::decode(*terminal.as_bytes()),
+            Some(terminal)
+        );
+        assert!(terminal.is_successor_of(review));
+        assert!(terminal.disposition().is_terminal());
+        assert!(terminal.transition(decision).is_err());
+        assert!(terminal.transition(AgentWorkDisposition::Running).is_err());
+        assert_eq!(
+            terminal
+                .interrupted(AgentWorkIncarnation::generate())
+                .unwrap(),
+            terminal
+        );
+    }
+    let restart = review
+        .interrupted(AgentWorkIncarnation::generate())
+        .unwrap();
+    assert_eq!(restart.disposition(), AgentWorkDisposition::Interrupted);
+    assert_eq!(restart.debt(), AgentWorkDebt::UNKNOWN);
+}
+
+#[test]
 fn unsuccessful_closed_facts_are_immutable_and_cannot_mint_mutation_authority() {
     let running = initial().transition(AgentWorkDisposition::Running).unwrap();
     for disposition in [

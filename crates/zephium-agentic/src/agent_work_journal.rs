@@ -11,7 +11,8 @@ use std::fmt;
 mod tests;
 
 use crate::{
-    AgentNativeShutdownProof, AgentRunManifest, AgentRunPolicySettlement, AgentRunProgressOutcome,
+    AgentNativeShutdownProof, AgentNeedsHumanTransition, AgentRunManifest,
+    AgentRunPolicySettlement, AgentRunProgressOutcome, AgentSupervisorFailure,
 };
 
 /// Fixed version-one record width, including reserved zero bytes.
@@ -69,6 +70,15 @@ pub enum AgentWorkDisposition {
 }
 
 impl AgentWorkDisposition {
+    const fn is_review_classification(self) -> bool {
+        matches!(
+            self,
+            Self::NeedsApproval
+                | Self::FreshAdmissionRequired
+                | Self::Rejected
+                | Self::FailedClosed
+        )
+    }
     /// Immutable records cannot be reopened or rewritten, including on restart.
     pub const fn is_terminal(self) -> bool {
         (self as u8) >= 6
@@ -133,12 +143,13 @@ impl AgentWorkRecord {
             || bytes[3..8] != [0; 5]
             || record.revision() == 0
             || bytes[16..32] == [0; 16]
-            || matches!(
-                disposition,
-                AgentWorkDisposition::Succeeded
-                    | AgentWorkDisposition::Failed
-                    | AgentWorkDisposition::Cancelled
-            ) != (bytes[2] == 0)
+            || (!disposition.is_review_classification()
+                && matches!(
+                    disposition,
+                    AgentWorkDisposition::Succeeded
+                        | AgentWorkDisposition::Failed
+                        | AgentWorkDisposition::Cancelled
+                ) != (bytes[2] == 0))
         {
             return None;
         }
@@ -234,6 +245,33 @@ impl AgentWorkRecord {
         };
         self.next(disposition, self.incarnation(), AgentWorkDebt::NONE)
     }
+    /// Records an unexecuted policy refusal only after original failed policy,
+    /// audit and native closure. The application must additionally own the
+    /// exact clean runtime join. Review is still required; no proposal or
+    /// authorization survives as executable authority in this record.
+    pub fn needs_approval_closed(
+        self,
+        policy: AgentRunPolicySettlement,
+        _native: &AgentNativeShutdownProof,
+        review: AgentNeedsHumanTransition,
+    ) -> Result<Self, AgentWorkJournalError> {
+        let closure = policy.closure();
+        if self.disposition() != AgentWorkDisposition::Running
+            || self.0[32..48] != closure.manifest().bytes()
+            || self.0[64..96] != closure.manifest_guard()
+            || self.0[48..64] != review.context().identity().owner().bytes()
+            || !review.matches_manifest_revision(closure.manifest(), closure.manifest_guard())
+            || closure.outcome()
+                != AgentRunProgressOutcome::Failed(AgentSupervisorFailure::PolicyDenied)
+        {
+            return Err(AgentWorkJournalError::Transition);
+        }
+        self.next(
+            AgentWorkDisposition::NeedsApproval,
+            self.incarnation(),
+            AgentWorkDebt::NONE,
+        )
+    }
     /// Store-only restart classification after acquiring the exclusive process
     /// lock. Terminal facts remain byte-for-byte unchanged.
     pub fn interrupted(self, owner: AgentWorkIncarnation) -> Result<Self, AgentWorkJournalError> {
@@ -282,6 +320,11 @@ impl AgentWorkRecord {
         ) {
             return previous.disposition() == AgentWorkDisposition::Running
                 && self.debt() == AgentWorkDebt::NONE;
+        }
+        if self.disposition() == AgentWorkDisposition::NeedsApproval
+            && self.debt() == AgentWorkDebt::NONE
+        {
+            return previous.disposition() == AgentWorkDisposition::Running;
         }
         previous.transition(self.disposition()) == Ok(self)
     }
@@ -416,6 +459,20 @@ impl AgentWorkJournalMutation {
         Ok(Self {
             expected: Some(previous),
             next: previous.closed_unsuccessfully(policy, native)?,
+            result_profile: None,
+        })
+    }
+    /// Preserves an exact policy-derived review request with original clean
+    /// closure proofs. A generic transition or decoded fact cannot clear debt.
+    pub fn needs_approval_closed(
+        previous: AgentWorkRecord,
+        policy: AgentRunPolicySettlement,
+        native: &AgentNativeShutdownProof,
+        review: AgentNeedsHumanTransition,
+    ) -> Result<Self, AgentWorkJournalError> {
+        Ok(Self {
+            expected: Some(previous),
+            next: previous.needs_approval_closed(policy, native, review)?,
             result_profile: None,
         })
     }

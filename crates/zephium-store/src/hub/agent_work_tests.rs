@@ -322,6 +322,107 @@ fn approval_accept_reject_stale_replay_and_cancellation_races_are_exact() {
 }
 
 #[test]
+fn proof_closed_review_partial_writes_restart_and_decisions_preserve_exact_debt() {
+    let _process = work_test_guard();
+    for decision in [
+        None,
+        Some(AgentWorkDisposition::FreshAdmissionRequired),
+        Some(AgentWorkDisposition::Rejected),
+        Some(AgentWorkDisposition::FailedClosed),
+    ] {
+        for injected in [Fault::BeforeWrite, Fault::AfterWrite, Fault::AfterCommit] {
+            let (directory, mut hub, owner) = open();
+            let admitted = initial(owner, 1);
+            put(&mut hub, admitted);
+            let running = transition(&mut hub, admitted, AgentWorkDisposition::Running).unwrap();
+            // Historical fixed-width facts exercise only the private storage
+            // transaction. Production mutation construction still needs the
+            // original failed policy/native and exact human refusal proofs.
+            let mut bytes = *running.as_bytes();
+            bytes[1] = AgentWorkDisposition::NeedsApproval as u8;
+            bytes[2] = AgentWorkDebt::NONE.bits();
+            bytes[8..16].copy_from_slice(&(running.revision() + 1).to_be_bytes());
+            let review = AgentWorkRecord::decode(bytes).unwrap();
+            FAULT.with(|fault| fault.set(Some(injected)));
+            assert_eq!(
+                compare_and_set_records(&mut hub.meta, Some(running), review, None, None),
+                Err(Error::Uncertain)
+            );
+            assert_eq!(
+                read(&hub.meta, running.key()).unwrap(),
+                Some(if injected == Fault::AfterCommit {
+                    review
+                } else {
+                    running
+                })
+            );
+            compare_and_set_records(&mut hub.meta, Some(running), review, None, None).unwrap();
+            compare_and_set_records(&mut hub.meta, Some(running), review, None, None).unwrap();
+            let final_record = if let Some(winner) = decision {
+                let mutation = AgentWorkJournalMutation::transition(review, winner).unwrap();
+                FAULT.with(|fault| fault.set(Some(injected)));
+                assert!(matches!(
+                    hub.agent_work(Request::CompareAndSet(mutation)),
+                    Err(Error::Uncertain)
+                ));
+                let terminal = transition(&mut hub, review, winner).unwrap();
+                assert_eq!(transition(&mut hub, review, winner), Ok(terminal));
+                assert_eq!(terminal.debt(), AgentWorkDebt::NONE);
+                for loser in [
+                    AgentWorkDisposition::FreshAdmissionRequired,
+                    AgentWorkDisposition::Rejected,
+                    AgentWorkDisposition::FailedClosed,
+                ] {
+                    if loser != winner {
+                        assert_eq!(transition(&mut hub, review, loser), Err(Error::Conflict));
+                    }
+                }
+                assert_eq!(
+                    transition(&mut hub, terminal, winner),
+                    Err(Error::Transition)
+                );
+                terminal
+            } else {
+                review
+            };
+            assert_eq!(inventory(&hub.meta).unwrap(), [final_record]);
+            drop(hub);
+            simulate_process_exit();
+            let mut reopened = Hub::open(directory.path().into()).unwrap();
+            let Reply::Claimed {
+                owner: current,
+                records,
+            } = reopened.agent_work(Request::Claim).unwrap()
+            else {
+                panic!()
+            };
+            assert_ne!(current, owner);
+            if decision.is_some() {
+                assert_eq!(
+                    records,
+                    [final_record],
+                    "review terminals are immutable even after restart"
+                );
+            } else {
+                assert_eq!(records.len(), 1);
+                assert_eq!(records[0].disposition(), AgentWorkDisposition::Interrupted);
+                assert_eq!(
+                    records[0].debt(),
+                    AgentWorkDebt::UNKNOWN,
+                    "restart cannot restore process-local closure authority"
+                );
+            }
+            assert!(matches!(
+                transition(&mut reopened, review, AgentWorkDisposition::Rejected),
+                Err(Error::Fenced)
+            ));
+            drop(reopened);
+            simulate_process_exit();
+        }
+    }
+}
+
+#[test]
 fn terminal_persistence_is_immutable_across_restart_and_sql_update() {
     let _process = work_test_guard();
     let (directory, mut hub, owner) = open();

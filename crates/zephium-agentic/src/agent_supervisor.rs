@@ -2116,6 +2116,23 @@ mod tests {
         assert!(transition_debug.contains("[redacted]"));
         assert!(!transition_debug.contains(&format!("{:?}", manifest.guard())));
 
+        assert_eq!(
+            supervisor.record_human_refusal(&execution, foreign_transition),
+            Err(AgentSupervisorRuntimeError::ProgressAuthority)
+        );
+        let refusal = supervisor
+            .record_human_refusal(&execution, transition)
+            .expect("retain execution for drain");
+        assert_eq!(refusal.state(), AgentProgressState::Failed);
+        assert_eq!(
+            refusal.blocker(),
+            Some(AgentProgressBlocker::NeedsHuman(
+                AgentNeedsHumanReason::HumanControl
+            ))
+        );
+        assert_eq!(supervisor.status().executing(), 1);
+        assert_eq!(supervisor.status().waiting(), 0);
+
         let receipt = supervisor
             .wait_for_human(&execution, transition)
             .expect("wait for human");

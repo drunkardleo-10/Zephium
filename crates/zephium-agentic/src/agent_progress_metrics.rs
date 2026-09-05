@@ -247,6 +247,7 @@ enum ProjectionKind {
     EffectActive(AgentEffectId),
     EffectTerminal(AgentEffectId),
     NeedsHuman(AgentNeedsHumanReason),
+    HumanRefusal(AgentNeedsHumanReason),
     SupervisorWait,
     SupervisorTerminal(AgentSupervisorExecutionOutcome),
     Other,
@@ -509,6 +510,11 @@ impl AgentRunProgressMetrics {
                 next_needs_human = next_needs_human.checked_record(reason)?;
                 next_node.human_wait_at = Some(recorded_at);
             }
+            ProjectionKind::HumanRefusal(reason) => {
+                // Execution is draining, not yielded for user interaction.
+                // Review occurs later outside this closed run's accounting.
+                next_needs_human = next_needs_human.checked_record(reason)?;
+            }
             ProjectionKind::SupervisorTerminal(outcome) => {
                 if self.active_models.iter().any(|active| active.node == node)
                     || self.active_effects.iter().any(|active| active.node == node)
@@ -751,6 +757,12 @@ fn classify_projection(
             Ok(ProjectionKind::Other)
         }
         None => match (operation, resource, state, blocker) {
+            (
+                AgentProgressOperation::Approval(_),
+                Some(AgentProgressResource::Context(_)),
+                AgentProgressState::Failed,
+                Some(AgentProgressBlocker::NeedsHuman(reason)),
+            ) => Ok(ProjectionKind::HumanRefusal(reason)),
             (AgentProgressOperation::Scheduling, None, AgentProgressState::Queued, None) => {
                 Ok(ProjectionKind::Queued)
             }
@@ -1226,6 +1238,22 @@ mod tests {
             .expect("settle context");
         let join = registry.join(identity.id()).expect("join");
         supervisor
+            .record_human_refusal(
+                &execution,
+                AgentNeedsHumanTransition::for_progress_test(
+                    &manifest,
+                    root,
+                    join,
+                    SemanticEffectClass::LocalWrite,
+                    AgentNeedsHumanReason::HumanControl,
+                ),
+            )
+            .expect("unissued refusal retains execution");
+        record(&mut ledger, &mut metrics, &supervisor, root, 3, 120);
+        assert_eq!(metrics.snapshot().human_wait(), None);
+        assert_eq!(metrics.snapshot().needs_human().total(), 1);
+        assert_eq!(supervisor.status().executing(), 1);
+        supervisor
             .wait_for_human(
                 &execution,
                 AgentNeedsHumanTransition::for_progress_test(
@@ -1237,19 +1265,19 @@ mod tests {
                 ),
             )
             .expect("wait for human");
-        record(&mut ledger, &mut metrics, &supervisor, root, 3, 130);
+        record(&mut ledger, &mut metrics, &supervisor, root, 4, 130);
         let waiting = metrics.snapshot();
         assert_eq!(waiting.human_wait(), None);
-        assert_eq!(waiting.needs_human().total(), 1);
+        assert_eq!(waiting.needs_human().total(), 2);
         assert_eq!(
             waiting
                 .needs_human()
                 .reason(AgentNeedsHumanReason::HumanControl),
-            1
+            2
         );
 
         let _resumed = supervisor.start(root, attempt(2)).expect("resume");
-        record(&mut ledger, &mut metrics, &supervisor, root, 4, 170);
+        record(&mut ledger, &mut metrics, &supervisor, root, 5, 170);
         let observed = metrics.snapshot().human_wait().expect("human duration");
         assert_eq!(observed.samples(), 1);
         assert_eq!(observed.total_millis(), 40);

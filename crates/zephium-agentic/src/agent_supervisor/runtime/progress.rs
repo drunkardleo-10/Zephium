@@ -380,6 +380,39 @@ impl AgentRunSupervisor {
         Ok(progress)
     }
 
+    /// Records an exact policy refusal while retaining the original executing
+    /// token and slot for terminal resource drain. This is not a yielded wait,
+    /// approval, resumption or successful completion. The owner must still
+    /// close its contexts and complete/cancel that same execution token.
+    pub fn record_human_refusal(
+        &mut self,
+        execution: &AgentNodeExecution,
+        transition: AgentNeedsHumanTransition,
+    ) -> Result<AgentSemanticProgress, AgentSupervisorRuntimeError> {
+        let index = self.require_running_execution(execution)?;
+        if !transition
+            .matches_manifest_revision(self.topology.manifest(), self.topology.manifest_guard())
+            || transition.node() != execution.node()
+            || !self.owns_context_assignment(execution.node(), transition.context().identity())
+        {
+            return Err(AgentSupervisorRuntimeError::ProgressAuthority);
+        }
+        let progress = self.progress(
+            execution.node(),
+            AgentProgressActivity {
+                operation: AgentProgressOperation::Approval(transition.effect()),
+                resource: Some(AgentProgressResource::Context(
+                    transition.context().identity().id(),
+                )),
+            },
+            AgentProgressState::Failed,
+            None,
+            Some(AgentProgressBlocker::NeedsHuman(transition.reason())),
+        );
+        self.nodes[index].progress = progress;
+        Ok(progress)
+    }
+
     /// Atomically records a policy-derived human blocker and releases the
     /// current execution slot into a resource-free yielded wait. The borrowed
     /// execution token is invalid after success and must be dropped.
