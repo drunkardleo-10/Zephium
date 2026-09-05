@@ -351,6 +351,17 @@ The wire form is compact and deterministic, for example:
 This example is illustrative, not a license to let text fields invent policy.
 All labels remain hostile page data.
 
+The bounded runtime preserves content-derived names when a control contains
+other semantic nodes: for example, a commerce link containing a heading and a
+price paragraph retains a name as well as the separately addressable children.
+This uses only retained ancestry during the existing traversal, charges each
+copy to the same field/global text ceilings, and preserves explicit author-name
+precedence. Hidden descendants, editable/value boundaries and secret/sensitive
+classification cannot acquire a new ancestor-name disclosure path. This is a
+bounded semantic projection, not a claim of complete platform accessibility-name
+algorithm conformance; alternate text and other unsupported naming cases still
+need separate measured coverage.
+
 ### 6.2 Opaque references
 
 References such as `@a3` are opaque capabilities for one observed node. They

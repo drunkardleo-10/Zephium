@@ -1378,6 +1378,28 @@
     if (record.sink === "value") record.wire.v = { k: "text", value: combined };
   }
 
+  function appendVisibleText(records, item, raw, state) {
+    if (item.sink !== null) appendSink(records[item.sink], raw, state);
+    if (item.nameAncestors === false) return;
+    // A link/button/heading may contain semantic children (for example a
+    // product heading and price paragraph). Their own text must not erase the
+    // enclosing control's content-derived name. Walk only the already bounded
+    // retained ancestry: no second DOM traversal, selector, or unbounded text
+    // getter. Every copy remains charged to the same field/global text budget.
+    for (let index = item.parent, depth = 0;
+      index !== null && depth <= MAX_TREE_DEPTH && !state.stopped;
+      index = records[index].wire.p === undefined ? null : records[index].wire.p, depth += 1) {
+      const record = records[index];
+      // Editable/credential and selectable values are not ancestor name text.
+      // Preserve existing private-field classification across the new path.
+      const role = record.wire.r;
+      if (record.wire.v !== undefined || record.sensitivity !== "public" ||
+        role === "textbox" || role === "password" || role === "searchbox" ||
+        role === "spinbutton" || role === "combobox" || role === "listbox" || role === "option") break;
+      if (index !== item.sink && record.sink === "name") appendSink(record, raw, state);
+    }
+  }
+
   function recordSink(descriptor, hasName) {
     if (
       descriptor.role === "button" ||
@@ -1528,7 +1550,7 @@
       if (type === 3) {
         if (item.sink !== null && textNodeVisible(item.node)) {
           const raw = read(characterDataGetter, item.node);
-          if (typeof raw === "string") appendSink(records[item.sink], raw, state);
+          if (typeof raw === "string") appendVisibleText(records, item, raw, state);
         }
         continue;
       }
@@ -1539,7 +1561,15 @@
       let parent = item.parent;
       let sink = item.sink;
       let disabled = item.disabled;
+      let nameAncestors = item.nameAncestors !== false;
       if (type === 1) {
+        const editable = attribute(item.node, "contenteditable", 16);
+        if (editable !== null && lower(editable) !== "false") {
+          // Generic editable containers need not produce a semantic record.
+          // They still fence ancestor-name inheritance before their children.
+          nameAncestors = false;
+          sink = null;
+        }
         disabled = disabledState(item.node, item.disabled);
         if (descriptor !== null) {
           const visibleStyle = styleIsVisible(item.node);
@@ -1597,7 +1627,7 @@
         pushChildren(
           stack,
           item.node,
-          { parent, sink, depth: item.depth + 1, disabled },
+          { parent, sink, depth: item.depth + 1, disabled, nameAncestors },
           state
         );
       }

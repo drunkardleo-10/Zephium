@@ -1011,6 +1011,38 @@ async function finish() {
   stopNativeTransport("S1");
   await new Promise((resolve) => setImmediate(resolve));
 
+  // The production commerce shape: named semantic children inside an unnamed
+  // actionable link. Preserve both children and the composed link name without
+  // another DOM walk or exposing hidden/credential content through ancestors.
+  const catalog = new Element("main");
+  const productLink = catalog.append(new Element("a", { href: "https://example.test/product" }));
+  productLink.append(new Element("h3")).append(new CharacterData("Fixture Cup"));
+  productLink.append(new Element("p")).append(new CharacterData("$15.00 USD"));
+  productLink.append(new Element("span", { hidden: "" })).append(new CharacterData("hidden-catalog-secret"));
+  const explicitLink = catalog.append(new Element("a", { href: "https://example.test/exact", "aria-label": "Explicit product" }));
+  explicitLink.append(new Element("h3")).append(new CharacterData("Unselected child label"));
+  const privateLink = catalog.append(new Element("a", { href: "https://example.test/private" }));
+  privateLink.append(new Element("div", { contenteditable: "true", "aria-label": "Private key" }))
+    .append(new Element("p")).append(new CharacterData("nested-credential-never-name"));
+  const secretLink = catalog.append(new Element("a", { href: "https://example.test/secret" }));
+  secretLink.append(new Element("h3")).append(new CharacterData("sk-name-secret-fixture-value"));
+  document._root = catalog;
+  setOwner(catalog, document);
+  const catalogWire = invoke(103, 103, { k: "initial" });
+  const catalogSnapshot = JSON.parse(catalogWire);
+  const catalogLink = catalogSnapshot.n.find((node) => node.r === "link" && node.n === "Fixture Cup $15.00 USD");
+  assert(catalogLink && (catalogLink.o & 1) === 1, "nested product text lost actionable link identity");
+  assert(catalogSnapshot.n.some((node) => node.r === "heading" && node.n === "Fixture Cup"), "nested heading was discarded");
+  assert(catalogSnapshot.n.some((node) => node.r === "paragraph" && node.t === "$15.00 USD"), "nested price was discarded");
+  assert(catalogSnapshot.n.some((node) => node.r === "link" && node.n === "Explicit product"), "explicit accessible name was overwritten");
+  assert(!catalogWire.includes("hidden-catalog-secret"), "hidden descendant entered parent name");
+  assert(!catalogSnapshot.n.some((node) => node.r === "link" && node.n && node.n.includes("nested-credential")), "credential descendant entered parent name");
+  assert(!catalogWire.includes("sk-name-secret-fixture-value"), "nested secret entered ancestor name");
+  const catalogLimited = JSON.parse(invoke(104, 104, { k: "initial" }, { t: 16 }));
+  assert(catalogLimited.c === "text_limit", "ancestor copies escaped aggregate text accounting");
+  const catalogInspected = JSON.parse(invoke(105, 105, { k: "initial" }, { n: 4, x: 4 }));
+  assert(catalogInspected.c === "inspection_limit", "nested names escaped the DOM inspection ceiling");
+
   process.stdout.write(`${JSON.stringify({
     schema: "zephium.agentic.semantic-runtime-smoke.v1",
     initial_nodes: initial.n.length,
@@ -1042,6 +1074,7 @@ async function finish() {
     geometry_change_rejected: true,
     malformed_request_rejected: true,
     oversized_action_subtree_rejected: true,
+    nested_control_names_bounded: true,
     immutable: true
   })}\n`);
 }
