@@ -483,3 +483,15 @@ still run before output. The original hidden guard's exact refusal is retained
 instead of replacing it with a generic restoration label. A later cleanup
 refusal remains authoritative and cannot turn an inner measurement into a
 successful qualification. No restoration predicate or native behavior changes.
+
+The one retained-evidence attempt used clean
+`1de80b09d1515cacc0cb7b1309c9c2af391969fb`, with pre-invocation host clock
+`2026-09-05 21:23:21 UTC` (not exact process start). It exited 1 in approximately
+364ms with authoritative `application_became_active`, immediate prior refusal
+`presented_application_became_active`, and `provisional_measurement=None`.
+AppKit event service therefore exposed an application-activation transition;
+the guard refused before any semantic/RAF measurement, and the restored hidden
+guard retained the same violation. This is not focus-isolated success. No
+keyboard/mouse event was retrieved or synthesized. The shared standalone
+harness calls `finishLaunching` before presentation; Apple's documented launch
+behavior must be examined before attributing activation to rendering itself.
