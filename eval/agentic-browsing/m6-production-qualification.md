@@ -2090,6 +2090,51 @@ authenticated work, endurance evidence, comparative performance, or visible
 Work UI readiness. No shipping app/engine composition, default Browse
 dependency or ceiling changed for this qualifier.
 
+## 2026-09-05 — first public three-document route attempt (unsuccessful)
+
+One authorized attempt started at 18:10:16 UTC on clean committed
+`e6cebb584bea94685ecca7572f5ef5dc3ffa69db`, after independent core/controller
+and closed qualifier acceptance. The exact command was
+`target/debug/macos-terra-agentic-probe --live-public-luna-work-site-inspectable react-route`.
+There was no automatic retry. The closed anonymous React route was Quick Start
+→ Your First Component → Importing and Exporting Components. This is a failed
+three-document workflow, not qualification of the whole route.
+
+The initial observation independently passed its exact departure heading
+(59 nodes, `Complete`). The first exact navigation committed, and the fresh
+middle observation independently passed both arrival and distinct departure
+predicates (64 nodes, `Complete`). Call 2 then terminated with `Failed` /
+`Some(Contract)` before any second navigation proposal event. Independent
+review of the authorized provider-retained response established the exact
+cause: Luna proposed the already committed first destination again. The
+controller's exact next-target refusal was correct; native navigation was not
+dispatched for that repeated target. The local process output alone exposed
+only the coarse contract failure, not that model proposal. No final document,
+terminal extraction, citation result or durable success was observed.
+
+| Call | Semantic bytes | Full request bytes | Input / output tokens | Charged micro-USD | Turn ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 / first navigation proposal | 4,389 | 9,475 | 2,391 / 42 | 648 | 3,169 |
+| 2 / repeated first destination (refused) | 4,738 | 9,831 | 2,529 / 85 | 735 | 2,524 |
+
+Totals: 2 Luna calls, 4,920 input tokens, 127 output tokens, 1,383 micro-USD,
+6,847 ms; both calls used `PricedCeiling`. The application reported
+`durable_success=false`, `cancelled_closed=false`, `shell_clean=true` and exit
+status 1. There was one published navigation proposal, zero baseline reads,
+native actions and verified effects. The wrapper's `native_engine` /
+`application_closure` stage is an umbrella failure, not evidence of a native
+engine defect. Original owners settled through unsuccessful clean closure.
+The fresh isolated anonymous profile and explicitly public retained-provider
+mode do not qualify authenticated continuity, cross-origin/redirect handling,
+additional sites, comparative performance or visible Work readiness.
+
+This exposed a model-contract gap after deliberate transcript retirement:
+the original objective described the entire route, but the successor request
+had no trusted explicit route progress. A subsequent correction adds a bounded
+policy-derived developer checkpoint while retaining exact authority, original
+budgets and full retirement of old page/provider replay. Its deterministic
+tests are implementation evidence only; no live retry is implied by that fix.
+
 ## Remaining release blockers
 
 - authorized named-device macOS native-input routes beyond fixed DOM;
