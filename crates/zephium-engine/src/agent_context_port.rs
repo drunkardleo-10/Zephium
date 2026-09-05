@@ -125,12 +125,15 @@ struct AgentPortAdmissionState {
     physical_screenshots: usize,
     sealed: bool,
     invariant_failed: bool,
+    native_shutdown_verified: bool,
+    retired: bool,
 }
 
 struct AgentPortAdmission {
     state: Mutex<AgentPortAdmissionState>,
     fatal: Arc<dyn Fn(&'static str) + Send + Sync>,
     fatal_reported: AtomicBool,
+    lineage_failed: Option<Arc<AtomicBool>>,
 }
 
 impl AgentPortAdmission {
@@ -139,7 +142,14 @@ impl AgentPortAdmission {
             state: Mutex::new(AgentPortAdmissionState::default()),
             fatal,
             fatal_reported: AtomicBool::new(false),
+            lineage_failed: None,
         }
+    }
+
+    fn lineage_failed(&self) -> bool {
+        self.lineage_failed
+            .as_ref()
+            .is_some_and(|failed| failed.load(Ordering::Acquire))
     }
 
     fn reserve(self: &Arc<Self>) -> Result<AgentTaskPermit, ContextPortFailure> {
@@ -154,7 +164,7 @@ impl AgentPortAdmission {
                 return Err(ContextPortFailure::Shutdown);
             }
         };
-        if state.sealed || state.invariant_failed {
+        if state.sealed || state.invariant_failed || self.lineage_failed() {
             return Err(ContextPortFailure::Shutdown);
         }
         if state.pending >= MAX_PENDING_NATIVE_CONTEXT_TASKS {
@@ -180,7 +190,7 @@ impl AgentPortAdmission {
                 return Err(ContextPortFailure::Shutdown);
             }
         };
-        if state.invariant_failed {
+        if state.invariant_failed || state.retired || self.lineage_failed() {
             return Err(ContextPortFailure::Shutdown);
         }
         if state.pending >= MAX_PENDING_NATIVE_CONTEXT_TASKS {
@@ -206,7 +216,7 @@ impl AgentPortAdmission {
                 return Err(ContextPortFailure::Shutdown);
             }
         };
-        if state.sealed || state.invariant_failed {
+        if state.sealed || state.invariant_failed || self.lineage_failed() {
             return Err(ContextPortFailure::Shutdown);
         }
         // Seal before checking capacity: even a full queue must not leave a
@@ -238,7 +248,7 @@ impl AgentPortAdmission {
                 return Err(ContextPortFailure::Shutdown);
             }
         };
-        if state.sealed || state.invariant_failed {
+        if state.sealed || state.invariant_failed || self.lineage_failed() {
             return Err(ContextPortFailure::Shutdown);
         }
         if state.pending >= MAX_PENDING_NATIVE_CONTEXT_TASKS
@@ -308,6 +318,8 @@ impl AgentPortAdmission {
     fn counts(&self) -> Option<(usize, usize)> {
         match self.state.lock() {
             Ok(state) => (!state.invariant_failed
+                && !state.retired
+                && !self.lineage_failed()
                 && state.pending <= MAX_PENDING_NATIVE_CONTEXT_TASKS
                 && state.physical_screenshots <= MAX_PENDING_SEMANTIC_SCREENSHOTS)
                 .then_some((state.pending, state.physical_screenshots)),
@@ -340,6 +352,61 @@ impl AgentPortAdmission {
         }
     }
 
+    // Only the exact native shutdown task may attest its own sealed cohort.
+    // Its permit is still held; every other request/capture must be absent.
+    fn verify_native_shutdown(&self, snapshot: ContextNativeResourceSnapshot) {
+        let Ok(mut state) = self.state.lock() else {
+            self.report_fatal_once();
+            return;
+        };
+        if state.sealed
+            && !state.invariant_failed
+            && !state.retired
+            && !self.lineage_failed()
+            && state.pending == 1
+            && state.physical_screenshots == 0
+            && matches!(
+                snapshot.counts(),
+                zephium_agentic::ContextNativeResourceCounts {
+                    known_bindings: 0,
+                    resident_views: 0,
+                    owned_reservations: 0,
+                    borrowed_leases: 0,
+                    visible_surfaces: 0,
+                    suspended_views: 0,
+                    pending_operations: 0,
+                    pending_captures: 0,
+                    queued_tasks: 0,
+                }
+            )
+        {
+            state.native_shutdown_verified = true;
+        }
+    }
+
+    // Linearizes retirement with old read-only audit admission. An old port
+    // never unseals, changes its sink, or audits a successor's native cohort.
+    fn retire_for_successor(&self) -> Result<(), ContextPortFailure> {
+        let mut state = self.state.lock().map_err(|_| {
+            if let Some(failed) = &self.lineage_failed {
+                failed.store(true, Ordering::Release);
+            }
+            ContextPortFailure::Shutdown
+        })?;
+        if state.invariant_failed || self.lineage_failed() || state.retired {
+            return Err(ContextPortFailure::Shutdown);
+        }
+        if !state.sealed
+            || !state.native_shutdown_verified
+            || state.pending != 0
+            || state.physical_screenshots != 0
+        {
+            return Err(ContextPortFailure::ProfileBusy);
+        }
+        state.retired = true;
+        Ok(())
+    }
+
     fn fail_invariant(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.invariant_failed = true;
@@ -349,6 +416,9 @@ impl AgentPortAdmission {
     }
 
     fn report_fatal_once(&self) {
+        if let Some(failed) = &self.lineage_failed {
+            failed.store(true, Ordering::Release);
+        }
         if !self.fatal_reported.swap(true, Ordering::AcqRel) {
             // This callback can be reached from native navigation delegates,
             // timeout handlers, and `AgentContextTask::drop`. A consumer panic
@@ -741,6 +811,11 @@ impl AgentContextTask {
             self.refuse(ContextPortFailure::NativeRefused);
             return;
         }
+        if let ContextNativeEvent::ShutdownAuditSettled(settlement) = &event {
+            if let Ok(snapshot) = settlement.outcome() {
+                self.permit.admission.verify_native_shutdown(snapshot);
+            }
+        }
         self.request = None;
         self.permit.release();
         emit_event(&self.sink, &self.permit.admission, event);
@@ -943,6 +1018,94 @@ struct AgentContextPortSlotState {
     taken: bool,
     sealed: bool,
     admission: Option<Arc<AgentPortAdmission>>,
+    factory: Option<Arc<AgentLifetimeFactoryInner>>,
+}
+
+/// Hard bound on sequential native lifetimes; no history or callback queue is
+/// retained by the factory. Application persistence has its own matching cap.
+pub const MAX_AGENT_BROWSER_LIFETIMES: u16 = 1024;
+
+/// Process-unique native lifetime authority, mutually exclusive with the legacy
+/// one-shot port. Each issued port is distinct and permanently seals itself.
+/// This factory is not task/policy permission: the application must also join
+/// the prior runtime, audit and durable terminal before a new run is admitted.
+pub struct AgentBrowserLifetimeFactory {
+    inner: Arc<AgentLifetimeFactoryInner>,
+}
+
+struct AgentLifetimeFactoryInner {
+    dispatch: MainThreadDispatch,
+    fatal: Arc<dyn Fn(&'static str) + Send + Sync>,
+    failed: Arc<AtomicBool>,
+    state: Mutex<AgentLifetimeFactoryState>,
+}
+
+#[derive(Default)]
+struct AgentLifetimeFactoryState {
+    sealed: bool,
+    issued: u16,
+    active: Option<Arc<AgentPortAdmission>>,
+}
+
+impl AgentBrowserLifetimeFactory {
+    /// Starts one fresh lifetime only after the prior exact native shutdown
+    /// task proved zero resources and every native permit has drained. Failure
+    /// neither replaces the active owner nor retries any native operation.
+    pub fn begin(
+        &mut self,
+        sink: impl Fn(ContextNativeEvent) + Send + Sync + 'static,
+    ) -> Result<Arc<dyn AgentBrowserPort>, ContextPortFailure> {
+        let mut state = self.inner.state.lock().map_err(|_| {
+            self.inner.failed.store(true, Ordering::Release);
+            ContextPortFailure::Shutdown
+        })?;
+        if state.sealed || self.inner.failed.load(Ordering::Acquire) {
+            return Err(ContextPortFailure::Shutdown);
+        }
+        if state.issued >= MAX_AGENT_BROWSER_LIFETIMES {
+            return Err(ContextPortFailure::ResourceExhausted);
+        }
+        if let Some(active) = state.active.clone() {
+            if let Err(failure) = active.retire_for_successor() {
+                drop(state);
+                if failure == ContextPortFailure::Shutdown {
+                    active.report_fatal_once();
+                }
+                return Err(failure);
+            }
+        }
+        let mut admission = AgentPortAdmission::new(self.inner.fatal.clone());
+        admission.lineage_failed = Some(self.inner.failed.clone());
+        let admission = Arc::new(admission);
+        state.issued += 1;
+        state.active = Some(admission.clone());
+        Ok(Arc::new(EngineAgentBrowserPort {
+            dispatch: self.inner.dispatch.clone(),
+            admission,
+            sink: Arc::new(sink),
+        }))
+    }
+}
+
+impl AgentLifetimeFactoryInner {
+    fn seal(&self) {
+        match self.state.lock() {
+            Ok(mut state) => {
+                state.sealed = true;
+                if let Some(active) = &state.active {
+                    active.seal();
+                }
+            }
+            Err(poisoned) => {
+                let mut state = poisoned.into_inner();
+                self.failed.store(true, Ordering::Release);
+                state.sealed = true;
+                if let Some(active) = &state.active {
+                    active.seal();
+                }
+            }
+        }
+    }
 }
 
 impl AgentContextPortSlot {
@@ -967,6 +1130,9 @@ impl AgentContextPortSlot {
                 if let Some(admission) = &state.admission {
                     admission.seal();
                 }
+                if let Some(factory) = &state.factory {
+                    factory.seal();
+                }
                 drop(state);
                 self.report_fatal_once();
                 return None;
@@ -985,6 +1151,37 @@ impl AgentContextPortSlot {
         }))
     }
 
+    pub(crate) fn take_factory(&self) -> Option<AgentBrowserLifetimeFactory> {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                let mut state = poisoned.into_inner();
+                state.sealed = true;
+                if let Some(admission) = &state.admission {
+                    admission.seal();
+                }
+                if let Some(factory) = &state.factory {
+                    factory.seal();
+                }
+                drop(state);
+                self.report_fatal_once();
+                return None;
+            }
+        };
+        if state.taken || state.sealed {
+            return None;
+        }
+        let inner = Arc::new(AgentLifetimeFactoryInner {
+            dispatch: self.dispatch.clone(),
+            fatal: self.fatal.clone(),
+            failed: Arc::new(AtomicBool::new(false)),
+            state: Mutex::new(AgentLifetimeFactoryState::default()),
+        });
+        state.taken = true;
+        state.factory = Some(inner.clone());
+        Some(AgentBrowserLifetimeFactory { inner })
+    }
+
     pub(crate) fn seal(&self) {
         match self.state.lock() {
             Ok(mut state) => {
@@ -992,12 +1189,18 @@ impl AgentContextPortSlot {
                 if let Some(admission) = &state.admission {
                     admission.seal();
                 }
+                if let Some(factory) = &state.factory {
+                    factory.seal();
+                }
             }
             Err(poisoned) => {
                 let mut state = poisoned.into_inner();
                 state.sealed = true;
                 if let Some(admission) = &state.admission {
                     admission.seal();
+                }
+                if let Some(factory) = &state.factory {
+                    factory.seal();
                 }
                 drop(state);
                 self.report_fatal_once();
@@ -1759,6 +1962,218 @@ mod tests {
         let sealed = AgentContextPortSlot::new(Arc::new(|_| false), Arc::new(|_| {}));
         sealed.seal();
         assert!(sealed.take(Arc::new(|_| {})).is_none());
+    }
+
+    fn zero_native_snapshot() -> ContextNativeResourceSnapshot {
+        ContextNativeResourceSnapshot::try_new(zephium_agentic::ContextNativeResourceCounts {
+            known_bindings: 0,
+            resident_views: 0,
+            owned_reservations: 0,
+            borrowed_leases: 0,
+            visible_surfaces: 0,
+            suspended_views: 0,
+            pending_operations: 0,
+            pending_captures: 0,
+            queued_tasks: 0,
+        })
+        .unwrap()
+    }
+
+    fn factory_admission(factory: &AgentBrowserLifetimeFactory) -> Arc<AgentPortAdmission> {
+        factory.inner.state.lock().unwrap().active.clone().unwrap()
+    }
+
+    fn settle_factory_native_shutdown(factory: &AgentBrowserLifetimeFactory) {
+        let admission = factory_admission(factory);
+        let permit = admission.reserve_shutdown_audit().unwrap();
+        AgentContextTask::new(
+            AgentPendingRequest::ShutdownAudit(ContextResourceAuditId::new(1).unwrap()),
+            permit,
+            Arc::new(|_| {}),
+        )
+        .complete_audit(Ok(zero_native_snapshot()));
+    }
+
+    #[test]
+    fn lifetime_factory_is_exclusive_bounded_and_never_reopens_an_old_port() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let slot = AgentContextPortSlot::new(
+            Arc::new(move |_| {
+                counted.fetch_add(1, Ordering::AcqRel);
+                false
+            }),
+            Arc::new(|_| {}),
+        );
+        let mut factory = slot.take_factory().unwrap();
+        assert!(slot.take_factory().is_none());
+        assert!(slot.take(Arc::new(|_| {})).is_none());
+        let first = factory.begin(|_| {}).unwrap();
+        assert!(matches!(
+            factory.begin(|_| {}),
+            Err(ContextPortFailure::ProfileBusy)
+        ));
+        settle_factory_native_shutdown(&factory);
+        let second = factory.begin(|_| {}).unwrap();
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(
+            first.dispatch(construction_request()),
+            ContextDispatch::Rejected(ContextPortFailure::Shutdown)
+        );
+        assert_eq!(
+            first.audit_resources(ContextResourceAuditId::new(2).unwrap()),
+            ContextDispatch::Rejected(ContextPortFailure::Shutdown)
+        );
+        assert_eq!(calls.load(Ordering::Acquire), 0);
+        factory.inner.state.lock().unwrap().issued = MAX_AGENT_BROWSER_LIFETIMES;
+        settle_factory_native_shutdown(&factory);
+        assert!(matches!(
+            factory.begin(|_| {}),
+            Err(ContextPortFailure::ResourceExhausted)
+        ));
+        slot.seal();
+        assert!(matches!(
+            factory.begin(|_| {}),
+            Err(ContextPortFailure::Shutdown)
+        ));
+
+        let legacy = AgentContextPortSlot::new(Arc::new(|_| false), Arc::new(|_| {}));
+        assert!(legacy.take(Arc::new(|_| {})).is_some());
+        assert!(legacy.take_factory().is_none());
+    }
+
+    #[test]
+    fn lifetime_factory_requires_exact_shutdown_not_an_ordinary_zero_or_missing_receipt() {
+        for fault in 0..5 {
+            let slot = AgentContextPortSlot::new(Arc::new(|_| false), Arc::new(|_| {}));
+            let mut factory = slot.take_factory().unwrap();
+            let _port = factory.begin(|_| {}).unwrap();
+            let admission = factory_admission(&factory);
+            let audit = ContextResourceAuditId::new(1).unwrap();
+            let ordinary = fault == 0;
+            let permit = if ordinary {
+                admission.seal();
+                admission.reserve_audit().unwrap()
+            } else {
+                admission.reserve_shutdown_audit().unwrap()
+            };
+            let task = AgentContextTask::new(
+                if ordinary {
+                    AgentPendingRequest::Audit(audit)
+                } else {
+                    AgentPendingRequest::ShutdownAudit(audit)
+                },
+                permit,
+                Arc::new(|_| {}),
+            );
+            match fault {
+                0 => task.complete_audit(Ok(zero_native_snapshot())),
+                1 => task.complete_audit(Err(ContextPortFailure::NativeRefused)),
+                2 => drop(task),
+                3 => {
+                    let mut counts = zero_native_snapshot().counts();
+                    counts.queued_tasks = 1;
+                    task.complete_audit(
+                        Ok(ContextNativeResourceSnapshot::try_new(counts).unwrap()),
+                    );
+                }
+                4 => task.complete(ContextNativeEvent::ShutdownAuditSettled(
+                    ContextShutdownAuditSettlement::new(
+                        ContextResourceAuditId::new(2).unwrap(),
+                        Ok(zero_native_snapshot()),
+                    ),
+                )),
+                _ => unreachable!(),
+            }
+            assert!(factory.begin(|_| {}).is_err(), "fault {fault}");
+            assert!(Arc::ptr_eq(&factory_admission(&factory), &admission));
+            assert!(!admission.state.lock().unwrap().retired);
+        }
+    }
+
+    #[test]
+    fn lifetime_factory_retains_pending_native_and_physical_owners() {
+        for physical in [false, true] {
+            let slot = AgentContextPortSlot::new(Arc::new(|_| false), Arc::new(|_| {}));
+            let mut factory = slot.take_factory().unwrap();
+            let _port = factory.begin(|_| {}).unwrap();
+            let admission = factory_admission(&factory);
+            let (mut permit, capture) = if physical {
+                let (permit, capture) = admission.reserve_screenshot().unwrap();
+                (permit, Some(capture))
+            } else {
+                (admission.reserve().unwrap(), None)
+            };
+            if physical {
+                permit.release();
+            }
+            settle_factory_native_shutdown(&factory);
+            assert!(matches!(
+                factory.begin(|_| {}),
+                Err(ContextPortFailure::ProfileBusy)
+            ));
+            drop(permit);
+            drop(capture);
+            // A later empty count is not the missing exact shutdown receipt.
+            assert!(matches!(
+                factory.begin(|_| {}),
+                Err(ContextPortFailure::ProfileBusy)
+            ));
+        }
+    }
+
+    #[test]
+    fn retired_lifetime_integrity_failure_blocks_its_successor_lineage() {
+        let slot = AgentContextPortSlot::new(Arc::new(|_| false), Arc::new(|_| {}));
+        let mut factory = slot.take_factory().unwrap();
+        let _old_port = factory.begin(|_| {}).unwrap();
+        let old = factory_admission(&factory);
+        settle_factory_native_shutdown(&factory);
+        let current = factory.begin(|_| {}).unwrap();
+        old.fail_invariant();
+        assert_eq!(
+            current.dispatch(construction_request()),
+            ContextDispatch::Rejected(ContextPortFailure::Shutdown)
+        );
+        assert!(matches!(
+            factory.begin(|_| {}),
+            Err(ContextPortFailure::Shutdown)
+        ));
+    }
+
+    #[test]
+    fn successor_retirement_linearizes_with_old_read_only_audit_and_global_shutdown() {
+        for _ in 0..32 {
+            let slot = AgentContextPortSlot::new(Arc::new(|_| false), Arc::new(|_| {}));
+            let mut factory = slot.take_factory().unwrap();
+            let _port = factory.begin(|_| {}).unwrap();
+            let old = factory_admission(&factory);
+            settle_factory_native_shutdown(&factory);
+            let racing = old.clone();
+            let audit = std::thread::spawn(move || racing.reserve_audit());
+            let next = factory.begin(|_| {});
+            let permit = audit.join().unwrap();
+            assert!(!(next.is_ok() && permit.is_ok()));
+            drop(permit);
+            if next.is_err() {
+                assert!(factory.begin(|_| {}).is_ok());
+            }
+            assert!(old.state.lock().unwrap().retired);
+            settle_factory_native_shutdown(&factory);
+            let thread = std::thread::spawn(move || (factory.begin(|_| {}), factory));
+            slot.seal();
+            let (port, mut factory) = thread.join().unwrap();
+            if let Ok(port) = port {
+                assert_eq!(
+                    port.dispatch(construction_request()),
+                    ContextDispatch::Rejected(ContextPortFailure::Shutdown)
+                );
+            }
+            assert!(matches!(
+                factory.begin(|_| {}),
+                Err(ContextPortFailure::Shutdown)
+            ));
+        }
     }
 
     #[test]

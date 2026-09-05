@@ -1,5 +1,7 @@
 #[cfg(feature = "agentic-browser")]
 mod agent_context_port;
+#[cfg(feature = "agentic-browser")]
+pub use agent_context_port::{AgentBrowserLifetimeFactory, MAX_AGENT_BROWSER_LIFETIMES};
 mod diagnostics;
 mod erasure;
 mod host;
@@ -1445,6 +1447,15 @@ pub fn enforce_runtime_security_floor() -> Result<RuntimeSecurityAdvisories, Str
 }
 
 impl WebviewEngine {
+    /// Takes the process-unique sequential native lifetime factory. This is
+    /// mutually exclusive with `take_agent_browser_port`; no old port reopens.
+    /// Merely taking the factory creates no native page, worker or timer.
+    #[cfg(feature = "agentic-browser")]
+    #[must_use]
+    pub fn take_agent_browser_lifetime_factory(&self) -> Option<AgentBrowserLifetimeFactory> {
+        self.agent_context_port.take_factory()
+    }
+
     /// Takes the process-unique production agent-browser native port.
     ///
     /// Taking the port allocates only its fixed admission state. If this

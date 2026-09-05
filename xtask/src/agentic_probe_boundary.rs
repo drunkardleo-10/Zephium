@@ -451,6 +451,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_engine_agent_context_panic_boundary(&read(
         repository.join(ENGINE_AGENT_CONTEXT_PORT),
     )?)?;
+    validate_engine_agent_lifetime_boundary(&read(repository.join(ENGINE_AGENT_CONTEXT_PORT))?)?;
     validate_engine_agent_redirect_contract(
         &read(repository.join(AGENTIC_CONTEXT_PORT))?,
         &read(repository.join(ENGINE_AGENT_CONTEXT_HOST))?,
@@ -879,6 +880,45 @@ fn validate_engine_root(source: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_engine_agent_lifetime_boundary(source: &str) -> Result<(), String> {
+    let source = compact(source);
+    for boundary in [
+        "pubstructAgentBrowserLifetimeFactory",
+        "pubconstMAX_AGENT_BROWSER_LIFETIMES:u16=1024;",
+        "ifstate.taken||state.sealed",
+        "state.issued>=MAX_AGENT_BROWSER_LIFETIMES",
+        "active.retire_for_successor()",
+        "!state.native_shutdown_verified",
+        "state.pending!=0",
+        "state.physical_screenshots!=0",
+        "state.retired=true;",
+        "state.retired||self.lineage_failed()",
+        "self.permit.admission.verify_native_shutdown(snapshot)",
+        "ContextNativeEvent::ShutdownAuditSettled(settlement)",
+        "state.pending==1",
+        "known_bindings:0,resident_views:0,owned_reservations:0,borrowed_leases:0,visible_surfaces:0,suspended_views:0,pending_operations:0,pending_captures:0,queued_tasks:0,",
+        "factory.seal();",
+        "failed.store(true,Ordering::Release)",
+    ] {
+        if !source.contains(boundary) {
+            return Err(format!("native lifetime factory lost exact ownership boundary: {boundary}"));
+        }
+    }
+    for forbidden in [
+        "state.sealed=false",
+        "state.retired=false",
+        "implCloneforAgentBrowserLifetimeFactory",
+        "#[derive(Clone)]pubstructAgentBrowserLifetimeFactory",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "native lifetime factory reopens authority: {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_engine_agent_context_boundary(
     engine_root: &str,
     host_root: &str,
@@ -1046,7 +1086,7 @@ fn validate_engine_agent_context_panic_boundary(source: &str) -> Result<(), Stri
         "fncontain_agent_port_panic<T>(admission:&AgentPortAdmission,operation:implFnOnce()->T,)->Option<T>",
         "matchstd::panic::catch_unwind(std::panic::AssertUnwindSafe(operation))",
         "Err(_)=>{admission.fail_invariant();None}",
-        "letmutstate=poisoned.into_inner();state.sealed=true;ifletSome(admission)=&state.admission{admission.seal();}drop(state);self.report_fatal_once();",
+        "letmutstate=poisoned.into_inner();state.sealed=true;ifletSome(admission)=&state.admission{admission.seal();}ifletSome(factory)=&state.factory{factory.seal();}drop(state);self.report_fatal_once();",
         "letaccepted=contain_agent_port_panic(&self.admission,||{dispatch(Box::new(move||{",
         "let_=contain_agent_port_panic(&callback_admission,||{",
         ".unwrap_or(false);",
@@ -1070,9 +1110,9 @@ fn validate_engine_agent_context_panic_boundary(source: &str) -> Result<(), Stri
             .count()
             != 1
         || source
-            .matches("letmutstate=poisoned.into_inner();state.sealed=true;ifletSome(admission)=&state.admission{admission.seal();}drop(state);self.report_fatal_once();")
+            .matches("letmutstate=poisoned.into_inner();state.sealed=true;ifletSome(admission)=&state.admission{admission.seal();}ifletSome(factory)=&state.factory{factory.seal();}drop(state);self.report_fatal_once();")
             .count()
-            != 2
+            != 3
     {
         return Err(
             "production agent-context dispatch must contain context, screenshot, and action panic boundaries exactly once"
@@ -8259,7 +8299,7 @@ fn validate_agent_context_shutdown_barrier_contract(
         .ok_or_else(|| "atomic shutdown-audit admission is missing".to_owned())?;
     let ordinary = &port[ordinary_start..shutdown_start];
     for required in [
-        "ifstate.invariant_failed{returnErr(ContextPortFailure::Shutdown);}",
+        "ifstate.invariant_failed||state.retired||self.lineage_failed(){returnErr(ContextPortFailure::Shutdown);}",
         "ifstate.pending>=MAX_PENDING_NATIVE_CONTEXT_TASKS{returnErr(ContextPortFailure::ResourceExhausted);}",
         "state.pending+=1;",
     ] {
@@ -8642,6 +8682,33 @@ struct CargoNode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sequential_native_lifetimes_cannot_reopen_or_replace_unproven_owners() {
+        let source = include_str!("../../crates/zephium-engine/src/agent_context_port.rs");
+        super::validate_engine_agent_lifetime_boundary(source).unwrap();
+        for boundary in [
+            "active.retire_for_successor()",
+            "!state.native_shutdown_verified",
+            "state.retired = true;",
+            "self.permit.admission.verify_native_shutdown(snapshot)",
+            "state.issued >= MAX_AGENT_BROWSER_LIFETIMES",
+        ] {
+            assert!(
+                super::validate_engine_agent_lifetime_boundary(
+                    &source.replace(boundary, "removed_boundary")
+                )
+                .is_err(),
+                "{boundary}"
+            );
+        }
+        for forbidden in ["state.sealed = false;", "state.retired = false;"] {
+            assert!(super::validate_engine_agent_lifetime_boundary(&format!(
+                "{source}\n{forbidden}"
+            ))
+            .is_err());
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -9203,8 +9270,8 @@ mod tests {
         }
         for invalid in [
             port.replace(
-                "if state.invariant_failed {",
-                "if state.sealed || state.invariant_failed {",
+                "if state.invariant_failed || state.retired || self.lineage_failed() {",
+                "if state.sealed || state.invariant_failed || state.retired || self.lineage_failed() {",
             ),
             port.replace(
                 "state.sealed = true;\n        if state.pending >= MAX_PENDING_NATIVE_CONTEXT_TASKS",
@@ -13031,7 +13098,7 @@ mod tests {
                 1,
             ),
             port.replacen(
-                "                state.sealed = true;\n                if let Some(admission) = &state.admission {\n                    admission.seal();\n                }\n                drop(state);\n                self.report_fatal_once();",
+                "                state.sealed = true;\n                if let Some(admission) = &state.admission {\n                    admission.seal();\n                }\n                if let Some(factory) = &state.factory {\n                    factory.seal();\n                }\n                drop(state);\n                self.report_fatal_once();",
                 "                drop(state);\n                self.report_fatal_once();",
                 1,
             ),
