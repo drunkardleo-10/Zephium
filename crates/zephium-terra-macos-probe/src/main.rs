@@ -13,6 +13,7 @@ mod work_actor;
 mod work_application;
 #[cfg(target_os = "macos")]
 mod work_artifact_cleanup;
+mod work_navigation;
 mod work_sites;
 
 #[cfg(not(target_os = "macos"))]
@@ -178,6 +179,9 @@ impl ProbeFailure {
             Self::Provider(TerraProbeProviderError::Authority) => "provider_authority",
             Self::Provider(TerraProbeProviderError::Account(_)) => {
                 "controller_account_reattestation"
+            }
+            Self::Provider(TerraProbeProviderError::Navigation(_)) => {
+                "controller_navigation_refused"
             }
             Self::Provider(TerraProbeProviderError::Cancelled) => "controller_cancelled",
             Self::Provider(TerraProbeProviderError::ActionPending) => "controller_action_pending",

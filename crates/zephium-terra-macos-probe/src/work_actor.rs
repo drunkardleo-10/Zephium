@@ -430,7 +430,7 @@ fn input_mode(
         input
     };
     let task: Box<dyn AgentWorkTask> = if let Some(site) = site {
-        site.task().map_err(|_| Error::Authority)?
+        site.task(context).map_err(|_| Error::Authority)?
     } else if combined {
         Box::new(PublicPreparedResultTask {
             actions: form_task,

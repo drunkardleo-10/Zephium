@@ -1,7 +1,7 @@
 //! Closed public-only site inventory through the existing application runner.
 //!
-//! These are initial-document projection checks, not SPA navigation, commerce
-//! transactions, authentication, or the six-site release matrix. No URL supplied
+//! Inventory checks and one fixed two-document read, not commerce transactions,
+//! authentication, arbitrary SPA navigation, or the six-site release matrix. No URL supplied
 //! by the caller/page/model can expand this public retained-data allowlist.
 
 use std::io::Write as _;
@@ -11,6 +11,7 @@ use zephium_agentic::*;
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Site {
     React,
+    ReactNavigation,
     Commerce,
 }
 
@@ -18,6 +19,7 @@ impl Site {
     pub(super) fn parse(value: &str) -> Result<Self, super::ProbeFailure> {
         match value {
             "react" => Ok(Self::React),
+            "react-navigation" => Ok(Self::ReactNavigation),
             "commerce" => Ok(Self::Commerce),
             _ => Err(super::ProbeFailure::Authority),
         }
@@ -26,13 +28,14 @@ impl Site {
     pub(super) const fn name(self) -> &'static str {
         match self {
             Self::React => "react_quick_start",
+            Self::ReactNavigation => "react_exact_component_guide",
             Self::Commerce => "vercel_commerce_catalog",
         }
     }
 
     pub(super) const fn url(self) -> &'static str {
         match self {
-            Self::React => "https://react.dev/learn",
+            Self::React | Self::ReactNavigation => "https://react.dev/learn",
             Self::Commerce => "https://demo.vercel.store/",
         }
     }
@@ -40,12 +43,14 @@ impl Site {
     pub(super) const fn objective(self) -> &'static str {
         match self {
             Self::React => "Read the React Quick Start page. The initial viewport omits later headings, so call extract with trusted schema 1 and subtree scope targeting the current main content landmark's opaque ref. Locate that landmark if necessary. Return inventory as three complete exact heading names from the freshly delivered subtree evidence: Quick Start, Creating and nesting components, and Writing markup with JSX. Cite exactly one heading text source for each. Do not use initial extraction scope, navigation-link citations, paraphrases, navigation, or page modifications.",
+            Self::ReactNavigation => super::work_navigation::OBJECTIVE,
             Self::Commerce => "Read the public Vercel demo commerce home catalog. Call extract with trusted schema 1 and initial scope. Return inventory as the three complete exact product-link names for Acme Circles T-Shirt, Acme Drawstring Bag, and Acme Cup. Include all price and currency text when it is part of the accessible link name, copied exactly from delivered evidence. Cite exactly one link text source per item. Do not paraphrase, navigate, search, change a cart, or modify anything.",
         }
     }
 
     fn slot(self, role: SemanticRole, text: &str) -> Option<usize> {
         let (role_expected, names) = match self {
+            Self::ReactNavigation => return None,
             Self::React => (
                 SemanticRole::Heading,
                 [
@@ -63,7 +68,7 @@ impl Site {
             return None;
         }
         names.iter().position(|name| match self {
-            Self::React => text == *name,
+            Self::React | Self::ReactNavigation => text == *name,
             Self::Commerce => text.strip_prefix(name).is_some_and(|rest| {
                 // Require the catalog price in the same source; a menu label
                 // or model-invented product name cannot satisfy this task.
@@ -72,7 +77,13 @@ impl Site {
         })
     }
 
-    pub(super) fn task(self) -> Result<Box<dyn AgentWorkTask>, AgentWorkFailure> {
+    pub(super) fn task(
+        self,
+        context: ContextIdentity,
+    ) -> Result<Box<dyn AgentWorkTask>, AgentWorkFailure> {
+        if matches!(self, Self::ReactNavigation) {
+            return super::work_navigation::task(context);
+        }
         Ok(Box::new(SiteTask {
             site: self,
             baseline: None,
@@ -88,14 +99,19 @@ impl Site {
             )?
             .with_subtree_extraction()
             .with_source_roles(match self {
-                Self::React => SemanticReadRoleSelection::try_new(&[SemanticRole::Heading])
-                    .map_err(|_| AgentWorkFailure::Contract)?,
+                Self::React | Self::ReactNavigation => {
+                    SemanticReadRoleSelection::try_new(&[SemanticRole::Heading])
+                        .map_err(|_| AgentWorkFailure::Contract)?
+                }
                 Self::Commerce => SemanticReadRoleSelection::ALL,
             }),
         }))
     }
 
     pub(super) fn verify_owned(self, result: &SemanticOwnedExtractionResult) -> bool {
+        if matches!(self, Self::ReactNavigation) {
+            return super::work_navigation::verify_owned(result);
+        }
         if result.trust() != SemanticExtractionTrust::ModelMapped || result.fields().len() != 1 {
             return false;
         }
@@ -257,8 +273,14 @@ mod tests {
 
     #[test]
     fn source_selection_is_fixed_task_authority_not_a_site_or_model_parameter() {
-        let react = Site::React.task().unwrap();
-        let commerce = Site::Commerce.task().unwrap();
+        let context = ContextIdentity::new(
+            ContextId::generate(),
+            ContextRunId::generate(),
+            1_u128.into(),
+            ContextKind::Owned,
+        );
+        let react = Site::React.task(context).unwrap();
+        let commerce = Site::Commerce.task(context).unwrap();
         assert_eq!(
             react.extraction_schema().unwrap().source_roles(),
             SemanticReadRoleSelection::try_new(&[SemanticRole::Heading]).unwrap()
@@ -286,6 +308,10 @@ mod tests {
         }
         assert!(matches!(Site::parse("react"), Ok(Site::React)));
         assert!(matches!(Site::parse("commerce"), Ok(Site::Commerce)));
+        assert!(matches!(
+            Site::parse("react-navigation"),
+            Ok(Site::ReactNavigation)
+        ));
     }
 
     #[test]

@@ -1160,6 +1160,13 @@ existing fixed 128-byte size. Completion still requires exact destination
 citations, task acceptance, and the usual durable/native/provider closure.
 This first slice is not redirect, cross-origin, authenticated-session, SPA
 history, multi-source synthesis, or unrestricted multi-page qualification.
+The release-excluded `react-navigation` public qualifier fixes Quick Start as
+departure and `/learn/your-first-component` as the only successor, then requires
+one exact `Your First Component` heading citation. It runs in the existing
+new ephemeral profile, takes at most one cached anonymous-scope sample per
+document, and makes no login-detection or authenticated-session claim. Its
+unit guards are deterministic; any actual Luna outcome is recorded separately
+in the M6 qualification ledger, not implied by the qualifier's existence.
 
 The default semantic core does not convert validated internal identity or
 static operation assumptions back through process-terminating constructors.

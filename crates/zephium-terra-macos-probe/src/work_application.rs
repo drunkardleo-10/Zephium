@@ -71,7 +71,7 @@ pub(super) fn run_read() -> Result<(), super::ProbeFailure> {
 pub(super) fn run_site(site: super::work_sites::Site) -> Result<(), super::ProbeFailure> {
     writeln!(
         std::io::stdout().lock(),
-        "work-site: site={}; task=cited_public_inventory; effects=read_only; content=redacted",
+        "work-site: site={}; task=closed_public_cited_read; effects=read_only; content=redacted",
         site.name()
     )
     .map_err(|_| super::ProbeFailure::Output)?;
@@ -214,6 +214,7 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
         let mut stale_control_sent = false;
         let mut native_actions = 0_u32;
         let mut baseline_reads = 0_u32;
+        let mut navigation_proposals = 0_u32;
         let mut terminal_observed = false;
         let mut archive_requested = false;
         let mut archive_verified = false;
@@ -260,6 +261,14 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
                             )
                         ) {
                             baseline_reads += 1;
+                        }
+                        if matches!(
+                            kind,
+                            AgentWorkEventKind::ToolProposed(
+                                zephium_agentic::AgentBrowserToolKind::Navigate
+                            )
+                        ) {
+                            navigation_proposals += 1;
                         }
                         writeln!(output, "work-application-event: sequence={}; phase={kind:?}; wall_ms={}; content=redacted", event.sequence(), event.elapsed_millis())
                     }
@@ -379,7 +388,9 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
                     if extraction && terminal_success {
                         terminal_success = view.take_extraction().is_some_and(|result| {
                         let verified = if let Some(site) = site {
-                            native_actions == 0 && effects == 0 && site.verify_owned(&result)
+                            native_actions == 0 && effects == 0 && baseline_reads == 0
+                                && navigation_proposals == u32::from(matches!(site, super::work_sites::Site::ReactNavigation))
+                                && site.verify_owned(&result)
                         } else if combined {
                             effects >= 3 && effects == native_actions && verify_prepared_result(&result)
                         } else {
@@ -520,6 +531,9 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
                     .is_some_and(|join| matches!(join.join(), Ok(Ok(ShutdownOutcome::Clean))));
                 if inspecting {
                     let _ = writeln!(std::io::stdout().lock(), "work-application-read: baseline_reads={baseline_reads}; fresh_capture=false; new_reference_authority=false; content=redacted");
+                }
+                if site.is_some() {
+                    let _ = writeln!(std::io::stdout().lock(), "work-site-tools: navigation_proposals={navigation_proposals}; baseline_reads={baseline_reads}; native_actions={native_actions}; content=redacted");
                 }
                 let _ = writeln!(std::io::stdout().lock(), "work-application-closure: model=gpt-5.6-luna; durable_success={terminal_success}; cancelled_closed={terminal_cancelled}; shell_clean={clean}; turns={turns}; native_actions={native_actions}; verified_effects={effects}; input_tokens={tokens_in}; output_tokens={tokens_out}; cost_micro_usd={cost}; elapsed_ms={}; content=redacted", started.elapsed().as_millis());
                 return Some(
