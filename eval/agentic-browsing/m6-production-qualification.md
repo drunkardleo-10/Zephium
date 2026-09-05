@@ -2271,6 +2271,40 @@ This is not yet a successful commercial witness, the six-site matrix, SPA
 interaction, stock/availability truth, a transaction, multi-page synthesis,
 authenticated continuity, cross-origin support or visible Work readiness.
 
+## 2026-09-05 — commercial two-document attempt (refused)
+
+After independent review and explicit clearance, one attempt used clean HEAD
+`93dac3a271de5b8460e516eadde17462c06925ef` and
+`target/debug/macos-terra-agentic-probe --live-public-luna-work-site-inspectable commerce-product`.
+No exact UTC start was supplied in the retained content-free output; none is
+inferred. This was a single attempt, not an automatic retry.
+
+The catalog observation at wall 442 ms contained 38 nodes, `Complete`, no frame
+boundaries, `catalog_match=true` and product predicate booleans
+`[true,true,false]`. Luna's first call proposed the exact admitted navigation.
+It consumed 2,029 input / 78 output tokens, 8,678 full-request bytes and 2,613
+semantic bytes, with `PricedCeiling` accounting of 593 micro-USD, 5,449 ms turn
+time and 6,174 ms wall time. `ToolProposed(Navigate)` appeared at 6,174 ms.
+
+The successor observation began at 6,809 ms after exact native navigation
+settlement. It contained 17 nodes, `Complete`, zero frame boundaries,
+`catalog_match=false` and product predicate booleans `[false,false,false]`.
+The task correctly refused all missing required facts; no successor provider
+call or extraction was admitted. The terminal was `Failed(Contract)` at
+6,934 ms, followed by `shell_clean=true` closure at 7,093 ms. Totals were one
+model turn, one navigation proposal, zero baseline reads, native actions and
+verified effects, 2,029 / 78 tokens and 593 charged micro-USD. No result or
+artifact success is claimed.
+
+The exact route committed, but these diagnostics do not identify which
+17 nodes were observed or prove viewport, streaming/hydration, runtime
+projection or page-load readiness as the root cause. `Complete` means a
+complete bounded semantic representation of the requested scope, not that
+all future page content has arrived. Investigation must preserve the exact
+task facts, roles and completeness contract; no fixed sleep, blind retry or
+automatic criterion/ceiling relaxation is justified by this failed witness.
+No raw page/provider bodies or private data were added to this record.
+
 ## Remaining release blockers
 
 - authorized named-device macOS native-input routes beyond fixed DOM;
