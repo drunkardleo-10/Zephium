@@ -168,6 +168,7 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
         ],
     )?;
     let qualifier = read("crates/zephium-terra-macos-probe/src/work_application.rs")?;
+    combined_result_qualification(&qualifier)?;
     require(
         &qualifier,
         &[
@@ -194,9 +195,40 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn combined_result_qualification(source: &str) -> Result<(), String> {
+    require(
+        source,
+        &[
+            "super::work_actor::combined_input(started)?",
+            "effects >= 3 && effects == native_actions && verify_prepared_result(&result)",
+            "source.snapshot != SemanticSnapshotGeneration::INITIAL",
+            "sources.next().is_none()",
+            "*source_bytes == text.len()",
+            "text == value.as_str()",
+            "verified && view.take_extraction().is_none()",
+        ],
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn combined_qualification_requires_verified_effects_and_exact_post_action_source() {
+        let source = include_str!("../../crates/zephium-terra-macos-probe/src/work_application.rs");
+        combined_result_qualification(source).unwrap();
+        for boundary in [
+            "super::work_actor::combined_input(started)?",
+            "effects >= 3 && effects == native_actions && verify_prepared_result(&result)",
+            "source.snapshot != SemanticSnapshotGeneration::INITIAL",
+            "sources.next().is_none()",
+            "*source_bytes == text.len()",
+            "text == value.as_str()",
+            "verified && view.take_extraction().is_none()",
+        ] {
+            assert!(combined_result_qualification(&source.replace(boundary, "removed")).is_err());
+        }
+    }
     #[test]
     fn production_composition_has_no_task_policy_or_probe_authority() {
         for source in [

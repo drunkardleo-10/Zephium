@@ -74,6 +74,9 @@ fn main() {
         [argument] if argument == "--live-public-luna-work-sequential-inspectable" => {
             work_application::run_sequential()
         }
+        [argument] if argument == "--live-public-luna-work-combined-inspectable" => {
+            work_application::run_combined()
+        }
         [argument, directory] if argument == "--cleanup-public-work-artifact" => {
             work_artifact_cleanup::recover(std::path::Path::new(directory))
         }

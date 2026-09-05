@@ -433,6 +433,11 @@ fn validate_work_actor_qualifier(source: &str) -> Result<(), String> {
         "AgentBrowserShutdownOutcome::Clean(_)",
         "StoreShutdownOutcome::Clean",
         "settlement.closure().effects()",
+        "impl AgentWorkTask for PublicPreparedResultTask",
+        "Some(result.observation()) != self.ready",
+        "preview.source_bytes() != value.as_str().len()",
+        "preview.text() != value.as_str()",
+        "self.extraction.accept_extraction(result)",
     ] {
         if !source.contains(required) {
             return Err(format!(
@@ -497,6 +502,11 @@ mod tests {
             "zephium_store::SqliteStore::open(",
             "AgentBrowserShutdownOutcome::Clean(_)",
             "AgentWorkOutcome::Succeeded(settlement)",
+            "impl AgentWorkTask for PublicPreparedResultTask",
+            "Some(result.observation()) != self.ready",
+            "preview.source_bytes() != value.as_str().len()",
+            "preview.text() != value.as_str()",
+            "self.extraction.accept_extraction(result)",
         ] {
             assert!(validate_work_actor_qualifier(
                 &WORK_QUALIFIER.replace(boundary, "removed_boundary")

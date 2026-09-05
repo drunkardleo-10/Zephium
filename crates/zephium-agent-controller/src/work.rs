@@ -29,8 +29,8 @@ mod tests;
 pub enum AgentWorkTaskProgress {
     /// The approved task still requires work.
     Continue,
-    /// Fresh trusted state satisfies the action postcondition. Only extraction
-    /// may follow; it still requires the registered schema and result predicate.
+    /// Fresh trusted state satisfies the action postcondition. Further actions
+    /// are refused; extraction requires the registered schema and result predicate.
     ReadyForExtraction,
     /// The product's own task predicate is satisfied.
     Complete,

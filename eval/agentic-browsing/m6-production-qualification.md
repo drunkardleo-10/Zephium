@@ -1311,6 +1311,96 @@ explicit recovery; parallel contexts/runs need a future scoped proof design.
 Trusted task authoring, richer tools, full desktop bootstrap and broader
 platform/site/resource qualification remain open.
 
+## One application run: verified actions to a cited result (2026-09-05)
+
+The shipping Work actor now admits an explicitly trusted combined task. This
+removes the previous mutual exclusion between snapshot actions and useful
+schema-bound output: the same session can prepare state and return one cited
+result. The task freezes its schema and combined mode before execution,
+evaluates readiness from fresh native observations, and independently accepts
+the mapped result. No model text, action count or new worker supplies authority.
+
+The exact locate/act/extract capability profile remains continuation-bound in
+both provider serializers. Read-only extraction remains the default for a
+schema task. Premature extraction and further actions after trusted readiness
+fail closed, without re-prompting or replay. Locate, verified actions, extraction
+proposal and mapping share the existing eight-call ceiling. The mapping binds
+the current post-action observation, frame cohort and capture timestamp; it
+cannot substitute the initial action baseline. Original policy/accounting,
+native settlement, runtime, durable audit and terminal-publication proofs remain
+required before one-shot result handoff.
+
+The release-excluded command
+`--live-public-luna-work-combined-inspectable` exercised the actual macOS
+composition, shell, EngineHost-owned extension-free page and shared SQLite
+Store. The trusted public-test task required the existing three search-field
+and language milestones, without submission or external writes, followed by
+one exact final-field value and its complete native value-preview citation.
+Both the trusted task and the application result consumer independently checked
+that evidence. No task definition or special authority was added to production.
+
+Two runs passed, including the final rebuilt qualifier. Both produced the
+sequence Fill → Locate → Select → Fill → Extract → mapping, with three native
+effects independently verified before result mapping. Each reached durable
+Succeeded, delivered its result once, passed focus isolation and completed
+application-owned Shell Clean teardown. No action, provider or verification
+retry occurred. These runs used ephemeral profile storage and memory-only result
+bodies; durable terminal facts were acknowledged. They do not add live evidence
+for combined-task artifact restart retrieval.
+
+| Run | Input / output tokens | Accounted µUSD | Provider-turn ms | Total wall ms | Verified effects / results |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 21,136 / 465 | 3,184 | 15,128 | 16,591 | 3 / 1 |
+| 2, final build | 21,338 / 533 | 2,700 | 14,128 | 16,472 | 3 / 1 |
+| Aggregate | 42,474 / 998 | 5,884 | 29,256 | 33,063 | 6 / 2 |
+
+Final-build per-turn boundary receipts (cost accounting is `PricedCeiling`):
+
+| Turn | Kind | Input / output tokens | Request bytes | Semantic bytes | Provider-turn ms | µUSD |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | Fill | 2,613 / 124 | 12,794 | 3,116 | 2,812 | 202 |
+| 2 | Locate | 2,835 / 89 | 15,201 | 287 | 2,944 | 216 |
+| 3 | Select | 2,984 / 80 | 17,398 | 208 | 2,052 | 191 |
+| 4 | Fill | 3,215 / 113 | 19,667 | 408 | 2,348 | 254 |
+| 5 | Extract proposal | 3,428 / 41 | 22,058 | 299 | 1,916 | 168 |
+| 6 | Schema mapping | 6,263 / 86 | 30,603 | 13,365 | 2,056 | 1,669 |
+
+The current initial-scope mapping still discloses a bounded read larger than this
+single result requires; this pass does not claim targeted-read efficiency. The
+explicit public qualification mode alone retained provider logs. Production and
+BYOK stay `store:false`; local receipts contain only typed stages, correlations,
+counts and timings. No page/provider bodies, credentials or profile state were
+retained in repository evidence.
+
+The combined controller fixture runs fifteen success/fault schedules through
+the original runtime and localhost provider/native ports: success, premature
+extraction, late action, wrong schema, expanded scope, foreign source, mapping
+count/stream takeover, lost audit/native callback, schema/mode mutation, false
+completion without a result, trusted result refusal and the exact eight-call
+ceiling. Missing-schema admission/readiness also fail without provider calls.
+Already verified effects stay accounted on refusal; lost original owners retain
+Recovery, and a valid result with missing audit remains unpublished. No clean
+proof is synthesized. Source-gate mutation tests protect the frozen task phase,
+current evidence join and independent application qualifier checks.
+
+Validation: 425 core; 15 shipping and 20 probe controller; 37 runtime; 339
+shipping and 343 all-feature application; 264 Store plus four doctests; 465
+shipping and 467 semantic-native engine plus three native probe tests; 97 desktop,
+two qualifier and 177 xtask tests. Ignored subprocess helpers remain
+parent-exercised. Strict Clippy and the controller/runtime/catalog/semantic,
+composition and persistence gates pass. Optimized default and opt-in `macos-work`
+desktop checks pass; the optimized qualifier is rejected by its compile-time
+boundary. The default desktop graph still excludes Work composition, controller,
+runtime, provider transport and reqwest. No dependency, default feature, lockfile,
+native scheduling, worker or idle-poll change was made. This is not battery,
+RAM/CPU, full-desktop-bootstrap or broad-site production qualification.
+
+The next larger execution seam is trustworthy cross-document navigation and
+its effect authorization, settlement and fresh continuation proof. Model-facing
+navigation vocabulary alone does not supply that host adapter. Trusted task
+authoring, richer read scopes, parallel runs and UI remain separate product work;
+this pass neither enables nor emulates them.
+
 ## Remaining release blockers
 
 - authorized named-device macOS native-input routes beyond fixed DOM;

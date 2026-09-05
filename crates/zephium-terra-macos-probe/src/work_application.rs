@@ -52,6 +52,10 @@ pub(super) fn run_sequential() -> Result<(), super::ProbeFailure> {
     run_mode(Qualification::Sequential)
 }
 
+pub(super) fn run_combined() -> Result<(), super::ProbeFailure> {
+    run_mode(Qualification::ActionsAndExtraction)
+}
+
 #[derive(Clone, Copy)]
 enum Qualification {
     Actions,
@@ -59,6 +63,7 @@ enum Qualification {
     Artifact,
     CancelExtraction,
     Sequential,
+    ActionsAndExtraction,
 }
 
 fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
@@ -66,12 +71,15 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
     let extraction = !matches!(mode, Qualification::Actions);
     let durable = matches!(mode, Qualification::Artifact);
     let sequential = matches!(mode, Qualification::Sequential);
+    let combined = matches!(mode, Qualification::ActionsAndExtraction);
     let cancel_after_turn = matches!(
         mode,
         Qualification::CancelExtraction | Qualification::Sequential
     );
     let started = Instant::now();
-    let (profile, input, task) = if durable {
+    let (profile, input, task) = if combined {
+        super::work_actor::combined_input(started)?
+    } else if durable {
         super::work_actor::artifact_input(started)?
     } else if extraction {
         super::work_actor::extraction_input(started)?
@@ -260,7 +268,11 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
                         });
                     if extraction && terminal_success {
                         terminal_success = view.take_extraction().is_some_and(|result| {
-                        let verified = verify_extraction(&result);
+                        let verified = if combined {
+                            effects >= 3 && effects == native_actions && verify_prepared_result(&result)
+                        } else {
+                            verify_extraction(&result)
+                        };
                         let stats = result.stats();
                         let _ = writeln!(std::io::stdout().lock(), "work-application-result: fields={}; values={}; source_edges={}; independently_verified={verified}; artifact_promised={durable}; content=redacted", stats.fields(), stats.values(), stats.source_edges());
                         verified && view.take_extraction().is_none()
@@ -534,4 +546,35 @@ fn verify_extraction(result: &zephium_agentic::SemanticOwnedExtractionResult) ->
         german |= text.contains("Deutsch");
     }
     english && german
+}
+
+fn verify_prepared_result(result: &zephium_agentic::SemanticOwnedExtractionResult) -> bool {
+    use zephium_agentic::*;
+    if result.trust() != SemanticExtractionTrust::ModelMapped || result.fields().len() != 1 {
+        return false;
+    }
+    let SemanticExtractedValue::Text(value) = result.fields()[0].value() else {
+        return false;
+    };
+    let Some(mut sources) = result.sources(value.source_span()) else {
+        return false;
+    };
+    let Some(source) = sources.next() else {
+        return false;
+    };
+    let SemanticOwnedReadContent::ValuePreview {
+        text,
+        source_bytes,
+        truncated,
+    } = &source.content
+    else {
+        return false;
+    };
+    value.as_str() == "Zephium open source browser"
+        && text == value.as_str()
+        && *source_bytes == text.len()
+        && !truncated
+        && matches!(source.role, SemanticRole::Searchbox | SemanticRole::Textbox)
+        && source.snapshot != SemanticSnapshotGeneration::INITIAL
+        && sources.next().is_none()
 }

@@ -20,6 +20,86 @@ impl TerraControllerClock for Clock {
 }
 
 struct Task(super::PreparedSearchProgress);
+struct PublicPreparedResultTask {
+    actions: Task,
+    extraction: AgentWorkExtractionTask,
+    ready: Option<SemanticObservationId>,
+}
+impl AgentWorkTask for PublicPreparedResultTask {
+    fn allows_actions_before_extraction(&self) -> bool {
+        true
+    }
+    fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
+        self.extraction.extraction_schema()
+    }
+    fn evaluate(
+        &mut self,
+        observation: &SemanticObservation,
+    ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+        if self.actions.evaluate(observation)? == AgentWorkTaskProgress::Complete {
+            self.ready = Some(observation.request().id());
+            Ok(AgentWorkTaskProgress::ReadyForExtraction)
+        } else {
+            Ok(AgentWorkTaskProgress::Continue)
+        }
+    }
+    fn assess(
+        &self,
+        action: &SemanticPreparedAction,
+    ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+        if self.ready.is_some() {
+            return Err(AgentWorkFailure::Contract);
+        }
+        self.actions.assess(action)
+    }
+    fn attest_account(
+        &self,
+        context: ContextJoin,
+        now: AgentPolicyInstant,
+    ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
+        self.actions.attest_account(context, now)
+    }
+    fn accept_extraction(
+        &mut self,
+        result: &SemanticExtractionResult<'_>,
+    ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+        if Some(result.observation()) != self.ready {
+            return Err(AgentWorkFailure::Contract);
+        }
+        let [field] = result.fields() else {
+            return Err(AgentWorkFailure::Contract);
+        };
+        let SemanticExtractedValue::Text(value) = field.value() else {
+            return Err(AgentWorkFailure::Contract);
+        };
+        let Some([source]) = result.sources(value.source_span()) else {
+            return Err(AgentWorkFailure::Contract);
+        };
+        let fragment = source.fragment();
+        let SemanticReadContent::ValuePreview(preview) = fragment.content() else {
+            return Err(AgentWorkFailure::Contract);
+        };
+        if value.as_str() != "Zephium open source browser"
+            || !matches!(
+                fragment.role(),
+                SemanticRole::Searchbox | SemanticRole::Textbox
+            )
+            || preview.truncated()
+            || preview.source_bytes() != value.as_str().len()
+            || preview.text() != value.as_str()
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
+        self.extraction.accept_extraction(result)
+    }
+}
+
+enum PublicWorkInput {
+    Actions,
+    Extraction,
+    Artifact,
+    ActionsAndExtraction,
+}
 // The public test's completion contract runs before successful actor closure;
 // application delivery checks the owned result again independently afterward.
 struct PublicExtractionTask(AgentWorkExtractionTask);
@@ -154,7 +234,7 @@ pub(super) fn input(
     ),
     super::ProbeFailure,
 > {
-    input_mode(started, false, false)
+    input_mode(started, PublicWorkInput::Actions)
 }
 
 pub(super) fn extraction_input(
@@ -167,7 +247,7 @@ pub(super) fn extraction_input(
     ),
     super::ProbeFailure,
 > {
-    input_mode(started, true, false)
+    input_mode(started, PublicWorkInput::Extraction)
 }
 
 pub(super) fn artifact_input(
@@ -180,13 +260,25 @@ pub(super) fn artifact_input(
     ),
     super::ProbeFailure,
 > {
-    input_mode(started, true, true)
+    input_mode(started, PublicWorkInput::Artifact)
+}
+
+pub(super) fn combined_input(
+    started: Instant,
+) -> Result<
+    (
+        zephium_core::ids::ProfileId,
+        AgentWorkRunInput,
+        Box<dyn AgentWorkTask>,
+    ),
+    super::ProbeFailure,
+> {
+    input_mode(started, PublicWorkInput::ActionsAndExtraction)
 }
 
 fn input_mode(
     started: Instant,
-    extraction: bool,
-    durable: bool,
+    mode: PublicWorkInput,
 ) -> Result<
     (
         zephium_core::ids::ProfileId,
@@ -196,6 +288,12 @@ fn input_mode(
     super::ProbeFailure,
 > {
     use super::ProbeFailure as Error;
+    let extraction = matches!(
+        mode,
+        PublicWorkInput::Extraction | PublicWorkInput::Artifact
+    );
+    let durable = matches!(mode, PublicWorkInput::Artifact);
+    let combined = matches!(mode, PublicWorkInput::ActionsAndExtraction);
     let profile = if durable {
         zephium_core::ids::ProfileId::generate()
     } else {
@@ -249,7 +347,9 @@ fn input_mode(
     )
     .map_err(|_| Error::Authority)?;
     let objective = "Prepare a public Wikipedia search without submitting or navigating. Fill the search with exactly Zephium browser and choose Deutsch in the search language selector, in either order. Once both are verified, refine the search text to exactly Zephium open source browser. Use one local_write act action per turn. Locate option references when needed. For each action use mutation_quiet=100 ms, settle_budget=2000 ms, and exact value or exact selected-option verification. Do not click links or submit. The host checks the exact milestones and stops when the final prepared search is verified.";
-    let objective = if extraction {
+    let objective = if combined {
+        "Prepare a public Wikipedia search without submitting or navigating. Fill the search with exactly Zephium browser and choose Deutsch in the search language selector, in either order. Once both are verified, refine the search text to exactly Zephium open source browser. Use one local_write act action per turn; locate option references when needed. Each action must use mutation_quiet=100 ms, settle_budget=2000 ms, and exact value or exact selected-option verification. Do not click links or submit. After all three milestones are verified, call extract with initial scope and trusted schema 1. Return prepared_query as the complete exact current search field value with its exact value-preview citation. Do not extract early or perform further actions after the final query is verified."
+    } else if extraction {
         "Extract an inventory of the ten prominent Wikipedia language-edition links. Use the trusted schema 1, initial scope. Return language_links as ten complete, exact accessible link names copied from the delivered evidence, including article-count text where it is part of a name. Do not paraphrase, translate, truncate or invent link names. Cite the exact source fragment for each item. Do not navigate or modify anything."
     } else {
         objective
@@ -284,7 +384,20 @@ fn input_mode(
     } else {
         input
     };
-    let task: Box<dyn AgentWorkTask> = if extraction {
+    let task: Box<dyn AgentWorkTask> = if combined {
+        Box::new(PublicPreparedResultTask {
+            actions: Task(Default::default()),
+            extraction: AgentWorkExtractionTask::try_new(
+                vec![
+                    SemanticExtractionFieldSchema::try_text("prepared_query".into(), true, 64)
+                        .map_err(|_| Error::Authority)?,
+                ],
+                AgentAccountScope::Anonymous,
+            )
+            .map_err(|_| Error::Authority)?,
+            ready: None,
+        })
+    } else if extraction {
         Box::new(PublicExtractionTask(
             AgentWorkExtractionTask::try_new(
                 vec![SemanticExtractionFieldSchema::try_text_list(

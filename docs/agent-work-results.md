@@ -84,6 +84,8 @@ extraction. `ReadyForExtraction` certifies the trusted action postcondition and
 permits extraction but refuses further actions. A combined task cannot declare
 `Complete` instead of returning a result. Readiness may already hold initially;
 neither a fixed action count nor a model response is completion authority.
+Bounded, read-only locate turns remain available in either phase and consume
+the same model-call budget; they cannot dispatch an action after readiness.
 
 The extraction proposal and mapping call consume the same bounded session, policy,
 transport, accounting and audit owners as the actions. The eight-call ceiling
@@ -129,6 +131,12 @@ language-link names against their cited native observation before completion.
 The delivery consumer checks the owned values and provenance again, then
 requires durable success, focus isolation and clean application-owned teardown.
 Only this explicit public mode retains provider logs. See the [M6 evidence](../eval/agentic-browsing/m6-production-qualification.md).
+
+The `--live-public-luna-work-combined-inspectable` qualifier exercises the same
+application path with three independently verified, unsubmitted public form-state
+changes followed by a cited final-value result. Both the trusted task and the
+application delivery consumer independently compare that value with its exact
+post-action native source. It adds no production scenario or special authority.
 
 The artifact vertical adds bounded typed private bodies and exact immutable
 publication on the same Store actor, separate from content-free journal/audit
