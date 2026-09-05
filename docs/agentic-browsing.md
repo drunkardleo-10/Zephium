@@ -1,7 +1,7 @@
 # Agentic browsing implementation specification
 
 Status: accepted implementation program
-Last reviewed: 2026-08-31
+Last reviewed: 2026-09-05
 
 This document defines how Zephium proves and builds the browser-execution layer
 used by Work. It is deliberately independent of the Work canvas, product
@@ -34,6 +34,58 @@ production-grade browser actor that can:
 
 The proof phase ends only with repeatable fixture, real-site, safety,
 concurrency, performance, and resource evidence on both supported platforms.
+
+### 1.1 Current evidence boundary
+
+The current implementation proves a substantial **bounded execution kernel**:
+native owned contexts, compact semantic observations, epoch-bound references,
+fixed native interaction recipes, deterministic policy admission, fresh
+postcondition observations, provider accounting, audit, cancellation, and
+clean teardown. Real Luna runs have exercised short exact routes on macOS.
+
+That evidence must not be described as a general Work agent yet. The live
+qualifiers still use trusted task adapters that provide route, completion,
+effect, account, extraction, and acceptance facts. They prove guarded execution
+of a prescribed workflow; they do not prove that a model can discover a route,
+decide that evidence is sufficient, or finish an unfamiliar objective. The
+current whole-context teardown is also a qualification lifetime, not the final
+persistent Work lifetime.
+
+The implementation therefore separates these three things explicitly:
+
+- **authority:** an immutable user/product-approved capability envelope for
+  accounts, origins, data classes, effects, budgets, approvals, and resources;
+- **intent and progress:** a bounded, persistent, revisable plan that a model
+  may propose but that never grants authority merely by existing;
+- **evidence:** native or service observations with an explicit verification
+  level, provenance, freshness, and uncertainty.
+
+Rust enforces authority and evidence joins. A model chooses within the admitted
+space; it does not classify its own permissions or manufacture proof of a
+business effect. Trusted workflow adapters remain valuable optimizations for
+known services, not the universal authoring model.
+
+### 1.2 Immediate implementation order
+
+The next production sequence is deliberately outcome-driven:
+
+1. qualify rendering and input behavior in the real macOS application
+   lifecycle, including honest foreground/background constraints;
+2. split persistent Work-owned browser resources from revocable run-owned
+   execution leases and scoped resource quarantine;
+3. add the capability envelope, persistent plan/progress state, evidence
+   levels, and conservative source/account sensitivity floors;
+4. build one generic open-objective runner whose expected answer and route are
+   hidden from the actor;
+5. prove one unfamiliar multi-page Luna workflow with retained evidence and
+   same-context human takeover;
+6. expand from measured failures into a small heterogeneous site matrix,
+   authenticated reads, reversible writes, Windows parity, concurrent
+   Browse/Work, and resource/endurance qualification.
+
+Tool breadth is not a milestone by itself. Add deterministic Rust capabilities
+when successful workflows or classified failures show that they reduce turns,
+tokens, latency, unsafe ambiguity, or human intervention.
 
 ## 2. Non-negotiable invariants
 
@@ -83,7 +135,7 @@ Agentic browsing needs browser identity that is not a disguised tab.
 
 **Owned context**
 
-- is created for a run and owned by that run or a delegated child;
+- is created for and owned by a persistent Work browser resource;
 - is not an `Item`, tab-strip entry, Today item, or normal session-restore tab;
 - never appears through extension `chrome.tabs` inventory;
 - is independently visible, focusable, suspendable, resumable, and destroyable;
@@ -91,6 +143,13 @@ Agentic browsing needs browser identity that is not a disguised tab.
   surface;
 - may be adopted explicitly into Browse, creating a normal tab under an
   auditable user action.
+
+An actor or delegated child operates an owned context only through a revocable
+execution lease. Pausing, completing, cancelling, or replacing a run drains and
+revokes that lease without implicitly destroying the useful page. Human
+takeover retains the exact context while invalidating every old agent reference
+and action permit. Uncertain teardown quarantines the affected context; it does
+not block unrelated Work resources unless the fault is proven engine-global.
 
 **Human sign-in handoff**
 
@@ -105,7 +164,8 @@ Agentic browsing needs browser identity that is not a disguised tab.
 
 ### 3.2 Identity port
 
-Introduce an agent-browser port around a durable `ContextId`, owner, profile,
+Introduce an agent-browser port around a durable `ContextId`, Work-resource
+owner, profile,
 generation, navigation epoch, lifecycle state, visibility, suspension state,
 and capability set. The port must express at least:
 
@@ -129,9 +189,10 @@ All asynchronous results rejoin `ContextId`, owner, profile, context
 generation, navigation epoch, frame generation, and run cancellation state.
 A result missing any current join is stale and discarded.
 
-Version 1 run-owned contexts use one domain-selected 1280-by-800 logical/CSS
-pixel viewport. The construction request derives that closed value from the
-owned source; neither a model nor a page can choose an arbitrary layout size.
+Version 1 qualification contexts use one domain-selected 1280-by-800
+logical/CSS pixel viewport. The construction request derives that closed value
+from the owned source; neither a model nor a page can choose an arbitrary
+layout size.
 Each platform adapter sets the native child bounds explicitly, retains the
 expected viewport, and fails construction or later attestation if the native
 frame diverges. Borrowed tabs and human sign-in handoffs retain their ordinary
@@ -139,7 +200,35 @@ presentation owner's viewport. This logical layout contract is distinct from
 physical screenshot dimensions under device scale and does not replace the
 named-device CPU, memory, GPU, or energy qualification.
 
-### 3.3 Promotion and takeover
+The viewport sentence above describes the current qualification adapter. In
+the product lifetime the viewport belongs to the Work browser resource and its
+current presentation/rendering lease, not permanently to one actor run.
+
+### 3.3 Independent lifecycle axes
+
+Do not encode browser execution as a hidden/headless Boolean. These states are
+independent and policy-controlled:
+
+- **presentation:** compact card/preview, dedicated page surface, or no current
+  user presentation;
+- **rendering opportunity:** whether the platform is currently allowed and able
+  to advance layout, animation, hydration, and visibility-dependent content;
+- **human input authority:** none, inspect-only, or exclusive human takeover;
+- **agent execution authority:** the exact active lease and its admitted
+  operations;
+- **resource state:** live, throttled, queued, suspended, renderer-lost, or
+  quarantined.
+
+On macOS, a permanently hidden `WKWebView` is not assumed to have full rendering
+liveness. If a page needs a display-backed rendering opportunity, the scheduler
+must acquire an explicit bounded lease in the normal Zephium application
+lifecycle. It must never activate Zephium, take key/main-window status, or
+compete for input merely to keep an agent running. If the application is
+inactive and supported public APIs cannot satisfy the lease, local execution
+pauses or defers honestly. No private WebKit SPI or website-specific animation
+shim may turn that limitation into a false success claim.
+
+### 3.4 Promotion and takeover
 
 Selecting an owned context in Work presents the exact native page in a
 dedicated non-overlapping page surface or split. It does not serialize and
@@ -541,6 +630,22 @@ There is no shipping `eval(js)`. A diagnostics-only evaluation facility may
 exist behind a non-release Cargo feature in the probe. It is never wired to a
 model, Work, remote input, or ordinary product build.
 
+The complete native capability registry may be richer than the tools visible
+in one model turn. A deterministic router selects a small profile from the
+objective phase, admitted envelope, current resource state, and prior typed
+failure. The model does not receive fifty schemas merely because Zephium can
+perform fifty operations. Tool discovery is bounded and cannot grant a
+capability absent from the original envelope.
+
+Prefer typed compound operations and Rust-selected execution recipes over
+making the model coordinate incidental mechanics. For example, a form action
+normally states its target, value, and desired observable outcome; Rust derives
+the compatible input recipe, settle strategy, and mandatory verification from
+the control semantics and policy. Explicit model-proposed waits or effect
+claims are hints to validate, not authority. Add specialized table, filter,
+sort, search, or service operations only when evidence shows that they improve
+verified outcomes versus the generic semantic path.
+
 `extract` is a composite capability: the page runtime supplies bounded
 semantic evidence, the model maps it to a schema where needed, and Rust
 validates the schema, provenance, size, and sensitivity. It is not arbitrary
@@ -796,6 +901,13 @@ Every observed value carries:
 - capture time and freshness;
 - provenance references.
 
+The source/account establishes a conservative sensitivity floor before
+field-level classification. Authenticated mail, documents, dashboards, and
+account pages are not treated as public merely because a field lacks a known
+`autocomplete` token. Field detection may raise sensitivity; it cannot lower
+the source floor. Unknown authenticated sources default to private/sensitive
+until a trusted adapter proves a narrower class.
+
 Every proposed operation declares:
 
 - destination origin/service/account;
@@ -818,6 +930,21 @@ DOM, secret values, or indiscriminate page contents. Each current-progress
 snapshot is accepted only from the exact supervisor incarnation and canonical
 manifest revision originally joined to the ledger; matching public identities
 cannot substitute a different scope revision.
+
+Evidence records distinguish at least:
+
+- **native-observed:** a fresh bounded browser observation established the
+  stated page fact;
+- **service-confirmed:** a trusted API or adapter independently established the
+  remote effect or durable state;
+- **model-interpreted:** a model mapped cited source evidence into a claim;
+- **user-accepted:** a person explicitly accepted or supplied the fact;
+- **needs-review:** provenance exists but the requested conclusion or effect is
+  not established strongly enough.
+
+Citation provenance does not turn interpretation into fact, and a page saying
+“saved” does not prove a remote write. Product UI and completion logic retain
+these distinctions instead of flattening them into one success Boolean.
 
 ### 10.1 Downloads, uploads, dialogs, and external schemes
 
