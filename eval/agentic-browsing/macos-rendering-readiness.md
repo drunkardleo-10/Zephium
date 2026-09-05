@@ -558,3 +558,6 @@ JavaScript smoke); formatting and diff-whitespace checks. The debug native
 binary was rebuilt before its pinned attempt. No paid/provider run or public
 site retry occurred. The earlier unrelated full-xtask fixture failure remains
 outside these passing targeted tests; no full-xtask success is claimed.
+The subsequent default and `macos-work` release desktop builds both passed,
+confirming that these debug-only changes remain excluded from both product
+graphs. This is build/isolation evidence, not a battery or rendering benchmark.
