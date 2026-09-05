@@ -1835,6 +1835,95 @@ evidence, not qualification of an account detector or cross-document navigation.
 No UI, hosted/local transport, concurrent lifetime, new browser tool, resource
 measurement or production-readiness claim is added.
 
+## Early public dynamic-page projection checks (2026-09-05)
+
+An early two-site discovery slice was moved ahead of destination-bound session
+navigation. The creator's concern was that Wikipedia alone could conceal
+projection failures on hydrated application and commerce pages. The checks use
+the existing production Work actor, application composition, actual hidden
+WKWebView, ephemeral extension-free profile, Luna, policy/audit accounting,
+SQLite terminal publication and application-owned teardown. They add no task
+interpreter or production URL allowlist.
+
+The excluded qualifier accepts only the closed site names below. Its schema is
+fixed, effects are read-only, and completion requires three distinct task slots
+whose entire value equals one exact native source of the required semantic role.
+The application checks the owned result again after durable terminal publication.
+An arbitrary URL, missing value, duplicate task slot, wrong role, fabricated
+price/name, multiple source fragments or paraphrase cannot qualify success.
+These are public provider-retained probes; production/BYOK storage remains false.
+Only typed states, counts, match masks, byte sizes and timings are printed.
+
+```sh
+cargo build --locked -p zephium-terra-macos-probe --features live-probe
+target/debug/macos-terra-agentic-probe --live-public-luna-work-site-inspectable commerce
+target/debug/macos-terra-agentic-probe --live-public-luna-work-site-inspectable react
+```
+
+| Fixed public target | Task | Observed outcome |
+| --- | --- | --- |
+| [Vercel demo commerce](https://demo.vercel.store/) | Three exact product-link names including their displayed prices, with link citations | Two pre-fix attempts reached mapping but failed the independent task predicate. The nested-name correction produced three exact independently verified links and clean durable success. |
+| [React Quick Start](https://react.dev/learn) | Three exact article-heading names, the third below the initial viewport | Two initial-only attempts correctly failed with one required heading absent. Explicit main-subtree extraction exposed an unclassified iframe boundary. After its correction, the same request reached extraction admission and correctly refused the existing encoded-output ceiling. |
+
+Two production corrections followed directly from this investigation:
+
+1. `acd457a` preserves a content-derived control name across already-retained
+   semantic children. The commerce links contain headings and price paragraphs;
+   the previous single sink retained the children but left the link unnamed.
+   Luna then attempted to reconstruct links from heading citations and Rust
+   correctly refused. The fix walks only bounded retained ancestry during the
+   same DOM traversal, charges every text copy, preserves author-name precedence
+   and fences hidden, editable/value and sensitive/secret boundaries. The
+   immutable program digest is updated with the source. This is not full
+   accessibility-name algorithm conformance.
+2. `4e3b739` marks retained child frames `Unsupported(PolicyBlocked)` in the Work
+   actor's main-only capture, for both initial and subtree observations. The
+   previous actor omitted every boundary disposition and therefore failed
+   assembly on React's embedded playground. No child is captured or given
+   authority. Read projection now reports `source_incomplete` when a parent has
+   unobserved children, even if that parent's native snapshot was complete.
+
+The commerce development witness used 38 initial nodes, 3 headings and 10 links;
+all three expected link/price slots appeared after the correction, versus zero
+before. It completed in 6,577 ms with two charged calls, 3,706 input tokens,
+247 output tokens and 1,224 charged micro-USD. Initial semantic disclosure was
+2,613 bytes (2,509 before), and mapping evidence was 2,762 bytes. Three values
+passed both independent citation checks. This is a development witness for the
+correction; no repeated final-build or endurance pass is inferred.
+
+The final React attempt on production HEAD `4e3b739` retained 59 initial nodes,
+5 headings and 19 links; only two task headings were in that initial viewport.
+Two locate calls selected the broader subtree. Native expansion then assembled
+successfully and reached `extract`, which refused with
+`Browser(InitialEncoding(OutputLimit))` before any mapping request. The unchanged
+16-KiB combined schema/read preflight is the limiting boundary. Three charged
+calls used 7,920 input and 230 output tokens, cost 559 micro-USD, and closed in
+8,547 ms. Earlier subtree code stopped at `Context` before that admission.
+Every exploratory failure and the commerce success had zero native actions,
+zero effects and clean application shutdown; no navigation after initial load,
+submission, checkout, login or external record mutation occurred.
+
+Deterministic validation: 527 all-feature agentic tests and eight evidence-binary
+tests, 38 controller/probe tests, nine focused read tests, two closed qualifier
+guard tests, immutable-runtime hostile JavaScript smoke, strict Clippy for the
+core/controller/qualifier, formatting/diff checks and both architecture boundaries.
+The embedded-frame schedule verifies successful scoped mapping without a child
+native call; the existing loss, stale-root, takeover, audit and phase schedules
+remain unchanged. Initial sandboxed actor tests could not bind their loopback
+listeners; the authorized unrestricted deterministic run passed. The expected
+source-digest mismatch during development was corrected and the full suite rerun.
+
+This is not the six-site release matrix, a framework event/action qualification,
+SPA routing, general iframe support, cross-origin navigation or a multi-page
+task. It established a useful commerce projection and exposed a remaining
+read-scope ergonomics limit on a real large page. That finding must inform the
+next narrow read/task contract: the current whole-main subtree is too large,
+and enlarging default observations would spend more tokens without granting
+the missing task/navigation semantics. The six-site authenticated/write matrix,
+explicit destination and redirect authority, document-epoch continuation,
+account continuity, parallel contexts and concurrent Browse qualification remain
+open.
+
 ## Remaining release blockers
 
 - authorized named-device macOS native-input routes beyond fixed DOM;

@@ -68,8 +68,19 @@ pub(super) fn run_read() -> Result<(), super::ProbeFailure> {
     run_mode(Qualification::ReadActions)
 }
 
+pub(super) fn run_site(site: super::work_sites::Site) -> Result<(), super::ProbeFailure> {
+    writeln!(
+        std::io::stdout().lock(),
+        "work-site: site={}; task=cited_public_inventory; effects=read_only; content=redacted",
+        site.name()
+    )
+    .map_err(|_| super::ProbeFailure::Output)?;
+    run_mode(Qualification::Site(site))
+}
+
 #[derive(Clone, Copy)]
 enum Qualification {
+    Site(super::work_sites::Site),
     ReadActions,
     Actions,
     Extraction,
@@ -84,6 +95,10 @@ enum Qualification {
 fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
     use super::ProbeFailure as Error;
     let review = matches!(mode, Qualification::ReviewAndFreshActions);
+    let site = match mode {
+        Qualification::Site(site) => Some(site),
+        _ => None,
+    };
     let inspecting = matches!(mode, Qualification::ReadActions);
     let extraction = !matches!(
         mode,
@@ -104,7 +119,9 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
         Qualification::CancelExtraction | Qualification::Sequential
     );
     let started = Instant::now();
-    let (profile, input, task) = if inspecting {
+    let (profile, input, task) = if let Some(site) = site {
+        super::work_actor::site_input(started, site)?
+    } else if inspecting {
         super::work_actor::read_input(started)?
     } else if review {
         super::work_actor::review_input(started)?
@@ -361,7 +378,9 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
                     }
                     if extraction && terminal_success {
                         terminal_success = view.take_extraction().is_some_and(|result| {
-                        let verified = if combined {
+                        let verified = if let Some(site) = site {
+                            native_actions == 0 && effects == 0 && site.verify_owned(&result)
+                        } else if combined {
                             effects >= 3 && effects == native_actions && verify_prepared_result(&result)
                         } else {
                             verify_extraction(&result)

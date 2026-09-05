@@ -13,6 +13,7 @@ mod work_actor;
 mod work_application;
 #[cfg(target_os = "macos")]
 mod work_artifact_cleanup;
+mod work_sites;
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -86,6 +87,11 @@ fn main() {
         [argument] if argument == "--live-public-luna-work-read-inspectable" => {
             work_application::run_read()
         }
+        [argument, site] if argument == "--live-public-luna-work-site-inspectable" => site
+            .to_str()
+            .ok_or(ProbeFailure::Authority)
+            .and_then(work_sites::Site::parse)
+            .and_then(work_application::run_site),
         [argument, directory] if argument == "--cleanup-public-work-artifact" => {
             work_artifact_cleanup::recover(std::path::Path::new(directory))
         }

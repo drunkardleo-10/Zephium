@@ -104,6 +104,7 @@ impl AgentWorkTask for PublicPreparedResultTask {
 }
 
 enum PublicWorkInput {
+    Site(super::work_sites::Site),
     ReadActions,
     Actions,
     ReviewActions,
@@ -228,6 +229,20 @@ pub(super) fn extraction_input(
     input_mode(started, PublicWorkInput::Extraction)
 }
 
+pub(super) fn site_input(
+    started: Instant,
+    site: super::work_sites::Site,
+) -> Result<
+    (
+        zephium_core::ids::ProfileId,
+        AgentWorkRunInput,
+        Box<dyn AgentWorkTask>,
+    ),
+    super::ProbeFailure,
+> {
+    input_mode(started, PublicWorkInput::Site(site))
+}
+
 pub(super) fn artifact_input(
     started: Instant,
 ) -> Result<
@@ -279,9 +294,13 @@ fn input_mode(
     super::ProbeFailure,
 > {
     use super::ProbeFailure as Error;
+    let site = match mode {
+        PublicWorkInput::Site(site) => Some(site),
+        _ => None,
+    };
     let extraction = matches!(
         mode,
-        PublicWorkInput::Extraction | PublicWorkInput::Artifact
+        PublicWorkInput::Extraction | PublicWorkInput::Artifact | PublicWorkInput::Site(_)
     );
     let durable = matches!(mode, PublicWorkInput::Artifact);
     let subtree = matches!(mode, PublicWorkInput::ActionsAndScopedExtraction);
@@ -300,8 +319,8 @@ fn input_mode(
         profile,
         ContextKind::Owned,
     );
-    let origin =
-        SemanticOrigin::parse("https://www.wikipedia.org/").map_err(|_| Error::Authority)?;
+    let target = site.map_or("https://www.wikipedia.org/", super::work_sites::Site::url);
+    let origin = SemanticOrigin::parse(target).map_err(|_| Error::Authority)?;
     let form_task = || {
         AgentWorkFormTask::try_new_local_preparation(
             context,
@@ -368,7 +387,9 @@ fn input_mode(
     )
     .map_err(|_| Error::Authority)?;
     let objective = "Prepare a public Wikipedia search without submitting or navigating. Fill the search with exactly Zephium browser and choose Deutsch in the search language selector, in either order. Once both are verified, refine the search text to exactly Zephium open source browser. Use one local_write act action per turn. Locate option references when needed. For each action use mutation_quiet=100 ms, settle_budget=2000 ms, and exact value or exact selected-option verification. Do not click links or submit. The host checks the exact milestones and stops when the final prepared search is verified.";
-    let objective = if inspecting {
+    let objective = if let Some(site) = site {
+        site.objective()
+    } else if inspecting {
         "Prepare a public Wikipedia search without submitting or navigating. First inspect the existing initial baseline with read to discover the collapsed search selector's option labels and source refs. From that evidence identify Deutsch and its combobox; do not substitute the prominent Deutsch edition link for a selector option. Then fill the search with exactly Zephium browser and choose Deutsch in either order. Once both are verified, refine the search to exactly Zephium open source browser. Use one local_write act action per turn, mutation_quiet=100 ms, settle_budget=2000 ms, and exact value or selected-option verification. Locate only if the bounded read omitted a needed ref. Do not click links or submit. Rust independently checks the goals and final value."
     } else if subtree {
         "Prepare a public Wikipedia search without submitting or navigating. Fill the search with exactly Zephium browser and choose Deutsch in the search language selector, in either order. Once both are verified, refine the search text to exactly Zephium open source browser. Use one local_write act action per turn; locate option references when needed. Each action must use mutation_quiet=100 ms, settle_budget=2000 ms, and exact value or exact selected-option verification. Do not click links or submit. After all three milestones are verified, call extract with subtree scope targeting the current search text field's opaque ref and trusted schema 1. The host will freshly read only that subtree. Return prepared_query as the complete exact current search field value with its exact value-preview citation. Do not use initial extraction scope, extract early or perform further actions after the final query is verified."
@@ -389,8 +410,7 @@ fn input_mode(
             } else {
                 ContextProfileStorageClass::Ephemeral
             },
-            ContextNavigationTarget::parse("https://www.wikipedia.org/")
-                .map_err(|_| Error::Authority)?,
+            ContextNavigationTarget::parse(target).map_err(|_| Error::Authority)?,
         )
         .map_err(|_| Error::Authority)?,
         objective.to_owned(),
@@ -409,7 +429,9 @@ fn input_mode(
     } else {
         input
     };
-    let task: Box<dyn AgentWorkTask> = if combined {
+    let task: Box<dyn AgentWorkTask> = if let Some(site) = site {
+        site.task().map_err(|_| Error::Authority)?
+    } else if combined {
         Box::new(PublicPreparedResultTask {
             actions: form_task,
             extraction: AgentWorkExtractionTask::try_new(
