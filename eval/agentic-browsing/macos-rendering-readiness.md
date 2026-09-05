@@ -495,3 +495,21 @@ guard retained the same violation. This is not focus-isolated success. No
 keyboard/mouse event was retrieved or synthesized. The shared standalone
 harness calls `finishLaunching` before presentation; Apple's documented launch
 behavior must be examined before attributing activation to rendering itself.
+
+### Non-activating standalone launch prerequisite
+
+Apple documents that
+[`finishLaunching`](https://developer.apple.com/documentation/appkit/nsapplication/finishlaunching%28%29)
+activates the app, while the public
+[`Prohibited` activation policy](https://developer.apple.com/documentation/appkit/nsapplication/activationpolicy-swift.enum/prohibited)
+permits neither activation nor window creation.
+[`setActivationPolicy`](https://developer.apple.com/documentation/appkit/nsapplication/setactivationpolicy%28_%3A%29)
+supports changing these policies on the supported macOS floor. The presented
+diagnostic now completes launch under attested Prohibited policy with no
+windows, then attests the transition to Accessory before constructing its
+window. Inactivity and absence of windows are checked at both phases; the
+presented guard subsequently requires unchanged Accessory policy as well as
+inactivity. This does not intentionally activate then deactivate the app,
+skip launch completion, or permit windows under Prohibited policy. Other
+hidden diagnostics and the product app bootstrap remain unchanged. Native
+qualification must still prove that no delayed activation occurs.

@@ -2585,6 +2585,11 @@ fn validate_macos_rendering_presented_probe(
     for required in [
         "constPRESENTED_TIMEOUT:Duration=Duration::from_secs(5);",
         "constMAX_APPKIT_EVENTS:usize=32;",
+        "actual==expected&&!active&&windows==0",
+        "app.setActivationPolicy(NSApplicationActivationPolicy::Prohibited)",
+        "app.finishLaunching();",
+        "app.setActivationPolicy(NSApplicationActivationPolicy::Accessory)",
+        "self.app.activationPolicy()==NSApplicationActivationPolicy::Accessory",
         "event_type==NSEventType::AppKitDefined&&dispatched<MAX_APPKIT_EVENTS",
         "NSEventMask::AppKitDefined,None,objc2_foundation::ns_string!(\"NSDefaultRunLoopMode\"),true,",
         "!appkit_event_permitted(event.r#type(),self.appkit_events_dispatched.get())",
@@ -2692,6 +2697,7 @@ fn validate_macos_rendering_presented_probe(
         "letnative_guard=ProbeNativeState::Hidden(NativeStateGuard{",
         "Self::Hidden(guard)=>guard.sample()",
         "ifletProbeNativeState::Presented(guard)=self.native_guard{guard.pump_appkit_event();}",
+        "ifmatches!(&mode,ProbeMode::RenderingPresented(_)){rendering_presented::initialize_inactive(&app)?;}",
         "Self::Presented(guard)=>guard.sample()",
         "rendering_presented::measure(&view,context,operation,&url,&runtime,&host.view)",
     ] {
@@ -12840,6 +12846,10 @@ mod tests {
         for required in [
             "Duration::from_secs(5)",
             "const MAX_APPKIT_EVENTS: usize = 32;",
+            "actual == expected && !active && windows == 0",
+            "app.setActivationPolicy(NSApplicationActivationPolicy::Prohibited)",
+            "app.finishLaunching();",
+            "app.setActivationPolicy(NSApplicationActivationPolicy::Accessory)",
             "event_type == NSEventType::AppKitDefined && dispatched < MAX_APPKIT_EVENTS",
             "NSEventMask::AppKitDefined,",
             "self.app.sendEvent(&event);",

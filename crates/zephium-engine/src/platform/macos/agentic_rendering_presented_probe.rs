@@ -7,6 +7,54 @@ use objc2_app_kit::{NSEventMask, NSEventType, NSScreen, NSWindowOcclusionState};
 const PRESENTED_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_APPKIT_EVENTS: usize = 32;
 
+fn launch_policy_valid(
+    actual: NSApplicationActivationPolicy,
+    expected: NSApplicationActivationPolicy,
+    active: bool,
+    windows: usize,
+) -> bool {
+    actual == expected && !active && windows == 0
+}
+
+pub(super) fn initialize_inactive(app: &NSApplication) -> Result<(), &'static str> {
+    if app.isActive() || !app.windows().is_empty() {
+        return Err("presented_launch_existing_authority");
+    }
+    // finishLaunching is documented to activate an ordinary/accessory app.
+    // Complete it before any window exists, under the public prohibition on
+    // both activation and window creation; only then permit accessory windows.
+    if !app.setActivationPolicy(NSApplicationActivationPolicy::Prohibited)
+        || !launch_policy_valid(
+            app.activationPolicy(),
+            NSApplicationActivationPolicy::Prohibited,
+            app.isActive(),
+            app.windows().len(),
+        )
+    {
+        return Err("presented_launch_prohibition");
+    }
+    app.finishLaunching();
+    if !launch_policy_valid(
+        app.activationPolicy(),
+        NSApplicationActivationPolicy::Prohibited,
+        app.isActive(),
+        app.windows().len(),
+    ) {
+        return Err("presented_launch_activated");
+    }
+    if !app.setActivationPolicy(NSApplicationActivationPolicy::Accessory)
+        || !launch_policy_valid(
+            app.activationPolicy(),
+            NSApplicationActivationPolicy::Accessory,
+            app.isActive(),
+            app.windows().len(),
+        )
+    {
+        return Err("presented_launch_accessory");
+    }
+    Ok(())
+}
+
 fn appkit_event_permitted(event_type: NSEventType, dispatched: usize) -> bool {
     event_type == NSEventType::AppKitDefined && dispatched < MAX_APPKIT_EVENTS
 }
@@ -103,6 +151,7 @@ pub(super) struct PresentedStateGuard<'a> {
 struct PresentedFacts {
     within_deadline: bool,
     app_inactive: bool,
+    app_accessory: bool,
     no_key_authority: bool,
     no_main_authority: bool,
     mouse_ignored: bool,
@@ -117,6 +166,7 @@ fn reject_facts(facts: PresentedFacts, require_visible_pixels: bool) -> Option<&
     for (valid, refusal) in [
         (facts.within_deadline, "presented_rendering_deadline"),
         (facts.app_inactive, "presented_application_became_active"),
+        (facts.app_accessory, "presented_application_policy_changed"),
         (facts.no_key_authority, "presented_key_authority"),
         (facts.no_main_authority, "presented_main_authority"),
         (facts.mouse_ignored, "presented_mouse_authority"),
@@ -195,6 +245,7 @@ impl PresentedStateGuard<'_> {
         let facts = PresentedFacts {
             within_deadline: Instant::now() < self.deadline,
             app_inactive: !self.app.isActive(),
+            app_accessory: self.app.activationPolicy() == NSApplicationActivationPolicy::Accessory,
             no_key_authority: !self.window.isKeyWindow() && !self.window.canBecomeKeyWindow(),
             no_main_authority: !self.window.isMainWindow() && !self.window.canBecomeMainWindow(),
             mouse_ignored: self.window.ignoresMouseEvents(),
@@ -517,6 +568,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn presented_launch_requires_exact_policy_no_activation_and_no_windows() {
+        for expected in [
+            NSApplicationActivationPolicy::Prohibited,
+            NSApplicationActivationPolicy::Accessory,
+        ] {
+            assert!(launch_policy_valid(expected, expected, false, 0));
+            assert!(!launch_policy_valid(expected, expected, true, 0));
+            assert!(!launch_policy_valid(expected, expected, false, 1));
+            assert!(!launch_policy_valid(expected, expected, false, usize::MAX));
+            for wrong in [
+                NSApplicationActivationPolicy::Regular,
+                NSApplicationActivationPolicy(-1),
+            ] {
+                assert!(!launch_policy_valid(wrong, expected, false, 0));
+            }
+        }
+        assert!(!launch_policy_valid(
+            NSApplicationActivationPolicy::Accessory,
+            NSApplicationActivationPolicy::Prohibited,
+            false,
+            0
+        ));
+        assert!(!launch_policy_valid(
+            NSApplicationActivationPolicy::Prohibited,
+            NSApplicationActivationPolicy::Accessory,
+            false,
+            0
+        ));
+    }
+
+    #[test]
     fn presented_cleanup_refusal_preserves_provisional_measurement_without_success() {
         let report = MacosAgenticPresentedRenderingReport {
             presented_elapsed_ms: 5,
@@ -599,6 +681,7 @@ mod tests {
         let valid = PresentedFacts {
             within_deadline: true,
             app_inactive: true,
+            app_accessory: true,
             no_key_authority: true,
             no_main_authority: true,
             mouse_ignored: true,
@@ -612,6 +695,7 @@ mod tests {
         for mutate in [
             |f: &mut PresentedFacts| f.within_deadline = false,
             |f: &mut PresentedFacts| f.app_inactive = false,
+            |f: &mut PresentedFacts| f.app_accessory = false,
             |f: &mut PresentedFacts| f.no_key_authority = false,
             |f: &mut PresentedFacts| f.no_main_authority = false,
             |f: &mut PresentedFacts| f.mouse_ignored = false,

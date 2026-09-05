@@ -569,10 +569,14 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
     if app.isActive() {
         return Err("focus_baseline");
     }
-    if !app.setActivationPolicy(NSApplicationActivationPolicy::Accessory) {
-        return Err("application_policy");
+    if matches!(&mode, ProbeMode::RenderingPresented(_)) {
+        rendering_presented::initialize_inactive(&app)?;
+    } else {
+        if !app.setActivationPolicy(NSApplicationActivationPolicy::Accessory) {
+            return Err("application_policy");
+        }
+        app.finishLaunching();
     }
-    app.finishLaunching();
 
     let window = new_window(mtm)?;
     let content = window.contentView().ok_or("window_construct")?;
