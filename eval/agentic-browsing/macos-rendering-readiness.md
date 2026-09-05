@@ -358,3 +358,15 @@ exact-page, exact-owned-page-descendant or foreign responder. It classifies
 the same retained native responder used for the comparison, exports no class
 name, pointer or page data, and still refuses every changed responder. It
 does not infer that a descendant responder is safe or permit it to continue.
+
+The single refined attempt used clean
+`51adfbd9b86807f364a2e19bd992870971374162`, with a pre-invocation host clock
+reading of `20:55:20 UTC` on 2026-09-05 (not an exact process start). It exited 1
+with `stage=presented_responder_changed_exact_page`. AppKit's changed responder
+was therefore the exact owned WKWebView itself, not a foreign object or an
+arbitrary descendant. All earlier isolation checks still held at that sample;
+the scope restored and the original teardown did not replace the refusal.
+No semantic measurement or RAF outcome exists for this attempt. This evidence
+supports evaluating a narrowly identity-bound internal-responder contract,
+not permitting general focus changes or declaring the page input-safe from
+its responder relationship alone.
