@@ -389,7 +389,7 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
                         terminal_success = view.take_extraction().is_some_and(|result| {
                         let verified = if let Some(site) = site {
                             native_actions == 0 && effects == 0 && baseline_reads == 0
-                                && navigation_proposals == u32::from(matches!(site, super::work_sites::Site::ReactNavigation))
+                                && navigation_proposals == site.navigation_proposals()
                                 && site.verify_owned(&result)
                         } else if combined {
                             effects >= 3 && effects == native_actions && verify_prepared_result(&result)

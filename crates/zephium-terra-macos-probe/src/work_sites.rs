@@ -1,6 +1,6 @@
 //! Closed public-only site inventory through the existing application runner.
 //!
-//! Inventory checks and one fixed two-document read, not commerce transactions,
+//! Inventory checks and fixed two/three-document reads, not commerce transactions,
 //! authentication, arbitrary SPA navigation, or the six-site release matrix. No URL supplied
 //! by the caller/page/model can expand this public retained-data allowlist.
 
@@ -12,6 +12,7 @@ use zephium_agentic::*;
 pub(super) enum Site {
     React,
     ReactNavigation,
+    ReactRoute,
     Commerce,
 }
 
@@ -20,6 +21,7 @@ impl Site {
         match value {
             "react" => Ok(Self::React),
             "react-navigation" => Ok(Self::ReactNavigation),
+            "react-route" => Ok(Self::ReactRoute),
             "commerce" => Ok(Self::Commerce),
             _ => Err(super::ProbeFailure::Authority),
         }
@@ -29,13 +31,14 @@ impl Site {
         match self {
             Self::React => "react_quick_start",
             Self::ReactNavigation => "react_exact_component_guide",
+            Self::ReactRoute => "react_exact_three_document_route",
             Self::Commerce => "vercel_commerce_catalog",
         }
     }
 
     pub(super) const fn url(self) -> &'static str {
         match self {
-            Self::React | Self::ReactNavigation => "https://react.dev/learn",
+            Self::React | Self::ReactNavigation | Self::ReactRoute => "https://react.dev/learn",
             Self::Commerce => "https://demo.vercel.store/",
         }
     }
@@ -44,13 +47,14 @@ impl Site {
         match self {
             Self::React => "Read the React Quick Start page. The initial viewport omits later headings, so call extract with trusted schema 1 and subtree scope targeting the current main content landmark's opaque ref. Locate that landmark if necessary. Return inventory as three complete exact heading names from the freshly delivered subtree evidence: Quick Start, Creating and nesting components, and Writing markup with JSX. Cite exactly one heading text source for each. Do not use initial extraction scope, navigation-link citations, paraphrases, navigation, or page modifications.",
             Self::ReactNavigation => super::work_navigation::OBJECTIVE,
+            Self::ReactRoute => super::work_route::OBJECTIVE,
             Self::Commerce => "Read the public Vercel demo commerce home catalog. Call extract with trusted schema 1 and initial scope. Return inventory as the three complete exact product-link names for Acme Circles T-Shirt, Acme Drawstring Bag, and Acme Cup. Include all price and currency text when it is part of the accessible link name, copied exactly from delivered evidence. Cite exactly one link text source per item. Do not paraphrase, navigate, search, change a cart, or modify anything.",
         }
     }
 
     fn slot(self, role: SemanticRole, text: &str) -> Option<usize> {
         let (role_expected, names) = match self {
-            Self::ReactNavigation => return None,
+            Self::ReactNavigation | Self::ReactRoute => return None,
             Self::React => (
                 SemanticRole::Heading,
                 [
@@ -68,7 +72,7 @@ impl Site {
             return None;
         }
         names.iter().position(|name| match self {
-            Self::React | Self::ReactNavigation => text == *name,
+            Self::React | Self::ReactNavigation | Self::ReactRoute => text == *name,
             Self::Commerce => text.strip_prefix(name).is_some_and(|rest| {
                 // Require the catalog price in the same source; a menu label
                 // or model-invented product name cannot satisfy this task.
@@ -83,6 +87,9 @@ impl Site {
     ) -> Result<Box<dyn AgentWorkTask>, AgentWorkFailure> {
         if matches!(self, Self::ReactNavigation) {
             return super::work_navigation::task(context);
+        }
+        if matches!(self, Self::ReactRoute) {
+            return super::work_route::task(context);
         }
         Ok(Box::new(SiteTask {
             site: self,
@@ -99,7 +106,7 @@ impl Site {
             )?
             .with_subtree_extraction()
             .with_source_roles(match self {
-                Self::React | Self::ReactNavigation => {
+                Self::React | Self::ReactNavigation | Self::ReactRoute => {
                     SemanticReadRoleSelection::try_new(&[SemanticRole::Heading])
                         .map_err(|_| AgentWorkFailure::Contract)?
                 }
@@ -111,6 +118,9 @@ impl Site {
     pub(super) fn verify_owned(self, result: &SemanticOwnedExtractionResult) -> bool {
         if matches!(self, Self::ReactNavigation) {
             return super::work_navigation::verify_owned(result);
+        }
+        if matches!(self, Self::ReactRoute) {
+            return super::work_route::verify_owned(result);
         }
         if result.trust() != SemanticExtractionTrust::ModelMapped || result.fields().len() != 1 {
             return false;
@@ -146,6 +156,16 @@ impl Site {
             }
         }
         slots.into_iter().all(|seen| seen)
+    }
+}
+
+impl Site {
+    pub(super) const fn navigation_proposals(self) -> u32 {
+        match self {
+            Self::ReactNavigation => 1,
+            Self::ReactRoute => 2,
+            _ => 0,
+        }
     }
 }
 

@@ -356,6 +356,21 @@ fn input_mode(
     let budget =
         AgentRunBudget::try_new(24, 1_000_000, 1_000_000, 1).map_err(|_| Error::Authority)?;
     let node = AgentPlanNodeId::generate();
+    let authority = AgentPlanNodeAuthority::try_new(
+        vec![profile],
+        vec![AgentAccountScope::Anonymous],
+        vec![origin.clone()],
+        SemanticSensitivity::Public,
+        effects,
+    )
+    .map_err(|_| Error::Authority)?;
+    let authority = if matches!(site, Some(super::work_sites::Site::ReactRoute)) {
+        authority
+            .with_navigation_route(super::work_route::route().map_err(|_| Error::Authority)?)
+            .map_err(|_| Error::Authority)?
+    } else {
+        authority
+    };
     let manifest = AgentRunManifest::try_new(
         AgentRunManifestId::generate(),
         context.owner(),
@@ -373,14 +388,7 @@ fn input_mode(
         AgentPolicyInstant::from_millis(200_000),
         vec![AgentPlanNodeScope::new(
             node,
-            AgentPlanNodeAuthority::try_new(
-                vec![profile],
-                vec![AgentAccountScope::Anonymous],
-                vec![origin],
-                SemanticSensitivity::Public,
-                effects,
-            )
-            .map_err(|_| Error::Authority)?,
+            authority,
             budget,
             AgentPolicyInstant::from_millis(199_999),
         )],

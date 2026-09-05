@@ -1188,6 +1188,19 @@ audit/clock/backpressure debt and exact original terminal closure. A real
 three-document Luna witness remains separate; this contract alone makes no
 additional live-site claim.
 
+The release-excluded `react-route` qualifier freezes Quick Start → Your First
+Component → Importing and Exporting Components in both its manifest and task.
+The middle page requires separate exact public headings for arrival (`Your
+First Component`) and departure (`Components: UI building blocks`); a heading
+on a menu link, duplicate, missing predicate, old observation, or skipped
+document cannot advance it. Terminal extraction requires one exact current
+`Importing and Exporting Components` heading citation. It uses only initial
+observations and the unchanged heading-only extraction projection, takes at
+most three cached anonymous-scope samples in the fresh isolated ephemeral
+profile, and admits no actions/read/subtree/redirect/cross-origin/auth claims.
+Its deterministic guards and build are distinct from a separately recorded
+live Luna outcome; the mere presence of this qualifier is not qualification.
+
 The release-excluded `react-navigation` public qualifier fixes Quick Start as
 departure and `/learn/your-first-component` as the only successor, then requires
 one exact `Your First Component` heading citation. It runs in the existing
