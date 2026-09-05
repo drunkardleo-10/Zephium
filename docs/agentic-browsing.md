@@ -1161,7 +1161,7 @@ citations, task acceptance, and the usual durable/native/provider closure.
 This first slice is not redirect, cross-origin, authenticated-session, SPA
 history, multi-source synthesis, or unrestricted multi-page qualification.
 
-The functional core also admits an optional finite same-origin route on a
+Work also admits an optional finite same-origin route on a
 plan node: one exact departure and at most two distinct ordered destinations.
 This is immutable manifest authority, not an increased navigation counter.
 All URL bytes, their order, and the owning node extend the manifest fingerprint;
@@ -1171,10 +1171,22 @@ lease, node, document successor and account, with a successor-time account
 sample. A cancelled or failed checkpoint cannot be retried or skipped. Two
 fixed receipt/progress slots preserve exact ordered audit/accounting closure;
 the audit record remains 128 bytes and original run ceilings do not change.
-The trusted host must bind the route departure to its actual initial context
-target: semantic observations do not attest a complete source URL. Controller
-admission and a three-document task witness are separate composition steps;
-the core route alone makes no additional live-site claim.
+Controller admission binds the task's entire route to the selected manifest
+node and its departure to the actual initial context target; semantic
+observations do not attest a complete source URL. The legacy one-hop target
+and an explicit route are mutually exclusive. Each fresh intermediate
+observation must independently satisfy the trusted task's arrival and
+departure predicates before the next fixed destination becomes eligible.
+Only the final checkpoint admits terminal extraction. The controller retires
+each prior transcript, refreshes account authority and revokes old refs on
+each hop under the same session and original model-call/operation/deadline
+owners. Before navigation it reserves room within the unchanged eight-call
+ceiling for all remaining route proposals plus terminal extraction/mapping.
+Deterministic three-document fixtures cover ordered admission, independent
+phase refusal, old-document replay retirement, second-hop native/account/
+audit/clock/backpressure debt and exact original terminal closure. A real
+three-document Luna witness remains separate; this contract alone makes no
+additional live-site claim.
 
 The release-excluded `react-navigation` public qualifier fixes Quick Start as
 departure and `/learn/your-first-component` as the only successor, then requires

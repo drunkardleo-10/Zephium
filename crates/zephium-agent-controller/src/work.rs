@@ -32,7 +32,7 @@ mod navigation;
 pub enum AgentWorkTaskProgress {
     /// The approved task still requires work.
     Continue,
-    /// Fresh trusted departure state permits the one frozen exact navigation.
+    /// Fresh trusted departure state permits the next frozen exact checkpoint.
     ReadyForNavigation,
     /// Fresh trusted state satisfies the action postcondition. Further actions
     /// are refused; extraction requires the registered schema and result predicate.
@@ -49,6 +49,13 @@ pub trait AgentWorkTask: Send {
     /// shape is read-only, initial-extraction only, with no redirects/repeats.
     /// The task must independently prove departure and arrival from fresh state.
     fn navigation_target(&self) -> Option<&ContextNavigationTarget> {
+        None
+    }
+    /// Optional immutable finite route, exactly equal to the selected manifest
+    /// node's route. Mutually exclusive with the legacy one-hop target. Every
+    /// intermediate document must independently prove arrival and departure;
+    /// only the final document may become ready for extraction.
+    fn navigation_route(&self) -> Option<&AgentNavigationRoute> {
         None
     }
     /// Opts into nonterminal public reads of the exact initial baseline. Reads
@@ -662,15 +669,31 @@ impl AgentWorkController {
         let subtree_extraction = task.allows_subtree_extraction();
         let baseline_read = task.allows_baseline_read();
         let navigation_target = task.navigation_target().cloned();
+        let navigation_route = task.navigation_route().cloned();
+        let approved_route = input
+            .manifest
+            .plan_node(input.lease.node())
+            .ok_or(AgentWorkFailure::Contract)?
+            .navigation_route();
+        if navigation_route.as_ref() != approved_route
+            || (navigation_target.is_some() && navigation_route.is_some())
+            || navigation_route.as_ref().is_some_and(|route| {
+                route.departure() != &input.context.target
+                    || route.origin() != &input.context.origin
+            })
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
         if let Some(target) = &navigation_target {
             Self::validate_navigation_target(target, &input.context)?;
-            if extraction_schema.is_none()
+        }
+        if (navigation_target.is_some() || navigation_route.is_some())
+            && (extraction_schema.is_none()
                 || actions_before_extraction
                 || subtree_extraction
-                || baseline_read
-            {
-                return Err(AgentWorkFailure::Contract);
-            }
+                || baseline_read)
+        {
+            return Err(AgentWorkFailure::Contract);
         }
         if ((input.durable_result || actions_before_extraction || subtree_extraction)
             && extraction_schema.is_none())
@@ -713,7 +736,8 @@ impl AgentWorkController {
                     subtree_extraction,
                     baseline_read,
                     navigation_target,
-                    navigation_committed: false,
+                    navigation_route,
+                    navigation_hops: 0,
                     extraction: None,
                     failure: None,
                     observation: None,
@@ -728,7 +752,8 @@ impl AgentWorkController {
 
 struct WorkState {
     navigation_target: Option<ContextNavigationTarget>,
-    navigation_committed: bool,
+    navigation_route: Option<AgentNavigationRoute>,
+    navigation_hops: usize,
     baseline_read: bool,
     extraction_schema: Option<SemanticExtractionSchema>,
     actions_before_extraction: bool,
@@ -750,6 +775,32 @@ struct WorkState {
 }
 
 impl WorkState {
+    fn navigation_length(&self) -> usize {
+        self.navigation_route
+            .as_ref()
+            .map_or(usize::from(self.navigation_target.is_some()), |route| {
+                route.destinations().len()
+            })
+    }
+
+    fn has_navigation(&self) -> bool {
+        self.navigation_target.is_some() || self.navigation_route.is_some()
+    }
+
+    fn navigation_complete(&self) -> bool {
+        self.navigation_hops == self.navigation_length()
+    }
+
+    fn current_navigation_target(&self) -> Option<&ContextNavigationTarget> {
+        if let Some(route) = &self.navigation_route {
+            route.destinations().get(self.navigation_hops)
+        } else if self.navigation_hops == 0 {
+            self.navigation_target.as_ref()
+        } else {
+            None
+        }
+    }
+
     fn refresh_account(
         &mut self,
         worker: &AgentRuntimeWorker,
@@ -783,8 +834,8 @@ impl WorkState {
         self.check_task_contract()?;
         let progress = self.task.evaluate(observation)?;
         self.check_task_contract()?;
-        if self.navigation_target.is_some() {
-            let expected = if self.navigation_committed {
+        if self.has_navigation() {
+            let expected = if self.navigation_complete() {
                 AgentWorkTaskProgress::ReadyForExtraction
             } else {
                 AgentWorkTaskProgress::ReadyForNavigation
@@ -807,6 +858,7 @@ impl WorkState {
     fn check_task_contract(&self) -> Result<(), AgentWorkFailure> {
         if self.task.extraction_schema() != self.extraction_schema.as_ref()
             || self.task.navigation_target() != self.navigation_target.as_ref()
+            || self.task.navigation_route() != self.navigation_route.as_ref()
             || self.task.allows_actions_before_extraction() != self.actions_before_extraction
             || self.task.allows_subtree_extraction() != self.subtree_extraction
             || self.task.allows_baseline_read() != self.baseline_read
@@ -1336,7 +1388,7 @@ impl AgentWorkController {
                 (false, false) => session.config.restrict_to_extraction(),
             };
         }
-        if state.navigation_target.is_some() {
+        if state.has_navigation() {
             session.config = session.config.restrict_to_navigation_and_extraction();
         }
         if state.baseline_read {
@@ -1541,7 +1593,7 @@ impl AgentWorkController {
         )
         .await?;
         if state.extraction_schema.is_some()
-            && state.navigation_target.is_none()
+            && !state.has_navigation()
             && !state.actions_before_extraction
             && !state.subtree_extraction
             && !state.baseline_read
@@ -1607,11 +1659,12 @@ impl AgentWorkController {
                 );
                 continue;
             }
+            let navigation_incomplete = state.has_navigation() && !state.navigation_complete();
             let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
             let proposal = match step.turn.proposal().kind() {
                 AgentBrowserToolKind::Extract => {
-                    if state.navigation_target.is_some()
-                        && (!state.navigation_committed
+                    if state.has_navigation()
+                        && (navigation_incomplete
                             || progress != AgentWorkTaskProgress::ReadyForExtraction)
                     {
                         return Err(AgentWorkFailure::TaskPhase {

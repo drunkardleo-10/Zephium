@@ -272,7 +272,9 @@ fn validate_navigation_route_contract(source: &str) -> Result<(), String> {
 fn validate_navigation(actor: &str, policy: &str, continuation: &str) -> Result<(), String> {
     for (source, boundaries) in [
         (actor, &[
-            "state.navigation_committed || progress != AgentWorkTaskProgress::ReadyForNavigation",
+            "state.navigation_complete() || progress != AgentWorkTaskProgress::ReadyForNavigation",
+            ".current_navigation_target()", "receipt.hop() != state.navigation_hops",
+            "state.navigation_hops += 1;", "remaining_hops + 1",
             "if proposed == &target",
             "state.refresh_account(worker, browser)?",
             "retire_for_navigation(observation, &target, &session.config)",
@@ -643,6 +645,7 @@ fn validate_inventory(crate_root: &Path) -> Result<(), String> {
             "work_account_tests.rs".to_owned(),
             "work_navigation.rs".to_owned(),
             "work_navigation_tests.rs".to_owned(),
+            "work_route_tests.rs".to_owned(),
             "work_form.rs".to_owned(),
             "work_form_tests.rs".to_owned(),
         ])
@@ -773,6 +776,12 @@ fn validate_work(source: &str) -> Result<(), String> {
         "state.task_progress(&observation)?",
         "let progress = self.task.evaluate(observation)?;",
         "self.task.extraction_schema() != self.extraction_schema.as_ref()",
+        "navigation_route.as_ref() != approved_route",
+        "navigation_target.is_some() && navigation_route.is_some()",
+        "route.departure() != &input.context.target",
+        "self.task.navigation_route() != self.navigation_route.as_ref()",
+        "route.destinations().get(self.navigation_hops)",
+        "self.navigation_hops == self.navigation_length()",
         "self.task.allows_actions_before_extraction() != self.actions_before_extraction",
         "(input.durable_result || actions_before_extraction || subtree_extraction)",
         "&& extraction_schema.is_none()",
@@ -929,6 +938,15 @@ mod tests {
 
     #[test]
     fn navigation_cannot_restore_replay_widen_target_or_replace_run_owners() {
+        for removed in [
+            "navigation_route.as_ref() != approved_route",
+            "navigation_target.is_some() && navigation_route.is_some()",
+            "route.departure() != &input.context.target",
+            "self.task.navigation_route() != self.navigation_route.as_ref()",
+            "route.destinations().get(self.navigation_hops)",
+        ] {
+            assert!(validate_work(&WORK.replace(removed, "removed")).is_err());
+        }
         validate_navigation_route_contract(RUN_MANIFEST).unwrap();
         for removed in [
             "MAX_AGENT_NAVIGATION_ROUTE_HOPS: usize = 2",

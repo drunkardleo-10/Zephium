@@ -393,6 +393,13 @@ fn input() -> AgentWorkRunInput {
 }
 
 fn input_with_effects(allowed: &[SemanticEffectClass]) -> AgentWorkRunInput {
+    input_with_route(allowed, None)
+}
+
+fn input_with_route(
+    allowed: &[SemanticEffectClass],
+    route: Option<AgentNavigationRoute>,
+) -> AgentWorkRunInput {
     let profile = 1_u128.into();
     let context = ContextIdentity::new(
         ContextId::generate(),
@@ -406,6 +413,19 @@ fn input_with_effects(allowed: &[SemanticEffectClass]) -> AgentWorkRunInput {
     let node = AgentPlanNodeId::generate();
     let policy_expires = FIXTURE_POLICY_NOW_MILLIS
         + zephium_agent_provider_transport::MAX_AGENT_PROVIDER_REQUEST_TIMEOUT_MILLIS;
+    let authority = AgentPlanNodeAuthority::try_new(
+        vec![profile],
+        vec![AgentAccountScope::Anonymous],
+        vec![origin.clone()],
+        SemanticSensitivity::Public,
+        effects,
+    )
+    .expect("authority");
+    let authority = if let Some(route) = route {
+        authority.with_navigation_route(route).unwrap()
+    } else {
+        authority
+    };
     let manifest = AgentRunManifest::try_new(
         AgentRunManifestId::generate(),
         context.owner(),
@@ -423,14 +443,7 @@ fn input_with_effects(allowed: &[SemanticEffectClass]) -> AgentWorkRunInput {
         AgentPolicyInstant::from_millis(policy_expires),
         vec![AgentPlanNodeScope::new(
             node,
-            AgentPlanNodeAuthority::try_new(
-                vec![profile],
-                vec![AgentAccountScope::Anonymous],
-                vec![origin],
-                SemanticSensitivity::Public,
-                effects,
-            )
-            .expect("authority"),
+            authority,
             budget,
             AgentPolicyInstant::from_millis(policy_expires),
         )],
@@ -604,7 +617,7 @@ impl AgentBrowserPort for Port {
                 lock(&self.calls).push(2);
                 #[cfg(feature = "probe-harness")]
                 if let Fault::Navigation(fault) = self.fault {
-                    if lock(&self.calls).iter().filter(|call| **call == 2).count() == 2 {
+                    if lock(&self.calls).iter().filter(|call| **call == 2).count() >= 2 {
                         return navigation_tests::navigate(self, request, fault);
                     }
                 }
@@ -1433,8 +1446,12 @@ fn provider_fixture_with_account(
         "fixture-not-a-secret".to_owned(),
     )
     .expect("credential");
-    let mut approved = if matches!(fault, ProviderFault::Native(native) if native.unissued_human())
-    {
+    let mut approved = if let ProviderFault::Navigation(NavigationFault::Route(_)) = fault {
+        input_with_route(
+            &[SemanticEffectClass::Read],
+            Some(navigation_tests::route_tests::route()),
+        )
+    } else if matches!(fault, ProviderFault::Native(native) if native.unissued_human()) {
         input_with_effects(&[SemanticEffectClass::Read])
     } else {
         input()
@@ -1468,10 +1485,17 @@ fn provider_fixture_with_account(
             .unwrap(),
         )
     } else if let ProviderFault::Navigation(fault) = fault {
-        Box::new(NavigationTask::new(
-            fault,
-            navigation_schedule.as_ref().unwrap().clone(),
-        ))
+        if let NavigationFault::Route(fault) = fault {
+            Box::new(navigation_tests::route_tests::RouteTask::new(
+                fault,
+                navigation_schedule.as_ref().unwrap().clone(),
+            ))
+        } else {
+            Box::new(NavigationTask::new(
+                fault,
+                navigation_schedule.as_ref().unwrap().clone(),
+            ))
+        }
     } else if let ProviderFault::Read(fault) = fault {
         Box::new(ReadTask::new(&approved, fault))
     } else if let ProviderFault::Scoped(fault) = fault {

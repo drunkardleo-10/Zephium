@@ -1,4 +1,4 @@
-//! One task-authored document hop through the original Work owners.
+//! Frozen task-authored document checkpoints through the original Work owners.
 
 use super::*;
 
@@ -41,24 +41,30 @@ impl AgentWorkController {
         AgentWorkFailure,
     > {
         state.check_task_contract()?;
-        if state.navigation_committed || progress != AgentWorkTaskProgress::ReadyForNavigation {
+        if state.navigation_complete() || progress != AgentWorkTaskProgress::ReadyForNavigation {
             return Err(AgentWorkFailure::TaskPhase {
                 expected: progress,
                 proposed: AgentBrowserToolKind::Navigate,
             });
         }
         let target = state
-            .navigation_target
-            .clone()
+            .current_navigation_target()
+            .cloned()
             .ok_or(AgentWorkFailure::Contract)?;
         if !matches!(turn.turn.proposal(), AgentBrowserToolProposal::Navigate(proposed) if proposed == &target)
         {
             return Err(AgentWorkFailure::Contract);
         }
         let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
-        // Reserve room for a destination proposal and its terminal mapping;
-        // navigation cannot reset or silently consume the final usable call.
-        if session.turns >= super::super::MAX_BROWSER_MODEL_TURNS - 1 {
+        // Keep the original total ceiling and reserve the remaining exact route
+        // proposals plus final extraction/mapping; no hop receives a new budget.
+        let remaining_hops = state
+            .navigation_length()
+            .checked_sub(state.navigation_hops)
+            .ok_or(AgentWorkFailure::Contract)?;
+        if usize::from(session.turns) + remaining_hops + 1
+            > usize::from(super::super::MAX_BROWSER_MODEL_TURNS)
+        {
             return Err(AgentWorkFailure::Browser(
                 AgentBrowserProviderError::TurnLimit,
             ));
@@ -226,7 +232,10 @@ impl AgentWorkController {
         };
         state.native.check_control(worker, browser)?;
         state.check_task_contract()?;
-        state.navigation_committed = true;
+        if receipt.hop() != state.navigation_hops {
+            return Err(AgentWorkFailure::Contract);
+        }
+        state.navigation_hops += 1;
         let fresh = Self::observe(state, worker, browser).await?;
         let captured_at = SemanticCaptureInstant::from_millis(
             state

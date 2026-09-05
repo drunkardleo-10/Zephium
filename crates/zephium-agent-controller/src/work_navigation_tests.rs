@@ -3,6 +3,9 @@ use super::*;
 use std::cell::Cell;
 use std::sync::atomic::AtomicBool;
 
+#[path = "work_route_tests.rs"]
+pub(super) mod route_tests;
+
 pub(super) struct NavigationSchedule {
     pub(super) events: Mutex<Option<Arc<Mutex<WorkEvents>>>>,
     native_started: AtomicBool,
@@ -35,6 +38,9 @@ impl NavigationClock {
 }
 impl TerraControllerClock for NavigationClock {
     fn now(&self) -> Result<AgentPolicyInstant, super::super::super::TerraControllerClockError> {
+        if let NavigationFault::Route(fault) = self.schedule.fault {
+            return route_tests::clock(self, fault);
+        }
         if self.schedule.native_started.load(Ordering::Relaxed) {
             let call = self
                 .schedule
@@ -73,6 +79,7 @@ impl TerraControllerClock for NavigationClock {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum NavigationFault {
+    Route(route_tests::RouteFault),
     None,
     PriorLocate,
     Ceiling,
@@ -113,6 +120,7 @@ pub(super) enum NavigationFault {
 impl NavigationFault {
     pub(super) fn requests(self) -> u8 {
         match self {
+            Self::Route(fault) => fault.requests(),
             Self::PriorLocate => 8,
             Self::Ceiling => 14,
             Self::DepartureMissing | Self::TargetMutation | Self::AccountMutation => 0,
@@ -127,9 +135,15 @@ impl NavigationFault {
         }
     }
     pub(super) fn cancelled(self, turns: u8, count: bool) -> bool {
+        if let Self::Route(fault) = self {
+            return fault.cancelled(turns, count);
+        }
         self == Self::CancelMapCount && turns == 2 && count
     }
     pub(super) fn stream(self, turn: u8) -> String {
+        if let Self::Route(fault) = self {
+            return fault.stream(turn);
+        }
         if (self == Self::PriorLocate && turn == 1) || (self == Self::Ceiling && turn < 7) {
             return tool_stream(turn, false);
         }
@@ -180,6 +194,9 @@ impl NavigationFault {
         }
     }
     pub(super) fn check_request(self, bytes: &[u8], turns: u8) {
+        if let Self::Route(fault) = self {
+            return fault.check_request(bytes, turns);
+        }
         let text = std::str::from_utf8(bytes).unwrap();
         assert!(
             text.contains("Verify a deterministic fixture."),
@@ -347,6 +364,9 @@ pub(super) fn navigate(
     request: ContextNavigationRequest,
     fault: NavigationFault,
 ) -> ContextDispatch {
+    if let NavigationFault::Route(fault) = fault {
+        return route_tests::navigate(port, request, fault);
+    }
     lock(&port.calls).push(9);
     port.navigation_schedule
         .as_ref()
@@ -401,6 +421,9 @@ pub(super) fn capture(
     invocation: SemanticRuntimeInvocation,
     fault: NavigationFault,
 ) -> ContextDispatch {
+    if let NavigationFault::Route(fault) = fault {
+        return route_tests::capture(port, invocation, fault);
+    }
     let arrived = lock(&port.calls).contains(&9);
     let correlation = invocation.correlation();
     assert_eq!(
@@ -506,6 +529,9 @@ pub(super) fn assert_outcome(
     calls: &[u8],
     events: &[AgentWorkEvent],
 ) {
+    if let NavigationFault::Route(fault) = fault {
+        return route_tests::assert_outcome(fault, outcome, shutdown, calls, events);
+    }
     assert!(!calls.contains(&7), "navigation never dispatches an action");
     assert!(!events
         .iter()
