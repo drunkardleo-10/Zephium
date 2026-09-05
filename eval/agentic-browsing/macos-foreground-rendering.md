@@ -342,3 +342,44 @@ There has been no third actual-application launch, public-site visit or provider
 call. The next independently authorized native run should retain the new exact
 predicate line alongside the unchanged admission, provisional and closure lines;
 it must not reuse or erase a nonempty prior diagnostic data root.
+
+## Fourth supplied actual-application witness: early refusal and unclosed cohort
+
+The independently supplied fourth real-app witness used the reviewed bundle
+with executable SHA-256
+`88f66feaddd98ff7bac8d10f2cd50176609b322fdeabb1a90257526915e0a9ef`,
+built for source checkpoint `40e654cad41f71fd8d0d90fe9179b6d9a103bac2`.
+Recorded date: 2026-09-06; exact UTC start, total process duration and child exit
+status were not supplied. Standard output was empty. Complete supplied stderr:
+
+```text
+work-rendering-admission: outcome=Admitted waited_ms=0 checks=1
+work-rendering-native-failures: available=false primary=None cleanup=None
+work-rendering-provisional: outcome=rendering_refused cleanup_failure=Some("rendering_retirement") native_cohort_clean=false human_ownership_preserved=true fixture_clean=true elapsed_ms=1347
+shutdown: native cleanup did not acknowledge cleanly; forcing process exit
+shutdown: clean completion was not proven; exiting unsuccessfully
+work-rendering-closure: qualified=false normal_shutdown_clean=false exact_native_weak_drain=None
+```
+
+This is an unclean correctness failure, not a clean rendering deferral or a RAF
+measurement. The driver received an acquisition refusal and then a retirement
+refusal. It did not reach successful context Close/Seal. The human baseline and
+fixture cleanup remained attested, but native cohort closure and weak-native
+release were not proven. The shutdown messages do not distinguish a missing
+acknowledgement from an explicit unclean acknowledgement.
+
+Source inspection exposes a concrete path with these outcomes: host acquisition
+preconditions can refuse before the attempted-acquisition bit and native trace
+are initialized. The scheduled request has already transferred a callback and
+possible-cleanup obligation to the driver, but a subsequent exact Retire finds
+neither the attempted bit nor a lease and returns Failed. The driver then stops
+cleanup before Close/Seal, leaving the cohort for forced, unclean shutdown.
+
+An independently identifiable ordering defect can enter that path: normal
+NavigationSettled is a committed-document receipt, whereas acquisition requires
+`location_stable_for_result()`, which additionally requires native Finished and
+location reconciliation. An immediate Acquire between those two native events
+therefore refuses a valid committed document. The supplied run did not retain
+the failed host predicate, so this schedule is a source-proven defect and a
+candidate cause, not a retrospectively observed live predicate. No rendering
+acceptance check may be relaxed on the basis of this output.
