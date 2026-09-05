@@ -2581,7 +2581,7 @@ fn run_work_host(
                 let Ok(operation) = receiver.try_recv() else {
                     break;
                 };
-                operation();
+                run_work_operation(operation);
             }
             pump_once(&run_loop, None);
         }
@@ -2595,7 +2595,7 @@ fn run_work_host(
                 let Ok(operation) = receiver.try_recv() else {
                     break;
                 };
-                operation();
+                run_work_operation(operation);
             }
             let failure = *fatal
                 .lock()
@@ -2634,7 +2634,7 @@ fn run_work_host(
             let Ok(operation) = receiver.try_recv() else {
                 break;
             };
-            operation();
+            run_work_operation(operation);
         }
         pump_once(&run_loop, None);
     }
@@ -2644,6 +2644,28 @@ fn run_work_host(
         return Err("actor_host_teardown");
     }
     Ok(())
+}
+
+fn run_work_operation(operation: Box<dyn FnOnce() + Send>) {
+    // Match Cocoa event dispatch: native construction/destruction may return
+    // autoreleased configuration/data-store references. A pool only around
+    // runUntilDate does not drain references created outside that pool.
+    objc2::rc::autoreleasepool(|_| operation());
+}
+
+#[cfg(test)]
+#[test]
+fn work_host_drains_native_dispatch_autoreleases_in_every_phase() {
+    let source = include_str!("agentic_semantic_probe.rs");
+    let host = source
+        .split("fn run_work_host(")
+        .nth(1)
+        .unwrap()
+        .split("fn run_work_operation(")
+        .next()
+        .unwrap();
+    assert_eq!(host.matches("run_work_operation(operation)").count(), 3);
+    assert!(!host.contains("operation();"));
 }
 
 fn pump_once(run_loop: &NSRunLoop, native_guard: Option<&NativeStateGuard<'_>>) {

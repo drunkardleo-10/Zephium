@@ -154,7 +154,7 @@ pub(super) fn input(
     ),
     super::ProbeFailure,
 > {
-    input_mode(started, false)
+    input_mode(started, false, false)
 }
 
 pub(super) fn extraction_input(
@@ -167,12 +167,26 @@ pub(super) fn extraction_input(
     ),
     super::ProbeFailure,
 > {
-    input_mode(started, true)
+    input_mode(started, true, false)
+}
+
+pub(super) fn artifact_input(
+    started: Instant,
+) -> Result<
+    (
+        zephium_core::ids::ProfileId,
+        AgentWorkRunInput,
+        Box<dyn AgentWorkTask>,
+    ),
+    super::ProbeFailure,
+> {
+    input_mode(started, true, true)
 }
 
 fn input_mode(
     started: Instant,
     extraction: bool,
+    durable: bool,
 ) -> Result<
     (
         zephium_core::ids::ProfileId,
@@ -182,7 +196,11 @@ fn input_mode(
     super::ProbeFailure,
 > {
     use super::ProbeFailure as Error;
-    let profile = 1_u128.into();
+    let profile = if durable {
+        zephium_core::ids::ProfileId::generate()
+    } else {
+        1_u128.into()
+    };
     let context = ContextIdentity::new(
         ContextId::generate(),
         ContextRunId::generate(),
@@ -241,7 +259,11 @@ fn input_mode(
         AgentPlanLeaseBinding::new(AgentPlanLeaseId::generate(), node),
         AgentWorkContextSpec::try_new(
             context,
-            ContextProfileStorageClass::Ephemeral,
+            if durable {
+                ContextProfileStorageClass::Durable
+            } else {
+                ContextProfileStorageClass::Ephemeral
+            },
             ContextNavigationTarget::parse("https://www.wikipedia.org/")
                 .map_err(|_| Error::Authority)?,
         )
@@ -255,6 +277,13 @@ fn input_mode(
         ),
     )
     .map_err(|_| Error::Authority)?;
+    let input = if durable {
+        input
+            .persist_extraction_result()
+            .map_err(|_| Error::Authority)?
+    } else {
+        input
+    };
     let task: Box<dyn AgentWorkTask> = if extraction {
         Box::new(PublicExtractionTask(
             AgentWorkExtractionTask::try_new(

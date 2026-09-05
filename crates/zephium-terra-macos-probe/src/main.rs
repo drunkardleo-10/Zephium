@@ -11,6 +11,8 @@
 mod work_actor;
 #[cfg(target_os = "macos")]
 mod work_application;
+#[cfg(target_os = "macos")]
+mod work_artifact_cleanup;
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -62,6 +64,12 @@ fn main() {
         }
         [argument] if argument == "--live-public-luna-work-extraction-inspectable" => {
             work_application::run_extraction()
+        }
+        [argument] if argument == "--live-public-luna-work-artifact-inspectable" => {
+            work_application::run_artifact()
+        }
+        [argument, directory] if argument == "--cleanup-public-work-artifact" => {
+            work_artifact_cleanup::recover(std::path::Path::new(directory))
         }
         _ => std::process::exit(2),
     };

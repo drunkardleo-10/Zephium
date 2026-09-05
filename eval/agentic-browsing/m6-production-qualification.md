@@ -1071,6 +1071,73 @@ timings. Durable artifact delivery, navigation/multi-page tasks, native lifetime
 reuse, parallel runs, UI/IPC task authoring, full Tauri bootstrap qualification,
 and battery/CPU/RAM qualification remain open.
 
+## Profile-owned atomic artifacts — 2026-09-05
+
+The next bounded product vertical preserves useful Work results across process
+exit without restoring execution. Trusted durable-profile extraction may opt
+into a private artifact body committed atomically with its original successful
+terminal. Memory-only remains the default. See the [artifact contract](../../docs/agent-work-artifacts.md)
+for the 256 KiB/body, 32 MiB/Store, shared four-permit lane, exact profile and
+process fencing, historical-data-only decoder and explicit refusal behavior.
+Neither journal/audit rows nor diagnostic projections contain result bodies.
+
+Three public Wikipedia Luna application attempts exercised the new artifact
+path. All independently checked ten native-cited values and committed/reloaded
+the artifact; only the corrected final attempt completed the entire qualifier.
+
+| Attempt | Input / output tokens | Body bytes | Priced ceiling µUSD | Wall ms | Full outcome |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Initial | 6,880 / 417 | 4,978 | 2,221 | 8,500 | Cleanup policy refusal |
+| Second | 6,881 / 434 | 5,310 | 1,902 | 9,356 | Native cleanup refusal |
+| Corrected | 6,879 / 407 | 5,296 | 1,869 | 8,713 | Complete |
+
+The corrected run used two turns: 5,658/21,160 request bytes,
+3,116/13,330 semantic bytes, and 2,858/5,186 ms model-turn elapsed. It proved
+atomic artifact publication, independent archived-value/source checking,
+native profile absence, Store finalization, durable `Succeeded`, clean Shell
+shutdown and zero focus theft. There were zero mutating native actions; ten
+cited values must not be reported as ten action effects. Only explicit
+retained-public qualification used OpenAI storage; production/BYOK stays
+stateless. No raw provider/page/body/crash data or test profile is committed.
+
+Failures were investigated without retries or weaker proofs. Shell deletion
+correctly requires Browse bootstrap, absent in this no-UI host. Excluded
+cleanup now composes existing Store authorization, exact native namespace,
+engine absence and Store finalization ports without bootstrapping an ordinary
+tab. Cold recovery exposed WebKit's uninitialized main-run-loop enumeration
+crash; the production adapter now initializes only a temporary configuration
+before enumeration. The second refusal came from the excluded dispatcher's
+autoreleased native objects: its pool covered run-loop pumping but not native
+operations. Per-operation pools now match Cocoa dispatch. Both retained test
+deletion obligations subsequently reached verified native absence and Store
+finalization; their temporary directories were removed. No action was replayed.
+
+Deterministic coverage includes four partial-write/ACK crash points, exact
+immutable retransmission, profile deletion, quota/corrupt-body refusal, mixed
+journal/artifact mailbox pressure, six actual controller/application publication
+faults, read-only timeout/late-callback fencing, and a subprocess Shell/SQLite
+exit after durable ACK but before consumer handoff. Its fresh reader creates no
+provider worker/native factory and retrieves only archived data. Missing schema
+refuses preparation; a trusted predicate that prematurely completes without
+its promised result retains the original owner and cannot publish success or
+claim clean shutdown.
+
+Passing suites: 424 core, 17 controller, 342 application (one subprocess helper
+ignored directly and exercised by its parent), 37 runtime, 263 Store (one
+similarly exercised helper), 461 native-semantic engine plus three probe binary
+tests, and 172 xtask tests. Optimized default and `macos-work` desktop checks
+pass, as do 97 desktop tests (one existing ignored test). Strict all-target
+Clippy passes for shipping and probe-enabled core/controller/application/engine,
+runtime, Store, composition, qualifier, desktop and xtask. Semantic, controller,
+runtime, model-catalog, composition/persistence and dependency gates pass;
+optimized probe enablement is compile-refused. The default graph still excludes controller/runtime/provider transport,
+Work composition and reqwest; no dependency/lockfile, idle worker, native
+scheduling or action-protocol changes were introduced. General artifact
+deletion/export, larger blob storage, new native lifetimes, multi-page work,
+parallel admission, trusted task authoring/UI and resource/battery qualification
+remain separate seams. This single corrected public workflow is not broad
+production qualification.
+
 ## Remaining release blockers
 
 - authorized named-device macOS native-input routes beyond fixed DOM;

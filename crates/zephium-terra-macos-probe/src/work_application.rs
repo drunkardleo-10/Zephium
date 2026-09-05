@@ -33,24 +33,36 @@ impl zephium_app::PresentationChrome for NoChrome {
 }
 
 pub(super) fn run() -> Result<(), super::ProbeFailure> {
-    run_mode(false)
+    run_mode(false, false)
 }
 
 pub(super) fn run_extraction() -> Result<(), super::ProbeFailure> {
-    run_mode(true)
+    run_mode(true, false)
 }
 
-fn run_mode(extraction: bool) -> Result<(), super::ProbeFailure> {
+pub(super) fn run_artifact() -> Result<(), super::ProbeFailure> {
+    run_mode(true, true)
+}
+
+fn run_mode(extraction: bool, durable: bool) -> Result<(), super::ProbeFailure> {
     use super::ProbeFailure as Error;
     let started = Instant::now();
-    let (profile, input, task) = if extraction {
+    let (profile, input, task) = if durable {
+        super::work_actor::artifact_input(started)?
+    } else if extraction {
         super::work_actor::extraction_input(started)?
     } else {
         super::work_actor::input(started)?
     };
-    let data = tempfile::tempdir().map_err(|_| Error::Runtime)?;
+    let data = tempfile::Builder::new()
+        .prefix("zephium-public-work-")
+        .tempdir()
+        .map_err(|_| Error::Runtime)?;
     let store =
         Arc::new(zephium_store::SqliteStore::open(data.path()).map_err(|_| Error::Runtime)?);
+    if durable {
+        register_public_profile(&store, profile)?;
+    }
     let blocker = zephium_blocker_service::ManagedBlocker::unconfigured(
         zephium_blocker::CompiledArtifactCacheConfig::new(data.path().join("compiled"))
             .map_err(|_| Error::Authority)?,
@@ -93,7 +105,7 @@ fn run_mode(extraction: bool) -> Result<(), super::ProbeFailure> {
             Box::new(|_| {}),
         )
         .map_err(|_| "application_shell_spawn")?;
-        let composition = MacosWorkComposition::new(engine, store);
+        let composition = MacosWorkComposition::new(engine.clone(), store.clone());
         let prepared = composition
             .prepare_public_qualification(request)
             .map_err(|_| "application_prepare")?;
@@ -108,6 +120,10 @@ fn run_mode(extraction: bool) -> Result<(), super::ProbeFailure> {
             std::thread::JoinHandle<Result<ShutdownOutcome, std::sync::mpsc::RecvTimeoutError>>,
         > = None;
         let mut terminal_success = false;
+        let mut terminal_observed = false;
+        let mut archive_requested = false;
+        let mut archive_verified = false;
+        let mut cleanup = None;
         let (mut turns, mut effects, mut tokens_in, mut tokens_out, mut cost) =
             (0_u32, 0_u32, 0_u64, 0_u64, 0_u64);
         Ok(Box::new(move |native_failed| {
@@ -157,18 +173,56 @@ fn run_mode(extraction: bool) -> Result<(), super::ProbeFailure> {
                 ) || native_failed
                     || failed.load(Ordering::Acquire))
             {
-                terminal_success = snapshot.phase == AgentWorkApplicationPhase::Succeeded
-                    && snapshot.failure.is_none()
-                    && view.records().iter().any(|record| {
-                        record.disposition() == zephium_agentic::AgentWorkDisposition::Succeeded
-                    });
-                if extraction && terminal_success {
-                    terminal_success = view.take_extraction().is_some_and(|result| {
+                if !terminal_observed {
+                    terminal_observed = true;
+                    terminal_success = snapshot.phase == AgentWorkApplicationPhase::Succeeded
+                        && snapshot.failure.is_none()
+                        && view.records().iter().any(|record| {
+                            record.disposition() == zephium_agentic::AgentWorkDisposition::Succeeded
+                        });
+                    if extraction && terminal_success {
+                        terminal_success = view.take_extraction().is_some_and(|result| {
                         let verified = verify_extraction(&result);
                         let stats = result.stats();
-                        let _ = writeln!(std::io::stdout().lock(), "work-application-result: fields={}; values={}; source_edges={}; independently_verified={verified}; persistence=memory_only; content=redacted", stats.fields(), stats.values(), stats.source_edges());
+                        let _ = writeln!(std::io::stdout().lock(), "work-application-result: fields={}; values={}; source_edges={}; independently_verified={verified}; artifact_promised={durable}; content=redacted", stats.fields(), stats.values(), stats.source_edges());
                         verified && view.take_extraction().is_none()
                     });
+                    }
+                }
+                if durable && terminal_success && !archive_verified {
+                    if !archive_requested {
+                        archive_requested = view
+                            .records()
+                            .into_iter()
+                            .find(|record| {
+                                record.disposition()
+                                    == zephium_agentic::AgentWorkDisposition::Succeeded
+                            })
+                            .is_some_and(|record| view.read_artifact(record, profile));
+                        if archive_requested {
+                            return None;
+                        }
+                        terminal_success = false;
+                    } else if let Some(archive) = view.take_archived_extraction() {
+                        archive_verified = verify_archive(&archive);
+                        terminal_success &= archive_verified;
+                        let _ = writeln!(std::io::stdout().lock(), "work-application-artifact: body_bytes={}; fields={}; independently_verified={archive_verified}; publication=atomic; content=redacted", archive.descriptor().bytes(), archive.fields().len());
+                    } else if snapshot.artifact_read.is_some() {
+                        terminal_success = false;
+                    } else {
+                        return None;
+                    }
+                }
+                if durable {
+                    if cleanup.is_none() {
+                        cleanup = Some(super::work_artifact_cleanup::Cleanup::start(
+                            store.clone(),
+                            engine.clone(),
+                            profile,
+                        ));
+                    }
+                    let erased = cleanup.as_mut().and_then(|cleanup| cleanup.poll())?;
+                    terminal_success &= archive_verified && erased;
                 }
                 let _ = writeln!(std::io::stdout().lock(), "work-application-terminal: phase={:?}; failure={:?}; persistence={:?}; durable_success={terminal_success}; content=redacted", snapshot.phase, snapshot.failure, snapshot.persistence_failure);
                 let request = shell.shutdown_with_deadline(Instant::now() + Duration::from_secs(8));
@@ -196,8 +250,99 @@ fn run_mode(extraction: bool) -> Result<(), super::ProbeFailure> {
             None
         }))
     });
+    if durable && result.is_err() {
+        // Preserve exact Store recovery metadata if native deletion was not
+        // qualified. Never discard its only durable obligation on failure.
+        let _ = data.keep();
+        let _ = writeln!(
+            std::io::stdout().lock(),
+            "work-artifact-recovery: private_test_directory_retained=true; content=redacted"
+        );
+    }
     result.map_err(Error::Engine)?;
     writeln!(std::io::stdout().lock(), "work-application-qualified: focus_isolation=passed; teardown=application_owned; elapsed_ms={}; content=redacted", started.elapsed().as_millis()).map_err(|_| Error::Output)
+}
+
+fn register_public_profile(
+    store: &zephium_store::SqliteStore,
+    profile: zephium_core::ids::ProfileId,
+) -> Result<(), super::ProbeFailure> {
+    use zephium_core::{
+        ids::{ProfileId, SpaceId},
+        ports::store::Store,
+        profiles::ProfileKind,
+        session::{PersistedProfile, PersistedSpace, SessionState},
+    };
+    let default = ProfileId::generate();
+    let default_space = SpaceId::generate();
+    store.save_session(SessionState {
+        profiles: vec![
+            PersistedProfile {
+                id: default,
+                name: "Public test default".into(),
+                kind: ProfileKind::Default,
+            },
+            PersistedProfile {
+                id: profile,
+                name: "Public Work test".into(),
+                kind: ProfileKind::Named,
+            },
+        ],
+        spaces: vec![
+            PersistedSpace {
+                id: default_space,
+                profile: default,
+                name: "Public test default".into(),
+            },
+            PersistedSpace {
+                id: SpaceId::generate(),
+                profile,
+                name: "Public Work test".into(),
+            },
+        ],
+        items: vec![],
+        active_space: Some(default_space),
+        active_item: None,
+        splits: None,
+        recently_closed: vec![],
+    });
+    if store.flush() {
+        Ok(())
+    } else {
+        Err(super::ProbeFailure::Runtime)
+    }
+}
+
+fn verify_archive(archive: &zephium_agentic::AgentWorkArchivedExtraction) -> bool {
+    use zephium_agentic::*;
+    if archive.trust() != SemanticExtractionTrust::ModelMapped || archive.fields().len() != 1 {
+        return false;
+    }
+    let ArchivedValue::TextList { items, .. } = archive.fields()[0].value() else {
+        return false;
+    };
+    if items.len() != 10 {
+        return false;
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    let (mut english, mut german) = (false, false);
+    for item in items {
+        let [id] = item.source_ids() else {
+            return false;
+        };
+        let Some(source) = archive.source(*id) else {
+            return false;
+        };
+        let ArchivedSourceContent::Text { value } = source.content() else {
+            return false;
+        };
+        if !ids.insert(id) || source.role() != "link" || value != item.value() {
+            return false;
+        }
+        english |= value.contains("English");
+        german |= value.contains("Deutsch");
+    }
+    english && german
 }
 
 fn verify_extraction(result: &zephium_agentic::SemanticOwnedExtractionResult) -> bool {

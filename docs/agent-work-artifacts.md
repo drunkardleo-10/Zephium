@@ -97,3 +97,21 @@ never accesses a lazy data-store/process-pool property or creates a page. The
 same retained deletion subsequently passed native absence verification and
 Store finalization in a cold process. No raw crash report or profile identity
 is committed; this is scoped recovery evidence, not general platform qualification.
+
+The following same-process run exposed a second, qualifier-only defect: its
+manual native dispatcher executed outside an autorelease pool. The pool around
+`NSRunLoop` pumping could not release objects created outside that pool. Work
+dispatch now uses one pool per operation, matching Cocoa event dispatch;
+production scheduling and native actions are unchanged. The corrected full
+Luna application run independently verified ten values, a 5,296-byte artifact,
+native profile absence, Store finalization and clean Shell shutdown with zero
+focus theft. Both earlier retained public-test deletion obligations were also
+recovered and finalized, without repeating any provider/native task action.
+
+If the trusted task declares an extraction schema but incorrectly reports
+completion without a result, publication preparation refuses and retains the
+original clean execution owner. It cannot report durable success or clean
+application closure. There is currently no in-process discard/repair authority
+for this invalid trusted contract; restart classifies the uncommitted run as
+interrupted. This is distinct from a retained, explicitly reconcilable Store
+publication timeout/refusal.

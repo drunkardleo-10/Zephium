@@ -154,7 +154,7 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
         &qualifier,
         &[
             "zephium_app::spawn_suspended(",
-            "MacosWorkComposition::new(engine, store)",
+            "MacosWorkComposition::new(engine.clone(), store.clone())",
             "composition.prepare_public_qualification(request)",
             "shell.shutdown_with_deadline(",
             "AgentWorkApplicationPhase::Succeeded",
