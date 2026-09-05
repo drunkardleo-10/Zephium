@@ -56,8 +56,9 @@ use crate::action::AgentBrowserVerifiedTransition;
 pub(crate) mod work;
 pub use work::{
     AgentWorkContextSpec, AgentWorkController, AgentWorkEvent, AgentWorkEventKind,
-    AgentWorkFailure, AgentWorkHandle, AgentWorkOutcome, AgentWorkRecovery, AgentWorkRunInput,
-    AgentWorkRunSettings, AgentWorkTask, AgentWorkTaskProgress, MAX_AGENT_WORK_EVENTS,
+    AgentWorkExtractionTask, AgentWorkFailure, AgentWorkHandle, AgentWorkOutcome,
+    AgentWorkRecovery, AgentWorkRunInput, AgentWorkRunSettings, AgentWorkSuccess, AgentWorkTask,
+    AgentWorkTaskProgress, MAX_AGENT_WORK_EVENTS,
 };
 
 /// This text-only/discarding vertical never needs Terra's catalog-wide 128k
@@ -1910,6 +1911,7 @@ pub struct AgentBrowserSession {
     credential: Option<AgentProviderCredential>,
     attempt: Option<AgentProviderAttempt>,
     retained_terminal: Option<BrowserUnsettledTerminal>,
+    extraction_output: Option<zephium_agentic::AgentProviderExtractionOutputCollector>,
     model_receipts: Vec<(
         AgentModelCallReceipt,
         zephium_agentic::AgentProviderInputMetricReceipt,
@@ -2047,6 +2049,7 @@ impl AgentBrowserSession {
             credential: Some(credential),
             attempt: None,
             retained_terminal: None,
+            extraction_output: None,
             model_receipts: Vec::with_capacity(usize::from(MAX_BROWSER_MODEL_TURNS)),
             config,
             objective: Some(objective),
@@ -2225,10 +2228,110 @@ impl AgentBrowserSession {
         ))
     }
 
+    /// Consumes one schema-bound terminal extraction proposal. The returned
+    /// mapping remains model-mapped data with exact delivered provenance, not
+    /// an independently verified fact or task-completion authority.
+    pub async fn extract<'a>(
+        &mut self,
+        turn: AgentBrowserProviderTurn,
+        observation: &'a zephium_agentic::SemanticObservation,
+        frames: &[zephium_agentic::SemanticFrameJoin],
+        captured_at: zephium_agentic::SemanticCaptureInstant,
+        schema: &zephium_agentic::SemanticExtractionSchema,
+    ) -> Result<zephium_agentic::SemanticExtractionResult<'a>, AgentBrowserProviderError> {
+        use zephium_agentic::*;
+        self.check_live()?;
+        if self.turns >= MAX_BROWSER_MODEL_TURNS {
+            return Err(AgentBrowserProviderError::TurnLimit);
+        }
+        if frames.len() != observation.frames().len()
+            || observation
+                .frames()
+                .iter()
+                .any(|frame| !frames.contains(frame.frame()))
+            || schema.id().get() != 1
+        {
+            return Err(AgentBrowserProviderError::Authority);
+        }
+        let (proposal, continuation) = turn.into_tool_turn().into_parts();
+        if !matches!(proposal, AgentBrowserToolProposal::Extract { scope: AgentBrowserScopeProposal::Initial, schema: id } if id == schema.id())
+        {
+            return Err(AgentBrowserProviderError::UnsupportedTool(proposal.kind()));
+        }
+        if let Some(journal) = &self.journal {
+            journal
+                .emit(work::AgentWorkEventKind::ToolProposed(
+                    AgentBrowserToolKind::Extract,
+                ))
+                .map_err(|_| AgentBrowserProviderError::Journal)?;
+        }
+        let read = read_semantic_observation(
+            observation,
+            SemanticReadAuthority::Initial,
+            captured_at,
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .map_err(|_| AgentBrowserProviderError::Authority)?;
+        let payload = encode_semantic_extraction_request(
+            schema,
+            &read,
+            SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
+        .map_err(AgentBrowserProviderError::InitialEncoding)?;
+        let request = self.next_model_call_request()?;
+        let bound = continuation
+            .bind_extraction_request(request, &self.config, schema, &read, payload)
+            .map_err(|_| AgentBrowserProviderError::Continuation)?;
+        let prepared = AgentProviderExtractionRequestDraft::try_new(bound)
+            .and_then(|draft| {
+                draft.try_prepare_for_provider_exact_count(&mut self.policy, request, schema, &read)
+            })
+            .map_err(|_| AgentBrowserProviderError::Authority)?;
+        let (input, output) = prepared.into_transport_parts();
+        let (terminal, _, _) = self.drive_terminal(input, Some(output)).await?;
+        self.extraction_output
+            .take()
+            .ok_or(AgentBrowserProviderError::Authority)?
+            .finish(
+                &terminal,
+                schema,
+                &read,
+                SemanticReadSensitivityLimit::PublicOnly,
+            )
+            .map_err(AgentBrowserProviderError::Extraction)
+    }
+
     async fn drive(
         &mut self,
         input: AgentProviderTransportInput,
     ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
+        let (terminal, input, provider_elapsed) = self.drive_terminal(input, None).await?;
+        let receipt = terminal.receipt();
+        let turn = terminal
+            .into_tool_turn()
+            .ok_or(AgentBrowserProviderError::Proposal)?;
+        Ok(AgentBrowserProviderTurn {
+            receipt,
+            input,
+            turn,
+            provider_elapsed,
+        })
+    }
+
+    async fn drive_terminal(
+        &mut self,
+        input: AgentProviderTransportInput,
+        output: Option<zephium_agentic::AgentProviderExtractionOutputBinding>,
+    ) -> Result<
+        (
+            zephium_agentic::AgentProviderSettledTerminal,
+            zephium_agentic::AgentProviderInputMetricReceipt,
+            Duration,
+        ),
+        AgentBrowserProviderError,
+    > {
         let provider_started = Instant::now();
         if let Err(error) = self.check_live() {
             let _ = input.cancel(&mut self.policy);
@@ -2239,7 +2342,10 @@ impl AgentBrowserSession {
             return Err(AgentBrowserProviderError::TurnLimit);
         }
         let cancellation = self.cancellation.clone();
-        if self.attempt.is_some() || self.retained_terminal.is_some() {
+        if self.attempt.is_some()
+            || self.retained_terminal.is_some()
+            || self.extraction_output.is_some()
+        {
             let _ = input.cancel(&mut self.policy);
             return Err(AgentBrowserProviderError::Transport);
         }
@@ -2256,6 +2362,18 @@ impl AgentBrowserSession {
                 .try_admit(input, &mut self.policy, credential, cancellation)
                 .map_err(|_| AgentBrowserProviderError::Transport)?,
         );
+        if let Some(output) = output {
+            let evidence = self
+                .attempt
+                .as_ref()
+                .and_then(AgentProviderAttempt::input_evidence)
+                .ok_or(AgentBrowserProviderError::Authority)?;
+            self.extraction_output = Some(
+                output
+                    .start(evidence)
+                    .map_err(AgentBrowserProviderError::Extraction)?,
+            );
+        }
         if let Some(journal) = self.journal.as_mut() {
             let call = self
                 .attempt
@@ -2279,7 +2397,17 @@ impl AgentBrowserSession {
                 counted,
             )) => match tokio::time::timeout_at(
                 tokio::time::Instant::from_std(self.deadline),
-                counted.execute(|_| AgentProviderBatchDisposition::Continue),
+                counted.execute(|batch| {
+                    if self
+                        .extraction_output
+                        .as_mut()
+                        .is_some_and(|output| output.push_batch(batch).is_err())
+                    {
+                        AgentProviderBatchDisposition::Cancel
+                    } else {
+                        AgentProviderBatchDisposition::Continue
+                    }
+                }),
             )
             .await
             {
@@ -2312,7 +2440,7 @@ impl AgentBrowserSession {
         drop(self.attempt.take());
         let input = result.input_metric_receipt();
         let disclosure = result.disclosure_stage();
-        let turn = settle_browser_result(
+        let terminal = settle_browser_terminal(
             result,
             disclosure,
             input,
@@ -2322,9 +2450,7 @@ impl AgentBrowserSession {
             &mut self.model_receipts,
         );
         self.record_model_receipts()?;
-        let mut turn = turn?;
-        turn.provider_elapsed = provider_started.elapsed();
-        Ok(turn)
+        Ok((terminal?, input, provider_started.elapsed()))
     }
 
     /// Seals admission and returns all run owners, even when drain refuses.
@@ -2334,6 +2460,9 @@ impl AgentBrowserSession {
     pub fn try_finish(
         mut self,
     ) -> Result<AgentBrowserSessionTerminal, AgentBrowserSessionFinishRefusal> {
+        // Partial model mappings are never recovery artifacts. Their attempt
+        // and policy/accounting owners remain in the normal close path.
+        self.extraction_output.take();
         self.transport.seal();
         self.cancellation.cancel();
         self.action_executions.seal();
@@ -2879,6 +3008,32 @@ fn settle_browser_result(
         zephium_agentic::AgentProviderInputMetricReceipt,
     )>,
 ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
+    let terminal =
+        settle_browser_terminal(result, disclosure, input, model, policy, retained, receipts)?;
+    let receipt = terminal.receipt();
+    let turn = terminal
+        .into_tool_turn()
+        .ok_or(AgentBrowserProviderError::Proposal)?;
+    Ok(AgentBrowserProviderTurn {
+        receipt,
+        input,
+        turn,
+        provider_elapsed: Duration::ZERO,
+    })
+}
+
+fn settle_browser_terminal(
+    result: AgentProviderTransportResult,
+    disclosure: AgentProviderDisclosureStage,
+    input: zephium_agentic::AgentProviderInputMetricReceipt,
+    model: AgentBrowserModel,
+    policy: &mut AgentRunPolicy,
+    retained: &mut Option<BrowserUnsettledTerminal>,
+    receipts: &mut Vec<(
+        AgentModelCallReceipt,
+        zephium_agentic::AgentProviderInputMetricReceipt,
+    )>,
+) -> Result<zephium_agentic::AgentProviderSettledTerminal, AgentBrowserProviderError> {
     match result.into_policy_settlement() {
         AgentProviderPolicySettlement::Immediate(settlement) => {
             let terminal_failure = match settlement.outcome() {
@@ -2947,15 +3102,7 @@ fn settle_browser_result(
             };
             let receipt = terminal.receipt();
             receipts.push((receipt, input));
-            let Some(turn) = terminal.into_tool_turn() else {
-                return Err(AgentBrowserProviderError::Proposal);
-            };
-            Ok(AgentBrowserProviderTurn {
-                receipt,
-                input,
-                turn,
-                provider_elapsed: Duration::ZERO,
-            })
+            Ok(*terminal)
         }
     }
 }
@@ -3015,6 +3162,9 @@ impl fmt::Debug for AgentBrowserProviderTurn {
 /// Closed content-free session refusal. No variant authorizes a blind retry.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum AgentBrowserProviderError {
+    /// Purpose-bound output or its exact delivered sources were refused.
+    #[error("browser extraction output was refused")]
+    Extraction(zephium_agentic::AgentProviderExtractionOutputError),
     /// Product projection or exact durable accounting refused a transition.
     #[error("browser session journal refused a transition")]
     Journal,

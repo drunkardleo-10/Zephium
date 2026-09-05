@@ -91,6 +91,10 @@ pub(crate) use tool::{AgentBrowserToolCall, AgentProviderToolCallCorrelation};
 
 /// Maximum bytes in one pinned provider model revision.
 pub const MAX_AGENT_PROVIDER_MODEL_REVISION_BYTES: usize = 96;
+/// Minimum total native dispatch, settlement and adjacent-observation allowance
+/// admitted by the current snapshot-action driver. This is not a required wait.
+/// Public native qualification observed >1 s captures on throttled owned pages.
+pub const MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS: u32 = 2_000;
 /// Maximum bytes in one provider-attested service-tier identity.
 pub const MAX_AGENT_PROVIDER_SERVICE_TIER_BYTES: usize = 32;
 /// Maximum trusted effective model revisions accepted for one requested alias.

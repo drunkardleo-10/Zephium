@@ -214,6 +214,11 @@ fn validate_terra(source: &str) -> Result<(), String> {
         "locate_semantic_observation",
         "SemanticModelEncodingBudget::LOCATE_RESULT_PROVIDER_EXACT_CONSERVATIVE",
         ".bind_locate_request(model_request, &self.config, &result, payload)",
+        "pub async fn extract<'a>(",
+        "schema.id().get() != 1",
+        "self.drive_terminal(input, Some(output)).await?",
+        "SemanticReadSensitivityLimit::PublicOnly",
+        "self.extraction_output.take()",
         ".bind_diff_request(request, &self.config, &diff, payload)",
         ".try_prepare_for_provider_exact_count(&mut self.policy, request, &diff)",
         ".try_prove_shutdown()",
@@ -329,6 +334,9 @@ fn validate_action(source: &str) -> Result<(), String> {
         "self.terminal = Some",
         "*proposal_failure = Some(self)",
         "AgentBrowserActionFinalizationRefusal",
+        "action.settle_budget().millis() < MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS",
+        "self.retain_failure(failed);",
+        "AgentBrowserActionError::Verification(reason)",
     ] {
         if !source.contains(required) {
             return Err(format!("controller action lost boundary: {required}"));

@@ -37,6 +37,19 @@ pub enum AgentWorkTaskProgress {
 /// page instructions, or a model-authored predicate. The UI does not receive
 /// this port; it receives only the content-free handle below.
 pub trait AgentWorkTask: Send {
+    /// Optional single trusted extraction schema. Identity 1 is run-local;
+    /// model/page content cannot register or replace it. Default is no extraction.
+    fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
+        None
+    }
+    /// Accepts a validated but explicitly model-mapped result against the
+    /// trusted task contract. Default refuses; shape alone is not task authority.
+    fn accept_extraction(
+        &mut self,
+        _: &SemanticExtractionResult<'_>,
+    ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+        Err(AgentWorkFailure::Contract)
+    }
     /// Evaluates the approved task against fresh semantic state.
     fn evaluate(
         &mut self,
@@ -215,9 +228,90 @@ impl AgentWorkHandle {
 pub enum AgentWorkOutcome {
     /// Trusted task completion with durable policy/accounting closure. Native
     /// and provider shutdown proofs are consumed by the runtime lifecycle.
-    Succeeded(AgentRunPolicySettlement),
+    Succeeded(AgentWorkSuccess),
     /// Execution stopped without enough evidence for clean closure.
     Recovery(AgentWorkRecovery),
+}
+
+/// Clean execution ownership plus an optional bounded model-mapped result.
+/// Result data is not a native-effect, factual-verification or durability proof.
+pub struct AgentWorkSuccess {
+    settlement: AgentRunPolicySettlement,
+    extraction: Option<Box<SemanticOwnedExtractionResult>>,
+}
+impl AgentWorkSuccess {
+    /// Original content-free closure metrics, not result factual verification.
+    pub const fn closure(&self) -> AgentRunMetricClosure {
+        self.settlement.closure()
+    }
+    /// Original successful policy/audit closure; never a replacement proof.
+    pub const fn policy_settlement(&self) -> AgentRunPolicySettlement {
+        self.settlement
+    }
+    /// Moves the result once. Application adapters must additionally gate
+    /// publication on their original clean lifecycle and durable terminal ACK.
+    pub fn take_extraction(&mut self) -> Option<SemanticOwnedExtractionResult> {
+        self.extraction.take().map(|result| *result)
+    }
+}
+
+/// Trusted public-data extraction task over one initial observation. The
+/// product supplies the schema before admission; no native action is allowed.
+pub struct AgentWorkExtractionTask {
+    schema: SemanticExtractionSchema,
+    account: AgentAccountScope,
+}
+impl AgentWorkExtractionTask {
+    /// Registers one run-local schema and explicitly trusted account scope.
+    pub fn try_new(
+        fields: Vec<SemanticExtractionFieldSchema>,
+        account: AgentAccountScope,
+    ) -> Result<Self, AgentWorkFailure> {
+        let id = SemanticExtractionSchemaId::new(1).ok_or(AgentWorkFailure::Contract)?;
+        let schema = SemanticExtractionSchema::try_new(id, fields)
+            .map_err(|_| AgentWorkFailure::Contract)?;
+        Ok(Self { schema, account })
+    }
+}
+impl AgentWorkTask for AgentWorkExtractionTask {
+    fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
+        Some(&self.schema)
+    }
+    fn evaluate(
+        &mut self,
+        _: &SemanticObservation,
+    ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+        Ok(AgentWorkTaskProgress::Continue)
+    }
+    fn assess(
+        &self,
+        _: &SemanticPreparedAction,
+    ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+        Err(AgentWorkFailure::Contract)
+    }
+    fn attest_account(
+        &self,
+        context: ContextJoin,
+        now: AgentPolicyInstant,
+    ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
+        Ok(AgentContextAccountBinding::new(
+            AgentAccountAttestationId::generate(),
+            context,
+            self.account,
+            now,
+        ))
+    }
+    fn accept_extraction(
+        &mut self,
+        result: &SemanticExtractionResult<'_>,
+    ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+        if result.schema() != self.schema.id() || result.stats().sensitive_source_edges() != 0 {
+            return Err(AgentWorkFailure::Contract);
+        }
+        // Core validated schema, types, bounds, source delivery and secret
+        // rejection. Completion means a model-mapped result, not proven truth.
+        Ok(AgentWorkTaskProgress::Complete)
+    }
 }
 
 /// Opaque, content-redacted recovery ownership; never permission to replay.
@@ -400,6 +494,12 @@ impl AgentWorkController {
         task: Box<dyn AgentWorkTask>,
         retention: AgentBrowserRetention,
     ) -> Result<(Self, AgentWorkHandle), AgentWorkFailure> {
+        if task
+            .extraction_schema()
+            .is_some_and(|schema| schema.id().get() != 1)
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
         let events = Arc::new(Mutex::new(WorkEvents::new(input.manifest.run())?));
         let journal = WorkJournal::new(
             &input.manifest,
@@ -427,6 +527,7 @@ impl AgentWorkController {
                     retention,
                     audit,
                     task,
+                    extraction: None,
                     failure: None,
                     observation: None,
                     native_terminal: None,
@@ -439,6 +540,7 @@ impl AgentWorkController {
 }
 
 struct WorkState {
+    extraction: Option<SemanticOwnedExtractionResult>,
     input: Option<AgentWorkRunInput>,
     session: Option<AgentBrowserSession>,
     drained: Option<WorkDrained>,
@@ -920,6 +1022,9 @@ impl AgentWorkController {
         )
         .map_err(AgentWorkFailure::Browser)?;
         session.journal = state.journal.take();
+        if state.task.extraction_schema().is_some() {
+            session.config = session.config.restrict_to_extraction();
+        }
         state.session = Some(session);
         Ok(())
     }
@@ -1053,6 +1158,14 @@ impl AgentWorkController {
     ) -> Result<(), AgentWorkFailure> {
         let state = self.state.as_mut().ok_or(AgentWorkFailure::Contract)?;
         let mut observation = Self::observe(state, worker, browser).await?;
+        let captured_at = SemanticCaptureInstant::from_millis(
+            state
+                .journal_mut()?
+                .clock
+                .now()
+                .map_err(|_| AgentWorkFailure::Contract)?
+                .millis(),
+        );
         if state.task.evaluate(&observation)? == AgentWorkTaskProgress::Complete {
             state.observation = Some(observation);
             return Ok(());
@@ -1066,6 +1179,31 @@ impl AgentWorkController {
             session.start_initial(&observation),
         )
         .await?;
+        if let Some(schema) = state.task.extraction_schema() {
+            let frames = observation
+                .frames()
+                .iter()
+                .map(|snapshot| snapshot.frame().clone())
+                .collect::<Vec<_>>();
+            let result = Self::provider(
+                &mut state.native,
+                worker,
+                browser,
+                session.cancellation.clone(),
+                session.extract(turn, &observation, &frames, captured_at, schema),
+            )
+            .await?;
+            if state.task.accept_extraction(&result)? != AgentWorkTaskProgress::Complete {
+                return Err(AgentWorkFailure::Contract);
+            }
+            state.extraction = Some(
+                result
+                    .into_owned()
+                    .map_err(|_| AgentWorkFailure::Contract)?,
+            );
+            state.observation = Some(observation);
+            return Ok(());
+        }
         loop {
             let frames = observation
                 .frames()
@@ -1584,7 +1722,10 @@ impl AgentWorkController {
         // Completion is separate from the bounded progress lane: saturation
         // cannot discard an already-consumed clean terminal owner.
         let _ = lock(&journal.events).publish(AgentWorkEventKind::Terminal);
-        *lock(&self.terminal) = Some(AgentWorkOutcome::Succeeded(settlement));
+        *lock(&self.terminal) = Some(AgentWorkOutcome::Succeeded(AgentWorkSuccess {
+            settlement,
+            extraction: state.extraction.take().map(Box::new),
+        }));
         self.state.take();
         Ok(())
     }

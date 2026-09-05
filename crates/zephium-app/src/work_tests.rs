@@ -9,6 +9,120 @@ use zephium_agent_controller::{
 
 static SERIAL: Mutex<()> = Mutex::new(());
 
+// Synthetic content fixture built by the same public read/extraction validator;
+// it carries no provider, policy, runtime or successful execution authority.
+fn owned_result() -> SemanticOwnedExtractionResult {
+    struct Counter(SemanticTokenizerRevision);
+    impl SemanticTokenCounter for Counter {
+        fn count_tokens(
+            &self,
+            _: &str,
+        ) -> Result<SemanticTokenMeasurement, SemanticTokenCounterError> {
+            SemanticTokenMeasurement::try_new(
+                self.0.clone(),
+                100,
+                SemanticTokenCountQuality::ExactLocal,
+            )
+            .map_err(|_| SemanticTokenCounterError::InvalidResult)
+        }
+    }
+    let identity = ContextIdentity::new(
+        ContextId::generate(),
+        ContextRunId::generate(),
+        1_u128.into(),
+        ContextKind::Owned,
+    );
+    let mut registry = ContextRegistry::new();
+    registry
+        .reserve(
+            identity,
+            ContextCapabilities::try_new(ContextKind::Owned, &[ContextCapability::Observe])
+                .unwrap(),
+        )
+        .unwrap();
+    let operation = registry
+        .begin_context(identity.id(), ContextOperationId::new(1).unwrap())
+        .unwrap();
+    registry
+        .settle_construction(identity.id(), operation, ContextSettlement::Applied)
+        .unwrap();
+    let context = registry.join(identity.id()).unwrap();
+    let frame = SemanticFrameJoin::try_new(
+        context,
+        FrameId::MAIN,
+        context.frame_generation(),
+        SemanticOrigin::parse("https://fixture.invalid/").unwrap(),
+        SemanticFrameTrust::SameOrigin,
+    )
+    .unwrap();
+    let snapshot = decode_semantic_snapshot(SemanticDecodeContext::new(SemanticInvocationId::new(1).unwrap(), frame, SemanticSnapshotGeneration::INITIAL),
+        br#"{"v":1,"i":1,"g":1,"c":"complete","n":[{"k":1,"r":"document","o":16},{"k":2,"p":0,"r":"paragraph","t":"Fixture result"}]}"#).unwrap();
+    let observation = SemanticObservationAssembler::new(
+        SemanticObservationRequest::initial(
+            SemanticObservationId::new(1).unwrap(),
+            context,
+            SemanticObservationBudget::INITIAL_FILTERED,
+        ),
+        snapshot,
+    )
+    .unwrap()
+    .finish()
+    .unwrap();
+    let read = read_semantic_observation(
+        &observation,
+        SemanticReadAuthority::Initial,
+        SemanticCaptureInstant::from_millis(1),
+        SemanticReadSensitivityLimit::PublicOnly,
+        SemanticReadBudget::STANDARD,
+    )
+    .unwrap();
+    let revision = SemanticTokenizerRevision::try_new("fixture-v1".into()).unwrap();
+    let delivery = encode_semantic_read(
+        &read,
+        SemanticModelEncodingBudget::try_new(32 * 1024, 1000, SemanticTokenCountRequirement::Exact)
+            .unwrap(),
+    )
+    .unwrap()
+    .admit(&Counter(revision.clone()), &revision)
+    .unwrap()
+    .settle_delivery(SemanticModelDeliverySettlement::Committed)
+    .unwrap();
+    let schema = SemanticExtractionSchema::try_new(
+        SemanticExtractionSchemaId::new(1).unwrap(),
+        vec![SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap()],
+    )
+    .unwrap();
+    extract_semantic_read(&schema, &read, &delivery, SemanticReadSensitivityLimit::PublicOnly,
+        br#"{"v":1,"schema":1,"fields":[{"name":"label","value":{"k":"text","value":"Fixture result","sources":["@r1"]}}]}"#).unwrap().into_owned().unwrap()
+}
+
+#[test]
+fn result_handoff_is_one_shot_phase_gated_and_separate_from_diagnostics() {
+    let journal = Arc::new(Journal::default());
+    let (actor, _owner, handle) = coordinator(journal);
+    lock(&actor.projection).extraction = Some(owned_result());
+    for phase in [
+        AgentWorkApplicationPhase::Loading,
+        AgentWorkApplicationPhase::Ready,
+        AgentWorkApplicationPhase::Admitting,
+        AgentWorkApplicationPhase::Running,
+        AgentWorkApplicationPhase::Closing,
+        AgentWorkApplicationPhase::NeedsReview,
+        AgentWorkApplicationPhase::Recovery,
+        AgentWorkApplicationPhase::PersistenceUncertain,
+    ] {
+        lock(&actor.projection).snapshot.phase = phase;
+        assert!(handle.take_extraction().is_none());
+        assert!(lock(&actor.projection).extraction.is_some());
+        assert!(!format!("{:?}", handle.snapshot()).contains("Fixture result"));
+    }
+    lock(&actor.projection).snapshot.phase = AgentWorkApplicationPhase::Succeeded;
+    let result = handle.take_extraction().unwrap();
+    assert_eq!(result.trust(), SemanticExtractionTrust::ModelMapped);
+    assert!(handle.take_extraction().is_none());
+    assert!(!format!("{result:?}").contains("Fixture result"));
+}
+
 struct Clock(AtomicU64);
 impl TerraControllerClock for Clock {
     fn now(&self) -> Result<AgentPolicyInstant, TerraControllerClockError> {

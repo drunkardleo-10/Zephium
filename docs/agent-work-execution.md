@@ -47,7 +47,10 @@ may manufacture a clean proof.
 - One run, one root and one independently managed extension-free owned page.
 - At most eight model turns and eight one-action turns; locate is bounded by
   the existing semantic matcher. No action or provider request is blindly retried.
-- Only locate and snapshot-verifiable act tools are advertised. Immediate and
+- Action tasks advertise only locate and snapshot-verifiable act. A trusted
+  `AgentWorkExtractionTask` instead advertises only initial-scope extraction;
+  its [bounded result](agent-work-results.md) remains explicitly model-mapped.
+  Immediate and
   mutation-quiet settlement use the core's bounded wake schedule before one
   adjacent fresh observation. Navigation/dialog/scroll adapters are absent.
 - The absolute deadline is bounded by the approved root expiry and ten minutes.
@@ -121,3 +124,7 @@ suspend/resume, authenticated/public multi-site qualification, concurrent Browse
 interaction, navigation and richer tool adapters remain open. A suspension
 request currently revokes and closes into recovery; it does not falsely claim
 that an unimplemented native suspend operation succeeded.
+
+The production extraction result is delivered once in memory after durable
+terminal acknowledgement. Durable artifact bodies and crash-safe result delivery
+are the next persistence seam; content never enters the existing audit/journal.

@@ -85,6 +85,11 @@ impl AgentBrowserActionProposal {
         ) {
             return Err(AgentBrowserActionError::EvidenceRequired);
         }
+        // A model cannot shorten the allowance below the current native
+        // snapshot capability. Never extend a deadline after dispatch instead.
+        if action.settle_budget().millis() < MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS {
+            return Err(AgentBrowserActionError::SettleBudget);
+        }
         Ok(Self {
             action,
             continuation,
@@ -394,10 +399,12 @@ impl AgentBrowserAction {
             match verify_semantic_action_terminal(*terminal, &self.proposal.action, evidence) {
                 Ok(verified) => verified,
                 Err(refusal) => {
+                    let reason = refusal.error();
                     let failed = policy
                         .settle_refused_semantic_terminal(refusal)
                         .map_err(AgentBrowserActionError::Policy)?;
-                    return Err(self.retain_failure(failed));
+                    self.retain_failure(failed);
+                    return Err(AgentBrowserActionError::Verification(reason));
                 }
             };
         self.finished = true;
@@ -483,8 +490,13 @@ pub enum AgentBrowserActionError {
     Settlement,
     /// The declared settlement condition is still pending.
     SettlementPending,
+    /// Total native/settlement/verification allowance is below host capability.
+    SettleBudget,
     /// One effect was charged as a typed failure.
     Failed(SemanticActionFailure),
+    /// Independent observation verification failed; the charged failed effect
+    /// remains owned exactly as for other failures. Contains no page content.
+    Verification(SemanticVerificationError),
     /// State or callback replay was rejected.
     State,
     /// Exact accounted batch admission refused.

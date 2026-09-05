@@ -4731,7 +4731,7 @@ fn action_variant(
         ("verification", verification_schema(action, snapshot_only)),
         (
             "settle_millis",
-            json!({"type":"integer","minimum":1,"maximum":MAX_SEMANTIC_ACTION_SETTLE_MILLIS}),
+            json!({"type":"integer","minimum":if snapshot_only { super::MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS } else { 1 },"maximum":MAX_SEMANTIC_ACTION_SETTLE_MILLIS}),
         ),
     ]);
     tagged_object(kind, properties)
@@ -5063,6 +5063,14 @@ mod tests {
             let variants = actions["items"]["anyOf"].as_array().expect("actions");
             assert_eq!(variants.len(), 4);
             for action in variants {
+                assert_eq!(
+                    action["properties"]["settle_millis"]["minimum"],
+                    super::super::MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS
+                );
+                assert_eq!(
+                    action["properties"]["settle_millis"]["maximum"],
+                    MAX_SEMANTIC_ACTION_SETTLE_MILLIS
+                );
                 let waits = action["properties"]["wait"]["anyOf"]
                     .as_array()
                     .expect("waits");

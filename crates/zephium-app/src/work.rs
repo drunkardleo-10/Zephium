@@ -168,6 +168,7 @@ pub struct AgentWorkApplicationSnapshot {
 }
 
 struct Projection {
+    extraction: Option<SemanticOwnedExtractionResult>,
     snapshot: AgentWorkApplicationSnapshot,
     records: Vec<AgentWorkRecord>,
     events: VecDeque<AgentWorkEvent>,
@@ -182,6 +183,16 @@ pub struct AgentWorkApplicationHandle {
 }
 
 impl AgentWorkApplicationHandle {
+    /// Moves one explicitly model-mapped result only after the original clean
+    /// lifecycle and durable terminal ACK. This is user-result content, never
+    /// diagnostic data, and is not yet a persisted artifact or factual proof.
+    pub fn take_extraction(&self) -> Option<SemanticOwnedExtractionResult> {
+        let mut projection = lock(&self.projection);
+        if projection.snapshot.phase != AgentWorkApplicationPhase::Succeeded {
+            return None;
+        }
+        projection.extraction.take()
+    }
     /// Latest bounded content-free state.
     pub fn snapshot(&self) -> AgentWorkApplicationSnapshot {
         lock(&self.projection).snapshot
@@ -289,6 +300,7 @@ impl CallbackHandle {
         engine: crate::SharedEngine,
     ) -> Option<AgentWorkApplicationHandle> {
         let projection = Arc::new(Mutex::new(Projection {
+            extraction: None,
             snapshot: AgentWorkApplicationSnapshot {
                 phase: AgentWorkApplicationPhase::Loading,
                 run: None,
@@ -601,6 +613,15 @@ impl ApplicationWork {
                     }
                     DurablePurpose::Start => self.activate(),
                     DurablePurpose::Terminal => {
+                        if record.disposition() == AgentWorkDisposition::Succeeded {
+                            if let Some(AgentWorkOutcome::Succeeded(success)) = self
+                                .active
+                                .as_mut()
+                                .and_then(|active| active.outcome.as_mut())
+                            {
+                                lock(&self.projection).extraction = success.take_extraction();
+                            }
+                        }
                         lock(&self.projection).snapshot.phase = match record.disposition() {
                             AgentWorkDisposition::Succeeded => AgentWorkApplicationPhase::Succeeded,
                             AgentWorkDisposition::NeedsApproval => {
@@ -847,7 +868,7 @@ impl ApplicationWork {
                 (Some(AgentWorkOutcome::Succeeded(policy)), Some(native), Some(true))
                     if lock(&self.projection).snapshot.failure.is_none() =>
                 {
-                    AgentWorkJournalMutation::completed(record, *policy, native)
+                    AgentWorkJournalMutation::completed(record, policy.policy_settlement(), native)
                 }
                 _ => AgentWorkJournalMutation::transition(
                     record,

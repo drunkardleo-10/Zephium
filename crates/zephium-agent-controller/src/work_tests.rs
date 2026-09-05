@@ -207,6 +207,10 @@ enum Fault {
     #[cfg(feature = "probe-harness")]
     ActionCallback,
     #[cfg(feature = "probe-harness")]
+    ActionVerification,
+    #[cfg(feature = "probe-harness")]
+    ActionBudget,
+    #[cfg(feature = "probe-harness")]
     ActionCancel,
     #[cfg(feature = "probe-harness")]
     ActionLost,
@@ -327,8 +331,8 @@ impl AgentBrowserPort for Port {
         lock(&self.calls).push(3);
         let correlation = invocation.correlation();
         assert_eq!(
-            correlation.snapshot_generation(),
-            SemanticSnapshotGeneration::INITIAL
+            correlation.snapshot_generation().get(),
+            if lock(&self.calls).contains(&7) { 2 } else { 1 }
         );
         let wire = format!("{{\"v\":1,\"i\":{},\"g\":{},\"c\":\"complete\",\"n\":[{{\"k\":1,\"r\":\"document\",\"o\":16}},{{\"k\":2,\"p\":0,\"r\":\"textbox\",\"n\":\"Field\",\"s\":64,\"o\":2,\"v\":{{\"k\":\"text\",\"value\":\"\"}},\"b\":{{\"x\":10,\"y\":20,\"w\":120,\"h\":30}}}}]}}", correlation.invocation().get(), correlation.snapshot_generation().get());
         let snapshot = decode_semantic_snapshot(
@@ -447,6 +451,19 @@ impl AgentBrowserPort for Port {
         match self.fault {
             Fault::ActionDispatch => return ContextDispatch::Unsupported,
             Fault::ActionCallback => {}
+            Fault::ActionVerification => {
+                let now = request.requested_at();
+                let geometry = request.expected_geometry();
+                completion(request.complete(
+                    SemanticActionExecutionBackend::PageWorldCompatibilityFill,
+                    SemanticActionNativeReadiness::ExactConnectedWritableFormTarget,
+                    SemanticActionNativeViewport::try_new(800, 600).unwrap(),
+                    geometry,
+                    now,
+                    now,
+                ));
+                return ContextDispatch::Scheduled;
+            }
             Fault::ActionCancel | Fault::ActionLost => {
                 lock(&self.control)
                     .as_ref()
@@ -614,6 +631,38 @@ enum ProviderFault {
     CancelCount,
     CancelStream,
     Native(Fault),
+    Extraction(ExtractionFault),
+}
+
+#[cfg(feature = "probe-harness")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExtractionFault {
+    None,
+    WrongSchema,
+    ExpandedScope,
+    WrongKind,
+    ForeignSource,
+    CancelCount,
+    CancelStream,
+    AuditLost,
+}
+
+#[cfg(feature = "probe-harness")]
+#[test]
+fn extraction_uses_the_same_worker_and_never_publishes_failed_or_unsettled_output() {
+    let _guard = lock(&SERIAL);
+    for fault in [
+        ExtractionFault::None,
+        ExtractionFault::WrongSchema,
+        ExtractionFault::ExpandedScope,
+        ExtractionFault::WrongKind,
+        ExtractionFault::ForeignSource,
+        ExtractionFault::CancelCount,
+        ExtractionFault::CancelStream,
+        ExtractionFault::AuditLost,
+    ] {
+        provider_fixture(ProviderFault::Extraction(fault));
+    }
 }
 
 #[cfg(feature = "probe-harness")]
@@ -623,6 +672,8 @@ fn native_action_refusal_takeover_and_callback_loss_keep_the_original_effect_own
     for fault in [
         Fault::ActionDispatch,
         Fault::ActionCallback,
+        Fault::ActionVerification,
+        Fault::ActionBudget,
         Fault::ActionCancel,
         Fault::ActionLost,
         Fault::ActionNeedsHuman,
@@ -685,6 +736,11 @@ fn provider_fixture(fault: ProviderFault) {
     let requests = match fault {
         ProviderFault::Ceiling => 16,
         ProviderFault::CountRefused | ProviderFault::CancelCount => 1,
+        ProviderFault::Extraction(ExtractionFault::CancelCount) => 3,
+        ProviderFault::Extraction(
+            ExtractionFault::WrongSchema | ExtractionFault::ExpandedScope,
+        ) => 2,
+        ProviderFault::Extraction(_) => 4,
         _ => 2,
     };
     let server = std::thread::spawn(move || {
@@ -735,7 +791,12 @@ fn provider_fixture(fault: ProviderFault) {
             }
             let is_count = request.starts_with(b"POST /v1/responses/input_tokens ");
             let cancelled = (is_count && fault == ProviderFault::CancelCount)
-                || (!is_count && fault == ProviderFault::CancelStream);
+                || (!is_count && fault == ProviderFault::CancelStream)
+                || (turns == 1
+                    && ((is_count
+                        && fault == ProviderFault::Extraction(ExtractionFault::CancelCount))
+                        || (!is_count
+                            && fault == ProviderFault::Extraction(ExtractionFault::CancelStream))));
             if cancelled {
                 lock(&server_control)
                     .as_ref()
@@ -756,7 +817,29 @@ fn provider_fixture(fault: ProviderFault) {
                 turns += 1;
                 (
                     "text/event-stream",
-                    tool_stream(turns, matches!(fault, ProviderFault::Native(_))),
+                    if let ProviderFault::Extraction(fault) = fault {
+                        if turns == 1 {
+                            let arguments = match fault {
+                                ExtractionFault::WrongSchema => {
+                                    r#"{\"scope\":{\"kind\":\"initial\"},\"schema_id\":2}"#
+                                }
+                                ExtractionFault::ExpandedScope => {
+                                    r#"{\"scope\":{\"kind\":\"subtree\",\"target\":\"@a2\"},\"schema_id\":1}"#
+                                }
+                                _ => r#"{\"scope\":{\"kind\":\"initial\"},\"schema_id\":1}"#,
+                            };
+                            named_tool_stream(turns, "extract", arguments)
+                        } else {
+                            extraction_stream(fault)
+                        }
+                    } else {
+                        let stream = tool_stream(turns, matches!(fault, ProviderFault::Native(_)));
+                        if fault == ProviderFault::Native(Fault::ActionBudget) {
+                            stream.replace("settle_millis\\\":2000", "settle_millis\\\":1000")
+                        } else {
+                            stream
+                        }
+                    },
                 )
             };
             let status = if refused {
@@ -785,12 +868,28 @@ fn provider_fixture(fault: ProviderFault) {
     } else {
         input()
     };
+    let task: Box<dyn AgentWorkTask> = if matches!(fault, ProviderFault::Extraction(_)) {
+        Box::new(
+            AgentWorkExtractionTask::try_new(
+                vec![SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap()],
+                AgentAccountScope::Anonymous,
+            )
+            .unwrap(),
+        )
+    } else {
+        Box::new(Continue)
+    };
+    let audit_fault = if fault == ProviderFault::Extraction(ExtractionFault::AuditLost) {
+        Fault::AuditLost
+    } else {
+        Fault::None
+    };
     let (controller, handle) = AgentWorkController::try_new_for_probe(
         approved,
         transport,
         credential,
-        Arc::new(Audit(Fault::None)),
-        Box::new(Continue),
+        Arc::new(Audit(audit_fault)),
+        task,
         AgentBrowserRetention::Stateless,
     )
     .expect("actor");
@@ -801,6 +900,90 @@ fn provider_fixture(fault: ProviderFault) {
     };
     let (outcome, shutdown, calls, events) =
         drive_with_control(controller, handle, native_fault, control);
+    if let ProviderFault::Extraction(fault) = fault {
+        assert_eq!(server.join().expect("fixture server"), requests / 2);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.kind(), AgentWorkEventKind::ModelSettled { .. }))
+                .count(),
+            if matches!(
+                fault,
+                ExtractionFault::WrongSchema | ExtractionFault::ExpandedScope
+            ) {
+                1
+            } else {
+                2
+            }
+        );
+        if fault == ExtractionFault::None {
+            let AgentWorkOutcome::Succeeded(mut success) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!(success.closure().model_calls(), 2);
+            assert_eq!(success.closure().effects(), 0);
+            let result = success.take_extraction().expect("owned result");
+            assert!(success.take_extraction().is_none());
+            assert_eq!(result.trust(), SemanticExtractionTrust::ModelMapped);
+            let SemanticExtractedValue::Text(value) = result.fields()[0].value() else {
+                panic!();
+            };
+            assert_eq!(value.as_str(), "Field");
+            assert!(
+                matches!(&result.sources(value.source_span()).unwrap().next().unwrap().content, SemanticOwnedReadContent::Text(text) if text == "Field")
+            );
+            assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+            assert_eq!(calls, [1, 2, 3, 4, 5, 6]);
+        } else {
+            let AgentWorkOutcome::Recovery(recovery) = outcome else {
+                panic!("invalid/unsettled result cannot succeed");
+            };
+            if let Some(session) = recovery.state.session.as_ref() {
+                assert!(session.credential.is_none());
+                assert!(session.extraction_output.is_none());
+                assert_eq!(session.policy.pending_model_calls(), 0);
+                assert_eq!(session.policy.pending_effects(), 0);
+                assert!(session.transport.snapshot().unwrap().is_idle());
+            } else {
+                assert_eq!(fault, ExtractionFault::AuditLost);
+                let drained = recovery.state.drained.as_ref().unwrap();
+                assert!(drained.provider.is_some());
+                assert_eq!(drained.policy.as_ref().unwrap().pending_model_calls(), 0);
+                assert!(drained.journal.as_ref().unwrap().audit.status().in_flight() > 0);
+                assert!(recovery.state.extraction.is_some());
+            }
+            assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Unclean));
+            assert!(!events
+                .iter()
+                .any(|event| event.kind() == AgentWorkEventKind::Terminal));
+            if matches!(
+                fault,
+                ExtractionFault::CancelCount | ExtractionFault::CancelStream
+            ) {
+                assert_eq!(recovery.failure(), AgentWorkFailure::HumanTakeover);
+            } else if matches!(
+                fault,
+                ExtractionFault::WrongKind | ExtractionFault::ForeignSource
+            ) {
+                assert!(matches!(
+                    recovery.failure(),
+                    AgentWorkFailure::Browser(AgentBrowserProviderError::Extraction(_))
+                ));
+            } else if matches!(
+                fault,
+                ExtractionFault::WrongSchema | ExtractionFault::ExpandedScope
+            ) {
+                assert_eq!(
+                    recovery.failure(),
+                    AgentWorkFailure::Browser(AgentBrowserProviderError::UnsupportedTool(
+                        AgentBrowserToolKind::Extract
+                    ))
+                );
+                assert_eq!(calls, [1, 2, 3, 4, 5]);
+            }
+        }
+        return;
+    }
     let AgentWorkOutcome::Recovery(recovery) = outcome else {
         panic!("model never satisfies trusted predicate");
     };
@@ -825,7 +1008,17 @@ fn provider_fixture(fault: ProviderFault) {
     assert!(session.transport.snapshot().expect("transport").is_idle());
     assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Unclean));
     if let ProviderFault::Native(fault) = fault {
-        if fault == Fault::ActionNeedsHuman {
+        if fault == Fault::ActionBudget {
+            assert_eq!(
+                recovery.failure(),
+                AgentWorkFailure::Browser(AgentBrowserProviderError::Action(
+                    crate::AgentBrowserActionError::SettleBudget
+                ))
+            );
+            assert_eq!(calls, [1, 2, 3, 4, 5]);
+            assert!(session.action.is_none());
+            assert_eq!(session.policy.pending_effects(), 0);
+        } else if fault == Fault::ActionNeedsHuman {
             assert_eq!(calls, [1, 2, 3, 4, 5]);
             assert!(session.action.is_none());
             assert!(
@@ -840,12 +1033,27 @@ fn provider_fixture(fault: ProviderFault) {
             assert!(events.iter().any(|event| event.kind()
                 == AgentWorkEventKind::NeedsHuman(AgentNeedsHumanReason::ScopeExpansion)));
         } else {
-            assert_eq!(calls, [1, 2, 3, 7, 4, 5]);
+            if fault == Fault::ActionVerification {
+                assert_eq!(calls, [1, 2, 3, 7, 3, 4, 5]);
+                assert_eq!(
+                    recovery.failure(),
+                    AgentWorkFailure::Browser(AgentBrowserProviderError::Action(
+                        crate::AgentBrowserActionError::Verification(
+                            SemanticVerificationError::OutcomeNotObserved
+                        )
+                    ))
+                );
+            } else {
+                assert_eq!(calls, [1, 2, 3, 7, 4, 5]);
+            }
             let action = session
                 .action
                 .as_ref()
                 .expect("original action and batch retained");
-            if matches!(fault, Fault::ActionDispatch | Fault::ActionCallback) {
+            if matches!(
+                fault,
+                Fault::ActionDispatch | Fault::ActionCallback | Fault::ActionVerification
+            ) {
                 assert!(
                     action.retained_failure().is_some(),
                     "charged failed effect retained"
@@ -884,10 +1092,15 @@ fn provider_fixture(fault: ProviderFault) {
 fn tool_stream(turn: u8, native: bool) -> String {
     let name = if native { "act" } else { "locate" };
     let arguments = if native {
-        r#"{\"actions\":[{\"kind\":\"fill\",\"target\":\"@a2\",\"value\":\"fixture value\",\"effect\":\"local_write\",\"wait\":{\"kind\":\"immediate\"},\"verification\":{\"kind\":\"target_value_matches_input\"},\"settle_millis\":1000}]}"#
+        r#"{\"actions\":[{\"kind\":\"fill\",\"target\":\"@a2\",\"value\":\"fixture value\",\"effect\":\"local_write\",\"wait\":{\"kind\":\"immediate\"},\"verification\":{\"kind\":\"target_value_matches_input\"},\"settle_millis\":2000}]}"#
     } else {
         r#"{\"semantic_query\":\"document\",\"scope\":{\"kind\":\"initial\"}}"#
     };
+    named_tool_stream(turn, name, arguments)
+}
+
+#[cfg(feature = "probe-harness")]
+fn named_tool_stream(turn: u8, name: &str, arguments: &str) -> String {
     let item = format!(
         r#"{{"type":"function_call","id":"fc_{turn}","call_id":"call_{turn}","name":"{name}","arguments":"{arguments}","status":"completed"}}"#
     );
@@ -953,6 +1166,38 @@ fn trusted_completion_closes_original_context_audit_policy_provider_and_runtime(
     for pair in events.windows(2) {
         assert_eq!(pair[0].sequence() + 1, pair[1].sequence());
     }
+}
+
+#[cfg(feature = "probe-harness")]
+fn extraction_stream(fault: ExtractionFault) -> String {
+    let source = if fault == ExtractionFault::ForeignSource {
+        "@r999"
+    } else {
+        "@r1"
+    };
+    let value = if fault == ExtractionFault::WrongKind {
+        format!(r#"{{"k":"boolean","value":true,"sources":["{source}"]}}"#)
+    } else {
+        format!(r#"{{"k":"text","value":"Field","sources":["{source}"]}}"#)
+    };
+    // Closed ASCII fixture values only; never a production JSON encoder.
+    let output = format!(r#"{{"v":1,"schema":1,"fields":[{{"name":"label","value":{value}}}]}}"#)
+        .replace('"', "\\\"");
+    let events = [
+        ("response.created", r#"{"type":"response.created","response":{"id":"resp_2","status":"in_progress","model":"gpt-5.6-luna","service_tier":"default"}}"#.to_owned()),
+        ("response.output_item.added", r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_2","status":"in_progress","role":"assistant"}}"#.to_owned()),
+        ("response.content_part.added", r#"{"type":"response.content_part.added","item_id":"msg_2","output_index":0,"content_index":0,"part":{"type":"output_text"}}"#.to_owned()),
+        ("response.output_text.delta", format!(r#"{{"type":"response.output_text.delta","item_id":"msg_2","output_index":0,"content_index":0,"delta":"{output}"}}"#)),
+        ("response.output_text.done", format!(r#"{{"type":"response.output_text.done","item_id":"msg_2","output_index":0,"content_index":0,"text":"{output}"}}"#)),
+        ("response.content_part.done", r#"{"type":"response.content_part.done","item_id":"msg_2","output_index":0,"content_index":0,"part":{"type":"output_text"}}"#.to_owned()),
+        ("response.output_item.done", r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_2","status":"completed","role":"assistant"}}"#.to_owned()),
+        ("response.completed", r#"{"type":"response.completed","response":{"id":"resp_2","status":"completed","model":"gpt-5.6-luna","service_tier":"default","output":[{"type":"message","id":"msg_2","status":"completed","role":"assistant","content":[{"type":"output_text"}]}],"usage":{"input_tokens":17,"output_tokens":3,"total_tokens":20,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}}"#.to_owned()),
+    ];
+    events
+        .into_iter()
+        .map(|(event, body)| format!("event: {event}\ndata: {body}\n\n"))
+        .collect::<String>()
+        + "data: [DONE]\n\n"
 }
 
 #[test]

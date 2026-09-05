@@ -5,7 +5,8 @@
 [`AgentWorkController`](agent-work-execution.md) now drives this session on the
 existing runtime worker, with the real browser-context, supervisor, audit and
 lifecycle authorities. `TerraTextOnlyController` remains a legacy adapter;
-desktop Work admission and persistence are not yet wired to the new actor.
+the opt-in [macOS composition](agent-work-composition.md) now connects the actor
+to real shell admission, native context ownership and durable terminal facts.
 
 The session removes the diagnostic two-action control flow: one owned policy
 and transport can process up to eight provider turns and eight native actions.
@@ -13,6 +14,16 @@ Each act turn contains exactly one action. Locate uses the existing bounded
 Rust semantic matcher, and an action continuation requires the functional
 core's independently verified, policy-accounted result and exact baseline diff.
 There is no automatic action retry or successful continuation after a refusal.
+
+Snapshot actions require at least 2,000 ms of total native dispatch, settlement
+and adjacent-observation allowance, both in the provider schema and independently
+before Rust policy/native dispatch. This is not a minimum wait: immediate/quiet
+settlement still proceeds as soon as ready. The existing 30 s ceiling, run
+deadline and exact postcondition remain unchanged. A controlled accepted-build
+comparison exposed 1,000 ms budgets expiring during fresh native capture; no
+dispatched deadline is extended and native throttling is not disabled. The
+driver retains the exact typed verifier refusal as well as the original charged
+failed-effect owner. See the M6 record for the comparison and qualification.
 
 ## Host contract
 
@@ -56,6 +67,14 @@ it deliberately does not manufacture an `AgentRunMetricClosure` or a durable
 audit acknowledgement.
 
 ## Current limits
+
+An explicit trusted extraction task can instead select the initial-scope,
+extract-only path. `extract` consumes the same session's provider continuation,
+charges a purpose-bound mapping call and returns validated, cited model-mapped
+data. It does not turn model text into a native effect or completion proof.
+The actor and application gate the one-shot result on their original closure
+and durable terminal ACK. See [Work results](agent-work-results.md) for bounds,
+trust and the memory-only delivery limitation.
 
 - Snapshot-verifiable actions only. Navigation, dialog and scroll evidence
   require distinct host adapters and are explicitly refused.

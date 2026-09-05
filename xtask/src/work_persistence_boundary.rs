@@ -84,13 +84,17 @@ fn validate_application(source: &str) -> Result<(), String> {
         "PendingAgentRuntime::spawn_suspended_with_controller(",
         "pending.bind_browser_port(browser).into_parts()",
         "std::ptr::addr_eq(Arc::as_ptr(&run.audit), Arc::as_ptr(&self.journal))",
-        "AgentWorkJournalMutation::completed(record, *policy, native)",
+        "AgentWorkJournalMutation::completed(record, policy.policy_settlement(), native)",
         "self.unstarted = handle.take_outcome()",
         "recovery.settle_audit_reconciliation(settlement)",
         "flight.reconciliations < 4",
         "self.audit_attempts >= 4",
         "AgentWorkDisposition::FreshAdmissionRequired",
         "active.runtime.stop_and_seal(reason)",
+        "projection.snapshot.phase != AgentWorkApplicationPhase::Succeeded",
+        "projection.extraction.take()",
+        "if record.disposition() == AgentWorkDisposition::Succeeded",
+        "lock(&self.projection).extraction = success.take_extraction()",
     ] {
         if !source.contains(required) {
             return Err(format!(
@@ -167,5 +171,12 @@ mod tests {
         assert!(
             validate_application(&source.replace("flight.reconciliations < 4", "true")).is_err()
         );
+        for boundary in [
+            "projection.snapshot.phase != AgentWorkApplicationPhase::Succeeded",
+            "if record.disposition() == AgentWorkDisposition::Succeeded",
+            "lock(&self.projection).extraction = success.take_extraction()",
+        ] {
+            assert!(validate_application(&source.replace(boundary, "removed_boundary")).is_err());
+        }
     }
 }
