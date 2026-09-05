@@ -112,6 +112,9 @@ impl PreparedAgentWork {
         ports: AgentWorkApplicationPorts,
     ) -> Result<Self, AgentWorkFailure> {
         let deadline = controller.deadline()?;
+        if deadline <= Instant::now() {
+            return Err(AgentWorkFailure::Deadline);
+        }
         let run = controller.run_identity()?;
         Ok(Self {
             engine: ports.engine,

@@ -23,6 +23,14 @@ pub enum WorkAdmissionFailure {
     Unavailable,
     /// Trusted input did not meet the existing controller contract.
     Contract(zephium_work_composition::AgentWorkFailure),
+    /// Attachment was not queued. Both original non-executing owners remain
+    /// available for an explicit attachment/admission retry, without preparation.
+    AttachmentMailbox {
+        /// Original prepared task and deferred native factory.
+        prepared: Box<PreparedAgentWork>,
+        /// Exact engine/Store owners needed to retry attachment.
+        composition: MacosWorkComposition,
+    },
     /// The exact prepared input remains owned after shell mailbox refusal.
     Mailbox {
         /// Original non-executing prepared owner.
@@ -40,6 +48,9 @@ impl std::fmt::Debug for WorkAdmissionFailure {
                 .debug_tuple("WorkAdmissionFailure::Contract")
                 .field(error)
                 .finish(),
+            Self::AttachmentMailbox { .. } => {
+                f.write_str("WorkAdmissionFailure::AttachmentMailbox([owned])")
+            }
             Self::Mailbox { .. } => f.write_str("WorkAdmissionFailure::Mailbox([owned])"),
         }
     }
@@ -57,18 +68,23 @@ pub fn admit_trusted_work(
     let state = app
         .try_state::<WorkCompositionState>()
         .ok_or(WorkAdmissionFailure::Unavailable)?;
-    let composition = state
-        .0
-        .lock()
-        .map_err(|_| WorkAdmissionFailure::Unavailable)?
-        .take()
-        .ok_or(WorkAdmissionFailure::Unavailable)?;
-    let view = composition
-        .attach(&shell.callback_handle())
-        .ok_or(WorkAdmissionFailure::Unavailable)?;
-    let prepared = composition
-        .prepare(request)
-        .map_err(WorkAdmissionFailure::Contract)?;
+    let (composition, prepared) = prepare_owned(
+        &mut *state
+            .0
+            .lock()
+            .map_err(|_| WorkAdmissionFailure::Unavailable)?,
+        |composition| composition.prepare(request),
+    )
+    .map_err(|error| match error {
+        PreparationFailure::Unavailable => WorkAdmissionFailure::Unavailable,
+        PreparationFailure::Contract(error) => WorkAdmissionFailure::Contract(error),
+    })?;
+    let Some(view) = composition.attach(&shell.callback_handle()) else {
+        return Err(WorkAdmissionFailure::AttachmentMailbox {
+            prepared: Box::new(prepared),
+            composition,
+        });
+    };
     if let Err(prepared) = view.admit(prepared) {
         return Err(WorkAdmissionFailure::Mailbox {
             prepared,
@@ -76,4 +92,58 @@ pub fn admit_trusted_work(
         });
     }
     Ok(view)
+}
+
+enum PreparationFailure<E> {
+    Unavailable,
+    Contract(E),
+}
+
+/// The only slot transition: validation completes before taking the owner.
+/// This has no shell/Store access and is called under the admission mutex.
+fn prepare_owned<C, P, E>(
+    slot: &mut Option<C>,
+    prepare: impl FnOnce(&C) -> Result<P, E>,
+) -> Result<(C, P), PreparationFailure<E>> {
+    let composition = slot.as_ref().ok_or(PreparationFailure::Unavailable)?;
+    let prepared = prepare(composition).map_err(PreparationFailure::Contract)?;
+    let composition = slot.take().ok_or(PreparationFailure::Unavailable)?;
+    Ok((composition, prepared))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_preparation_preserves_the_exact_slot_for_later_valid_admission() {
+        let identity = Arc::new(());
+        let mut slot = Some(identity.clone());
+        let mut attachments = 0;
+        let invalid = prepare_owned(&mut slot, |_| Err::<(), _>("stale"));
+        if invalid.is_ok() {
+            attachments += 1;
+        }
+        assert!(matches!(
+            invalid,
+            Err(PreparationFailure::Contract("stale"))
+        ));
+        assert!(Arc::ptr_eq(slot.as_ref().unwrap(), &identity));
+        assert_eq!(attachments, 0);
+
+        let prepared = Box::new(7);
+        let exact = std::ptr::from_ref(prepared.as_ref());
+        let Ok((owner, prepared)) = prepare_owned(&mut slot, |_| Ok::<_, ()>(prepared)) else {
+            panic!("valid preparation must retain admission");
+        };
+        attachments += 1;
+        assert!(Arc::ptr_eq(&owner, &identity));
+        assert_eq!(std::ptr::from_ref(prepared.as_ref()), exact);
+        assert!(slot.is_none());
+        assert_eq!(attachments, 1);
+        assert!(matches!(
+            prepare_owned(&mut slot, |_| -> Result<(), ()> { panic!("consumed slot") }),
+            Err(PreparationFailure::Unavailable)
+        ));
+    }
 }

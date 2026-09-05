@@ -61,10 +61,11 @@ impl MacosWorkComposition {
         shell.attach_work(self.store.clone(), self.engine.clone())
     }
 
-    /// Consumes the factory once; actual port acquisition remains deferred
-    /// until the application's two durable admission acknowledgements.
+    /// Validates without consuming this composition or attaching the journal.
+    /// The returned factory still acquires the sealed port only after both
+    /// durable admission acknowledgements. Clones retain exact owner identity.
     pub fn prepare(
-        self,
+        &self,
         request: TrustedWorkRequest,
     ) -> Result<PreparedAgentWork, AgentWorkFailure> {
         PreparedAgentWork::try_new(
@@ -72,16 +73,17 @@ impl MacosWorkComposition {
             request.config,
             request.credential,
             request.task,
-            self.into_ports(),
+            self.ports(),
         )
     }
 
-    pub(crate) fn into_ports(self) -> AgentWorkApplicationPorts {
+    pub(crate) fn ports(&self) -> AgentWorkApplicationPorts {
+        let engine = self.engine.clone();
         AgentWorkApplicationPorts::new(
-            self.engine.clone(),
-            self.store,
+            engine.clone(),
+            self.store.clone(),
             Box::new(move |sink| {
-                self.engine.take_agent_browser_port(move |event| {
+                engine.take_agent_browser_port(move |event| {
                     let _ = sink.publish(event);
                 })
             }),

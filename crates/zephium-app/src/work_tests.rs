@@ -48,6 +48,10 @@ impl AgentWorkTask for Task {
 }
 
 fn input() -> AgentWorkRunInput {
+    input_with_deadline(Instant::now() + Duration::from_secs(10))
+}
+
+fn input_with_deadline(deadline: Instant) -> AgentWorkRunInput {
     let profile = 1_u128.into();
     let context = ContextIdentity::new(
         ContextId::generate(),
@@ -112,7 +116,7 @@ fn input() -> AgentWorkRunInput {
             AgentBrowserModel::Luna,
             ids,
             Arc::new(Clock(AtomicU64::new(2))),
-            Instant::now() + Duration::from_secs(10),
+            deadline,
         ),
     )
     .unwrap()
@@ -1088,4 +1092,50 @@ fn mismatched_durable_and_audit_owners_are_refused_before_runtime_creation() {
         assert_eq!(factories.load(Ordering::Acquire), 0);
         assert!(lock(&journal.pending).is_empty());
     }
+}
+
+#[test]
+fn expired_preparation_never_claims_journal_or_native_and_fresh_preparation_survives() {
+    let journal = Arc::new(Journal::default());
+    let factories = Arc::new(AtomicUsize::new(0));
+    let factory_calls = factories.clone();
+    let deadline = Instant::now() + Duration::from_millis(100);
+    let stale = input_with_deadline(deadline);
+    std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+    let rejected = PreparedAgentWork::try_new(
+        stale,
+        AgentWorkApplicationConfig::new(
+            AgentRuntimeConfig::STANDARD,
+            AgentProviderTransportConfig::STANDARD,
+        ),
+        AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "synthetic-not-a-secret".into(),
+        )
+        .unwrap(),
+        Box::new(Task),
+        AgentWorkApplicationPorts::new(
+            fixture_engine(),
+            journal.clone(),
+            Box::new(move |_| {
+                factory_calls.fetch_add(1, Ordering::AcqRel);
+                None
+            }),
+        ),
+    );
+    assert!(matches!(rejected, Err(AgentWorkFailure::Deadline)));
+    assert_eq!(factories.load(Ordering::Acquire), 0);
+    assert!(lock(&journal.pending).is_empty());
+    let fresh = prepared(
+        journal.clone(),
+        Fault::None,
+        Arc::new(Mutex::new(Vec::new())),
+        factories.clone(),
+    );
+    assert!(Arc::ptr_eq(
+        &fresh.engine,
+        &(fixture_engine() as crate::SharedEngine)
+    ));
+    assert_eq!(factories.load(Ordering::Acquire), 0);
+    assert!(lock(&journal.pending).is_empty());
 }

@@ -21,7 +21,12 @@ credential and `AgentWorkTask`. The trusted task supplies both task-level
 completion and independent effect/account assessment. There is no default task
 and no interpretation of model text as product authority.
 
-Admission consumes the desktop composition once. Attachment binds the ordinary
+Preparation first borrows the exact engine/Store owners under the desktop
+admission mutex, without attachment, persistence claim or native acquisition.
+It rechecks the original absolute deadline. Validation failure leaves the
+desktop slot intact for a new valid request; no restart or recreated native
+authority is required. Only successful preparation consumes the slot.
+Attachment then binds the ordinary
 shell's exact engine and Store owners; preparation binds that same engine and
 Store's audit port. The shell checks both allocation identities, then checks
 the prepared owner again. A different engine or Store fails before any native
@@ -33,8 +38,10 @@ The deferred `FnOnce` factory calls the actual
 durable `Admitted` and `Running` acknowledgements. No ordinary tab is supplied,
 and no sealed port is reopened. Native events enter the existing bounded
 runtime event sink; publication failure remains runtime recovery debt.
-Mailbox admission refusal returns the original prepared owner and exact
-application handle, not a recreated task or native factory.
+Attachment-mailbox refusal returns the original prepared owner and exact
+composition, allowing an explicit attachment retry without preparing again.
+Admission-mailbox refusal returns the original prepared owner and exact
+application handle. Neither recreates the task or native factory.
 
 The application's existing incarnation fence, immutable terminal CAS,
 cancellation, audit reconciliation, worker join and shutdown proofs remain the

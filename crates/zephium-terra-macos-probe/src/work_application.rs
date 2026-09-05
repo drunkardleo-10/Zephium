@@ -82,12 +82,12 @@ pub(super) fn run() -> Result<(), super::ProbeFailure> {
         )
         .map_err(|_| "application_shell_spawn")?;
         let composition = MacosWorkComposition::new(engine, store);
-        let view = composition
-            .attach(&shell.callback_handle())
-            .ok_or("application_attach")?;
         let prepared = composition
             .prepare_public_qualification(request)
             .map_err(|_| "application_prepare")?;
+        let view = composition
+            .attach(&shell.callback_handle())
+            .ok_or("application_attach")?;
         view.admit(prepared).map_err(|_| "application_admit")?;
         if !shell.admit_startup() {
             return Err("application_startup");

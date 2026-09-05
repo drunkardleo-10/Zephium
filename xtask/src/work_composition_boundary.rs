@@ -45,6 +45,20 @@ fn production(source: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn preparation_precedes_attachment(source: &str) -> Result<(), String> {
+    let source = compact(source);
+    let prepared = source
+        .find("let(composition,prepared)=prepare_owned(")
+        .ok_or("desktop lost preparation-before-consumption")?;
+    let attached = source
+        .find("composition.attach(&shell.callback_handle())")
+        .ok_or("desktop lost exact attachment")?;
+    if prepared >= attached {
+        return Err("desktop attachment precedes successful preparation".into());
+    }
+    Ok(())
+}
+
 pub(crate) fn check(root: &Path) -> Result<(), String> {
     let read = |path: &str| {
         fs::read_to_string(root.join(path))
@@ -59,10 +73,10 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
             "store: Arc<SqliteStore>",
             "task: Box<dyn AgentWorkTask>",
             "shell.attach_work(self.store.clone(), self.engine.clone())",
-            "pub fn prepare(self, request: TrustedWorkRequest",
+            "pub fn prepare(&self, request: TrustedWorkRequest",
             "PreparedAgentWork::try_new(",
-            "AgentWorkApplicationPorts::new(self.engine.clone(), self.store, Box::new(move |sink|",
-            "self.engine.take_agent_browser_port(move |event|",
+            "AgentWorkApplicationPorts::new(engine.clone(), self.store.clone(), Box::new(move |sink|",
+            "engine.take_agent_browser_port(move |event|",
         ],
     )?;
     if native.matches("take_agent_browser_port(").count() != 1 {
@@ -78,8 +92,11 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
             "composition.prepare(request)",
             "view.admit(prepared)",
             "Mailbox { prepared, handle: view, }",
+            "AttachmentMailbox { prepared: Box::new(prepared), composition, }",
+            "let prepared = prepare(composition).map_err(PreparationFailure::Contract)?; let composition = slot.take()",
         ],
     )?;
+    preparation_precedes_attachment(&desktop)?;
     require(&read("desktop/src/lib.rs")?, &["#[cfg(feature = \"macos-work\")] mod work;", "#[cfg(feature = \"macos-work\")] if !work::install(app.handle(), engine.clone(), store.clone())"])?;
     require(&read("desktop/Cargo.toml")?, &["macos-work = [\"dep:zephium-work-composition\", \"zephium-work-composition/macos-work\"]", "zephium-work-composition = { workspace = true, optional = true }"])?;
     let manifest = read("crates/zephium-work-composition/Cargo.toml")?;
@@ -116,6 +133,7 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
             "#[cfg(feature = \"work-execution-probe\")] #[path = \"work_probe.rs\"] mod probe;",
             "!Arc::ptr_eq(&run.engine, &self.engine)",
             "Arc::ptr_eq(&self.engine, engine)",
+            "if deadline <= Instant::now() { return Err(AgentWorkFailure::Deadline); }",
         ],
     )?;
     require(
@@ -182,5 +200,15 @@ mod tests {
     #[test]
     fn actual_composition_identity_feature_and_qualification_gates_are_present() {
         check(&Path::new(env!("CARGO_MANIFEST_DIR")).join("..")).unwrap();
+    }
+    #[test]
+    fn attachment_before_validation_is_rejected_by_the_architecture_gate() {
+        let source = include_str!("../../desktop/src/work.rs");
+        preparation_precedes_attachment(source).unwrap();
+        assert!(preparation_precedes_attachment(&format!(
+            "composition.attach(&shell.callback_handle());\n{source}"
+        ))
+        .is_err());
+        assert!(preparation_precedes_attachment("").is_err());
     }
 }

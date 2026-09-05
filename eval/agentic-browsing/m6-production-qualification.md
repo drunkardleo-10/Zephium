@@ -937,6 +937,19 @@ these authorized public runs retain provider logs. No credentials, objectives,
 page/provider contents, profiles or raw traces are committed. These small
 repeats are not a latency benchmark, production readiness or battery claim.
 
+Acceptance follow-up: desktop preparation now precedes attachment/claim and
+slot consumption. Invalid or expired preparation preserves later valid
+admission; a fresh absolute-deadline check occurs before attachment. Attachment
+mailbox refusal retains the original prepared owner and composition, while
+admission mailbox refusal retains the prepared owner and exact handle. A
+deterministic slot-ordering regression, real stale-preparation/no-native/no-claim
+fixture and adversarial source-order gate cover this change. The live figures
+above remain evidence for the preceding build; this ordering correction does
+not claim a new provider run. Follow-up validation passes 336 application tests,
+171 xtask tests, the focused desktop admission regression, strict
+desktop/composition/application/xtask Clippy, optimized desktop feature/default
+builds and the same source/dependency boundaries.
+
 ## Remaining release blockers
 
 - authorized named-device macOS native-input routes beyond fixed DOM;

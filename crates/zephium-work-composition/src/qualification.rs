@@ -7,7 +7,7 @@ impl MacosWorkComposition {
     /// Explicit excluded public qualifier; never accepts private/BYOK task data.
     #[doc(hidden)]
     pub fn prepare_public_qualification(
-        self,
+        &self,
         request: TrustedWorkRequest,
     ) -> Result<PreparedAgentWork, AgentWorkFailure> {
         PreparedAgentWork::try_new_for_public_probe(
@@ -15,7 +15,7 @@ impl MacosWorkComposition {
             request.config,
             request.credential,
             request.task,
-            self.into_ports(),
+            self.ports(),
         )
     }
 }
