@@ -17,6 +17,7 @@ const NAVIGATION_POLICY: &str = "crates/zephium-agentic/src/agent_policy/navigat
 const RUN_MANIFEST: &str = "crates/zephium-agentic/src/agent_manifest.rs";
 const READ: &str = "crates/zephium-agentic/src/semantic_read.rs";
 const CONTINUATION: &str = "crates/zephium-agentic/src/agent_provider/continuation.rs";
+const PROVIDER_REQUEST: &str = "crates/zephium-agentic/src/agent_provider/request.rs";
 const POLICY: &str = "crates/zephium-agentic/src/agent_policy.rs";
 const QUALIFIER: &str = "crates/zephium-terra-macos-probe/src/main.rs";
 const WORK_QUALIFIER: &str = "crates/zephium-terra-macos-probe/src/work_actor.rs";
@@ -70,6 +71,11 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(CONTINUATION))?,
     )?;
     validate_navigation_route_contract(&read(repository.join(RUN_MANIFEST))?)?;
+    validate_navigation_progress(
+        &read(repository.join(NAVIGATION_POLICY))?,
+        &read(repository.join(CONTINUATION))?,
+        &read(repository.join(PROVIDER_REQUEST))?,
+    )?;
     validate_scoped_extraction(
         &read(repository.join(READ))?,
         &read(repository.join(CONTINUATION))?,
@@ -265,6 +271,71 @@ fn validate_navigation_route_contract(source: &str) -> Result<(), String> {
                 "finite navigation route lost immutable boundary: {required}"
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_navigation_progress(
+    policy: &str,
+    continuation: &str,
+    request: &str,
+) -> Result<(), String> {
+    for (source, required) in [
+        (policy, &[
+            "pub(crate) struct AgentNavigationCheckpointBinding",
+            "checkpoint.binding == binding", "receipt.hop != hop",
+            "receipt.target_guard != target_guard(&route.destinations()[hop])",
+            "receipt.settlement != AgentNavigationSettlement::Committed",
+            "receipt.operation.context() != context",
+        ][..]),
+        (continuation, &[
+            "navigation_checkpoint: Option<super::request::AgentProviderNavigationContext>",
+            "checkpoint.text.len() > super::request::MAX_AGENT_PROVIDER_NAVIGATION_CHECKPOINT_BYTES",
+            "policy.validate_provider_navigation_checkpoint(request, checkpoint.binding)",
+        ][..]),
+        (request, &[
+            "struct AgentProviderNavigationContext", "ZEPHIUM_HOST_NAVIGATION_CHECKPOINT_V1",
+            "target.is_some_and(looks_like_secret_value)",
+            "checkpoint.binding()", "openai_text_message(\"developer\", checkpoint)",
+        ][..]),
+    ] {
+        for boundary in required {
+            let compact = |text: &str| text.split_whitespace().collect::<String>();
+            if !compact(source).contains(&compact(boundary)) {
+                return Err(format!("trusted navigation progress lost boundary: {boundary}"));
+            }
+        }
+    }
+    if request
+        .matches(".validate_navigation_checkpoint(policy, call_request)?;")
+        .count()
+        != 8
+        || request
+            .matches("policy.reject_unstructured_navigation_input(call_request)?;")
+            .count()
+            != 6
+    {
+        return Err(
+            "navigation progress can be omitted, replayed or undercounted by a provider path"
+                .into(),
+        );
+    }
+    let initial = request
+        .split("pub fn try_openai_for_provider_exact_count(")
+        .nth(1)
+        .and_then(|source| source.split("pub fn try_anthropic(").next())
+        .ok_or("navigation progress lost whole-input observation builder")?;
+    let projection = initial
+        .find(".provider_navigation_checkpoint(call_request, observation)?")
+        .ok_or("missing policy projection")?;
+    let encoding = initial
+        .find("encode_openai_observation_body(")
+        .ok_or("missing checkpoint encoding")?;
+    let admission = initial
+        .find("policy.prepare_provider_observation_input(")
+        .ok_or("missing whole-input admission")?;
+    if !(projection < encoding && encoding < admission) {
+        return Err("navigation progress serialized after policy reservation".into());
     }
     Ok(())
 }
@@ -890,8 +961,8 @@ fn validate_work_actor_qualifier(source: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        validate_account_refresh, validate_navigation, validate_navigation_route_contract,
-        validate_scoped_extraction,
+        validate_account_refresh, validate_navigation, validate_navigation_progress,
+        validate_navigation_route_contract, validate_scoped_extraction,
     };
     use super::{
         validate_action, validate_form, validate_manifest, validate_probe, validate_root,
@@ -907,6 +978,8 @@ mod tests {
     const READ: &str = include_str!("../../crates/zephium-agentic/src/semantic_read.rs");
     const CONTINUATION: &str =
         include_str!("../../crates/zephium-agentic/src/agent_provider/continuation.rs");
+    const PROVIDER_REQUEST: &str =
+        include_str!("../../crates/zephium-agentic/src/agent_provider/request.rs");
     const POLICY: &str = include_str!("../../crates/zephium-agentic/src/agent_policy.rs");
     const RUN_MANIFEST: &str = include_str!("../../crates/zephium-agentic/src/agent_manifest.rs");
     const QUALIFIER: &str = include_str!("../../crates/zephium-terra-macos-probe/src/main.rs");
@@ -917,6 +990,32 @@ mod tests {
         include_str!("../../crates/zephium-agent-controller/src/work_navigation.rs");
     const NAVIGATION_POLICY: &str =
         include_str!("../../crates/zephium-agentic/src/agent_policy/navigation.rs");
+
+    #[test]
+    fn navigation_progress_cannot_lose_trust_replay_or_whole_input_admission() {
+        validate_navigation_progress(NAVIGATION_POLICY, CONTINUATION, PROVIDER_REQUEST).unwrap();
+        for boundary in ["receipt.hop != hop", "checkpoint.binding == binding"] {
+            assert!(validate_navigation_progress(
+                &NAVIGATION_POLICY.replace(boundary, "removed"),
+                CONTINUATION,
+                PROVIDER_REQUEST
+            )
+            .is_err());
+        }
+        for boundary in [
+            ".validate_navigation_checkpoint(policy, call_request)?;",
+            "policy.reject_unstructured_navigation_input(call_request)?;",
+            "openai_text_message(\"developer\", checkpoint)",
+            "target.is_some_and(looks_like_secret_value)",
+        ] {
+            assert!(validate_navigation_progress(
+                NAVIGATION_POLICY,
+                CONTINUATION,
+                &PROVIDER_REQUEST.replacen(boundary, "removed", 1)
+            )
+            .is_err());
+        }
+    }
 
     #[test]
     fn current_controller_boundary_is_valid() {

@@ -29,6 +29,7 @@ pub use navigation::{
     AgentActiveNavigation, AgentNavigationAuthorizationRequest, AgentNavigationPermit,
     AgentNavigationProgressId, AgentNavigationReceipt, AgentNavigationSettlement,
 };
+pub(crate) use navigation::{AgentNavigationCheckpoint, AgentNavigationCheckpointBinding};
 
 use crate::semantic_diff::SemanticObservationFingerprint;
 use crate::semantic_diff_model::SemanticDiffDeliveryAuthority;

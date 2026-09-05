@@ -52,14 +52,17 @@ const _: () = {
     assert!(MAX_AGENT_PROVIDER_CONTINUATION_TURNS > 0);
 };
 
-/// Private structured initial user turn retained only for stateless replay.
+/// Private structured initial inputs retained only for stateless replay.
 ///
 /// The objective allocation is shared with the run-owned admitted objective;
 /// the semantic allocation is moved from the admitted payload after request
 /// serialization. This value is never cloneable, logged, or persisted.
+/// Optional host progress is retained with its exact private policy binding;
+/// it is neither page evidence nor a caller-editable continuation instruction.
 pub(super) struct AgentProviderTranscript {
     objective: Arc<str>,
     initial_observation: String,
+    navigation_checkpoint: Option<super::request::AgentProviderNavigationContext>,
     turns: Vec<AgentProviderTranscriptTurn>,
     retained_bytes: usize,
 }
@@ -83,18 +86,38 @@ pub(super) struct AgentProviderBoundTranscript {
 
 impl AgentProviderTranscript {
     pub(super) fn try_initial(objective: Arc<str>, initial_observation: String) -> Option<Self> {
+        Self::try_initial_with_navigation_checkpoint(objective, initial_observation, None)
+    }
+
+    pub(super) fn try_initial_with_navigation_checkpoint(
+        objective: Arc<str>,
+        initial_observation: String,
+        navigation_checkpoint: Option<super::request::AgentProviderNavigationContext>,
+    ) -> Option<Self> {
         if objective.len() > super::MAX_AGENT_PROVIDER_OBJECTIVE_BYTES
             || initial_observation.len() > MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES
+            || navigation_checkpoint.as_ref().is_some_and(|checkpoint| {
+                checkpoint.text.len()
+                    > super::request::MAX_AGENT_PROVIDER_NAVIGATION_CHECKPOINT_BYTES
+            })
         {
             return None;
         }
-        let retained_bytes = objective.len().checked_add(initial_observation.len())?;
+        let retained_bytes = objective
+            .len()
+            .checked_add(initial_observation.len())?
+            .checked_add(
+                navigation_checkpoint
+                    .as_ref()
+                    .map_or(0, |checkpoint| checkpoint.text.len()),
+            )?;
         if retained_bytes > MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES {
             return None;
         }
         Some(Self {
             objective,
             initial_observation,
+            navigation_checkpoint,
             turns: Vec::new(),
             retained_bytes,
         })
@@ -152,6 +175,25 @@ impl AgentProviderTranscript {
         &self.initial_observation
     }
 
+    pub(super) fn navigation_checkpoint(&self) -> Option<&str> {
+        self.navigation_checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.text.as_str())
+    }
+
+    pub(super) fn validate_navigation_checkpoint(
+        &self,
+        policy: &crate::AgentRunPolicy,
+        request: crate::AgentModelCallRequest,
+    ) -> Result<(), crate::AgentPolicyError> {
+        match &self.navigation_checkpoint {
+            Some(checkpoint) => {
+                policy.validate_provider_navigation_checkpoint(request, checkpoint.binding)
+            }
+            None => policy.reject_unstructured_navigation_input(request),
+        }
+    }
+
     pub(super) fn turns(&self) -> &[AgentProviderTranscriptTurn] {
         &self.turns
     }
@@ -168,6 +210,10 @@ impl AgentProviderBoundTranscript {
 
     pub(super) fn initial_observation(&self) -> &str {
         self.prior.initial_observation()
+    }
+
+    pub(super) fn navigation_checkpoint(&self) -> Option<&str> {
+        self.prior.navigation_checkpoint()
     }
 
     pub(super) fn turns(&self) -> impl Iterator<Item = &AgentProviderTranscriptTurn> {

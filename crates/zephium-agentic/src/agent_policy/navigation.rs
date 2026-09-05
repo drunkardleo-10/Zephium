@@ -239,6 +239,129 @@ impl fmt::Debug for AgentNavigationReceipt {
 }
 
 impl AgentRunPolicy {
+    pub(crate) fn reject_unstructured_navigation_input(
+        &self,
+        request: AgentModelCallRequest,
+    ) -> Result<(), AgentPolicyError> {
+        let lease = self
+            .lease_index(request.lease())
+            .ok_or(AgentPolicyError::Lease)?;
+        let node = self
+            .manifest
+            .plan_node(self.leases[lease].binding.node())
+            .ok_or(AgentPolicyError::Invariant)?;
+        if node.navigation_route().is_some() {
+            return Err(AgentPolicyError::Navigation);
+        }
+        Ok(())
+    }
+
+    /// Read-only host progress derived from the original route and exact native
+    /// terminal prefix. This is descriptive model context, never a permit.
+    /// No caller-provided phase, page string or historical transcript enters it.
+    pub(crate) fn provider_navigation_checkpoint(
+        &self,
+        request: AgentModelCallRequest,
+        observation: &SemanticObservation,
+    ) -> Result<Option<AgentNavigationCheckpoint<'_>>, AgentPolicyError> {
+        self.navigation_checkpoint_for_context(request, observation.request().context())
+    }
+
+    pub(crate) fn validate_provider_navigation_checkpoint(
+        &self,
+        request: AgentModelCallRequest,
+        binding: AgentNavigationCheckpointBinding,
+    ) -> Result<(), AgentPolicyError> {
+        if self
+            .navigation_checkpoint_for_context(request, request.account().context())?
+            .is_some_and(|checkpoint| checkpoint.binding == binding)
+        {
+            Ok(())
+        } else {
+            Err(AgentPolicyError::Navigation)
+        }
+    }
+
+    fn navigation_checkpoint_for_context(
+        &self,
+        request: AgentModelCallRequest,
+        context: ContextJoin,
+    ) -> Result<Option<AgentNavigationCheckpoint<'_>>, AgentPolicyError> {
+        let lease = self
+            .lease_index(request.lease())
+            .ok_or(AgentPolicyError::Lease)?;
+        let node_id = self.leases[lease].binding.node();
+        let node = self
+            .manifest
+            .plan_node(node_id)
+            .ok_or(AgentPolicyError::Invariant)?;
+        let Some(route) = node.navigation_route() else {
+            return Ok(None);
+        };
+        let completed = self.navigation_attempts;
+        if self.navigation.is_some()
+            || completed > route.destinations().len()
+            || self.navigation_receipts.iter().flatten().count() != completed
+            || request.account().context() != context
+        {
+            return Err(AgentPolicyError::Navigation);
+        }
+        validate_time(
+            &self.manifest,
+            node.expires_at(),
+            request.account(),
+            request.now(),
+        )?;
+        for (hop, receipt) in self.navigation_receipts.iter().enumerate() {
+            if hop >= completed {
+                if receipt.is_some() {
+                    return Err(AgentPolicyError::Navigation);
+                }
+                continue;
+            }
+            let receipt = receipt.ok_or(AgentPolicyError::Navigation)?;
+            if receipt.hop != hop
+                || !receipt.matches_manifest_revision(self.manifest.id(), self.manifest.guard())
+                || receipt.lease != request.lease()
+                || receipt.node != node_id
+                || receipt.target_guard != target_guard(&route.destinations()[hop])
+                || receipt.settlement != AgentNavigationSettlement::Committed
+                || receipt.account != request.account().account()
+                || receipt.settled_at > request.account().observed_at()
+                || !is_document_successor(receipt.source, receipt.operation.context())
+            {
+                return Err(AgentPolicyError::Navigation);
+            }
+            if hop > 0 {
+                let prior =
+                    self.navigation_receipts[hop - 1].ok_or(AgentPolicyError::Navigation)?;
+                if receipt.source != prior.operation.context()
+                    || receipt.settled_at < prior.settled_at
+                {
+                    return Err(AgentPolicyError::Navigation);
+                }
+            }
+            if hop + 1 == completed && receipt.operation.context() != context {
+                return Err(AgentPolicyError::Navigation);
+            }
+        }
+        Ok(Some(AgentNavigationCheckpoint {
+            binding: AgentNavigationCheckpointBinding {
+                manifest_guard: self.manifest.guard(),
+                lease: request.lease(),
+                node: node_id,
+                context,
+                account: request.account().account(),
+                terminals: self
+                    .navigation_receipts
+                    .map(|receipt| receipt.map(AgentNavigationReceipt::progress_id)),
+            },
+            completed_hops: completed,
+            total_hops: route.destinations().len(),
+            next_target: route.destinations().get(completed),
+        }))
+    }
+
     /// Reserves the run's one exact same-origin navigation. The caller must also
     /// prove the frozen task destination and exact settled Navigate proposal.
     /// This admits no redirects, history operation or semantic action.
@@ -504,6 +627,42 @@ impl AgentRunPolicy {
     pub fn pending_navigations(&self) -> usize {
         usize::from(self.navigation.is_some())
     }
+}
+
+/// Private policy-owned projection. Its lifetime borrows the immutable route;
+/// it cannot be supplied by a task, provider response or page observation.
+pub(crate) struct AgentNavigationCheckpoint<'a> {
+    binding: AgentNavigationCheckpointBinding,
+    completed_hops: usize,
+    total_hops: usize,
+    next_target: Option<&'a ContextNavigationTarget>,
+}
+
+impl AgentNavigationCheckpoint<'_> {
+    pub(crate) const fn binding(&self) -> AgentNavigationCheckpointBinding {
+        self.binding
+    }
+    pub(crate) const fn completed_hops(&self) -> usize {
+        self.completed_hops
+    }
+    pub(crate) const fn total_hops(&self) -> usize {
+        self.total_hops
+    }
+    pub(crate) const fn next_target(&self) -> Option<&ContextNavigationTarget> {
+        self.next_target
+    }
+}
+
+/// Content-free exact owner retained beside the provider's descriptive text.
+/// Fresh account IDs may change, but document/scope/route/terminal identity may not.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct AgentNavigationCheckpointBinding {
+    manifest_guard: [u8; 32],
+    lease: AgentPlanLeaseId,
+    node: AgentPlanNodeId,
+    context: ContextJoin,
+    account: AgentAccountScope,
+    terminals: [Option<AgentNavigationProgressId>; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS],
 }
 
 pub(crate) fn is_document_successor(prior: ContextJoin, next: ContextJoin) -> bool {

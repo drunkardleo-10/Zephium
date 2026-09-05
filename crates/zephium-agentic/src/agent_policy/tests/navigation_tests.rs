@@ -2,17 +2,25 @@ use super::*;
 use crate::{ContextNavigationSettlement, ContextNavigationTarget, ContextPortFailure};
 
 fn route_fixture(operations: u32) -> (PolicyFixture, ContextRegistry, SemanticObservation) {
+    route_fixture_with_targets(operations, 10_000, vec![target(), final_target()])
+}
+
+fn route_fixture_with_targets(
+    operations: u32,
+    tokens: u64,
+    destinations: Vec<ContextNavigationTarget>,
+) -> (PolicyFixture, ContextRegistry, SemanticObservation) {
     let (mut registry, context) = make_context_registry(901, 902, 903);
     registry
         .acknowledge_observation(context.identity().id(), context)
         .unwrap();
     let source = origin("source");
     let observation = actionable_observation(context, source.clone(), 1);
-    let budget = run_budget(operations, 10_000, 10_000);
+    let budget = run_budget(operations, tokens, 10_000);
     let effects = effects(&[SemanticEffectClass::Read]);
     let route = crate::AgentNavigationRoute::try_new(
         ContextNavigationTarget::parse("https://source.example.test/start").unwrap(),
-        vec![target(), final_target()],
+        destinations,
     )
     .unwrap();
     let authority = AgentPlanNodeAuthority::try_new(
@@ -122,6 +130,469 @@ fn committed_route() -> (
         terminals.push((active, receipt));
     }
     (f, terminals)
+}
+
+#[test]
+fn provider_route_checkpoint_is_derived_from_exact_ordered_committed_receipts() {
+    for fault in 0..13 {
+        let (mut f, terminals) = committed_route();
+        let source = terminals[1].1.operation().context();
+        let prior = terminals[0].1.operation().context();
+        let observation =
+            actionable_observation(if fault == 6 { prior } else { source }, origin("source"), 3);
+        let binding = AgentContextAccountBinding::new(
+            AgentAccountAttestationId::generate(),
+            if matches!(fault, 6 | 7) {
+                prior
+            } else {
+                source
+            },
+            if fault == 8 {
+                AgentAccountScope::Authenticated(AgentAccountId::generate())
+            } else {
+                AgentAccountScope::Anonymous
+            },
+            AgentPolicyInstant::from_millis(if fault == 9 { NOW - 1 } else { NOW }),
+        );
+        match fault {
+            1 => f.policy.navigation_receipts.swap(0, 1),
+            2 => f.policy.navigation_receipts[0] = None,
+            3 => f.policy.navigation_receipts[1] = f.policy.navigation_receipts[0],
+            4 => f.policy.navigation_attempts = 1,
+            5 => f.policy.navigation_attempts = 3,
+            11 => f.policy.manifest = route_fixture(6).0.policy.manifest,
+            12 => {
+                f.policy.manifest =
+                    route_fixture_with_targets(5, 10_000, vec![final_target(), target()])
+                        .0
+                        .policy
+                        .manifest
+            }
+            _ => {}
+        }
+        let request = call_request(
+            3,
+            if fault == 10 {
+                AgentPlanLeaseId::generate()
+            } else {
+                f.lease
+            },
+            binding,
+            0,
+            0,
+            0,
+            NOW,
+        );
+        let result = f
+            .policy
+            .provider_navigation_checkpoint(request, &observation);
+        if fault == 0 {
+            let checkpoint = result.unwrap().unwrap();
+            assert_eq!(checkpoint.completed_hops(), 2);
+            assert_eq!(checkpoint.total_hops(), 2);
+            assert!(checkpoint.next_target().is_none());
+        } else {
+            assert!(result.is_err(), "checkpoint substitution {fault}");
+        }
+        assert_eq!(f.policy.pending_model_calls(), 0);
+        assert_eq!(f.policy.accounting().reserved_operations(), 0);
+    }
+    let (mut f, terminals) = committed_route();
+    f.policy.navigation_attempts = 1;
+    f.policy.navigation_receipts[1] = None;
+    let middle = actionable_observation(terminals[0].1.operation().context(), origin("source"), 2);
+    let checkpoint = f
+        .policy
+        .provider_navigation_checkpoint(
+            call_request(
+                3,
+                f.lease,
+                account(middle.request().context(), NOW),
+                0,
+                0,
+                0,
+                NOW,
+            ),
+            &middle,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(checkpoint.completed_hops(), 1);
+    assert_eq!(checkpoint.next_target(), Some(&final_target()));
+    let retained_middle = checkpoint.binding();
+    f.policy.navigation_attempts = 2;
+    f.policy.navigation_receipts[1] = Some(terminals[1].1);
+    let fresh = call_request(
+        3,
+        f.lease,
+        account(terminals[1].1.operation().context(), NOW),
+        0,
+        0,
+        0,
+        NOW,
+    );
+    assert!(
+        f.policy
+            .validate_provider_navigation_checkpoint(fresh, retained_middle)
+            .is_err(),
+        "current policy cannot admit a replay carrying a retired document checkpoint"
+    );
+    let (f, _, observation) = route_fixture(5);
+    let checkpoint = f
+        .policy
+        .provider_navigation_checkpoint(
+            call_request(
+                2,
+                f.lease,
+                account(observation.request().context(), NOW),
+                0,
+                0,
+                0,
+                NOW,
+            ),
+            &observation,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(checkpoint.completed_hops(), 0);
+    assert_eq!(checkpoint.next_target(), Some(&target()));
+}
+
+#[test]
+fn provider_route_checkpoint_rejects_pending_cancelled_and_failed_navigation() {
+    for fault in 0..3 {
+        let (mut f, mut registry, observation) = route_fixture(5);
+        let request = route_request(
+            &f,
+            &registry,
+            &observation,
+            account(observation.request().context(), NOW),
+        );
+        let permit = f
+            .policy
+            .authorize_navigation(request, &observation, &baseline(&observation), &target())
+            .unwrap();
+        let mut successor = None;
+        match fault {
+            0 => {} // Original reservation is still active, with no terminal.
+            1 => f.policy.cancel_navigation(permit).unwrap(),
+            2 => {
+                let operation = registry
+                    .begin_navigation(
+                        observation.request().context().identity().id(),
+                        ContextOperationId::new(2).unwrap(),
+                    )
+                    .unwrap();
+                let active = f
+                    .policy
+                    .dispatch_navigation(permit, operation, AgentPolicyInstant::from_millis(NOW))
+                    .unwrap();
+                f.policy
+                    .refuse_navigation_dispatch(
+                        &active,
+                        ContextPortFailure::NativeRefused,
+                        AgentPolicyInstant::from_millis(NOW),
+                    )
+                    .unwrap();
+                successor = Some(actionable_observation(
+                    operation.context(),
+                    origin("source"),
+                    2,
+                ));
+            }
+            _ => unreachable!(),
+        }
+        let current = successor.as_ref().unwrap_or(&observation);
+        assert!(f
+            .policy
+            .provider_navigation_checkpoint(
+                call_request(
+                    2,
+                    f.lease,
+                    account(current.request().context(), NOW),
+                    0,
+                    0,
+                    0,
+                    NOW
+                ),
+                current,
+            )
+            .is_err());
+        assert_eq!(f.policy.pending_model_calls(), 0);
+        assert_eq!(
+            f.policy.accounting().reserved_operations(),
+            u32::from(fault == 0)
+        );
+    }
+}
+
+#[test]
+fn route_provider_request_counts_trusted_checkpoint_and_refuses_unsupported_or_secret_input() {
+    for fault in 0..5 {
+        let next = if fault == 4 {
+            ContextNavigationTarget::parse(
+                "https://source.example.test/sk-abcdefghijklmnop1234567890",
+            )
+            .unwrap()
+        } else {
+            target()
+        };
+        let (mut f, _, observation) =
+            route_fixture_with_targets(5, 100_000, vec![next, final_target()]);
+        let selected = tokenizer();
+        let payload = encode_semantic_observation(
+            &observation,
+            SemanticModelEncodingBudget::INITIAL_CONSERVATIVE,
+        )
+        .unwrap()
+        .admit_conservative_utf8(&selected)
+        .unwrap();
+        let objective = AgentProviderObjective::try_admit_conservative_utf8(
+            "Complete the reviewed workflow".to_owned(),
+            &selected,
+        )
+        .unwrap();
+        let request = call_request(
+            2,
+            f.lease,
+            account(observation.request().context(), NOW),
+            if fault == 3 { 0 } else { 64_000 },
+            128,
+            1_000,
+            NOW,
+        );
+        let config = provider_exact_config(selected, 128, 64_000);
+        let result = match fault {
+            1 => AgentPreparedObservationRequest::try_openai(
+                &mut f.policy,
+                request,
+                &observation,
+                payload,
+                &objective,
+                config,
+            ),
+            2 => AgentPreparedObservationRequest::try_anthropic(
+                &mut f.policy,
+                request,
+                &observation,
+                payload,
+                &objective,
+                config,
+            ),
+            _ => AgentPreparedObservationRequest::try_openai_for_provider_exact_count(
+                &mut f.policy,
+                request,
+                &observation,
+                payload,
+                &objective,
+                config,
+            ),
+        };
+        if fault == 0 {
+            let prepared = result.unwrap();
+            let body: Value = serde_json::from_slice(prepared.request().body()).unwrap();
+            let input = body["input"].as_array().unwrap();
+            assert_eq!(input.len(), 3);
+            assert_eq!(input[0]["role"], "user");
+            assert_eq!(
+                input[0]["content"][0]["text"],
+                "Complete the reviewed workflow"
+            );
+            assert_eq!(input[1]["role"], "user");
+            assert_eq!(input[2]["role"], "developer");
+            let checkpoint = input[2]["content"][0]["text"].as_str().unwrap();
+            assert!(checkpoint.starts_with("ZEPHIUM_HOST_NAVIGATION_CHECKPOINT_V1\n"));
+            let progress: Value = serde_json::from_str(checkpoint.lines().last().unwrap()).unwrap();
+            assert_eq!(
+                progress,
+                json!({"completed_hops":0,"total_hops":2,"next_navigation_target":target().as_url().as_str()})
+            );
+            assert_eq!(
+                f.policy.accounting().reserved_model_tokens(),
+                prepared.request().body().len() as u64 + 128
+            );
+            assert!(!format!("{prepared:?}").contains("source.example.test"));
+            let count: Value = serde_json::from_slice(
+                prepared
+                    .request()
+                    .openai_input_token_request()
+                    .unwrap()
+                    .body(),
+            )
+            .unwrap();
+            assert_eq!(
+                count["input"], body["input"],
+                "the exact count includes trusted progress"
+            );
+            let retained = input[0]["content"][0]["text"].as_str().unwrap().len()
+                + input[1]["content"][0]["text"].as_str().unwrap().len()
+                + checkpoint.len();
+            let transport = prepared.into_transport_input();
+            assert_eq!(transport.continuation_transcript_bytes(), Some(retained));
+            let _ = transport.cancel(&mut f.policy).unwrap();
+        } else {
+            assert!(
+                result.is_err(),
+                "unsupported/accounting/privacy fault {fault}"
+            );
+        }
+        assert_eq!(f.policy.pending_model_calls(), 0);
+        assert_eq!(f.policy.accounting().reserved_operations(), 0);
+    }
+}
+
+#[test]
+fn route_locate_replay_revalidates_progress_before_new_policy_reservation() {
+    for fault in 0..3 {
+        let (mut f, mut registry, observation) =
+            route_fixture_with_targets(6, 100_000, vec![target(), final_target()]);
+        let selected = tokenizer();
+        let config = provider_exact_config(selected.clone(), 128, 64_000);
+        let binding = account(observation.request().context(), NOW);
+        let objective = AgentProviderObjective::try_admit_conservative_utf8(
+            "Complete the approved route".to_owned(),
+            &selected,
+        )
+        .unwrap();
+        let payload = encode_semantic_observation(
+            &observation,
+            SemanticModelEncodingBudget::INITIAL_CONSERVATIVE,
+        )
+        .unwrap()
+        .admit_conservative_utf8(&selected)
+        .unwrap();
+        let committed = AgentPreparedObservationRequest::try_openai_for_provider_exact_count(
+            &mut f.policy,
+            call_request(2, f.lease, binding, 64_000, 128, 1_000, NOW),
+            &observation,
+            payload,
+            &objective,
+            config.clone(),
+        )
+        .unwrap()
+        .into_transport_input()
+        .commit(&mut f.policy)
+        .unwrap();
+        let (initial, input, seed) = committed.into_parts();
+        let (active, evidence) = input.into_parts();
+        let baseline = evidence.observation_acknowledgement().unwrap().clone();
+        f.policy
+            .settle_model_call(active, AgentModelCallSettlement::Completed, 65, 4, 80)
+            .unwrap();
+        let arguments = r#"{"semantic_query":"save draft","scope":{"kind":"initial"}}"#;
+        let tool = crate::AgentBrowserToolCall::decode_openai(
+            initial.call(),
+            "fc_route_2".to_owned(),
+            "call_route_2".to_owned(),
+            "locate",
+            arguments.to_owned(),
+        )
+        .unwrap();
+        let completion = crate::AgentProviderCompletion::new(
+            initial.call(),
+            crate::AgentProviderStopReason::ToolCalls,
+            crate::AgentProviderUsage::try_new(65, 4, 0, 0, 0).unwrap(),
+            crate::AgentProviderStreamStats::new(200, 8, 0, 1, arguments.len() as u32),
+            true,
+        );
+        let continuation = seed
+            .unwrap()
+            .join_terminal_tool_for_test(completion, tool.into_continuation_parts_for_test().0)
+            .unwrap();
+        let frames = observation
+            .frames()
+            .iter()
+            .map(|frame| frame.frame().clone())
+            .collect::<Vec<_>>();
+        let locate = SemanticLocateRequest::bind(
+            SemanticLocateId::new(1).unwrap(),
+            &observation,
+            &baseline,
+            &frames,
+            SemanticLocateQuery::try_new("save draft".to_owned()).unwrap(),
+            SemanticLocateScope::Initial,
+            SemanticLocateBudget::STANDARD,
+        )
+        .unwrap();
+        let result = locate_semantic_observation(&observation, locate).unwrap();
+        let payload = encode_semantic_locate_result(
+            &result,
+            SemanticModelEncodingBudget::LOCATE_RESULT_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .unwrap()
+        .admit_conservative_utf8(&selected)
+        .unwrap();
+        let mut request = call_request(3, f.lease, binding, 64_000, 128, 1_000, NOW);
+        let draft = AgentProviderLocateRequestDraft::try_new(
+            continuation
+                .bind_locate_request(request, &config, &result, payload)
+                .unwrap(),
+        )
+        .unwrap();
+        if fault > 0 {
+            let auth = route_request(&f, &registry, &observation, binding);
+            let permit = f
+                .policy
+                .authorize_navigation(auth, &observation, &baseline, &target())
+                .unwrap();
+            let operation = registry
+                .begin_navigation(
+                    observation.request().context().identity().id(),
+                    ContextOperationId::new(2).unwrap(),
+                )
+                .unwrap();
+            let active = f
+                .policy
+                .dispatch_navigation(permit, operation, AgentPolicyInstant::from_millis(NOW))
+                .unwrap();
+            f.policy
+                .settle_navigation(
+                    &active,
+                    &ContextNavigationSettlement::try_new(operation, Ok(target())).unwrap(),
+                    AgentPolicyInstant::from_millis(NOW),
+                )
+                .unwrap();
+            registry
+                .settle_navigation(
+                    operation.context().identity().id(),
+                    operation,
+                    ContextSettlement::Applied,
+                )
+                .unwrap();
+            if fault == 2 {
+                request = call_request(
+                    3,
+                    f.lease,
+                    account(operation.context(), NOW),
+                    64_000,
+                    128,
+                    1_000,
+                    NOW,
+                );
+            }
+        }
+        let prepared = draft.try_prepare_for_provider_exact_count(&mut f.policy, request, &result);
+        if fault == 0 {
+            let _ = prepared
+                .unwrap()
+                .into_transport_input()
+                .cancel(&mut f.policy)
+                .unwrap();
+        } else {
+            assert!(
+                matches!(
+                    prepared,
+                    Err(crate::AgentProviderRequestError::Policy(
+                        AgentPolicyError::Navigation
+                    ))
+                ),
+                "old checkpoint cannot replay under either old or successor account context"
+            );
+        }
+        assert_eq!(f.policy.pending_model_calls(), 0);
+        assert_eq!(f.policy.accounting().reserved_operations(), 0);
+        assert_eq!(f.policy.pending_navigations(), 0);
+    }
 }
 
 #[test]

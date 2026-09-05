@@ -1188,6 +1188,32 @@ audit/clock/backpressure debt and exact original terminal closure. A real
 three-document Luna witness remains separate; this contract alone makes no
 additional live-site claim.
 
+Explicit routes also supply one bounded, host-authored provider checkpoint:
+version, completed/total hops and the exact next already-approved destination,
+or null after the final commit. The policy derives it from the immutable node
+route and its ordered committed native receipts, not task counters, model
+memory or page text. A private binding retains the manifest revision, lease,
+node, document, account scope and exact terminal identities. Every supported
+same-document continuation revalidates that binding before new input
+reservation. A fresh account sample may change its identity/time but cannot
+substitute a document, scope or receipt prefix.
+
+On the current whole-request-counted OpenAI path the checkpoint is a separate
+developer message; the original objective and untrusted semantic observation
+remain separate user items. Locate and extraction replay retain only the
+current checkpoint. Navigation retires it with the old transcript, then
+rebuilds it after the independent arrival predicate and fresh account sample.
+The checkpoint is descriptive guidance, not a permit, task-success proof or
+citable page evidence. Exact next-target equality, all task phases and policy
+guards remain mandatory even when a model ignores that guidance. The serialized
+message is included in the existing request digest, exact count projection and
+transcript/token ceilings, and rejects existing secret-shaped value patterns
+before reservation. No default/no-route wire bytes or ceilings change. Legacy
+fixed-count observation/read builders and screenshot paths refuse explicit
+routes; Anthropic also refuses routed continuation encoding until an equivalent
+trusted, completely accounted adapter is implemented. This is not a claim of
+local-model or second-provider route qualification.
+
 The release-excluded `react-route` qualifier freezes Quick Start → Your First
 Component → Importing and Exporting Components in both its manifest and task.
 The middle page requires separate exact public headings for arrival (`Your
