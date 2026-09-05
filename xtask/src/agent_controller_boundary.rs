@@ -55,6 +55,11 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_terra(&terra)?;
     validate_action(&action)?;
     validate_work(&read(repository.join(WORK))?)?;
+    validate_account_refresh(
+        &terra,
+        &read(repository.join(WORK))?,
+        &read(repository.join(POLICY))?,
+    )?;
     validate_form(&read(repository.join(FORM))?)?;
     validate_scoped_extraction(
         &read(repository.join(READ))?,
@@ -93,6 +98,8 @@ fn validate_form(source: &str) -> Result<(), String> {
         "action.fill_text() != Some(&goal.value)",
         "self.bindings.clear();",
         "self.refused = true;",
+        "self.account_sample.get()",
+        "sample.context() == context",
     ] {
         if !source.contains(required) {
             return Err(format!("trusted form contract lost boundary: {required}"));
@@ -119,6 +126,66 @@ fn validate_form(source: &str) -> Result<(), String> {
         if source.contains(forbidden) {
             return Err(format!(
                 "trusted form contract acquired extra authority or content sink: {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_account_refresh(terra: &str, work: &str, policy: &str) -> Result<(), String> {
+    let refresh = terra
+        .split("pub fn refresh_account(")
+        .nth(1)
+        .and_then(|tail| tail.split("/// Starts one session").next())
+        .ok_or("account refresh lost its owned session boundary")?;
+    for required in [
+        "self.check_live()?",
+        "self.failure = Some(error)",
+        "self.policy.accounting().reserved_operations() != 0",
+        "account.context() != self.account.context()",
+        "account.account() != self.account.account()",
+        "account.observed_at() > now",
+        "account.observed_at() < self.account.observed_at()",
+        "MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS",
+        "account != self.account",
+        "account.attestation() == self.account.attestation()",
+        "self.account_attestations.contains(&account.attestation())",
+        "self.account_attestations.len() >= MAX_BROWSER_ACCOUNT_ATTESTATIONS",
+    ] {
+        if !refresh.contains(required) {
+            return Err(format!("account refresh lost authority fence: {required}"));
+        }
+    }
+    let sample = work
+        .split("fn refresh_account(")
+        .nth(1)
+        .and_then(|tail| tail.split("fn task_progress(").next())
+        .ok_or("Work lost trusted account sampling boundary")?;
+    if sample
+        .matches("self.native.check_control(worker, browser)?")
+        .count()
+        != 2
+        || !sample.contains("self.task.attest_account(context, now);")
+        || !sample.contains(".refresh_account(account)")
+        || !work.contains("session.continue_inspection(")
+        || work
+            .matches("state.refresh_account(worker, browser)?")
+            .count()
+            != 5
+        || !policy.contains("MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS: u64 = 30_000;")
+    {
+        return Err("Work lost per-admission sampling, control or original expiry boundary".into());
+    }
+    for forbidden in [
+        "AgentContextAccountBinding::new",
+        "self.deadline =",
+        "self.clock =",
+        "self.policy =",
+        "self.config =",
+    ] {
+        if refresh.contains(forbidden) || sample.contains(forbidden) {
+            return Err(format!(
+                "account refresh minted or replaced authority: {forbidden}"
             ));
         }
     }
@@ -430,6 +497,7 @@ fn validate_inventory(crate_root: &Path) -> Result<(), String> {
             "work_combined_tests.rs".to_owned(),
             "work_scoped_tests.rs".to_owned(),
             "work_read_tests.rs".to_owned(),
+            "work_account_tests.rs".to_owned(),
             "work_form.rs".to_owned(),
             "work_form_tests.rs".to_owned(),
         ])
@@ -551,6 +619,7 @@ fn validate_work(source: &str) -> Result<(), String> {
     }
     for required in [
         "impl AgentRuntimeController for AgentWorkController",
+        "self.account_sample.get()",
         "AgentRunSupervisor",
         "AgentAuditLedger",
         "AgentRunMetricClosure::try_close",
@@ -665,7 +734,7 @@ fn validate_work_actor_qualifier(source: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_scoped_extraction;
+    use super::{validate_account_refresh, validate_scoped_extraction};
     use super::{
         validate_action, validate_form, validate_manifest, validate_probe, validate_root,
         validate_terra, validate_work, validate_work_actor_qualifier, validate_workflow_qualifier,
@@ -694,11 +763,51 @@ mod tests {
         validate_terra(TERRA).expect("controller Terra path");
         validate_action(ACTION).expect("controller native action path");
         validate_work(WORK).expect("production Work actor");
+        validate_account_refresh(TERRA, WORK, POLICY).expect("trusted account sampling");
         validate_form(FORM).expect("production trusted form contract");
         validate_scoped_extraction(READ, CONTINUATION, POLICY).expect("scoped extraction proof");
         validate_workflow_qualifier(QUALIFIER).expect("same-driver native qualification path");
         validate_work_actor_qualifier(WORK_QUALIFIER)
             .expect("actual actor/native/store qualification path");
+    }
+
+    #[test]
+    fn account_sampling_cannot_renew_time_switch_identity_or_skip_a_boundary() {
+        for removed in [
+            "account.context() != self.account.context()",
+            "account.account() != self.account.account()",
+            "self.account_attestations.contains(&account.attestation())",
+            "self.failure = Some(error)",
+        ] {
+            assert!(
+                validate_account_refresh(&TERRA.replace(removed, "removed"), WORK, POLICY).is_err()
+            );
+        }
+        for removed in [
+            "state.refresh_account(worker, browser)?",
+            "self.task.attest_account(context, now);",
+            "self.native.check_control(worker, browser)?",
+        ] {
+            assert!(
+                validate_account_refresh(TERRA, &WORK.replacen(removed, "removed", 1), POLICY)
+                    .is_err()
+            );
+        }
+        assert!(validate_account_refresh(
+            TERRA,
+            WORK,
+            &POLICY.replace("u64 = 30_000;", "u64 = 600_000;")
+        )
+        .is_err());
+        assert!(validate_account_refresh(
+            &TERRA.replace(
+                "pub fn refresh_account(",
+                "pub fn refresh_account( /* self.deadline = */"
+            ),
+            WORK,
+            POLICY
+        )
+        .is_err());
     }
 
     #[test]

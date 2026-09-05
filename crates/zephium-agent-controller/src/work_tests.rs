@@ -128,6 +128,11 @@ use scoped_tests::{ScopedFault, ScopedTask};
 mod read_tests;
 #[cfg(feature = "probe-harness")]
 use read_tests::{ReadFault, ReadTask};
+#[cfg(feature = "probe-harness")]
+#[path = "work_account_tests.rs"]
+mod account_tests;
+#[cfg(feature = "probe-harness")]
+use account_tests::{AccountFault, AccountTask};
 const FIXTURE_POLICY_NOW_MILLIS: u64 = 2;
 
 #[test]
@@ -1039,6 +1044,15 @@ fn production_form_task_keeps_actor_refusal_and_callback_owners() {
 
 #[cfg(feature = "probe-harness")]
 fn provider_fixture_with_form(fault: ProviderFault, form: Option<&str>) {
+    provider_fixture_with_account(fault, form, None);
+}
+
+#[cfg(feature = "probe-harness")]
+fn provider_fixture_with_account(
+    fault: ProviderFault,
+    form: Option<&str>,
+    account: Option<AccountFault>,
+) {
     use std::io::{Read as _, Write as _};
     struct Continue;
     impl AgentWorkTask for Continue {
@@ -1074,30 +1088,38 @@ fn provider_fixture_with_form(fault: ProviderFault, form: Option<&str>) {
     );
     let control = Arc::new(Mutex::new(None::<AgentRuntimeHandle>));
     let server_control = control.clone();
-    let requests = match fault {
-        ProviderFault::Read(fault) => fault.requests(),
-        ProviderFault::Scoped(fault) => fault.requests(),
-        ProviderFault::Combined(
-            CombinedFault::Premature
-            | CombinedFault::SchemaMutation
-            | CombinedFault::ModeMutation
-            | CombinedFault::CompleteWithoutResult
-            | CombinedFault::ActionLost,
-        ) => 2,
-        ProviderFault::Combined(
-            CombinedFault::ExtraAction | CombinedFault::WrongSchema | CombinedFault::ExpandedScope,
-        ) => 4,
-        ProviderFault::Combined(CombinedFault::CancelMapCount) => 5,
-        ProviderFault::Combined(CombinedFault::Ceiling) => 16,
-        ProviderFault::Combined(_) => 6,
-        ProviderFault::Ceiling => 16,
-        ProviderFault::CountRefused | ProviderFault::CancelCount => 1,
-        ProviderFault::Extraction(ExtractionFault::CancelCount) => 3,
-        ProviderFault::Extraction(
-            ExtractionFault::WrongSchema | ExtractionFault::ExpandedScope,
-        ) => 2,
-        ProviderFault::Extraction(_) => 4,
-        _ => 2,
+    let account_clock = account.map(|_| Arc::new(Clock(AtomicU64::new(FIXTURE_POLICY_NOW_MILLIS))));
+    let server_clock = account_clock.clone();
+    let requests = if account.is_some_and(|fault| fault != AccountFault::Slow) {
+        2
+    } else {
+        match fault {
+            ProviderFault::Read(fault) => fault.requests(),
+            ProviderFault::Scoped(fault) => fault.requests(),
+            ProviderFault::Combined(
+                CombinedFault::Premature
+                | CombinedFault::SchemaMutation
+                | CombinedFault::ModeMutation
+                | CombinedFault::CompleteWithoutResult
+                | CombinedFault::ActionLost,
+            ) => 2,
+            ProviderFault::Combined(
+                CombinedFault::ExtraAction
+                | CombinedFault::WrongSchema
+                | CombinedFault::ExpandedScope,
+            ) => 4,
+            ProviderFault::Combined(CombinedFault::CancelMapCount) => 5,
+            ProviderFault::Combined(CombinedFault::Ceiling) => 16,
+            ProviderFault::Combined(_) => 6,
+            ProviderFault::Ceiling => 16,
+            ProviderFault::CountRefused | ProviderFault::CancelCount => 1,
+            ProviderFault::Extraction(ExtractionFault::CancelCount) => 3,
+            ProviderFault::Extraction(
+                ExtractionFault::WrongSchema | ExtractionFault::ExpandedScope,
+            ) => 2,
+            ProviderFault::Extraction(_) => 4,
+            _ => 2,
+        }
     };
     let server = std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(12);
@@ -1258,6 +1280,12 @@ fn provider_fixture_with_form(fault: ProviderFault, form: Option<&str>) {
             } else {
                 "200 OK"
             };
+            if !is_count {
+                if let Some(clock) = &server_clock {
+                    // A slow completed provider turn, without a wall-clock sleep.
+                    clock.0.fetch_add(31_000, Ordering::Relaxed);
+                }
+            }
             let response = write!(socket, "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
             assert!(cancelled || response.is_ok());
         }
@@ -1274,11 +1302,15 @@ fn provider_fixture_with_form(fault: ProviderFault, form: Option<&str>) {
         "fixture-not-a-secret".to_owned(),
     )
     .expect("credential");
-    let approved = if matches!(fault, ProviderFault::Native(native) if native.unissued_human()) {
+    let mut approved = if matches!(fault, ProviderFault::Native(native) if native.unissued_human())
+    {
         input_with_effects(&[SemanticEffectClass::Read])
     } else {
         input()
     };
+    if let Some(clock) = account_clock {
+        approved.settings.clock = clock;
+    }
     let task: Box<dyn AgentWorkTask> = if let Some(value) = form {
         Box::new(
             crate::AgentWorkFormTask::try_new_local_preparation(
@@ -1320,6 +1352,11 @@ fn provider_fixture_with_form(fault: ProviderFault, form: Option<&str>) {
         )
     } else {
         Box::new(Continue)
+    };
+    let task: Box<dyn AgentWorkTask> = match account {
+        Some(AccountFault::Static) => task,
+        Some(fault) => Box::new(AccountTask::new(task, fault, control.clone())),
+        None => task,
     };
     let audit_fault = if matches!(
         fault,
@@ -1371,6 +1408,11 @@ fn provider_fixture_with_form(fault: ProviderFault, form: Option<&str>) {
     };
     let (outcome, shutdown, calls, events) =
         drive_with_control(controller, handle, native_fault, control);
+    if let Some(account) = account.filter(|fault| *fault != AccountFault::Slow) {
+        assert_eq!(server.join().expect("account fixture server"), 1);
+        account_tests::assert_refusal(account, outcome, shutdown, &calls);
+        return;
+    }
     if let ProviderFault::Read(fault) = fault {
         assert_eq!(server.join().expect("read fixture server"), requests / 2);
         read_tests::assert_outcome(fault, outcome, shutdown, &calls, &events);

@@ -6,6 +6,11 @@ instead of writing a new Rust completion predicate for each form workflow.
 It does not create a planner, interpreter, actor, native port or policy authority.
 It uses the existing controller and durable application/composition path.
 
+The supplied account scope is an initial product assertion, not a live sign-in
+detector. Later samples retain its original identity/time. Longer work needs an
+independently sourced [account adapter](agent-work-execution.md#stops-audit-and-terminal-truth);
+this task does not renew authority by changing a timestamp.
+
 ## Trusted admission, not automatic effect classification
 
 `try_new_local_preparation` is an explicit product attestation: changing these

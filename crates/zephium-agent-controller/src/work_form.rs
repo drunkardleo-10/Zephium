@@ -118,6 +118,7 @@ pub struct AgentWorkFormTask {
     identity: ContextIdentity,
     origin: SemanticOrigin,
     account: AgentAccountScope,
+    account_sample: std::cell::Cell<Option<AgentContextAccountBinding>>,
     phases: Vec<AgentWorkFormPhase>,
     phase: usize,
     baseline: Option<Baseline>,
@@ -152,6 +153,7 @@ impl AgentWorkFormTask {
             identity,
             origin,
             account,
+            account_sample: std::cell::Cell::new(None),
             phases,
             phase: 0,
             baseline: None,
@@ -378,11 +380,22 @@ impl AgentWorkTask for AgentWorkFormTask {
         {
             return Err(AgentWorkFailure::Contract);
         }
-        Ok(AgentContextAccountBinding::new(
+        if let Some(sample) = self.account_sample.get() {
+            return if sample.context() == context {
+                Ok(sample)
+            } else {
+                Err(AgentWorkFailure::Contract)
+            };
+        }
+        // A constructor-supplied scope is not a live account detector. Preserve
+        // its original age; only a trusted adapter can supply a new sample.
+        let sample = AgentContextAccountBinding::new(
             AgentAccountAttestationId::generate(),
             context,
             self.account,
             now,
-        ))
+        );
+        self.account_sample.set(Some(sample));
+        Ok(sample)
     }
 }

@@ -81,7 +81,12 @@ pub trait AgentWorkTask: Send {
         &self,
         action: &SemanticPreparedAction,
     ) -> Result<AgentEffectAssessment, AgentWorkFailure>;
-    /// Supplies the trusted account attestation for this exact current context.
+    /// Supplies independently sourced current account facts for this exact
+    /// context. Called at startup and before each provider/effect admission,
+    /// including nonterminal inspection and extraction mapping. It must be
+    /// bounded and nonblocking. Do not renew a cached sample's timestamp: return
+    /// its original identity/time or obtain a new sample from the trusted
+    /// adapter. A changed account/context refuses the run, not a scope switch.
     fn attest_account(
         &self,
         context: ContextJoin,
@@ -345,6 +350,7 @@ pub struct AgentWorkExtractionTask {
     baseline_read: bool,
     schema: SemanticExtractionSchema,
     account: AgentAccountScope,
+    account_sample: std::cell::Cell<Option<AgentContextAccountBinding>>,
     subtree: bool,
 }
 impl AgentWorkExtractionTask {
@@ -359,6 +365,7 @@ impl AgentWorkExtractionTask {
         Ok(Self {
             schema,
             account,
+            account_sample: std::cell::Cell::new(None),
             subtree: false,
             baseline_read: false,
         })
@@ -406,12 +413,22 @@ impl AgentWorkTask for AgentWorkExtractionTask {
         context: ContextJoin,
         now: AgentPolicyInstant,
     ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
-        Ok(AgentContextAccountBinding::new(
+        if let Some(sample) = self.account_sample.get() {
+            return if sample.context() == context {
+                Ok(sample)
+            } else {
+                Err(AgentWorkFailure::Contract)
+            };
+        }
+        // Static product scope must not become synthetic freshness authority.
+        let sample = AgentContextAccountBinding::new(
             AgentAccountAttestationId::generate(),
             context,
             self.account,
             now,
-        ))
+        );
+        self.account_sample.set(Some(sample));
+        Ok(sample)
     }
     fn accept_extraction(
         &mut self,
@@ -699,6 +716,32 @@ struct WorkState {
 }
 
 impl WorkState {
+    fn refresh_account(
+        &mut self,
+        worker: &AgentRuntimeWorker,
+        browser: &AgentRuntimeBrowser,
+    ) -> Result<(), AgentWorkFailure> {
+        self.check_task_contract()?;
+        self.native.check_control(worker, browser)?;
+        let id = self.native.identity.id();
+        let context = self
+            .native
+            .contexts()?
+            .join(id)
+            .map_err(|_| AgentWorkFailure::Context)?;
+        let session = self.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        session.check_live().map_err(AgentWorkFailure::Browser)?;
+        let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
+        let account = self.task.attest_account(context, now);
+        self.native.check_control(worker, browser)?;
+        let account = account?;
+        let session = self.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        session
+            .refresh_account(account)
+            .map_err(AgentWorkFailure::Browser)?;
+        self.check_task_contract()
+    }
+
     fn task_progress(
         &mut self,
         observation: &SemanticObservation,
@@ -773,6 +816,35 @@ struct WorkContextResources {
 }
 
 impl WorkNative {
+    // A synchronous trusted adapter cannot yield to the provider/event pump.
+    // Recheck sticky controls after it returns, before admitting more work.
+    fn check_control(
+        &mut self,
+        worker: &AgentRuntimeWorker,
+        browser: &AgentRuntimeBrowser,
+    ) -> Result<(), AgentWorkFailure> {
+        let failure = if worker.shutdown_deadline().is_some() {
+            Some(AgentWorkFailure::Shutdown)
+        } else if worker.status().cancelled() {
+            Some(match worker.stop_reason() {
+                Some(AgentRuntimeStopReason::HumanTakeover) => AgentWorkFailure::HumanTakeover,
+                Some(AgentRuntimeStopReason::Suspend) => AgentWorkFailure::SuspendRequested,
+                Some(AgentRuntimeStopReason::PolicyRevoked) => AgentWorkFailure::PolicyRevoked,
+                _ => AgentWorkFailure::Cancelled,
+            })
+        } else if worker.status().mailbox_fault().is_some() {
+            Some(AgentWorkFailure::Mailbox)
+        } else if Instant::now() >= self.deadline {
+            Some(AgentWorkFailure::Deadline)
+        } else {
+            None
+        };
+        if let Some(failure) = failure {
+            self.revoke(browser)?;
+            return Err(failure);
+        }
+        Ok(())
+    }
     fn new(
         identity: ContextIdentity,
         origin: SemanticOrigin,
@@ -1389,6 +1461,7 @@ impl AgentWorkController {
             state.observation = Some(observation);
             return Ok(());
         }
+        state.refresh_account(worker, browser)?;
         let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
         let mut turn: AgentBrowserProviderTurn = Self::provider(
             &mut state.native,
@@ -1407,29 +1480,46 @@ impl AgentWorkController {
             state.observation = Some(observation);
             return Ok(());
         }
+        let mut frames = observation
+            .frames()
+            .iter()
+            .map(|snapshot| snapshot.frame().clone())
+            .collect::<Vec<_>>();
         loop {
-            let frames = observation
-                .frames()
-                .iter()
-                .map(|snapshot| snapshot.frame().clone())
-                .collect::<Vec<_>>();
-            let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
-            let step = Self::provider(
-                &mut state.native,
-                worker,
-                browser,
-                session.cancellation.clone(),
-                session.next_step(
-                    turn,
-                    &observation,
-                    &frames,
-                    Some(captured_at),
-                    state.extraction_schema.is_some(),
-                    |_, _, _| {},
-                ),
-            )
-            .await?;
             state.check_task_contract()?;
+            if matches!(
+                turn.turn.proposal().kind(),
+                AgentBrowserToolKind::Locate | AgentBrowserToolKind::Read
+            ) {
+                if state
+                    .session
+                    .as_ref()
+                    .ok_or(AgentWorkFailure::Contract)?
+                    .turns
+                    >= super::MAX_BROWSER_MODEL_TURNS
+                {
+                    return Err(AgentWorkFailure::Browser(
+                        AgentBrowserProviderError::TurnLimit,
+                    ));
+                }
+                state.refresh_account(worker, browser)?;
+                let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+                turn = Self::provider(
+                    &mut state.native,
+                    worker,
+                    browser,
+                    session.cancellation.clone(),
+                    session.continue_inspection(
+                        turn.into_tool_turn(),
+                        &observation,
+                        &frames,
+                        Some(captured_at),
+                    ),
+                )
+                .await?;
+                continue;
+            }
+            let step = turn;
             let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
             let proposal = match step.turn.proposal().kind() {
                 AgentBrowserToolKind::Extract => {
@@ -1460,9 +1550,15 @@ impl AgentWorkController {
                         .bind_action_turn(step, &observation, &frames)
                         .map_err(AgentWorkFailure::Browser)?
                 }
-                _ => return Err(AgentWorkFailure::Contract),
+                kind => {
+                    return Err(AgentWorkFailure::Browser(
+                        AgentBrowserProviderError::UnsupportedTool(kind),
+                    ))
+                }
             };
             let assessment = state.task.assess(proposal.action())?;
+            state.refresh_account(worker, browser)?;
+            let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
             let id = state.native.identity.id();
             let automation = state
                 .native
@@ -1555,6 +1651,27 @@ impl AgentWorkController {
                 state.observation = Some(observation);
                 return Ok(());
             }
+            // Reads/locates retain this exact frame cohort. Reuse its bounded
+            // storage; only an independently captured observation replaces it.
+            frames.clear();
+            frames.extend(
+                observation
+                    .frames()
+                    .iter()
+                    .map(|snapshot| snapshot.frame().clone()),
+            );
+            if state
+                .session
+                .as_ref()
+                .ok_or(AgentWorkFailure::Contract)?
+                .turns
+                >= super::MAX_BROWSER_MODEL_TURNS
+            {
+                return Err(AgentWorkFailure::Browser(
+                    AgentBrowserProviderError::TurnLimit,
+                ));
+            }
+            state.refresh_account(worker, browser)?;
             let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
             turn = Self::provider(
                 &mut state.native,
@@ -1650,6 +1767,7 @@ impl AgentWorkController {
             .iter()
             .map(|snapshot| snapshot.frame().clone())
             .collect::<Vec<_>>();
+        state.refresh_account(worker, browser)?;
         let schema = state
             .extraction_schema
             .as_ref()
@@ -2021,6 +2139,9 @@ impl AgentWorkController {
                     AgentWorkFailure::Browser(AgentBrowserProviderError::Action(
                         crate::AgentBrowserActionError::NeedsHuman(_),
                     )) => AgentSupervisorFailure::PolicyDenied,
+                    AgentWorkFailure::Browser(AgentBrowserProviderError::Account(_)) => {
+                        AgentSupervisorFailure::PolicyDenied
+                    }
                     AgentWorkFailure::Browser(_) => AgentSupervisorFailure::ProviderFailed,
                     _ => AgentSupervisorFailure::PolicyDenied,
                 })

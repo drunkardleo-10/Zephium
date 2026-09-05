@@ -81,6 +81,30 @@ not measured battery, RAM or CPU qualification.
 
 ## Stops, audit and terminal truth
 
+Account evidence is sampled through the trusted task before each provider or
+effect admission, including locate/read continuations, verified-action diffs
+and extraction mapping. The actor owns that outer inspection loop; several
+model calls cannot hide behind one startup sample. It checks sticky controls
+before and after the bounded, synchronous account adapter. This adds no worker,
+timer, native capture, model request or account-discovery mechanism.
+
+The session freezes the admitted account and complete context/document join.
+New samples must be fresh under the unchanged 30-second core policy limit,
+non-regressing and non-future. An attestation identity cannot be rewritten or
+replayed, and the fixed inventory is bounded by the model/effect ceilings.
+An unchanged cached sample keeps its original age. Refresh over an original
+provider/effect reservation refuses without replacing that owner. Refusal is
+sticky and new identity requires fresh authorized admission, even when both
+accounts appear in a manifest.
+
+The built-in form/extraction predicates contain a constructor-supplied account
+scope, not a live sign-in detector. They now preserve their first account sample
+instead of minting newer timestamps. Without an independently sourced account
+adapter they still fail closed when that sample expires. A trusted task may
+delegate its predicate to these types and supply fresh account facts through
+`attest_account`; neither page/model claims nor a timestamp update are evidence.
+Native authenticated-account discovery and monitoring remain unimplemented.
+
 Cancellation, human takeover, policy revocation and suspension requests use the
 existing sealed control lane with a first-wins typed reason. Shutdown remains
 the stronger lifecycle event. Renderer/navigation loss, mailbox faults,

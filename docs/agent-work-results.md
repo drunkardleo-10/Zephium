@@ -7,6 +7,11 @@ worker, native Work context, provider transport, policy accounting, audit ledger
 and durable application coordinator. There is no second extraction worker or
 automation stack, and no UI/IPC authority is introduced.
 
+The supplied account scope is not a live sign-in detector: later samples retain
+their original identity/time. Longer work needs an independently sourced
+[account adapter](agent-work-execution.md#stops-audit-and-terminal-truth), not a
+timestamp renewal by this extraction predicate.
+
 This vertical was selected because the previously qualified product path could
 manipulate form state but could not deliver structured information. Initial
 public-data extraction reuses the already implemented semantic read, extraction

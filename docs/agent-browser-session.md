@@ -27,6 +27,15 @@ failed-effect owner. See the M6 record for the comparison and qualification.
 
 ## Host contract
 
+The owning host can use `refresh_account` at idle admission boundaries with
+independently sourced facts. It never changes the admitted account/document,
+the original deadline or pending request authority. Freshness remains 30 seconds;
+stale, changed, regressing, future, rewritten/replayed or over-budget samples
+stop new work while preserving all current owners. Work samples its existing
+trusted task port before every provider/effect admission. Direct session hosts
+remain responsible for that sampling; `next_action` does not invent an account
+adapter. See [the account boundary](agent-work-execution.md#stops-audit-and-terminal-truth).
+
 1. Construct the session with `try_new` before polling `start_initial`. This
    reserves no model budget and makes the asynchronous owner explicit.
 2. `next_action` processes model-requested locate turns and binds one action

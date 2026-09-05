@@ -1,6 +1,38 @@
 //! Synthetic semantics only; exercise real decode/bind/prepare contracts.
 use super::*;
 
+#[test]
+fn static_task_scopes_never_renew_their_initial_account_sample() {
+    let frame = frame();
+    let form = AgentWorkFormTask::try_new_local_preparation(
+        frame.context().identity(),
+        frame.origin().clone(),
+        AgentAccountScope::Anonymous,
+        vec![AgentWorkFormPhase::try_new(vec![
+            AgentWorkFormGoal::fill(None, "fixture".into()).unwrap()
+        ])
+        .unwrap()],
+    )
+    .unwrap();
+    let extraction = crate::AgentWorkExtractionTask::try_new(
+        vec![SemanticExtractionFieldSchema::try_text("label".into(), true, 32).unwrap()],
+        AgentAccountScope::Anonymous,
+    )
+    .unwrap();
+    for task in [
+        &form as &dyn AgentWorkTask,
+        &extraction as &dyn AgentWorkTask,
+    ] {
+        let first = task
+            .attest_account(frame.context(), AgentPolicyInstant::from_millis(1))
+            .unwrap();
+        let old = task
+            .attest_account(frame.context(), AgentPolicyInstant::from_millis(60_001))
+            .unwrap();
+        assert_eq!(first, old, "a static scope is not live account evidence");
+    }
+}
+
 fn frame() -> SemanticFrameJoin {
     let identity = ContextIdentity::new(
         ContextId::generate(),

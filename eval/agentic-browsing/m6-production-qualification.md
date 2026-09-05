@@ -1784,6 +1784,57 @@ this read as either. Existing subtree extraction remains terminal. No UI,
 concurrent native lifetime, richer native tool, cloud, account integration,
 resource/battery qualification or extension authority was added.
 
+## Trusted account re-attestation at Work boundaries (2026-09-05)
+
+This pass addresses an authority/lifetime blocker found while tracing safe
+cross-document continuation: Work sampled its account only at session startup,
+then reused it at every later model/effect admission. Core policy correctly
+expires an account sample after 30 seconds, independently of the ten-minute
+run ceiling. A deterministic unchanged-startup test still returns exactly
+`AgentPolicyError::AccountStale`; that limit was not raised or bypassed.
+
+The production actor now samples its existing trusted task/account port before
+each initial, locate/read, action, verified-action continuation and extraction
+mapping admission. It checks controls before and after the synchronous adapter,
+including when the adapter returns an error. Session refresh freezes the full
+context/document and account, rejects pending-owner substitution, time
+regression/future/staleness, rewritten/replayed identities and bounded-inventory
+exhaustion. Refusal is sticky, not a retry or account-switch grant.
+
+The built-in form/extraction tasks have only constructor-supplied account scope.
+They retain their original sample rather than manufacture newer timestamps.
+They therefore still refuse after expiry without a real current-account adapter.
+The new slow-turn tests use an explicit synthetic account source, not a claimed
+native sign-in detector. Authenticated account sensing remains a product seam.
+
+Eight actor schedules advance trusted policy time by 31 seconds per completed
+provider turn, using the actual shipping actor, runtime and loopback transport:
+form action, repeated reads, action→read→cited result, action→cited result,
+subtree mapping, the eight-turn locate ceiling, native callback loss and audit
+loss. Fifteen additional schedules exercise invalid/static/refused samples,
+four stop reasons, simultaneous cancellation/refusal, pre-read/pre-mapping
+refusal and changed account after an already-verified action. The last retains
+one charged verified effect and closes unsuccessfully; no mutation is replayed.
+Session tests cover the exact pending provider reservation, replay/clock/identity
+fences and sample ceiling; built-in tests prove the initial sample never renews.
+
+Validation: controller 27 shipping tests and 37 excluded-fixture tests (the full
+37-test suite repeated); App 347 passed/1 ignored; runtime 37; source-gate suite
+181. Strict Clippy passed for controller, App, composition, xtask, opt-in desktop
+and excluded native qualifier. All four agent architecture gates and the fixed
+native semantic-JS smoke checks passed. Default and `macos-work` desktop optimized
+`cargo check` passed; the optimized retained qualifier failed at its expected
+core `compile_error!`. Default desktop has no controller, runtime, provider
+transport, Work composition or reqwest normal dependency. No manifest/lockfile,
+native scheduling, durability format, worker, queue or Browse behavior changed.
+
+No live Luna run was added: another short public workflow would not establish
+fresh account authority, and delaying a real request would add no evidence over
+the deterministic policy-clock schedules. Prior live results remain historical
+evidence, not qualification of an account detector or cross-document navigation.
+No UI, hosted/local transport, concurrent lifetime, new browser tool, resource
+measurement or production-readiness claim is added.
+
 ## Remaining release blockers
 
 - authorized named-device macOS native-input routes beyond fixed DOM;
