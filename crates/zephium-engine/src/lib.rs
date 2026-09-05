@@ -14,9 +14,11 @@ mod platform;
 #[doc(hidden)]
 pub use platform::macos::agentic_foreground_driver::{
     cancel_foreground_rendering_witness, capture_foreground_rendering_admission,
-    foreground_rendering_native_drain, foreground_rendering_policy_event,
-    schedule_foreground_admission_wake, start_foreground_rendering_witness,
-    ForegroundAdmissionWake, ForegroundRenderingAdmission, ForegroundRenderingWitnessReport,
+    foreground_rendering_native_drain, foreground_rendering_native_failures,
+    foreground_rendering_policy_event, schedule_foreground_admission_wake,
+    start_foreground_rendering_witness, ForegroundAdmissionWake, ForegroundFailurePhase,
+    ForegroundFailurePredicate, ForegroundNativeFailure, ForegroundNativeFailures,
+    ForegroundRenderingAdmission, ForegroundRenderingWitnessReport,
 };
 
 #[cfg(all(feature = "native-agentic-input-probe", not(debug_assertions)))]

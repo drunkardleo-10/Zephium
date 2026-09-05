@@ -17,6 +17,139 @@ use zephium_agentic::{ContextJoin, ForegroundRenderingState};
 
 const RENDERING_BUDGET: Duration = Duration::from_secs(5);
 
+/// Closed, content-free location of a refused native attestation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForegroundFailurePhase {
+    Host,
+    Prepare,
+    Present,
+    Poll,
+    Cleanup,
+}
+
+/// Only fixed host predicates: never native addresses, page content or geometry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForegroundFailurePredicate {
+    MainThread,
+    MainWindow,
+    OriginalParent,
+    HiddenPage,
+    FixedViewport,
+    HumanResponderNotPage,
+    Screen,
+    ScreenViewportFit,
+    Deadline,
+    ContextJoin,
+    PreparedState,
+    SurfaceOwner,
+    HiddenSurface,
+    NoKeyCapability,
+    NoMainCapability,
+    SurfaceAlpha,
+    ContentView,
+    OnScreenFrame,
+    StableSurfaceFrame,
+    VisibleSurface,
+    VisibleHierarchy,
+    NoKeyOwnership,
+    NoMainOwnership,
+    IgnoreMouse,
+    OpaqueSurface,
+    PageAlpha,
+    ExactPageWindow,
+    HumanOwnersUnchanged,
+    ExactRestoredFrame,
+    ExactRestoredParent,
+    PriorCleanupFailure,
+    WatchdogScheduled,
+    LeaseOwner,
+}
+
+/// One exact failed predicate, without a native handle or caller-controlled text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ForegroundNativeFailure {
+    pub phase: ForegroundFailurePhase,
+    pub predicate: ForegroundFailurePredicate,
+}
+
+/// Bounded first-cause evidence. Cleanup cannot replace a primary refusal.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ForegroundNativeFailures {
+    pub primary: Option<ForegroundNativeFailure>,
+    pub cleanup: Option<ForegroundNativeFailure>,
+}
+
+struct NativeFailureTrace {
+    context: ContextJoin,
+    failures: ForegroundNativeFailures,
+}
+
+impl NativeFailureTrace {
+    fn evidence(&self, context: ContextJoin) -> Option<ForegroundNativeFailures> {
+        (self.context == context).then_some(self.failures)
+    }
+
+    fn record(&mut self, context: ContextJoin, failure: ForegroundNativeFailure) -> bool {
+        if context != self.context {
+            return false;
+        }
+        let slot = if failure.phase == ForegroundFailurePhase::Cleanup {
+            &mut self.failures.cleanup
+        } else {
+            &mut self.failures.primary
+        };
+        if slot.is_none() {
+            *slot = Some(failure);
+        }
+        true
+    }
+}
+
+thread_local! { static FAILURE_TRACE: std::cell::RefCell<Option<NativeFailureTrace>> = const { std::cell::RefCell::new(None) }; }
+
+pub(crate) fn native_failure_evidence(context: ContextJoin) -> Option<ForegroundNativeFailures> {
+    FAILURE_TRACE.with(|slot| {
+        slot.try_borrow()
+            .ok()
+            .and_then(|trace| trace.as_ref().and_then(|trace| trace.evidence(context)))
+    })
+}
+
+fn begin_failure_trace(context: ContextJoin) {
+    FAILURE_TRACE.with(|slot| {
+        if let Ok(mut trace) = slot.try_borrow_mut() {
+            if trace.is_none() {
+                *trace = Some(NativeFailureTrace {
+                    context,
+                    failures: ForegroundNativeFailures::default(),
+                });
+            }
+        }
+    });
+}
+
+fn failed(
+    context: ContextJoin,
+    phase: ForegroundFailurePhase,
+    predicate: ForegroundFailurePredicate,
+) -> ForegroundRenderingState {
+    FAILURE_TRACE.with(|slot| {
+        if let Ok(mut trace) = slot.try_borrow_mut() {
+            if let Some(trace) = trace.as_mut() {
+                trace.record(context, ForegroundNativeFailure { phase, predicate });
+            }
+        }
+    });
+    ForegroundRenderingState::Failed
+}
+
+// Preserve the original native checks' order and short-circuit behavior.
+macro_rules! first_failed_predicate {
+    ($($predicate:expr => $admitted:expr),+ $(,)?) => {
+        None::<ForegroundFailurePredicate>$(.or_else(|| (!$admitted).then_some($predicate)))+
+    };
+}
+
 struct WeakNativeWitness {
     context: ContextJoin,
     page: Weak<WKWebView>,
@@ -141,10 +274,15 @@ impl ForegroundRenderingLease {
         context: ContextJoin,
         view: &wry::WebView,
     ) -> Result<Self, ForegroundRenderingState> {
-        let mtm = MainThreadMarker::new().ok_or(ForegroundRenderingState::Failed)?;
+        use ForegroundFailurePhase::Prepare;
+        use ForegroundFailurePredicate as P;
+        begin_failure_trace(context);
+        let mtm = MainThreadMarker::new().ok_or_else(|| failed(context, Prepare, P::MainThread))?;
         let app = NSApplication::sharedApplication(mtm);
         let page = super::native_webview(view);
-        let main = page.window().ok_or(ForegroundRenderingState::Failed)?;
+        let main = page
+            .window()
+            .ok_or_else(|| failed(context, Prepare, P::MainWindow))?;
         let responder = main
             .firstResponder()
             .ok_or(ForegroundRenderingState::DeferredForeground)?;
@@ -153,23 +291,25 @@ impl ForegroundRenderingLease {
         }
         // SAFETY: the exact retained native page is read on the main thread;
         // the returned parent is retained before any hierarchy mutation.
-        let original_parent =
-            unsafe { page.superview() }.ok_or(ForegroundRenderingState::Failed)?;
+        let original_parent = unsafe { page.superview() }
+            .ok_or_else(|| failed(context, Prepare, P::OriginalParent))?;
         let original_frame = page.frame();
-        if !page.isHidden()
-            || original_frame.size != viewport().size
-            || Retained::as_ptr(&responder).addr() == Retained::as_ptr(&page).addr()
-        {
-            return Err(ForegroundRenderingState::Failed);
+        if let Some(predicate) = first_failed_predicate!(
+            P::HiddenPage => page.isHidden(),
+            P::FixedViewport => original_frame.size == viewport().size,
+            P::HumanResponderNotPage => Retained::as_ptr(&responder).addr() != Retained::as_ptr(&page).addr(),
+        ) {
+            return Err(failed(context, Prepare, predicate));
         }
         let screen = main
             .screen()
-            .ok_or(ForegroundRenderingState::Failed)?
+            .ok_or_else(|| failed(context, Prepare, P::Screen))?
             .visibleFrame();
-        let frame = surface_frame(screen).ok_or(ForegroundRenderingState::Failed)?;
+        let frame =
+            surface_frame(screen).ok_or_else(|| failed(context, Prepare, P::ScreenViewportFit))?;
         let deadline = Instant::now()
             .checked_add(RENDERING_BUDGET)
-            .ok_or(ForegroundRenderingState::Failed)?;
+            .ok_or_else(|| failed(context, Prepare, P::Deadline))?;
         // SAFETY: the main-thread marker owns AppKit allocation; all frame
         // components are finite and the retained window remains Rust-owned.
         let surface = unsafe {
@@ -217,31 +357,33 @@ impl ForegroundRenderingLease {
     }
 
     pub(crate) fn present(&mut self, context: ContextJoin) -> ForegroundRenderingState {
-        if self.context != context || self.state != ForegroundRenderingState::Prepared {
-            self.state = ForegroundRenderingState::Failed;
-            return self.state;
+        use ForegroundFailurePhase::Present;
+        use ForegroundFailurePredicate as P;
+        if let Some(predicate) = first_failed_predicate!(
+            P::ContextJoin => self.context == context,
+            P::PreparedState => self.state == ForegroundRenderingState::Prepared,
+        ) {
+            return self.refuse(Present, predicate);
         }
         if !foreground(&self.app, &self.main, &self.responder).admitted() {
             self.state = ForegroundRenderingState::DeferredForeground;
             return self.state;
         }
         let Some(surface) = self.surface.as_ref() else {
-            self.state = ForegroundRenderingState::Failed;
-            return self.state;
+            return self.refuse(Present, P::SurfaceOwner);
         };
         // This fallible attestation occurs only after the host retains the
         // hidden native owner, so every refusal can prove exact retirement.
-        if surface.isVisible()
-            || surface.canBecomeKeyWindow()
-            || surface.canBecomeMainWindow()
-            || surface.alphaValue() != 1.0
-        {
-            self.state = ForegroundRenderingState::Failed;
-            return self.state;
+        if let Some(predicate) = first_failed_predicate!(
+            P::HiddenSurface => !surface.isVisible(),
+            P::NoKeyCapability => !surface.canBecomeKeyWindow(),
+            P::NoMainCapability => !surface.canBecomeMainWindow(),
+            P::SurfaceAlpha => surface.alphaValue() == 1.0,
+        ) {
+            return self.refuse(Present, predicate);
         }
         let Some(parent) = surface.contentView() else {
-            self.state = ForegroundRenderingState::Failed;
-            return self.state;
+            return self.refuse(Present, P::ContentView);
         };
         // Publish the effect phase before native hierarchy/presentation calls.
         self.state = ForegroundRenderingState::Acquiring;
@@ -254,9 +396,10 @@ impl ForegroundRenderingLease {
     }
 
     pub(crate) fn poll(&mut self, context: ContextJoin) -> ForegroundRenderingState {
+        use ForegroundFailurePhase::Poll;
+        use ForegroundFailurePredicate as P;
         if self.context != context {
-            self.state = ForegroundRenderingState::Failed;
-            return self.state;
+            return self.refuse(Poll, P::ContextJoin);
         }
         if self.state == ForegroundRenderingState::Retiring {
             if self
@@ -280,25 +423,23 @@ impl ForegroundRenderingLease {
         } else if Instant::now() >= self.deadline {
             self.state = ForegroundRenderingState::Expired;
         } else if let Some(surface) = self.surface.as_ref() {
-            if !admitted_frame(self.frame, self.screen)
-                || surface.frame() != self.frame
-                || self.page.frame() != viewport()
-                || !surface.isVisible()
-                || self.page.isHiddenOrHasHiddenAncestor()
-                || surface.isKeyWindow()
-                || surface.isMainWindow()
-                || surface.canBecomeKeyWindow()
-                || surface.canBecomeMainWindow()
-                || !surface.ignoresMouseEvents()
-                || !surface.isOpaque()
-                || surface.alphaValue() != 1.0
-                || self.page.alphaValue() != 1.0
-                || !self
-                    .page
-                    .window()
-                    .is_some_and(|window| std::ptr::eq(&*window, &**surface))
-            {
-                self.state = ForegroundRenderingState::Failed;
+            if let Some(predicate) = first_failed_predicate!(
+                P::OnScreenFrame => admitted_frame(self.frame, self.screen),
+                P::StableSurfaceFrame => surface.frame() == self.frame,
+                P::FixedViewport => self.page.frame() == viewport(),
+                P::VisibleSurface => surface.isVisible(),
+                P::VisibleHierarchy => !self.page.isHiddenOrHasHiddenAncestor(),
+                P::NoKeyOwnership => !surface.isKeyWindow(),
+                P::NoMainOwnership => !surface.isMainWindow(),
+                P::NoKeyCapability => !surface.canBecomeKeyWindow(),
+                P::NoMainCapability => !surface.canBecomeMainWindow(),
+                P::IgnoreMouse => surface.ignoresMouseEvents(),
+                P::OpaqueSurface => surface.isOpaque(),
+                P::SurfaceAlpha => surface.alphaValue() == 1.0,
+                P::PageAlpha => self.page.alphaValue() == 1.0,
+                P::ExactPageWindow => self.page.window().is_some_and(|window| std::ptr::eq(&*window, &**surface)),
+            ) {
+                return self.refuse(Poll, predicate);
             } else {
                 let visible = surface
                     .occlusionState()
@@ -313,7 +454,7 @@ impl ForegroundRenderingLease {
                 };
             }
         } else {
-            self.state = ForegroundRenderingState::Failed;
+            return self.refuse(Poll, P::SurfaceOwner);
         }
         self.state
     }
@@ -321,6 +462,8 @@ impl ForegroundRenderingLease {
     /// Hides before restoring the exact parent/frame. It never restores human
     /// focus: a changed human foreground owner remains the user's authority.
     pub(crate) fn retire(&mut self) -> ForegroundRenderingState {
+        use ForegroundFailurePhase::Cleanup;
+        use ForegroundFailurePredicate as P;
         if !self.cleanup_failed
             && matches!(
                 self.state,
@@ -339,21 +482,20 @@ impl ForegroundRenderingLease {
             self.retired_surface = Some(Weak::from_retained(&surface));
             surface.close();
         }
-        if !self.page.isHidden()
-            || human_owners(&self.app) != human_before
-            || self.page.frame() != self.original_frame
+        if let Some(predicate) = first_failed_predicate!(
+            P::HiddenPage => self.page.isHidden(),
+            P::HumanOwnersUnchanged => human_owners(&self.app) == human_before,
+            P::ExactRestoredFrame => self.page.frame() == self.original_frame,
             // SAFETY: the retained page/parent are main-thread-owned and the
             // exact returned parent is compared without escaping its lifetime.
-            || !unsafe { self.page.superview() }
-                .is_some_and(|parent| std::ptr::eq(&*parent, &*self.original_parent))
-        {
-            self.state = ForegroundRenderingState::Failed;
+            P::ExactRestoredParent => unsafe { self.page.superview() }
+                .is_some_and(|parent| std::ptr::eq(&*parent, &*self.original_parent)),
+        ) {
             self.cleanup_failed = true;
-            return self.state;
+            return self.refuse(Cleanup, predicate);
         }
         if self.cleanup_failed {
-            self.state = ForegroundRenderingState::Failed;
-            return self.state;
+            return self.refuse(Cleanup, P::PriorCleanupFailure);
         }
         self.poll(self.context)
     }
@@ -382,6 +524,31 @@ impl ForegroundRenderingLease {
             .as_ref()
             .is_some_and(|surface| surface.isVisible())
             || !self.page.isHidden()
+    }
+
+    fn refuse(
+        &mut self,
+        phase: ForegroundFailurePhase,
+        predicate: ForegroundFailurePredicate,
+    ) -> ForegroundRenderingState {
+        self.state = failed(self.context, phase, predicate);
+        self.state
+    }
+
+    pub(crate) fn watchdog_failed(context: ContextJoin) -> ForegroundRenderingState {
+        failed(
+            context,
+            ForegroundFailurePhase::Host,
+            ForegroundFailurePredicate::WatchdogScheduled,
+        )
+    }
+
+    pub(crate) fn owner_unavailable(context: ContextJoin) -> ForegroundRenderingState {
+        failed(
+            context,
+            ForegroundFailurePhase::Host,
+            ForegroundFailurePredicate::LeaseOwner,
+        )
     }
 }
 
@@ -478,6 +645,135 @@ fn exact_foreground_admission(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn failure_context() -> (
+        zephium_agentic::ContextRegistry,
+        zephium_agentic::ContextIdentity,
+        ContextJoin,
+    ) {
+        use zephium_agentic::*;
+        let identity = ContextIdentity::new(
+            ContextId::generate(),
+            ContextRunId::generate(),
+            AgentWorkProfileId::generate(),
+            ContextKind::Owned,
+        );
+        let mut registry = ContextRegistry::new();
+        registry
+            .reserve(
+                identity,
+                ContextCapabilities::try_new(
+                    ContextKind::Owned,
+                    &[ContextCapability::Observe, ContextCapability::Navigate],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let operation = registry
+            .begin_context(identity.id(), ContextOperationId::new(1).unwrap())
+            .unwrap();
+        registry
+            .settle_construction(identity.id(), operation, ContextSettlement::Applied)
+            .unwrap();
+        let context = registry.join(identity.id()).unwrap();
+        (registry, identity, context)
+    }
+
+    #[test]
+    fn native_failure_evidence_cannot_cross_context_or_document_identity() {
+        let (mut registry, identity, context) = failure_context();
+        let mut trace = NativeFailureTrace {
+            context,
+            failures: ForegroundNativeFailures::default(),
+        };
+        let failure = ForegroundNativeFailure {
+            phase: ForegroundFailurePhase::Present,
+            predicate: ForegroundFailurePredicate::NoKeyCapability,
+        };
+        let (_, _, other) = failure_context();
+        let successor = registry
+            .begin_navigation(
+                identity.id(),
+                zephium_agentic::ContextOperationId::new(2).unwrap(),
+            )
+            .unwrap()
+            .context();
+        for wrong in [other, successor] {
+            assert!(!trace.record(wrong, failure));
+            assert_eq!(trace.evidence(wrong), None);
+        }
+        assert_eq!(
+            trace.evidence(context),
+            Some(ForegroundNativeFailures::default())
+        );
+        assert!(trace.record(context, failure));
+        assert_eq!(trace.evidence(context).unwrap().primary, Some(failure));
+    }
+
+    #[test]
+    fn native_failure_first_cause_and_cleanup_are_independently_sticky() {
+        let (_, _, context) = failure_context();
+        let mut trace = NativeFailureTrace {
+            context,
+            failures: ForegroundNativeFailures::default(),
+        };
+        let primary = ForegroundNativeFailure {
+            phase: ForegroundFailurePhase::Present,
+            predicate: ForegroundFailurePredicate::NoMainCapability,
+        };
+        let cleanup = ForegroundNativeFailure {
+            phase: ForegroundFailurePhase::Cleanup,
+            predicate: ForegroundFailurePredicate::ExactRestoredParent,
+        };
+        assert!(trace.record(context, primary));
+        assert!(trace.record(
+            context,
+            ForegroundNativeFailure {
+                phase: ForegroundFailurePhase::Poll,
+                predicate: ForegroundFailurePredicate::FixedViewport
+            }
+        ));
+        assert!(trace.record(context, cleanup));
+        assert!(trace.record(
+            context,
+            ForegroundNativeFailure {
+                phase: ForegroundFailurePhase::Cleanup,
+                predicate: ForegroundFailurePredicate::PriorCleanupFailure
+            }
+        ));
+        assert_eq!(
+            trace.evidence(context),
+            Some(ForegroundNativeFailures {
+                primary: Some(primary),
+                cleanup: Some(cleanup)
+            })
+        );
+    }
+
+    #[test]
+    fn native_failure_predicates_preserve_order_and_short_circuit_without_changing_acceptance() {
+        use ForegroundFailurePredicate as P;
+        for first_false in 0..=3 {
+            let checked = std::cell::Cell::new(0);
+            let allowed = |index| {
+                checked.set(checked.get() + 1);
+                index != first_false
+            };
+            let failed = first_failed_predicate!(
+                P::HiddenSurface => allowed(0),
+                P::NoKeyCapability => allowed(1),
+                P::NoMainCapability => allowed(2),
+            );
+            let expected = [
+                Some(P::HiddenSurface),
+                Some(P::NoKeyCapability),
+                Some(P::NoMainCapability),
+                None,
+            ][first_false];
+            assert_eq!(failed, expected);
+            assert_eq!(checked.get(), (first_false + 1).min(3));
+        }
+    }
 
     #[test]
     fn foreground_admission_cannot_substitute_another_active_key_main_window() {

@@ -128,6 +128,7 @@ fn validate_driver(driver: &str, desktop: &str) -> Result<(), String> {
         "self.cleanup_failure=Some(reason)",
         "drop(self)",
         "native_witness_drained",
+        "context.get().and_then(super::agentic_foreground_probe::native_failure_evidence)",
     ] {
         require(&driver, required)?;
     }
@@ -142,6 +143,7 @@ fn validate_driver(driver: &str, desktop: &str) -> Result<(), String> {
         "native_drain==Some(true)",
         "report.cleanup_failure.is_none()",
         "configuration::require_fresh_data_root(root)",
+        "work-rendering-native-failures:",
     ] {
         require(&desktop, required)?;
     }
@@ -198,7 +200,7 @@ fn validate(native: &str, host: &str, port: &str) -> Result<(), String> {
         "surface.setIgnoresMouseEvents(true)",
         "surface.canBecomeKeyWindow()",
         "surface.canBecomeMainWindow()",
-        "human_owners(&self.app)!=human_before",
+        "P::HumanOwnersUnchanged=>human_owners(&self.app)==human_before",
         "self.original_parent.addSubview(&self.page)",
         "self.page.setFrame(self.original_frame)",
         "Weak::from_retained(&surface)",
@@ -206,6 +208,16 @@ fn validate(native: &str, host: &str, port: &str) -> Result<(), String> {
         "self.state=ForegroundRenderingState::DeferredForeground",
         "exact_foreground_admission(expected_main,&*main,foreground(&app,&main,&responder))",
         "!expected.is_null()&&expected==observed&&facts.admitted()",
+        "ifcontext!=self.context",
+        "(self.context==context).then_some(self.failures)",
+        "ifslot.is_none()",
+        "iftrace.is_none()",
+        "&mutself.failures.cleanup",
+        "&mutself.failures.primary",
+        "P::NoKeyCapability=>!surface.canBecomeKeyWindow()",
+        "P::NoMainCapability=>!surface.canBecomeMainWindow()",
+        "P::VisibleSurface=>surface.isVisible()",
+        "P::ExactPageWindow=>self.page.window().is_some_and(|window|std::ptr::eq(&*window,&**surface))",
     ] {
         require(&native, required)?;
     }
@@ -312,6 +324,31 @@ mod tests {
         include_str!("../../crates/zephium-engine/src/host/agent_foreground_probe.rs");
     const PORT: &str =
         include_str!("../../crates/zephium-engine/src/agent_foreground_probe_port.rs");
+
+    #[test]
+    fn foreground_failures_require_exact_context_sticky_causes_and_unchanged_predicates() {
+        validate(NATIVE, HOST, PORT).unwrap();
+        for changed in [
+            NATIVE.replace("context != self.context", "false"),
+            NATIVE.replace(
+                "(self.context == context).then_some(self.failures)",
+                "Some(self.failures)",
+            ),
+            NATIVE.replace("if slot.is_none()", "if true"),
+            NATIVE.replace("if trace.is_none()", "if true"),
+            NATIVE.replace("&mut self.failures.cleanup", "&mut self.failures.primary"),
+            NATIVE.replace(
+                "P::VisibleSurface => surface.isVisible()",
+                "P::VisibleSurface => true",
+            ),
+            NATIVE.replace(
+                "P::NoKeyCapability => !surface.canBecomeKeyWindow()",
+                "P::NoKeyCapability => true",
+            ),
+        ] {
+            assert!(validate(&changed, HOST, PORT).is_err());
+        }
+    }
 
     #[test]
     fn foreground_rendering_rejects_activation_policy_hacks_untracked_owners_and_raised_bounds() {

@@ -143,8 +143,9 @@ impl EngineHost {
                 });
                 let guard = task.callback_guard();
                 let Some(watchdog) = rendering_watchdog(context, guard) else {
+                    let failure = ForegroundRenderingLease::watchdog_failed(context);
                     let _ = binding.retire_foreground_probe();
-                    task.complete(State::Failed);
+                    task.complete(failure);
                     return;
                 };
                 // The independent watchdog is retained before presentation.
@@ -169,7 +170,7 @@ impl EngineHost {
                             }
                         })
                     })
-                    .unwrap_or(State::Failed);
+                    .unwrap_or_else(|| ForegroundRenderingLease::owner_unavailable(context));
                 task.complete(state);
             }
             Operation::Poll | Operation::Retire => {
@@ -195,7 +196,7 @@ impl EngineHost {
                             }
                         })
                     })
-                    .unwrap_or(State::Failed);
+                    .unwrap_or_else(|| ForegroundRenderingLease::owner_unavailable(context));
                 task.complete(state);
             }
         }
@@ -223,10 +224,11 @@ impl EngineHost {
                     lease.guard(context)
                 }
             })
-            .unwrap_or(State::Failed);
+            .unwrap_or_else(|_| ForegroundRenderingLease::owner_unavailable(context));
         if matches!(state, State::Prepared | State::Acquiring | State::Ready) {
             probe.watchdog = rendering_watchdog(context, guard);
             if probe.watchdog.is_none() {
+                let _ = ForegroundRenderingLease::watchdog_failed(context);
                 let _ = binding.retire_foreground_probe();
             }
         }

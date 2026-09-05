@@ -314,6 +314,14 @@ fn record_report(
     for (index, sample) in report.samples.iter().enumerate() {
         super::write_diagnostic(format_args!("work-rendering-sample: index={index} elapsed_ms={} nodes={} controls={} animation_frame={}", sample.elapsed_ms, sample.nodes, sample.controls, sample.animation_frame));
     }
+    let evidence = zephium_engine::foreground_rendering_native_failures();
+    let (primary, cleanup) = evidence.map_or((None, None), |evidence| {
+        (evidence.primary, evidence.cleanup)
+    });
+    super::write_diagnostic(format_args!(
+        "work-rendering-native-failures: available={} primary={primary:?} cleanup={cleanup:?}",
+        evidence.is_some()
+    ));
     super::write_diagnostic(format_args!("work-rendering-provisional: outcome={} cleanup_failure={:?} native_cohort_clean={} human_ownership_preserved={} fixture_clean={} elapsed_ms={}", report.outcome, report.cleanup_failure, report.native_cohort_clean, report.human_ownership_preserved, report.fixture_clean, report.elapsed_ms));
     let acceptable = report.native_cohort_clean
         && report.fixture_clean

@@ -27,6 +27,20 @@ const OFFSETS_MS: [u64; 8] = [0, 50, 100, 200, 400, 800, 1600, 3200];
 const TOTAL_BUDGET: Duration = Duration::from_secs(15);
 const CLEANUP_BUDGET: Duration = Duration::from_secs(5);
 
+pub use super::agentic_foreground_probe::{
+    ForegroundFailurePhase, ForegroundFailurePredicate, ForegroundNativeFailure,
+    ForegroundNativeFailures,
+};
+
+/// Fixed failure predicates for this exact acquired context only; never authority.
+pub fn foreground_rendering_native_failures() -> Option<ForegroundNativeFailures> {
+    EXPECTED_DRAIN.with(|context| {
+        context
+            .get()
+            .and_then(super::agentic_foreground_probe::native_failure_evidence)
+    })
+}
+
 /// Move-only diagnostic admission; no native handle or mutable owner escapes.
 /// Captured by the desktop for its exact trusted main window, not ambient focus.
 pub struct ForegroundRenderingAdmission(HumanForegroundGuard);

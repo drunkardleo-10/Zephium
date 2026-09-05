@@ -1,10 +1,10 @@
 # Actual-application foreground rendering qualification
 
-Status: native ownership seam and isolated actual-desktop driver implemented;
-the first actual-app launch deferred before Work allocation. A foreground
-rendering measurement remains pending. No RAF, foreground preservation or commercial-site
-success is claimed by this document yet. The prior standalone evidence and its
-event-loop limitations remain in [macos-rendering-readiness.md](macos-rendering-readiness.md).
+Status: actual-application foreground admission is reached, but native rendering
+has refused before any semantic/RAF sample. A qualified rendering measurement
+remains pending; no RAF or commercial-site success is claimed. The prior
+standalone evidence and its event-loop limitations remain in
+[macos-rendering-readiness.md](macos-rendering-readiness.md).
 
 ## Release-excluded ownership checkpoint
 
@@ -297,3 +297,48 @@ this false value alone does not establish a native teardown leak. The generic
 Failed result cannot justify relaxing any acceptance predicate. The next change
 must retain bounded, content-free, exact native refusal predicates and separate
 cleanup evidence before any behavior correction or newly authorized rerun.
+
+## Exact failed-predicate refinement, without an acceptance change
+
+The release-excluded native lease now records the first refused fixed predicate
+with a closed phase: Prepare, Present, Poll or Cleanup. Host watchdog setup and
+lease-owner failures are distinguished as Host. Each existing native condition
+still executes in its original order and short-circuits at the same first
+refusal. No visibility, geometry, input, foreground, deadline, scope or cleanup
+condition has been removed, widened or converted into a retry.
+
+Evidence is bounded to one exact ContextJoin, one immutable first primary cause,
+and one independently immutable cleanup cause. Later poll/retirement failures
+cannot erase the earlier cause; foreign-context or successor-document evidence
+cannot be inserted or read. The trace contains only fixed enums, no native
+addresses, window geometry values, strings from pages, URLs or credentials. Its
+availability means preparation entered the diagnostic path, not that a surface
+was successfully allocated, presented or qualified. Evidence absence remains
+explicit and cannot relax a refusal.
+
+The desktop emits one content-free `work-rendering-native-failures` line with
+availability, primary and cleanup fields, read through the driver's exact
+acquired-context join. These diagnostics never feed task/model authority or the
+qualification predicate. Generic failure, original driver outcome, normal
+shutdown and weak-native-drain requirements remain unchanged. The earlier
+518 ms witness cannot be retroactively assigned a predicate that it did not
+record; no behavior correction is justified until new authorized native evidence
+identifies the actual refused condition.
+
+Deterministic tests cover context/document substitution, independent first-cause
+and cleanup retention, and unchanged ordered short-circuit evaluation.
+Architecture adversaries reject lost exact binding, overwritten causes, missing
+cleanup separation and relaxed native visibility/key-authority predicates.
+Final gates pass: all 495 engine library tests, seven isolated configuration/
+admission tests, strict all-target foreground-feature desktop and engine Clippy,
+four foreground architecture adversaries, both architecture commands including
+hostile semantic JavaScript smoke, ordinary non-probe `agentic-browser` engine
+check, workspace fmt and diff checks. The isolated debug application bundle
+rebuilt through the same pinned Node/pnpm/Tauri flow, without signing or launch;
+its Info.plist identity remains `app.zephium.work-rendering-probe`. The executable
+SHA-256 is
+`88f66feaddd98ff7bac8d10f2cd50176609b322fdeabb1a90257526915e0a9ef`.
+There has been no third actual-application launch, public-site visit or provider
+call. The next independently authorized native run should retain the new exact
+predicate line alongside the unchanged admission, provisional and closure lines;
+it must not reuse or erase a nonempty prior diagnostic data root.
