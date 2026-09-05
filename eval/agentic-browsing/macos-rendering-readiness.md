@@ -334,3 +334,21 @@ new model capability, Work UI or proof of open-objective behavior. If it proves
 RAF progress, production admission still needs explicit rendered-resource
 ownership, deadline/cancellation/revocation, observation freshness and truthful
 native accounting, distinct from visibility, human takeover and suspension.
+
+### 2026-09-05 — first presented attempt (refused before measurement)
+
+One invocation used clean source HEAD
+`5310f99a6c5b6021f66b7523a2c9420b500392a4`. The pre-invocation host clock read
+`20:51:42 UTC`; the exact process start was not emitted. The command exited 1
+with `stage=presented_responder_changed`, before any semantic measurement or
+RAF outcome. This is not a negative RAF result.
+
+The guard checks deadline, application inactivity, absence of key/main-window
+status and authority, and mouse exclusion before the responder comparison.
+Those checks did not refuse that native sample. The exact internal responder
+relationship was not captured, so the output does not establish whether it
+belonged to the owned page. The original hide/restore and native teardown path
+completed without replacing the reported stage. No provider or public-site
+request occurred and no success is claimed. Diagnosis must distinguish an
+internal non-key-window responder transition from user-input/focus authority,
+without removing the independent native isolation checks.
