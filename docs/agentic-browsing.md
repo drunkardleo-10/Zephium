@@ -1,7 +1,7 @@
 # Agentic browsing implementation specification
 
 Status: accepted implementation program
-Last reviewed: 2026-09-05
+Last reviewed: 2026-09-06
 
 This document defines how Zephium proves and builds the browser-execution layer
 used by Work. It is deliberately independent of the Work canvas, product
@@ -1449,7 +1449,65 @@ The fixture suite is exhaustive and cheap. It covers:
 Fixture correctness is 100%: no flaky pass budget, false success, safety
 violation, or uncontrolled side effect.
 
-### 13.2 Initial real-site matrix
+### 13.2 Held-out open-objective qualification
+
+Before expanding site coverage, prove that the model can make the decisions
+that task-authored qualifiers currently make for it. The actor receives only:
+
+- the user's bounded natural-language objective;
+- the immutable capability envelope and resource ceilings;
+- the initial Work-owned browser resource and its current observation; and
+- the small model-facing capability profile admitted for the current phase.
+
+The route, expected answer, completion predicate, evidence requirements, and
+recovery path are withheld from the actor. They are retained by a separate
+validator that cannot grant browser authority or contribute instructions to the
+model context. A successful run must independently choose what to inspect,
+follow at least one previously observed navigation opportunity, recognize when
+evidence is sufficient, and terminate through a bounded `finish` proposal that
+names the retained evidence it relies on. The validator then evaluates the
+result and provenance; a model's declaration of success is never the verdict.
+
+The first objective uses versioned loopback documents with an unfamiliar
+route, distractors, dynamic state, and a hidden ground-truth value. This keeps
+the decision problem real while making failures reproducible. Subsequent
+objectives add same-origin SPA transitions, cross-origin scope boundaries,
+multiple pages, contradictory sources, insufficient evidence, and a required
+human-takeover branch. At least one successful page and its evidence remain
+owned by Work after the actor lease ends, proving that run completion and
+resource destruction are not the same lifetime.
+
+Every run records a content-free decision trace: offered capability profile,
+chosen capability, observation/evidence identifiers, verification level,
+typed refusal or recovery class, turns, tokens, latency, cost, and resource
+closure. It does not retain hidden answers, page content, provider payloads, or
+credentials in committed evidence.
+
+### 13.3 Evaluation portfolio
+
+No single browser benchmark is the release gate. Zephium uses complementary
+evidence layers:
+
+1. deterministic hostile fixtures for protocol, policy, lifecycle, safety, and
+   exact failure diagnosis;
+2. held-out open objectives for model planning, evidence selection, stopping,
+   uncertainty, and recovery;
+3. a small heterogeneous live-site matrix for current-web compatibility;
+4. reproducible self-hosted tasks from maintained BrowserGym/WebArena-family
+   environments where their task semantics match Zephium capabilities;
+5. a sampled live benchmark such as Online-Mind2Web for external validity and
+   a sampled WebVoyager-compatible run only for market comparability; and
+6. owned authenticated accounts with reversible read/write workflows, followed
+   by long-running real Work scenarios and human takeover.
+
+Live benchmarks drift, contain ambiguous or time-dependent tasks, encounter
+anti-automation defenses, and often use model judges. Report the exact task
+revision, exclusions, environment, model, provider settings, pass definition,
+repetitions, intervention policy, and confidence interval. Never optimize the
+runtime or prompt solely for one leaderboard, and never let benchmark-specific
+helpers enter the production capability surface.
+
+### 13.4 Initial real-site matrix
 
 The first matrix is intentionally small enough to run repeatedly while still
 covering distinct failure classes. Use only owned/authorized test accounts and
@@ -1477,7 +1535,7 @@ credentials and recorded in a versioned eval manifest. The cross-check swaps
 both OS and provider. A smaller set also swaps only provider or only OS when a
 failure must be attributed correctly.
 
-### 13.3 Concurrent production configuration
+### 13.5 Concurrent production configuration
 
 The controlled matrix may use an exclusive profile with the normal browser
 closed. That is not the production condition. A separate qualification runs:
@@ -1494,7 +1552,7 @@ stability, native view/process pressure, CPU, memory, GPU/compositor behavior,
 wakeups, battery/energy impact, and cancellation. Agent work must not corrupt
 or noticeably destabilize ordinary browsing.
 
-### 13.4 Endurance and fault injection
+### 13.6 Endurance and fault injection
 
 Run multi-hour loops with bounded create/navigate/suspend/resume/destroy,
 renderer termination, network loss, model disconnect, rate limit, cancellation,
