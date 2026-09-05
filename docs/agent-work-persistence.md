@@ -40,6 +40,17 @@ original successful policy/audit settlement and native shutdown proof, joined
 to the exact manifest guard. The application must additionally retain the
 matching clean runtime lifecycle result.
 
+The same constructor-closed boundary now admits distinct immutable `Failed`
+and `Cancelled` facts with zero debt when the original policy closure reports
+that outcome and the native/runtime owners prove drain. Generic transitions,
+review decisions and decoded historical records cannot construct those writes.
+`FailedClosed` retains its original meaning: conservative classification with
+unresolved debt, never proof of clean cleanup. The fixed 96-byte version-one
+envelope adds two closed discriminants; older readers reject these unknown
+values rather than guessing success. No schema migration or result body is
+needed. Exact CAS, rollback, lost-ACK reconciliation and restart immutability
+apply equally to all proof-bearing terminal outcomes.
+
 Accepting review produces `FreshAdmissionRequired`; rejecting it produces
 `Rejected`. Both preserve unknown execution debt. Neither resumes the original
 proposal, and neither means clean resource settlement. Stale/conflicting

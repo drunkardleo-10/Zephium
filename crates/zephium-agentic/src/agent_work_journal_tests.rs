@@ -25,11 +25,17 @@ fn every_disposition_pair_has_closed_transition_grammar() {
         FreshAdmissionRequired,
         Rejected,
         FailedClosed,
+        Failed,
+        Cancelled,
     ];
     for from in dispositions {
         let mut bytes = *initial().as_bytes();
         bytes[1] = from as u8;
-        bytes[2] = if from == Succeeded { 0 } else { 63 };
+        bytes[2] = if matches!(from, Succeeded | Failed | Cancelled) {
+            0
+        } else {
+            63
+        };
         let record = AgentWorkRecord::decode(bytes).unwrap();
         for to in dispositions {
             let allowed = matches!(
@@ -70,6 +76,35 @@ fn review_is_one_use_and_never_clears_execution_debt() {
 }
 
 #[test]
+fn unsuccessful_closed_facts_are_immutable_and_cannot_mint_mutation_authority() {
+    let running = initial().transition(AgentWorkDisposition::Running).unwrap();
+    for disposition in [
+        AgentWorkDisposition::Failed,
+        AgentWorkDisposition::Cancelled,
+    ] {
+        let mut bytes = *running.as_bytes();
+        bytes[1] = disposition as u8;
+        bytes[2] = 0;
+        bytes[8..16].copy_from_slice(&(running.revision() + 1).to_be_bytes());
+        let terminal = AgentWorkRecord::decode(bytes).unwrap();
+        assert!(terminal.is_successor_of(running));
+        assert!(!terminal.is_successor_of(initial()));
+        assert_eq!(terminal.debt(), AgentWorkDebt::NONE);
+        assert_eq!(
+            terminal.interrupted(AgentWorkIncarnation::generate()),
+            Ok(terminal)
+        );
+        assert!(AgentWorkJournalMutation::transition(running, disposition).is_err());
+        assert!(terminal.transition(AgentWorkDisposition::Running).is_err());
+        assert!(terminal
+            .transition(AgentWorkDisposition::FailedClosed)
+            .is_err());
+        bytes[2] = AgentWorkDebt::UNKNOWN.bits();
+        assert!(AgentWorkRecord::decode(bytes).is_none());
+    }
+}
+
+#[test]
 fn restart_fences_incomplete_state_without_reopening_terminal_state() {
     let prior = initial().transition(AgentWorkDisposition::Running).unwrap();
     let owner = AgentWorkIncarnation::generate();
@@ -95,7 +130,7 @@ fn corrupt_versions_reserved_fields_and_zero_or_contradictory_state_fail_closed(
         (0, 0),
         (0, 2),
         (1, 0),
-        (1, 10),
+        (1, 12),
         (2, 64),
         (3, 1),
         (7, 1),

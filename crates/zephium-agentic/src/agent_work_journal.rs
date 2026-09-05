@@ -62,6 +62,10 @@ pub enum AgentWorkDisposition {
     Rejected = 8,
     /// Explicit fail-closed classification; never evidence of clean drain.
     FailedClosed = 9,
+    /// Task failed, but original execution and lifecycle owners proved drain.
+    Failed = 10,
+    /// Task was cancelled, with original execution and lifecycle owners drained.
+    Cancelled = 11,
 }
 
 impl AgentWorkDisposition {
@@ -80,6 +84,8 @@ impl AgentWorkDisposition {
             7 => Self::FreshAdmissionRequired,
             8 => Self::Rejected,
             9 => Self::FailedClosed,
+            10 => Self::Failed,
+            11 => Self::Cancelled,
             _ => return None,
         })
     }
@@ -127,7 +133,12 @@ impl AgentWorkRecord {
             || bytes[3..8] != [0; 5]
             || record.revision() == 0
             || bytes[16..32] == [0; 16]
-            || (disposition == AgentWorkDisposition::Succeeded) != (bytes[2] == 0)
+            || matches!(
+                disposition,
+                AgentWorkDisposition::Succeeded
+                    | AgentWorkDisposition::Failed
+                    | AgentWorkDisposition::Cancelled
+            ) != (bytes[2] == 0)
         {
             return None;
         }
@@ -202,6 +213,27 @@ impl AgentWorkRecord {
             AgentWorkDebt::NONE,
         )
     }
+    /// Records unsuccessful closure only from the original policy/audit and
+    /// native proofs. A failure classification alone cannot clear debt. The
+    /// application must also own the matching clean runtime lifecycle result.
+    pub fn closed_unsuccessfully(
+        self,
+        policy: AgentRunPolicySettlement,
+        _native: &AgentNativeShutdownProof,
+    ) -> Result<Self, AgentWorkJournalError> {
+        if self.disposition() != AgentWorkDisposition::Running
+            || self.0[32..48] != policy.closure().manifest().bytes()
+            || self.0[64..96] != policy.closure().manifest_guard()
+        {
+            return Err(AgentWorkJournalError::Transition);
+        }
+        let disposition = match policy.closure().outcome() {
+            AgentRunProgressOutcome::Failed(_) => AgentWorkDisposition::Failed,
+            AgentRunProgressOutcome::Cancelled(_) => AgentWorkDisposition::Cancelled,
+            AgentRunProgressOutcome::Succeeded => return Err(AgentWorkJournalError::Transition),
+        };
+        self.next(disposition, self.incarnation(), AgentWorkDebt::NONE)
+    }
     /// Store-only restart classification after acquiring the exclusive process
     /// lock. Terminal facts remain byte-for-byte unchanged.
     pub fn interrupted(self, owner: AgentWorkIncarnation) -> Result<Self, AgentWorkJournalError> {
@@ -242,7 +274,12 @@ impl AgentWorkRecord {
         {
             return false;
         }
-        if self.disposition() == AgentWorkDisposition::Succeeded {
+        if matches!(
+            self.disposition(),
+            AgentWorkDisposition::Succeeded
+                | AgentWorkDisposition::Failed
+                | AgentWorkDisposition::Cancelled
+        ) {
             return previous.disposition() == AgentWorkDisposition::Running
                 && self.debt() == AgentWorkDebt::NONE;
         }
@@ -366,6 +403,19 @@ impl AgentWorkJournalMutation {
         Ok(Self {
             expected: Some(previous),
             next: previous.completed(policy, native)?,
+            result_profile: None,
+        })
+    }
+    /// Persists failed/cancelled drain, never task success, from the original
+    /// joined policy/audit and native proofs plus the application's clean join.
+    pub fn closed_unsuccessfully(
+        previous: AgentWorkRecord,
+        policy: AgentRunPolicySettlement,
+        native: &AgentNativeShutdownProof,
+    ) -> Result<Self, AgentWorkJournalError> {
+        Ok(Self {
+            expected: Some(previous),
+            next: previous.closed_unsuccessfully(policy, native)?,
             result_profile: None,
         })
     }

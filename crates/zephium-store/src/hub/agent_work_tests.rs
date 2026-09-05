@@ -221,6 +221,71 @@ fn partial_writes_and_lost_acknowledgement_reconcile_only_exact_cas() {
 }
 
 #[test]
+fn settled_unsuccessful_terminals_survive_crash_without_reopening_or_result_bodies() {
+    let _process = work_test_guard();
+    for disposition in [
+        AgentWorkDisposition::Failed,
+        AgentWorkDisposition::Cancelled,
+    ] {
+        for injected in [Fault::BeforeWrite, Fault::AfterWrite, Fault::AfterCommit] {
+            let (directory, mut hub, owner) = open();
+            let admitted = initial(owner, 1);
+            put(&mut hub, admitted);
+            let running = transition(&mut hub, admitted, AgentWorkDisposition::Running).unwrap();
+            // Exercise only the private storage transaction with historical
+            // bytes. The public port still requires a proof-bearing mutation.
+            let mut bytes = *running.as_bytes();
+            bytes[1] = disposition as u8;
+            bytes[2] = AgentWorkDebt::NONE.bits();
+            bytes[8..16].copy_from_slice(&(running.revision() + 1).to_be_bytes());
+            let terminal = AgentWorkRecord::decode(bytes).unwrap();
+            FAULT.with(|fault| fault.set(Some(injected)));
+            assert_eq!(
+                compare_and_set_records(&mut hub.meta, Some(running), terminal, None, None),
+                Err(Error::Uncertain)
+            );
+            assert_eq!(
+                read(&hub.meta, running.key()).unwrap(),
+                Some(if injected == Fault::AfterCommit {
+                    terminal
+                } else {
+                    running
+                })
+            );
+            compare_and_set_records(&mut hub.meta, Some(running), terminal, None, None).unwrap();
+            compare_and_set_records(&mut hub.meta, Some(running), terminal, None, None).unwrap();
+            assert_eq!(inventory(&hub.meta).unwrap(), [terminal]);
+            assert!(
+                AgentWorkJournalMutation::transition(terminal, AgentWorkDisposition::Running)
+                    .is_err()
+            );
+            let bodies: u64 = hub
+                .meta
+                .query_row("SELECT count(*) FROM agent_work_artifacts", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(bodies, 0);
+            drop(hub);
+            simulate_process_exit();
+            let mut reopened = Hub::open(directory.path().into()).unwrap();
+            let Reply::Claimed {
+                owner: current,
+                records,
+            } = reopened.agent_work(Request::Claim).unwrap()
+            else {
+                panic!()
+            };
+            assert_ne!(current, owner);
+            assert_eq!(records, [terminal]);
+            assert_eq!(terminal.debt(), AgentWorkDebt::NONE);
+            drop(reopened);
+            simulate_process_exit();
+        }
+    }
+}
+
+#[test]
 fn approval_accept_reject_stale_replay_and_cancellation_races_are_exact() {
     let _process = work_test_guard();
     for winner in [
