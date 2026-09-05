@@ -522,3 +522,39 @@ The then-compound refusal did not distinguish a false policy-setter result
 from failed native policy/inactivity/no-window attestation. Subsequent admission
 must accept an already-attested exact policy without demanding a redundant
 transition; the setter is necessary only when native policy actually differs.
+
+One idempotent-admission invocation on clean
+`e85dfbffdfd40fad05054af8100eeaef9ab34c0b`
+(pre-invocation host clock `2026-09-05 21:29:49 UTC`, not exact start) exited 1
+in approximately 467ms with `application_became_active`, immediate prior
+`presented_application_became_active`, and no provisional measurement. Exact
+Prohibited launch and subsequent Accessory policy admission had passed before
+window construction, but did not prevent delayed activation when native AppKit
+events were serviced. No semantic or RAF measurement occurred.
+
+### Disposition after the standalone presented attempts
+
+No presented attempt has qualified RAF progress or foreground isolation.
+The earlier hidden native measurements remain exact evidence for their
+standalone NSRunLoop harness, not proof of the normal product app lifecycle.
+Servicing AppKit's lifecycle queue exposed a bootstrap activation effect that
+the previous harness did not account for. Do not treat its cached inactivity
+samples as a general guarantee about full application-event processing.
+
+The next approved evidence boundary is the normal foreground Zephium app
+lifecycle, with foreground ownership explicitly belonging to the creator/user.
+A bounded Work rendering opportunity must preserve that existing surface's
+key/main/input/responder authority. It must defer if an inactive app would
+need activation for rendering, rather than activate and repair focus afterward.
+No custom NSApplication loop, private SPI, synthetic event, scheduler shim or
+site-specific reveal is authorized as the next solution. The current native
+changes remain release-excluded diagnostic code, not a product rendering lease.
+
+Final deterministic regressions on `e85dfbf`: all 478 native-feature engine
+library tests; all three rendering architecture-mutation tests; strict
+all-target native-feature engine Clippy; non-probe `agentic-browser` engine
+check; both actual architecture gates (including hostile immutable-runtime
+JavaScript smoke); formatting and diff-whitespace checks. The debug native
+binary was rebuilt before its pinned attempt. No paid/provider run or public
+site retry occurred. The earlier unrelated full-xtask fixture failure remains
+outside these passing targeted tests; no full-xtask success is claimed.
