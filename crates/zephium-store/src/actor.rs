@@ -613,6 +613,12 @@ enum Cmd {
         agent_work::WorkPermit,
         zephium_agentic::AgentWorkJournalCompletion,
     ),
+    #[cfg(feature = "work-execution")]
+    AgentWorkArtifact(
+        zephium_agentic::AgentWorkArtifactRequest,
+        agent_work::WorkPermit,
+        zephium_agentic::AgentWorkArtifactCompletion,
+    ),
     SaveWake,
     VisitWake,
     SettingWake,
@@ -3607,6 +3613,10 @@ fn actor(
             #[cfg(feature = "work-execution")]
             Some(Cmd::AgentWork(request, _permit, completion)) => {
                 agent_work::settle(&mut hub, request, completion);
+            }
+            #[cfg(feature = "work-execution")]
+            Some(Cmd::AgentWorkArtifact(request, _permit, completion)) => {
+                agent_work::settle_artifact(&mut hub, request, completion);
             }
             Some(Cmd::AppendAgentAudit(delivery, _permit, completion)) => {
                 if let Some(message) =

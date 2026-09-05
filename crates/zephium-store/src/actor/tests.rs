@@ -102,18 +102,43 @@ fn test_store_with_sender(tx: SyncSender<Cmd>) -> SqliteStore {
 #[cfg(feature = "work-execution")]
 #[test]
 fn work_journal_mailbox_is_lazy_bounded_and_refusal_never_calls_completion() {
-    use zephium_agentic::{AgentWorkJournalError, AgentWorkJournalPort, AgentWorkJournalRequest};
+    use zephium_agentic::{
+        AgentWorkArtifactRequest, AgentWorkIncarnation, AgentWorkJournalError,
+        AgentWorkJournalPort, AgentWorkJournalRequest, AgentWorkRecord, AGENT_WORK_RECORD_BYTES,
+    };
     let (tx, rx) = mpsc::sync_channel(8);
     let store = test_store_with_sender(tx);
     assert!(store.work_admission.get().is_none());
-    for _ in 0..4 {
-        assert!(store
-            .dispatch(
+    let owner = AgentWorkIncarnation::generate();
+    // Persisted fixture data only; no terminal/native authority is created.
+    let mut bytes = [0; AGENT_WORK_RECORD_BYTES];
+    bytes[0] = 1;
+    bytes[1] = 1;
+    bytes[2] = 63;
+    bytes[15] = 1;
+    bytes[16..32].copy_from_slice(&owner.bytes());
+    bytes[47] = 1;
+    bytes[63] = 1;
+    let request = AgentWorkArtifactRequest::Read {
+        owner,
+        record: AgentWorkRecord::decode(bytes).unwrap(),
+        profile: 1_u128.into(),
+    };
+    for index in 0..4 {
+        let admitted = if index % 2 == 0 {
+            store.dispatch(
                 AgentWorkJournalRequest::Claim,
-                Box::new(|_| panic!("not pumped"))
+                Box::new(|_| panic!("not pumped")),
             )
-            .is_ok());
+        } else {
+            store.artifact(request.clone(), Box::new(|_| panic!("not pumped")))
+        };
+        assert!(admitted.is_ok());
     }
+    assert_eq!(
+        store.artifact(request.clone(), Box::new(|_| panic!("refused callback"))),
+        Err(AgentWorkJournalError::Capacity)
+    );
     assert_eq!(
         store.dispatch(
             AgentWorkJournalRequest::Claim,
@@ -138,6 +163,10 @@ fn work_journal_mailbox_is_lazy_bounded_and_refusal_never_calls_completion() {
             AgentWorkJournalRequest::Claim,
             Box::new(|_| panic!("refused callback"))
         ),
+        Err(AgentWorkJournalError::Shutdown)
+    );
+    assert_eq!(
+        store.artifact(request, Box::new(|_| panic!("refused callback"))),
         Err(AgentWorkJournalError::Shutdown)
     );
 }

@@ -39,6 +39,11 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
     let application = fs::read_to_string(root.join("crates/zephium-app/src/work.rs"))
         .map_err(|_| "missing Work application")?;
     validate_application(&application)?;
+    let artifact =
+        fs::read_to_string(root.join("crates/zephium-agentic/src/agent_work_artifact.rs"))
+            .map_err(|_| "missing bounded Work artifact codec")?;
+    validate_artifact(&artifact)?;
+    validate_artifact_store(&hub)?;
     let manifest = fs::read_to_string(root.join("crates/zephium-app/Cargo.toml"))
         .map_err(|_| "missing application manifest")?;
     for required in [
@@ -49,6 +54,76 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
     ] {
         if !manifest.contains(required) {
             return Err(format!("Work application lost optional boundary: {required}"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_artifact(source: &str) -> Result<(), String> {
+    for forbidden in [
+        "println!",
+        "eprintln!",
+        "dbg!",
+        "tracing::",
+        "log::",
+        "reqwest",
+        "thread::spawn",
+        "tokio::spawn",
+        "AgentProviderCredential",
+        "AgentProviderObjective",
+        "ContextJoin::",
+        "SemanticOpaqueRef::",
+        "AgentRunPolicy::",
+        "AgentWorkJournalMutation::completed",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "Work archive gains content logging or execution authority: {forbidden}"
+            ));
+        }
+    }
+    for required in [
+        "MAX_AGENT_WORK_ARTIFACT_BYTES: usize = 256 * 1024",
+        "MAX_AGENT_WORK_ARTIFACT_TOTAL_BYTES: usize = 32 * 1024 * 1024",
+        "mutation.next().disposition() != AgentWorkDisposition::Succeeded",
+        "identity.profile() != profile",
+        "identity.owner().bytes() != mutation.next().key()[16..32]",
+        "source.sensitivity != SemanticSensitivity::Public",
+        "result.stats().sensitive_source_edges() != 0",
+        "body: Arc<[u8]>",
+        "Sha256::digest(bytes)",
+        "document.validate()?",
+        "document.profile != descriptor.profile",
+        "serde_json::to_vec(&document).map_err(|_| AgentWorkJournalError::Uncertain)? != bytes",
+        "SemanticExtractionTrust::ModelMapped",
+        "#[serde(deny_unknown_fields)]",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "Work archive lost bounded provenance/data-only contract: {required}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_artifact_store(source: &str) -> Result<(), String> {
+    for required in [
+        "ownership.incarnation != owner || !self.registry.contains(&profile)",
+        "publication.mutation()",
+        "stored_profile != Some(publication.descriptor.profile())",
+        "archived.descriptor() != descriptor",
+        "next.disposition() == AgentWorkDisposition::Succeeded && stored_profile.is_some()",
+        "retained as usize + publication.body.len() > MAX_AGENT_WORK_ARTIFACT_TOTAL_BYTES",
+        "INSERT INTO agent_work_artifacts",
+        "CASE WHEN length(body) BETWEEN 1 AND ?3 THEN body END",
+        "tests::Fault::AfterArtifactWrite",
+        "transaction.commit()",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "Work artifact Store lost atomic original-owner boundary: {required}"
+            ));
         }
     }
     Ok(())
@@ -135,6 +210,35 @@ fn validate_content_free(source: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn artifacts_remain_bounded_data_and_atomic_profile_owned_publications() {
+        let codec = include_str!("../../crates/zephium-agentic/src/agent_work_artifact.rs");
+        let store = include_str!("../../crates/zephium-store/src/hub/agent_work.rs");
+        validate_artifact(codec).unwrap();
+        validate_artifact_store(store).unwrap();
+        for removed in [
+            "identity.profile() != profile",
+            "Sha256::digest(bytes)",
+            "document.validate()?",
+        ] {
+            assert!(validate_artifact(&codec.replace(removed, "removed_boundary")).is_err());
+        }
+        for mutation in [
+            "ContextJoin::restored()",
+            "eprintln!(body)",
+            "AgentWorkJournalMutation::completed()",
+        ] {
+            assert!(validate_artifact(&format!("{codec}\n{mutation}")).is_err());
+        }
+        for removed in [
+            "archived.descriptor() != descriptor",
+            "CASE WHEN length(body) BETWEEN 1 AND ?3 THEN body END",
+            "tests::Fault::AfterArtifactWrite",
+        ] {
+            assert!(validate_artifact_store(&store.replace(removed, "removed_boundary")).is_err());
+        }
+    }
 
     #[test]
     fn closed_work_records_and_store_lane_remain_content_free() {

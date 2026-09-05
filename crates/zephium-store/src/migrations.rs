@@ -1396,6 +1396,30 @@ pub static META: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 18,
+        up: |tx| {
+            tx.execute_batch(
+                "ALTER TABLE agent_work_runs ADD COLUMN result_profile TEXT
+                     CHECK (result_profile IS NULL OR length(result_profile) = 26);
+                 CREATE TRIGGER agent_work_result_intent_immutable BEFORE UPDATE ON agent_work_runs
+                 WHEN NEW.result_profile IS NOT OLD.result_profile
+                 BEGIN SELECT RAISE(ABORT, 'work result intent is immutable'); END;
+                 CREATE TABLE agent_work_artifacts (
+                     run_key BLOB PRIMARY KEY REFERENCES agent_work_runs(run_key),
+                     profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                     artifact_id BLOB NOT NULL UNIQUE CHECK (length(artifact_id) = 16),
+                     digest BLOB NOT NULL CHECK (length(digest) = 32),
+                     body BLOB NOT NULL CHECK (length(body) BETWEEN 1 AND 262144)
+                 ) STRICT, WITHOUT ROWID;
+                 CREATE TRIGGER agent_work_artifact_capacity BEFORE INSERT ON agent_work_artifacts
+                 WHEN (SELECT coalesce(sum(length(body)), 0) FROM agent_work_artifacts) + length(NEW.body) > 33554432
+                 BEGIN SELECT RAISE(ABORT, 'work result capacity exceeded'); END;
+                 CREATE TRIGGER agent_work_artifact_immutable BEFORE UPDATE ON agent_work_artifacts
+                 BEGIN SELECT RAISE(ABORT, 'work result is immutable'); END;",
+            )
+        },
+    },
 ];
 
 pub static PROFILE: &[Migration] = &[

@@ -46,6 +46,42 @@ impl Drop for WorkPermit {
 }
 
 impl AgentWorkJournalPort for SqliteStore {
+    fn artifact(
+        &self,
+        request: zephium_agentic::AgentWorkArtifactRequest,
+        completion: zephium_agentic::AgentWorkArtifactCompletion,
+    ) -> Result<(), Error> {
+        let lifecycle = match self.lifecycle.try_lock() {
+            Ok(value) => value,
+            Err(TryLockError::Poisoned(value)) => value.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                return refuse_artifact(Error::Unavailable, completion)
+            }
+        };
+        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
+            return refuse_artifact(Error::Shutdown, completion);
+        }
+        let permit = match WorkPermit::acquire(&self.work_admission) {
+            Ok(permit) => permit,
+            Err(error) => return refuse_artifact(error, completion),
+        };
+        match self
+            .tx
+            .try_send(Cmd::AgentWorkArtifact(request, permit, completion))
+        {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let (error, command) = match error {
+                    mpsc::TrySendError::Full(command) => (Error::Capacity, command),
+                    mpsc::TrySendError::Disconnected(command) => (Error::Shutdown, command),
+                };
+                if let Cmd::AgentWorkArtifact(_, _, completion) = command {
+                    return refuse_artifact(error, completion);
+                }
+                Err(error)
+            }
+        }
+    }
     fn dispatch(
         &self,
         request: AgentWorkJournalRequest,
@@ -85,6 +121,23 @@ impl AgentWorkJournalPort for SqliteStore {
 fn refuse(error: Error, completion: AgentWorkJournalCompletion) -> Result<(), Error> {
     let _discard = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(completion)));
     Err(error)
+}
+
+fn refuse_artifact(
+    error: Error,
+    completion: zephium_agentic::AgentWorkArtifactCompletion,
+) -> Result<(), Error> {
+    let _discard = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(completion)));
+    Err(error)
+}
+
+pub(super) fn settle_artifact(
+    hub: &mut crate::hub::Hub,
+    request: zephium_agentic::AgentWorkArtifactRequest,
+    completion: zephium_agentic::AgentWorkArtifactCompletion,
+) {
+    let result = hub.agent_work_artifact(request);
+    let _completed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| completion(result)));
 }
 
 pub(super) fn settle(

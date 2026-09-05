@@ -15,7 +15,7 @@ impl Drop for WorkTestGuard {
         simulate_process_exit();
     }
 }
-fn simulate_process_exit() {
+pub(super) fn simulate_process_exit() {
     let mut fence = PROCESS_WORK_FENCE.lock().unwrap();
     if let Some(owner) = fence.as_ref() {
         assert_eq!(Arc::strong_count(owner), 1, "fixture still owns a live Hub");
@@ -27,10 +27,11 @@ fn simulate_process_exit() {
 pub(super) enum Fault {
     BeforeWrite,
     AfterWrite,
+    AfterArtifactWrite,
     AfterCommit,
     RestartPartial,
 }
-thread_local! { static FAULT: std::cell::Cell<Option<Fault>> = const { std::cell::Cell::new(None) }; }
+thread_local! { pub(super) static FAULT: std::cell::Cell<Option<Fault>> = const { std::cell::Cell::new(None) }; }
 pub(super) fn fault(expected: Fault) -> bool {
     FAULT.with(|fault| {
         if fault.get() == Some(expected) {
@@ -42,7 +43,7 @@ pub(super) fn fault(expected: Fault) -> bool {
     })
 }
 
-fn initial(owner: AgentWorkIncarnation, key: u16) -> AgentWorkRecord {
+pub(super) fn initial(owner: AgentWorkIncarnation, key: u16) -> AgentWorkRecord {
     let mut bytes = [0; AGENT_WORK_RECORD_BYTES];
     bytes[0] = 1;
     bytes[1] = 1;
@@ -54,7 +55,7 @@ fn initial(owner: AgentWorkIncarnation, key: u16) -> AgentWorkRecord {
     AgentWorkRecord::decode(bytes).unwrap()
 }
 
-fn open() -> (tempfile::TempDir, Hub, AgentWorkIncarnation) {
+pub(super) fn open() -> (tempfile::TempDir, Hub, AgentWorkIncarnation) {
     let directory = tempfile::tempdir().unwrap();
     let mut hub = Hub::open(directory.path().into()).unwrap();
     let Reply::Claimed { owner, records } = hub.agent_work(Request::Claim).unwrap() else {
@@ -65,7 +66,7 @@ fn open() -> (tempfile::TempDir, Hub, AgentWorkIncarnation) {
 }
 
 fn put(hub: &mut Hub, record: AgentWorkRecord) {
-    compare_and_set(&mut hub.meta, None, record).unwrap();
+    compare_and_set_records(&mut hub.meta, None, record, None, None).unwrap();
 }
 
 fn transition(
@@ -322,7 +323,7 @@ fn retention_capacity_refuses_admission_without_evicting_debt() {
     }
     transaction.commit().unwrap();
     assert_eq!(
-        compare_and_set(&mut hub.meta, None, initial(owner, 1025)),
+        compare_and_set_records(&mut hub.meta, None, initial(owner, 1025), None, None),
         Err(Error::Capacity)
     );
     assert_eq!(inventory(&hub.meta).unwrap().len(), 1024);
