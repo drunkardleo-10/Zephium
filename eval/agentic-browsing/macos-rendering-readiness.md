@@ -419,3 +419,17 @@ The public window-visible bit and full child-visible rectangle did not jointly
 converge; this output does not distinguish which was absent. Original
 hide/restore and teardown did not replace the failure. This is an acquisition
 failure, not a negative RAF result or permission to enlarge the deadline.
+
+Source inspection then exposed a concrete prerequisite in the diagnostic:
+Wry converts the initial top-left child origin using the unflipped host's
+560px height, giving the fixed 800px child a native y origin of −240. The
+presentation scope resized the host, but intentional non-autoresizing retained
+that original child frame. Requiring a fully visible child while preserving
+that origin was inconsistent. The scope now explicitly rebases the unchanged
+1280×800 page to native (0,0), freezes the full page frame (not just its size),
+and restores and attests the original frame after hiding. The visible-rectangle
+check also includes its origin. A timed-out acquisition now distinguishes
+window occlusion, parent clipping, or both using the same sampled facts. No
+deadline, viewport extent, input authority, production scheduling policy or
+semantic acceptance rule changed. Source inspection explains a necessary
+correction; it does not retroactively establish the unrecorded occlusion bit.

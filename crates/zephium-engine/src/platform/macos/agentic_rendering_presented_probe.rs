@@ -6,6 +6,19 @@ use objc2_app_kit::{NSScreen, NSWindowOcclusionState};
 
 const PRESENTED_TIMEOUT: Duration = Duration::from_secs(5);
 
+fn viewport_frame() -> NSRect {
+    NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1280.0, 800.0))
+}
+
+fn opportunity_refusal(window_has_pixels: bool, page_unclipped: bool) -> Option<&'static str> {
+    match (window_has_pixels, page_unclipped) {
+        (true, true) => None,
+        (false, true) => Some("presented_window_occluded"),
+        (true, false) => Some("presented_page_clipped"),
+        (false, false) => Some("presented_window_occluded_and_page_clipped"),
+    }
+}
+
 /// Exact fixed-fixture outcome, returned only after hiding and native teardown.
 #[derive(Debug)]
 pub struct MacosAgenticPresentedRenderingReport {
@@ -78,7 +91,7 @@ impl PresentedStateGuard<'_> {
         let exact_page = std::ptr::from_ref(self.page).addr();
         let geometry_failure = if self.window.frame() != self.expected_window_frame {
             Some("presented_window_frame_mismatch")
-        } else if self.page.frame().size != NSSize::new(1280.0, 800.0) {
+        } else if self.page.frame() != viewport_frame() {
             Some("presented_page_viewport_mismatch")
         } else if !self
             .page
@@ -89,6 +102,7 @@ impl PresentedStateGuard<'_> {
         } else {
             None
         };
+        let opportunity_failure = self.opportunity_failure();
         let facts = PresentedFacts {
             within_deadline: Instant::now() < self.deadline,
             app_inactive: !self.app.isActive(),
@@ -105,13 +119,17 @@ impl PresentedStateGuard<'_> {
                 && self.window.isOpaque()
                 && self.page.alphaValue() == 1.0,
             exact_geometry: geometry_failure.is_none(),
-            visible_pixels: self.has_visible_pixels(),
+            visible_pixels: opportunity_failure.is_none(),
         };
         if self.failure.get().is_none() {
             let failure = reject_facts(facts, self.require_visible_pixels.get());
             self.failure.set(match failure {
                 Some("presented_responder_changed") => Some(self.responder_refusal(responder)),
                 Some("presented_surface_geometry") => geometry_failure,
+                Some("presented_rendering_deadline") if !self.require_visible_pixels.get() => {
+                    opportunity_failure.or(failure)
+                }
+                Some("presented_surface_occluded") => opportunity_failure,
                 other => other,
             });
             if failure.is_none() && responder_identity == Some(exact_page) {
@@ -143,12 +161,18 @@ impl PresentedStateGuard<'_> {
     }
 
     fn has_visible_pixels(&self) -> bool {
+        self.opportunity_failure().is_none()
+    }
+
+    fn opportunity_failure(&self) -> Option<&'static str> {
         // AppKit's Visible bit means not fully occluded, not proof that every
         // pixel is uncovered. The separate view rectangle excludes parent clipping.
-        self.window
-            .occlusionState()
-            .contains(NSWindowOcclusionState::Visible)
-            && self.page.visibleRect().size == NSSize::new(1280.0, 800.0)
+        opportunity_refusal(
+            self.window
+                .occlusionState()
+                .contains(NSWindowOcclusionState::Visible),
+            self.page.visibleRect() == viewport_frame(),
+        )
     }
 
     pub(super) fn failed(&self) -> bool {
@@ -171,6 +195,7 @@ struct PresentedScope<'a> {
     host: &'a NSView,
     original_window_frame: NSRect,
     original_host_frame: NSRect,
+    original_page_frame: NSRect,
     original_ignores_mouse: bool,
     original_opaque: bool,
 }
@@ -181,6 +206,7 @@ impl PresentedScope<'_> {
         // this path nor its Drop backstop can make a page key or activate an app.
         self.page.setHidden(true);
         self.window.orderOut(None);
+        self.page.setFrame(self.original_page_frame);
         self.host.setFrame(self.original_host_frame);
         self.window
             .setFrame_display(self.original_window_frame, false);
@@ -191,6 +217,7 @@ impl PresentedScope<'_> {
             || !self.page.isHidden()
             || self.window.frame() != self.original_window_frame
             || self.host.frame() != self.original_host_frame
+            || self.page.frame() != self.original_page_frame
             || self.window.ignoresMouseEvents() != self.original_ignores_mouse
             || self.window.isOpaque() != self.original_opaque
         {
@@ -292,6 +319,7 @@ pub(super) fn measure(
         host,
         original_window_frame: original.window.frame(),
         original_host_frame: host.frame(),
+        original_page_frame: original.page.frame(),
         original_ignores_mouse: original.window.ignoresMouseEvents(),
         original_opaque: original.window.isOpaque(),
     };
@@ -302,6 +330,10 @@ pub(super) fn measure(
         scope
             .host
             .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), frame.size));
+        // Wry maps top-left coordinates using the original host height.
+        // Resizing that host does not rebase the fixed, non-autoresizing child.
+        // Preserve the exact viewport extent; restore this native origin on exit.
+        scope.page.setFrame(viewport_frame());
         scope.page.setHidden(false);
         // Publicly documented to preserve key and main windows even when this
         // application is inactive. This is real presentation, never disguised.
@@ -379,6 +411,32 @@ pub(super) fn measure(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presented_opportunity_distinguishes_occlusion_from_parent_clipping() {
+        assert_eq!(opportunity_refusal(true, true), None);
+        assert_eq!(
+            opportunity_refusal(false, true),
+            Some("presented_window_occluded")
+        );
+        assert_eq!(
+            opportunity_refusal(true, false),
+            Some("presented_page_clipped")
+        );
+        assert_eq!(
+            opportunity_refusal(false, false),
+            Some("presented_window_occluded_and_page_clipped")
+        );
+        let old_child = NSRect::new(NSPoint::new(0.0, 560.0 - 800.0), viewport_frame().size);
+        assert_ne!(old_child, viewport_frame());
+        for changed in [
+            old_child,
+            NSRect::new(NSPoint::new(1.0, 0.0), viewport_frame().size),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1280.0, 560.0)),
+        ] {
+            assert!(opportunity_refusal(true, changed == viewport_frame()).is_some());
+        }
+    }
 
     #[test]
     fn presented_evidence_requires_independent_focus_input_geometry_and_time_facts() {
