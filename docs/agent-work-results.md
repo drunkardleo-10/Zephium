@@ -83,11 +83,12 @@ tasks. Partial mapping output is discarded while original provider/accounting
 debt remains owned. Audit loss after a valid mapping retains the drained original
 owners and an unpublished result; it cannot manufacture successful closure.
 
-The result body is **memory-only**, not a durable artifact. Durable `Succeeded`
-records execution closure, not artifact-body persistence. Process exit before
-the consumer takes the result loses that body; restart never recreates it by
-replaying a provider request or native operation. This distinction is explicit
-in the application API and qualification metrics.
+Results remain **memory-only by default**: `Succeeded` then records execution
+closure, not body persistence. A trusted durable-profile extraction request can
+now explicitly require [profile-owned artifact publication](agent-work-artifacts.md).
+That intent is persisted before execution and requires an atomic body/terminal
+transaction before handoff. Restart retrieval yields historical `ModelMapped`
+data, never a provider/native replay or restored execution authority.
 
 ## Qualification and next seam
 
@@ -99,11 +100,9 @@ The delivery consumer checks the owned values and provenance again, then
 requires durable success, focus isolation and clean application-owned teardown.
 Only this explicit public mode retains provider logs. See the [M6 evidence](../eval/agentic-browsing/m6-production-qualification.md).
 
-Next is durable artifact delivery: a separate private content store and typed
-artifact identity, with an exact terminal/result publication transaction or
-recoverable outbox, bounded retention and restart classification that never
-replays execution. Result content must not enter the existing content-free Work
-journal or audit rows. User-facing task authoring, initial-scope expansion,
+The artifact vertical adds bounded typed private bodies and exact immutable
+publication on the same Store actor, separate from content-free journal/audit
+rows. User-facing task authoring, initial-scope expansion,
 navigation, multi-page research, new native lifetimes and parallel runs remain
 separate authorities. Default Browse dependencies and scheduling are unchanged;
 this is structural evidence, not battery, CPU/RAM or broad-site qualification.

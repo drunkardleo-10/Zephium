@@ -84,6 +84,7 @@ pub struct PreparedAgentWork {
     native: AgentWorkNativeFactory,
     deadline: Instant,
     run: ContextRunId,
+    result_profile: Option<zephium_core::ids::ProfileId>,
 }
 
 impl PreparedAgentWork {
@@ -116,6 +117,7 @@ impl PreparedAgentWork {
             return Err(AgentWorkFailure::Deadline);
         }
         let run = controller.run_identity()?;
+        let result_profile = controller.durable_result_profile()?;
         Ok(Self {
             engine: ports.engine,
             audit: ports.audit,
@@ -125,6 +127,7 @@ impl PreparedAgentWork {
             native: ports.native,
             deadline,
             run,
+            result_profile,
         })
     }
 }
@@ -165,9 +168,14 @@ pub struct AgentWorkApplicationSnapshot {
     pub persistence_failure: Option<AgentWorkJournalError>,
     pub last_review: Option<Result<AgentWorkRecord, AgentWorkJournalError>>,
     pub recovery_audit: Option<Result<AgentAuditLedgerStatus, AgentWorkFailure>>,
+    /// Exact durable result identity after atomic publication or explicit read.
+    pub artifact: Option<AgentWorkArtifactDescriptor>,
+    /// Closed result-retrieval state; bodies never enter this projection.
+    pub artifact_read: Option<Result<bool, AgentWorkJournalError>>,
 }
 
 struct Projection {
+    archived: Option<AgentWorkArchivedExtraction>,
     extraction: Option<SemanticOwnedExtractionResult>,
     snapshot: AgentWorkApplicationSnapshot,
     records: Vec<AgentWorkRecord>,
@@ -183,9 +191,22 @@ pub struct AgentWorkApplicationHandle {
 }
 
 impl AgentWorkApplicationHandle {
+    /// Explicit profile-scoped retrieval after completion/restart, never replay.
+    pub fn read_artifact(
+        &self,
+        record: AgentWorkRecord,
+        profile: zephium_core::ids::ProfileId,
+    ) -> bool {
+        self.send_control(WorkControl::ReadArtifact { record, profile })
+    }
+    /// Moves one read result. Archived data cannot restore execution authority.
+    pub fn take_archived_extraction(&self) -> Option<AgentWorkArchivedExtraction> {
+        lock(&self.projection).archived.take()
+    }
     /// Moves one explicitly model-mapped result only after the original clean
     /// lifecycle and durable terminal ACK. This is user-result content, never
-    /// diagnostic data, and is not yet a persisted artifact or factual proof.
+    /// diagnostic data or factual proof. A durable-result opt-in additionally
+    /// requires the atomic artifact publication ACK before this handoff.
     pub fn take_extraction(&self) -> Option<SemanticOwnedExtractionResult> {
         let mut projection = lock(&self.projection);
         if projection.snapshot.phase != AgentWorkApplicationPhase::Succeeded {
@@ -262,6 +283,10 @@ impl fmt::Debug for WorkSubmission {
 
 #[derive(Clone, Copy, Debug)]
 pub enum WorkControl {
+    ReadArtifact {
+        record: AgentWorkRecord,
+        profile: zephium_core::ids::ProfileId,
+    },
     Stop {
         run: ContextRunId,
         reason: AgentRuntimeStopReason,
@@ -300,6 +325,7 @@ impl CallbackHandle {
         engine: crate::SharedEngine,
     ) -> Option<AgentWorkApplicationHandle> {
         let projection = Arc::new(Mutex::new(Projection {
+            archived: None,
             extraction: None,
             snapshot: AgentWorkApplicationSnapshot {
                 phase: AgentWorkApplicationPhase::Loading,
@@ -308,6 +334,8 @@ impl CallbackHandle {
                 persistence_failure: None,
                 last_review: None,
                 recovery_audit: None,
+                artifact: None,
+                artifact_read: None,
             },
             records: Vec::new(),
             events: VecDeque::new(),
@@ -343,6 +371,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 struct ActiveWork {
+    result_profile: Option<zephium_core::ids::ProfileId>,
     pending_event: Option<AgentWorkEvent>,
     needs_review: bool,
     handle: AgentWorkHandle,
@@ -361,7 +390,16 @@ struct RecoveryAuditFlight {
     uncertain: bool,
 }
 
-type DurableResult = Result<AgentWorkJournalReply, AgentWorkJournalError>;
+#[derive(Clone)]
+enum DurableRequest {
+    Journal(AgentWorkJournalRequest),
+    Artifact(AgentWorkArtifactRequest),
+}
+enum DurableReply {
+    Journal(AgentWorkJournalReply),
+    Artifact(AgentWorkArtifactReply),
+}
+type DurableResult = Result<DurableReply, AgentWorkJournalError>;
 
 struct DurableSlot {
     result: Mutex<Option<DurableResult>>,
@@ -391,7 +429,7 @@ impl DurableSlot {
 }
 
 struct DurableFlight {
-    request: AgentWorkJournalRequest,
+    request: DurableRequest,
     result: Arc<DurableSlot>,
     deadline: Instant,
     uncertain: bool,
@@ -401,6 +439,8 @@ struct DurableFlight {
 
 #[derive(Clone, Copy)]
 enum DurablePurpose {
+    ArtifactPublish,
+    ArtifactRead,
     Claim,
     Admit,
     Start,
@@ -424,6 +464,7 @@ pub(crate) struct ApplicationWork {
     record: Option<AgentWorkRecord>,
     stopping: bool,
     used: bool,
+    artifact_preparation_failed: bool,
 }
 
 impl ApplicationWork {
@@ -455,6 +496,7 @@ impl ApplicationWork {
             record: None,
             stopping: false,
             used: false,
+            artifact_preparation_failed: false,
         }
     }
 
@@ -499,16 +541,21 @@ impl ApplicationWork {
         purpose: DurablePurpose,
         reconciliations: u8,
     ) {
+        self.dispatch_request(DurableRequest::Journal(request), purpose, reconciliations);
+    }
+
+    fn dispatch_request(
+        &mut self,
+        request: DurableRequest,
+        purpose: DurablePurpose,
+        reconciliations: u8,
+    ) {
         let result = Arc::new(DurableSlot::new());
         let sink = result.clone();
         let waker = self.waker.clone();
-        let callback = Box::new(move |value| {
-            sink.put(value);
-            waker.wake();
-        });
         let deadline = Instant::now() + Duration::from_secs(2);
         let flight = DurableFlight {
-            request,
+            request: request.clone(),
             result: result.clone(),
             deadline,
             uncertain: false,
@@ -516,7 +563,23 @@ impl ApplicationWork {
             purpose,
         };
         self.flight = Some(flight);
-        if let Err(error) = self.journal.dispatch(request, callback) {
+        let dispatch = match request {
+            DurableRequest::Journal(request) => self.journal.dispatch(
+                request,
+                Box::new(move |value| {
+                    sink.put(value.map(DurableReply::Journal));
+                    waker.wake();
+                }),
+            ),
+            DurableRequest::Artifact(request) => self.journal.artifact(
+                request,
+                Box::new(move |value| {
+                    sink.put(value.map(DurableReply::Artifact));
+                    waker.wake();
+                }),
+            ),
+        };
+        if let Err(error) = dispatch {
             result.put(Err(error));
         }
     }
@@ -551,6 +614,84 @@ impl ApplicationWork {
     }
 
     fn acknowledge(
+        &mut self,
+        purpose: DurablePurpose,
+        request: DurableRequest,
+        reply: DurableReply,
+    ) -> Result<(), AgentWorkJournalError> {
+        match (request, reply) {
+            (DurableRequest::Journal(request), DurableReply::Journal(reply)) => {
+                self.acknowledge_journal(purpose, request, reply)
+            }
+            (
+                DurableRequest::Artifact(AgentWorkArtifactRequest::Publish(publication)),
+                DurableReply::Artifact(AgentWorkArtifactReply::Published { record, descriptor }),
+            ) if matches!(purpose, DurablePurpose::ArtifactPublish)
+                && record == publication.mutation().next()
+                && descriptor == publication.descriptor() =>
+            {
+                if !self.remember(record) {
+                    return Err(AgentWorkJournalError::Capacity);
+                }
+                self.record = Some(record);
+                lock(&self.projection).snapshot.artifact = Some(descriptor);
+                self.finish_terminal(record);
+                Ok(())
+            }
+            (
+                DurableRequest::Artifact(AgentWorkArtifactRequest::Read {
+                    record, profile, ..
+                }),
+                DurableReply::Artifact(AgentWorkArtifactReply::Read(result)),
+            ) if matches!(purpose, DurablePurpose::ArtifactRead) => {
+                if result.as_ref().is_some_and(|result| {
+                    result.descriptor().key() != record.key()
+                        || result.descriptor().profile() != profile
+                }) {
+                    return Err(AgentWorkJournalError::Conflict);
+                }
+                let mut projection = lock(&self.projection);
+                if projection.archived.is_some() {
+                    return Err(AgentWorkJournalError::Capacity);
+                }
+                projection.snapshot.artifact = result.as_ref().map(|result| result.descriptor());
+                projection.snapshot.artifact_read = Some(Ok(result.is_some()));
+                projection.archived = result;
+                projection.snapshot.phase = if self.stopping {
+                    AgentWorkApplicationPhase::Recovery
+                } else if self
+                    .record
+                    .is_some_and(|record| record.disposition() == AgentWorkDisposition::Succeeded)
+                {
+                    AgentWorkApplicationPhase::Succeeded
+                } else {
+                    AgentWorkApplicationPhase::Ready
+                };
+                Ok(())
+            }
+            _ => Err(AgentWorkJournalError::Conflict),
+        }
+    }
+
+    fn finish_terminal(&mut self, record: AgentWorkRecord) {
+        if record.disposition() == AgentWorkDisposition::Succeeded {
+            if let Some(AgentWorkOutcome::Succeeded(success)) = self
+                .active
+                .as_mut()
+                .and_then(|active| active.outcome.as_mut())
+            {
+                lock(&self.projection).extraction = success.take_extraction();
+            }
+        }
+        lock(&self.projection).snapshot.phase = match record.disposition() {
+            AgentWorkDisposition::Succeeded => AgentWorkApplicationPhase::Succeeded,
+            AgentWorkDisposition::NeedsApproval => AgentWorkApplicationPhase::NeedsReview,
+            _ => AgentWorkApplicationPhase::Recovery,
+        };
+        self.abort_staged();
+    }
+
+    fn acknowledge_journal(
         &mut self,
         purpose: DurablePurpose,
         request: AgentWorkJournalRequest,
@@ -613,23 +754,7 @@ impl ApplicationWork {
                     }
                     DurablePurpose::Start => self.activate(),
                     DurablePurpose::Terminal => {
-                        if record.disposition() == AgentWorkDisposition::Succeeded {
-                            if let Some(AgentWorkOutcome::Succeeded(success)) = self
-                                .active
-                                .as_mut()
-                                .and_then(|active| active.outcome.as_mut())
-                            {
-                                lock(&self.projection).extraction = success.take_extraction();
-                            }
-                        }
-                        lock(&self.projection).snapshot.phase = match record.disposition() {
-                            AgentWorkDisposition::Succeeded => AgentWorkApplicationPhase::Succeeded,
-                            AgentWorkDisposition::NeedsApproval => {
-                                AgentWorkApplicationPhase::NeedsReview
-                            }
-                            _ => AgentWorkApplicationPhase::Recovery,
-                        };
-                        self.abort_staged();
+                        self.finish_terminal(record);
                     }
                     DurablePurpose::Review => {
                         if self.record.is_some_and(|prior| prior.key() == record.key()) {
@@ -637,7 +762,9 @@ impl ApplicationWork {
                         }
                         lock(&self.projection).snapshot.last_review = Some(Ok(record));
                     }
-                    DurablePurpose::Claim => return Err(AgentWorkJournalError::Conflict),
+                    DurablePurpose::Claim
+                    | DurablePurpose::ArtifactPublish
+                    | DurablePurpose::ArtifactRead => return Err(AgentWorkJournalError::Conflict),
                 }
                 Ok(())
             }
@@ -655,29 +782,27 @@ impl ApplicationWork {
             self.abort_staged();
         }
         let mut continue_audit = false;
-        if let Some(mut flight) = self.flight.take() {
+        if let Some(flight) = self.flight.take() {
             let result = lock(&flight.result.result).take();
             match result {
                 Some(Ok(reply)) => {
-                    if let Err(error) = self.acknowledge(flight.purpose, flight.request, reply) {
-                        flight.uncertain = true;
-                        self.flight = Some(flight);
-                        self.durable_uncertain(error);
+                    if let Err(error) =
+                        self.acknowledge(flight.purpose, flight.request.clone(), reply)
+                    {
+                        self.refuse_durable_flight(flight, error);
                     } else {
                         lock(&self.projection).snapshot.persistence_failure = None;
                     }
                 }
                 Some(Err(error)) => {
-                    flight.uncertain = true;
-                    self.flight = Some(flight);
-                    self.durable_uncertain(error);
+                    self.refuse_durable_flight(flight, error);
                 }
                 None => {
                     if !flight.uncertain && Instant::now() >= flight.deadline {
-                        flight.uncertain = true;
-                        self.durable_uncertain(AgentWorkJournalError::Uncertain);
+                        self.refuse_durable_flight(flight, AgentWorkJournalError::Uncertain);
+                    } else {
+                        self.flight = Some(flight);
                     }
-                    self.flight = Some(flight);
                 }
             }
         }
@@ -834,6 +959,7 @@ impl ApplicationWork {
         let (runtime, completion, lifecycle) = pending.bind_browser_port(browser).into_parts();
         completion.set_waker(self.waker.clone());
         self.active = Some(ActiveWork {
+            result_profile: staged.result_profile,
             pending_event: None,
             needs_review: false,
             handle: staged.handle,
@@ -854,6 +980,9 @@ impl ApplicationWork {
     }
 
     fn persist_execution_end(&mut self) {
+        if self.artifact_preparation_failed {
+            return;
+        }
         let Some(record) = self.record else {
             return;
         };
@@ -887,6 +1016,40 @@ impl ApplicationWork {
         match mutation {
             Ok(mutation) => {
                 lock(&self.projection).snapshot.phase = AgentWorkApplicationPhase::Closing;
+                if mutation.next().disposition() == AgentWorkDisposition::Succeeded {
+                    if let Some(profile) = self
+                        .active
+                        .as_ref()
+                        .and_then(|active| active.result_profile)
+                    {
+                        let publication = self
+                            .active
+                            .as_ref()
+                            .and_then(|active| active.outcome.as_ref())
+                            .and_then(|outcome| match outcome {
+                                AgentWorkOutcome::Succeeded(success) => success.extraction(),
+                                _ => None,
+                            })
+                            .ok_or(AgentWorkJournalError::Transition)
+                            .and_then(|result| {
+                                AgentWorkArtifactPublication::prepare(mutation, profile, result)
+                            });
+                        match publication {
+                            Ok(publication) => self.dispatch_request(
+                                DurableRequest::Artifact(AgentWorkArtifactRequest::Publish(
+                                    Arc::new(publication),
+                                )),
+                                DurablePurpose::ArtifactPublish,
+                                0,
+                            ),
+                            Err(error) => {
+                                self.artifact_preparation_failed = true;
+                                self.durable_uncertain(error);
+                            }
+                        }
+                        return;
+                    }
+                }
                 self.dispatch(
                     AgentWorkJournalRequest::CompareAndSet(mutation),
                     DurablePurpose::Terminal,
@@ -904,6 +1067,19 @@ impl ApplicationWork {
         projection.snapshot.phase = AgentWorkApplicationPhase::Recovery;
         drop(projection);
         self.stop_active(AgentRuntimeStopReason::Cancelled);
+    }
+
+    fn refuse_durable_flight(&mut self, mut flight: DurableFlight, error: AgentWorkJournalError) {
+        if matches!(flight.purpose, DurablePurpose::ArtifactRead) {
+            // A read has no publication or execution debt. Refusal/timeout must
+            // not consume future admission or replace an unread result. A late
+            // callback retains only its original disconnected bounded slot.
+            lock(&self.projection).snapshot.artifact_read = Some(Err(error));
+        } else {
+            flight.uncertain = true;
+            self.flight = Some(flight);
+            self.durable_uncertain(error);
+        }
     }
 
     fn abort_staged(&mut self) {
@@ -943,8 +1119,57 @@ impl ApplicationWork {
             return;
         }
         match command.control {
+            WorkControl::ReadArtifact { record, profile } => {
+                let error = if self.stopping {
+                    Some(AgentWorkJournalError::Shutdown)
+                } else if self.flight.is_some()
+                    || self.recovery_audit.is_some()
+                    || lock(&self.projection).archived.is_some()
+                {
+                    Some(AgentWorkJournalError::Capacity)
+                } else if !matches!(
+                    lock(&self.projection).snapshot.phase,
+                    AgentWorkApplicationPhase::Ready | AgentWorkApplicationPhase::Succeeded
+                ) || record.disposition() != AgentWorkDisposition::Succeeded
+                    || !lock(&self.projection).records.contains(&record)
+                {
+                    Some(AgentWorkJournalError::Conflict)
+                } else {
+                    None
+                };
+                if let Some(error) = error {
+                    lock(&self.projection).snapshot.artifact_read = Some(Err(error));
+                } else if let Some(owner) = self.owner {
+                    lock(&self.projection).snapshot.artifact_read = None;
+                    self.dispatch_request(
+                        DurableRequest::Artifact(AgentWorkArtifactRequest::Read {
+                            owner,
+                            record,
+                            profile,
+                        }),
+                        DurablePurpose::ArtifactRead,
+                        0,
+                    );
+                }
+            }
             WorkControl::Stop { run, reason } => {
-                if lock(&self.projection).snapshot.run == Some(run) {
+                // The first retained successful terminal CAS owns publication.
+                // Its native/runtime/provider owners are already clean; a late
+                // stop cannot rewrite that immutable outcome or disable reads.
+                let terminal_owned = self
+                    .record
+                    .is_some_and(|record| record.disposition().is_terminal())
+                    || self
+                        .flight
+                        .as_ref()
+                        .is_some_and(|flight| match &flight.request {
+                            DurableRequest::Journal(AgentWorkJournalRequest::CompareAndSet(
+                                mutation,
+                            )) => mutation.next().disposition() == AgentWorkDisposition::Succeeded,
+                            DurableRequest::Artifact(AgentWorkArtifactRequest::Publish(_)) => true,
+                            _ => false,
+                        });
+                if lock(&self.projection).snapshot.run == Some(run) && !terminal_owned {
                     self.stopping = true;
                     self.stop_active(reason);
                     self.abort_staged();
@@ -1013,7 +1238,11 @@ impl ApplicationWork {
             WorkControl::Reconcile => {
                 if let Some(flight) = self.flight.take() {
                     if flight.uncertain && flight.reconciliations < 4 {
-                        self.dispatch(flight.request, flight.purpose, flight.reconciliations + 1);
+                        self.dispatch_request(
+                            flight.request,
+                            flight.purpose,
+                            flight.reconciliations + 1,
+                        );
                     } else {
                         self.flight = Some(flight);
                     }
@@ -1138,6 +1367,7 @@ impl ApplicationWork {
         }
         self.poll();
         self.flight.is_none()
+            && !self.artifact_preparation_failed
             && self.recovery_audit.is_none()
             && self.unstarted.is_none()
             && self

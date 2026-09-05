@@ -170,6 +170,13 @@ fn validate_application(source: &str) -> Result<(), String> {
         "projection.extraction.take()",
         "if record.disposition() == AgentWorkDisposition::Succeeded",
         "lock(&self.projection).extraction = success.take_extraction()",
+        "AgentWorkArtifactPublication::prepare(mutation, profile, result)",
+        "self.artifact_preparation_failed = true",
+        "descriptor == publication.descriptor()",
+        "if matches!(flight.purpose, DurablePurpose::ArtifactRead)",
+        "projection.archived = result",
+        "lock(&self.projection).archived.is_some()",
+        "DurableRequest::Artifact(AgentWorkArtifactRequest::Publish(_)) => true",
     ] {
         if !source.contains(required) {
             return Err(format!(
@@ -279,6 +286,9 @@ mod tests {
             "projection.snapshot.phase != AgentWorkApplicationPhase::Succeeded",
             "if record.disposition() == AgentWorkDisposition::Succeeded",
             "lock(&self.projection).extraction = success.take_extraction()",
+            "descriptor == publication.descriptor()",
+            "self.artifact_preparation_failed = true",
+            "lock(&self.projection).archived.is_some()",
         ] {
             assert!(validate_application(&source.replace(boundary, "removed_boundary")).is_err());
         }

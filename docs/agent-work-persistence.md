@@ -82,6 +82,12 @@ batch uses the ledger's checked next delivery identity, not a guessed count.
 No provider request or native action is replayed. Undelivered audit remains debt;
 draining it does not clear native, provider, accounting or lifecycle obligations.
 
+Explicit durable-profile extraction can require an atomic private
+[artifact/terminal publication](agent-work-artifacts.md). It shares the same
+retained request slot and Store permits, not the content-free journal/audit
+body format. Read-only archive failures release their own slot without consuming
+future admission; publication uncertainty retains the exact original owner.
+
 The existing shell mailbox carries one globally coalesced Work wake. No extra
 worker or periodic poll is added; the existing timer wakes only for pending
 acknowledgement/admission deadlines. The application projection holds at most 64

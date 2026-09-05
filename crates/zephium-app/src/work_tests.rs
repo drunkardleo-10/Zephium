@@ -9,6 +9,10 @@ use zephium_agent_controller::{
 
 static SERIAL: Mutex<()> = Mutex::new(());
 
+#[cfg(feature = "work-execution-probe")]
+#[path = "work_artifact_tests.rs"]
+mod artifact_tests;
+
 // Synthetic content fixture built by the same public read/extraction validator;
 // it carries no provider, policy, runtime or successful execution authority.
 fn owned_result() -> SemanticOwnedExtractionResult {
@@ -161,11 +165,120 @@ impl AgentWorkTask for Task {
     }
 }
 
+struct PrematureExtractionTask(SemanticExtractionSchema);
+impl AgentWorkTask for PrematureExtractionTask {
+    fn evaluate(
+        &mut self,
+        observation: &SemanticObservation,
+    ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+        Task.evaluate(observation)
+    }
+    fn assess(
+        &self,
+        action: &SemanticPreparedAction,
+    ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+        Task.assess(action)
+    }
+    fn attest_account(
+        &self,
+        context: ContextJoin,
+        now: AgentPolicyInstant,
+    ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
+        Task.attest_account(context, now)
+    }
+    fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
+        Some(&self.0)
+    }
+}
+
+#[test]
+fn required_artifact_rejects_missing_contract_and_retains_premature_success_without_publication() {
+    let _serial = lock(&SERIAL);
+    for schema_present in [false, true] {
+        let journal = Arc::new(Journal::default());
+        let (mut actor, _owner, view) = coordinator(journal.clone());
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_sink = calls.clone();
+        let task: Box<dyn AgentWorkTask> = if schema_present {
+            Box::new(PrematureExtractionTask(
+                SemanticExtractionSchema::try_new(
+                    SemanticExtractionSchemaId::new(1).unwrap(),
+                    vec![
+                        SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap(),
+                    ],
+                )
+                .unwrap(),
+            ))
+        } else {
+            Box::new(Task)
+        };
+        let prepared = PreparedAgentWork::try_new(
+            input_with_storage(
+                Instant::now() + Duration::from_secs(8),
+                ContextProfileStorageClass::Durable,
+            )
+            .persist_extraction_result()
+            .unwrap(),
+            AgentWorkApplicationConfig::new(
+                AgentRuntimeConfig::STANDARD,
+                AgentProviderTransportConfig::STANDARD,
+            ),
+            AgentProviderCredential::try_new(
+                AgentProviderKind::OpenAiResponses,
+                "synthetic-not-a-secret".into(),
+            )
+            .unwrap(),
+            task,
+            AgentWorkApplicationPorts::new(
+                fixture_engine(),
+                journal.clone(),
+                Box::new(move |sink| {
+                    Some(Arc::new(NativeFixture {
+                        sink,
+                        calls: calls_sink,
+                        fault: Fault::None,
+                    }))
+                }),
+            ),
+        );
+        if !schema_present {
+            assert!(matches!(prepared, Err(AgentWorkFailure::Contract)));
+            assert!(lock(&calls).is_empty());
+            continue;
+        }
+        start(&mut actor, &journal, prepared.unwrap());
+        pump(&mut actor, |actor| actor.artifact_preparation_failed);
+        assert_eq!(
+            view.snapshot().phase,
+            AgentWorkApplicationPhase::PersistenceUncertain
+        );
+        assert_eq!(
+            view.snapshot().persistence_failure,
+            Some(AgentWorkJournalError::Transition)
+        );
+        assert!(view.take_extraction().is_none());
+        assert!(actor.flight.is_none() && lock(&journal.artifacts).is_empty());
+        assert!(matches!(
+            actor.active.as_ref().unwrap().outcome,
+            Some(AgentWorkOutcome::Succeeded(_))
+        ));
+        assert_eq!(
+            actor.record.unwrap().disposition(),
+            AgentWorkDisposition::Running
+        );
+        assert!(!actor.shutdown_until(Instant::now() + Duration::from_millis(5)));
+    }
+}
+
 fn input() -> AgentWorkRunInput {
     input_with_deadline(Instant::now() + Duration::from_secs(10))
 }
 
 fn input_with_deadline(deadline: Instant) -> AgentWorkRunInput {
+    input_with_storage(deadline, ContextProfileStorageClass::Ephemeral)
+}
+
+fn input_with_storage(deadline: Instant, storage: ContextProfileStorageClass) -> AgentWorkRunInput {
     let profile = 1_u128.into();
     let context = ContextIdentity::new(
         ContextId::generate(),
@@ -221,7 +334,7 @@ fn input_with_deadline(deadline: Instant) -> AgentWorkRunInput {
         AgentPlanLeaseBinding::new(AgentPlanLeaseId::generate(), node),
         AgentWorkContextSpec::try_new(
             context,
-            ContextProfileStorageClass::Ephemeral,
+            storage,
             ContextNavigationTarget::parse("https://application-fixture.invalid/").unwrap(),
         )
         .unwrap(),
@@ -299,7 +412,7 @@ impl AgentBrowserPort for NativeFixture {
             return ContextDispatch::Scheduled;
         }
         let correlation = invocation.correlation();
-        let wire = format!("{{\"v\":1,\"i\":{},\"g\":{},\"c\":\"complete\",\"n\":[{{\"k\":1,\"r\":\"document\",\"o\":16}}]}}", correlation.invocation().get(), correlation.snapshot_generation().get());
+        let wire = format!("{{\"v\":1,\"i\":{},\"g\":{},\"c\":\"complete\",\"n\":[{{\"k\":1,\"r\":\"document\",\"o\":16}},{{\"k\":2,\"p\":0,\"r\":\"paragraph\",\"t\":\"Fixture result\"}}]}}", correlation.invocation().get(), correlation.snapshot_generation().get());
         let snapshot = decode_semantic_snapshot(
             SemanticDecodeContext::new(
                 correlation.invocation(),
@@ -394,11 +507,24 @@ fn prepared(
 
 #[derive(Default)]
 struct Journal {
+    artifacts: Mutex<VecDeque<(AgentWorkArtifactRequest, AgentWorkArtifactCompletion)>>,
+    refuse_artifact: AtomicBool,
     audit_proofs: Mutex<Vec<AgentAuditDeliveryProof>>,
     lose_audit: AtomicBool,
     pending: Mutex<VecDeque<(AgentWorkJournalRequest, AgentWorkJournalCompletion)>>,
 }
 impl AgentWorkJournalPort for Journal {
+    fn artifact(
+        &self,
+        request: AgentWorkArtifactRequest,
+        completion: AgentWorkArtifactCompletion,
+    ) -> Result<(), AgentWorkJournalError> {
+        if self.refuse_artifact.load(Ordering::Acquire) {
+            return Err(AgentWorkJournalError::Capacity);
+        }
+        lock(&self.artifacts).push_back((request, completion));
+        Ok(())
+    }
     fn dispatch(
         &self,
         request: AgentWorkJournalRequest,
@@ -425,7 +551,9 @@ impl AgentAuditPort for Journal {
 impl Journal {
     fn settle(
         &self,
-        reply: impl FnOnce(AgentWorkJournalRequest) -> DurableResult,
+        reply: impl FnOnce(
+            AgentWorkJournalRequest,
+        ) -> Result<AgentWorkJournalReply, AgentWorkJournalError>,
     ) -> AgentWorkJournalRequest {
         let (request, callback) = lock(&self.pending).pop_front().unwrap();
         callback(reply(request));
@@ -450,7 +578,7 @@ fn fixture_engine() -> Arc<crate::shell::tests::FakeEngine> {
 }
 
 fn coordinator(
-    journal: Arc<Journal>,
+    journal: Arc<dyn AgentWorkJournalPort>,
 ) -> (
     ApplicationWork,
     crate::actor::Handle,
@@ -831,7 +959,11 @@ fn historical(
     let mut bytes = [0; AGENT_WORK_RECORD_BYTES];
     bytes[0] = 1;
     bytes[1] = disposition as u8;
-    bytes[2] = 63;
+    bytes[2] = if disposition == AgentWorkDisposition::Succeeded {
+        0
+    } else {
+        63
+    };
     bytes[15] = 3;
     bytes[16..32].copy_from_slice(&owner.bytes());
     bytes[47] = 1;

@@ -133,6 +133,7 @@ pub struct AgentWorkRunInput {
     context: AgentWorkContextSpec,
     objective: Option<AgentProviderObjective>,
     settings: AgentWorkRunSettings,
+    durable_result: bool,
 }
 
 impl AgentWorkRunInput {
@@ -192,7 +193,32 @@ impl AgentWorkRunInput {
             context,
             objective: Some(objective),
             settings,
+            durable_result: false,
         })
+    }
+    /// Explicitly opts a trusted extraction task into profile-owned result
+    /// persistence. Private/ephemeral contexts cannot silently write artifacts.
+    pub fn persist_extraction_result(mut self) -> Result<Self, AgentWorkFailure> {
+        if self.context.storage != ContextProfileStorageClass::Durable {
+            return Err(AgentWorkFailure::Contract);
+        }
+        self.durable_result = true;
+        Ok(self)
+    }
+    fn admission(
+        &self,
+        owner: AgentWorkIncarnation,
+    ) -> Result<AgentWorkJournalMutation, AgentWorkFailure> {
+        if self.durable_result {
+            AgentWorkJournalMutation::admit_with_result(
+                &self.manifest,
+                owner,
+                self.context.identity.profile(),
+            )
+            .map_err(|_| AgentWorkFailure::Contract)
+        } else {
+            Ok(AgentWorkJournalMutation::admit(&self.manifest, owner))
+        }
     }
 }
 
@@ -240,6 +266,10 @@ pub struct AgentWorkSuccess {
     extraction: Option<Box<SemanticOwnedExtractionResult>>,
 }
 impl AgentWorkSuccess {
+    /// Borrowed private result for exact terminal/artifact publication only.
+    pub fn extraction(&self) -> Option<&SemanticOwnedExtractionResult> {
+        self.extraction.as_deref()
+    }
     /// Original content-free closure metrics, not result factual verification.
     pub const fn closure(&self) -> AgentRunMetricClosure {
         self.settlement.closure()
@@ -333,7 +363,7 @@ impl AgentWorkRecovery {
             .input
             .as_ref()
             .ok_or(AgentWorkFailure::Contract)?;
-        Ok(AgentWorkJournalMutation::admit(&input.manifest, owner))
+        input.admission(owner)
     }
     /// Seals the original retained ledger and prepares its exact pending batch,
     /// or the next never-dispatched batch. This grants no browser/provider work.
@@ -409,6 +439,17 @@ pub struct AgentWorkController {
 }
 
 impl AgentWorkController {
+    /// Trusted durable destination, fixed before native/provider admission.
+    pub fn durable_result_profile(&self) -> Result<Option<AgentWorkProfileId>, AgentWorkFailure> {
+        let input = self
+            .state
+            .as_ref()
+            .and_then(|state| state.input.as_ref())
+            .ok_or(AgentWorkFailure::Contract)?;
+        Ok(input
+            .durable_result
+            .then_some(input.context.identity.profile()))
+    }
     /// Prepares content-free durable admission while this controller is still
     /// dormant. This does not start a provider request, runtime or native page.
     pub fn journal_admission(
@@ -420,7 +461,7 @@ impl AgentWorkController {
             .as_ref()
             .and_then(|state| state.input.as_ref())
             .ok_or(AgentWorkFailure::Contract)?;
-        Ok(AgentWorkJournalMutation::admit(&input.manifest, owner))
+        input.admission(owner)
     }
 
     /// Stable content-free run identity selected by the trusted input.
@@ -494,9 +535,10 @@ impl AgentWorkController {
         task: Box<dyn AgentWorkTask>,
         retention: AgentBrowserRetention,
     ) -> Result<(Self, AgentWorkHandle), AgentWorkFailure> {
-        if task
-            .extraction_schema()
-            .is_some_and(|schema| schema.id().get() != 1)
+        if (input.durable_result && task.extraction_schema().is_none())
+            || task
+                .extraction_schema()
+                .is_some_and(|schema| schema.id().get() != 1)
         {
             return Err(AgentWorkFailure::Contract);
         }

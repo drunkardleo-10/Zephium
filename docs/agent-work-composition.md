@@ -50,6 +50,11 @@ only execution authorities. See [persistence](agent-work-persistence.md) and
 per process/native lifetime. Review does not replay an action, and restart does
 not restore a credential, task predicate, observation/ref or approval authority.
 
+Trusted extraction inputs may explicitly request [profile-owned durable
+results](agent-work-artifacts.md) before preparation. This does not change the
+deferred one-shot native factory or exact Engine/Store allocation identity.
+Archive retrieval after restart is non-executing historical data.
+
 ## Qualification and remaining authority
 
 The release-excluded public qualifier uses the same composition, actual shell
