@@ -433,3 +433,12 @@ window occlusion, parent clipping, or both using the same sampled facts. No
 deadline, viewport extent, input authority, production scheduling policy or
 semantic acceptance rule changed. Source inspection explains a necessary
 correction; it does not retroactively establish the unrecorded occlusion bit.
+
+The one rebased-page attempt used clean
+`96474529adee0cb34259accbb78feba5540076dd`, with pre-invocation host clock
+`2026-09-05 21:11:32 UTC` (not exact process start). It exited 1 with
+`stage=presented_window_occluded` at the bounded acquisition deadline. The
+full page-visible rectangle was present; the public window-visible bit was
+absent. No semantic or RAF sample exists. The original isolation, restoration
+and teardown path retained this specific failure. This resolves the clipping
+ambiguity without establishing why AppKit's occlusion bit remained absent.
