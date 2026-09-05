@@ -2228,6 +2228,56 @@ impl AgentBrowserSession {
         ))
     }
 
+    /// Continues one settled read proposal against the exact already-delivered
+    /// initial baseline. The host supplies its original trusted capture time;
+    /// this function never captures, refreshes or acknowledges a new document.
+    /// Policy still admits the read's source cohort and exact whole request.
+    pub async fn continue_after_read(
+        &mut self,
+        turn: AgentProviderSettledToolTurn,
+        observation: &zephium_agentic::SemanticObservation,
+        captured_at: zephium_agentic::SemanticCaptureInstant,
+    ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
+        use zephium_agentic::*;
+        self.check_live()?;
+        if self.turns >= MAX_BROWSER_MODEL_TURNS {
+            return Err(AgentBrowserProviderError::TurnLimit);
+        }
+        let (proposal, continuation) = turn.into_parts();
+        if !self.config.permits_baseline_read()
+            || !matches!(
+                proposal,
+                AgentBrowserToolProposal::Read(AgentBrowserScopeProposal::Initial)
+            )
+        {
+            return Err(AgentBrowserProviderError::UnsupportedTool(proposal.kind()));
+        }
+        let read = read_semantic_observation(
+            observation,
+            SemanticReadAuthority::Initial,
+            captured_at,
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .map_err(AgentBrowserProviderError::Read)?;
+        let payload = encode_semantic_read(
+            &read,
+            SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
+        .map_err(AgentBrowserProviderError::ReadEncoding)?;
+        let request = self.next_model_call_request()?;
+        let bound = continuation
+            .bind_read_request(request, &self.config, &read, payload)
+            .map_err(|_| AgentBrowserProviderError::Continuation)?;
+        let prepared = AgentProviderReadContinuationRequestDraft::try_new(bound)
+            .and_then(|draft| {
+                draft.try_prepare_for_provider_exact_count(&mut self.policy, request, &read)
+            })
+            .map_err(|_| AgentBrowserProviderError::Authority)?;
+        self.drive(prepared.into_transport_input()).await
+    }
+
     /// Consumes one schema-bound terminal extraction proposal. The returned
     /// mapping remains model-mapped data with exact delivered provenance, not
     /// an independently verified fact or task-completion authority.
@@ -2663,7 +2713,7 @@ impl AgentBrowserSession {
         ),
     ) -> Result<crate::AgentBrowserActionProposal, AgentBrowserProviderError> {
         let turn = self
-            .next_step(turn, observation, current_frames, false, record)
+            .next_step(turn, observation, current_frames, None, false, record)
             .await?;
         self.bind_action_turn(turn, observation, current_frames)
     }
@@ -2676,6 +2726,7 @@ impl AgentBrowserSession {
         mut turn: AgentBrowserProviderTurn,
         observation: &zephium_agentic::SemanticObservation,
         current_frames: &[zephium_agentic::SemanticFrameJoin],
+        captured_at: Option<zephium_agentic::SemanticCaptureInstant>,
         extraction: bool,
         mut record: impl FnMut(
             AgentModelCallReceipt,
@@ -2702,7 +2753,8 @@ impl AgentBrowserSession {
                     .map_err(|_| AgentBrowserProviderError::Journal)?;
             }
             match tool.proposal().kind() {
-                zephium_agentic::AgentBrowserToolKind::Locate => {
+                zephium_agentic::AgentBrowserToolKind::Locate
+                | zephium_agentic::AgentBrowserToolKind::Read => {
                     // Locate is observation-bound, and its ref inventory must
                     // also remain current at the caller's registry boundary.
                     if current_frames.len() != observation.frames().len()
@@ -2713,9 +2765,18 @@ impl AgentBrowserSession {
                     {
                         return Err(AgentBrowserProviderError::Authority);
                     }
-                    turn = self
-                        .continue_after_locate(tool, observation, self.next_call)
-                        .await?;
+                    turn = if tool.proposal().kind() == zephium_agentic::AgentBrowserToolKind::Read
+                    {
+                        self.continue_after_read(
+                            tool,
+                            observation,
+                            captured_at.ok_or(AgentBrowserProviderError::Authority)?,
+                        )
+                        .await?
+                    } else {
+                        self.continue_after_locate(tool, observation, self.next_call)
+                            .await?
+                    };
                 }
                 kind => return Err(AgentBrowserProviderError::UnsupportedTool(kind)),
             }
@@ -3264,6 +3325,9 @@ impl fmt::Debug for AgentBrowserProviderTurn {
 /// Closed content-free session refusal. No variant authorizes a blind retry.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum AgentBrowserProviderError {
+    /// A bounded read exceeded its encoding/admission ceiling.
+    #[error("browser semantic read encoding was refused")]
+    ReadEncoding(zephium_agentic::SemanticModelEncodingError),
     /// Fresh bounded read did not join its exact source authority.
     #[error("browser semantic read authority was refused")]
     Read(zephium_agentic::SemanticReadError),

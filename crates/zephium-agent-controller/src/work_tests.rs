@@ -9,6 +9,58 @@ use zephium_agent_runtime::{
 static SERIAL: Mutex<()> = Mutex::new(());
 
 #[test]
+fn baseline_read_capability_is_frozen_before_any_provider_or_native_action() {
+    struct MutatingTask(bool);
+    impl AgentWorkTask for MutatingTask {
+        fn allows_baseline_read(&self) -> bool {
+            self.0
+        }
+        fn evaluate(
+            &mut self,
+            _: &SemanticObservation,
+        ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+            self.0 = false;
+            Ok(AgentWorkTaskProgress::Continue)
+        }
+        fn assess(
+            &self,
+            _: &SemanticPreparedAction,
+        ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+            panic!("mutated contract")
+        }
+        fn attest_account(
+            &self,
+            context: ContextJoin,
+            now: AgentPolicyInstant,
+        ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
+            Task.attest_account(context, now)
+        }
+    }
+    let _serial = lock(&SERIAL);
+    let (controller, handle) = AgentWorkController::try_new(
+        input(),
+        AgentProviderTransportConfig::STANDARD,
+        AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "synthetic-not-a-secret".into(),
+        )
+        .unwrap(),
+        Arc::new(Audit(Fault::None)),
+        Box::new(MutatingTask(true)),
+    )
+    .unwrap();
+    let (outcome, shutdown, calls, _) = drive(controller, handle, Fault::None);
+    let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+        panic!("{outcome:?}")
+    };
+    assert_eq!(closed.failure(), AgentWorkFailure::Contract);
+    assert_eq!(closed.policy_settlement().closure().model_calls(), 0);
+    assert_eq!(closed.policy_settlement().closure().effects(), 0);
+    assert_eq!(calls, [1, 2, 3, 4, 5, 6]);
+    assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+}
+
+#[test]
 fn production_form_initial_completion_or_missing_field_never_calls_provider() {
     let _serial = lock(&SERIAL);
     for name in ["Field", "Missing"] {
@@ -71,6 +123,11 @@ use combined_tests::{CombinedFault, CombinedTask};
 mod scoped_tests;
 #[cfg(feature = "probe-harness")]
 use scoped_tests::{ScopedFault, ScopedTask};
+#[cfg(feature = "probe-harness")]
+#[path = "work_read_tests.rs"]
+mod read_tests;
+#[cfg(feature = "probe-harness")]
+use read_tests::{ReadFault, ReadTask};
 const FIXTURE_POLICY_NOW_MILLIS: u64 = 2;
 
 #[test]
@@ -871,6 +928,7 @@ fn variable_provider_turns_use_real_worker_io_and_stop_at_the_exact_ceiling() {
 #[cfg(feature = "probe-harness")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProviderFault {
+    Read(ReadFault),
     Scoped(ScopedFault),
     Combined(CombinedFault),
     Ceiling,
@@ -1017,6 +1075,7 @@ fn provider_fixture_with_form(fault: ProviderFault, form: Option<&str>) {
     let control = Arc::new(Mutex::new(None::<AgentRuntimeHandle>));
     let server_control = control.clone();
     let requests = match fault {
+        ProviderFault::Read(fault) => fault.requests(),
         ProviderFault::Scoped(fault) => fault.requests(),
         ProviderFault::Combined(
             CombinedFault::Premature
@@ -1087,7 +1146,13 @@ fn provider_fixture_with_form(fault: ProviderFault, form: Option<&str>) {
                 request.extend_from_slice(&bytes[..count]);
             }
             let is_count = request.starts_with(b"POST /v1/responses/input_tokens ");
-            let cancelled = matches!(fault, ProviderFault::Scoped(fault) if fault.cancelled(turns, is_count))
+            let read_stop = if let ProviderFault::Read(fault) = fault {
+                fault.stop(turns, is_count)
+            } else {
+                None
+            };
+            let cancelled = read_stop.is_some()
+                || matches!(fault, ProviderFault::Scoped(fault) if fault.cancelled(turns, is_count))
                 || (turns == 2
                     && ((is_count
                         && fault == ProviderFault::Combined(CombinedFault::CancelMapCount))
@@ -1104,10 +1169,14 @@ fn provider_fixture_with_form(fault: ProviderFault, form: Option<&str>) {
                 lock(&server_control)
                     .as_ref()
                     .expect("control")
-                    .stop_and_seal(AgentRuntimeStopReason::HumanTakeover);
+                    .stop_and_seal(read_stop.unwrap_or(AgentRuntimeStopReason::HumanTakeover));
             }
             let refused = (is_count && fault == ProviderFault::CountRefused)
-                || (!is_count && fault == ProviderFault::StreamRefused);
+                || (!is_count && fault == ProviderFault::StreamRefused)
+                || matches!(fault, ProviderFault::Read(fault) if fault.refused(turns, is_count));
+            if let ProviderFault::Read(fault) = fault {
+                fault.check_request(&request[header + 4..], turns);
+            }
             let (kind, body) = if is_count {
                 (
                     "application/json",
@@ -1120,7 +1189,9 @@ fn provider_fixture_with_form(fault: ProviderFault, form: Option<&str>) {
                 turns += 1;
                 (
                     "text/event-stream",
-                    if let ProviderFault::Scoped(fault) = fault {
+                    if let ProviderFault::Read(fault) = fault {
+                        fault.stream(turns)
+                    } else if let ProviderFault::Scoped(fault) = fault {
                         fault.stream(turns)
                     } else if let ProviderFault::Combined(fault) = fault {
                         if fault == CombinedFault::Ceiling && turns < 7 {
@@ -1225,6 +1296,8 @@ fn provider_fixture_with_form(fault: ProviderFault, form: Option<&str>) {
             )
             .unwrap(),
         )
+    } else if let ProviderFault::Read(fault) = fault {
+        Box::new(ReadTask::new(&approved, fault))
     } else if let ProviderFault::Scoped(fault) = fault {
         Box::new(ScopedTask::new(fault))
     } else if let ProviderFault::Combined(fault) = fault {
@@ -1254,6 +1327,7 @@ fn provider_fixture_with_form(fault: ProviderFault, form: Option<&str>) {
             | ProviderFault::Combined(CombinedFault::AuditLost)
             | ProviderFault::Scoped(ScopedFault::AuditLost)
             | ProviderFault::Native(Fault::ActionNeedsHumanAuditLost)
+            | ProviderFault::Read(ReadFault::AuditLost)
     ) {
         Fault::AuditLost
     } else if fault == ProviderFault::Native(Fault::ActionNeedsHumanAuditRefused) {
@@ -1278,7 +1352,13 @@ fn provider_fixture_with_form(fault: ProviderFault, form: Option<&str>) {
         state.input.as_mut().unwrap().settings.deadline = deadline;
         state.native.deadline = deadline;
     }
-    let native_fault = if let ProviderFault::Scoped(fault) = fault {
+    let native_fault = if let ProviderFault::Read(fault) = fault {
+        if fault == ReadFault::ActionLost {
+            Fault::ActionLost
+        } else {
+            Fault::ActionApplied
+        }
+    } else if let ProviderFault::Scoped(fault) = fault {
         Fault::Scoped(fault)
     } else if fault == ProviderFault::Combined(CombinedFault::ActionLost) {
         Fault::ActionLost
@@ -1291,6 +1371,11 @@ fn provider_fixture_with_form(fault: ProviderFault, form: Option<&str>) {
     };
     let (outcome, shutdown, calls, events) =
         drive_with_control(controller, handle, native_fault, control);
+    if let ProviderFault::Read(fault) = fault {
+        assert_eq!(server.join().expect("read fixture server"), requests / 2);
+        read_tests::assert_outcome(fault, outcome, shutdown, &calls, &events);
+        return;
+    }
     if form.is_some() && fault == ProviderFault::Native(Fault::ActionApplied) {
         assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
         if form == Some("fixture value") {

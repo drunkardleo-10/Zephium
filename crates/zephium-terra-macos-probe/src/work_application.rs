@@ -64,8 +64,13 @@ pub(super) fn run_review() -> Result<(), super::ProbeFailure> {
     run_mode(Qualification::ReviewAndFreshActions)
 }
 
+pub(super) fn run_read() -> Result<(), super::ProbeFailure> {
+    run_mode(Qualification::ReadActions)
+}
+
 #[derive(Clone, Copy)]
 enum Qualification {
+    ReadActions,
     Actions,
     Extraction,
     Artifact,
@@ -79,9 +84,10 @@ enum Qualification {
 fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
     use super::ProbeFailure as Error;
     let review = matches!(mode, Qualification::ReviewAndFreshActions);
+    let inspecting = matches!(mode, Qualification::ReadActions);
     let extraction = !matches!(
         mode,
-        Qualification::Actions | Qualification::ReviewAndFreshActions
+        Qualification::Actions | Qualification::ReviewAndFreshActions | Qualification::ReadActions
     );
     let durable = matches!(mode, Qualification::Artifact);
     let sequential = matches!(
@@ -98,7 +104,9 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
         Qualification::CancelExtraction | Qualification::Sequential
     );
     let started = Instant::now();
-    let (profile, input, task) = if review {
+    let (profile, input, task) = if inspecting {
+        super::work_actor::read_input(started)?
+    } else if review {
         super::work_actor::review_input(started)?
     } else if scoped {
         super::work_actor::scoped_input(started)?
@@ -188,6 +196,7 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
         )> = None;
         let mut stale_control_sent = false;
         let mut native_actions = 0_u32;
+        let mut baseline_reads = 0_u32;
         let mut terminal_observed = false;
         let mut archive_requested = false;
         let mut archive_verified = false;
@@ -226,6 +235,14 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
                         }
                         if matches!(kind, AgentWorkEventKind::Verified) {
                             effects += 1;
+                        }
+                        if matches!(
+                            kind,
+                            AgentWorkEventKind::ToolProposed(
+                                zephium_agentic::AgentBrowserToolKind::Read
+                            )
+                        ) {
+                            baseline_reads += 1;
                         }
                         writeln!(output, "work-application-event: sequence={}; phase={kind:?}; wall_ms={}; content=redacted", event.sequence(), event.elapsed_millis())
                     }
@@ -337,6 +354,10 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
                         && effects == 0;
                     if review && lifetime == 2 {
                         terminal_success &= effects == 3 && native_actions == 3;
+                    }
+                    if inspecting {
+                        terminal_success &=
+                            baseline_reads > 0 && native_actions == 3 && effects == 3;
                     }
                     if extraction && terminal_success {
                         terminal_success = view.take_extraction().is_some_and(|result| {
@@ -478,6 +499,9 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
                 let clean = shutdown
                     .take()
                     .is_some_and(|join| matches!(join.join(), Ok(Ok(ShutdownOutcome::Clean))));
+                if inspecting {
+                    let _ = writeln!(std::io::stdout().lock(), "work-application-read: baseline_reads={baseline_reads}; fresh_capture=false; new_reference_authority=false; content=redacted");
+                }
                 let _ = writeln!(std::io::stdout().lock(), "work-application-closure: model=gpt-5.6-luna; durable_success={terminal_success}; cancelled_closed={terminal_cancelled}; shell_clean={clean}; turns={turns}; native_actions={native_actions}; verified_effects={effects}; input_tokens={tokens_in}; output_tokens={tokens_out}; cost_micro_usd={cost}; elapsed_ms={}; content=redacted", started.elapsed().as_millis());
                 return Some(
                     if clean

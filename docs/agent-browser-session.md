@@ -77,6 +77,11 @@ through that closure; only then may the actor discard it and publish a
 
 ## Current limits
 
+Trusted tasks may opt into [nonterminal baseline inspection](agent-work-inspection.md).
+The Work actor handles initial-scope `read` through the same provider/policy
+continuation and original capture-time authority, without a new native capture,
+observation acknowledgement, action allowance or task-completion signal.
+
 An explicit trusted extraction task can instead select the initial-scope,
 extract-only path. `extract` consumes the same session's provider continuation,
 charges a purpose-bound mapping call and returns validated, cited model-mapped

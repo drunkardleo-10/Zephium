@@ -104,6 +104,7 @@ impl AgentWorkTask for PublicPreparedResultTask {
 }
 
 enum PublicWorkInput {
+    ReadActions,
     Actions,
     ReviewActions,
     Extraction,
@@ -199,6 +200,19 @@ pub(super) fn review_input(
     super::ProbeFailure,
 > {
     input_mode(started, PublicWorkInput::ReviewActions)
+}
+
+pub(super) fn read_input(
+    started: Instant,
+) -> Result<
+    (
+        zephium_core::ids::ProfileId,
+        AgentWorkRunInput,
+        Box<dyn AgentWorkTask>,
+    ),
+    super::ProbeFailure,
+> {
+    input_mode(started, PublicWorkInput::ReadActions)
 }
 
 pub(super) fn extraction_input(
@@ -306,6 +320,12 @@ fn input_mode(
         )
     };
     let form_task = form_task().map_err(|_| Error::Authority)?;
+    let inspecting = matches!(mode, PublicWorkInput::ReadActions);
+    let form_task = if inspecting {
+        form_task.with_baseline_read()
+    } else {
+        form_task
+    };
     let effects = AgentEffectScope::try_new(
         if extraction || matches!(mode, PublicWorkInput::ReviewActions) {
             &[SemanticEffectClass::Read]
@@ -348,7 +368,9 @@ fn input_mode(
     )
     .map_err(|_| Error::Authority)?;
     let objective = "Prepare a public Wikipedia search without submitting or navigating. Fill the search with exactly Zephium browser and choose Deutsch in the search language selector, in either order. Once both are verified, refine the search text to exactly Zephium open source browser. Use one local_write act action per turn. Locate option references when needed. For each action use mutation_quiet=100 ms, settle_budget=2000 ms, and exact value or exact selected-option verification. Do not click links or submit. The host checks the exact milestones and stops when the final prepared search is verified.";
-    let objective = if subtree {
+    let objective = if inspecting {
+        "Prepare a public Wikipedia search without submitting or navigating. First inspect the existing initial baseline with read to discover the collapsed search selector's option labels and source refs. From that evidence identify Deutsch and its combobox; do not substitute the prominent Deutsch edition link for a selector option. Then fill the search with exactly Zephium browser and choose Deutsch in either order. Once both are verified, refine the search to exactly Zephium open source browser. Use one local_write act action per turn, mutation_quiet=100 ms, settle_budget=2000 ms, and exact value or selected-option verification. Locate only if the bounded read omitted a needed ref. Do not click links or submit. Rust independently checks the goals and final value."
+    } else if subtree {
         "Prepare a public Wikipedia search without submitting or navigating. Fill the search with exactly Zephium browser and choose Deutsch in the search language selector, in either order. Once both are verified, refine the search text to exactly Zephium open source browser. Use one local_write act action per turn; locate option references when needed. Each action must use mutation_quiet=100 ms, settle_budget=2000 ms, and exact value or exact selected-option verification. Do not click links or submit. After all three milestones are verified, call extract with subtree scope targeting the current search text field's opaque ref and trusted schema 1. The host will freshly read only that subtree. Return prepared_query as the complete exact current search field value with its exact value-preview citation. Do not use initial extraction scope, extract early or perform further actions after the final query is verified."
     } else if combined {
         "Prepare a public Wikipedia search without submitting or navigating. Fill the search with exactly Zephium browser and choose Deutsch in the search language selector, in either order. Once both are verified, refine the search text to exactly Zephium open source browser. Use one local_write act action per turn; locate option references when needed. Each action must use mutation_quiet=100 ms, settle_budget=2000 ms, and exact value or exact selected-option verification. Do not click links or submit. After all three milestones are verified, call extract with initial scope and trusted schema 1. Return prepared_query as the complete exact current search field value with its exact value-preview citation. Do not extract early or perform further actions after the final query is verified."

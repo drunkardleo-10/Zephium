@@ -292,6 +292,44 @@ fn validate_probe(source: &str) -> Result<(), String> {
 }
 
 fn validate_terra(source: &str) -> Result<(), String> {
+    let read = source
+        .split_once("pub async fn continue_after_read(")
+        .and_then(|(_, tail)| tail.split_once("pub async fn extract<'a>("))
+        .map(|(read, _)| read)
+        .ok_or("controller lost bounded read driver")?;
+    for required in [
+        "self.check_live()?",
+        "self.turns >= MAX_BROWSER_MODEL_TURNS",
+        "!self.config.permits_baseline_read()",
+        "AgentBrowserScopeProposal::Initial",
+        "read_semantic_observation",
+        "SemanticReadAuthority::Initial",
+        "SemanticReadSensitivityLimit::PublicOnly",
+        "SemanticReadBudget::STANDARD",
+        ".bind_read_request(request, &self.config, &read, payload)",
+        "AgentProviderReadContinuationRequestDraft::try_new(bound)",
+        "try_prepare_for_provider_exact_count",
+        "self.drive(prepared.into_transport_input()).await",
+    ] {
+        if !read.contains(required) {
+            return Err(format!(
+                "controller read lost authority boundary: {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "invoke_semantic",
+        "capture_once",
+        "from_fingerprint",
+        "begin_expansion",
+        "acknowledge(",
+    ] {
+        if read.contains(forbidden) {
+            return Err(format!(
+                "controller read acquired new native/ref authority: {forbidden}"
+            ));
+        }
+    }
     let compact: String = source.split_whitespace().collect();
     if compact.contains("pubfntry_finish_unsuccessful(")
         || compact.contains("pub(crate)fntry_finish_unsuccessful(")
@@ -391,6 +429,7 @@ fn validate_inventory(crate_root: &Path) -> Result<(), String> {
             "work_tests.rs".to_owned(),
             "work_combined_tests.rs".to_owned(),
             "work_scoped_tests.rs".to_owned(),
+            "work_read_tests.rs".to_owned(),
             "work_form.rs".to_owned(),
             "work_form_tests.rs".to_owned(),
         ])
@@ -524,6 +563,8 @@ fn validate_work(source: &str) -> Result<(), String> {
         "(input.durable_result || actions_before_extraction || subtree_extraction)",
         "&& extraction_schema.is_none()",
         "self.task.allows_subtree_extraction() != self.subtree_extraction",
+        "self.task.allows_baseline_read() != self.baseline_read",
+        "session.config = session.config.with_baseline_read()",
         ".begin_extraction_subtree(",
         "Self::capture_once(state, worker, browser, request, frame).await?",
         "expanded.as_ref().map(|_| observation)",
@@ -680,6 +721,29 @@ mod tests {
         ] {
             assert!(validate_form(&format!("{FORM}\n{forbidden}")).is_err());
         }
+    }
+
+    #[test]
+    fn baseline_read_cannot_lose_policy_or_gain_capture_authority() {
+        for required in [
+            "!self.config.permits_baseline_read()",
+            ".bind_read_request(request, &self.config, &read, payload)",
+            "AgentProviderReadContinuationRequestDraft::try_new(bound)",
+        ] {
+            assert!(validate_terra(&TERRA.replace(required, "removed_boundary")).is_err());
+        }
+        for forbidden in ["invoke_semantic", "begin_expansion", "from_fingerprint"] {
+            assert!(validate_terra(&TERRA.replace(
+                "pub async fn continue_after_read(",
+                &format!("pub async fn continue_after_read( /* {forbidden} */")
+            ))
+            .is_err());
+        }
+        assert!(validate_work(&WORK.replace(
+            "self.task.allows_baseline_read() != self.baseline_read",
+            "false"
+        ))
+        .is_err());
     }
 
     #[test]

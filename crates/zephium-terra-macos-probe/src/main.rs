@@ -83,6 +83,9 @@ fn main() {
         [argument] if argument == "--live-public-luna-work-review-inspectable" => {
             work_application::run_review()
         }
+        [argument] if argument == "--live-public-luna-work-read-inspectable" => {
+            work_application::run_read()
+        }
         [argument, directory] if argument == "--cleanup-public-work-artifact" => {
             work_artifact_cleanup::recover(std::path::Path::new(directory))
         }
@@ -180,6 +183,7 @@ impl ProbeFailure {
             Self::Provider(TerraProbeProviderError::InitialEncoding(_)) => {
                 "provider_initial_encoding"
             }
+            Self::Provider(TerraProbeProviderError::ReadEncoding(_)) => "provider_read_encoding",
             Self::Provider(TerraProbeProviderError::DiffEncoding(_)) => "provider_diff_encoding",
             Self::Provider(TerraProbeProviderError::LocateTool) => "provider_locate_tool",
             Self::Provider(TerraProbeProviderError::Locate) => "provider_locate",
@@ -452,6 +456,7 @@ impl ProbeFailure {
 
         let error = match self {
             Self::Provider(TerraProbeProviderError::InitialEncoding(error))
+            | Self::Provider(TerraProbeProviderError::ReadEncoding(error))
             | Self::Provider(TerraProbeProviderError::DiffEncoding(error))
             | Self::Provider(TerraProbeProviderError::LocateEncoding(error)) => error,
             _ => return "not_applicable",

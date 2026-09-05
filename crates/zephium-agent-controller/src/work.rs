@@ -40,6 +40,12 @@ pub enum AgentWorkTaskProgress {
 /// page instructions, or a model-authored predicate. The UI does not receive
 /// this port; it receives only the content-free handle below.
 pub trait AgentWorkTask: Send {
+    /// Opts into nonterminal public reads of the exact initial baseline. Reads
+    /// grant no task progress, new observation/ref or native effect authority.
+    /// This setting is frozen at admission with the other task capabilities.
+    fn allows_baseline_read(&self) -> bool {
+        false
+    }
     /// Explicitly permits one terminal native subtree read anchored to the
     /// exact model-acknowledged observation. Frozen at admission; default is
     /// initial-scope only. This grants no action or navigation authority.
@@ -336,6 +342,7 @@ impl AgentWorkSuccess {
 /// The product may opt into one acknowledged-ref subtree capture. The schema
 /// is frozen before admission; no native action is allowed.
 pub struct AgentWorkExtractionTask {
+    baseline_read: bool,
     schema: SemanticExtractionSchema,
     account: AgentAccountScope,
     subtree: bool,
@@ -353,6 +360,7 @@ impl AgentWorkExtractionTask {
             schema,
             account,
             subtree: false,
+            baseline_read: false,
         })
     }
 
@@ -362,8 +370,19 @@ impl AgentWorkExtractionTask {
         self.subtree = true;
         self
     }
+
+    /// Allows nonterminal public inspection of the existing initial baseline
+    /// before selecting the terminal extraction scope. No fresh capture or
+    /// mapping result is implied by a read.
+    pub fn with_baseline_read(mut self) -> Self {
+        self.baseline_read = true;
+        self
+    }
 }
 impl AgentWorkTask for AgentWorkExtractionTask {
+    fn allows_baseline_read(&self) -> bool {
+        self.baseline_read
+    }
     fn allows_subtree_extraction(&self) -> bool {
         self.subtree
     }
@@ -605,6 +624,7 @@ impl AgentWorkController {
         let extraction_schema = task.extraction_schema().cloned();
         let actions_before_extraction = task.allows_actions_before_extraction();
         let subtree_extraction = task.allows_subtree_extraction();
+        let baseline_read = task.allows_baseline_read();
         if ((input.durable_result || actions_before_extraction || subtree_extraction)
             && extraction_schema.is_none())
             || task
@@ -644,6 +664,7 @@ impl AgentWorkController {
                     extraction_schema,
                     actions_before_extraction,
                     subtree_extraction,
+                    baseline_read,
                     extraction: None,
                     failure: None,
                     observation: None,
@@ -657,6 +678,7 @@ impl AgentWorkController {
 }
 
 struct WorkState {
+    baseline_read: bool,
     extraction_schema: Option<SemanticExtractionSchema>,
     actions_before_extraction: bool,
     subtree_extraction: bool,
@@ -697,6 +719,7 @@ impl WorkState {
         if self.task.extraction_schema() != self.extraction_schema.as_ref()
             || self.task.allows_actions_before_extraction() != self.actions_before_extraction
             || self.task.allows_subtree_extraction() != self.subtree_extraction
+            || self.task.allows_baseline_read() != self.baseline_read
         {
             return Err(AgentWorkFailure::Contract);
         }
@@ -1194,6 +1217,9 @@ impl AgentWorkController {
                 (false, false) => session.config.restrict_to_extraction(),
             };
         }
+        if state.baseline_read {
+            session.config = session.config.with_baseline_read();
+        }
         state.session = Some(session);
         Ok(())
     }
@@ -1375,6 +1401,7 @@ impl AgentWorkController {
         if state.extraction_schema.is_some()
             && !state.actions_before_extraction
             && !state.subtree_extraction
+            && !state.baseline_read
         {
             Self::extract_current(state, worker, browser, turn, &observation, captured_at).await?;
             state.observation = Some(observation);
@@ -1396,11 +1423,14 @@ impl AgentWorkController {
                     turn,
                     &observation,
                     &frames,
-                    state.actions_before_extraction || state.subtree_extraction,
+                    Some(captured_at),
+                    state.extraction_schema.is_some(),
                     |_, _, _| {},
                 ),
             )
             .await?;
+            state.check_task_contract()?;
+            let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
             let proposal = match step.turn.proposal().kind() {
                 AgentBrowserToolKind::Extract => {
                     if state.actions_before_extraction

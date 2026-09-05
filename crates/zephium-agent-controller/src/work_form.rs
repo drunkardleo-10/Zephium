@@ -114,6 +114,7 @@ struct Baseline {
 /// It keeps at most eight goals and current opaque bindings, no page snapshots,
 /// worker, timer, queue, persistence or hidden replay path.
 pub struct AgentWorkFormTask {
+    baseline_read: bool,
     identity: ContextIdentity,
     origin: SemanticOrigin,
     account: AgentAccountScope,
@@ -147,6 +148,7 @@ impl AgentWorkFormTask {
             return Err(AgentWorkFailure::Contract);
         }
         Ok(Self {
+            baseline_read: false,
             identity,
             origin,
             account,
@@ -156,6 +158,14 @@ impl AgentWorkFormTask {
             bindings: Vec::with_capacity(MAX_GOALS),
             refused: false,
         })
+    }
+
+    /// Allows the model to inspect bounded public details already captured in
+    /// the acknowledged baseline before proposing a field action. This adds
+    /// no turns, native operations, task goals or approval authority.
+    pub fn with_baseline_read(mut self) -> Self {
+        self.baseline_read = true;
+        self
     }
 
     fn observe(
@@ -300,6 +310,9 @@ fn descendant(snapshot: &SemanticSnapshot, mut node: usize, ancestor: usize) -> 
 }
 
 impl AgentWorkTask for AgentWorkFormTask {
+    fn allows_baseline_read(&self) -> bool {
+        self.baseline_read
+    }
     fn evaluate(
         &mut self,
         observation: &SemanticObservation,
