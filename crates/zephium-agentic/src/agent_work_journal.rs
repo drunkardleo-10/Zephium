@@ -297,10 +297,20 @@ pub enum AgentWorkJournalRequest {
 }
 
 /// Exact mutation intent. Decoded records cannot mint successful terminal writes.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct AgentWorkJournalMutation {
     expected: Option<AgentWorkRecord>,
     next: AgentWorkRecord,
+    result_profile: Option<zephium_core::ids::ProfileId>,
+}
+
+impl fmt::Debug for AgentWorkJournalMutation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AgentWorkJournalMutation")
+            .field("next", &self.next)
+            .field("requires_result", &self.result_profile.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl AgentWorkJournalMutation {
@@ -309,7 +319,31 @@ impl AgentWorkJournalMutation {
         Self {
             expected: None,
             next: AgentWorkRecord::admitted(manifest, owner),
+            result_profile: None,
         }
+    }
+    /// Requires atomic durable result publication for this exact registered
+    /// profile. Store persists this intent before any execution starts.
+    pub fn admit_with_result(
+        manifest: &AgentRunManifest,
+        owner: AgentWorkIncarnation,
+        profile: zephium_core::ids::ProfileId,
+    ) -> Result<Self, AgentWorkJournalError> {
+        if !manifest
+            .plan_nodes()
+            .iter()
+            .any(|node| node.profiles().contains(&profile))
+        {
+            return Err(AgentWorkJournalError::Transition);
+        }
+        Ok(Self {
+            result_profile: Some(profile),
+            ..Self::admit(manifest, owner)
+        })
+    }
+    /// Explicit durable-result destination, present only on original admission.
+    pub const fn result_profile(self) -> Option<zephium_core::ids::ProfileId> {
+        self.result_profile
     }
     /// Creates a non-success transition, including one-use human review.
     pub fn transition(
@@ -319,6 +353,7 @@ impl AgentWorkJournalMutation {
         Ok(Self {
             expected: Some(previous),
             next: previous.transition(disposition)?,
+            result_profile: None,
         })
     }
     /// The original clean runtime lifecycle owner supplies its native proof;
@@ -331,6 +366,7 @@ impl AgentWorkJournalMutation {
         Ok(Self {
             expected: Some(previous),
             next: previous.completed(policy, native)?,
+            result_profile: None,
         })
     }
     /// Exact expected bytes for adapter-side CAS, absent only on admission.
@@ -363,6 +399,15 @@ pub type AgentWorkJournalCompletion =
 
 /// Dormant content-free application persistence port, not a native authority.
 pub trait AgentWorkJournalPort: Send + Sync {
+    /// Separate private result lane, never a content-bearing journal/audit row.
+    /// The same exact Store allocation owns both lanes. Default adapters refuse.
+    fn artifact(
+        &self,
+        _request: crate::AgentWorkArtifactRequest,
+        _completion: crate::AgentWorkArtifactCompletion,
+    ) -> Result<(), AgentWorkJournalError> {
+        Err(AgentWorkJournalError::Unavailable)
+    }
     /// Nonblocking bounded admission. Refusal does not invoke the callback.
     fn dispatch(
         &self,

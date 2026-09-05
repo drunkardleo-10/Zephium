@@ -32,7 +32,16 @@ mod agent_policy;
 mod agent_progress_metrics;
 mod agent_provider;
 mod agent_supervisor;
+mod agent_work_artifact;
+/// Existing product profile identity used by durable Work result contracts.
+pub use zephium_core::ids::ProfileId as AgentWorkProfileId;
 mod agent_work_journal;
+pub use agent_work_artifact::{
+    AgentWorkArchivedExtraction, AgentWorkArtifactCompletion, AgentWorkArtifactDescriptor,
+    AgentWorkArtifactPublication, AgentWorkArtifactReply, AgentWorkArtifactRequest, ArchivedField,
+    ArchivedSource, ArchivedSourceContent, ArchivedText, ArchivedValue,
+    MAX_AGENT_WORK_ARTIFACT_BYTES, MAX_AGENT_WORK_ARTIFACT_TOTAL_BYTES,
+};
 mod context;
 mod context_port;
 mod context_registry;
