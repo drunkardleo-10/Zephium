@@ -950,6 +950,127 @@ not claim a new provider run. Follow-up validation passes 336 application tests,
 desktop/composition/application/xtask Clippy, optimized desktop feature/default
 builds and the same source/dependency boundaries.
 
+## Production Work extraction and action-budget comparison (2026-09-05)
+
+The production session, actor and durable application now deliver one bounded,
+source-carrying extraction result through `take_extraction`. This is explicitly
+model-mapped, memory-only user-result content, separate from diagnostics and
+the content-free durable journal. No artifact-body persistence is claimed.
+The [result contract](../../docs/agent-work-results.md) specifies exact schemas,
+source joins, limits, cancellation and publication after durable terminal ACK.
+
+The final public extraction task supplies a trusted schema for ten Wikipedia
+language-link names. It independently compares all ten values with distinct
+exact native source fragments before task completion; the application consumer
+rechecks the owned result after durable success and verifies one-shot delivery.
+The same actual composition, shell, EngineHost Work page, profile isolation and
+shared SQLite Store are used. There are no native actions, ordinary tabs or
+external writes in this extraction workflow.
+
+Final-contract results, excluding earlier exploratory runs:
+
+| Workflow / run | Provider turns | Independently checked result | Input / output tokens | Priced ceiling (micro-USD) | Provider-turn time | Elapsed |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| Extraction 1 | 2 | 10 exact cited values; 0 effects | 6,879 / 408 | 1,870 | 8.383 s | 9.007 s |
+| Extraction 2 | 2 | 10 exact cited values; 0 effects | 6,878 / 368 | 1,822 | 7.147 s | 7.695 s |
+| Action 1 | 4 | 3 verified effects | 11,149 / 379 | 1,086 | 9.884 s | 11.447 s |
+| Action 2 | 4 | 3 verified effects | 11,226 / 377 | 820 | 10.400 s | 12.675 s |
+
+All four runs used `gpt-5.6-luna`, reached the trusted task terminal and durable
+`Succeeded`, proved clean application-owned teardown, preserved focus isolation
+and exited 0. The action workflow remains variable: the first run chose locate
+before fill, the second after fill; neither action count nor model text determined
+success. Extracted source-edge counts were 11 and 14, including collection-level
+citations; each item had one distinct exact native source. These are small public
+qualification repeats, not a latency/resource benchmark or broad-site guarantee.
+
+Final extraction per-turn disclosure:
+
+| Run / turn | Request bytes | New semantic bytes | Input / output tokens | Provider-turn time |
+| --- | ---: | ---: | ---: | ---: |
+| 1 / 1 | 5,658 | 3,116 | 1,480 / 36 | 1.792 s |
+| 1 / 2 | 21,160 | 13,330 | 5,399 / 372 | 6.591 s |
+| 2 / 1 | 5,658 | 3,116 | 1,480 / 35 | 2.894 s |
+| 2 / 2 | 21,160 | 13,330 | 5,398 / 333 | 4.253 s |
+
+Final action per-turn disclosure (wall time is the settled-event clock):
+
+| Run / turn | Tool | Request bytes | New semantic bytes | Input / output tokens | Provider-turn time | Wall time |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 / 1 | Locate | 12,012 | 3,116 | 2,516 / 85 | 2.287 s | 2.702 s |
+| 1 / 2 | Fill | 14,184 | 208 | 2,661 / 95 | 2.172 s | 4.882 s |
+| 1 / 3 | Select | 16,399 | 287 | 2,854 / 113 | 2.877 s | 8.153 s |
+| 1 / 4 | Fill | 18,860 | 408 | 3,118 / 86 | 2.548 s | 10.956 s |
+| 2 / 1 | Fill | 12,012 | 3,116 | 2,516 / 110 | 3.006 s | 3.397 s |
+| 2 / 2 | Locate | 14,315 | 287 | 2,724 / 58 | 2.081 s | 6.748 s |
+| 2 / 3 | Select | 16,400 | 302 | 2,864 / 107 | 2.344 s | 9.100 s |
+| 2 / 4 | Fill | 18,821 | 408 | 3,122 / 102 | 2.969 s | 12.213 s |
+
+Two evidenced defects were investigated rather than counted as success:
+
+- The initial extraction mapping reached two priced calls but returned a type
+  inconsistent with the trusted schema. Rust refused `Extraction(TypeMismatch)`;
+  no result or clean success escaped. The previous provider envelope allowed all
+  value kinds for every field. Its replacement binds exact trusted field names,
+  kinds, schema identity and bounds before generation, while retaining independent
+  Rust validation. Two intermediate corrected extraction runs also passed, but
+  are not included in the final table.
+- The first action regression stopped on the old collapsed `VerificationFailed`
+  class. A detached accepted `4393585` control, changed only to retain the exact
+  diagnostic reason and print content-free action metadata, reproduced a first
+  Fill failure: `MutationQuiet(100 ms)`, 1,000 ms total action allowance, and
+  `Verification(EvidenceAfterDeadline)` while awaiting the adjacent fresh native
+  observation. This proves a pre-existing admission/timing defect independent of
+  extraction; the original collapsed error cannot retroactively supply its exact
+  subreason. Two diagnostic current-build action runs also passed before the fix,
+  demonstrating why a small passing sample had not exposed the allowance defect.
+  Two post-fix runs also passed with four and five turns while the qualifier's
+  objective still requested the old allowance; the model followed the stricter
+  schema. The final table uses two subsequent repeats after aligning that trusted
+  objective with the admitted 2,000 ms capability.
+
+The shipping snapshot driver now advertises and independently enforces a 2,000 ms
+minimum **total allowance** before policy/native dispatch. Smaller proposals are
+typed pre-dispatch refusals. This does not wait two seconds, extend an already
+dispatched deadline, replay an action, weaken verification or alter WebKit's
+attested `Throttle` scheduling. The 30 s hard action ceiling and original run
+deadline remain. One final successful Fill took 1.267 s from `ActionActive` to
+`Verified`, independently demonstrating that the previous one-second allowance
+was insufficient even when the action and adjacent observation both completed.
+The public [Apple policy contract](https://developer.apple.com/documentation/webkit/wkpreferences/inactiveschedulingpolicy-swift.enum)
+defines limited processing, not a capture-latency guarantee; the chosen allowance
+is based on this named-device observation, not a claimed platform-wide bound.
+
+Deterministic validation passes 420 functional-core, 17 controller (including
+eight extraction cases and seven native-action refusal cases), 337 application,
+37 runtime, 257 Store and 459 native-semantic engine tests, plus 171 xtask tests.
+The Store subprocess helper is ignored for direct invocation and exercised by
+its parent test. Extraction cases cover valid ownership, schema substitution,
+scope expansion, wrong type, forged citation, count/stream takeover and audit
+loss. The native matrix includes undersized-budget refusal before dispatch and
+exact postcondition refusal with its original charged effect retained. Result
+tests cover source-span isolation, quote deduplication, observation teardown,
+content-redacted diagnostics, phase-gated publication and one-shot delivery.
+Existing crash/restart, immutable terminal CAS, uncertain writes, audit recovery,
+cancellation, mailbox and lost-native-callback suites remain passing.
+
+Strict all-target Clippy passes for core, shipping and fixture-enabled controller,
+application, qualifier, composition, desktop feature and xtask. Optimized default
+and `macos-work` desktop checks pass. Semantic/controller/runtime/model-catalog,
+composition/persistence and default-dependency gates pass. The default desktop
+graph has no controller, agent runtime, provider transport, Work composition or
+reqwest dependency; its existing transport-free agentic core is unchanged as a
+dependency. Optimized probe enablement is compile-refused. No manifest or lockfile
+dependency changes, extra workers, Browse scheduling changes, secrets, objectives,
+page/provider bodies, profiles, screenshots or raw traces are committed.
+
+Only explicit retained-public qualification used provider storage; shipping/BYOK
+remains `store:false`. OpenAI Logs remain exact provider-boundary evidence for
+those public runs; local diagnostics carry only closed states, counters and
+timings. Durable artifact delivery, navigation/multi-page tasks, native lifetime
+reuse, parallel runs, UI/IPC task authoring, full Tauri bootstrap qualification,
+and battery/CPU/RAM qualification remain open.
+
 ## Remaining release blockers
 
 - authorized named-device macOS native-input routes beyond fixed DOM;

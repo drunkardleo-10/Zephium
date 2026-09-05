@@ -60,6 +60,9 @@ fn main() {
         [argument] if argument == "--live-public-luna-work-application-inspectable" => {
             work_application::run()
         }
+        [argument] if argument == "--live-public-luna-work-extraction-inspectable" => {
+            work_application::run_extraction()
+        }
         _ => std::process::exit(2),
     };
     if let Err(error) = result {
@@ -131,6 +134,9 @@ impl ProbeFailure {
         use zephium_agentic::{AgentProviderFailureClass, AgentProviderProtocolError};
 
         match self {
+            Self::Provider(zephium_agent_controller::TerraProbeProviderError::Extraction(_)) => {
+                "extraction_output"
+            }
             Self::Runtime => "runtime",
             Self::SuiteLaunch => "suite_launch",
             Self::SuiteChild => "suite_child",

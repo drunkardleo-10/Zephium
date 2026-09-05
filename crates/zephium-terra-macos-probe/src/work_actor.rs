@@ -20,6 +20,70 @@ impl TerraControllerClock for Clock {
 }
 
 struct Task(super::PreparedSearchProgress);
+// The public test's completion contract runs before successful actor closure;
+// application delivery checks the owned result again independently afterward.
+struct PublicExtractionTask(AgentWorkExtractionTask);
+impl AgentWorkTask for PublicExtractionTask {
+    fn evaluate(
+        &mut self,
+        observation: &SemanticObservation,
+    ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+        self.0.evaluate(observation)
+    }
+    fn assess(
+        &self,
+        action: &SemanticPreparedAction,
+    ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+        self.0.assess(action)
+    }
+    fn attest_account(
+        &self,
+        context: ContextJoin,
+        now: AgentPolicyInstant,
+    ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
+        self.0.attest_account(context, now)
+    }
+    fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
+        self.0.extraction_schema()
+    }
+    fn accept_extraction(
+        &mut self,
+        result: &SemanticExtractionResult<'_>,
+    ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+        let mut ids = std::collections::BTreeSet::new();
+        let (mut english, mut german) = (false, false);
+        let [field] = result.fields() else {
+            return Err(AgentWorkFailure::Contract);
+        };
+        let SemanticExtractedValue::TextList(list) = field.value() else {
+            return Err(AgentWorkFailure::Contract);
+        };
+        if list.items().len() != 10 {
+            return Err(AgentWorkFailure::Contract);
+        }
+        for item in list.items() {
+            let Some([source]) = result.sources(item.source_span()) else {
+                return Err(AgentWorkFailure::Contract);
+            };
+            let fragment = source.fragment();
+            let SemanticReadContent::Text(text) = fragment.content() else {
+                return Err(AgentWorkFailure::Contract);
+            };
+            if fragment.role() != SemanticRole::Link
+                || !ids.insert(fragment.id())
+                || text.as_str() != item.as_str()
+            {
+                return Err(AgentWorkFailure::Contract);
+            }
+            english |= text.as_str().contains("English");
+            german |= text.as_str().contains("Deutsch");
+        }
+        if !english || !german {
+            return Err(AgentWorkFailure::Contract);
+        }
+        self.0.accept_extraction(result)
+    }
+}
 impl AgentWorkTask for Task {
     fn evaluate(
         &mut self,
@@ -42,6 +106,7 @@ impl AgentWorkTask for Task {
                 && node.name().is_some_and(|name| name.as_str() == "Deutsch")
                 && node.states().contains(SemanticState::Selected);
         }
+        let _ = writeln!(std::io::stdout().lock(), "work-task-observed: initial={initial}; final_query={final_query}; language={language}; content=redacted");
         Ok(if self.0.observe(initial, final_query, language) {
             AgentWorkTaskProgress::Complete
         } else {
@@ -52,6 +117,7 @@ impl AgentWorkTask for Task {
         &self,
         action: &SemanticPreparedAction,
     ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+        let _ = writeln!(std::io::stdout().lock(), "work-task-action: kind={:?}; wait={:?}; verification={:?}; settle_millis={}; content=redacted", action.kind(), action.wait(), action.verification(), action.settle_budget().millis());
         if !matches!(
             action.kind(),
             SemanticActionKind::Fill | SemanticActionKind::Select
@@ -88,6 +154,33 @@ pub(super) fn input(
     ),
     super::ProbeFailure,
 > {
+    input_mode(started, false)
+}
+
+pub(super) fn extraction_input(
+    started: Instant,
+) -> Result<
+    (
+        zephium_core::ids::ProfileId,
+        AgentWorkRunInput,
+        Box<dyn AgentWorkTask>,
+    ),
+    super::ProbeFailure,
+> {
+    input_mode(started, true)
+}
+
+fn input_mode(
+    started: Instant,
+    extraction: bool,
+) -> Result<
+    (
+        zephium_core::ids::ProfileId,
+        AgentWorkRunInput,
+        Box<dyn AgentWorkTask>,
+    ),
+    super::ProbeFailure,
+> {
     use super::ProbeFailure as Error;
     let profile = 1_u128.into();
     let context = ContextIdentity::new(
@@ -98,9 +191,12 @@ pub(super) fn input(
     );
     let origin =
         SemanticOrigin::parse("https://www.wikipedia.org/").map_err(|_| Error::Authority)?;
-    let effects =
-        AgentEffectScope::try_new(&[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite])
-            .map_err(|_| Error::Authority)?;
+    let effects = AgentEffectScope::try_new(if extraction {
+        &[SemanticEffectClass::Read]
+    } else {
+        &[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite]
+    })
+    .map_err(|_| Error::Authority)?;
     let budget =
         AgentRunBudget::try_new(24, 1_000_000, 1_000_000, 1).map_err(|_| Error::Authority)?;
     let node = AgentPlanNodeId::generate();
@@ -134,7 +230,12 @@ pub(super) fn input(
         )],
     )
     .map_err(|_| Error::Authority)?;
-    let objective = "Prepare a public Wikipedia search without submitting or navigating. Fill the search with exactly Zephium browser and choose Deutsch in the search language selector, in either order. Once both are verified, refine the search text to exactly Zephium open source browser. Use one local_write act action per turn. Locate option references when needed. For each action use mutation_quiet=100 ms, settle_budget=1000 ms, and exact value or exact selected-option verification. Do not click links or submit. The host checks the exact milestones and stops when the final prepared search is verified.";
+    let objective = "Prepare a public Wikipedia search without submitting or navigating. Fill the search with exactly Zephium browser and choose Deutsch in the search language selector, in either order. Once both are verified, refine the search text to exactly Zephium open source browser. Use one local_write act action per turn. Locate option references when needed. For each action use mutation_quiet=100 ms, settle_budget=2000 ms, and exact value or exact selected-option verification. Do not click links or submit. The host checks the exact milestones and stops when the final prepared search is verified.";
+    let objective = if extraction {
+        "Extract an inventory of the ten prominent Wikipedia language-edition links. Use the trusted schema 1, initial scope. Return language_links as ten complete, exact accessible link names copied from the delivered evidence, including article-count text where it is part of a name. Do not paraphrase, translate, truncate or invent link names. Cite the exact source fragment for each item. Do not navigate or modify anything."
+    } else {
+        objective
+    };
     let input = AgentWorkRunInput::try_new(
         manifest,
         AgentPlanLeaseBinding::new(AgentPlanLeaseId::generate(), node),
@@ -154,7 +255,24 @@ pub(super) fn input(
         ),
     )
     .map_err(|_| Error::Authority)?;
-    Ok((profile, input, Box::new(Task(Default::default()))))
+    let task: Box<dyn AgentWorkTask> = if extraction {
+        Box::new(PublicExtractionTask(
+            AgentWorkExtractionTask::try_new(
+                vec![SemanticExtractionFieldSchema::try_text_list(
+                    "language_links".into(),
+                    true,
+                    10,
+                    256,
+                )
+                .map_err(|_| Error::Authority)?],
+                AgentAccountScope::Anonymous,
+            )
+            .map_err(|_| Error::Authority)?,
+        ))
+    } else {
+        Box::new(Task(Default::default()))
+    };
+    Ok((profile, input, task))
 }
 
 pub(super) fn run() -> Result<(), super::ProbeFailure> {

@@ -33,9 +33,21 @@ impl zephium_app::PresentationChrome for NoChrome {
 }
 
 pub(super) fn run() -> Result<(), super::ProbeFailure> {
+    run_mode(false)
+}
+
+pub(super) fn run_extraction() -> Result<(), super::ProbeFailure> {
+    run_mode(true)
+}
+
+fn run_mode(extraction: bool) -> Result<(), super::ProbeFailure> {
     use super::ProbeFailure as Error;
     let started = Instant::now();
-    let (profile, input, task) = super::work_actor::input(started)?;
+    let (profile, input, task) = if extraction {
+        super::work_actor::extraction_input(started)?
+    } else {
+        super::work_actor::input(started)?
+    };
     let data = tempfile::tempdir().map_err(|_| Error::Runtime)?;
     let store =
         Arc::new(zephium_store::SqliteStore::open(data.path()).map_err(|_| Error::Runtime)?);
@@ -150,6 +162,14 @@ pub(super) fn run() -> Result<(), super::ProbeFailure> {
                     && view.records().iter().any(|record| {
                         record.disposition() == zephium_agentic::AgentWorkDisposition::Succeeded
                     });
+                if extraction && terminal_success {
+                    terminal_success = view.take_extraction().is_some_and(|result| {
+                        let verified = verify_extraction(&result);
+                        let stats = result.stats();
+                        let _ = writeln!(std::io::stdout().lock(), "work-application-result: fields={}; values={}; source_edges={}; independently_verified={verified}; persistence=memory_only; content=redacted", stats.fields(), stats.values(), stats.source_edges());
+                        verified && view.take_extraction().is_none()
+                    });
+                }
                 let _ = writeln!(std::io::stdout().lock(), "work-application-terminal: phase={:?}; failure={:?}; persistence={:?}; durable_success={terminal_success}; content=redacted", snapshot.phase, snapshot.failure, snapshot.persistence_failure);
                 let request = shell.shutdown_with_deadline(Instant::now() + Duration::from_secs(8));
                 shutdown = std::thread::Builder::new()
@@ -178,4 +198,40 @@ pub(super) fn run() -> Result<(), super::ProbeFailure> {
     });
     result.map_err(Error::Engine)?;
     writeln!(std::io::stdout().lock(), "work-application-qualified: focus_isolation=passed; teardown=application_owned; elapsed_ms={}; content=redacted", started.elapsed().as_millis()).map_err(|_| Error::Output)
+}
+
+fn verify_extraction(result: &zephium_agentic::SemanticOwnedExtractionResult) -> bool {
+    use zephium_agentic::*;
+    if result.trust() != SemanticExtractionTrust::ModelMapped || result.fields().len() != 1 {
+        return false;
+    }
+    let SemanticExtractedValue::TextList(list) = result.fields()[0].value() else {
+        return false;
+    };
+    if list.items().len() != 10 {
+        return false;
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    let mut english = false;
+    let mut german = false;
+    for item in list.items() {
+        let Some(mut sources) = result.sources(item.source_span()) else {
+            return false;
+        };
+        let Some(source) = sources.next() else {
+            return false;
+        };
+        if sources.next().is_some() || source.role != SemanticRole::Link || !ids.insert(source.id) {
+            return false;
+        }
+        let SemanticOwnedReadContent::Text(text) = &source.content else {
+            return false;
+        };
+        if text != item.as_str() {
+            return false;
+        }
+        english |= text.contains("English");
+        german |= text.contains("Deutsch");
+    }
+    english && german
 }
