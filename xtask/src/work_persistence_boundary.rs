@@ -36,6 +36,68 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
             return Err(format!("Work persistence lost {required}"));
         }
     }
+    let application = fs::read_to_string(root.join("crates/zephium-app/src/work.rs"))
+        .map_err(|_| "missing Work application")?;
+    validate_application(&application)?;
+    let manifest = fs::read_to_string(root.join("crates/zephium-app/Cargo.toml"))
+        .map_err(|_| "missing application manifest")?;
+    for required in [
+        "work-execution = [\"agentic-browser\", \"dep:zephium-agent-controller\", \"dep:zephium-agent-runtime\", \"dep:zephium-agent-provider-transport\"]",
+        "zephium-agent-controller = { workspace = true, optional = true, features = [\"provider-transport\"] }",
+        "zephium-agent-runtime = { workspace = true, optional = true }",
+        "zephium-agent-provider-transport = { workspace = true, optional = true }",
+    ] {
+        if !manifest.contains(required) {
+            return Err(format!("Work application lost optional boundary: {required}"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_application(source: &str) -> Result<(), String> {
+    for forbidden in [
+        "println!",
+        "eprintln!",
+        "dbg!",
+        "diagnostic!",
+        "tracing::",
+        "log::",
+        "serde_json",
+        "thread::spawn",
+        "tokio::spawn",
+        "try_new_for_probe",
+        "InspectablePublic",
+        "execute_semantic_action",
+        "evaluate_javascript",
+        "AgentRunPolicy::",
+        "AgentRunSupervisor::",
+        "AgentContextRegistry::",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "Work application duplicates authority or exposes content: {forbidden}"
+            ));
+        }
+    }
+    for required in [
+        "AgentWorkController::try_new(",
+        "PendingAgentRuntime::spawn_suspended_with_controller(",
+        "pending.bind_browser_port(browser).into_parts()",
+        "std::ptr::addr_eq(Arc::as_ptr(&run.audit), Arc::as_ptr(&self.journal))",
+        "AgentWorkJournalMutation::completed(record, *policy, native)",
+        "self.unstarted = handle.take_outcome()",
+        "recovery.settle_audit_reconciliation(settlement)",
+        "flight.reconciliations < 4",
+        "self.audit_attempts >= 4",
+        "AgentWorkDisposition::FreshAdmissionRequired",
+        "active.runtime.stop_and_seal(reason)",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "Work application lost original-owner boundary: {required}"
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -88,5 +150,22 @@ mod tests {
                 assert!(validate_content_free(&format!("{source}\n{mutation}")).is_err());
             }
         }
+    }
+
+    #[test]
+    fn work_application_preserves_original_authorities_and_stateless_execution() {
+        let source = include_str!("../../crates/zephium-app/src/work.rs");
+        validate_application(source).unwrap();
+        for mutation in [
+            "eprintln!(page)",
+            "AgentRunPolicy::new()",
+            "try_new_for_probe()",
+            "tokio::spawn(worker)",
+        ] {
+            assert!(validate_application(&format!("{source}\n{mutation}")).is_err());
+        }
+        assert!(
+            validate_application(&source.replace("flight.reconciliations < 4", "true")).is_err()
+        );
     }
 }

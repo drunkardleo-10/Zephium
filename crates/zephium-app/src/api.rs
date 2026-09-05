@@ -337,6 +337,14 @@ pub enum ContentPolicyStatusQueryOutcome {
 
 #[derive(Clone, Debug)]
 pub enum Command {
+    #[cfg(feature = "work-execution")]
+    AttachWork(crate::work::WorkAttachment),
+    #[cfg(feature = "work-execution")]
+    AdmitWork(crate::work::WorkSubmission),
+    #[cfg(feature = "work-execution")]
+    WorkControl(Box<crate::work::WorkCommand>),
+    #[cfg(feature = "work-execution")]
+    WorkWake,
     /// A privileged user mutation with an externally visible admission and
     /// actor-order disposition identity. Engine callbacks and replaceable UI
     /// facts never use this wrapper.

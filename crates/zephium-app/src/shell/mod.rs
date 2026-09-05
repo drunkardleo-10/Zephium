@@ -182,6 +182,8 @@ impl AgentLifecycleOwner {
 }
 
 pub struct Shell {
+    #[cfg(feature = "work-execution")]
+    work: Option<Box<crate::work::ApplicationWork>>,
     profiles: Profiles,
     spaces: Spaces,
     items: Items,
@@ -462,6 +464,8 @@ impl Shell {
             blocker: blocker::BlockerCoordinator::new_deferred(blocker),
             #[cfg(feature = "agentic-browser")]
             agent_lifecycle: AgentLifecycleOwner::new(agent_lifecycle),
+            #[cfg(feature = "work-execution")]
+            work: None,
             extension_service: Some(extension_service),
             extension_startup_ready: false,
             extension_browser_surfaces: ExtensionBrowserSurfaceState::default(),
@@ -520,6 +524,34 @@ impl Shell {
             return;
         }
         match cmd {
+            #[cfg(feature = "work-execution")]
+            Command::AttachWork(attachment) => {
+                if let Some(mut work) = crate::work::ApplicationWork::take_attachment(&attachment) {
+                    if !work.belongs_to_store(&self.store)
+                        || self.work.is_some()
+                        || !matches!(self.agent_lifecycle, AgentLifecycleOwner::Absent)
+                    {
+                        work.refuse_attachment();
+                    } else {
+                        work.initialize();
+                        self.work = Some(Box::new(work));
+                    }
+                }
+            }
+            #[cfg(feature = "work-execution")]
+            Command::AdmitWork(submission) => {
+                if let Some(work) = &mut self.work {
+                    work.admit(submission);
+                }
+            }
+            #[cfg(feature = "work-execution")]
+            Command::WorkControl(control) => {
+                if let Some(work) = &mut self.work {
+                    work.control(*control);
+                }
+            }
+            #[cfg(feature = "work-execution")]
+            Command::WorkWake => {}
             Command::Operation {
                 operation_id,
                 command,
@@ -872,9 +904,25 @@ impl Shell {
             Command::Engine(event) => self.on_engine_event(event),
             Command::Shutdown { deadline, ack } => self.shutdown_until(deadline, ack),
         }
+        #[cfg(feature = "work-execution")]
+        self.poll_work();
+    }
+
+    #[cfg(feature = "work-execution")]
+    fn poll_work(&mut self) {
+        if let Some(work) = &mut self.work {
+            work.poll();
+            if let Some(queue) = &self.self_queue {
+                queue.schedule_work(work.next_deadline());
+            }
+        }
     }
 
     fn shutdown_until(&mut self, deadline: std::time::Instant, ack: SyncSender<ShutdownOutcome>) {
+        #[cfg(feature = "work-execution")]
+        if let Some(work) = &mut self.work {
+            work.begin_shutdown();
+        }
         if std::time::Instant::now() >= deadline {
             self.retryable_shutdown_failure(ack);
             return;
@@ -1106,6 +1154,10 @@ impl Shell {
     /// proof; the proof is deliberately consumed inside the actor barrier.
     #[cfg(feature = "agentic-browser")]
     fn shutdown_agent_lifecycle_until(&mut self, deadline: std::time::Instant) -> bool {
+        #[cfg(feature = "work-execution")]
+        if let Some(work) = &mut self.work {
+            return work.shutdown_until(deadline);
+        }
         let owner = std::mem::replace(&mut self.agent_lifecycle, AgentLifecycleOwner::Consumed);
         let lifecycle = match owner {
             AgentLifecycleOwner::Absent => return true,

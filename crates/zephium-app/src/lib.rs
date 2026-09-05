@@ -19,6 +19,15 @@ mod actor;
 mod api;
 mod shell;
 mod store_reads;
+#[cfg(feature = "work-execution")]
+mod work;
+
+#[cfg(feature = "work-execution")]
+pub use work::{
+    AgentWorkApplicationConfig, AgentWorkApplicationHandle, AgentWorkApplicationPhase,
+    AgentWorkApplicationPorts, AgentWorkApplicationSnapshot, AgentWorkNativeFactory,
+    AgentWorkReviewDecision, PreparedAgentWork,
+};
 
 pub use actor::{
     spawn, spawn_suspended, CallbackHandle, ContentPolicyStatusRequest,

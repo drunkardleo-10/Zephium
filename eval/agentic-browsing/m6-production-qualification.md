@@ -851,6 +851,27 @@ The authoritative aggregate records and exact remaining blockers are in
 `native-input-matrix-v1.json`, `semantic-runtime-macos-v3.json`, and
 `browse-baseline-v1.json`.
 
+## Application durable foundation (not live qualification)
+
+The next 2026-09-05 slice adds optional `zephium-app/work-execution` admission
+over the existing controller/runtime, and `zephium-store/work-execution` on the
+existing Store actor. See the [persistence contract](../../docs/agent-work-persistence.md).
+It requires exact durable admission before consuming the single-use native
+factory and immutable terminal CAS before publishing success. Process-exit
+fencing, restart interruption, review decisions and original-ledger audit
+redelivery do not restore or replay native/provider work.
+
+Deterministic evidence: 335 application tests (13 focused Work fixtures),
+257 Store tests plus a subprocess helper exercised by its parent fixture,
+417 default functional-core tests (515 with excluded localhost fixtures), 37 runtime tests, 13 production-feature
+controller tests and 16 excluded controller/localhost tests, and 168 xtask
+tests. The application fixture uses the actual shell command path and one real
+SQLite Store for journal/audit/ordinary storage, but a typed synthetic native
+port; it is not a live native workflow. Strict Clippy, optimized application,
+Store/controller/default-desktop builds, content-free/source boundaries and
+default-desktop dependency checks pass. Optimized probe enablement remains
+compile-refused. No new live-provider or battery claim is made.
+
 ## Remaining release blockers
 
 - authorized named-device macOS native-input routes beyond fixed DOM;

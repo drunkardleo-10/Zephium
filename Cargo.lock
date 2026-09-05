@@ -6230,10 +6230,15 @@ name = "zephium-app"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "tempfile",
  "url",
+ "zephium-agent-controller",
+ "zephium-agent-provider-transport",
+ "zephium-agent-runtime",
  "zephium-agentic",
  "zephium-core",
  "zephium-ipc",
+ "zephium-store",
 ]
 
 [[package]]

@@ -1505,7 +1505,9 @@ normally sufficient.
 Do not build during the isolated proof:
 
 - the Work spatial UI or design system;
-- production Work persistence, tasks, notes, memory, or knowledge;
+- Work tasks, notes, memory, or knowledge; the subsequently authorized
+  [application admission/recovery foundation](agent-work-persistence.md) stores
+  only bounded content-free facts, not executable session or content persistence;
 - the hosted AI service or cloud browser execution;
 - mobile, collaboration, teams, or synchronization;
 - arbitrary JavaScript, CSS selectors, XPath, raw DOM, or a model-facing CDP;

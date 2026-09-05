@@ -16,7 +16,14 @@ classification and exact account attestation. Neither a model response nor
 hostile page text may implement these authorities. Model text and action counts
 cannot terminate a task successfully.
 
-Construct `AgentWorkController::try_new` with the transport configuration,
+The optional [application admission boundary](agent-work-persistence.md) now
+owns durable admission and the complete runtime lifecycle. The composition root
+prepares `PreparedAgentWork`, attaches the same Store's journal port to the
+shell, and submits through `AgentWorkApplicationHandle`; native creation waits
+for both durable admission acknowledgements. No UI or default-desktop agent
+dependency is enabled by this seam.
+
+For direct trusted compositions, construct `AgentWorkController::try_new` with the transport configuration,
 move-only credential and existing `AgentAuditPort`. Move it into
 `PendingAgentRuntime::spawn_suspended_with_controller`, bind the actual
 `EngineHost::take_agent_browser_port`, and retain the existing runtime handle,
@@ -87,11 +94,12 @@ never establish Clean.
 
 Recovery retains the sealed session, policy, journal, native owners and retained
 callbacks without credentials or objective data. It deliberately grants no
-replay permission. This pass does not expose a recovery reconciliation/resume
-command or persist live executable state across process exit. Failure-path
-audit events that have not been acknowledged remain in the retained ledger;
-they are not described as durable. A later application recovery adapter must
-settle that exact debt, not launch a new controller over a fabricated clean run.
+replay permission. The application may now explicitly reconcile the original
+retained audit ledger and an exact uncertain durable write. Failure-path audit
+events that have not been acknowledged remain debt, not claimed durability.
+Persisted recovery facts classify interruption after restart; they do not
+restore live executable state or fabricate a clean controller. Approval review
+requires fresh admission and never executes an old proposal.
 
 ## Evidence and remaining product seams
 
@@ -103,9 +111,10 @@ Only explicit public qualification can enable retained provider logs;
 production/BYOK remains `store:false`. Local diagnostics contain only closed
 states, correlations, counters and timings; no page/provider data or secrets.
 
-Next: authoritative Work application admission/state persistence and explicit
-approval/recovery reconciliation over this retained owner. The current desktop
-does not yet start this actor from a user Work command. Local/hosted model
+Next: trusted desktop composition over the implemented application admission
+and recovery port. The current desktop does not yet start this actor from a user
+Work command, and the new application path has deterministic shell/SQLite
+evidence rather than a new live-native qualification. Local/hosted model
 transport adapters must share the same session semantics. Native macOS
 suspend/resume, authenticated/public multi-site qualification, concurrent Browse
 interaction, navigation and richer tool adapters remain open. A suspension

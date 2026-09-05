@@ -950,6 +950,50 @@ fn ci() {
             "provider-transport",
         ],
     );
+    // Work admission and Store fencing are intentionally absent from the
+    // default desktop graph; exercise their real shipping paths explicitly.
+    for package in ["zephium-app", "zephium-store"] {
+        for target in ["--all-targets", "--lib"] {
+            run(
+                "cargo",
+                &[
+                    "clippy",
+                    "--locked",
+                    "-p",
+                    package,
+                    "--features",
+                    "work-execution",
+                    target,
+                    "--",
+                    "-D",
+                    "warnings",
+                ],
+            );
+        }
+        run(
+            "cargo",
+            &[
+                "test",
+                "--locked",
+                "-p",
+                package,
+                "--features",
+                "work-execution",
+            ],
+        );
+        run(
+            "cargo",
+            &[
+                "check",
+                "--locked",
+                "--release",
+                "-p",
+                package,
+                "--features",
+                "work-execution",
+            ],
+        );
+    }
     // `--all-targets` enables test-only references while linting library
     // artifacts, which can hide dead production paths behind cfg(test).
     run(

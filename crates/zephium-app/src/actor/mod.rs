@@ -1307,6 +1307,14 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
         let mut maintenance_deadline = std::time::Instant::now() + MAINTENANCE_INTERVAL;
         loop {
             match timer_queue.wait_for_timer(maintenance_deadline) {
+                #[cfg(feature = "work-execution")]
+                TimerWake::Work => match timer_queue.try_push(Command::WorkWake) {
+                    Ok(()) | Err(TryPushError::Sealed(_)) => {}
+                    Err(TryPushError::Full(_)) => timer_queue.schedule_work(Some(
+                        std::time::Instant::now() + std::time::Duration::from_millis(25),
+                    )),
+                    Err(TryPushError::Closed(_)) => break,
+                },
                 TimerWake::Maintenance => {
                     maintenance_deadline = std::time::Instant::now() + MAINTENANCE_INTERVAL;
                     match timer_queue.try_push(Command::Tick) {

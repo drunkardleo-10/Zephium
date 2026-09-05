@@ -17,6 +17,8 @@ use crate::{Command, StoreReadResult};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum CoalescedKey {
+    #[cfg(feature = "work-execution")]
+    Work,
     Bootstrap,
     Title(ItemId),
     Url(ItemId),
@@ -102,7 +104,8 @@ const MAX_CRITICAL_LIFECYCLE_FACTS: usize = zephium_core::session::MAX_SESSION_I
     + zephium_core::ports::extensions::MAX_PENDING_EXTENSION_RUNTIME_GRANT_REQUESTS
     + zephium_core::permissions::MAX_PENDING_PAGE_PERMISSION_REQUESTS
     + crate::api::MAX_PENDING_EXTENSION_MANAGEMENT_OPERATIONS
-    + 3;
+    + 3
+    + cfg!(feature = "work-execution") as usize;
 const COMMAND_QUEUE_CAPACITY: usize = NORMAL_COMMAND_CAPACITY + MAX_CRITICAL_LIFECYCLE_FACTS + 1;
 const LIFECYCLE_COMMAND_CAPACITY: usize = COMMAND_QUEUE_CAPACITY - 1;
 // During a failed store barrier, keep at most the bounded set of lifecycle
@@ -123,6 +126,8 @@ pub(crate) struct CommandQueueInner {
 
 #[derive(Default)]
 pub(crate) struct TimerState {
+    #[cfg(feature = "work-execution")]
+    work_deadline: Option<std::time::Instant>,
     stopped: bool,
     extension_startup_deadline: Option<std::time::Instant>,
     pub(crate) persist_deadline: Option<std::time::Instant>,
@@ -148,6 +153,8 @@ pub(crate) struct PresentationDeadline {
 }
 
 pub(crate) enum TimerWake {
+    #[cfg(feature = "work-execution")]
+    Work,
     Maintenance,
     ExtensionStartup,
     Persist,
@@ -284,6 +291,18 @@ fn retain_post_barrier(commands: &mut VecDeque<Command>, command: Command) {
 }
 
 impl CommandQueue {
+    #[cfg(feature = "work-execution")]
+    pub(crate) fn schedule_work(&self, deadline: Option<std::time::Instant>) {
+        let mut timer = self
+            .inner
+            .timer_state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if timer.work_deadline != deadline {
+            timer.work_deadline = deadline;
+            self.inner.timer_ready.notify_one();
+        }
+    }
     pub(crate) fn new() -> Self {
         Self {
             inner: Arc::new(CommandQueueInner {
@@ -847,6 +866,11 @@ impl CommandQueue {
                 return TimerWake::Stopped;
             }
             let now = std::time::Instant::now();
+            #[cfg(feature = "work-execution")]
+            if timer.work_deadline.is_some_and(|deadline| now >= deadline) {
+                timer.work_deadline = None;
+                return TimerWake::Work;
+            }
             if timer
                 .extension_startup_deadline
                 .is_some_and(|deadline| now >= deadline)
@@ -952,6 +976,10 @@ impl CommandQueue {
             if let Some(extension_startup) = timer.extension_startup_deadline {
                 deadline = deadline.min(extension_startup);
             }
+            #[cfg(feature = "work-execution")]
+            if let Some(work) = timer.work_deadline {
+                deadline = deadline.min(work);
+            }
             if let Some((_, favicon, _)) = next_favicon {
                 deadline = deadline.min(favicon);
             }
@@ -1002,6 +1030,16 @@ fn enqueue(
     hard_capacity: usize,
     critical: bool,
 ) -> Result<(), Command> {
+    // Work wakes carry no ordered state; the actual bounded slots are read
+    // after every shell command. One wake suffices across user FIFO barriers.
+    #[cfg(feature = "work-execution")]
+    if matches!(command, Command::WorkWake)
+        && commands
+            .iter()
+            .any(|queued| matches!(queued, Command::WorkWake))
+    {
+        return Ok(());
+    }
     let coalesced_key = command_coalesced_key(&command);
     if let Some(key) = coalesced_key {
         let burst_start = commands
@@ -1054,6 +1092,10 @@ fn enqueue(
 /// or failed view is still live. They receive reserved admission and may
 /// displace older presentation facts at the absolute lifecycle ceiling.
 fn command_is_critical(command: &Command) -> bool {
+    #[cfg(feature = "work-execution")]
+    if matches!(command, Command::WorkWake) {
+        return true;
+    }
     matches!(
         command,
         Command::BlockerReady(_)
@@ -1098,6 +1140,8 @@ fn command_is_observational_query(command: &Command) -> bool {
 
 fn command_coalesced_key(command: &Command) -> Option<CoalescedKey> {
     match command {
+        #[cfg(feature = "work-execution")]
+        Command::WorkWake => Some(CoalescedKey::Work),
         Command::Bootstrap => Some(CoalescedKey::Bootstrap),
         Command::Engine(event) => CoalescedKey::of(event),
         Command::SetWindowSize(_) => Some(CoalescedKey::WindowSize),
