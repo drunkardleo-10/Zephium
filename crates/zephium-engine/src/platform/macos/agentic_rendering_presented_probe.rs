@@ -68,16 +68,16 @@ fn reject_facts(facts: PresentedFacts, require_visible_pixels: bool) -> Option<&
 
 impl PresentedStateGuard<'_> {
     pub(super) fn sample(&self) {
+        let responder = self.window.firstResponder();
         let facts = PresentedFacts {
             within_deadline: Instant::now() < self.deadline,
             app_inactive: !self.app.isActive(),
             no_key_authority: !self.window.isKeyWindow() && !self.window.canBecomeKeyWindow(),
             no_main_authority: !self.window.isMainWindow() && !self.window.canBecomeMainWindow(),
             mouse_ignored: self.window.ignoresMouseEvents(),
-            responder_unchanged: self
-                .window
-                .firstResponder()
-                .map(|value| Retained::as_ptr(&value).addr())
+            responder_unchanged: responder
+                .as_ref()
+                .map(|value| Retained::as_ptr(value).addr())
                 == self.first_responder,
             surface_visible: self.window.isVisible() && !self.page.isHiddenOrHasHiddenAncestor(),
             surface_opaque: self.window.alphaValue() == 1.0
@@ -92,9 +92,34 @@ impl PresentedStateGuard<'_> {
             visible_pixels: self.has_visible_pixels(),
         };
         if self.failure.get().is_none() {
-            self.failure
-                .set(reject_facts(facts, self.require_visible_pixels.get()));
+            let failure = reject_facts(facts, self.require_visible_pixels.get());
+            self.failure.set(match failure {
+                Some("presented_responder_changed") => Some(self.responder_refusal(responder)),
+                other => other,
+            });
         }
+    }
+
+    fn responder_refusal(
+        &self,
+        responder: Option<Retained<objc2_app_kit::NSResponder>>,
+    ) -> &'static str {
+        let Some(responder) = responder else {
+            return "presented_responder_changed_none";
+        };
+        if Retained::as_ptr(&responder).addr() == std::ptr::from_ref(self.window).addr() {
+            return "presented_responder_changed_exact_window";
+        }
+        if Retained::as_ptr(&responder).addr() == std::ptr::from_ref(self.page).addr() {
+            return "presented_responder_changed_exact_page";
+        }
+        if responder
+            .downcast::<NSView>()
+            .is_ok_and(|view| view.isDescendantOf(self.page))
+        {
+            return "presented_responder_changed_owned_descendant";
+        }
+        "presented_responder_changed_foreign"
     }
 
     fn has_visible_pixels(&self) -> bool {

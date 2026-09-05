@@ -352,3 +352,9 @@ completed without replacing the reported stage. No provider or public-site
 request occurred and no success is claimed. Diagnosis must distinguish an
 internal non-key-window responder transition from user-input/focus authority,
 without removing the independent native isolation checks.
+
+The follow-up diagnostic refines only this refusal into absent, exact-window,
+exact-page, exact-owned-page-descendant or foreign responder. It classifies
+the same retained native responder used for the comparison, exports no class
+name, pointer or page data, and still refuses every changed responder. It
+does not infer that a descendant responder is safe or permit it to continue.
