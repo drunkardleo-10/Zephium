@@ -8,7 +8,9 @@ mod rendering_opportunity;
 pub use rendering_opportunity::{MacosAgenticRenderingOpportunityReport, RenderingOpportunity};
 #[path = "agentic_rendering_presented_probe.rs"]
 mod rendering_presented;
-pub use rendering_presented::MacosAgenticPresentedRenderingReport;
+pub use rendering_presented::{
+    MacosAgenticPresentedRenderingFailure, MacosAgenticPresentedRenderingReport,
+};
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -300,7 +302,7 @@ pub enum MacosAgenticSemanticTwoActionScenario {
 enum ProbeMode<'a> {
     Full,
     Rendering(&'a mut Option<MacosAgenticRenderingProbeReport>),
-    RenderingPresented(&'a mut Option<MacosAgenticPresentedRenderingReport>),
+    RenderingPresented(&'a mut Option<rendering_presented::PresentedOutcome>),
     RenderingOpportunity {
         opportunity: RenderingOpportunity,
         report: &'a mut Option<MacosAgenticRenderingOpportunityReport>,
@@ -438,15 +440,22 @@ pub(crate) fn run_rendering_opportunity(
     report.ok_or("rendering_opportunity_report_missing")
 }
 
-pub(crate) fn run_rendering_presented() -> Result<MacosAgenticPresentedRenderingReport, &'static str>
-{
+pub(crate) fn run_rendering_presented() -> rendering_presented::PresentedOutcome {
     let mut report = None;
     let pending =
         objc2::rc::autoreleasepool(|_| begin(ProbeMode::RenderingPresented(&mut report)))?;
-    if finish(pending)?.is_some() {
-        return Err("unexpected_model_terminal");
+    match finish(pending) {
+        Ok(None) => report.ok_or_else(|| {
+            MacosAgenticPresentedRenderingFailure::from("rendering_presented_report_missing")
+        })?,
+        Ok(Some(_)) => Err(MacosAgenticPresentedRenderingFailure::supersede(
+            "unexpected_model_terminal",
+            report,
+        )),
+        Err(stage) => Err(MacosAgenticPresentedRenderingFailure::supersede(
+            stage, report,
+        )),
     }
-    report.ok_or("rendering_presented_report_missing")
 }
 
 pub(crate) fn run_model_click(
@@ -675,10 +684,11 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
             let url = server.url(FixtureRoute::SemanticRendering);
             let (context, operation) =
                 navigate_with_receipt(&mut view, &mut registry, identity.id(), 2, &url, &runtime)?;
-            **report = Some(rendering_presented::measure(
-                &view, context, operation, &url, &runtime, &host.view,
-            )?);
-            return Ok(None);
+            let outcome =
+                rendering_presented::measure(&view, context, operation, &url, &runtime, &host.view);
+            let refusal = outcome.as_ref().err().map(|failure| failure.stage);
+            **report = Some(outcome);
+            return refusal.map_or(Ok(None), Err);
         }
         if let ProbeMode::RenderingOpportunity {
             opportunity,

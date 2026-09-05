@@ -39,6 +39,52 @@ pub struct MacosAgenticPresentedRenderingReport {
     pub measurement: MacosAgenticRenderingProbeReport,
 }
 
+/// Failed attempt evidence; a provisional measurement never certifies cleanup.
+#[derive(Debug)]
+pub struct MacosAgenticPresentedRenderingFailure {
+    /// Authoritative refusal, including a later restoration/teardown failure.
+    pub stage: &'static str,
+    /// Earlier refusal, retained when later cleanup supersedes it.
+    pub prior_stage: Option<&'static str>,
+    /// Completed content-free samples only, not a successful native qualification.
+    pub provisional_measurement: Option<MacosAgenticRenderingProbeReport>,
+}
+
+impl From<&'static str> for MacosAgenticPresentedRenderingFailure {
+    fn from(stage: &'static str) -> Self {
+        Self {
+            stage,
+            prior_stage: None,
+            provisional_measurement: None,
+        }
+    }
+}
+
+impl MacosAgenticPresentedRenderingFailure {
+    pub(super) fn supersede(stage: &'static str, prior: Option<PresentedOutcome>) -> Self {
+        match prior {
+            Some(Ok(report)) => Self {
+                stage,
+                prior_stage: None,
+                provisional_measurement: Some(report.measurement),
+            },
+            Some(Err(failure)) => Self {
+                stage,
+                prior_stage: if failure.stage == stage {
+                    failure.prior_stage
+                } else {
+                    Some(failure.stage)
+                },
+                provisional_measurement: failure.provisional_measurement,
+            },
+            None => stage.into(),
+        }
+    }
+}
+
+pub(super) type PresentedOutcome =
+    Result<MacosAgenticPresentedRenderingReport, MacosAgenticPresentedRenderingFailure>;
+
 /// Separate guard: hidden probes never gain a "visibility is optional" flag.
 pub(super) struct PresentedStateGuard<'a> {
     app: &'a NSApplication,
@@ -331,9 +377,9 @@ pub(super) fn measure(
     url: &str,
     runtime: &ProbeRuntime<'_, '_>,
     host: &NSView,
-) -> Result<MacosAgenticPresentedRenderingReport, &'static str> {
+) -> PresentedOutcome {
     let ProbeNativeState::Hidden(original) = runtime.native_guard else {
-        return Err("presented_original_guard");
+        return Err("presented_original_guard".into());
     };
     original.sample();
     if runtime.failed()
@@ -346,7 +392,7 @@ pub(super) fn measure(
         || original.window.canBecomeMainWindow()
         || original.window.alphaValue() != 1.0
     {
-        return Err("presented_admission");
+        return Err("presented_admission".into());
     }
     let mtm = MainThreadMarker::new().ok_or("presented_main_thread")?;
     let screen = NSScreen::mainScreen(mtm).ok_or("presented_screen_unavailable")?;
@@ -437,31 +483,69 @@ pub(super) fn measure(
             measurement,
         ))
     })();
-    scope.hide()?;
+    let restore = scope.hide();
     original.sample();
-    if runtime.failed() {
-        return Err("presented_restored_native_state");
-    }
     let presented_elapsed_ms =
         u64::try_from(started.elapsed().as_millis()).map_err(|_| "presented_clock")?;
-    let (
-        opportunity_elapsed_ms,
-        exact_page_responder_observed,
-        appkit_events_dispatched,
-        measurement,
-    ) = outcome?;
-    Ok(MacosAgenticPresentedRenderingReport {
-        presented_elapsed_ms,
-        opportunity_elapsed_ms,
-        exact_page_responder_observed,
-        appkit_events_dispatched,
-        measurement,
-    })
+    let outcome = outcome
+        .map(
+            |(
+                opportunity_elapsed_ms,
+                exact_page_responder_observed,
+                appkit_events_dispatched,
+                measurement,
+            )| MacosAgenticPresentedRenderingReport {
+                presented_elapsed_ms,
+                opportunity_elapsed_ms,
+                exact_page_responder_observed,
+                appkit_events_dispatched,
+                measurement,
+            },
+        )
+        .map_err(MacosAgenticPresentedRenderingFailure::from);
+    if let Some(stage) = restore.err().or_else(|| runtime.failure_stage()) {
+        return Err(MacosAgenticPresentedRenderingFailure::supersede(
+            stage,
+            Some(outcome),
+        ));
+    }
+    outcome
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presented_cleanup_refusal_preserves_provisional_measurement_without_success() {
+        let report = MacosAgenticPresentedRenderingReport {
+            presented_elapsed_ms: 5,
+            opportunity_elapsed_ms: 1,
+            exact_page_responder_observed: false,
+            appkit_events_dispatched: 0,
+            measurement: MacosAgenticRenderingProbeReport {
+                samples: Vec::new(),
+                disposition: rendering::RenderingDisposition::ControlsIncomplete,
+            },
+        };
+        let failed = MacosAgenticPresentedRenderingFailure::supersede("restore", Some(Ok(report)));
+        assert_eq!(failed.stage, "restore");
+        assert_eq!(failed.prior_stage, None);
+        assert!(failed.provisional_measurement.is_some());
+        let failed =
+            MacosAgenticPresentedRenderingFailure::supersede("teardown", Some(Err(failed)));
+        assert_eq!(failed.stage, "teardown");
+        assert_eq!(failed.prior_stage, Some("restore"));
+        assert!(failed.provisional_measurement.is_some());
+        let failed =
+            MacosAgenticPresentedRenderingFailure::supersede("teardown", Some(Err(failed)));
+        assert_eq!(failed.prior_stage, Some("restore"));
+        assert!(failed.provisional_measurement.is_some());
+        let failed =
+            MacosAgenticPresentedRenderingFailure::supersede("restore", Some(Err("inner".into())));
+        assert_eq!(failed.prior_stage, Some("inner"));
+        assert!(failed.provisional_measurement.is_none());
+    }
 
     #[test]
     fn presented_appkit_pump_excludes_input_unknown_types_and_capacity_overflow() {

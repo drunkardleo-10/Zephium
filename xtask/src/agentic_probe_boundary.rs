@@ -2625,7 +2625,9 @@ fn validate_macos_rendering_presented_probe(
         "scope.window.orderFrontRegardless()",
         "guard.require_visible_pixels.set(true)",
         "rendering::measure(view,context,operation,url,&presented_runtime)",
-        "scope.hide()?",
+        "letrestore=scope.hide();",
+        "restore.err().or_else(||runtime.failure_stage())",
+        "MacosAgenticPresentedRenderingFailure::supersede(stage,Some(outcome),)",
         "self.page.setHidden(true)",
         "self.window.orderOut(None)",
         "implDropforPresentedScope",
@@ -2684,13 +2686,14 @@ fn validate_macos_rendering_presented_probe(
     for required in [
         "#[path=\"agentic_rendering_presented_probe.rs\"]modrendering_presented;",
         "begin(ProbeMode::RenderingPresented(&mutreport))",
-        "iffinish(pending)?.is_some()",
-        "report.ok_or(\"rendering_presented_report_missing\")",
+        "matchfinish(pending)",
+        "Err(stage)=>Err(MacosAgenticPresentedRenderingFailure::supersede(stage,report,))",
+        "**report=Some(outcome);returnrefusal.map_or(Ok(None),Err);",
         "letnative_guard=ProbeNativeState::Hidden(NativeStateGuard{",
         "Self::Hidden(guard)=>guard.sample()",
         "ifletProbeNativeState::Presented(guard)=self.native_guard{guard.pump_appkit_event();}",
         "Self::Presented(guard)=>guard.sample()",
-        "rendering_presented::measure(&view,context,operation,&url,&runtime,&host.view,)",
+        "rendering_presented::measure(&view,context,operation,&url,&runtime,&host.view)",
     ] {
         if !parent.contains(required) {
             return Err(format!(
@@ -2698,7 +2701,9 @@ fn validate_macos_rendering_presented_probe(
             ));
         }
     }
-    if !compact(binary).contains("arguments.as_slice()==[\"--ci-presented-rendering-readiness\"]") {
+    if !compact(binary).contains("arguments.as_slice()==[\"--ci-presented-rendering-readiness\"]")
+        || !binary.contains("provisional_measurement_is_not_qualification=true")
+    {
         return Err("presented rendering lost closed CLI".into());
     }
     Ok(())
@@ -12860,7 +12865,8 @@ mod tests {
             "NSWindowOcclusionState::Visible",
             "scope.window.setIgnoresMouseEvents(true)",
             "guard.require_visible_pixels.set(true)",
-            "scope.hide()?",
+            "let restore = scope.hide();",
+            "restore.err().or_else(|| runtime.failure_stage())",
             "self.window.orderOut(None)",
             "impl Drop for PresentedScope",
         ] {
@@ -12899,7 +12905,7 @@ mod tests {
         }
         assert!(validate_macos_rendering_presented_probe(
             source,
-            &parent.replace("finish(pending)?", "Ok(None)?"),
+            &parent.replace("match finish(pending)", "match Ok(None)"),
             binary
         )
         .is_err());

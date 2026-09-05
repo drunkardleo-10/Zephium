@@ -76,13 +76,15 @@ pub use platform::macos::MacosAgenticRenderingProbeReport;
 #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
 #[doc(hidden)]
 pub fn run_macos_agentic_presented_rendering_probe(
-) -> Result<MacosAgenticPresentedRenderingReport, &'static str> {
+) -> Result<MacosAgenticPresentedRenderingReport, MacosAgenticPresentedRenderingFailure> {
     platform::macos::run_agentic_rendering_presented_probe()
 }
 
 #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
 #[doc(hidden)]
-pub use platform::macos::MacosAgenticPresentedRenderingReport;
+pub use platform::macos::{
+    MacosAgenticPresentedRenderingFailure, MacosAgenticPresentedRenderingReport,
+};
 
 /// Closed provider-free public-native rendering comparison; no production policy.
 #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]

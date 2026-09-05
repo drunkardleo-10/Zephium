@@ -12,8 +12,8 @@ fn main() {
     if arguments.as_slice() == ["--ci-presented-rendering-readiness"] {
         match zephium_engine::run_macos_agentic_presented_rendering_probe() {
             Ok(report) => eprintln!("macos-agentic-presented-rendering-probe: {report:?}; fixture=loopback-only; provider=absent; profile=ephemeral; presentation=explicitly-onscreen; input=ignored; key_authority=absent; main_authority=absent; scheduling=throttle; hidden_restore=verified; original_native_teardown=verified"),
-            Err(stage) => {
-                eprintln!("macos-agentic-presented-rendering-probe: failed; stage={stage}");
+            Err(failure) => {
+                eprintln!("macos-agentic-presented-rendering-probe: failed; evidence={failure:?}; provisional_measurement_is_not_qualification=true");
                 std::process::exit(1);
             }
         }

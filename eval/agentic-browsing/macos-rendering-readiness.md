@@ -475,3 +475,11 @@ error replaced the inner outcome, so the captured output does not establish
 whether rendering/RAF advanced or which original native guard failed. Native
 fixture/teardown did not replace the reported stage. The next diagnostic must
 preserve both facts without treating pre-teardown evidence as success.
+
+The presented diagnostic now returns a typed failure with the authoritative
+closed stage, an immediate prior refusal when superseded, and any completed
+content-free provisional semantic measurement. Native restoration and teardown
+still run before output. The original hidden guard's exact refusal is retained
+instead of replacing it with a generic restoration label. A later cleanup
+refusal remains authoritative and cannot turn an inner measurement into a
+successful qualification. No restoration predicate or native behavior changes.
