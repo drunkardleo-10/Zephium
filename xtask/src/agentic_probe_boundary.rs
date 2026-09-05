@@ -6246,6 +6246,7 @@ fn validate_semantic_extraction_provider_contract(
         "self.correlation.kind()!=AgentBrowserToolKind::Extract||self.correlation.extraction_schema!=Some(schema.id())",
         "if!read.matches_acknowledgement(&self.baseline)",
         "if!payload.matches(schema,read)",
+        "output_schema:super::request::bound_extraction_output_schema(schema)",
         "pubstructAgentProviderBoundExtractionContinuation",
         "AgentBrowserToolKind::Locate|AgentBrowserToolKind::Read|AgentBrowserToolKind::Extract|AgentBrowserToolKind::Screenshot",
         "AgentProviderInputEvidence::Extraction(_)|AgentProviderInputEvidence::Screenshot(_)=>{returnNone;}",
@@ -6269,7 +6270,8 @@ fn validate_semantic_extraction_provider_contract(
         "commitment:AgentProviderInputCommitment::Extraction",
         "continuation_transcript:None",
         "staticEXTRACTION_OUTPUT_SCHEMA:LazyLock<Value>",
-        "project_anthropic_schema(extraction_output_schema())",
+        "project_anthropic_schema(output_schema)",
+        "pub(super)fnbound_extraction_output_schema(schema:&SemanticExtractionSchema)",
         "AgentProviderInputEvidence::Extraction(receipt)",
     ] {
         if !provider_request.contains(required) {

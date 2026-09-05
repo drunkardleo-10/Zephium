@@ -111,7 +111,23 @@ impl SemanticEncodedExtractionRequest {
         expected_revision: &SemanticTokenizerRevision,
     ) -> Result<SemanticExtractionModelPayload, SemanticModelEncodingError> {
         let measurement = self.measure(counter, expected_revision)?;
-        Ok(SemanticExtractionModelPayload {
+        Ok(self.into_payload(measurement))
+    }
+
+    /// Uses the existing conservative UTF-8 bound only as admission to an
+    /// authenticated whole-request provider count, never as an exact count.
+    pub fn admit_conservative_utf8(
+        self,
+        revision: &SemanticTokenizerRevision,
+    ) -> Result<SemanticExtractionModelPayload, SemanticModelEncodingError> {
+        let measurement =
+            crate::semantic_model::conservative_utf8_measurement(&self.content, revision)?;
+        validate_semantic_token_measurement(&self.budget, &measurement, revision)?;
+        Ok(self.into_payload(measurement))
+    }
+
+    fn into_payload(self, measurement: SemanticTokenMeasurement) -> SemanticExtractionModelPayload {
+        SemanticExtractionModelPayload {
             content: self.content,
             stats: self.stats,
             measurement,
@@ -124,7 +140,7 @@ impl SemanticEncodedExtractionRequest {
             captured_at: self.captured_at,
             read_guard: self.read_guard,
             request_guard: self.request_guard,
-        })
+        }
     }
 }
 
@@ -702,6 +718,46 @@ mod tests {
         let debug = format!("{receipt:?}");
         assert!(!debug.contains("Quarterly summary"));
         assert!(!debug.contains("title"));
+    }
+
+    #[test]
+    fn conservative_extraction_remains_inexact_and_preserves_exact_schema_read_binding() {
+        let (observation, schema) = fixture();
+        let read = read_semantic_observation(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(45),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .unwrap();
+        let revision = SemanticTokenizerRevision::try_new("extract-bound-v1".into()).unwrap();
+        let payload = encode_semantic_extraction_request(
+            &schema,
+            &read,
+            SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .unwrap()
+        .admit_conservative_utf8(&revision)
+        .unwrap();
+        assert!(payload.matches(&schema, &read));
+        assert_eq!(
+            payload.token_measurement().quality(),
+            SemanticTokenCountQuality::Conservative
+        );
+        let exact = SemanticModelEncodingBudget::try_new(
+            32 * 1024,
+            32 * 1024,
+            SemanticTokenCountRequirement::Exact,
+        )
+        .unwrap();
+        assert_eq!(
+            encode_semantic_extraction_request(&schema, &read, exact)
+                .unwrap()
+                .admit_conservative_utf8(&revision)
+                .unwrap_err(),
+            SemanticModelEncodingError::TokenQuality
+        );
     }
 
     #[test]

@@ -724,6 +724,7 @@ pub struct AgentProviderCallConfig {
     stream: AgentProviderStreamBudget,
     store_response: bool,
     locate_act_only: bool,
+    extraction_only: bool,
 }
 
 impl AgentProviderCallConfig {
@@ -760,6 +761,7 @@ impl AgentProviderCallConfig {
             stream,
             store_response: false,
             locate_act_only: false,
+            extraction_only: false,
         })
     }
 
@@ -770,10 +772,23 @@ impl AgentProviderCallConfig {
     /// applies equally to every provider protocol and request turn.
     pub fn restrict_to_locate_and_act(mut self) -> Self {
         self.locate_act_only = true;
+        self.extraction_only = false;
+        self
+    }
+
+    /// Restricts browser planning to the one trusted run-local extraction
+    /// schema (identity 1), using only the current initial observation.
+    /// This enables no native action, navigation or scope expansion.
+    pub fn restrict_to_extraction(mut self) -> Self {
+        self.locate_act_only = false;
+        self.extraction_only = true;
         self
     }
 
     pub(super) fn permits_tool(&self, kind: AgentBrowserToolKind) -> bool {
+        if self.extraction_only {
+            return kind == AgentBrowserToolKind::Extract;
+        }
         !self.locate_act_only
             || matches!(
                 kind,

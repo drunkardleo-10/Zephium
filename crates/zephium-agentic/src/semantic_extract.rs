@@ -636,6 +636,70 @@ pub struct SemanticExtractionResult<'a> {
 }
 
 impl<'a> SemanticExtractionResult<'a> {
+    /// Moves validated fields into one bounded owned result, retaining each
+    /// cited source fragment once. This is model-mapped data, never authority.
+    pub fn into_owned(self) -> Result<SemanticOwnedExtractionResult, SemanticExtractionError> {
+        let mut sources: Vec<SemanticOwnedExtractionSource> = Vec::new();
+        let mut edges = Vec::new();
+        edges
+            .try_reserve_exact(self.sources.len())
+            .map_err(|_| SemanticExtractionError::Invariant)?;
+        for source in self.sources {
+            let fragment = source.fragment();
+            let index =
+                if let Some(index) = sources.iter().position(|source| source.id == fragment.id()) {
+                    index
+                } else {
+                    let provenance = fragment.provenance();
+                    let content = match fragment.content() {
+                        crate::SemanticReadContent::Text(value) => {
+                            SemanticOwnedReadContent::Text(value.as_str().to_owned())
+                        }
+                        crate::SemanticReadContent::ValuePreview(value) => {
+                            SemanticOwnedReadContent::ValuePreview {
+                                text: value.text().to_owned(),
+                                source_bytes: value.source_bytes(),
+                                truncated: value.truncated(),
+                            }
+                        }
+                        crate::SemanticReadContent::Boolean(value) => {
+                            SemanticOwnedReadContent::Boolean(value)
+                        }
+                        crate::SemanticReadContent::Ordinal(value) => {
+                            SemanticOwnedReadContent::Ordinal(value)
+                        }
+                    };
+                    sources
+                        .try_reserve(1)
+                        .map_err(|_| SemanticExtractionError::Invariant)?;
+                    sources.push(SemanticOwnedExtractionSource {
+                        id: fragment.id(),
+                        field: fragment.field(),
+                        role: fragment.role(),
+                        frame: provenance.frame().clone(),
+                        invocation: provenance.invocation(),
+                        snapshot: provenance.snapshot(),
+                        reference: provenance.reference(),
+                        sensitivity: provenance.sensitivity(),
+                        trust: provenance.trust(),
+                        content,
+                    });
+                    sources.len() - 1
+                };
+            edges.push(u16::try_from(index).map_err(|_| SemanticExtractionError::Invariant)?);
+        }
+        Ok(SemanticOwnedExtractionResult {
+            schema: self.schema,
+            observation: self.observation,
+            observation_generation: self.observation_generation,
+            captured_at: self.captured_at,
+            fields: self.fields,
+            sources,
+            edges,
+            stats: self.stats,
+            guard: self.guard,
+        })
+    }
     /// Exact trusted schema used to validate this result.
     pub const fn schema(&self) -> SemanticExtractionSchemaId {
         self.schema
@@ -682,6 +746,123 @@ impl<'a> SemanticExtractionResult<'a> {
     /// Content-free aggregate admission metrics.
     pub const fn stats(&self) -> SemanticExtractionStats {
         self.stats
+    }
+}
+
+/// Bounded copied source primitive. It is hostile page data, not an instruction.
+pub enum SemanticOwnedReadContent {
+    /// Exact bounded, secret-filtered source text.
+    Text(String),
+    /// A truthful truncated form-value preview, never a recovered full value.
+    ValuePreview {
+        /// Retained preview only.
+        text: String,
+        /// Original UTF-8 size reported by the safe projection.
+        source_bytes: usize,
+        /// Whether the full source was omitted.
+        truncated: bool,
+    },
+    /// Source Boolean.
+    Boolean(bool),
+    /// Source bounded ordinal.
+    Ordinal(u16),
+}
+
+/// Owned provenance and one deduplicated safe source quote. No live ref authority.
+pub struct SemanticOwnedExtractionSource {
+    /// Read-local non-actionable fragment identity.
+    pub id: SemanticReadFragmentId,
+    /// Source semantic field.
+    pub field: crate::SemanticReadField,
+    /// Source semantic role.
+    pub role: crate::SemanticRole,
+    /// Historical context/document/frame/origin identity; never a live capability.
+    pub frame: crate::SemanticFrameJoin,
+    /// Historical invocation identity.
+    pub invocation: crate::SemanticInvocationId,
+    /// Historical snapshot identity.
+    pub snapshot: crate::SemanticSnapshotGeneration,
+    /// Historical opaque reference; never reusable for execution.
+    pub reference: crate::SemanticReferenceId,
+    /// Independently projected source sensitivity.
+    pub sensitivity: SemanticSensitivity,
+    /// Independently projected hostile/source trust class.
+    pub trust: crate::SemanticTrust,
+    /// Safe source quote or primitive.
+    pub content: SemanticOwnedReadContent,
+}
+
+/// Owned, source-carrying mapping after exact provider output admission.
+/// Its only constructor consumes the validated result. It is not policy,
+/// task-completion, persistence or independent factual-verification proof.
+pub struct SemanticOwnedExtractionResult {
+    schema: SemanticExtractionSchemaId,
+    observation: SemanticObservationId,
+    observation_generation: SemanticObservationGeneration,
+    captured_at: SemanticCaptureInstant,
+    fields: Vec<SemanticExtractedField>,
+    sources: Vec<SemanticOwnedExtractionSource>,
+    edges: Vec<u16>,
+    stats: SemanticExtractionStats,
+    guard: [u8; 32],
+}
+
+impl SemanticOwnedExtractionResult {
+    /// Trusted schema identity.
+    pub const fn schema(&self) -> SemanticExtractionSchemaId {
+        self.schema
+    }
+    /// Historical source observation.
+    pub const fn observation(&self) -> SemanticObservationId {
+        self.observation
+    }
+    /// Historical source observation generation.
+    pub const fn observation_generation(&self) -> SemanticObservationGeneration {
+        self.observation_generation
+    }
+    /// Trusted original source capture time.
+    pub const fn captured_at(&self) -> SemanticCaptureInstant {
+        self.captured_at
+    }
+    /// Explicitly unverified model-mapping classification.
+    pub const fn trust(&self) -> SemanticExtractionTrust {
+        SemanticExtractionTrust::ModelMapped
+    }
+    /// Validated schema-ordered fields.
+    pub fn fields(&self) -> &[SemanticExtractedField] {
+        &self.fields
+    }
+    /// Content-free result bounds.
+    pub const fn stats(&self) -> SemanticExtractionStats {
+        self.stats
+    }
+    /// Exact quoted sources for this result's value span; foreign spans fail.
+    pub fn sources(
+        &self,
+        span: SemanticExtractionSourceSpan,
+    ) -> Option<impl Iterator<Item = &SemanticOwnedExtractionSource>> {
+        if span.result_guard != self.guard {
+            return None;
+        }
+        let start = usize::from(span.start);
+        let end = start.checked_add(usize::from(span.len))?;
+        Some(
+            self.edges
+                .get(start..end)?
+                .iter()
+                .filter_map(|index| self.sources.get(usize::from(*index))),
+        )
+    }
+}
+
+impl fmt::Debug for SemanticOwnedExtractionResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SemanticOwnedExtractionResult")
+            .field("trust", &self.trust())
+            .field("stats", &self.stats)
+            .field("content", &"[redacted]")
+            .finish()
     }
 }
 
@@ -1449,6 +1630,42 @@ mod tests {
 
         let debug = format!("{result:?} {:?} {:?}", result.fields()[0], title);
         assert!(!debug.contains("Quarterly summary"));
+        assert!(!debug.contains("Private"));
+        assert!(!debug.contains("title"));
+    }
+
+    #[test]
+    fn owned_mapping_outlives_observation_deduplicates_quotes_and_never_promotes_trust() {
+        let owned = {
+            let observation = observation();
+            let read = read(&observation, 31);
+            extract_semantic_read(
+                &schema(),
+                &read,
+                &delivered(&read),
+                SemanticReadSensitivityLimit::Sensitive,
+                &serde_json::to_vec(&valid_output()).unwrap(),
+            )
+            .unwrap()
+            .into_owned()
+            .unwrap()
+        };
+        assert_eq!(owned.trust(), SemanticExtractionTrust::ModelMapped);
+        assert_eq!(owned.stats().source_edges(), 7);
+        assert_eq!(owned.sources.len(), 4);
+        let SemanticExtractedValue::Text(title) = owned.fields()[0].value() else {
+            panic!()
+        };
+        let source = owned.sources(title.source_span()).unwrap().next().unwrap();
+        assert_eq!(source.id.get(), 1);
+        assert!(
+            matches!(&source.content, SemanticOwnedReadContent::Text(value) if value == "Quarterly summary")
+        );
+        let mut foreign = title.source_span();
+        foreign.result_guard[0] ^= 1;
+        assert!(owned.sources(foreign).is_none());
+        let debug = format!("{owned:?}");
+        assert!(!debug.contains("Quarterly"));
         assert!(!debug.contains("Private"));
         assert!(!debug.contains("title"));
     }

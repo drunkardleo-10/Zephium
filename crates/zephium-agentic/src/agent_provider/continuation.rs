@@ -672,6 +672,7 @@ impl AgentProviderContinuation {
             semantic_stats,
             delivery,
             schema: schema.id(),
+            output_schema: super::request::bound_extraction_output_schema(schema),
             observation: read.observation(),
             observation_generation: read.observation_generation(),
         })
@@ -1134,6 +1135,7 @@ pub struct AgentProviderBoundExtractionContinuation {
     semantic_stats: SemanticExtractionEncodingStats,
     delivery: SemanticExtractionDeliveryAuthority,
     schema: crate::SemanticExtractionSchemaId,
+    output_schema: serde_json::Value,
     observation: SemanticObservationId,
     observation_generation: SemanticObservationGeneration,
 }
@@ -1157,6 +1159,10 @@ impl AgentProviderBoundExtractionContinuation {
     /// Exact trusted extraction schema selected by the prior tool call.
     pub const fn schema(&self) -> crate::SemanticExtractionSchemaId {
         self.schema
+    }
+
+    pub(super) const fn output_schema(&self) -> &serde_json::Value {
+        &self.output_schema
     }
 
     /// Exact source observation represented by the bounded read.
