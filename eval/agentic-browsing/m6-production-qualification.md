@@ -1924,6 +1924,85 @@ explicit destination and redirect authority, document-epoch continuation,
 account continuity, parallel contexts and concurrent Browse qualification remain
 open.
 
+## Trusted source-role selection witness (2026-09-05)
+
+The early dynamic-page check above exposed a task/evidence problem before
+navigation: an entire main subtree could assemble successfully but exceed the
+unchanged 16-KiB combined schema/read envelope. Production commit `fce0887`
+adds one narrow task-owned answer: a trusted extraction schema may select a
+nonempty closed set of semantic source roles from the already-authorized
+capture. The default remains all roles. This is not a selector, native recapture,
+capture-budget increase, model-authored filter or new browsing capability.
+
+The exact selection is frozen with the admitted schema and bound into schema,
+read and delivery guards, even when alternative sets produce identical source
+fragments. Encoding and output validation refuse schema/read disagreement.
+Selection runs after privacy checks and reports `role_selection` separately from
+native `source_incomplete`, withheld sensitivity/secrets, and byte/item limits.
+Nondefault selection metadata consumes the original encoding budget. Initial
+observations, baseline reads, native traversal, task phases, account sampling,
+provider accounting and durable publication retain their original owners.
+
+Qualifier commit `56cd62d` fixes React's schema to `Heading`; commerce keeps the
+default all-role set. It changes no URL, objective, subtree authority or task
+predicate. One live attempt was made on that exact code after the deterministic
+gates. There was no retry or later source change for the witness.
+
+The same hidden ephemeral, extension-free WKWebView initially retained 59 nodes,
+5 headings and 19 links, with only two of the three required task headings in
+the initial viewport. Luna selected the main landmark through one locate call,
+requested its exact acknowledged-ref native subtree, and mapped the resulting
+heading-only evidence. The three complete values each equalled their one cited
+native Heading source (11, 31 and 23 bytes), covered distinct task slots, and
+passed the independent owned-result check after durable terminal publication.
+The third task heading therefore came from the fresh scoped observation, not a
+claim about missing initial content.
+
+| Witness quantity | Observed value |
+| --- | --- |
+| Final status | Succeeded; durable success and clean original shell/native teardown |
+| Calls | 3: initial locate proposal, subtree-extraction proposal, terminal mapping |
+| Initial semantic bytes | 4,389 |
+| Locate-result semantic bytes | 888 |
+| Mapping schema/read bytes | 1,664; unchanged 16-KiB combined preflight |
+| Mapping full provider request bytes | 14,273; independently counted by existing transport |
+| Charged input / output tokens | 7,872 / 445 |
+| Charged cost | 1,960 micro-USD |
+| Closed elapsed time | 14,268 ms |
+| Result | 1 field, 3 values, 6 bounded citation edges; explicitly model-mapped |
+| Native actions / verified effects | 0 / 0 |
+
+These are single-run resource observations, not comparative latency/cost or
+endurance claims: the prior failed run used a different number of locate turns.
+The witness uses the existing explicit public provider-retained qualification;
+production/BYOK retention stays false. No page/provider text, credential,
+origin path or artifact content was printed. There was no navigation beyond
+the initial admitted load, external mutation, login, child-frame capture or
+private account content.
+
+Deterministic proof: 532 all-feature agentic tests plus 3 and 5 evidence-binary
+tests; 38 controller tests, with the final verified-action role-only mutation
+schedule also rerun; 5 qualifier tests; strict core/controller/qualifier Clippy;
+formatting and diff checks; both architecture gates and hostile immutable-runtime
+JavaScript smoke. Selected initial/subtree success schedules preserve exact
+native-call counts. Role-only changes during evaluation, account sampling,
+verified-action phase transition and result acceptance refuse without result
+publication. Selected reads retain original stale/refused/lost capture,
+takeover/renderer, mapping-count/stream cancellation, foreign citation and audit
+debt outcomes. Constructor, zero-copy provenance, privacy/source omissions,
+same-fragment substitution and combined encoding budgets have direct core tests.
+The first sandboxed all-feature core run could not bind loopback transport
+fixtures; the authorized unrestricted rerun passed. One new account fixture's
+expected dispatch marker was corrected and its full controller suite rerun;
+no production behavior changed in response to that assertion.
+
+This closes the observed oversized mapping-evidence seam for this bounded
+heading task without inflating default capture or read ceilings. It does not
+make selection a completeness proof, repair omitted native content, qualify
+React interaction/routing, complete the six-site matrix or demonstrate a genuine
+multi-page workflow. Explicit destination/redirect authority, document-epoch
+continuation and task-level navigation/account semantics remain subsequent work.
+
 ## Remaining release blockers
 
 - authorized named-device macOS native-input routes beyond fixed DOM;
