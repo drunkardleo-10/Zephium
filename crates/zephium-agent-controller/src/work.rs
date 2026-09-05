@@ -24,11 +24,16 @@ use super::{
 #[path = "work_tests.rs"]
 mod tests;
 
+#[path = "work_navigation.rs"]
+mod navigation;
+
 /// Trusted task-level decision from fresh independently collected state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentWorkTaskProgress {
     /// The approved task still requires work.
     Continue,
+    /// Fresh trusted departure state permits the one frozen exact navigation.
+    ReadyForNavigation,
     /// Fresh trusted state satisfies the action postcondition. Further actions
     /// are refused; extraction requires the registered schema and result predicate.
     ReadyForExtraction,
@@ -40,6 +45,12 @@ pub enum AgentWorkTaskProgress {
 /// page instructions, or a model-authored predicate. The UI does not receive
 /// this port; it receives only the content-free handle below.
 pub trait AgentWorkTask: Send {
+    /// One immutable same-origin exact destination. The first navigation task
+    /// shape is read-only, initial-extraction only, with no redirects/repeats.
+    /// The task must independently prove departure and arrival from fresh state.
+    fn navigation_target(&self) -> Option<&ContextNavigationTarget> {
+        None
+    }
     /// Opts into nonterminal public reads of the exact initial baseline. Reads
     /// grant no task progress, new observation/ref or native effect authority.
     /// This setting is frozen at admission with the other task capabilities.
@@ -650,6 +661,17 @@ impl AgentWorkController {
         let actions_before_extraction = task.allows_actions_before_extraction();
         let subtree_extraction = task.allows_subtree_extraction();
         let baseline_read = task.allows_baseline_read();
+        let navigation_target = task.navigation_target().cloned();
+        if let Some(target) = &navigation_target {
+            Self::validate_navigation_target(target, &input.context)?;
+            if extraction_schema.is_none()
+                || actions_before_extraction
+                || subtree_extraction
+                || baseline_read
+            {
+                return Err(AgentWorkFailure::Contract);
+            }
+        }
         if ((input.durable_result || actions_before_extraction || subtree_extraction)
             && extraction_schema.is_none())
             || task
@@ -690,6 +712,8 @@ impl AgentWorkController {
                     actions_before_extraction,
                     subtree_extraction,
                     baseline_read,
+                    navigation_target,
+                    navigation_committed: false,
                     extraction: None,
                     failure: None,
                     observation: None,
@@ -703,6 +727,8 @@ impl AgentWorkController {
 }
 
 struct WorkState {
+    navigation_target: Option<ContextNavigationTarget>,
+    navigation_committed: bool,
     baseline_read: bool,
     extraction_schema: Option<SemanticExtractionSchema>,
     actions_before_extraction: bool,
@@ -757,6 +783,18 @@ impl WorkState {
         self.check_task_contract()?;
         let progress = self.task.evaluate(observation)?;
         self.check_task_contract()?;
+        if self.navigation_target.is_some() {
+            let expected = if self.navigation_committed {
+                AgentWorkTaskProgress::ReadyForExtraction
+            } else {
+                AgentWorkTaskProgress::ReadyForNavigation
+            };
+            if progress != expected {
+                return Err(AgentWorkFailure::Contract);
+            }
+        } else if progress == AgentWorkTaskProgress::ReadyForNavigation {
+            return Err(AgentWorkFailure::Contract);
+        }
         if (progress == AgentWorkTaskProgress::ReadyForExtraction
             && self.extraction_schema.is_none())
             || (progress == AgentWorkTaskProgress::Complete && self.actions_before_extraction)
@@ -768,6 +806,7 @@ impl WorkState {
 
     fn check_task_contract(&self) -> Result<(), AgentWorkFailure> {
         if self.task.extraction_schema() != self.extraction_schema.as_ref()
+            || self.task.navigation_target() != self.navigation_target.as_ref()
             || self.task.allows_actions_before_extraction() != self.actions_before_extraction
             || self.task.allows_subtree_extraction() != self.subtree_extraction
             || self.task.allows_baseline_read() != self.baseline_read
@@ -1297,6 +1336,9 @@ impl AgentWorkController {
                 (false, false) => session.config.restrict_to_extraction(),
             };
         }
+        if state.navigation_target.is_some() {
+            session.config = session.config.restrict_to_navigation_and_extraction();
+        }
         if state.baseline_read {
             session.config = session.config.with_baseline_read();
         }
@@ -1499,6 +1541,7 @@ impl AgentWorkController {
         )
         .await?;
         if state.extraction_schema.is_some()
+            && state.navigation_target.is_none()
             && !state.actions_before_extraction
             && !state.subtree_extraction
             && !state.baseline_read
@@ -1547,9 +1590,35 @@ impl AgentWorkController {
                 continue;
             }
             let step = turn;
+            if step.turn.proposal().kind() == AgentBrowserToolKind::Navigate {
+                let next =
+                    Self::navigate_current(state, worker, browser, step, &observation, progress)
+                        .await?;
+                observation = next.0;
+                captured_at = next.1;
+                progress = next.2;
+                turn = next.3;
+                frames.clear();
+                frames.extend(
+                    observation
+                        .frames()
+                        .iter()
+                        .map(|snapshot| snapshot.frame().clone()),
+                );
+                continue;
+            }
             let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
             let proposal = match step.turn.proposal().kind() {
                 AgentBrowserToolKind::Extract => {
+                    if state.navigation_target.is_some()
+                        && (!state.navigation_committed
+                            || progress != AgentWorkTaskProgress::ReadyForExtraction)
+                    {
+                        return Err(AgentWorkFailure::TaskPhase {
+                            expected: progress,
+                            proposed: AgentBrowserToolKind::Extract,
+                        });
+                    }
                     if state.actions_before_extraction
                         && progress != AgentWorkTaskProgress::ReadyForExtraction
                     {
@@ -2424,6 +2493,21 @@ impl AgentWorkController {
                 _ => {}
             }
             let accounted = match &event {
+                AgentRuntimeEvent::NativeTerminal(ContextNativeEvent::NavigationSettled(value))
+                    if state.session.as_ref().is_some_and(|session| {
+                        session
+                            .navigation
+                            .as_ref()
+                            .is_some_and(|active| active.operation() == value.operation())
+                    }) =>
+                {
+                    // A stop revokes continuation, not the original dispatched
+                    // operation's accounting and durable terminal obligation.
+                    state
+                        .session
+                        .as_mut()
+                        .is_some_and(|session| session.settle_navigation_terminal(value).is_ok())
+                }
                 // These exact callbacks settle read-only/cancellation owners,
                 // never a dispatched action or a replacement observation.
                 AgentRuntimeEvent::NativeTerminal(ContextNativeEvent::SemanticRuntimeSettled(

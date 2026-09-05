@@ -1121,6 +1121,32 @@ no clock, telemetry or persistence port, task, worker, channel, browser
 context, or native resource; if it is not constructed, it has zero runtime
 state or work.
 
+Work also supports one task-authored exact same-origin document hop followed
+by a cited initial-scope extraction. Admission freezes the destination and
+schema, excludes actions/history/subtree/baseline-read combinations, and
+requires an independently observed departure predicate before the model's
+exact `navigate` proposal is eligible. A distinct policy permit reserves one
+operation; the registry revokes the old document refs before native dispatch.
+The native exact-target gate admits no redirects, including a same-URL
+redirect, and the policy accepts only its original next-document operation
+and exact committed destination. Failure, callback loss, or audit ambiguity
+cannot become task success or silently release the original owner.
+
+After a commit, Work requires a fresh successor initial observation, an
+independent arrival predicate, and a newly sampled same-account attestation
+whose exact context and observation time join the native terminal. The old
+provider transcript and tool correlations are retired; only the already
+admitted trusted objective continues with the new bounded observation. The
+original policy, taints, model-call and operation counters, deadline,
+credential/transport, audit, and lifecycle owners remain unchanged. Navigation
+does not reset a budget or manufacture an action/effect sample. Its separate
+metric receipt joins both original policy accounting and canonical progress
+through an opaque full-authority fingerprint; audit records retain their
+existing fixed 128-byte size. Completion still requires exact destination
+citations, task acceptance, and the usual durable/native/provider closure.
+This first slice is not redirect, cross-origin, authenticated-session, SPA
+history, multi-source synthesis, or unrestricted multi-page qualification.
+
 The default semantic core does not convert validated internal identity or
 static operation assumptions back through process-terminating constructors.
 Opaque node keys move their existing nonzero representation directly into the

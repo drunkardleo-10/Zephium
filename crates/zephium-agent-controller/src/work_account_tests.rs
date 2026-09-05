@@ -41,6 +41,9 @@ impl AccountTask {
     }
 }
 impl AgentWorkTask for AccountTask {
+    fn navigation_target(&self) -> Option<&ContextNavigationTarget> {
+        self.task.navigation_target()
+    }
     fn allows_baseline_read(&self) -> bool {
         self.task.allows_baseline_read()
     }

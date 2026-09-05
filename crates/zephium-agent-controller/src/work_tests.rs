@@ -208,6 +208,11 @@ use read_tests::{ReadFault, ReadTask};
 mod account_tests;
 #[cfg(feature = "probe-harness")]
 use account_tests::{AccountFault, AccountTask};
+#[cfg(feature = "probe-harness")]
+#[path = "work_navigation_tests.rs"]
+mod navigation_tests;
+#[cfg(feature = "probe-harness")]
+use navigation_tests::{NavigationFault, NavigationTask};
 const FIXTURE_POLICY_NOW_MILLIS: u64 = 2;
 
 #[test]
@@ -466,6 +471,8 @@ fn input_with_effects(allowed: &[SemanticEffectClass]) -> AgentWorkRunInput {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Fault {
     #[cfg(feature = "probe-harness")]
+    Navigation(NavigationFault),
+    #[cfg(feature = "probe-harness")]
     Scoped(ScopedFault),
     None,
     EmbeddedFrame,
@@ -593,6 +600,12 @@ impl AgentBrowserPort for Port {
             }
             ContextNativeRequest::Navigate(request) => {
                 lock(&self.calls).push(2);
+                #[cfg(feature = "probe-harness")]
+                if let Fault::Navigation(fault) = self.fault {
+                    if lock(&self.calls).iter().filter(|call| **call == 2).count() == 2 {
+                        return navigation_tests::navigate(self, request, fault);
+                    }
+                }
                 if self.fault == Fault::NavigateDispatch {
                     return ContextDispatch::Unsupported;
                 }
@@ -650,6 +663,10 @@ impl AgentBrowserPort for Port {
 
     fn invoke_semantic(&self, invocation: SemanticRuntimeInvocation) -> ContextDispatch {
         lock(&self.calls).push(3);
+        #[cfg(feature = "probe-harness")]
+        if let Fault::Navigation(fault) = self.fault {
+            return navigation_tests::capture(self, invocation, fault);
+        }
         #[cfg(feature = "probe-harness")]
         if let Fault::Scoped(fault) = self.fault {
             return scoped_tests::capture(self, invocation, fault);
@@ -1014,6 +1031,7 @@ fn variable_provider_turns_use_real_worker_io_and_stop_at_the_exact_ceiling() {
 #[cfg(feature = "probe-harness")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProviderFault {
+    Navigation(NavigationFault),
     Read(ReadFault),
     Scoped(ScopedFault),
     Combined(CombinedFault),
@@ -1177,6 +1195,7 @@ fn provider_fixture_with_account(
         2
     } else {
         match fault {
+            ProviderFault::Navigation(fault) => fault.requests(),
             ProviderFault::Read(fault) => fault.requests(),
             ProviderFault::Scoped(fault) => fault.requests(),
             ProviderFault::Combined(
@@ -1258,6 +1277,7 @@ fn provider_fixture_with_account(
                 None
             };
             let cancelled = read_stop.is_some()
+                || matches!(fault, ProviderFault::Navigation(fault) if fault.cancelled(turns, is_count))
                 || matches!(fault, ProviderFault::Scoped(fault) if fault.cancelled(turns, is_count))
                 || (turns == 2
                     && ((is_count
@@ -1283,6 +1303,9 @@ fn provider_fixture_with_account(
             if let ProviderFault::Read(fault) = fault {
                 fault.check_request(&request[header + 4..], turns);
             }
+            if let ProviderFault::Navigation(fault) = fault {
+                fault.check_request(&request[header + 4..], turns);
+            }
             let (kind, body) = if is_count {
                 (
                     "application/json",
@@ -1295,7 +1318,9 @@ fn provider_fixture_with_account(
                 turns += 1;
                 (
                     "text/event-stream",
-                    if let ProviderFault::Read(fault) = fault {
+                    if let ProviderFault::Navigation(fault) = fault {
+                        fault.stream(turns)
+                    } else if let ProviderFault::Read(fault) = fault {
                         fault.stream(turns)
                     } else if let ProviderFault::Scoped(fault) = fault {
                         fault.stream(turns)
@@ -1412,6 +1437,8 @@ fn provider_fixture_with_account(
             )
             .unwrap(),
         )
+    } else if let ProviderFault::Navigation(fault) = fault {
+        Box::new(NavigationTask::new(fault))
     } else if let ProviderFault::Read(fault) = fault {
         Box::new(ReadTask::new(&approved, fault))
     } else if let ProviderFault::Scoped(fault) = fault {
@@ -1450,6 +1477,7 @@ fn provider_fixture_with_account(
     let audit_fault = if matches!(
         fault,
         ProviderFault::Extraction(ExtractionFault::AuditLost)
+            | ProviderFault::Navigation(NavigationFault::AuditLost)
             | ProviderFault::Combined(CombinedFault::AuditLost)
             | ProviderFault::Scoped(ScopedFault::AuditLost)
             | ProviderFault::Native(Fault::ActionNeedsHumanAuditLost)
@@ -1478,7 +1506,9 @@ fn provider_fixture_with_account(
         state.input.as_mut().unwrap().settings.deadline = deadline;
         state.native.deadline = deadline;
     }
-    let native_fault = if let ProviderFault::Read(fault) = fault {
+    let native_fault = if let ProviderFault::Navigation(fault) = fault {
+        Fault::Navigation(fault)
+    } else if let ProviderFault::Read(fault) = fault {
         if fault == ReadFault::ActionLost {
             Fault::ActionLost
         } else {
@@ -1497,6 +1527,14 @@ fn provider_fixture_with_account(
     };
     let (outcome, shutdown, calls, events) =
         drive_with_control(controller, handle, native_fault, control);
+    if let ProviderFault::Navigation(fault) = fault {
+        assert_eq!(
+            server.join().expect("navigation fixture server"),
+            requests / 2
+        );
+        navigation_tests::assert_outcome(fault, outcome, shutdown, &calls, &events);
+        return;
+    }
     if let Some(account) = account.filter(|fault| *fault != AccountFault::Slow) {
         assert_eq!(server.join().expect("account fixture server"), 1);
         account_tests::assert_refusal(

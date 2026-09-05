@@ -1908,6 +1908,8 @@ impl fmt::Debug for TerraControllerRecovery {
 /// this driver alone is not a fully closed Work run.
 #[must_use]
 pub struct AgentBrowserSession {
+    navigation: Option<zephium_agentic::AgentActiveNavigation>,
+    navigation_receipt: Option<zephium_agentic::AgentNavigationReceipt>,
     journal: Option<work::WorkJournal>,
     journal_receipts: usize,
     policy: AgentRunPolicy,
@@ -1971,6 +1973,14 @@ impl AgentBrowserSession {
         &mut self,
         account: AgentContextAccountBinding,
     ) -> Result<(), AgentBrowserProviderError> {
+        self.validate_account_update(account, self.account.context())
+    }
+
+    fn validate_account_update(
+        &mut self,
+        account: AgentContextAccountBinding,
+        expected_context: zephium_agentic::ContextJoin,
+    ) -> Result<(), AgentBrowserProviderError> {
         use zephium_agentic::MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS;
         let refusal = AgentBrowserProviderError::Account;
         if self.attempt.is_some()
@@ -1980,7 +1990,7 @@ impl AgentBrowserSession {
         {
             return Err(refusal(AgentBrowserAccountError::Pending));
         }
-        if account.context() != self.account.context() {
+        if account.context() != expected_context {
             return Err(refusal(AgentBrowserAccountError::ContextChanged));
         }
         if account.account() != self.account.account() {
@@ -2113,6 +2123,8 @@ impl AgentBrowserSession {
         account_attestations.push(account.attestation());
         Ok(Self {
             policy,
+            navigation: None,
+            navigation_receipt: None,
             journal: None,
             journal_receipts: 0,
             transport,
@@ -2164,14 +2176,14 @@ impl AgentBrowserSession {
         let call = self.next_model_call_request()?;
         let objective = self
             .objective
-            .take()
+            .as_ref()
             .ok_or(AgentBrowserProviderError::Continuation)?;
         let prepared = AgentPreparedObservationRequest::try_openai_for_provider_exact_count(
             &mut self.policy,
             call,
             observation,
             payload,
-            &objective,
+            objective,
             self.config.clone(),
         )
         .map_err(|_| AgentBrowserProviderError::Authority)?;
@@ -2673,6 +2685,8 @@ impl AgentBrowserSession {
         let error = if provider.is_err() {
             Some(AgentBrowserProviderError::Transport)
         } else if self.action.is_some()
+            || self.navigation.is_some()
+            || self.navigation_receipt.is_some()
             || self.action_executions.status().pending() != 0
             || self.action_settlements.status().pending() != 0
             || self.action_refusal.is_some()
@@ -3432,6 +3446,9 @@ pub enum AgentBrowserAccountError {
 /// Closed content-free session refusal. No variant authorizes a blind retry.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum AgentBrowserProviderError {
+    /// Exact task-authorized native navigation policy refused its checkpoint.
+    #[error("browser document navigation was refused")]
+    Navigation(zephium_agentic::AgentPolicyError),
     /// The trusted host could not maintain exact fresh account authority.
     #[error("browser account re-attestation was refused")]
     Account(AgentBrowserAccountError),

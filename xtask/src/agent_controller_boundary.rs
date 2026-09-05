@@ -12,6 +12,8 @@ const TERRA: &str = "crates/zephium-agent-controller/src/terra.rs";
 const ACTION: &str = "crates/zephium-agent-controller/src/action.rs";
 const WORK: &str = "crates/zephium-agent-controller/src/work.rs";
 const FORM: &str = "crates/zephium-agent-controller/src/work_form.rs";
+const NAVIGATION: &str = "crates/zephium-agent-controller/src/work_navigation.rs";
+const NAVIGATION_POLICY: &str = "crates/zephium-agentic/src/agent_policy/navigation.rs";
 const READ: &str = "crates/zephium-agentic/src/semantic_read.rs";
 const CONTINUATION: &str = "crates/zephium-agentic/src/agent_provider/continuation.rs";
 const POLICY: &str = "crates/zephium-agentic/src/agent_policy.rs";
@@ -61,6 +63,11 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(POLICY))?,
     )?;
     validate_form(&read(repository.join(FORM))?)?;
+    validate_navigation(
+        &read(repository.join(NAVIGATION))?,
+        &read(repository.join(NAVIGATION_POLICY))?,
+        &read(repository.join(CONTINUATION))?,
+    )?;
     validate_scoped_extraction(
         &read(repository.join(READ))?,
         &read(repository.join(CONTINUATION))?,
@@ -142,7 +149,8 @@ fn validate_account_refresh(terra: &str, work: &str, policy: &str) -> Result<(),
         "self.check_live()?",
         "self.failure = Some(error)",
         "self.policy.accounting().reserved_operations() != 0",
-        "account.context() != self.account.context()",
+        "self.validate_account_update(account, self.account.context())",
+        "account.context() != expected_context",
         "account.account() != self.account.account()",
         "account.observed_at() > now",
         "account.observed_at() < self.account.observed_at()",
@@ -231,6 +239,85 @@ fn validate_scoped_extraction(read: &str, continuation: &str, policy: &str) -> R
                 return Err(format!("scoped extraction lost proof boundary: {boundary}"));
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_navigation(actor: &str, policy: &str, continuation: &str) -> Result<(), String> {
+    for (source, boundaries) in [
+        (actor, &[
+            "state.navigation_committed || progress != AgentWorkTaskProgress::ReadyForNavigation",
+            "if proposed == &target",
+            "state.refresh_account(worker, browser)?",
+            "retire_for_navigation(observation, &target, &session.config)",
+            ".authorize_navigation(", ".dispatch_navigation(permit, operation, now)",
+            ".begin_navigation(id, op)", "state.native.snapshot_generation = None;",
+            "session.navigation = Some(active);", "ContextNativeRequest::Navigate(request)",
+            "terminal.operation() == operation", ".settle_navigation_terminal(&terminal)",
+            "Self::observe(state, worker, browser).await?", "state.task_progress(&fresh)?",
+            "state.task.attest_account(operation.context(), now)",
+            "account.observed_at() < receipt.settled_at()", "account.attestation() == self.account.attestation()",
+            "self.validate_account_update(account, receipt.operation().context())?",
+            "SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE",
+            ".validate_successor(receipt, observation, request, &self.config)",
+            "self.drive(prepared.into_transport_input()).await",
+        ][..]),
+        (policy, &[
+            "self.navigation_used || self.navigation.is_some()", "!self.calls.is_empty()", "!self.effects.is_empty()",
+            "!baseline.matches(observation)", "!request.automation.can_automate()",
+            "observation.frames()[0].frame().origin() != &origin",
+            "operation.kind() != ContextOperationKind::Navigate", "!is_document_successor(",
+            "terminal.operation() != active.operation", "target != &active.row.target",
+            "self.navigation_receipt = Some(receipt)", "AgentNavigationProgressId(hash.finalize().into())",
+        ][..]),
+        (continuation, &[
+            "pub struct AgentProviderNavigationCheckpoint", "pub fn retire_for_navigation(",
+            "self.correlation.navigation_target.as_ref() != Some(target)",
+            "pub fn validate_successor(", "request.id() <= self.prior_call.call()",
+            "receipt.matches_source(&self.baseline, &self.target)",
+            "observation.request().context() != successor", "request.account().account() != receipt.account()",
+        ][..]),
+    ] {
+        for boundary in boundaries {
+            if !source.contains(boundary) { return Err(format!("navigation lost boundary: {boundary}")); }
+        }
+    }
+    for forbidden in [
+        "self.policy =",
+        "self.deadline =",
+        "self.turns =",
+        "self.config =",
+        "self.clock =",
+        "execute_semantic_action",
+        "try_new_with_redirect_policy",
+        "AgentProviderTranscript::",
+    ] {
+        if actor.contains(forbidden) || policy.contains(forbidden) {
+            return Err(format!(
+                "navigation widened or replaced authority: {forbidden}"
+            ));
+        }
+    }
+    let checkpoint = continuation
+        .split("pub struct AgentProviderNavigationCheckpoint {")
+        .nth(1)
+        .and_then(|tail| tail.split('}').next())
+        .ok_or("navigation checkpoint is missing")?;
+    for forbidden in ["transcript", "String", "Arc<str>", "correlation:"] {
+        if checkpoint.contains(forbidden) {
+            return Err(format!(
+                "retired checkpoint retained page replay: {forbidden}"
+            ));
+        }
+    }
+    let revoke = actor
+        .find(".begin_navigation(id, op)")
+        .ok_or("navigation lost ref revocation")?;
+    let dispatch = actor
+        .find("ContextNativeRequest::Navigate(request)")
+        .ok_or("navigation lost dispatch")?;
+    if revoke >= dispatch {
+        return Err("navigation dispatched before old refs were revoked".into());
     }
     Ok(())
 }
@@ -498,6 +585,8 @@ fn validate_inventory(crate_root: &Path) -> Result<(), String> {
             "work_scoped_tests.rs".to_owned(),
             "work_read_tests.rs".to_owned(),
             "work_account_tests.rs".to_owned(),
+            "work_navigation.rs".to_owned(),
+            "work_navigation_tests.rs".to_owned(),
             "work_form.rs".to_owned(),
             "work_form_tests.rs".to_owned(),
         ])
@@ -734,7 +823,7 @@ fn validate_work_actor_qualifier(source: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_account_refresh, validate_scoped_extraction};
+    use super::{validate_account_refresh, validate_navigation, validate_scoped_extraction};
     use super::{
         validate_action, validate_form, validate_manifest, validate_probe, validate_root,
         validate_terra, validate_work, validate_work_actor_qualifier, validate_workflow_qualifier,
@@ -754,6 +843,10 @@ mod tests {
     const WORK_QUALIFIER: &str =
         include_str!("../../crates/zephium-terra-macos-probe/src/work_actor.rs");
     const FORM: &str = include_str!("../../crates/zephium-agent-controller/src/work_form.rs");
+    const NAVIGATION: &str =
+        include_str!("../../crates/zephium-agent-controller/src/work_navigation.rs");
+    const NAVIGATION_POLICY: &str =
+        include_str!("../../crates/zephium-agentic/src/agent_policy/navigation.rs");
 
     #[test]
     fn current_controller_boundary_is_valid() {
@@ -765,6 +858,8 @@ mod tests {
         validate_work(WORK).expect("production Work actor");
         validate_account_refresh(TERRA, WORK, POLICY).expect("trusted account sampling");
         validate_form(FORM).expect("production trusted form contract");
+        validate_navigation(NAVIGATION, NAVIGATION_POLICY, CONTINUATION)
+            .expect("exact document continuation");
         validate_scoped_extraction(READ, CONTINUATION, POLICY).expect("scoped extraction proof");
         validate_workflow_qualifier(QUALIFIER).expect("same-driver native qualification path");
         validate_work_actor_qualifier(WORK_QUALIFIER)
@@ -772,9 +867,61 @@ mod tests {
     }
 
     #[test]
+    fn navigation_cannot_restore_replay_widen_target_or_replace_run_owners() {
+        for removed in [
+            "state.refresh_account(worker, browser)?",
+            ".begin_navigation(id, op)",
+            "state.task_progress(&fresh)?",
+            "account.observed_at() < receipt.settled_at()",
+        ] {
+            assert!(validate_navigation(
+                &NAVIGATION.replace(removed, "removed"),
+                NAVIGATION_POLICY,
+                CONTINUATION
+            )
+            .is_err());
+        }
+        for removed in [
+            "target != &active.row.target",
+            "!is_document_successor(",
+            "self.navigation_receipt = Some(receipt)",
+        ] {
+            assert!(validate_navigation(
+                NAVIGATION,
+                &NAVIGATION_POLICY.replace(removed, "removed"),
+                CONTINUATION
+            )
+            .is_err());
+        }
+        for forbidden in [
+            "self.policy =",
+            "self.deadline =",
+            "self.turns =",
+            "try_new_with_redirect_policy",
+        ] {
+            assert!(validate_navigation(
+                &format!("{NAVIGATION}\n{forbidden}"),
+                NAVIGATION_POLICY,
+                CONTINUATION
+            )
+            .is_err());
+        }
+        assert!(validate_navigation(
+            NAVIGATION,
+            NAVIGATION_POLICY,
+            &CONTINUATION.replace(
+                "pub struct AgentProviderNavigationCheckpoint {",
+                "pub struct AgentProviderNavigationCheckpoint { transcript: String,"
+            )
+        )
+        .is_err());
+    }
+
+    #[test]
     fn account_sampling_cannot_renew_time_switch_identity_or_skip_a_boundary() {
         for removed in [
-            "account.context() != self.account.context()",
+            "self.validate_account_update(account, self.account.context())",
+            "account.context() != expected_context",
             "account.account() != self.account.account()",
             "self.account_attestations.contains(&account.attestation())",
             "self.failure = Some(error)",
