@@ -8,6 +8,70 @@ use zephium_agent_runtime::{
 
 static SERIAL: Mutex<()> = Mutex::new(());
 
+#[test]
+fn dormant_refusal_retains_original_identity_and_reconciles_only_exact_audit() {
+    let _serial = lock(&SERIAL);
+    let (controller, mut handle) = AgentWorkController::try_new(
+        input(),
+        AgentProviderTransportConfig::STANDARD,
+        AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "synthetic-not-a-secret".into(),
+        )
+        .unwrap(),
+        Arc::new(Audit(Fault::None)),
+        Box::new(Task),
+    )
+    .unwrap();
+    let owner = AgentWorkIncarnation::generate();
+    let admission = controller.journal_admission(owner).unwrap().next();
+    drop(controller);
+    let AgentWorkOutcome::Recovery(mut recovery) = handle.take_outcome().unwrap() else {
+        panic!("dormant controller cannot succeed");
+    };
+    assert!(recovery.state.credential.is_none());
+    assert!(recovery.state.transport.is_none());
+    assert!(recovery.state.input.as_ref().unwrap().objective.is_none());
+    assert_eq!(recovery.journal_admission(owner).unwrap().next(), admission);
+    assert!(recovery.prepare_audit_reconciliation().unwrap().is_none());
+    assert_eq!(recovery.failure(), AgentWorkFailure::Shutdown);
+    let (outcome, _, _, _) = run(Fault::AuditLost);
+    let AgentWorkOutcome::Recovery(mut recovery) = outcome else {
+        panic!("lost audit cannot succeed");
+    };
+    let failure = recovery.failure();
+    let delivery = recovery.prepare_audit_reconciliation().unwrap().unwrap();
+    assert_eq!(
+        recovery
+            .prepare_audit_reconciliation()
+            .unwrap()
+            .unwrap()
+            .proof(),
+        delivery.proof()
+    );
+    recovery
+        .settle_audit_reconciliation(
+            delivery
+                .proof()
+                .settle(AgentAuditDeliveryOutcome::Committed),
+        )
+        .unwrap();
+    while let Some(delivery) = recovery.prepare_audit_reconciliation().unwrap() {
+        recovery
+            .settle_audit_reconciliation(
+                delivery
+                    .proof()
+                    .settle(AgentAuditDeliveryOutcome::Committed),
+            )
+            .unwrap();
+    }
+    let status = recovery.audit_reconciliation_status().unwrap();
+    assert_eq!(status.pending(), 0);
+    assert_eq!(status.in_flight(), 0);
+    assert!(status.shutdown_sealed() && !status.fail_stopped());
+    assert_eq!(recovery.failure(), failure);
+}
+
 struct Clock(AtomicU64);
 impl TerraControllerClock for Clock {
     fn now(&self) -> Result<AgentPolicyInstant, super::super::TerraControllerClockError> {
@@ -138,10 +202,15 @@ enum Fault {
     CloseRefused,
     DeadlineObservation,
     ShutdownObservation,
+    #[cfg(feature = "probe-harness")]
     ActionDispatch,
+    #[cfg(feature = "probe-harness")]
     ActionCallback,
+    #[cfg(feature = "probe-harness")]
     ActionCancel,
+    #[cfg(feature = "probe-harness")]
     ActionLost,
+    #[cfg(feature = "probe-harness")]
     ActionNeedsHuman,
     CancelObservation,
     TakeoverObservation,
@@ -360,6 +429,15 @@ impl AgentBrowserPort for Port {
     fn audit_resources(&self, _audit: ContextResourceAuditId) -> ContextDispatch {
         ContextDispatch::Unsupported
     }
+    #[cfg(not(feature = "probe-harness"))]
+    fn execute_semantic_action(
+        &self,
+        _request: SemanticActionNativeRequest,
+        _completion: SemanticActionNativeCompletion,
+    ) -> ContextDispatch {
+        panic!("completed task must not execute an action")
+    }
+    #[cfg(feature = "probe-harness")]
     fn execute_semantic_action(
         &self,
         request: SemanticActionNativeRequest,

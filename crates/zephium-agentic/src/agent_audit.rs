@@ -562,6 +562,20 @@ impl AgentAuditLedger {
     }
 
     /// Begins one exact bounded delivery without removing retained events.
+    pub fn begin_next_delivery(
+        &mut self,
+        max_events: usize,
+    ) -> Result<AgentAuditDelivery, AgentAuditError> {
+        let next = match self.last_delivery {
+            Some(previous) => previous.get().checked_add(1),
+            None => Some(1),
+        }
+        .and_then(AgentAuditDeliveryId::new)
+        .ok_or(AgentAuditError::Invariant)?;
+        self.begin_delivery(next, max_events)
+    }
+
+    /// Begins one explicitly identified bounded delivery without removing events.
     pub fn begin_delivery(
         &mut self,
         id: AgentAuditDeliveryId,
@@ -1440,6 +1454,50 @@ mod tests {
         assert_eq!(ledger.status().pending(), 0);
         assert_eq!(ledger.status().committed(), 1);
         assert!(ledger.status().fail_stopped());
+    }
+
+    #[test]
+    fn next_delivery_uses_original_identity_after_refusal_and_never_wraps() {
+        let manifest = manifest(3);
+        let supervisor = make_supervisor(&manifest, 20);
+        let mut ledger = AgentAuditLedger::try_new(&manifest, &supervisor).unwrap();
+        ledger
+            .record_current(
+                &supervisor,
+                AgentPlanNodeId::from_raw(1),
+                event(1),
+                AgentPolicyInstant::from_millis(100),
+            )
+            .unwrap();
+        let first = ledger.begin_delivery(delivery_id(10), 1).unwrap();
+        ledger
+            .settle_delivery(first.proof().settle(AgentAuditDeliveryOutcome::Refused(
+                AgentAuditSinkFailure::Unavailable,
+            )))
+            .unwrap();
+        let next = ledger.begin_next_delivery(1).unwrap();
+        assert_eq!(next.proof().id().get(), 11);
+        assert_eq!(
+            ledger.current_delivery().unwrap().unwrap().proof(),
+            next.proof()
+        );
+        ledger
+            .settle_delivery(next.proof().settle(AgentAuditDeliveryOutcome::Refused(
+                AgentAuditSinkFailure::Unavailable,
+            )))
+            .unwrap();
+        let last = ledger.begin_delivery(delivery_id(u64::MAX), 1).unwrap();
+        ledger
+            .settle_delivery(last.proof().settle(AgentAuditDeliveryOutcome::Refused(
+                AgentAuditSinkFailure::Unavailable,
+            )))
+            .unwrap();
+        assert!(matches!(
+            ledger.begin_next_delivery(1),
+            Err(AgentAuditError::Invariant)
+        ));
+        assert_eq!(ledger.status().pending(), 1);
+        assert_eq!(ledger.status().committed(), 0);
     }
 
     #[test]

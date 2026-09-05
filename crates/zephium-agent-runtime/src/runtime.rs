@@ -846,6 +846,7 @@ impl StartupGate {
 struct CompletionState {
     stopped: Mutex<bool>,
     changed: Condvar,
+    waker: Mutex<Option<std::task::Waker>>,
 }
 
 impl CompletionState {
@@ -853,13 +854,33 @@ impl CompletionState {
         Self {
             stopped: Mutex::new(false),
             changed: Condvar::new(),
+            waker: Mutex::new(None),
         }
     }
 
     fn mark_stopped(&self) {
         let mut stopped = recover_lock(&self.stopped);
         *stopped = true;
+        let waker = recover_lock(&self.waker).take();
         self.changed.notify_all();
+        drop(stopped);
+        Self::wake(waker);
+    }
+
+    fn set_waker(&self, waker: std::task::Waker) {
+        let stopped = recover_lock(&self.stopped);
+        if *stopped {
+            drop(stopped);
+            Self::wake(Some(waker));
+        } else {
+            *recover_lock(&self.waker) = Some(waker);
+        }
+    }
+
+    fn wake(waker: Option<std::task::Waker>) {
+        if let Some(waker) = waker {
+            let _notified = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake()));
+        }
     }
 
     fn is_stopped(&self) -> bool {
@@ -1200,6 +1221,12 @@ pub struct AgentRuntimeCompletion {
 }
 
 impl AgentRuntimeCompletion {
+    /// Registers one replaceable content-free application wake. Registration
+    /// racing worker exit cannot lose the wake; it is not a lifecycle proof.
+    /// The waker must enqueue work without waiting for this worker to join.
+    pub fn set_waker(&self, waker: std::task::Waker) {
+        self.inner.completion.set_waker(waker);
+    }
     /// Whether the worker loop stopped and published its completion signal.
     pub fn is_stopped(&self) -> bool {
         self.inner.completion.is_stopped()
@@ -1970,6 +1997,43 @@ mod tests {
     use super::*;
 
     static RUNTIME_TEST_SERIALIZER: Mutex<()> = Mutex::new(());
+
+    struct CompletionWakeCounter(AtomicUsize);
+    impl std::task::Wake for CompletionWakeCounter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    #[test]
+    fn completion_wake_registration_racing_exit_is_never_lost() {
+        for _ in 0..32 {
+            let state = Arc::new(CompletionState::new());
+            let wake = Arc::new(CompletionWakeCounter(AtomicUsize::new(0)));
+            let exit = state.clone();
+            let thread = std::thread::spawn(move || exit.mark_stopped());
+            state.set_waker(std::task::Waker::from(wake.clone()));
+            thread.join().unwrap();
+            assert!(state.is_stopped());
+            assert_eq!(wake.0.load(Ordering::Acquire), 1);
+            state.mark_stopped();
+            assert_eq!(wake.0.load(Ordering::Acquire), 1);
+        }
+    }
+
+    #[test]
+    fn completion_wake_panic_does_not_strand_worker_exit() {
+        struct PanickingWake;
+        impl std::task::Wake for PanickingWake {
+            fn wake(self: Arc<Self>) {
+                panic!("synthetic wake panic");
+            }
+        }
+        let state = CompletionState::new();
+        state.set_waker(std::task::Waker::from(Arc::new(PanickingWake)));
+        state.mark_stopped();
+        assert!(state.wait_until(Instant::now()));
+    }
 
     struct RecordingPort {
         calls: AtomicUsize,

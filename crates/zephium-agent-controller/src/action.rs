@@ -194,7 +194,7 @@ pub struct AgentBrowserAction {
 }
 
 impl AgentBrowserAction {
-    #[cfg(test)]
+    #[cfg(all(test, feature = "probe-harness"))]
     pub(crate) fn retained_failure(&self) -> Option<&AgentFailedSemanticEffect> {
         self.failed.as_ref()
     }

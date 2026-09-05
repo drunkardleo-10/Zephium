@@ -191,6 +191,15 @@ pub struct AgentWorkHandle {
 }
 
 impl AgentWorkHandle {
+    /// Registers one content-free, nonblocking application wake. The consumer
+    /// must enqueue work without re-entering this handle from its waker.
+    pub fn set_waker(&self, waker: std::task::Waker) {
+        let mut events = lock(&self.events);
+        events.waker = Some(waker);
+        if !events.queue.is_empty() {
+            events.wake();
+        }
+    }
     /// Removes the oldest bounded event, preserving its stable sequence.
     pub fn take_event(&self) -> Option<AgentWorkEvent> {
         lock(&self.events).queue.pop_front()
@@ -219,6 +228,62 @@ pub struct AgentWorkRecovery {
 }
 
 impl AgentWorkRecovery {
+    /// Content-free admission identity retained when execution never started.
+    /// Recovery of a consumed input cannot create a replacement admission.
+    pub fn journal_admission(
+        &self,
+        owner: AgentWorkIncarnation,
+    ) -> Result<AgentWorkJournalMutation, AgentWorkFailure> {
+        let input = self
+            .state
+            .input
+            .as_ref()
+            .ok_or(AgentWorkFailure::Contract)?;
+        Ok(AgentWorkJournalMutation::admit(&input.manifest, owner))
+    }
+    /// Seals the original retained ledger and prepares its exact pending batch,
+    /// or the next never-dispatched batch. This grants no browser/provider work.
+    pub fn prepare_audit_reconciliation(
+        &mut self,
+    ) -> Result<Option<AgentAuditDelivery>, AgentWorkFailure> {
+        let audit = &mut self.state.journal_mut()?.audit;
+        audit
+            .seal_for_shutdown()
+            .map_err(|_| AgentWorkFailure::Audit)?;
+        if let Some(delivery) = audit
+            .current_delivery()
+            .map_err(|_| AgentWorkFailure::Audit)?
+        {
+            return Ok(Some(delivery));
+        }
+        if audit.is_quiescent() {
+            return Ok(None);
+        }
+        audit
+            .begin_next_delivery(MAX_AGENT_AUDIT_DELIVERY_EVENTS)
+            .map(Some)
+            .map_err(|_| AgentWorkFailure::Audit)
+    }
+
+    /// Applies only the exact original ledger's delivery receipt. Audit drain
+    /// never clears native, provider, policy or runtime recovery obligations.
+    pub fn settle_audit_reconciliation(
+        &mut self,
+        settlement: AgentAuditDeliverySettlement,
+    ) -> Result<AgentAuditDeliveryOutcome, AgentWorkFailure> {
+        self.state
+            .journal_mut()?
+            .audit
+            .settle_delivery(settlement)
+            .map_err(|_| AgentWorkFailure::Audit)
+    }
+
+    /// Content-free status of the original retained audit ledger.
+    pub fn audit_reconciliation_status(
+        &mut self,
+    ) -> Result<AgentAuditLedgerStatus, AgentWorkFailure> {
+        Ok(self.state.journal_mut()?.audit.status())
+    }
     /// Exact closed stop reason.
     pub const fn failure(&self) -> AgentWorkFailure {
         self.failure
@@ -247,6 +312,40 @@ impl fmt::Debug for AgentWorkOutcome {
 pub struct AgentWorkController {
     state: Option<WorkState>,
     terminal: Arc<Mutex<Option<AgentWorkOutcome>>>,
+}
+
+impl AgentWorkController {
+    /// Prepares content-free durable admission while this controller is still
+    /// dormant. This does not start a provider request, runtime or native page.
+    pub fn journal_admission(
+        &self,
+        owner: AgentWorkIncarnation,
+    ) -> Result<AgentWorkJournalMutation, AgentWorkFailure> {
+        let input = self
+            .state
+            .as_ref()
+            .and_then(|state| state.input.as_ref())
+            .ok_or(AgentWorkFailure::Contract)?;
+        Ok(AgentWorkJournalMutation::admit(&input.manifest, owner))
+    }
+
+    /// Stable content-free run identity selected by the trusted input.
+    pub fn run_identity(&self) -> Result<ContextRunId, AgentWorkFailure> {
+        self.state
+            .as_ref()
+            .and_then(|state| state.input.as_ref())
+            .map(|input| input.manifest.run())
+            .ok_or(AgentWorkFailure::Contract)
+    }
+
+    /// Original bounded absolute deadline, never extended by persistence waits.
+    pub fn deadline(&self) -> Result<Instant, AgentWorkFailure> {
+        self.state
+            .as_ref()
+            .and_then(|state| state.input.as_ref())
+            .map(|input| input.settings.deadline)
+            .ok_or(AgentWorkFailure::Contract)
+    }
 }
 
 impl AgentWorkController {
@@ -1759,6 +1858,7 @@ pub enum AgentWorkFailure {
 }
 
 pub(super) struct WorkEvents {
+    waker: Option<std::task::Waker>,
     started: Instant,
     run: ContextRunId,
     next: u64,
@@ -1774,6 +1874,7 @@ impl WorkEvents {
             .map_err(|_| AgentWorkFailure::Backpressure)?;
         Ok(Self {
             run,
+            waker: None,
             started: Instant::now(),
             next: 1,
             queue,
@@ -1796,7 +1897,15 @@ impl WorkEvents {
             kind,
             elapsed_millis: u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
         });
+        self.wake();
         Ok(())
+    }
+
+    fn wake(&self) {
+        if let Some(waker) = &self.waker {
+            let _notified =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake_by_ref()));
+        }
     }
 }
 
