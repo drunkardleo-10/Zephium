@@ -27,6 +27,14 @@ mod tests;
 #[path = "work_navigation.rs"]
 mod navigation;
 
+#[path = "work_retained.rs"]
+mod retained;
+use retained::WorkBrowser;
+pub use retained::{
+    AgentWorkRetainedBrowser, AgentWorkRetainedController, AgentWorkRetainedHandle,
+    AgentWorkRetainedOutcome, AgentWorkRetainedRecovery,
+};
+
 /// Trusted task-level decision from fresh independently collected state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentWorkTaskProgress {
@@ -565,6 +573,7 @@ impl fmt::Debug for AgentWorkOutcome {
 pub struct AgentWorkController {
     state: Option<WorkState>,
     terminal: Arc<Mutex<Option<AgentWorkOutcome>>>,
+    retained_terminal: Option<Arc<Mutex<Option<AgentWorkRetainedOutcome>>>>,
 }
 
 impl AgentWorkController {
@@ -632,6 +641,7 @@ impl AgentWorkController {
             audit,
             task,
             AgentBrowserRetention::Stateless,
+            None,
         )
     }
 
@@ -653,7 +663,7 @@ impl AgentWorkController {
         if snapshot.is_sealed() || !snapshot.is_idle() {
             return Err(AgentWorkFailure::Contract);
         }
-        Self::with_transport(input, transport, credential, audit, task, retention)
+        Self::with_transport(input, transport, credential, audit, task, retention, None)
     }
 
     fn with_transport(
@@ -663,6 +673,7 @@ impl AgentWorkController {
         audit: Arc<dyn AgentAuditPort>,
         task: Box<dyn AgentWorkTask>,
         retention: AgentBrowserRetention,
+        retained: Option<Box<dyn AgentWorkRetainedBrowser>>,
     ) -> Result<(Self, AgentWorkHandle), AgentWorkFailure> {
         let extraction_schema = task.extraction_schema().cloned();
         let actions_before_extraction = task.allows_actions_before_extraction();
@@ -670,6 +681,16 @@ impl AgentWorkController {
         let baseline_read = task.allows_baseline_read();
         let navigation_target = task.navigation_target().cloned();
         let navigation_route = task.navigation_route().cloned();
+        if retained.is_some()
+            && (input.durable_result
+                || extraction_schema.is_none()
+                || actions_before_extraction
+                || subtree_extraction
+                || navigation_target.is_some()
+                || navigation_route.is_some())
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
         let approved_route = input
             .manifest
             .plan_node(input.lease.node())
@@ -712,11 +733,13 @@ impl AgentWorkController {
             Arc::clone(&input.settings.clock),
             Arc::clone(&events),
         )?;
-        let native = WorkNative::new(
+        let mut native = WorkNative::new(
             input.context.identity,
             input.context.origin.clone(),
             input.settings.deadline,
+            retained,
         )?;
+        native.clock = Some(input.settings.clock.clone());
         let terminal = Arc::new(Mutex::new(None));
         Ok((
             Self {
@@ -744,6 +767,7 @@ impl AgentWorkController {
                     native_terminal: None,
                 }),
                 terminal: Arc::clone(&terminal),
+                retained_terminal: None,
             },
             AgentWorkHandle { events, terminal },
         ))
@@ -804,16 +828,11 @@ impl WorkState {
     fn refresh_account(
         &mut self,
         worker: &AgentRuntimeWorker,
-        browser: &AgentRuntimeBrowser,
+        browser: &WorkBrowser<'_>,
     ) -> Result<(), AgentWorkFailure> {
         self.check_task_contract()?;
         self.native.check_control(worker, browser)?;
-        let id = self.native.identity.id();
-        let context = self
-            .native
-            .contexts()?
-            .join(id)
-            .map_err(|_| AgentWorkFailure::Context)?;
+        let context = self.native.context()?;
         let session = self.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
         session.check_live().map_err(AgentWorkFailure::Browser)?;
         let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
@@ -886,10 +905,15 @@ struct WorkDrained {
     native: Option<AgentNativeShutdownCoordinator>,
     resources: Option<AgentNativeShutdownResources>,
     proof: Option<AgentNativeShutdownProof>,
+    delivery: Option<WorkBrowserLeaseDeliveryProof>,
+    scoped_refusal: Option<Box<zephium_agent_runtime::AgentRuntimeScopedCommitRefusal>>,
 }
 
 struct WorkNative {
     resources: Option<WorkContextResources>,
+    retained: Option<Box<dyn AgentWorkRetainedBrowser>>,
+    retained_delivery: Option<WorkBrowserLeaseDeliveryProof>,
+    clock: Option<Arc<dyn TerraControllerClock>>,
     identity: ContextIdentity,
     origin: SemanticOrigin,
     profile: Option<ContextProfileLease>,
@@ -920,7 +944,7 @@ impl WorkNative {
     fn check_control(
         &mut self,
         worker: &AgentRuntimeWorker,
-        browser: &AgentRuntimeBrowser,
+        browser: &WorkBrowser<'_>,
     ) -> Result<(), AgentWorkFailure> {
         let failure = if worker.shutdown_deadline().is_some() {
             Some(AgentWorkFailure::Shutdown)
@@ -942,24 +966,28 @@ impl WorkNative {
             self.revoke(browser)?;
             return Err(failure);
         }
-        Ok(())
+        self.check_retained_health()
     }
     fn new(
         identity: ContextIdentity,
         origin: SemanticOrigin,
         deadline: Instant,
+        retained: Option<Box<dyn AgentWorkRetainedBrowser>>,
     ) -> Result<Self, AgentWorkFailure> {
         let mut deferred = Vec::new();
         deferred
             .try_reserve_exact(super::MAX_DEFERRED_RUNTIME_EVENTS)
             .map_err(|_| AgentWorkFailure::Backpressure)?;
         Ok(Self {
-            resources: Some(WorkContextResources {
+            resources: retained.is_none().then(|| WorkContextResources {
                 contexts: ContextRegistry::new(),
                 profiles: ContextProfileLeaseRegistry::new(),
                 cookies: ContextCookieTransferRegistry::new(),
                 screenshots: SemanticScreenshotCoordinator::new(),
             }),
+            retained,
+            retained_delivery: None,
+            clock: None,
             identity,
             origin,
             profile: None,
@@ -990,6 +1018,16 @@ impl WorkNative {
             .map(|resources| &mut resources.contexts)
             .ok_or(AgentWorkFailure::Context)
     }
+    fn context(&mut self) -> Result<ContextJoin, AgentWorkFailure> {
+        if let Some(retained) = &self.retained {
+            Ok(retained.binding().frame().context())
+        } else {
+            let id = self.identity.id();
+            self.contexts()?
+                .join(id)
+                .map_err(|_| AgentWorkFailure::Context)
+        }
+    }
     fn profiles(&mut self) -> Result<&mut ContextProfileLeaseRegistry, AgentWorkFailure> {
         self.resources
             .as_mut()
@@ -1005,11 +1043,14 @@ impl WorkNative {
         Ok(())
     }
 
-    fn revoke(&mut self, browser: &AgentRuntimeBrowser) -> Result<(), AgentWorkFailure> {
+    fn revoke(&mut self, browser: &WorkBrowser<'_>) -> Result<(), AgentWorkFailure> {
         if self.revoked {
             return Ok(());
         }
         self.revoked = true;
+        if let Some(retained) = self.retained.as_mut() {
+            return retained.begin_revocation();
+        }
         let id = self.identity.id();
         let registry = self.contexts()?;
         let Ok(prior) = registry.join(id) else {
@@ -1033,7 +1074,7 @@ impl WorkNative {
     async fn next_event(
         &mut self,
         worker: &mut AgentRuntimeWorker,
-        browser: &AgentRuntimeBrowser,
+        browser: &WorkBrowser<'_>,
     ) -> Result<AgentRuntimeEvent, AgentWorkFailure> {
         let deadline = worker
             .shutdown_deadline()
@@ -1042,16 +1083,39 @@ impl WorkNative {
             self.revoke(browser)?;
             return Err(AgentWorkFailure::Deadline);
         }
-        let event = tokio::time::timeout_at(
-            tokio::time::Instant::from_std(deadline),
-            worker.next_event(),
-        )
-        .await;
+        let health = if self.revoked {
+            None
+        } else {
+            self.retained.as_ref()
+        };
+        let clock = &self.clock;
+        let event = {
+            let event = worker.next_event();
+            tokio::pin!(event);
+            tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                std::future::poll_fn(|cx| {
+                    if let Some(retained) = health {
+                        let result = clock
+                            .as_ref()
+                            .ok_or(AgentWorkFailure::Contract)
+                            .and_then(|clock| clock.now().map_err(|_| AgentWorkFailure::Contract))
+                            .and_then(|now| retained.check_health(now));
+                        if let Err(error) = result {
+                            return std::task::Poll::Ready(Err(error));
+                        }
+                    }
+                    std::future::Future::poll(event.as_mut(), cx)
+                        .map(|event| event.map_err(|_| AgentWorkFailure::Mailbox))
+                }),
+            )
+            .await
+        };
         let event = match event {
             Ok(Ok(event)) => event,
-            Ok(Err(_)) => {
+            Ok(Err(failure)) => {
                 self.revoke(browser)?;
-                return Err(AgentWorkFailure::Mailbox);
+                return Err(failure);
             }
             Err(_) => {
                 self.revoke(browser)?;
@@ -1132,7 +1196,7 @@ impl WorkNative {
     async fn terminal_event(
         &mut self,
         worker: &mut AgentRuntimeWorker,
-        browser: &AgentRuntimeBrowser,
+        browser: &WorkBrowser<'_>,
         cleanup: Option<Instant>,
     ) -> Result<AgentRuntimeEvent, AgentWorkFailure> {
         match cleanup {
@@ -1149,6 +1213,7 @@ impl AgentRuntimeController for AgentWorkController {
         browser: AgentRuntimeBrowser,
     ) -> AgentRuntimeControllerFuture {
         Box::pin(async move {
+            let browser = WorkBrowser::Legacy(&browser);
             let mut controller = *self;
             if let Err(failure) = controller.execute(&mut worker, &browser).await {
                 if let Some(state) = controller.state.as_mut() {
@@ -1171,7 +1236,7 @@ impl AgentWorkController {
     async fn execute(
         &mut self,
         worker: &mut AgentRuntimeWorker,
-        browser: &AgentRuntimeBrowser,
+        browser: &WorkBrowser<'_>,
     ) -> Result<(), AgentWorkFailure> {
         let state = self.state.as_mut().ok_or(AgentWorkFailure::Contract)?;
         let started = state.native.next_event(worker, browser).await?;
@@ -1182,6 +1247,12 @@ impl AgentWorkController {
         let input = state.input.as_ref().ok_or(AgentWorkFailure::Contract)?;
         let journal = state.journal.as_mut().ok_or(AgentWorkFailure::Contract)?;
         journal.start(input.settings.ids.attempt)?;
+        if state.native.retained.is_some() {
+            journal.emit(AgentWorkEventKind::ContextActive)?;
+            self.start_session()?;
+            self.browser_loop(worker, browser).await?;
+            return self.close_retained(worker, None).await;
+        }
         let caps = ContextCapabilities::try_new(
             ContextKind::Owned,
             &[
@@ -1334,12 +1405,7 @@ impl AgentWorkController {
     fn start_session(&mut self) -> Result<(), AgentWorkFailure> {
         let state = self.state.as_mut().ok_or(AgentWorkFailure::Contract)?;
         let mut input = state.input.take().ok_or(AgentWorkFailure::Contract)?;
-        let id = state.native.identity.id();
-        let context = state
-            .native
-            .contexts()?
-            .join(id)
-            .map_err(|_| AgentWorkFailure::Context)?;
+        let context = state.native.context()?;
         let now = input
             .settings
             .clock
@@ -1401,7 +1467,7 @@ impl AgentWorkController {
     async fn observe(
         state: &mut WorkState,
         worker: &mut AgentRuntimeWorker,
-        browser: &AgentRuntimeBrowser,
+        browser: &WorkBrowser<'_>,
     ) -> Result<SemanticObservation, AgentWorkFailure> {
         state.journal_mut()?.emit(AgentWorkEventKind::Observing)?;
         // Only an explicit pre-dispatch NotReady receipt can start another
@@ -1430,8 +1496,11 @@ impl AgentWorkController {
     async fn observe_once(
         state: &mut WorkState,
         worker: &mut AgentRuntimeWorker,
-        browser: &AgentRuntimeBrowser,
+        browser: &WorkBrowser<'_>,
     ) -> Result<SemanticObservation, AgentWorkFailure> {
+        if state.native.retained.is_some() {
+            return state.native.observe_retained(worker).await;
+        }
         let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
         session.check_live().map_err(AgentWorkFailure::Browser)?;
         let id = state.native.identity.id();
@@ -1460,7 +1529,7 @@ impl AgentWorkController {
     async fn capture_once(
         state: &mut WorkState,
         worker: &mut AgentRuntimeWorker,
-        browser: &AgentRuntimeBrowser,
+        browser: &WorkBrowser<'_>,
         request: SemanticObservationRequest,
         frame: SemanticFrameJoin,
     ) -> Result<SemanticObservation, AgentWorkFailure> {
@@ -1547,7 +1616,7 @@ impl AgentWorkController {
     async fn provider<T>(
         native: &mut WorkNative,
         worker: &mut AgentRuntimeWorker,
-        browser: &AgentRuntimeBrowser,
+        browser: &WorkBrowser<'_>,
         cancellation: AgentProviderCancellation,
         future: impl std::future::Future<Output = Result<T, AgentBrowserProviderError>>,
     ) -> Result<T, AgentWorkFailure> {
@@ -1565,7 +1634,7 @@ impl AgentWorkController {
     async fn browser_loop(
         &mut self,
         worker: &mut AgentRuntimeWorker,
-        browser: &AgentRuntimeBrowser,
+        browser: &WorkBrowser<'_>,
     ) -> Result<(), AgentWorkFailure> {
         let state = self.state.as_mut().ok_or(AgentWorkFailure::Contract)?;
         let mut observation = Self::observe(state, worker, browser).await?;
@@ -1836,7 +1905,7 @@ impl AgentWorkController {
     async fn extract_current(
         state: &mut WorkState,
         worker: &mut AgentRuntimeWorker,
-        browser: &AgentRuntimeBrowser,
+        browser: &WorkBrowser<'_>,
         turn: AgentBrowserProviderTurn,
         observation: &SemanticObservation,
         captured_at: SemanticCaptureInstant,
@@ -1952,7 +2021,7 @@ impl AgentWorkController {
     async fn close_context(
         state: &mut WorkState,
         worker: &mut AgentRuntimeWorker,
-        browser: &AgentRuntimeBrowser,
+        browser: &WorkBrowser<'_>,
     ) -> Result<(), AgentWorkFailure> {
         let id = state.native.identity.id();
         // Revoke before teardown even on trusted successful completion.
@@ -2054,7 +2123,7 @@ impl AgentWorkController {
         journal.record()
     }
 
-    fn begin_recovery_close(state: &mut WorkState, browser: &AgentRuntimeBrowser) {
+    fn begin_recovery_close(state: &mut WorkState, browser: &WorkBrowser<'_>) {
         if !state.native.revoked || state.native.profile.is_none() || state.native.close_attempted {
             return;
         }
@@ -2092,7 +2161,7 @@ impl AgentWorkController {
     async fn close_success(
         &mut self,
         worker: &mut AgentRuntimeWorker,
-        browser: &AgentRuntimeBrowser,
+        browser: &WorkBrowser<'_>,
     ) -> Result<(), AgentWorkFailure> {
         let state = self.state.as_mut().ok_or(AgentWorkFailure::Contract)?;
         Self::close_context(state, worker, browser).await?;
@@ -2102,7 +2171,7 @@ impl AgentWorkController {
     async fn close_unsuccessful(
         &mut self,
         worker: &mut AgentRuntimeWorker,
-        browser: &AgentRuntimeBrowser,
+        browser: &WorkBrowser<'_>,
         deadline: Instant,
     ) -> Result<(), AgentWorkFailure> {
         let state = self.state.as_ref().ok_or(AgentWorkFailure::Contract)?;
@@ -2132,7 +2201,7 @@ impl AgentWorkController {
     async fn close_resources(
         &mut self,
         worker: &mut AgentRuntimeWorker,
-        browser: &AgentRuntimeBrowser,
+        browser: &WorkBrowser<'_>,
         cleanup: Option<Instant>,
     ) -> Result<(), AgentWorkFailure> {
         let state = self.state.as_mut().ok_or(AgentWorkFailure::Contract)?;
@@ -2201,6 +2270,8 @@ impl AgentWorkController {
                 resources.screenshots,
             )),
             proof: None,
+            delivery: None,
+            scoped_refusal: None,
         });
         let drained = state.drained.as_mut().ok_or(AgentWorkFailure::Contract)?;
         match AgentNativeShutdownCoordinator::try_new(
@@ -2220,7 +2291,7 @@ impl AgentWorkController {
             .map_err(|_| AgentWorkFailure::Shutdown)?;
         state.native.shutdown_audit = Some(audit);
         native
-            .account_port_seal(audit, browser.seal_for_shutdown(audit))
+            .account_port_seal(audit, browser.seal_for_shutdown(audit)?)
             .map_err(|_| AgentWorkFailure::Shutdown)?;
         // No automatic mutation retry. A nonzero native barrier is retained
         // recovery; subsequent read-only resource qualification is explicit.
@@ -2254,6 +2325,17 @@ impl AgentWorkController {
                 return Err(AgentWorkFailure::Shutdown);
             }
         }
+        self.finish_accounting(worker, browser, cleanup).await
+    }
+
+    async fn finish_accounting(
+        &mut self,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        cleanup: Option<Instant>,
+    ) -> Result<(), AgentWorkFailure> {
+        let state = self.state.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let drained = state.drained.as_mut().ok_or(AgentWorkFailure::Contract)?;
         let journal = drained.journal.as_mut().ok_or(AgentWorkFailure::Contract)?;
         let completion = match state.failure.filter(|_| cleanup.is_some()) {
             Some(failure) => {
@@ -2314,7 +2396,7 @@ impl AgentWorkController {
     async fn deliver_audit(
         &mut self,
         worker: &mut AgentRuntimeWorker,
-        browser: &AgentRuntimeBrowser,
+        browser: &WorkBrowser<'_>,
         cleanup: Option<Instant>,
     ) -> Result<(), AgentWorkFailure> {
         let state = self.state.as_mut().ok_or(AgentWorkFailure::Contract)?;
@@ -2399,7 +2481,7 @@ impl AgentWorkController {
             return Err(AgentWorkFailure::Mailbox);
         }
         let drained = state.drained.as_mut().ok_or(AgentWorkFailure::Contract)?;
-        if drained.proof.is_none() || drained.provider.is_none() {
+        if (drained.proof.is_none() && drained.delivery.is_none()) || drained.provider.is_none() {
             return Err(AgentWorkFailure::Shutdown);
         }
         let journal = drained.journal.as_ref().ok_or(AgentWorkFailure::Contract)?;
@@ -2431,7 +2513,17 @@ impl AgentWorkController {
         if (closure.outcome() == AgentRunProgressOutcome::Succeeded) == unsuccessful {
             return Err(AgentWorkFailure::Accounting);
         }
-        let claim = match worker.try_claim_controller_terminal(class).await {
+        let claim = match if self.retained_terminal.is_some() {
+            worker
+                .try_claim_scoped_terminal(class)
+                .await
+                .map(retained::TerminalClaim::Scoped)
+        } else {
+            worker
+                .try_claim_controller_terminal(class)
+                .await
+                .map(retained::TerminalClaim::Legacy)
+        } {
             Ok(claim) => claim,
             Err(refusal) => {
                 while let Some(event) = worker.try_drain_terminal_claim_refusal_event() {
@@ -2458,9 +2550,20 @@ impl AgentWorkController {
                     return Err(AgentWorkFailure::Accounting);
                 }
             };
-        let proof = drained.proof.take().ok_or(AgentWorkFailure::Shutdown)?;
         let provider = drained.provider.take().ok_or(AgentWorkFailure::Shutdown)?;
-        claim.commit_with_shutdown(proof, settlement, provider);
+        match claim {
+            retained::TerminalClaim::Legacy(claim) => {
+                let proof = drained.proof.take().ok_or(AgentWorkFailure::Shutdown)?;
+                claim.commit_with_shutdown(proof, settlement, provider);
+            }
+            retained::TerminalClaim::Scoped(claim) => {
+                let delivery = drained.delivery.take().ok_or(AgentWorkFailure::Shutdown)?;
+                if let Err(refusal) = claim.commit(delivery, settlement, provider) {
+                    drained.scoped_refusal = Some(refusal);
+                    return Err(AgentWorkFailure::Shutdown);
+                }
+            }
+        }
         let human_review = drained
             .proposal_refusal
             .take()
@@ -2472,6 +2575,25 @@ impl AgentWorkController {
         // Completion is separate from the bounded progress lane: saturation
         // cannot discard an already-consumed clean terminal owner.
         let _ = lock(&journal.events).publish(AgentWorkEventKind::Terminal);
+        if let Some(terminal) = &self.retained_terminal {
+            *lock(terminal) = Some(match failure {
+                Some(failure) => {
+                    AgentWorkRetainedOutcome::ClosedUnsuccessfully(AgentWorkClosedUnsuccessfully {
+                        settlement,
+                        failure,
+                        human_review,
+                    })
+                }
+                None => AgentWorkRetainedOutcome::Accepted {
+                    settlement,
+                    extraction: Box::new(
+                        state.extraction.take().ok_or(AgentWorkFailure::Contract)?,
+                    ),
+                },
+            });
+            self.state.take();
+            return Ok(());
+        }
         *lock(&self.terminal) = Some(match failure {
             Some(failure) => {
                 AgentWorkOutcome::ClosedUnsuccessfully(AgentWorkClosedUnsuccessfully {
@@ -2492,7 +2614,7 @@ impl AgentWorkController {
     async fn drain_recovery(
         &mut self,
         worker: &mut AgentRuntimeWorker,
-        browser: &AgentRuntimeBrowser,
+        browser: &WorkBrowser<'_>,
     ) -> Instant {
         let deadline = worker
             .shutdown_deadline()
@@ -2651,8 +2773,23 @@ impl Drop for AgentWorkController {
             }
         }
         let failure = state.failure.unwrap_or(AgentWorkFailure::Shutdown);
+        // Only actor handles are abandoned here. Original operation receivers,
+        // native port, health and destruction remain with the application.
+        state.native.retained.take();
         if let Ok(journal) = state.journal_mut() {
             let _ = journal.emit(AgentWorkEventKind::Recovery);
+        }
+        if let Some(terminal) = &self.retained_terminal {
+            let mut slot = lock(terminal);
+            if slot.is_none() {
+                *slot = Some(AgentWorkRetainedOutcome::Recovery(
+                    AgentWorkRetainedRecovery(AgentWorkRecovery {
+                        failure,
+                        state: Box::new(state),
+                    }),
+                ));
+            }
+            return;
         }
         let mut slot = lock(&self.terminal);
         if slot.is_none() {

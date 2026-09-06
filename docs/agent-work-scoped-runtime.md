@@ -1,9 +1,10 @@
 # Scoped Work actor runtime closure
 
-Status: production runtime foundation with deterministic actual-worker tests;
-not yet connected to the retained-resource controller, durable coordinator or
-product admission. No native, provider-request, public-site or UI qualification
-is added by this cut.
+Status: production runtime foundation and read-only retained backing in the
+existing Work controller, with deterministic actual-worker/loopback-provider
+tests through the private application resource owner. Durable coordination and
+product admission remain separate. No native, public-site or UI qualification
+is added by this integration.
 
 ## The ownership distinction
 
@@ -136,10 +137,72 @@ mismatch, and allocation-specific proofs/old controls. The original functional
 resource remains retained through actor failures and is destroyed only by its
 original owner. This is not additional native retention evidence.
 
-Next cuts must connect the existing controller to the private retained-resource
-facade, then join explicit durable scope, original Store acknowledgement,
-independent result/provenance acceptance, settled delivery/health and fresh B
-task/account/manifest admission. ModelMapped artifact validity is not objective
-success, and neither this proof nor native retirement permits B by itself.
-The existing v1 journal meanings, artifact publication and legacy successor API
-are not changed here.
+## Common controller over the private retained facade
+
+`AgentWorkRetainedController` runs the existing `AgentWorkController::execute`,
+`browser_loop`, `AgentBrowserSession`, provider pump, trusted account/task checks,
+source-bound extraction and policy/metric/audit closure. Only the native backing
+and terminal claim differ. The retained branch never constructs a legacy context,
+profile, cookie or screenshot registry, and cannot dispatch legacy effects or
+claim a native port seal. Its original session transport—not an unrelated idle
+transport—supplies provider closure. An original physical delivery proof remains
+retained if later session closure refuses.
+
+The controller's closed `AgentWorkRetainedBrowser` port exposes original read
+binding, immutable listener registration, exact health, one bounded initial read,
+and lease revocation/delivery polling. The only production implementation is a
+private application adapter around the original `LeaseBrowser`. Application-owned
+operation slots, resource observer, native sink and destruction authority never
+move into the runtime. Source correlation comes from the original core-admitted
+request, not a new counter or registry. Optional model-selected baseline reads
+reuse the acknowledged observation without additional native capture. Navigation,
+actions and subtree requests remain excluded; task capability mutation refuses.
+
+One immutable listener per exact lease is registered on the actual worker before
+dispatch, including registration on the original delivery ticket before native
+revocation. A bounded weak listener lane fans out scalar wakes while preserving
+the stable application sink. Publication precedes wake; polling acquire-consumes
+the coalescing signal and rearms the original health observer. Duplicate, poisoned,
+lost-owner, panicking or reentrant listener authority fails closed. Arbitrary wake
+and final Waker destruction happen outside the owner lane/slot-collection locks.
+Expired/stale A facades cannot read B; A's exact retired marker prevents a late
+old wake or facade drop from poisoning B.
+
+`AgentWorkRetainedOutcome::Accepted` is explicitly **non-durable**: the trusted
+task accepted an exactly source-bound, schema-valid but ModelMapped result, not a
+factual-verification or user-objective-success proof. The actual scoped worker
+drain remains a separate operand. Recovery has no durable admission or global
+native shutdown adapter. No public application admission API is added.
+
+Physical delivery may be consumed while the native notifier is Running. The
+scoped worker can therefore drain before that notification returns; it proves
+actor closure only. The original native reservation still blocks Acquire and
+destruction, and a late notifier failure quarantines the resource. There is no
+recursive second notification barrier. The adversarial actual-worker schedule
+holds that original listener through actor drain and independently observes
+native B/destruction refusal. This does not qualify their later success.
+
+Deterministic application fixtures cover the actual two-call extraction and
+three-call model-selected baseline-read loop; result retrieval before original
+resource destruction; exact original scoped worker drain; foreign-source
+rejection; lost audit; cancellation and lost/late read callbacks; idle native
+health waking the worker; duplicate/poisoned/panicking/reentrant listeners; and
+stale-A isolation. Their native adapter is synthetic: original macOS retention,
+rendering and full application/global weak closure remain the separate previously
+qualified evidence, not claims of this loopback fixture.
+
+Next cuts must join explicit durable scope, original Store acknowledgement,
+result publication/retrieval, settled current resource health and fresh B
+task/account/manifest admission. The existing v1 journal meanings, artifact
+publication and legacy successor API are unchanged.
+
+Integration regression checkpoint: nine focused private-application schedules,
+592 + 3 + 5 core tests, 504 native-engine tests, 38 runtime tests, 41 controller
+tests plus six scoped-runtime integrations, and 380 application tests (one
+existing ignored test) pass. Strict all-target core/engine/controller/application
+Clippy, all three architecture gates, resource-boundary mutation tests, hostile
+semantic JavaScript smoke, default and `macos-work` release desktop builds,
+formatting and default Browse provider/runtime dependency isolation pass. These
+are deterministic/build results; no GUI, credential or public provider service
+was used. All actual-runtime application fixtures share the existing process-wide
+worker test lock; the production one-worker admission limit is unchanged.

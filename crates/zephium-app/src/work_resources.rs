@@ -1,8 +1,9 @@
 //! Application-owned retained-page substrate, not product/run admission.
 //!
-//! This private cut deliberately has no runtime, controller, journal or Store
-//! authority. Those joins must precede exposing it from the application shell.
-#![allow(dead_code)] // Next composition cut consumes this privately tested seam.
+//! The original owner has no actor-runtime, journal or Store admission authority.
+//! Its opt-in child supplies only the common controller's narrow lease facade;
+//! durable/scoped product admission must precede exposure from the shell.
+#![allow(dead_code)] // Private until the independently reviewed product admission cut.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -10,6 +11,10 @@ use std::sync::{mpsc, Arc, Mutex, MutexGuard, TryLockError};
 use std::task::Wake;
 use zephium_agentic::*;
 use zephium_core::ids::ProfileId;
+
+#[cfg(feature = "work-execution")]
+#[path = "work_resources_controller.rs"]
+mod controller;
 
 type NativeSink = Arc<dyn Fn(ContextNativeEvent) + Send + Sync>;
 type NativeFactory = Box<dyn FnOnce(NativeSink) -> Option<Arc<dyn AgentBrowserPort>>>;
@@ -33,6 +38,8 @@ struct Notifications {
     pending: AtomicBool,
     failed: AtomicBool,
     wake: WakeApplication,
+    #[cfg(feature = "work-execution")]
+    actors: Mutex<Vec<std::sync::Weak<controller::LeaseSignal>>>,
 }
 impl Notifications {
     fn publish(&self) -> bool {
@@ -45,6 +52,8 @@ impl Notifications {
         {
             self.failed.store(true, Ordering::Release);
         }
+        #[cfg(feature = "work-execution")]
+        self.publish_actor_wakes();
         !self.failed.load(Ordering::Acquire)
     }
 }
@@ -94,14 +103,28 @@ impl Resource {
     }
     fn retain(&self, slot: OwnedSlot) -> Result<(), Refusal> {
         let mut slots = self.lock_local(&self.slots)?;
-        slots.retain(|slot| !slot.finished(self));
-        // One lifecycle, one read and one overtaking destruction maximum.
-        if slots.len() >= 3 {
-            self.fail();
-            return Err(Refusal::Busy);
+        let mut retired = Vec::new();
+        let mut index = 0;
+        while index < slots.len() {
+            if slots[index].finished(self) {
+                retired.push(slots.swap_remove(index));
+            } else {
+                index += 1;
+            }
         }
-        slots.push(slot);
-        Ok(())
+        // One lifecycle, one read and one overtaking destruction maximum.
+        let result = if slots.len() >= 3 {
+            self.fail();
+            Err(Refusal::Busy)
+        } else {
+            slots.push(slot);
+            Ok(())
+        };
+        drop(slots);
+        // Delivery listeners may own arbitrary Waker destructors. Never reap
+        // their last slot while holding the application collection mutex.
+        drop(retired);
+        result
     }
 }
 struct Shared {
@@ -120,6 +143,10 @@ impl Shared {
         // Existing facades do not traverse the map. They must still observe a
         // poisoned original owner before admitting or accepting another read.
         if self.rows.is_poisoned() || self.resources.is_poisoned() {
+            self.refusal();
+        }
+        #[cfg(feature = "work-execution")]
+        if self.notifications.actors.is_poisoned() {
             self.refusal();
         }
         !self.notifications.failed.load(Ordering::Acquire)
@@ -166,6 +193,8 @@ impl WorkResourceOwner {
             pending: AtomicBool::new(false),
             failed: AtomicBool::new(false),
             wake,
+            #[cfg(feature = "work-execution")]
+            actors: Mutex::new(Vec::with_capacity(MAX_LIVE_CONTEXTS)),
         });
         // Resource-local events use their exact sticky observer, not this lane.
         // Only original global audit events belong here. Overflow/unexpected
@@ -710,7 +739,7 @@ impl LifecycleOperation {
             }
         }
         let ticket = self.delivery.as_mut().ok_or(Refusal::Uncertain)?;
-        let Some(receipt) = ticket.try_take().map_err(|_| Refusal::Uncertain)? else {
+        let Some(receipt) = ticket.try_take().map_err(|_| resource.refusal())? else {
             return Ok(None);
         };
         let ended = self.ended.take().ok_or(Refusal::Uncertain)?;

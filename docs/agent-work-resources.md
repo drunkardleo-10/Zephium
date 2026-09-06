@@ -431,9 +431,12 @@ runtime, journal, Store layout, lifecycle enums and legacy successor are unchang
 
 The [scoped runtime foundation](agent-work-scoped-runtime.md) now adds a separate
 actual-worker drain proof without moving this owner's native port or changing
-global Clean. It remains unconnected to this private owner. Next joins remain
-separately reviewable: retained backing in the existing controller; versioned durable
-scope and original Store ACK; and fresh task/manifest/account admission for B.
+global Clean. Its read-only common-controller backing now connects to this
+private owner through an exact per-lease listener and original operation slots;
+see the linked scoped-runtime contract for the non-durable result and evidence
+boundary. Next joins remain separately reviewable: versioned durable scope and
+original Store ACK; result publication/retrieval; and fresh task/manifest/account
+admission for B.
 ModelMapped extraction validity is not user-objective success. The eventual
 end-to-end proof must retrieve accepted artifacts before resource destruction,
 then join original destruction and global application closure afterward.

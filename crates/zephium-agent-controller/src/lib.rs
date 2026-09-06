@@ -40,7 +40,9 @@ pub use terra::{
     AgentBrowserSessionFinishRefusal, AgentBrowserSessionTerminal, AgentWorkClosedUnsuccessfully,
     AgentWorkContextSpec, AgentWorkController, AgentWorkEvent, AgentWorkEventKind,
     AgentWorkExtractionTask, AgentWorkFailure, AgentWorkHandle, AgentWorkOutcome,
-    AgentWorkRecovery, AgentWorkRunInput, AgentWorkRunSettings, AgentWorkSuccess, AgentWorkTask,
+    AgentWorkRecovery, AgentWorkRetainedBrowser, AgentWorkRetainedController,
+    AgentWorkRetainedHandle, AgentWorkRetainedOutcome, AgentWorkRetainedRecovery,
+    AgentWorkRunInput, AgentWorkRunSettings, AgentWorkSuccess, AgentWorkTask,
     AgentWorkTaskProgress, MAX_AGENT_WORK_EVENTS,
 };
 

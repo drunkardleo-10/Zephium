@@ -7,7 +7,7 @@ use zephium_agent_controller::{
     TerraControllerClock, TerraControllerClockError, TerraControllerIds,
 };
 
-static SERIAL: Mutex<()> = Mutex::new(());
+use crate::WORK_RUNTIME_TEST_SERIAL as SERIAL;
 
 // Healthy runs use the controller's transport-aligned ten-minute hard ceiling.
 // Their absolute deadline includes synchronous HTTP-client construction, which

@@ -7,6 +7,12 @@ compile_error!("the internal repository E2E authority may not link into Zephium 
 
 mod diagnostics;
 
+#[cfg(all(test, feature = "work-execution-probe"))]
+mod work_provider_fixture;
+
+#[cfg(all(test, feature = "work-execution"))]
+static WORK_RUNTIME_TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 macro_rules! diagnostic {
     ($($argument:tt)*) => {{
         crate::diagnostics::write(format_args!($($argument)*));

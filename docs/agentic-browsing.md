@@ -211,7 +211,10 @@ now expresses separate resource identity, scoped lease drain and quarantine in
 the functional core. macOS now supports the narrow frozen-document/initial-read
 native slice, with one actual-application witness proving that the same native
 page survives two distinct execution leases under the independently qualified
-foreground rendering holder. General persistent Work execution, navigation,
+foreground rendering holder. The existing common controller now has a read-only
+retained-resource backing with scoped worker closure and source-bound non-durable
+results, proven through deterministic private-application/loopback fixtures.
+General persistent Work execution, navigation,
 product presentation and human takeover remain unqualified; the existing
 general workflow qualifiers still use their original run-owned/all-zero lifetime.
 

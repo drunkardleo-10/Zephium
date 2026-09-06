@@ -57,8 +57,10 @@ pub(crate) mod work;
 pub use work::{
     AgentWorkClosedUnsuccessfully, AgentWorkContextSpec, AgentWorkController, AgentWorkEvent,
     AgentWorkEventKind, AgentWorkExtractionTask, AgentWorkFailure, AgentWorkHandle,
-    AgentWorkOutcome, AgentWorkRecovery, AgentWorkRunInput, AgentWorkRunSettings, AgentWorkSuccess,
-    AgentWorkTask, AgentWorkTaskProgress, MAX_AGENT_WORK_EVENTS,
+    AgentWorkOutcome, AgentWorkRecovery, AgentWorkRetainedBrowser, AgentWorkRetainedController,
+    AgentWorkRetainedHandle, AgentWorkRetainedOutcome, AgentWorkRetainedRecovery,
+    AgentWorkRunInput, AgentWorkRunSettings, AgentWorkSuccess, AgentWorkTask,
+    AgentWorkTaskProgress, MAX_AGENT_WORK_EVENTS,
 };
 
 /// This text-only/discarding vertical never needs Terra's catalog-wide 128k

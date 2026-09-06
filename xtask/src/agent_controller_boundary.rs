@@ -727,6 +727,7 @@ fn validate_inventory(crate_root: &Path) -> Result<(), String> {
             "probe.rs".to_owned(),
             "terra.rs".to_owned(),
             "work.rs".to_owned(),
+            "work_retained.rs".to_owned(),
             "work_tests.rs".to_owned(),
             "work_combined_tests.rs".to_owned(),
             "work_scoped_tests.rs".to_owned(),

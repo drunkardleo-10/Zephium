@@ -18,6 +18,53 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
 
 const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
     (
+        "crates/zephium-agent-controller/src/work.rs",
+        &[
+            "ifretained.is_some()&&(input.durable_result||extraction_schema.is_none()||actions_before_extraction||subtree_extraction||navigation_target.is_some()||navigation_route.is_some())",
+            "resources:retained.is_none().then(||WorkContextResources{",
+            "ifstate.native.retained.is_some(){journal.emit(AgentWorkEventKind::ContextActive)?;self.start_session()?;self.browser_loop(worker,browser).await?;returnself.close_retained(worker,None).await;}",
+            "state.transport.take().ok_or(AgentWorkFailure::Contract)?",
+            "worker.try_claim_scoped_terminal(class)",
+            "claim.commit(delivery,settlement,provider)",
+            "state.native.retained.take()",
+        ],
+        &["WorkBrowserResources::new", "implAgentWorkRetainedBrowser", "attach_successor_work"],
+    ),
+    (
+        "crates/zephium-agent-controller/src/work_retained.rs",
+        &[
+            "pubtraitAgentWorkRetainedBrowser:Send", "fnregister_listener(&mutself,waker:Waker)",
+            "fncheck_health(&self,now:AgentPolicyInstant)",
+            "fnbinding(&self)->&WorkBrowserReadBinding",
+            "implzephium_agent_runtime::AgentRuntimeScopedControllerforAgentWorkRetainedController",
+            "controller.execute(&mutworker,&WorkBrowser::Retained).await",
+            "AgentWorkController::with_transport(",
+            "browser.register_listener(cx.waker().clone())",
+            "session.try_finish_unsuccessful()", "session.try_finish()",
+            "provider:Some(terminal.provider)",
+            "state.native.retained_delivery=Some(delivery)",
+            "Self::Retained=>ContextDispatch::Unsupported",
+        ],
+        &["AgentBrowserPort", "ContextRegistry::new", "AgentNativeShutdownProof", "AgentNativeShutdownCoordinator", "AgentWorkJournal", "Serialize", "Deserialize", "std::thread", "tokio::spawn", "try_prove_shutdown"],
+    ),
+    (
+        "crates/zephium-app/src/work_resources_controller.rs",
+        &[
+            "implAgentWorkRetainedBrowserforRetainedBrowser", "browser:LeaseBrowser",
+            "binding:WorkBrowserReadBinding", "resource:Weak<Resource>",
+            "lease:WorkBrowserExecutionLease", "retired:Arc<AtomicBool>",
+            "actors.len()>=MAX_LIVE_CONTEXTS", "actors.push(Arc::downgrade(&listener))",
+            "self.pending.swap(false,Ordering::AcqRel)", "self.pending.swap(true,Ordering::AcqRel)",
+            "self.running.swap(true,Ordering::AcqRel)", "std::panic::catch_unwind",
+            "read:Option<(PendingRead,SemanticObservationRequest)>", "revoke:Option<PendingLifecycle>",
+            "ticket.register_waker(listener.into())", "Some(ticket)",
+            "self.browser.shared.lock_rows()", "revoke_with_delivery(&self.browser.lease)",
+            "observe_initial(&self.browser.lease,now)", "correlation.invocation().get()",
+            "Some(LifecycleResult::Delivered(proof))",
+        ],
+        &["pubstruct", "pubfn", "pub(crate)", "AgentBrowserPort", "ContextRegistry", "AgentNativeShutdownProof", "AgentWorkJournal", "Serialize", "Deserialize", "std::thread", "tokio::spawn", "port.dispatch", "port.invoke_semantic", "port.seal_for_shutdown"],
+    ),
+    (
         "crates/zephium-agentic/src/work_browser_observation.rs",
         &[
             "#[derive(Debug)]pubstructWorkBrowserReadBinding{lease:WorkBrowserExecutionLease,frame:SemanticFrameJoin,}",
@@ -26,6 +73,8 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "Ok(WorkBrowserReadBinding{lease:lease.clone(),frame,})",
             "letbinding=self.read_binding(lease,now)?;letrow=self.row_mut(lease.resource())?;ifrow.observation.is_some()",
             "letframe=binding.frame;letcontext=frame.context();",
+            "SemanticObservationId::new(u64::from(sequence))",
+            "SemanticInvocationId::new(u64::from(sequence))",
             "*sequence<=MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS",
         ],
         &[

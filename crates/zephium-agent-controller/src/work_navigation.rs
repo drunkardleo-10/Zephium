@@ -27,7 +27,7 @@ impl AgentWorkController {
     pub(super) async fn navigate_current(
         state: &mut WorkState,
         worker: &mut AgentRuntimeWorker,
-        browser: &AgentRuntimeBrowser,
+        browser: &WorkBrowser<'_>,
         turn: AgentBrowserProviderTurn,
         observation: &SemanticObservation,
         progress: AgentWorkTaskProgress,
