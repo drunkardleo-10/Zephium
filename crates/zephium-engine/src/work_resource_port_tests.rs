@@ -925,3 +925,55 @@ impl WorkLifecycleTask {
         move || (admission.work_is_absent(), admission.pending())
     }
 }
+
+impl WorkResourceGuard {
+    pub(crate) fn lifecycle_for_test(
+        self: &Arc<Self>,
+        request: WorkBrowserResourceRequest,
+        completion: WorkBrowserResourceCompletionCallback,
+    ) -> WorkLifecycleTask {
+        self.admit_lifecycle(&request, tick(1)).unwrap();
+        WorkLifecycleTask {
+            request: Some(request),
+            completion: Some(completion),
+            guard: self.clone(),
+            permit: self.admission.upgrade().unwrap().reserve().unwrap(),
+        }
+    }
+    pub(crate) fn observation_for_test(
+        self: &Arc<Self>,
+        request: WorkBrowserObservationRequest,
+        completion: WorkBrowserObservationCompletionCallback,
+    ) -> WorkObservationTask {
+        self.admit_read(&request, tick(1)).unwrap();
+        WorkObservationTask {
+            request: Some(request),
+            terminal: None,
+            completion: Some(completion),
+            guard: self.clone(),
+            permit: self.admission.upgrade().unwrap().reserve().unwrap(),
+        }
+    }
+    pub(crate) fn assert_shutdown_for_test(&self, resource_absent: bool) {
+        let admission = self.admission.upgrade().unwrap();
+        admission.seal();
+        let audit = admission.reserve_audit().unwrap();
+        // An adversarial zero snapshot cannot ignore the original resource
+        // ingress or its exact callback/task debt. Only the final caller also
+        // attests actual native-ledger zero before invoking this helper.
+        admission.verify_native_shutdown(zero());
+        assert_eq!(
+            admission.state.lock().unwrap().native_shutdown_verified,
+            resource_absent
+        );
+        drop(audit);
+        assert_eq!(
+            admission.retire_for_successor(),
+            if resource_absent {
+                Ok(())
+            } else {
+                Err(ContextPortFailure::ProfileBusy)
+            }
+        );
+    }
+}

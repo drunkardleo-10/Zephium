@@ -111,6 +111,16 @@ impl WorkNativeResource {
             task.complete(Outcome::Refused);
         }
     }
+    fn prepare_destruction(&mut self) -> bool {
+        // Settle terminals this host still owns before waiting for their
+        // physical delivery barriers. Ingress-owned queued tasks and accepted
+        // reads remain independently owed; refusal is not a drain shortcut.
+        self.retire_construction();
+        if let Some(task) = self.revocation.take() {
+            task.complete(Outcome::Refused);
+        }
+        self.destruction_drained()
+    }
     pub(super) fn consistent(&self, id: ContextId) -> bool {
         self.guard.resource().identity().context() == id
             && self.native_resource.is_some()
@@ -514,20 +524,13 @@ impl EngineHost {
             guard.fail();
         }
         if resource.destruction.is_some() {
-            // A constructor already retained by this host must settle before
-            // testing its drain barrier. A not-yet-dispatched constructor is
-            // still owned by ingress and will settle itself when it arrives.
-            resource.retire_construction();
-            if resource.destruction_drained() {
+            if resource.prepare_destruction() {
                 let Some(mut resource) = self.work_resources.remove(&id) else {
                     guard.fail();
                     return;
                 };
                 resource.watchdog = None;
                 resource.lifecycle_deadline = None;
-                if let Some(task) = resource.revocation.take() {
-                    task.complete(Outcome::Refused);
-                }
                 let task = resource.destruction.take();
                 drop(resource);
                 if let Some(task) = task {
@@ -829,6 +832,217 @@ mod tests {
     #[test]
     fn destroy_settles_host_retained_constructor_before_waiting_for_its_barrier() {
         destroy_construction_schedule(true);
+    }
+    #[test]
+    fn destroy_settles_host_retained_tracked_revoke_before_waiting_for_read_and_delivery() {
+        for read_before_wake in [false, true] {
+            destroy_revocation_schedule(true, read_before_wake);
+        }
+    }
+    #[test]
+    fn destroy_settles_host_retained_legacy_revoke_before_waiting_for_read_and_delivery() {
+        for read_before_wake in [false, true] {
+            destroy_revocation_schedule(false, read_before_wake);
+        }
+    }
+    fn destroy_revocation_schedule(tracked: bool, read_before_wake: bool) {
+        use super::super::resources::NativeResourceLedger;
+        use std::sync::atomic::{AtomicU8, Ordering};
+        use zephium_agentic::{WorkBrowserObservationEvent, WorkBrowserResourceEvent};
+
+        let tick = AgentPolicyInstant::from_millis;
+        let rows = Arc::new(Mutex::new(WorkBrowserResources::new(
+            WorkId::generate(),
+            ProfileId::generate(),
+        )));
+        let construct = rows
+            .lock()
+            .unwrap()
+            .construct_document(
+                WorkBrowserResourceId::generate(),
+                ContextId::generate(),
+                ContextProfileStorageClass::Ephemeral,
+                ContextNavigationTarget::parse("https://example.test/").unwrap(),
+                tick(0),
+            )
+            .unwrap();
+        let join = construct.resource().clone();
+        let queue = Arc::new(Mutex::new(Vec::<Box<dyn FnOnce() + Send>>::new()));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        // Native delivery intentionally contains receiver panics. Assert these
+        // checks ran through normal return rather than swallowing test failures.
+        let callback_checks = Arc::new(AtomicU8::new(0));
+        let callback = || {
+            let rows = rows.clone();
+            let events = events.clone();
+            Box::new(move |completion| {
+                events
+                    .lock()
+                    .unwrap()
+                    .push(rows.lock().unwrap().settle_at(completion, tick(1)).unwrap());
+            }) as zephium_agentic::WorkBrowserResourceCompletionCallback
+        };
+        let queued = queue.clone();
+        let construction = WorkLifecycleTask::construction_for_test(
+            construct,
+            callback(),
+            Arc::new(move |task| {
+                queued.lock().unwrap().push(task);
+                true
+            }),
+        );
+        let guard = construction.guard();
+        let closure = construction.closure_for_test();
+        construction.complete(Outcome::Constructed);
+        let acquire = rows
+            .lock()
+            .unwrap()
+            .acquire(&join, ContextRunId::generate(), tick(1), tick(1_000_000))
+            .unwrap();
+        let lease = acquire.lease().unwrap().clone();
+        guard
+            .lifecycle_for_test(acquire, callback())
+            .complete(Outcome::Acquired);
+        events.lock().unwrap().clear();
+
+        // A real accepted read envelope is held before native execution. Its
+        // result callback still belongs to this lease; there is no fabricated
+        // zero counter, native view, platform timer or replacement host loop.
+        let read = rows
+            .lock()
+            .unwrap()
+            .observe_initial(&lease, tick(1))
+            .unwrap();
+        let read_rows = rows.clone();
+        let read_guard = guard.clone();
+        let read_checks = callback_checks.clone();
+        let read = guard.observation_for_test(
+            read,
+            Box::new(move |completion| {
+                assert!(matches!(
+                    read_rows
+                        .lock()
+                        .unwrap()
+                        .settle_observation(completion, tick(1))
+                        .unwrap(),
+                    WorkBrowserObservationEvent::DebtSettled
+                ));
+                assert!(!read_guard.callbacks_drained());
+                read_guard.assert_shutdown_for_test(false);
+                read_checks.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        let (revoke, ticket) = if tracked {
+            let (request, ticket) = rows.lock().unwrap().revoke_with_delivery(&lease).unwrap();
+            (request, Some(ticket))
+        } else {
+            (rows.lock().unwrap().revoke(&lease).unwrap(), None)
+        };
+        let ticket = Arc::new(Mutex::new(ticket));
+        let during_ticket = ticket.clone();
+        let during_guard = guard.clone();
+        let revoke_checks = callback_checks.clone();
+        let core_callback = callback();
+        let revocation = guard.lifecycle_for_test(
+            revoke,
+            Box::new(move |completion| {
+                core_callback(completion);
+                if let Some(ticket) = during_ticket.lock().unwrap().as_mut() {
+                    assert!(ticket.try_take().unwrap().is_none());
+                }
+                assert!(!during_guard.callbacks_drained());
+                assert!(during_guard.execution_reserved());
+                during_guard.assert_shutdown_for_test(false);
+                revoke_checks.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        rows.lock().unwrap().quarantine(&join).unwrap();
+        let destroy = rows.lock().unwrap().destroy(&join).unwrap();
+        let during_guard = guard.clone();
+        let destroy_checks = callback_checks.clone();
+        let core_callback = callback();
+        let destruction = guard.lifecycle_for_test(
+            destroy,
+            Box::new(move |completion| {
+                core_callback(completion);
+                during_guard.assert_shutdown_for_test(false);
+                destroy_checks.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        let ledger = NativeResourceLedger::default();
+        let reservation = ledger
+            .try_acquire(NativeResourceClass::AgentContext)
+            .unwrap();
+        let mut resource = WorkNativeResource::unconstructed(guard.clone(), reservation);
+        resource.revocation = Some(revocation);
+        resource.destruction = Some(destruction);
+        assert!(!resource.destruction_drained());
+        assert_eq!(closure(), (false, Some(3)));
+
+        // This is the same preparation path used by host destruction progress.
+        // It must refuse the Revoke it owns before testing the delivery barrier.
+        assert!(!resource.prepare_destruction());
+        assert_eq!(callback_checks.load(Ordering::SeqCst), 1);
+        assert!(resource.revocation.is_none());
+        assert!(resource.view.is_none());
+        assert_eq!(
+            ledger.count_for_audit(NativeResourceClass::AgentContext),
+            Some(1)
+        );
+        assert_eq!(closure(), (false, Some(3))); // read, Destroy, deferred wake
+        assert!(matches!(
+            events.lock().unwrap().as_slice(),
+            [WorkBrowserResourceEvent::DebtSettled(_)]
+        ));
+        if let Some(ticket) = ticket.lock().unwrap().as_mut() {
+            assert!(!ticket.try_take().unwrap().unwrap().returned());
+        }
+        assert_eq!(queue.lock().unwrap().len(), 1);
+        let mut read = Some(read);
+        if read_before_wake {
+            read.take()
+                .unwrap()
+                .refuse(SemanticRuntimePortFailure::Cancelled);
+            assert!(
+                !resource.prepare_destruction(),
+                "deferred delivery wake remains owned"
+            );
+            assert_eq!(closure(), (false, Some(2)));
+        }
+        queue.lock().unwrap().pop().unwrap()();
+        if let Some(read) = read {
+            assert!(
+                !resource.prepare_destruction(),
+                "read still physically owned"
+            );
+            assert_eq!(closure(), (false, Some(2)));
+            assert!(resource.destruction.is_some());
+            read.refuse(SemanticRuntimePortFailure::Cancelled);
+        }
+        assert!(resource.prepare_destruction());
+        assert_eq!(callback_checks.load(Ordering::SeqCst), 2);
+        assert_eq!(closure(), (false, Some(1)));
+        assert!(matches!(
+            events.lock().unwrap().as_slice(),
+            [WorkBrowserResourceEvent::DebtSettled(_)]
+        ));
+        let destruction = resource.destruction.take().unwrap();
+        drop(resource);
+        assert!(ledger.is_quiescent());
+        destruction.complete(Outcome::Destroyed);
+        assert_eq!(callback_checks.load(Ordering::SeqCst), 3);
+        assert!(matches!(
+            events.lock().unwrap().as_slice(),
+            [
+                WorkBrowserResourceEvent::DebtSettled(_),
+                WorkBrowserResourceEvent::Destroyed(_)
+            ]
+        ));
+        assert_eq!(closure(), (true, Some(0)));
+        rows.lock().unwrap().seal();
+        assert!(rows.lock().unwrap().is_quiescent());
+        assert!(!guard.admits(&lease, tick(1)));
+        guard.assert_shutdown_for_test(true);
     }
     fn destroy_construction_schedule(constructor_at_host: bool) {
         use super::super::resources::NativeResourceLedger;

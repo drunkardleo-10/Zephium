@@ -168,6 +168,14 @@ constructor is already retained by the host, destruction first settles that
 original task with Refused, then waits for its barrier; it must not wait for an
 obligation whose terminal it still owns. No sleep or new capacity is added.
 
+The same ordering applies to a host-retained Revoke when explicit destruction
+overtakes it. Destruction first refuses that original Revoke, then tests the
+physical drain predicate. Otherwise it would wait for a delivery reservation
+whose terminal it still held. The refusal is not `LeaseEnded` and a tracked
+ticket is unproven. Accepted reads, the original callback-return/task-permit
+barrier and the deferred resource notification still have to drain before
+Destroyed. Taking the host-owned terminal cannot bypass any of those owners.
+
 A synchronous Construct non-admission uses the same ingress mutex as Destroy
 admission. It removes ingress only when no destruction owner has been admitted;
 otherwise it drains the original construction obligation and wakes the retained
@@ -304,6 +312,21 @@ are deterministic/build checks only. No GUI/native witness or provider run
 accompanied this proof cut, and the earlier qualified witness retains its own
 pinned source and evidence boundary. Scoped run/worker/durable closure and
 product B admission are still subsequent integration work.
+
+Independent review of this proof cut found a destruction self-wait: the host
+tested `retirement_delivery` absence before settling its own retained Revoke.
+The corrective host ordering above is covered by tracked and legacy schedules
+using the real move-only lifecycle/read tasks and native resource ledger, with
+no native view. Both read-before-wake and wake-before-read orders retain the
+exact destruction owner, refuse early global/successor proof, return an unproven
+tracked ticket, and finish original resource destruction followed by exact
+original-port shutdown only after callback debt and ledger reservations reach
+zero. No callback, queue, deadline, authority or cleanup predicate is weakened.
+Correction gates pass: 30 focused core schedules, 26 native/host Work-resource
+tests, full ordinary/resource-feature engine suites of 494/541, strict all-target
+Clippy for both engine configurations, both architecture commands with hostile
+semantic JavaScript smoke, resource-boundary mutations and workspace fmt/diff.
+This is provider-free deterministic evidence; no GUI or native app rerun occurred.
 
 ## Actual-application retention witness
 
