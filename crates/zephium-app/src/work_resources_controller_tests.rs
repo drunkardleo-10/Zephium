@@ -575,6 +575,159 @@ fn wait_until(mut predicate: impl FnMut() -> bool) {
 }
 
 #[test]
+fn snapshot_probe_holds_original_observation_until_release_without_recapture() {
+    use super::snapshot_probe::{SnapshotRelease, SnapshotReleaseBrowser};
+    for result in [Some(true), Some(false), None] {
+        let (owner, native, resource, browser) = setup();
+        let (tx, rx) = mpsc::sync_channel(1);
+        let release = SnapshotRelease::new(
+            resource.clone(),
+            Box::new(move |callback| {
+                tx.send(callback).unwrap();
+                true
+            }),
+        );
+        let mut browser = SnapshotReleaseBrowser::new(browser, release.clone()).unwrap();
+        browser
+            .register_listener(Arc::new(CountWake(AtomicUsize::new(0))).into())
+            .unwrap();
+        browser.begin_observation(now()).unwrap();
+        assert!(browser.poll_observation(now()).unwrap().is_none());
+        assert_eq!(native.reads.load(Ordering::Acquire), 1);
+        assert!(!release.returned().unwrap());
+        let callback = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        if let Some(value) = result {
+            callback(value);
+        } else {
+            drop(callback);
+        }
+        match result {
+            Some(true) => {
+                let observation = browser.poll_observation(now()).unwrap().unwrap();
+                assert_eq!(observation.request().id().get(), 1);
+                assert_eq!(
+                    observation.request().context(),
+                    browser.binding().frame().context()
+                );
+                assert!(release.returned().unwrap());
+            }
+            _ => assert!(browser.poll_observation(now()).is_err()),
+        }
+        assert!(browser.begin_observation(now()).is_err());
+        assert_eq!(native.reads.load(Ordering::Acquire), 1);
+        drop(browser);
+        let mut destroy = owner.destroy(&resource).unwrap();
+        assert!(matches!(
+            destroy.poll(now()).unwrap(),
+            Some(LifecycleResult::Event(WorkBrowserResourceEvent::Destroyed(
+                _
+            )))
+        ));
+    }
+}
+
+#[test]
+fn snapshot_probe_release_is_resource_bound_and_owner_survives_actor_loss() {
+    use super::snapshot_probe::{SnapshotRelease, SnapshotReleaseBrowser};
+    let (owner, _, resource, browser) = setup();
+    let (_, _, wrong_resource, wrong_browser) = setup();
+    let (tx, rx) = mpsc::sync_channel(1);
+    let release = SnapshotRelease::new(
+        resource.clone(),
+        Box::new(move |callback| {
+            tx.send(callback).unwrap();
+            true
+        }),
+    );
+    assert!(SnapshotReleaseBrowser::new(wrong_browser, release.clone()).is_err());
+    assert_ne!(resource, wrong_resource);
+    let mut browser = SnapshotReleaseBrowser::new(browser, release.clone()).unwrap();
+    browser
+        .register_listener(Arc::new(CountWake(AtomicUsize::new(0))).into())
+        .unwrap();
+    browser.begin_observation(now()).unwrap();
+    assert!(browser.poll_observation(now()).unwrap().is_none());
+    let callback = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    drop(browser);
+    assert!(!release.returned().unwrap());
+    callback(true);
+    assert!(release.returned().unwrap());
+    assert!(!owner.locally_retired());
+    let mut destroy = owner.destroy(&resource).unwrap();
+    assert!(matches!(
+        destroy.poll(now()).unwrap(),
+        Some(LifecycleResult::Event(WorkBrowserResourceEvent::Destroyed(
+            _
+        )))
+    ));
+}
+
+#[test]
+fn snapshot_probe_common_worker_cannot_start_model_until_native_release() {
+    use super::snapshot_probe::{SnapshotRelease, SnapshotReleaseBrowser};
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (owner, native, resource, browser) = setup();
+    let (tx, rx) = mpsc::sync_channel(1);
+    let release = SnapshotRelease::new(
+        resource.clone(),
+        Box::new(move |callback| {
+            tx.send(callback).unwrap();
+            true
+        }),
+    );
+    let browser = SnapshotReleaseBrowser::new(browser, release.clone()).unwrap();
+    let (controller, mut result, scope, server) = prepared(
+        Box::new(browser),
+        vec![response_stream(1), response_stream(2)],
+        false,
+    );
+    let (_handle, lifecycle) = start(controller, scope);
+    let callback = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    while let Some(event) = result.take_event() {
+        assert!(!matches!(
+            event.kind(),
+            AgentWorkEventKind::ModelActive
+                | AgentWorkEventKind::ModelSettled { .. }
+                | AgentWorkEventKind::ToolProposed(_)
+        ));
+    }
+    assert!(result.take_outcome().is_none());
+    assert_eq!(native.reads.load(Ordering::Acquire), 1);
+    callback(true);
+    let mut outcome = None;
+    wait_until(|| {
+        while result.take_event().is_some() {}
+        outcome = result.take_outcome();
+        outcome.is_some()
+    });
+    assert!(matches!(
+        outcome,
+        Some(AgentWorkRetainedOutcome::Accepted { .. })
+    ));
+    assert!(release.returned().unwrap());
+    assert!(matches!(
+        lifecycle.drain_until(Instant::now() + Duration::from_secs(2)),
+        AgentRuntimeScopedDrain::Drained(_)
+    ));
+    native.join();
+    assert_eq!(native.destructions.load(Ordering::Acquire), 0);
+    assert!(!owner.locally_retired());
+    let mut destroy = owner.destroy(&resource).unwrap();
+    assert!(matches!(
+        destroy.poll(now()).unwrap(),
+        Some(LifecycleResult::Event(WorkBrowserResourceEvent::Destroyed(
+            _
+        )))
+    ));
+    owner.reap_absent(&resource).unwrap();
+    owner.seal_resources().unwrap();
+    assert!(owner.locally_retired());
+    assert_eq!(server.join().unwrap(), 2);
+}
+
+#[test]
 fn actual_common_controller_returns_source_bound_result_before_original_resource_destruction() {
     let _serial = crate::WORK_RUNTIME_TEST_SERIAL
         .lock()

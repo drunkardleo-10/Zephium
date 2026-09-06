@@ -18,6 +18,23 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
 
 const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
     (
+        "crates/zephium-app/src/work_resources_snapshot_probe.rs",
+        &[
+            "browser:RetainedBrowser",
+            "resource:WorkBrowserResourceJoin",
+            "browser.binding().lease().resource()!=&release.resource",
+            "self.observation=Some(observation);self.release.start()?",
+            "ifself.release.returned()?{Ok(self.observation.take())}",
+            "ifself.observed{returnErr(AgentWorkFailure::Contract);}",
+            "letreturned=ReleaseCompletion(Some(self.clone()))",
+            "implDropforReleaseCompletion",
+            "let_=slot.complete(false)",
+            "listener:Mutex<Option<Arc<Waker>>>",
+            "std::panic::catch_unwind",
+        ],
+        &["AgentBrowserPort", "AgentProviderTransport", "ContextRegistry", "AgentNativeShutdownProof", "Serialize", "Deserialize", "evaluateJavaScript", "browser_loop", "tokio::spawn", "std::thread", "WorkBrowserResources::new"],
+    ),
+    (
         "crates/zephium-agent-controller/src/work.rs",
         &[
             "ifretained.is_some()&&(input.durable_result||extraction_schema.is_none()||actions_before_extraction||subtree_extraction||navigation_target.is_some()||navigation_route.is_some())",

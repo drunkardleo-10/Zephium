@@ -490,3 +490,23 @@ native-cohort zero, unchanged human ownership, fixture closure, normal
 application shutdown and exact native weak drain all passed. The final result
 is Qualified within the linked evidence boundary; no production authority is
 added by that result.
+
+## Retained controller/native composition prerequisite
+
+The release-excluded application snapshot adapter prepares the next real-app
+join without extending the five-second rendering lease over provider latency.
+It delegates the original private retained facade and holds its single original
+observation until the exact resource-bound presentation retirement returns.
+Only then may the common controller receive that same observation and start its
+existing model/session loop. There is no recapture, selector, script, second
+agent loop, renewed deadline or new production presentation capability.
+
+The application retains the one-shot retirement slot independently of the
+worker. Refusal, callback loss, poison and wake panic fail closed; publication
+precedes an immutable listener wake outside slot locks. The native callback's
+physical return/task reservation remains independent, as do scoped worker drain,
+resource destruction and final original native/application audit. A retirement
+result is not any of those proofs. Deterministic evidence includes a real scoped
+worker/common controller with no model-active event before the held retirement
+is released, then the existing loopback provider path and original resource
+cleanup. This prerequisite is not yet native/provider qualification.

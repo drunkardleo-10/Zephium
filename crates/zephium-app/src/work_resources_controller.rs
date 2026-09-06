@@ -4,6 +4,10 @@ use super::*;
 use std::task::Waker;
 use zephium_agent_controller::{AgentWorkFailure, AgentWorkRetainedBrowser};
 
+#[cfg(feature = "work-execution-probe")]
+#[path = "work_resources_snapshot_probe.rs"]
+mod snapshot_probe;
+
 #[cfg(all(test, feature = "work-execution-probe"))]
 #[path = "work_resources_controller_tests.rs"]
 mod tests;
