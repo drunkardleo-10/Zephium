@@ -1,11 +1,12 @@
 # Persistent Work browser resources and execution leases
 
 Status: functional core, typed ports and opt-in macOS native integration;
-**the native two-lease retention witness is not yet qualified**. Other adapters
-remain explicitly Unsupported. Deterministic tests do not claim that a real
-page has survived two actor leases. The existing run-owned qualification path
-remains available, and its all-zero proof now also excludes retained Work
-resources and their outstanding delivery owners.
+**one native two-lease retention witness is qualified** under the separately
+qualified, release-excluded foreground holder. Other adapters remain explicitly
+Unsupported. This proves one fixed native document survived two actor leases,
+not product rendering authority or general task execution. The existing
+run-owned qualification path remains available, and its all-zero proof now also
+excludes retained Work resources and their outstanding delivery owners.
 
 ## Why this boundary exists
 
@@ -193,16 +194,16 @@ No global native proof may ignore retained resources. Local `is_quiescent` is
 not global native shutdown, policy/provider/audit drain, durable terminal
 acknowledgement or a successful task. Default Browse remains dormant.
 
-## Next integration proof
+## Qualified native boundary and remaining integration
 
-In the ordinary application lifecycle, a provider-free witness must
-exercise two distinct read-only leases over one unchanged native page, reject
-old lease/observation authority, preserve the document invocation ceiling, and
-eventually prove exact resource destruction and full application shutdown.
+In the ordinary application lifecycle, one provider-free witness now exercises
+two distinct read-only leases over one unchanged native page, rejects old
+lease/observation authority, preserves the document invocation ceiling, and
+proves exact resource destruction and full application shutdown.
 The rendering probe remains a qualification tool, not a product capability.
-The production resource has no rendering-presentation permission. Its witness
-must use the independently qualified, release-excluded foreground holder and
-claim only page retention under that holder, not hidden-page rendering viability.
+The production resource has no rendering-presentation permission. The witness
+uses the independently qualified, release-excluded foreground holder and claims
+only page retention under that holder, not hidden-page rendering viability.
 Presentation, input takeover, persistent Store ownership, general task planning
 and open-objective provider qualification remain separate unimplemented joins.
 
@@ -244,7 +245,7 @@ and an explicitly held callback barrier: no view or additional construction
 reservation, no early Destroyed event, and exact final original-owner zero are
 asserted. They cover overtaking construction, host-retained construction and
 synchronous non-admission; they do not execute a real AppKit page or qualify
-the pending two-lease witness. No GUI or provider run accompanied this fix.
+the then-pending two-lease witness. No GUI or provider run accompanied this fix.
 
 ## Actual-application retention witness
 
@@ -281,3 +282,14 @@ ownership, fixture cleanup, normal application shutdown and exact native weak
 drain. See `eval/agentic-browsing/macos-work-resource-retention.md` for the evidence
 boundary and result. This is a provider-free ownership witness, not product
 presentation, open-objective task, authenticated session or restart durability.
+
+Reviewed native result (2026-09-06): the pinned source and executable completed
+one actual-application run with two distinct leases and two exact lease-ended
+receipts over the unchanged page/document/world. Both current-document samples
+passed the fixed readiness markers, including animation-frame reveal; the
+native completed-invocation count advanced from 1 to 2, while stale A authority
+was rejected by both core and native adapter. Resource-core quiescence, original
+native-cohort zero, unchanged human ownership, fixture closure, normal
+application shutdown and exact native weak drain all passed. The final result
+is Qualified within the linked evidence boundary; no production authority is
+added by that result.

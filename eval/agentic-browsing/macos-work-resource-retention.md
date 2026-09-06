@@ -1,7 +1,9 @@
 # macOS actual-application Work resource retention
 
-Status: **not yet qualified**. The deterministic harness and native plumbing
-do not prove that a real WebKit document survives two actor execution leases.
+Status: **Qualified** for one provider-free actual-application two-lease
+retention witness under the separately qualified foreground rendering holder.
+This is native page-ownership evidence, not product rendering authority or
+general agent-workflow qualification.
 
 ## Scope and acceptance
 
@@ -40,11 +42,51 @@ isolated data root and a pinned executable hash. Machine-local paths and profile
 locations are not committed. A refused run remains a refused run; it is not
 automatically retried or promoted to a successful observation.
 
-## Result
+## Reviewed actual-application result (2026-09-06)
 
-No actual-application two-lease result is recorded at this checkpoint. No
-resource-retention, real-site, provider, authenticated-account, product-rendering,
-human-takeover, restart-resumption or open-objective qualification is claimed.
+One authorized launch used clean reviewed source
+`db924342713cd2e61c4fe69d2ec2308de94d4861` and the inspected executable SHA-256
+`20f98db5a7fc237a2ea36de7eabfc5a22b23c8cc919656e5536e7253ddbfae29`, with a fresh,
+previously absent isolated application data root. The launch exited 0. Exact
+start UTC was not supplied; no launch-wall-clock duration is inferred.
+
+The normal application loop admitted the exact foreground owner after 118 ms
+and two checks. The reviewed content-free aggregate establishes:
+
+| Predicate | Observed result |
+| --- | --- |
+| Distinct actor runs and execution leases | true |
+| Exact lease-ended receipts | 2 |
+| Unchanged native page, document and isolated world | true |
+| Stale A authority rejected by core and native adapter | true / true |
+| Document-wide native completed invocations, A to B | 1 to 2 |
+| Resource-core quiescence after exact destruction | true |
+| Native failure predicates available | true; primary and cleanup both None |
+
+Both bounded semantic snapshots passed the source-pinned current-document,
+completeness and fixed-sentinel checks. Sample elapsed time is measured from
+rendering acquisition, not from application launch or foreground admission:
+
+| Sample / lease | Rendering elapsed (ms) | Nodes | Document/load/microtask/timer controls | Animation-frame reveal |
+| --- | ---: | ---: | --- | --- |
+| 0 / A | 308 | 7 | true | true |
+| 1 / B | 768 | 7 | true | true |
+
+The provisional outcome was `ResourceRetainedAcrossLeases` at driver elapsed
+1,560 ms, with no cleanup failure, the original native cohort clean, human
+ownership preserved and the loopback fixture clean. The final application
+closure reported Qualified, normal shutdown clean and exact native weak drain
+`Some(true)`. These joins require both original lease receipts, resource
+destruction, all nine original native cohort counters zero and the original
+page/surface/store weak drain; local resource-core quiescence alone is not the
+qualification. Foreground-admission wait and driver/rendering times remain
+separate measurements.
+
+This qualifies retention of one fixed anonymous native document across two
+execution leases under the release-excluded holder. No real-site, provider,
+authenticated-account, product-rendering, human-takeover, restart-resumption,
+open-objective or performance/battery qualification is claimed. The reviewed
+native launch is not authorization for an automatic rerun.
 
 ## Prelaunch build and deterministic checkpoint (2026-09-06)
 
@@ -70,8 +112,9 @@ node node_modules/@tauri-apps/cli/tauri.js build --debug --bundles app \
 The inspected artifact is an arm64 application with isolated bundle identifier
 `app.zephium.work-rendering-probe`. Executable SHA-256:
 `20f98db5a7fc237a2ea36de7eabfc5a22b23c8cc919656e5536e7253ddbfae29`.
-This hash pins an unlaunched candidate, not a qualified run. Initial sandboxed
-packaging could not fetch the pinned package-manager signatures; the same
-command with authorized network access completed without bypassing verification
-or changing dependencies, lockfiles or configuration. No provider or GUI action
-was taken to obtain these build/test results.
+This is the same executable used in the reviewed native result above; build
+success alone did not qualify it. Initial sandboxed packaging could not fetch
+the pinned package-manager signatures; the same command with authorized network
+access completed without bypassing verification or changing dependencies,
+lockfiles or configuration. No provider or GUI action was taken to obtain these
+build/test results.

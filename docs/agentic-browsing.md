@@ -208,9 +208,12 @@ current presentation/rendering lease, not permanently to one actor run.
 
 The initial [persistent Work-resource and execution-lease boundary](agent-work-resources.md)
 now expresses separate resource identity, scoped lease drain and quarantine in
-the functional core. Its native port remains Unsupported; current qualification
-controllers still use their original run-owned/all-zero lifetime. This is a
-contract checkpoint, not native persistent-page or human-takeover evidence.
+the functional core. macOS now supports the narrow frozen-document/initial-read
+native slice, with one actual-application witness proving that the same native
+page survives two distinct execution leases under the independently qualified
+foreground rendering holder. General persistent Work execution, navigation,
+product presentation and human takeover remain unqualified; the existing
+general workflow qualifiers still use their original run-owned/all-zero lifetime.
 
 Do not encode browser execution as a hidden/headless Boolean. These states are
 independent and policy-controlled:
