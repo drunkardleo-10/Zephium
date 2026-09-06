@@ -823,13 +823,32 @@ fn registration_never_owns_wake_and_native_reservation_covers_held_return_or_pan
             assert!(!self.panic, "injected late listener panic");
         }
     }
+    struct RefusedWaker {
+        decided: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+    impl std::task::Wake for RefusedWaker {
+        fn wake(self: Arc<Self>) {
+            panic!("refused listener must never run");
+        }
+    }
+    impl Drop for RefusedWaker {
+        fn drop(&mut self) {
+            self.decided.send(()).unwrap();
+            self.release
+                .get_mut()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .expect("bounded refusal return delay");
+        }
+    }
     struct Release(mpsc::Sender<()>);
     impl Drop for Release {
         fn drop(&mut self) {
             let _ = self.0.send(());
         }
     }
-    for fault in 0..3 {
+    for fault in 0..4 {
         let (mut rows, admission, guard, health) = tracked();
         let lease = leased(&mut rows, &guard);
         let (request, ticket) = rows.revoke_with_delivery(&lease).unwrap();
@@ -847,7 +866,8 @@ fn registration_never_owns_wake_and_native_reservation_covers_held_return_or_pan
             ticket.register_waker(listener.into()).unwrap();
             (ticket, std::thread::current().id())
         });
-        let (mut ticket, registration_thread) = registration.join().unwrap();
+        let (ticket, registration_thread) = registration.join().unwrap();
+        let mut ticket = Some(ticket);
         assert!(matches!(
             entered_rx.try_recv(),
             Err(mpsc::TryRecvError::Empty)
@@ -918,25 +938,104 @@ fn registration_never_owns_wake_and_native_reservation_covers_held_return_or_pan
         if fault == 2 {
             // The listener is running, but its coordination mutex is free.
             assert!(matches!(
-                ticket.register_waker(Arc::new(HealthWake::default()).into()),
+                ticket
+                    .as_mut()
+                    .unwrap()
+                    .register_waker(Arc::new(HealthWake::default()).into()),
                 Err(zephium_agentic::WorkBrowserLeaseDeliveryPollError::RegistrationClosed)
             ));
+        }
+        let mut delayed_registration = None;
+        let mut physical_receipt = None;
+        if fault == 3 {
+            // The physical return fact can be consumed while the independent
+            // notifier is Running; refusal must not rewrite that exact receipt.
+            let receipt = ticket.as_mut().unwrap().try_take().unwrap().unwrap();
+            assert!(receipt.returned());
+            physical_receipt = Some(receipt);
+            let (decided_tx, decided_rx) = mpsc::channel();
+            let (resume_tx, resume_rx) = mpsc::channel();
+            let resume = Release(resume_tx);
+            let (registration_returned_tx, registration_returned_rx) = mpsc::channel();
+            let mut refused_ticket = ticket.take().unwrap();
+            let registration = std::thread::spawn(move || {
+                let result = refused_ticket.register_waker(
+                    Arc::new(RefusedWaker {
+                        decided: decided_tx,
+                        release: Mutex::new(resume_rx),
+                    })
+                    .into(),
+                );
+                registration_returned_tx.send(()).unwrap();
+                (refused_ticket, result)
+            });
+            delayed_registration = Some((registration, registration_returned_rx, resume));
+            decided_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            // The locked refusal decision happened, but the public call has
+            // not returned and no caller follow-up can publish failure for it.
         }
         drop(release);
         returned_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         native.join().unwrap();
+        if let Some((registration, registration_returned, resume)) = delayed_registration {
+            assert!(matches!(
+                registration_returned.try_recv(),
+                Err(mpsc::TryRecvError::Empty)
+            ));
+            assert!(
+                !guard.is_healthy(),
+                "native completion must see the already-published refusal"
+            );
+            assert_eq!(
+                health.snapshot(),
+                zephium_agentic::WorkBrowserResourceHealthState::Uncertain
+            );
+            assert!(physical_receipt.as_ref().unwrap().returned());
+            let next = rows
+                .lock()
+                .unwrap()
+                .acquire(
+                    guard.resource(),
+                    ContextRunId::generate(),
+                    tick(4),
+                    tick(100),
+                )
+                .unwrap();
+            assert_eq!(
+                guard.admit_lifecycle(&next, tick(4)),
+                Err(ContextPortFailure::Stale)
+            );
+            let _ = rows
+                .lock()
+                .unwrap()
+                .dispatch_refused(next, ContextPortFailure::Stale)
+                .unwrap();
+            drop(resume);
+            let (returned_ticket, result) = registration.join().unwrap();
+            assert!(matches!(
+                result,
+                Err(zephium_agentic::WorkBrowserLeaseDeliveryPollError::RegistrationClosed)
+            ));
+            ticket = Some(returned_ticket);
+        }
         assert!(guard.callbacks_drained());
         assert!(!guard.execution_reserved());
         assert_eq!(guard.is_healthy(), fault == 0);
         if fault == 0 {
-            assert!(ticket.try_take().unwrap().unwrap().returned());
+            assert!(ticket
+                .as_mut()
+                .unwrap()
+                .try_take()
+                .unwrap()
+                .unwrap()
+                .returned());
         } else {
             assert_eq!(
                 health.snapshot(),
                 zephium_agentic::WorkBrowserResourceHealthState::Uncertain
             );
             assert!(matches!(
-                ticket.try_take(),
+                ticket.as_mut().unwrap().try_take(),
                 Err(zephium_agentic::WorkBrowserLeaseDeliveryPollError::Notification)
             ));
         }

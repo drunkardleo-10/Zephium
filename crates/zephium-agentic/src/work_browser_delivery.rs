@@ -140,26 +140,36 @@ impl WorkBrowserLeaseDeliveryTicket {
         &mut self,
         waker: Waker,
     ) -> Result<(), WorkBrowserLeaseDeliveryPollError> {
-        let waker = Arc::new(waker);
+        let mut proposed = Some(Arc::new(waker));
+        // Refusal is part of the locked decision, not follow-up work after
+        // unlock: a running notifier can finish as soon as that lock releases.
         let result = match self.binding.0.listener.coordination.lock() {
             Ok(mut registration) => match registration.phase {
                 NotificationPhase::Running | NotificationPhase::Completed => {
+                    self.binding.0.listener.fail();
                     Err(WorkBrowserLeaseDeliveryPollError::RegistrationClosed)
                 }
                 NotificationPhase::Pending
                     if registration.waker.is_none()
                         && !self.binding.0.listener.failed.load(Ordering::Acquire) =>
                 {
-                    registration.waker = Some(waker);
+                    registration.waker = proposed.take();
                     Ok(())
                 }
-                _ => Err(WorkBrowserLeaseDeliveryPollError::Notification),
+                _ => {
+                    self.binding.0.listener.fail();
+                    Err(WorkBrowserLeaseDeliveryPollError::Notification)
+                }
             },
-            Err(_) => Err(WorkBrowserLeaseDeliveryPollError::Notification),
+            Err(poisoned) => {
+                let _registration = poisoned.into_inner();
+                self.binding.0.listener.fail();
+                Err(WorkBrowserLeaseDeliveryPollError::Notification)
+            }
         };
-        if result.is_err() {
-            self.binding.0.listener.fail();
-        }
+        // A rejected user-defined waker can have an arbitrary destructor.
+        // Release it only after the coordination guard and refusal publication.
+        drop(proposed);
         result
     }
     /// Takes the exact terminal once. `None` means delivery is still pending,

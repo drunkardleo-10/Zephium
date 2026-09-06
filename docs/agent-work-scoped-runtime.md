@@ -103,6 +103,10 @@ the physical fact without invoking code under its lock, then notifies outside
 both locks while its exact retirement reservation blocks Acquire/destruction and
 global drain through the actual listener return. A held or reentrant listener
 cannot release that reservation; a late panic quarantines the exact resource.
+Every invalidating registration refusal publishes failure while still holding
+that same coordination lock, before the notifier can decide completion. Releasing
+the rejected proposed waker and returning the refusal happen afterward, outside
+the lock; neither is needed to make the failure visible to native retirement.
 
 Notification has no receipt or execution authority. Its failure cannot replace
 or retroactively rewrite a physical returned receipt. A future product successor
@@ -115,8 +119,13 @@ duplicate/lost/poisoned/panicking listeners, closed registration, missing and ea
 notification, unproven terminals and single consumption. Threaded native-ledger
 schedules hold the original listener through successful return, late panic and
 late registration while checking unlocked coordination, exact Acquire refusal,
-destruction debt and global/successor refusal. Concurrent missing-notifier races
-also have present-notifier and listener-free positive controls. This is
+destruction debt and global/successor refusal. They also include the inverse
+refusal-return schedule: the refused waker destructor holds
+registration before external return while the original listener finishes and
+native quarantine becomes visible. A physical receipt consumed during Running
+remains unchanged. The locked refusal ordering is also mechanically pinned.
+Concurrent missing-notifier races have present-notifier and listener-free
+positive controls. This is
 deterministic native-adapter evidence, not a new rendering or provider workflow.
 
 Adversarial schedules cover post-claim blocking/deadline, polling panic,
