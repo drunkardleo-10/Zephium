@@ -697,3 +697,340 @@ fn synchronous_read_non_admission_preserves_its_exact_native_failure() {
         assert!(a.health(tick(2)).is_ok());
     }
 }
+
+fn poison<T>(mutex: &Mutex<T>) {
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = mutex.lock().unwrap();
+        panic!("injected owner-state poison");
+    }))
+    .is_err());
+    assert!(mutex.is_poisoned());
+}
+
+#[test]
+fn refused_construction_retires_waking_reporter_before_any_owner_slot_or_rows_lock() {
+    // Preflight the exact locks before actual reentry, so regressing the drop
+    // location fails an assertion instead of hanging the test process forever.
+    for schedule in 0..4 {
+        let destination = Arc::new(Mutex::new(std::sync::Weak::<Shared>::new()));
+        let attempted = Arc::new(AtomicUsize::new(0));
+        let reentered = Arc::new(AtomicUsize::new(0));
+        let blocked = Arc::new(AtomicBool::new(false));
+        let wake_destination = destination.clone();
+        let wake_attempted = attempted.clone();
+        let wake_reentered = reentered.clone();
+        let wake_blocked = blocked.clone();
+        let (owner, native) = setup(Arc::new(move || {
+            let Some(shared) = wake_destination.lock().unwrap().upgrade() else {
+                return true;
+            };
+            wake_attempted.fetch_add(1, Ordering::AcqRel);
+            let rows_available = shared.rows.try_lock().is_ok();
+            let resources = shared
+                .resources
+                .try_lock()
+                .ok()
+                .map(|rows| rows.values().cloned().collect::<Vec<_>>());
+            let locks_available = rows_available
+                && resources.as_ref().is_some_and(|rows| {
+                    rows.iter().all(|row| {
+                        row.health.try_lock().is_ok()
+                            && row.facade.try_lock().is_ok()
+                            && row.slots.try_lock().is_ok_and(|slots| {
+                                slots.iter().all(|slot| match slot {
+                                    OwnedSlot::Lifecycle(slot) => slot.try_lock().is_ok(),
+                                    OwnedSlot::Read(slot) => slot.try_lock().is_ok(),
+                                })
+                            })
+                    })
+                });
+            if !locks_available {
+                wake_blocked.store(true, Ordering::Release);
+                return true;
+            }
+            // This is the real application-owned drain, not a second owner or
+            // a simulated mutex-only wake. It must remain callable synchronously.
+            shared.drain_abandoned(tick(0)).unwrap();
+            for resource in resources.unwrap() {
+                assert!(Arc::ptr_eq(
+                    &shared.resource(&resource.join).unwrap(),
+                    &resource
+                ));
+                let _ = shared.current(&resource);
+            }
+            wake_reentered.fetch_add(1, Ordering::AcqRel);
+            true
+        }));
+        *destination.lock().unwrap() = Arc::downgrade(&owner.shared);
+        native.reject_construct.store(1, Ordering::Release);
+        let mut pending = owner
+            .construct(
+                WorkBrowserResourceId::generate(),
+                ContextId::generate(),
+                ContextProfileStorageClass::Ephemeral,
+                ContextNavigationTarget::parse("https://example.test/frozen").unwrap(),
+                tick(0),
+            )
+            .unwrap();
+        let resource = pending.resource.clone();
+        match schedule {
+            0 => {
+                assert!(pending.poll(tick(0)).unwrap().is_some());
+                drop(pending);
+            }
+            1 => {
+                drop(pending);
+                owner.drain_abandoned(tick(0)).unwrap();
+            }
+            2 => {
+                poison(&owner.shared.rows);
+                assert_eq!(pending.poll(tick(0)).err(), Some(Refusal::Uncertain));
+                drop(pending);
+            }
+            3 => {
+                poison(&pending.slot);
+                assert_eq!(pending.poll(tick(0)).err(), Some(Refusal::Uncertain));
+                drop(pending);
+                assert_eq!(owner.drain_abandoned(tick(0)), Err(Refusal::Uncertain));
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            !blocked.load(Ordering::Acquire),
+            "wake held an owner lock: {schedule}"
+        );
+        assert_eq!(attempted.load(Ordering::Acquire), 1, "{schedule}");
+        assert_eq!(reentered.load(Ordering::Acquire), 1, "{schedule}");
+        assert_eq!(native.constructions.load(Ordering::Acquire), 0);
+        if schedule < 2 {
+            assert_eq!(resource.flights.load(Ordering::Acquire), 0);
+            owner.seal_resources().unwrap();
+            assert!(owner.locally_retired());
+        } else {
+            assert_eq!(resource.flights.load(Ordering::Acquire), 1);
+            assert!(!owner.locally_retired());
+        }
+        // Do not exercise the unrelated owner-Drop wake in this schedule.
+        *destination.lock().unwrap() = std::sync::Weak::new();
+    }
+}
+
+#[test]
+fn original_owner_poison_closes_preexisting_facades_without_a_map_lookup() {
+    for poison_rows in [false, true] {
+        let (owner, native) = setup(Arc::new(|| true));
+        let a_join = construct(&owner);
+        let b_join = construct(&owner);
+        let a = acquire(&owner, &a_join, 1);
+        let b = acquire(&owner, &b_join, 2);
+        if poison_rows {
+            poison(&owner.shared.rows);
+        } else {
+            poison(&owner.shared.resources);
+        }
+        // Neither facade traverses the resources map; both must nevertheless
+        // latch and observe its poison before any owner lookup/drain does so.
+        assert_eq!(a.health(tick(2)), Err(Refusal::Uncertain));
+        assert!(owner.shared.notifications.failed.load(Ordering::Acquire));
+        assert_eq!(b.observe_initial(tick(2)).err(), Some(Refusal::Uncertain));
+        assert_eq!(native.observations.load(Ordering::Acquire), 0);
+        assert!(!owner.locally_retired());
+    }
+}
+
+#[test]
+fn original_map_entry_points_latch_global_poison_before_returning() {
+    for entry in 0..7 {
+        let (owner, native) = setup(Arc::new(|| true));
+        let join = construct(&owner);
+        let browser = acquire(&owner, &join, 1);
+        poison(&owner.shared.resources);
+        match entry {
+            0 => assert_eq!(owner.poll_native_event().err(), Some(Refusal::Uncertain)),
+            1 => assert_eq!(owner.poll_health(&join).err(), Some(Refusal::Uncertain)),
+            2 => assert_eq!(owner.drain_abandoned(tick(2)), Err(Refusal::Uncertain)),
+            3 => assert_eq!(
+                owner
+                    .construct(
+                        WorkBrowserResourceId::generate(),
+                        ContextId::generate(),
+                        ContextProfileStorageClass::Ephemeral,
+                        ContextNavigationTarget::parse("https://example.test/frozen").unwrap(),
+                        tick(2),
+                    )
+                    .err(),
+                Some(Refusal::Uncertain)
+            ),
+            4 => assert!(!owner.locally_retired()),
+            5 => assert_eq!(owner.reap_absent(&join).err(), Some(Refusal::Uncertain)),
+            6 => assert_eq!(
+                owner.browser(browser.lease.clone(), tick(2)).err(),
+                Some(Refusal::Uncertain)
+            ),
+            _ => unreachable!(),
+        }
+        assert!(
+            owner.shared.notifications.failed.load(Ordering::Acquire),
+            "{entry}"
+        );
+        assert_eq!(browser.health(tick(2)), Err(Refusal::Uncertain));
+        assert!(browser.observe_initial(tick(2)).is_err());
+        assert_eq!(native.observations.load(Ordering::Acquire), 0);
+        assert_eq!(native.constructions.load(Ordering::Acquire), 1);
+    }
+}
+
+#[test]
+fn resource_local_poison_closes_only_its_exact_existing_facade() {
+    for local in 0..3 {
+        let (owner, native) = setup(Arc::new(|| true));
+        let a_join = construct(&owner);
+        let b_join = construct(&owner);
+        let a = acquire(&owner, &a_join, 1);
+        let b = acquire(&owner, &b_join, 2);
+        match local {
+            0 => poison(&a.resource.health),
+            1 => poison(&a.resource.slots),
+            2 => poison(&a.resource.facade),
+            _ => unreachable!(),
+        }
+        assert_eq!(a.health(tick(2)), Err(Refusal::Uncertain));
+        assert!(a.resource.failed.load(Ordering::Acquire));
+        assert!(!owner.shared.notifications.failed.load(Ordering::Acquire));
+        if local == 1 {
+            assert_eq!(owner.drain_abandoned(tick(2)), Err(Refusal::Uncertain));
+        }
+        assert!(a.observe_initial(tick(2)).is_err());
+        assert!(b.health(tick(2)).is_ok());
+        assert!(b
+            .observe_initial(tick(2))
+            .unwrap()
+            .poll(tick(2))
+            .unwrap()
+            .is_some());
+        assert_eq!(native.observations.load(Ordering::Acquire), 1);
+    }
+}
+
+#[test]
+fn poisoned_read_slot_retains_late_terminal_and_reports_abandoned_drain_failure() {
+    let (owner, native) = setup(Arc::new(|| true));
+    let a_join = construct(&owner);
+    let b_join = construct(&owner);
+    let a = acquire(&owner, &a_join, 1);
+    let b = acquire(&owner, &b_join, 2);
+    native.hold_read.store(true, Ordering::Release);
+    let mut pending = a.observe_initial(tick(2)).unwrap();
+    poison(&pending.slot);
+    // Direct polling itself must latch exact failure, without a health preflight.
+    assert_eq!(pending.poll(tick(2)).err(), Some(Refusal::Uncertain));
+    assert!(a.resource.failed.load(Ordering::Acquire));
+    drop(pending);
+    let (request, callback) = native.read.lock().unwrap().take().unwrap();
+    callback(request.into_parts().1);
+    assert_eq!(owner.drain_abandoned(tick(3)), Err(Refusal::Uncertain));
+    assert_eq!(a.resource.flights.load(Ordering::Acquire), 1);
+    assert_eq!(a.resource.reads.load(Ordering::Acquire), 1);
+    // Another exact resource's abandoned slot is still accounted even when
+    // either map iteration order encounters the poisoned slot first.
+    let b_read = b.observe_initial(tick(3)).unwrap();
+    let (request, callback) = native.read.lock().unwrap().take().unwrap();
+    drop(b_read);
+    callback(request.into_parts().1);
+    assert_eq!(owner.drain_abandoned(tick(4)), Err(Refusal::Uncertain));
+    assert_eq!(b.resource.flights.load(Ordering::Acquire), 0);
+    assert_eq!(a.resource.flights.load(Ordering::Acquire), 1);
+    assert!(!owner.shared.notifications.failed.load(Ordering::Acquire));
+    assert!(!owner.locally_retired());
+}
+
+#[test]
+fn poisoned_revocation_slot_cannot_publish_delivery_or_readmit_its_lease() {
+    let (owner, native) = setup(Arc::new(|| true));
+    let join = construct(&owner);
+    let browser = acquire(&owner, &join, 1);
+    native.hold_revoke.store(true, Ordering::Release);
+    let mut pending = browser.revoke().unwrap();
+    poison(&pending.slot);
+    assert_eq!(pending.poll(tick(2)).err(), Some(Refusal::Uncertain));
+    assert!(browser.resource.failed.load(Ordering::Acquire));
+    drop(pending);
+    let (request, callback) = native.lifecycle.lock().unwrap().take().unwrap();
+    native.finish(request, callback);
+    assert!(native
+        .delivery
+        .lock()
+        .unwrap()
+        .take()
+        .unwrap()
+        .publish_returned());
+    assert_eq!(owner.drain_abandoned(tick(3)), Err(Refusal::Uncertain));
+    assert_eq!(browser.resource.flights.load(Ordering::Acquire), 1);
+    assert!(!browser.retired.load(Ordering::Acquire));
+    assert_eq!(
+        owner.acquire(&join, run_id(2), tick(3), tick(100)).err(),
+        Some(Refusal::Uncertain)
+    );
+    assert!(!owner.shared.notifications.failed.load(Ordering::Acquire));
+    assert!(!owner.locally_retired());
+}
+
+#[test]
+fn busy_slot_inspection_never_waits_or_mislabels_callback_ownership() {
+    let (owner, native) = setup(Arc::new(|| true));
+    let join = construct(&owner);
+    let browser = acquire(&owner, &join, 1);
+    native.hold_read.store(true, Ordering::Release);
+    let pending = browser.observe_initial(tick(2)).unwrap();
+    let _poll_guard = pending.slot.lock().unwrap();
+    let slots = browser.resource.slots.lock().unwrap();
+    assert!(!slots.iter().all(|slot| slot.finished(&browser.resource)));
+    assert!(!browser.resource.failed.load(Ordering::Acquire));
+    assert_eq!(browser.resource.flights.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn poisoned_pending_operation_is_visible_before_its_handle_is_polled_or_dropped() {
+    let (owner, native) = setup(Arc::new(|| true));
+    let join = construct(&owner);
+    let browser = acquire(&owner, &join, 1);
+    native.hold_read.store(true, Ordering::Release);
+    let pending = browser.observe_initial(tick(2)).unwrap();
+    poison(&pending.slot);
+    assert_eq!(browser.health(tick(2)), Err(Refusal::Uncertain));
+    assert!(browser.resource.failed.load(Ordering::Acquire));
+    assert!(browser.observe_initial(tick(2)).is_err());
+    assert_eq!(native.observations.load(Ordering::Acquire), 1);
+    assert_eq!(browser.resource.flights.load(Ordering::Acquire), 1);
+    assert!(!owner.shared.notifications.failed.load(Ordering::Acquire));
+}
+
+#[test]
+fn slot_retention_discovers_poison_before_dispatching_an_already_prepared_read() {
+    let (owner, native) = setup(Arc::new(|| true));
+    let join = construct(&owner);
+    let browser = acquire(&owner, &join, 1);
+    let mut prior = browser.observe_initial(tick(2)).unwrap();
+    assert!(prior.poll(tick(2)).unwrap().is_some());
+    // Exact trusted request preparation wins, then another operation's state
+    // poisons before this request can reserve its application-owned slot.
+    browser.health(tick(3)).unwrap();
+    let request = owner
+        .shared
+        .lock_rows()
+        .unwrap()
+        .observe_initial(&browser.lease, tick(3))
+        .unwrap();
+    poison(&prior.slot);
+    let mut pending =
+        PendingRead::dispatch(owner.shared.clone(), browser.resource.clone(), request).unwrap();
+    assert!(browser.resource.failed.load(Ordering::Acquire));
+    assert_eq!(native.observations.load(Ordering::Acquire), 1);
+    assert_eq!(
+        pending.poll(tick(3)).err(),
+        Some(Refusal::NativeAdmission(ContextPortFailure::Shutdown))
+    );
+    assert_eq!(browser.resource.flights.load(Ordering::Acquire), 0);
+    assert!(!owner.shared.notifications.failed.load(Ordering::Acquire));
+    assert!(browser.health(tick(3)).is_err());
+}

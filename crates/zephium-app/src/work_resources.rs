@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard, TryLockError};
 use std::task::Wake;
 use zephium_agentic::*;
 use zephium_core::ids::ProfileId;
@@ -68,18 +68,33 @@ struct Resource {
 }
 impl Resource {
     fn current(&self) -> bool {
+        if self.health.is_poisoned()
+            || self.facade.is_poisoned()
+            || self.slots.is_poisoned()
+            || self
+                .lock_local(&self.slots)
+                .is_ok_and(|slots| slots.iter().any(OwnedSlot::is_poisoned))
+        {
+            self.fail();
+        }
         !self.failed.load(Ordering::Acquire)
             && self
-                .health
-                .lock()
+                .lock_local(&self.health)
                 .is_ok_and(|health| health.snapshot() == WorkBrowserResourceHealthState::Current)
     }
     fn fail(&self) {
         self.failed.store(true, Ordering::Release);
     }
+    fn refusal(&self) -> Refusal {
+        self.fail();
+        Refusal::Uncertain
+    }
+    fn lock_local<'a, T>(&self, mutex: &'a Mutex<T>) -> Result<MutexGuard<'a, T>, Refusal> {
+        mutex.lock().map_err(|_| self.refusal())
+    }
     fn retain(&self, slot: OwnedSlot) -> Result<(), Refusal> {
-        let mut slots = self.slots.lock().map_err(|_| Refusal::Uncertain)?;
-        slots.retain(|slot| !slot.finished());
+        let mut slots = self.lock_local(&self.slots)?;
+        slots.retain(|slot| !slot.finished(self));
         // One lifecycle, one read and one overtaking destruction maximum.
         if slots.len() >= 3 {
             self.fail();
@@ -97,24 +112,35 @@ struct Shared {
     notifications: Arc<Notifications>,
 }
 impl Shared {
+    fn refusal(&self) -> Refusal {
+        self.notifications.failed.store(true, Ordering::Release);
+        Refusal::Uncertain
+    }
+    fn global_current(&self) -> bool {
+        // Existing facades do not traverse the map. They must still observe a
+        // poisoned original owner before admitting or accepting another read.
+        if self.rows.is_poisoned() || self.resources.is_poisoned() {
+            self.refusal();
+        }
+        !self.notifications.failed.load(Ordering::Acquire)
+    }
+    fn lock_resources(
+        &self,
+    ) -> Result<MutexGuard<'_, BTreeMap<WorkBrowserResourceId, Arc<Resource>>>, Refusal> {
+        self.resources.lock().map_err(|_| self.refusal())
+    }
     fn lock_rows(&self) -> Result<std::sync::MutexGuard<'_, WorkBrowserResources>, Refusal> {
-        self.rows.lock().map_err(|_| {
-            self.notifications.failed.store(true, Ordering::Release);
-            Refusal::Uncertain
-        })
+        self.rows.lock().map_err(|_| self.refusal())
     }
     fn current(&self, resource: &Resource) -> Result<(), Refusal> {
-        if self.notifications.failed.load(Ordering::Acquire) || !resource.current() {
+        if !self.global_current() || !resource.current() {
             Err(Refusal::Uncertain)
         } else {
             Ok(())
         }
     }
     fn resource(&self, join: &WorkBrowserResourceJoin) -> Result<Arc<Resource>, Refusal> {
-        let resources = self.resources.lock().map_err(|_| {
-            self.notifications.failed.store(true, Ordering::Release);
-            Refusal::Uncertain
-        })?;
+        let resources = self.lock_resources()?;
         resources
             .get(&join.identity().resource())
             .filter(|row| &row.join == join)
@@ -172,6 +198,7 @@ impl WorkResourceOwner {
     // Caller drains until None. Empty is the re-arm point; clear then recheck
     // ensures a concurrent publication is observed or arranges the next wake.
     fn poll_native_event(&self) -> Result<Option<ContextNativeEvent>, Refusal> {
+        self.shared.global_current(); // Cleanup events remain account-able after failure.
         match self.native_events.try_recv() {
             Ok(event) => return Ok(Some(event)),
             Err(mpsc::TryRecvError::Empty) => {}
@@ -189,20 +216,9 @@ impl WorkResourceOwner {
             .swap(false, Ordering::AcqRel);
         // Drain/re-arm each stable observer too. Otherwise its initial pending
         // health wake could suppress an idle renderer failure after A exits.
-        let resources: Vec<_> = self
-            .shared
-            .resources
-            .lock()
-            .map_err(|_| Refusal::Uncertain)?
-            .values()
-            .cloned()
-            .collect();
+        let resources: Vec<_> = self.shared.lock_resources()?.values().cloned().collect();
         for resource in resources {
-            let state = resource
-                .health
-                .lock()
-                .map_err(|_| Refusal::Uncertain)?
-                .poll();
+            let state = resource.lock_local(&resource.health)?.poll();
             if state == WorkBrowserResourceHealthState::Uncertain {
                 resource.fail();
             }
@@ -228,7 +244,7 @@ impl WorkResourceOwner {
         target: ContextNavigationTarget,
         now: AgentPolicyInstant,
     ) -> Result<PendingLifecycle, Refusal> {
-        if self.shared.notifications.failed.load(Ordering::Acquire) {
+        if !self.shared.global_current() {
             return Err(Refusal::Uncertain);
         }
         let request = self
@@ -251,11 +267,7 @@ impl WorkResourceOwner {
             slots: Mutex::new(Vec::with_capacity(3)),
             facade: Mutex::new(None),
         });
-        self.shared
-            .resources
-            .lock()
-            .map_err(|_| Refusal::Uncertain)?
-            .insert(id, resource.clone());
+        self.shared.lock_resources()?.insert(id, resource.clone());
         PendingLifecycle::dispatch(self.shared.clone(), resource, request, None, None)
     }
 
@@ -289,7 +301,7 @@ impl WorkResourceOwner {
         self.shared.current(&resource)?;
         self.shared.lock_rows()?.admits_lease(&lease, now)?;
         {
-            let mut prior = resource.facade.lock().map_err(|_| Refusal::Uncertain)?;
+            let mut prior = resource.lock_local(&resource.facade)?;
             if prior.as_ref() == Some(&lease) {
                 return Err(Refusal::Busy);
             }
@@ -333,9 +345,7 @@ impl WorkResourceOwner {
         }
         let identity = self.shared.lock_rows()?.reap(join)?;
         self.shared
-            .resources
-            .lock()
-            .map_err(|_| Refusal::Uncertain)?
+            .lock_resources()?
             .remove(&join.identity().resource());
         Ok(identity)
     }
@@ -352,15 +362,15 @@ impl WorkResourceOwner {
 
     fn locally_retired(&self) -> bool {
         // Descriptive local accounting only. No global native proof is minted.
-        !self.shared.notifications.failed.load(Ordering::Acquire)
+        self.shared.global_current()
             && self
                 .shared
                 .lock_rows()
                 .is_ok_and(|rows| rows.is_quiescent())
-            && self.shared.resources.lock().is_ok_and(|resources| {
+            && self.shared.lock_resources().is_ok_and(|resources| {
                 resources.values().all(|resource| {
                     resource.flights.load(Ordering::Acquire) == 0
-                        && resource.health.lock().is_ok_and(|health| {
+                        && resource.lock_local(&resource.health).is_ok_and(|health| {
                             matches!(
                                 health.snapshot(),
                                 WorkBrowserResourceHealthState::Retired
@@ -376,11 +386,7 @@ impl WorkResourceOwner {
         join: &WorkBrowserResourceJoin,
     ) -> Result<WorkBrowserResourceHealthState, Refusal> {
         let resource = self.shared.resource(join)?;
-        let state = resource
-            .health
-            .lock()
-            .map_err(|_| Refusal::Uncertain)?
-            .poll();
+        let state = resource.lock_local(&resource.health)?.poll();
         if state == WorkBrowserResourceHealthState::Uncertain {
             resource.fail();
         }
@@ -388,25 +394,28 @@ impl WorkResourceOwner {
     }
 
     fn drain_abandoned(&self, now: AgentPolicyInstant) -> Result<(), Refusal> {
-        let resources: Vec<_> = self
-            .shared
-            .resources
-            .lock()
-            .map_err(|_| Refusal::Uncertain)?
-            .values()
-            .cloned()
-            .collect();
+        self.shared.drain_abandoned(now)
+    }
+}
+impl Shared {
+    fn drain_abandoned(&self, now: AgentPolicyInstant) -> Result<(), Refusal> {
+        let resources: Vec<_> = self.lock_resources()?.values().cloned().collect();
+        let mut failure = None;
         for resource in resources {
-            let slots = resource
-                .slots
-                .lock()
-                .map_err(|_| Refusal::Uncertain)?
-                .clone();
+            let slots = match resource.lock_local(&resource.slots) {
+                Ok(slots) => slots.clone(),
+                Err(error) => {
+                    failure = Some(error);
+                    continue;
+                }
+            };
             for slot in slots {
-                slot.drain_abandoned(&self.shared, &resource, now);
+                if let Err(error) = slot.drain_abandoned(self, &resource, now) {
+                    failure = Some(error);
+                }
             }
         }
-        Ok(())
+        failure.map_or(Ok(()), Err)
     }
 }
 impl Drop for WorkResourceOwner {
@@ -573,10 +582,29 @@ impl PendingLifecycle {
             retirement,
         }));
         resource.retain(OwnedSlot::Lifecycle(slot.clone()))?;
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            shared.port.work_resource_lifecycle(request, callback)
-        }));
-        let mut state = slot.lock().map_err(|_| Refusal::Uncertain)?;
+        let cleanup = matches!(
+            request.operation(),
+            WorkBrowserResourceOperation::Revoke | WorkBrowserResourceOperation::Destroy
+        );
+        let mut result =
+            if !cleanup && (!shared.global_current() || resource.failed.load(Ordering::Acquire)) {
+                drop(callback);
+                Ok(WorkBrowserResourceDispatch::Rejected {
+                    request: Box::new(request),
+                    failure: ContextPortFailure::Shutdown,
+                })
+            } else {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    shared.port.work_resource_lifecycle(request, callback)
+                }))
+            };
+        // A synchronously returned construction was never installed. Retire its
+        // callback-bearing reporter NOW, outside every application mutex. No
+        // refused request stored/polled/dropped in a slot may carry that wake.
+        if let Ok(WorkBrowserResourceDispatch::Rejected { request, .. }) = &mut result {
+            drop(request.take_resource_health_reporter());
+        }
+        let mut state = resource.lock_local(&slot)?;
         state.refused = match result {
             Ok(WorkBrowserResourceDispatch::Scheduled) => None,
             Ok(WorkBrowserResourceDispatch::Rejected { request, failure }) => {
@@ -596,9 +624,8 @@ impl PendingLifecycle {
         })
     }
     fn poll(&mut self, now: AgentPolicyInstant) -> Result<Option<LifecycleResult>, Refusal> {
-        self.slot
-            .lock()
-            .map_err(|_| Refusal::Uncertain)?
+        self.resource
+            .lock_local(&self.slot)?
             .poll(&self.shared, &self.resource, now)
     }
 }
@@ -732,10 +759,18 @@ impl PendingRead {
             refused: None,
         }));
         resource.retain(OwnedSlot::Read(slot.clone()))?;
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            shared.port.work_resource_observe(request, callback)
-        }));
-        let mut state = slot.lock().map_err(|_| Refusal::Uncertain)?;
+        let result = if !shared.global_current() || resource.failed.load(Ordering::Acquire) {
+            drop(callback);
+            Ok(WorkBrowserObservationDispatch::Rejected {
+                request: Box::new(request),
+                failure: ContextPortFailure::Shutdown,
+            })
+        } else {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                shared.port.work_resource_observe(request, callback)
+            }))
+        };
+        let mut state = resource.lock_local(&slot)?;
         state.refused = match result {
             Ok(WorkBrowserObservationDispatch::Scheduled) => None,
             Ok(WorkBrowserObservationDispatch::Rejected { request, failure }) => {
@@ -758,9 +793,8 @@ impl PendingRead {
         &mut self,
         now: AgentPolicyInstant,
     ) -> Result<Option<WorkBrowserObservationEvent>, Refusal> {
-        self.slot
-            .lock()
-            .map_err(|_| Refusal::Uncertain)?
+        self.resource
+            .lock_local(&self.slot)?
             .poll(&self.shared, &self.resource, now)
     }
 }
@@ -822,29 +856,55 @@ enum OwnedSlot {
     Read(Arc<Mutex<ReadOperation>>),
 }
 impl OwnedSlot {
-    fn finished(&self) -> bool {
+    fn is_poisoned(&self) -> bool {
         match self {
-            Self::Lifecycle(slot) => slot.lock().is_ok_and(|slot| slot.flight.finished),
-            Self::Read(slot) => slot.lock().is_ok_and(|slot| slot.flight.finished),
+            Self::Lifecycle(slot) => slot.is_poisoned(),
+            Self::Read(slot) => slot.is_poisoned(),
         }
     }
-    fn drain_abandoned(&self, shared: &Shared, resource: &Resource, now: AgentPolicyInstant) {
+    fn finished(&self, resource: &Resource) -> bool {
+        // Called while the slots collection is held. Never wait for an operation
+        // whose poll may recheck resource health (and the slots collection).
+        match self {
+            Self::Lifecycle(slot) => match slot.try_lock() {
+                Ok(slot) => slot.flight.finished,
+                Err(TryLockError::Poisoned(_)) => {
+                    resource.fail();
+                    false
+                }
+                Err(TryLockError::WouldBlock) => false,
+            },
+            Self::Read(slot) => match slot.try_lock() {
+                Ok(slot) => slot.flight.finished,
+                Err(TryLockError::Poisoned(_)) => {
+                    resource.fail();
+                    false
+                }
+                Err(TryLockError::WouldBlock) => false,
+            },
+        }
+    }
+    fn drain_abandoned(
+        &self,
+        shared: &Shared,
+        resource: &Resource,
+        now: AgentPolicyInstant,
+    ) -> Result<(), Refusal> {
         match self {
             Self::Lifecycle(slot) => {
-                if let Ok(mut slot) = slot.lock() {
-                    if slot.flight.abandoned && !slot.flight.finished {
-                        let _ = slot.poll(shared, resource, now);
-                    }
+                let mut slot = resource.lock_local(slot)?;
+                if slot.flight.abandoned && !slot.flight.finished {
+                    let _ = slot.poll(shared, resource, now);
                 }
             }
             Self::Read(slot) => {
-                if let Ok(mut slot) = slot.lock() {
-                    if slot.flight.abandoned && !slot.flight.finished {
-                        let _ = slot.poll(shared, resource, now);
-                    }
+                let mut slot = resource.lock_local(slot)?;
+                if slot.flight.abandoned && !slot.flight.finished {
+                    let _ = slot.poll(shared, resource, now);
                 }
             }
         }
+        Ok(())
     }
 }
 

@@ -366,6 +366,11 @@ and local. The two-slot original global-audit lane is separate; unexpected
 legacy events, overflow, poisoned state, lost owner or failed application wake
 close admission. Consumers drain the global lane until Empty, acquire-consume
 its pending signal, drain/re-arm resource observers and recheck for raced events.
+Poison of the original resource map or functional registry closes every existing
+facade, including facades that do not traverse that map. Poison of one resource's
+health, facade, slots collection or exact pending operation instead latches only
+that resource's failure. Lock-error handling never invokes the application wake
+under an owner mutex. Poison is not repaired or treated as callback absence.
 
 The move-only actor facade exposes only exact lease/deadline-bound health,
 the existing bounded initial read, and cleanup revocation. It cannot extract
@@ -387,6 +392,14 @@ contents to B. Synchronous non-admission requires an already-disconnected callba
 sender with no queued terminal; a retained or synchronously delivered callback
 is an explicit contract failure whose debt remains recoverable. Native refusal
 classes are preserved.
+For a synchronously returned Construct, the never-installed native health
+reporter is detached and retired immediately after dispatch returns, outside
+every application mutex, before storing or settling the refused request. Its
+unrestricted synchronous application wake may reenter original-owner draining;
+later normal, abandoned or error-path slot cleanup contains no waking reporter.
+Finished-slot inspection does not wait for an operation mutex while holding the
+slots collection. An operation poll may independently inspect that collection's
+poison state without creating the inverse lock-order dependency.
 
 Read terminals are accounted before the core's zero-read revocation settlement.
 After an exact terminal and delivery receipt are consumed, failed health/delivery
@@ -397,12 +410,18 @@ delivery proof. **It is not product B admission or scoped run completion.** Loca
 resource retirement is separately named and cannot become a global native proof;
 global notification failure still refuses it. Proven-absent construction can be
 reaped without allocating or destroying a native page.
+Abandoned draining reports local slot poison and retains its unsettled debt,
+while continuing to account unaffected resources' terminals. A poisoned slot
+does not manufacture a completed delivery, release a flight or admit a successor.
 
 Deterministic tests cover two exact leases under one original owner/sink,
 stale/foreign authority, idle failures, lost facade/owner, abandoned late reads
 and revocations, destruction overtaking reads, unproven delivery, queued and
 retained callbacks contradicting non-admission, wake rearming/overflow/failure,
-and exact local retirement. No GUI, provider, public site, result artifact or
+reentrant refused-reporter wake across normal/abandoned/poisoned cleanup,
+global versus resource-local poison with existing facades, late terminals in
+poisoned read/revocation slots, nonblocking busy-slot inspection, and exact local
+retirement. No GUI, provider, public site, result artifact or
 native rendering claim is added by these fixtures. The existing controller,
 runtime, journal, Store layout, lifecycle enums and legacy successor are unchanged.
 
