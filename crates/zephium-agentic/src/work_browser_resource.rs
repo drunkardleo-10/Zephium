@@ -216,6 +216,7 @@ pub struct WorkBrowserResourceRequest {
     operation: OperationJoin,
     storage: ContextProfileStorageClass,
     document: Option<Arc<ContextNavigationTarget>>,
+    delivery: Option<delivery::DeliveryDispatch>,
 }
 impl WorkBrowserResourceRequest {
     /// Exact persistent and process-local resource coordinates.
@@ -240,6 +241,12 @@ impl WorkBrowserResourceRequest {
     pub fn document(&self) -> Option<&ContextNavigationTarget> {
         self.document.as_deref()
     }
+    /// Transfers the optional exact delivery-barrier owner to the native task.
+    /// It must stay beside the original task permit until the terminal callback
+    /// returns. Leaving it unhandled fails closed, including on older adapters.
+    pub fn take_lease_delivery_completion(&mut self) -> Option<WorkBrowserLeaseDeliveryCompletion> {
+        self.delivery.as_mut()?.completion.take()
+    }
     /// Consume the native request to settle once. The trusted adapter must
     /// inspect its original physical owners; constructing a value is not proof.
     pub fn complete(
@@ -249,6 +256,7 @@ impl WorkBrowserResourceRequest {
         WorkBrowserResourceCompletion {
             operation: self.operation,
             outcome,
+            delivery: self.delivery.map(|delivery| delivery.binding),
         }
     }
 }
@@ -317,14 +325,18 @@ pub enum WorkBrowserResourceNativeOutcome {
 pub struct WorkBrowserResourceCompletion {
     operation: OperationJoin,
     outcome: WorkBrowserResourceNativeOutcome,
+    delivery: Option<delivery::DeliveryBinding>,
 }
 
-/// Exact ended native lease, not run success, resource destruction or permission
-/// to start a successor. Fresh product/policy/account admission remains required.
+/// Exact ended native lease, not physical terminal-callback return, run success,
+/// resource destruction or permission to start a successor. Core `Retained` is
+/// bookkeeping only; delivery proof and fresh product/policy/account admission
+/// remain independently required.
 #[must_use]
 #[derive(Debug)]
 pub struct WorkBrowserLeaseEnded {
     lease: WorkBrowserExecutionLease,
+    delivery: Option<delivery::DeliveryBinding>,
 }
 impl WorkBrowserLeaseEnded {
     /// Ended lease and its still-owned resource.
@@ -520,6 +532,7 @@ impl WorkBrowserResources {
             operation,
             storage,
             document,
+            delivery: None,
         })
     }
     /// Reserve one run-bound native lease without transferring page ownership.
@@ -572,6 +585,7 @@ impl WorkBrowserResources {
             operation,
             storage: row.storage,
             document: row.document.clone(),
+            delivery: None,
         })
     }
     /// Check exact current native-lease membership and immutable deadline.
@@ -629,7 +643,24 @@ impl WorkBrowserResources {
             operation,
             storage: row.storage,
             document: row.document.clone(),
+            delivery: None,
         })
+    }
+    /// Revokes the exact lease and additionally tracks physical delivery of its
+    /// terminal callback. The native adapter must implement the separate return
+    /// barrier; receiving `LeaseEnded` or polling Pending never establishes it.
+    /// No new operation, callback, worker or native capacity is allocated.
+    pub fn revoke_with_delivery(
+        &mut self,
+        lease: &WorkBrowserExecutionLease,
+    ) -> Result<
+        (WorkBrowserResourceRequest, WorkBrowserLeaseDeliveryTicket),
+        WorkBrowserResourceError,
+    > {
+        let mut request = self.revoke(lease)?;
+        let (delivery, ticket) = delivery::track(lease.clone());
+        request.delivery = Some(delivery);
+        Ok((request, ticket))
     }
     /// Quarantine one resource without discarding callback or capacity debt.
     /// A late exact terminal can settle debt but cannot unquarantine the page.
@@ -674,6 +705,7 @@ impl WorkBrowserResources {
             operation,
             storage: row.storage,
             document: row.document.clone(),
+            delivery: None,
         })
     }
     /// Settle the exact owned terminal. Wrong authority/phase cannot be replaced
@@ -767,7 +799,10 @@ impl WorkBrowserResources {
                     if let Some(lease) = row.lease.take() {
                         row.phase = WorkBrowserResourcePhase::Retained;
                         return Ok(WorkBrowserResourceEvent::LeaseEnded(
-                            WorkBrowserLeaseEnded { lease },
+                            WorkBrowserLeaseEnded {
+                                lease,
+                                delivery: completion.delivery,
+                            },
                         ));
                     }
                 }
@@ -890,6 +925,14 @@ mod observation;
 pub use observation::{
     WorkBrowserObservationCompletion, WorkBrowserObservationCompletionCallback,
     WorkBrowserObservationDispatch, WorkBrowserObservationEvent, WorkBrowserObservationRequest,
+};
+
+#[path = "work_browser_delivery.rs"]
+mod delivery;
+pub use delivery::{
+    WorkBrowserLeaseDeliveryCompletion, WorkBrowserLeaseDeliveryPollError,
+    WorkBrowserLeaseDeliveryProof, WorkBrowserLeaseDeliveryReceipt,
+    WorkBrowserLeaseDeliveryRefusal, WorkBrowserLeaseDeliveryTicket,
 };
 
 /// Move-only terminal callback for an accepted resource operation. A synchronous

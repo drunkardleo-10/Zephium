@@ -224,10 +224,14 @@ fn saturation_seals_revoke_without_dispatch_or_poisoning_another_resource() {
 }
 
 #[test]
-fn move_only_revocation_receipt_transfers_at_callback_entry_but_global_permit_waits() {
+fn core_terminal_transfer_cannot_admit_reentrant_native_acquire_before_delivery_returns() {
     let (mut rows, admission, guard) = setup();
     let lease = leased(&mut rows, &guard);
-    let request = rows.revoke(&lease).unwrap();
+    let (request, ticket) = rows.revoke_with_delivery(&lease).unwrap();
+    let ticket = Arc::new(Mutex::new(ticket));
+    let during_ticket = ticket.clone();
+    let terminal = Arc::new(Mutex::new(None));
+    let during_terminal = terminal.clone();
     guard.admit_lifecycle(&request, tick(1)).unwrap();
     let in_callback = guard.clone();
     let port_admission = admission.clone();
@@ -237,16 +241,20 @@ fn move_only_revocation_receipt_transfers_at_callback_entry_but_global_permit_wa
         permit: admission.reserve().unwrap(),
         completion: Some(Box::new(move |completion| {
             assert_eq!(in_callback.state.lock().unwrap().callbacks, 0);
-            assert!(!in_callback.execution_reserved());
+            assert!(in_callback.execution_reserved());
+            assert!(!in_callback.callbacks_drained());
+            assert!(during_ticket.lock().unwrap().try_take().unwrap().is_none());
             assert_eq!(
                 port_admission.pending(),
                 Some(1),
                 "terminal delivery still blocks global zero"
             );
-            assert!(matches!(
-                rows.settle_at(completion, tick(1)).unwrap(),
-                WorkBrowserResourceEvent::LeaseEnded(_)
-            ));
+            let WorkBrowserResourceEvent::LeaseEnded(ended) =
+                rows.settle_at(completion, tick(1)).unwrap()
+            else {
+                panic!("exact original lease ended");
+            };
+            *during_terminal.lock().unwrap() = Some(ended);
             let next = rows
                 .acquire(
                     in_callback.resource(),
@@ -255,13 +263,343 @@ fn move_only_revocation_receipt_transfers_at_callback_entry_but_global_permit_wa
                     tick(1000),
                 )
                 .unwrap();
-            in_callback.admit_lifecycle(&next, tick(1)).unwrap();
-            assert!(in_callback.acquisition_current(next.lease().unwrap(), tick(1)));
+            assert_eq!(
+                in_callback.admit_lifecycle(&next, tick(1)),
+                Err(ContextPortFailure::Stale)
+            );
+            assert!(!in_callback.acquisition_current(next.lease().unwrap(), tick(1)));
+            let _ = rows
+                .dispatch_refused(next, ContextPortFailure::Stale)
+                .unwrap();
+            assert_eq!(
+                rows.phase(in_callback.resource()).unwrap(),
+                zephium_agentic::WorkBrowserResourcePhase::Retained
+            );
         })),
     }
     .complete(drained());
     assert_eq!(admission.pending(), Some(0));
     assert!(guard.is_healthy());
+    assert!(!guard.execution_reserved());
+    let receipt = ticket.lock().unwrap().try_take().unwrap().unwrap();
+    let proof = terminal
+        .lock()
+        .unwrap()
+        .take()
+        .unwrap()
+        .join_delivery(receipt)
+        .unwrap();
+    assert_eq!(proof.lease(), &lease);
+    assert!(!admission.work_is_absent());
+    admission.verify_native_shutdown(zero());
+    assert!(!admission.state.lock().unwrap().native_shutdown_verified);
+    assert_eq!(
+        admission.retire_for_successor(),
+        Err(ContextPortFailure::ProfileBusy)
+    );
+}
+
+#[test]
+fn enqueue_then_block_keeps_delivery_pending_and_successor_closed_until_physical_return() {
+    let (mut rows, admission, guard) = setup();
+    let lease = leased(&mut rows, &guard);
+    let (request, mut ticket) = rows.revoke_with_delivery(&lease).unwrap();
+    guard.admit_lifecycle(&request, tick(1)).unwrap();
+    let rows = Arc::new(Mutex::new(rows));
+    let during_rows = rows.clone();
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+    let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(1);
+    let task = WorkLifecycleTask {
+        request: Some(request),
+        guard: guard.clone(),
+        permit: admission.reserve().unwrap(),
+        completion: Some(Box::new(move |completion| {
+            let WorkBrowserResourceEvent::LeaseEnded(ended) = during_rows
+                .lock()
+                .unwrap()
+                .settle_at(completion, tick(2))
+                .unwrap()
+            else {
+                panic!("core receipt precedes physical return");
+            };
+            entered_tx.send(ended).unwrap();
+            resume_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+        })),
+    };
+    let running = std::thread::spawn(move || task.complete(drained()));
+    let ended = entered_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    assert!(ticket.try_take().unwrap().is_none());
+    assert_eq!(admission.pending(), Some(1));
+    assert!(guard.execution_reserved());
+    assert!(!guard.callbacks_drained());
+    let next = rows
+        .lock()
+        .unwrap()
+        .acquire(
+            guard.resource(),
+            ContextRunId::generate(),
+            tick(3),
+            tick(1_000_000),
+        )
+        .unwrap();
+    assert_eq!(
+        guard.admit_lifecycle(&next, tick(3)),
+        Err(ContextPortFailure::Stale)
+    );
+    assert!(!guard.acquisition_current(next.lease().unwrap(), tick(3)));
+    let _ = rows
+        .lock()
+        .unwrap()
+        .dispatch_refused(next, ContextPortFailure::Stale)
+        .unwrap();
+    admission.verify_native_shutdown(zero());
+    assert!(!admission.state.lock().unwrap().native_shutdown_verified);
+    assert_eq!(
+        admission.retire_for_successor(),
+        Err(ContextPortFailure::ProfileBusy)
+    );
+    resume_tx.send(()).unwrap();
+    running.join().unwrap();
+    let proof = ended
+        .join_delivery(ticket.try_take().unwrap().unwrap())
+        .unwrap();
+    assert_eq!(proof.lease(), &lease);
+    assert_eq!(admission.pending(), Some(0));
+    assert!(guard.callbacks_drained());
+    assert!(!guard.execution_reserved());
+    let next = rows
+        .lock()
+        .unwrap()
+        .acquire(
+            guard.resource(),
+            ContextRunId::generate(),
+            tick(4),
+            tick(1_000_000),
+        )
+        .unwrap();
+    guard.admit_lifecycle(&next, tick(4)).unwrap();
+    assert!(guard.acquisition_current(next.lease().unwrap(), tick(4)));
+}
+
+#[test]
+fn callback_enqueue_then_panic_cannot_publish_delivery_or_admit_successor() {
+    let (mut rows, admission, guard) = setup();
+    let lease = leased(&mut rows, &guard);
+    let (request, mut ticket) = rows.revoke_with_delivery(&lease).unwrap();
+    guard.admit_lifecycle(&request, tick(1)).unwrap();
+    let terminal = Arc::new(Mutex::new(None));
+    let during = terminal.clone();
+    WorkLifecycleTask {
+        request: Some(request),
+        guard: guard.clone(),
+        permit: admission.reserve().unwrap(),
+        completion: Some(Box::new(move |completion| {
+            let WorkBrowserResourceEvent::LeaseEnded(ended) =
+                rows.settle_at(completion, tick(2)).unwrap()
+            else {
+                panic!("lease ended");
+            };
+            *during.lock().unwrap() = Some(ended);
+            panic!("terminal enqueued but receiver did not return normally");
+        })),
+    }
+    .complete(drained());
+    let receipt = ticket.try_take().unwrap().unwrap();
+    assert!(!receipt.returned());
+    assert!(terminal
+        .lock()
+        .unwrap()
+        .take()
+        .unwrap()
+        .join_delivery(receipt)
+        .is_err());
+    assert!(!guard.is_healthy());
+    assert_eq!(admission.pending(), Some(0));
+    assert!(
+        guard.callbacks_drained(),
+        "physical unwind still permits later destruction"
+    );
+    assert!(!admission.state.lock().unwrap().invariant_failed);
+    assert_eq!(
+        admission.retire_for_successor(),
+        Err(ContextPortFailure::ProfileBusy)
+    );
+}
+
+#[test]
+fn accepted_discard_or_consumer_loss_cannot_publish_delivery_success() {
+    for discard_task in [false, true] {
+        let (mut rows, admission, guard) = setup();
+        let lease = leased(&mut rows, &guard);
+        let (request, ticket) = rows.revoke_with_delivery(&lease).unwrap();
+        guard.admit_lifecycle(&request, tick(1)).unwrap();
+        let task = WorkLifecycleTask {
+            request: Some(request),
+            guard: guard.clone(),
+            permit: admission.reserve().unwrap(),
+            completion: Some(Box::new(move |completion| {
+                let _ = rows.settle_at(completion, tick(2)).unwrap();
+            })),
+        };
+        if discard_task {
+            drop(task);
+            let mut ticket = ticket;
+            assert!(!ticket.try_take().unwrap().unwrap().returned());
+        } else {
+            drop(ticket);
+            task.complete(drained());
+        }
+        assert!(!guard.is_healthy());
+        assert_eq!(admission.pending(), Some(0));
+        assert!(guard.callbacks_drained());
+        assert!(!admission.work_is_absent());
+    }
+}
+
+#[test]
+fn legacy_revoke_without_ticket_keeps_same_physical_delivery_admission_barrier() {
+    let (mut rows, admission, guard) = setup();
+    let lease = leased(&mut rows, &guard);
+    let request = rows.revoke(&lease).unwrap();
+    guard.admit_lifecycle(&request, tick(1)).unwrap();
+    let rows = Arc::new(Mutex::new(rows));
+    let during_rows = rows.clone();
+    let during_guard = guard.clone();
+    WorkLifecycleTask {
+        request: Some(request),
+        guard: guard.clone(),
+        permit: admission.reserve().unwrap(),
+        completion: Some(Box::new(move |completion| {
+            let mut rows = during_rows.lock().unwrap();
+            assert!(matches!(
+                rows.settle_at(completion, tick(2)).unwrap(),
+                WorkBrowserResourceEvent::LeaseEnded(_)
+            ));
+            let next = rows
+                .acquire(
+                    during_guard.resource(),
+                    ContextRunId::generate(),
+                    tick(3),
+                    tick(1_000_000),
+                )
+                .unwrap();
+            assert_eq!(
+                during_guard.admit_lifecycle(&next, tick(3)),
+                Err(ContextPortFailure::Stale)
+            );
+            assert!(!during_guard.acquisition_current(next.lease().unwrap(), tick(3)));
+            let _ = rows
+                .dispatch_refused(next, ContextPortFailure::Stale)
+                .unwrap();
+            assert!(during_guard.execution_reserved());
+        })),
+    }
+    .complete(drained());
+    assert_eq!(admission.pending(), Some(0));
+    assert!(guard.is_healthy());
+    assert!(!guard.execution_reserved());
+    let next = rows
+        .lock()
+        .unwrap()
+        .acquire(
+            guard.resource(),
+            ContextRunId::generate(),
+            tick(4),
+            tick(1_000_000),
+        )
+        .unwrap();
+    guard.admit_lifecycle(&next, tick(4)).unwrap();
+    assert!(guard.acquisition_current(next.lease().unwrap(), tick(4)));
+}
+
+#[test]
+fn post_receipt_shutdown_quarantine_or_permit_uncertainty_cannot_publish_delivery() {
+    for failure in 0..3 {
+        let (mut rows, admission, guard) = setup();
+        let lease = leased(&mut rows, &guard);
+        let (request, mut ticket) = rows.revoke_with_delivery(&lease).unwrap();
+        guard.admit_lifecycle(&request, tick(1)).unwrap();
+        let during_guard = guard.clone();
+        let during_admission = admission.clone();
+        WorkLifecycleTask {
+            request: Some(request),
+            guard: guard.clone(),
+            permit: admission.reserve().unwrap(),
+            completion: Some(Box::new(move |completion| {
+                assert!(matches!(
+                    rows.settle_at(completion, tick(2)).unwrap(),
+                    WorkBrowserResourceEvent::LeaseEnded(_)
+                ));
+                match failure {
+                    0 => during_admission.seal(),
+                    1 => during_guard.fail(),
+                    _ => during_admission.release(), // Adversarial lost original permit count.
+                }
+            })),
+        }
+        .complete(drained());
+        assert!(!ticket.try_take().unwrap().unwrap().returned());
+        assert!(!guard.is_healthy());
+        assert!(!admission.work_is_absent());
+        assert_eq!(
+            admission.pending(),
+            if failure == 2 { None } else { Some(0) }
+        );
+        assert!(!admission.state.lock().unwrap().native_shutdown_verified);
+    }
+}
+
+#[test]
+fn expired_abandoned_wait_keeps_original_callback_debt_until_late_return() {
+    let (mut rows, admission, guard) = setup();
+    let resource = guard.resource().clone();
+    let lease = leased(&mut rows, &guard);
+    let (request, mut ticket) = rows.revoke_with_delivery(&lease).unwrap();
+    guard.admit_lifecycle(&request, tick(1)).unwrap();
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+    let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(1);
+    let task = WorkLifecycleTask {
+        request: Some(request),
+        guard: guard.clone(),
+        permit: admission.reserve().unwrap(),
+        completion: Some(Box::new(move |completion| {
+            assert!(matches!(
+                rows.settle_at(completion, tick(1_000_001)).unwrap(),
+                WorkBrowserResourceEvent::LeaseEnded(_)
+            ));
+            assert!(rows
+                .acquire(
+                    &resource,
+                    ContextRunId::generate(),
+                    tick(1_000_001),
+                    tick(1_000_000)
+                )
+                .is_err());
+            entered_tx.send(()).unwrap();
+            resume_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+        })),
+    };
+    let running = std::thread::spawn(move || task.complete(drained()));
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    assert!(ticket.try_take().unwrap().is_none());
+    drop(ticket); // Owner's wait deadline/cancellation does not cancel native debt.
+    assert_eq!(admission.pending(), Some(1));
+    assert!(guard.execution_reserved());
+    assert!(!guard.callbacks_drained());
+    resume_tx.send(()).unwrap();
+    running.join().unwrap();
+    assert_eq!(admission.pending(), Some(0));
+    assert!(guard.callbacks_drained());
+    assert!(!guard.is_healthy());
+    assert!(!admission.work_is_absent());
 }
 
 #[test]

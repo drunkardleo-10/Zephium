@@ -7,9 +7,10 @@ use std::sync::OnceLock;
 use std::time::Instant;
 use zephium_agentic::{
     AgentPolicyInstant, ContextId, ContextNavigationTarget, ContextProfileStorageClass,
-    WorkBrowserExecutionLease, WorkBrowserObservationCompletionCallback,
-    WorkBrowserObservationDispatch, WorkBrowserObservationRequest,
-    WorkBrowserResourceCompletionCallback, WorkBrowserResourceDispatch, WorkBrowserResourceJoin,
+    WorkBrowserExecutionLease, WorkBrowserLeaseDeliveryCompletion,
+    WorkBrowserObservationCompletionCallback, WorkBrowserObservationDispatch,
+    WorkBrowserObservationRequest, WorkBrowserResourceCompletionCallback,
+    WorkBrowserResourceDispatch, WorkBrowserResourceJoin,
     WorkBrowserResourceNativeOutcome as Outcome, WorkBrowserResourceOperation as Operation,
     WorkBrowserResourceRequest, MAX_LIVE_CONTEXTS,
 };
@@ -38,6 +39,9 @@ struct State {
     phase: Phase,
     construction_pending: bool,
     lease: Option<WorkBrowserExecutionLease>,
+    // The lease terminal can transfer before its physical callback returns.
+    // Keep that exact delivery reservation separate from the active lease.
+    retirement_delivery: Option<WorkBrowserExecutionLease>,
     reads: usize,
     callbacks: usize,
     uncertain: bool,
@@ -69,6 +73,7 @@ impl WorkResourceGuard {
                 phase: Phase::Constructing,
                 construction_pending: true,
                 lease: None,
+                retirement_delivery: None,
                 reads: 0,
                 callbacks: 0,
                 uncertain: false,
@@ -158,6 +163,7 @@ impl WorkResourceGuard {
                 if state.phase == Phase::Retained
                     && !state.uncertain
                     && state.lease.is_none()
+                    && state.retirement_delivery.is_none()
                     && state.reads == 0
                     && state.callbacks == 0 =>
             {
@@ -169,10 +175,11 @@ impl WorkResourceGuard {
                 state.phase = Phase::Acquiring;
             }
             Operation::Revoke if state.phase == Phase::Leased || state.phase == Phase::Revoking => {
-                if state.lease.as_ref() != request.lease() {
+                if state.lease.as_ref() != request.lease() || state.retirement_delivery.is_some() {
                     return Err(ContextPortFailure::Stale);
                 }
                 state.phase = Phase::Revoking;
+                state.retirement_delivery = request.lease().cloned();
             }
             Operation::Destroy
                 if state.phase != Phase::Destroyed && state.phase != Phase::Destroying =>
@@ -192,6 +199,7 @@ impl WorkResourceGuard {
             && self.state.lock().is_ok_and(|state| {
                 !state.uncertain
                     && state.phase == Phase::Leased
+                    && state.retirement_delivery.is_none()
                     && state.callbacks == 0
                     && state.lease.as_ref() == Some(lease)
                     && now < lease.deadline()
@@ -206,21 +214,23 @@ impl WorkResourceGuard {
             && self.state.lock().is_ok_and(|state| {
                 !state.uncertain
                     && state.phase == Phase::Acquiring
+                    && state.retirement_delivery.is_none()
                     && state.callbacks == 0
                     && state.lease.as_ref() == Some(lease)
                     && now < lease.deadline()
             })
     }
     pub(crate) fn execution_reserved(&self) -> bool {
-        self.state
-            .lock()
-            .map_or(true, |state| state.lease.is_some())
+        self.state.lock().map_or(true, |state| {
+            state.lease.is_some() || state.retirement_delivery.is_some()
+        })
     }
     pub(crate) fn lease_drained(&self, lease: &WorkBrowserExecutionLease) -> bool {
         self.state.lock().is_ok_and(|state| {
             !state.uncertain
                 && state.phase == Phase::Revoking
                 && state.lease.as_ref() == Some(lease)
+                && state.retirement_delivery.as_ref() == Some(lease)
                 && state.reads == 0
                 && state.callbacks == 0
         })
@@ -228,6 +238,7 @@ impl WorkResourceGuard {
     pub(crate) fn callbacks_drained(&self) -> bool {
         self.state.lock().is_ok_and(|state| {
             !state.construction_pending
+                && state.retirement_delivery.is_none()
                 && state.reads == 0
                 && state.callbacks == 0
                 && !state.notification_pending
@@ -359,9 +370,14 @@ impl WorkResourceGuard {
             {
                 state.phase = Phase::Retained;
                 state.lease = None;
+                // Native Acquire remains closed until the exact callback and
+                // its task permit have finished, even for legacy consumers.
             }
             (Operation::Destroy, Outcome::Destroyed)
-                if !state.construction_pending && state.reads == 0 && state.callbacks == 0 =>
+                if !state.construction_pending
+                    && state.retirement_delivery.is_none()
+                    && state.reads == 0
+                    && state.callbacks == 0 =>
             {
                 state.phase = Phase::Destroyed;
                 state.lease = None;
@@ -372,6 +388,43 @@ impl WorkResourceGuard {
                     state.phase = Phase::Quarantined;
                 }
             }
+        }
+    }
+    fn finish_revocation_delivery(
+        &self,
+        lease: &WorkBrowserExecutionLease,
+        callback_returned: bool,
+        permit_released: bool,
+        delivery: Option<WorkBrowserLeaseDeliveryCompletion>,
+    ) {
+        let port_open = self.port_open();
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let exact = state.retirement_delivery.as_ref() == Some(lease);
+        let retained = exact
+            && callback_returned
+            && permit_released
+            && port_open
+            && !state.uncertain
+            && state.phase == Phase::Retained
+            && state.lease.is_none()
+            && state.reads == 0
+            && state.callbacks == 0;
+        // Publication only mutates the exact fixed atomic slot. No callback or
+        // wake runs here. Acquire cannot observe an open gate before publication.
+        let published = retained && delivery.is_none_or(|owner| owner.publish_returned());
+        if !published {
+            state.uncertain = true;
+            if !matches!(state.phase, Phase::Destroying | Phase::Destroyed) {
+                state.phase = Phase::Quarantined;
+            }
+        }
+        if exact && permit_released {
+            // Failure still remains quarantined; physical return may release
+            // this debt so original resource destruction can subsequently drain.
+            state.retirement_delivery = None;
         }
     }
     fn not_admitted(&self, request: &WorkBrowserResourceRequest) {
@@ -387,6 +440,11 @@ impl WorkResourceGuard {
                 state.phase = Phase::Retained;
             }
         } else {
+            if request.operation() == Operation::Revoke
+                && state.retirement_delivery.as_ref() == request.lease()
+            {
+                state.retirement_delivery = None;
+            }
             state.uncertain = true;
             if state.phase != Phase::Destroyed {
                 state.phase = Phase::Quarantined;
@@ -477,25 +535,34 @@ impl WorkLifecycleTask {
         self.deliver(outcome);
     }
     fn deliver(&mut self, outcome: Outcome) {
-        let Some(request) = self.request.take() else {
+        let Some(mut request) = self.request.take() else {
             return;
         };
         let construction = request.operation() == Operation::Construct;
+        let revocation = (request.operation() == Operation::Revoke)
+            .then(|| request.lease().cloned())
+            .flatten();
+        let delivery = request.take_lease_delivery_completion();
         self.guard.outcome(&request, outcome);
         // Moving this request into the FnOnce argument transfers its sole
         // lease-bearing terminal owner to the application at callback entry.
-        // It is not an additional lease callback owed by the native page.
-        // Keep the shared task permit (and destruction ingress row) until the
-        // call returns, preventing reentrant global audit/successor zero proof.
-        if let Some(completion) = self.completion.take() {
+        // The physical delivery remains independently owned until return. Keep
+        // its exact reservation and shared task permit, preventing early scoped
+        // drain, native acquisition, destruction, or global-zero proof.
+        let callback_returned = if let Some(completion) = self.completion.take() {
             if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 completion(request.complete(outcome))
             }))
             .is_err()
             {
                 self.guard.fail();
+                false
+            } else {
+                true
             }
-        }
+        } else {
+            false
+        };
         if outcome == Outcome::Destroyed {
             let mut ingress = self
                 .permit
@@ -516,7 +583,15 @@ impl WorkLifecycleTask {
             }
         }
         self.permit.release();
-        if construction && self.guard.destruction_started() {
+        if let Some(lease) = &revocation {
+            self.guard.finish_revocation_delivery(
+                lease,
+                callback_returned,
+                self.permit.released && self.permit.admission.counts().is_some(),
+                delivery,
+            );
+        }
+        if (construction || revocation.is_some()) && self.guard.destruction_started() {
             crate::host::notify_work_resource(self.guard.clone());
         }
     }

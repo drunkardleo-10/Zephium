@@ -18,6 +18,24 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
 
 const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
     (
+        "crates/zephium-agentic/src/work_browser_delivery.rs",
+        &[
+            "Arc::ptr_eq(&self.0,&other.0)",
+            "DeliveryBinding(Arc::new(AtomicU8::new(PENDING)))",
+            "PENDING=>Ok(None)",
+            "compare_exchange(state,CONSUMED,Ordering::AcqRel,Ordering::Acquire)",
+            "(state!=CONSUMED&&state!=ABANDONED).then_some(ABANDONED)",
+            "compare_exchange(PENDING,RETURNED,Ordering::AcqRel,Ordering::Acquire)",
+            "compare_exchange(PENDING,UNPROVEN,Ordering::AcqRel,Ordering::Acquire)",
+            "receipt.returned&&self.lease==receipt.lease&&self.delivery.as_ref().is_some_and(|binding|binding.matches(&receipt.binding))",
+            "Err(Box::new(WorkBrowserLeaseDeliveryRefusal{ended:self,receipt,}))",
+        ],
+        &[
+            "AgentNativeShutdownProof", "AgentBrowserShutdownOutcome", "Serialize", "Deserialize",
+            "std::thread", "tokio::", "Condvar", "FnOnce", "is_clean(",
+        ],
+    ),
+    (
         "crates/zephium-engine/src/agent_work_resource_probe_port.rs",
         &[
             "self.resource==next.resource", "self.view==next.view", "self.world==next.world", "self.document==next.document",
@@ -83,7 +101,7 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "request.document()!=self.document.as_ref()",
             "construction_pending:true",
             "state.phase==Phase::Constructing&&state.construction_pending&&!state.uncertain",
-            "!state.construction_pending&&state.reads==0&&state.callbacks==0&&!state.notification_pending",
+            "!state.construction_pending&&state.retirement_delivery.is_none()&&state.reads==0&&state.callbacks==0&&!state.notification_pending",
             "letremove=guard.construction_returned()",
             "self.admission.work_construction_returned(&guard)",
             "state.phase=Phase::Revoking",
@@ -96,6 +114,16 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "self.guard.read_terminal_begin()",
             "self.guard.read_terminal_end()",
             "self.permit.release()",
+            "state.phase==Phase::Retained&&!state.uncertain&&state.lease.is_none()&&state.retirement_delivery.is_none()",
+            "state.phase==Phase::Acquiring&&state.retirement_delivery.is_none()",
+            "state.lease.is_some()||state.retirement_delivery.is_some()",
+            "state.retirement_delivery.as_ref()==Some(lease)",
+            "exact&&callback_returned&&permit_released&&port_open&&!state.uncertain&&state.phase==Phase::Retained",
+            "letpublished=retained&&delivery.is_none_or(|owner|owner.publish_returned())",
+            "ifexact&&permit_released{",
+            "self.permit.release();ifletSome(lease)=&revocation{self.guard.finish_revocation_delivery(",
+            "self.permit.released&&self.permit.admission.counts().is_some()",
+            "(construction||revocation.is_some())&&self.guard.destruction_started()",
             "Arc::ptr_eq(current,guard)",
             "ingress.rows.len()>=MAX_LIVE_CONTEXTS",
             ">=zephium_agentic::MAX_EXECUTING_CONTEXTS",

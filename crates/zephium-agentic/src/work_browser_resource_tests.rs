@@ -61,6 +61,164 @@ fn drained() -> WorkBrowserResourceNativeOutcome {
         resource_retained: true,
     }
 }
+
+fn ended(
+    registry: &mut WorkBrowserResources,
+    request: WorkBrowserResourceRequest,
+) -> WorkBrowserLeaseEnded {
+    match registry.settle(request.complete(drained())).unwrap() {
+        WorkBrowserResourceEvent::LeaseEnded(ended) => ended,
+        _ => panic!("exact lease ended"),
+    }
+}
+
+#[test]
+fn delivery_requires_normal_native_return_beside_exact_core_terminal_and_consumes_once() {
+    let mut rows = registry();
+    let resource = create(&mut rows, 301);
+    let lease = acquire(&mut rows, &resource, 302);
+    let (mut request, mut ticket) = rows.revoke_with_delivery(&lease).unwrap();
+    let native = request.take_lease_delivery_completion().unwrap();
+    assert!(request.take_lease_delivery_completion().is_none());
+    let ended = ended(&mut rows, request);
+    assert!(ticket.try_take().unwrap().is_none());
+    assert!(!rows.is_quiescent());
+    assert!(native.publish_returned());
+    let receipt = ticket.try_take().unwrap().unwrap();
+    assert!(receipt.returned());
+    assert_eq!(
+        ticket.try_take().unwrap_err(),
+        WorkBrowserLeaseDeliveryPollError::Consumed
+    );
+    let proof = ended.join_delivery(receipt).unwrap();
+    assert_eq!(proof.lease(), &lease);
+    assert!(!rows.is_quiescent());
+    assert!(rows.observe_initial(&lease, tick(2)).is_err());
+    destroy(&mut rows, &resource);
+}
+
+#[test]
+fn delivery_unhandled_adapter_or_dropped_native_half_is_never_returned() {
+    for explicitly_taken in [false, true] {
+        let mut rows = registry();
+        let resource = create(&mut rows, 303);
+        let lease = acquire(&mut rows, &resource, 304);
+        let (mut request, mut ticket) = rows.revoke_with_delivery(&lease).unwrap();
+        if explicitly_taken {
+            drop(request.take_lease_delivery_completion());
+        }
+        let ended = ended(&mut rows, request);
+        let receipt = ticket.try_take().unwrap().unwrap();
+        assert!(!receipt.returned());
+        let refusal = ended.join_delivery(receipt).unwrap_err();
+        let (ended, receipt) = refusal.into_parts();
+        assert_eq!(ended.lease(), &lease);
+        assert!(!receipt.returned());
+        assert!(!rows.is_quiescent());
+    }
+}
+
+#[test]
+fn delivery_consumer_loss_cannot_acknowledge_normal_return() {
+    let mut rows = registry();
+    let resource = create(&mut rows, 305);
+    let lease = acquire(&mut rows, &resource, 306);
+    let (mut request, ticket) = rows.revoke_with_delivery(&lease).unwrap();
+    let native = request.take_lease_delivery_completion().unwrap();
+    drop(ticket);
+    assert!(!native.publish_returned());
+    let _ended = ended(&mut rows, request);
+    assert!(!rows.is_quiescent());
+}
+
+#[test]
+fn delivery_same_public_lease_cannot_substitute_another_private_request_slot() {
+    let mut rows = registry();
+    let resource = create(&mut rows, 307);
+    let lease = acquire(&mut rows, &resource, 308);
+    let (mut request, mut ticket) = rows.revoke_with_delivery(&lease).unwrap();
+    let native = request.take_lease_delivery_completion().unwrap();
+    let (mut foreign, mut foreign_ticket) = delivery::track(lease.clone());
+    assert!(foreign.completion.take().unwrap().publish_returned());
+    let ended = ended(&mut rows, request);
+    let foreign_receipt = foreign_ticket.try_take().unwrap().unwrap();
+    let refusal = ended.join_delivery(foreign_receipt).unwrap_err();
+    let (ended, _) = refusal.into_parts();
+    assert!(native.publish_returned());
+    let proof = ended
+        .join_delivery(ticket.try_take().unwrap().unwrap())
+        .unwrap();
+    assert_eq!(proof.lease(), &lease);
+}
+
+#[test]
+fn delivery_legacy_lease_terminal_cannot_join_a_tracked_slot() {
+    let mut rows = registry();
+    let resource = create(&mut rows, 309);
+    let lease = acquire(&mut rows, &resource, 310);
+    let request = rows.revoke(&lease).unwrap();
+    let ended = ended(&mut rows, request);
+    let (mut foreign, mut ticket) = delivery::track(lease);
+    assert!(foreign.completion.take().unwrap().publish_returned());
+    assert!(ended
+        .join_delivery(ticket.try_take().unwrap().unwrap())
+        .is_err());
+}
+
+#[test]
+fn delivery_stale_lease_receipts_refuse_without_losing_either_exact_owner() {
+    let mut rows = registry();
+    let resource = create(&mut rows, 311);
+    let lease_a = acquire(&mut rows, &resource, 312);
+    let (mut request_a, mut ticket_a) = rows.revoke_with_delivery(&lease_a).unwrap();
+    let native_a = request_a.take_lease_delivery_completion().unwrap();
+    let ended_a = ended(&mut rows, request_a);
+    assert!(native_a.publish_returned());
+    let lease_b = acquire(&mut rows, &resource, 313);
+    let (mut request_b, mut ticket_b) = rows.revoke_with_delivery(&lease_b).unwrap();
+    let native_b = request_b.take_lease_delivery_completion().unwrap();
+    let ended_b = ended(&mut rows, request_b);
+    assert!(native_b.publish_returned());
+    let refused = ended_a
+        .join_delivery(ticket_b.try_take().unwrap().unwrap())
+        .unwrap_err();
+    let (ended_a, receipt_b) = refused.into_parts();
+    assert_eq!(ended_b.join_delivery(receipt_b).unwrap().lease(), &lease_b);
+    assert_eq!(
+        ended_a
+            .join_delivery(ticket_a.try_take().unwrap().unwrap())
+            .unwrap()
+            .lease(),
+        &lease_a
+    );
+    assert!(!rows.is_quiescent());
+}
+
+#[test]
+fn delivery_synchronous_non_admission_retains_refusal_without_a_callback_proof() {
+    let mut rows = registry();
+    let resource = create(&mut rows, 314);
+    let lease = acquire(&mut rows, &resource, 315);
+    let (request, mut ticket) = rows.revoke_with_delivery(&lease).unwrap();
+    assert!(matches!(
+        rows.dispatch_refused(request, ContextPortFailure::Unsupported)
+            .unwrap(),
+        WorkBrowserResourceEvent::AdmissionRefused {
+            operation: WorkBrowserResourceOperation::Revoke,
+            failure: ContextPortFailure::Unsupported,
+            ..
+        }
+    ));
+    assert_eq!(
+        rows.phase(&resource).unwrap(),
+        WorkBrowserResourcePhase::Quarantined
+    );
+    assert!(!ticket.try_take().unwrap().unwrap().returned());
+    assert!(rows
+        .acquire(&resource, ContextRunId::from_raw(316), tick(2), tick(100))
+        .is_err());
+    assert!(!rows.is_quiescent());
+}
 fn destroy(registry: &mut WorkBrowserResources, resource: &WorkBrowserResourceJoin) {
     let request = registry.destroy(resource).unwrap();
     assert!(matches!(
@@ -310,6 +468,7 @@ fn wrong_phase_duplicate_and_old_incarnation_receipts_cannot_reopen_resources() 
     let duplicate = WorkBrowserResourceCompletion {
         operation: request.operation.clone(),
         outcome: WorkBrowserResourceNativeOutcome::Acquired,
+        delivery: None,
     };
     assert!(matches!(
         registry

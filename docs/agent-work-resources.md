@@ -115,13 +115,45 @@ stay resource-owned. Coalesced resource notifications share the original native
 task queue ceiling; they are not a new unbounded queue.
 
 The lifecycle terminal itself has move-only transfer semantics: at invocation
-of its `FnOnce` receiver the exact request/receipt is application-owned, so the
-native resource no longer owes that lease callback. The shared native delivery
-permit remains held until the receiver returns. Destruction also retains its
-ingress row through that return. Thus a receiver may account `LeaseEnded` and
-request another lease, but cannot produce reentrant global-zero or successor
-proof while native delivery is still active. Read callbacks, unlike this
-ownership-transfer terminal, retain explicit lease callback debt through return.
+of its `FnOnce` receiver the exact request/receipt is application-owned. This
+does **not** prove physical callback delivery has finished. Native revocation
+retains an exact lease-bound delivery reservation and the original shared task
+permit until the receiver returns. Even the legacy, untracked revoke path
+cannot admit or execute another native Acquire during that interval. Read
+callbacks retain explicit lease callback debt through return. Destruction also
+waits for revocation delivery and retains its own ingress row through return.
+
+`revoke_with_delivery` additionally creates one fixed, move-only poll/consume
+ticket. The native adapter takes its completion half from the original request;
+only after normal callback return, exact task-permit release and a healthy
+retained-resource recheck can it publish. Publication is a single atomic-slot
+transition under the resource admission guard, not a second callback requiring
+another delivery proof. Polling is nonblocking; the eventual application owner
+must use bounded wake-driven polling outside the revocation callback, not spin
+or synchronously wait there. An unhandled/dropped completion publishes an
+unproven result. Consumer loss before publication, callback panic or uncertain
+task release cannot reopen native execution. Discarding an already-published
+ticket grants no product successor authority either. The original resource
+remains available for explicit cleanup; a cancelled wait cannot erase an active
+callback obligation.
+
+The ticket can be consumed once. Joining its receipt with `LeaseEnded` checks
+the exact lease and private request-allocation binding; foreign, stale,
+untracked or unproven receipts fail losslessly. The resulting
+`WorkBrowserLeaseDeliveryProof` means only exact lease retirement plus physical
+revocation-delivery drain. It is not current resource health, worker/run closure,
+durable terminal acknowledgement, task success or global native shutdown, and
+has no conversion to those authorities. No controller/runtime or global
+lifecycle enum is changed by this proof cut.
+
+The core may reach `Retained` at `LeaseEnded`; **that is not product run-B
+admission**. An early logical Acquire is losslessly refused by native ingress;
+the caller must account its returned exact request to restore core `Retained`.
+The eventual product join must require delivery proof and independently scoped
+run/worker closure, durable terminal acknowledgement, fresh task/policy/account
+admission and current resource health before another actor. Those joins remain
+unimplemented. A retained page still refuses global-zero and legacy successor
+proof even after its delivery ticket is consumed successfully.
 
 Construction admission publishes an outstanding-constructor obligation before
 calling the main-thread dispatcher. Destruction seals that exact resource's
@@ -246,6 +278,32 @@ reservation, no early Destroyed event, and exact final original-owner zero are
 asserted. They cover overtaking construction, host-retained construction and
 synchronous non-admission; they do not execute a real AppKit page or qualify
 the then-pending two-lease witness. No GUI or provider run accompanied this fix.
+
+### Physical revocation-delivery proof cut (2026-09-06)
+
+The tracked poll/consume barrier and native admission closure described above
+pass 30 focused core resource/read/delivery schedules and 24 native ownership
+schedules. New adversaries hold the real callback after enqueueing `LeaseEnded`,
+attempt reentrant and concurrent early Acquire, panic after terminal transfer,
+discard an accepted task or waiting ticket, and inject expired/cancelled waits,
+port sealing, resource quarantine and uncertain task release. Exact private-slot
+substitution, stale-lease cross-joins, unhandled adapters, synchronous refusal
+and double consumption cannot establish delivery proof. The untracked legacy
+revoke has the same physical callback-return barrier. The tests directly assert
+that retained resources refuse global shutdown verification and legacy
+succession, including after an exact delivery proof has been consumed.
+
+Full regression gates pass: core `probe-harness` 524 + 3 + 5; ordinary agentic
+engine 492; resource/foreground-feature engine 539; strict all-target core and
+both engine configurations; both architecture commands and hostile semantic
+JavaScript smoke; two resource and six foreground architecture mutation tests;
+workspace fmt/diff checks and default Browse dependency isolation. Eight
+loopback fixture tests initially hit sandbox socket-permission errors; the same
+full core suite passed with loopback permission, without code changes. These
+are deterministic/build checks only. No GUI/native witness or provider run
+accompanied this proof cut, and the earlier qualified witness retains its own
+pinned source and evidence boundary. Scoped run/worker/durable closure and
+product B admission are still subsequent integration work.
 
 ## Actual-application retention witness
 
