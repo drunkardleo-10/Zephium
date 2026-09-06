@@ -460,3 +460,42 @@ checkpoint; the concrete fourth witness's uncaptured preflight predicate is
 still not retroactively assigned. The next independently reviewed native run
 must use this exact bundle and preserve all original qualification and teardown
 requirements, including the separate first-failure and cleanup evidence.
+
+## Exact geometry refusal and paired AppKit normalization evidence
+
+On 2026-09-06, the creator-side reviewer launched the independently reviewed
+application from clean source `6a70fbbe82455cce6e0ac581c009308667e853ee`, with the
+executable SHA-256 `5daae5d8a740fdfee748acf1e614862c878acc659ccacb09f2763b3a11a59f31`.
+Exact start UTC was not supplied. stdout was empty; the complete supplied
+content-free diagnostic output was:
+
+```text
+work-rendering-admission: outcome=Admitted waited_ms=0 checks=1
+work-rendering-native-failures: available=true primary=Some(ForegroundNativeFailure { phase: Poll, predicate: OnScreenFrame }) cleanup=None
+work-rendering-provisional: outcome=rendering_refused cleanup_failure=None native_cohort_clean=true human_ownership_preserved=true fixture_clean=true elapsed_ms=517
+work-rendering-closure: qualified=false normal_shutdown_clean=false exact_native_weak_drain=Some(true)
+```
+
+This run reached native presentation and retained its exact failed predicate.
+Unlike the preceding unclosed-cohort failure, exact native/fixture cleanup,
+human ownership and post-shutdown weak-native drain were proven. The refused
+qualification still reports normal-shutdown success as false; native cleanup
+alone must not turn a rendering refusal into a successful qualification. No
+RAF or real-site rendering success is established.
+
+The reviewer independently supplied two minimal, provider-free AppKit geometry
+comparisons on this display. Its visible screen rectangle was
+`(0.0, 0.0, 1280.0, 803.0)`. The current centering calculation requested a
+borderless surface at `(0.0, 1.5, 1280.0, 800.0)`; after construction and
+ordering, AppKit reported `(0.0, 1.0, 1280.0, 801.0)`. Flooring the requested
+origin instead produced `(0.0, 1.0, 1280.0, 800.0)`, which AppKit preserved
+exactly. Both reported visible=true and occlusion raw=8194. These paired results
+isolate a point/pixel normalization defect in the current placement calculation
+on this display, not a justification to admit an enlarged or clipped viewport.
+
+A separate supplied Swift comparison used a foreground AppKit application with
+a visible key/main host and an unattached 1280-by-800 WKWebView. Load and a
+zero-delay timer completed; RAF did not. This reinforces the earlier hidden-view
+boundary: foreground application ownership alone does not establish rendering
+opportunity for an unattached page. Neither throwaway comparison uses the Work
+adapter or qualifies Work semantic rendering, isolation or teardown.
