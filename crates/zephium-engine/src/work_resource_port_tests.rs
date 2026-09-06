@@ -647,6 +647,126 @@ fn accepted_discard_or_consumer_loss_cannot_publish_delivery_success() {
 }
 
 #[test]
+fn delivery_notification_reenters_outside_native_lock_without_opening_acquire_or_global_zero() {
+    struct Listener {
+        rows: Arc<Mutex<WorkBrowserResources>>,
+        guard: Arc<WorkResourceGuard>,
+        admission: Arc<AgentPortAdmission>,
+        panic: bool,
+        wakes: std::sync::atomic::AtomicUsize,
+    }
+    impl std::task::Wake for Listener {
+        fn wake(self: Arc<Self>) {
+            assert!(
+                self.guard.state.try_lock().is_ok(),
+                "notification under native mutex"
+            );
+            assert!(self.guard.execution_reserved());
+            assert!(!self.guard.callbacks_drained());
+            assert_eq!(
+                self.admission.pending(),
+                Some(0),
+                "original task already released"
+            );
+            assert!(!self.admission.work_is_absent());
+            assert_eq!(
+                self.admission.retire_for_successor(),
+                Err(ContextPortFailure::ProfileBusy)
+            );
+            let mut rows = self.rows.lock().unwrap();
+            let next = rows
+                .acquire(
+                    self.guard.resource(),
+                    ContextRunId::generate(),
+                    tick(3),
+                    tick(100),
+                )
+                .unwrap();
+            assert_eq!(
+                self.guard.admit_lifecycle(&next, tick(3)),
+                Err(ContextPortFailure::Stale)
+            );
+            let _ = rows
+                .dispatch_refused(next, ContextPortFailure::Stale)
+                .unwrap();
+            drop(rows);
+            self.wakes.fetch_add(1, Ordering::AcqRel);
+            assert!(!self.panic, "injected listener failure");
+        }
+    }
+    for panic in [false, true] {
+        let (mut rows, admission, guard) = setup();
+        let lease = leased(&mut rows, &guard);
+        let (request, mut ticket) = rows.revoke_with_delivery(&lease).unwrap();
+        guard.admit_lifecycle(&request, tick(1)).unwrap();
+        let rows = Arc::new(Mutex::new(rows));
+        let listener = Arc::new(Listener {
+            rows: rows.clone(),
+            guard: guard.clone(),
+            admission: admission.clone(),
+            panic,
+            wakes: std::sync::atomic::AtomicUsize::new(0),
+        });
+        ticket.register_waker(listener.clone().into()).unwrap();
+        WorkLifecycleTask {
+            request: Some(request),
+            guard: guard.clone(),
+            permit: admission.reserve().unwrap(),
+            completion: Some(Box::new(move |completion| {
+                assert!(matches!(
+                    rows.lock().unwrap().settle_at(completion, tick(2)).unwrap(),
+                    WorkBrowserResourceEvent::LeaseEnded(_)
+                ));
+            })),
+        }
+        .complete(drained());
+        assert_eq!(listener.wakes.load(Ordering::Acquire), 1);
+        assert!(guard.callbacks_drained());
+        assert_eq!(guard.is_healthy(), !panic);
+        if panic {
+            assert!(matches!(
+                ticket.try_take(),
+                Err(zephium_agentic::WorkBrowserLeaseDeliveryPollError::Notification)
+            ));
+        } else {
+            assert!(ticket.try_take().unwrap().unwrap().returned());
+        }
+        assert!(!admission.work_is_absent());
+    }
+}
+
+#[test]
+fn concurrent_delivery_registration_and_notification_loss_cannot_miss_each_other() {
+    struct Listener;
+    impl std::task::Wake for Listener {
+        fn wake(self: Arc<Self>) {}
+    }
+    for _ in 0..64 {
+        let (mut rows, admission, guard) = setup();
+        let lease = leased(&mut rows, &guard);
+        let (mut request, mut ticket) = rows.revoke_with_delivery(&lease).unwrap();
+        let mut completion = request.take_lease_delivery_completion().unwrap();
+        let notification = completion.take_notification().unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        std::thread::scope(|scope| {
+            let worker_barrier = barrier.clone();
+            scope.spawn(move || {
+                worker_barrier.wait();
+                drop(notification);
+            });
+            barrier.wait();
+            let _ = ticket.register_waker(Arc::new(Listener).into());
+        });
+        drop(completion);
+        assert!(matches!(
+            ticket.try_take(),
+            Err(zephium_agentic::WorkBrowserLeaseDeliveryPollError::Notification)
+        ));
+        assert!(!admission.work_is_absent());
+    }
+}
+
+#[test]
 fn legacy_revoke_without_ticket_keeps_same_physical_delivery_admission_barrier() {
     let (mut rows, admission, guard) = setup();
     let lease = leased(&mut rows, &guard);

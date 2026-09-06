@@ -48,11 +48,12 @@ mod context_registry;
 mod work_browser_resource;
 pub use work_browser_resource::{
     WorkBrowserExecutionLease, WorkBrowserLeaseDeliveryCompletion,
-    WorkBrowserLeaseDeliveryPollError, WorkBrowserLeaseDeliveryProof,
-    WorkBrowserLeaseDeliveryReceipt, WorkBrowserLeaseDeliveryRefusal,
-    WorkBrowserLeaseDeliveryTicket, WorkBrowserLeaseEnded, WorkBrowserLeaseNativeDebt,
-    WorkBrowserObservationCompletion, WorkBrowserObservationCompletionCallback,
-    WorkBrowserObservationDispatch, WorkBrowserObservationEvent, WorkBrowserObservationRequest,
+    WorkBrowserLeaseDeliveryNotification, WorkBrowserLeaseDeliveryPollError,
+    WorkBrowserLeaseDeliveryProof, WorkBrowserLeaseDeliveryReceipt,
+    WorkBrowserLeaseDeliveryRefusal, WorkBrowserLeaseDeliveryTicket, WorkBrowserLeaseEnded,
+    WorkBrowserLeaseNativeDebt, WorkBrowserObservationCompletion,
+    WorkBrowserObservationCompletionCallback, WorkBrowserObservationDispatch,
+    WorkBrowserObservationEvent, WorkBrowserObservationRequest, WorkBrowserReadBinding,
     WorkBrowserResourceCompletion, WorkBrowserResourceCompletionCallback,
     WorkBrowserResourceDispatch, WorkBrowserResourceError, WorkBrowserResourceEvent,
     WorkBrowserResourceFailure, WorkBrowserResourceHealth, WorkBrowserResourceHealthReporter,

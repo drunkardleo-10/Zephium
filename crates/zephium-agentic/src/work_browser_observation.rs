@@ -18,6 +18,27 @@ pub(super) struct ObservationJoin {
     correlation: SemanticRuntimeCorrelation,
 }
 
+/// Original-row description for one current retained-page execution lease.
+/// This carries no read request, native port or legacy context ownership. It
+/// permits trusted account/task binding before an independently admitted read.
+#[must_use]
+#[derive(Debug)]
+pub struct WorkBrowserReadBinding {
+    lease: WorkBrowserExecutionLease,
+    frame: SemanticFrameJoin,
+}
+
+impl WorkBrowserReadBinding {
+    /// Exact process-local resource incarnation and execution lease.
+    pub const fn lease(&self) -> &WorkBrowserExecutionLease {
+        &self.lease
+    }
+    /// Original fixed-document correlation, not a legacy context capability.
+    pub const fn frame(&self) -> &SemanticFrameJoin {
+        &self.frame
+    }
+}
+
 /// Move-only request produced after publishing the exact read callback owner.
 /// There is no caller-supplied script, selector, role set, scope or ceiling.
 #[must_use]
@@ -79,28 +100,20 @@ pub enum WorkBrowserObservationEvent {
 }
 
 impl WorkBrowserResources {
-    /// Admit one initial all-role read with existing conservative ceilings.
-    /// Task/policy/account admission remains the trusted application's separate
-    /// responsibility; this is a native resource primitive, not a model tool.
-    pub fn observe_initial(
+    /// Describes only a currently admitted lease from this original registry.
+    /// No invocation, capacity or callback is reserved. A subsequent read must
+    /// independently recheck health, the same lease and its original deadline.
+    pub fn read_binding(
         &mut self,
         lease: &WorkBrowserExecutionLease,
         now: AgentPolicyInstant,
-    ) -> Result<WorkBrowserObservationRequest, WorkBrowserResourceError> {
+    ) -> Result<WorkBrowserReadBinding, WorkBrowserResourceError> {
         self.admits_lease(lease, now)?;
         let row = self.row_mut(lease.resource())?;
-        if row.observation.is_some() {
-            return Err(WorkBrowserResourceError::Pending);
-        }
         let document = row
             .document
             .as_ref()
             .ok_or(WorkBrowserResourceError::Phase)?;
-        let sequence = row
-            .observation_sequence
-            .checked_add(1)
-            .filter(|sequence| *sequence <= MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS)
-            .ok_or(WorkBrowserResourceError::Exhausted)?;
         let context = ContextJoin::work_execution(
             ContextIdentity::new(
                 row.join.identity.context,
@@ -119,6 +132,32 @@ impl WorkBrowserResources {
             SemanticFrameTrust::SameOrigin,
         )
         .map_err(|_| WorkBrowserResourceError::Phase)?;
+        Ok(WorkBrowserReadBinding {
+            lease: lease.clone(),
+            frame,
+        })
+    }
+
+    /// Admit one initial all-role read with existing conservative ceilings.
+    /// Task/policy/account admission remains the trusted application's separate
+    /// responsibility; this is a native resource primitive, not a model tool.
+    pub fn observe_initial(
+        &mut self,
+        lease: &WorkBrowserExecutionLease,
+        now: AgentPolicyInstant,
+    ) -> Result<WorkBrowserObservationRequest, WorkBrowserResourceError> {
+        let binding = self.read_binding(lease, now)?;
+        let row = self.row_mut(lease.resource())?;
+        if row.observation.is_some() {
+            return Err(WorkBrowserResourceError::Pending);
+        }
+        let sequence = row
+            .observation_sequence
+            .checked_add(1)
+            .filter(|sequence| *sequence <= MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS)
+            .ok_or(WorkBrowserResourceError::Exhausted)?;
+        let frame = binding.frame;
+        let context = frame.context();
         let observation = SemanticObservationRequest::initial(
             SemanticObservationId::new(u64::from(sequence))
                 .ok_or(WorkBrowserResourceError::Exhausted)?,
@@ -274,6 +313,46 @@ mod tests {
             resource_retained: true,
         }
     }
+    #[test]
+    fn descriptive_binding_is_original_current_and_does_not_reserve_a_read() {
+        let (mut rows, resource) = document();
+        let lease = acquire(&mut rows, &resource, ContextRunId::generate());
+        let binding = rows.read_binding(&lease, tick(2)).unwrap();
+        assert_eq!(binding.lease(), &lease);
+        assert_eq!(binding.frame().context().identity().owner(), lease.run());
+        assert_eq!(
+            binding.frame().origin(),
+            &SemanticOrigin::parse("https://example.test").unwrap()
+        );
+        let second_binding = rows.read_binding(&lease, tick(2)).unwrap();
+        assert_eq!(second_binding.frame(), binding.frame());
+        let request = rows.observe_initial(&lease, tick(2)).unwrap();
+        assert_eq!(request.invocation().invocation().get(), 1);
+        assert_eq!(request.invocation().frame(), binding.frame());
+        let (mut foreign, _) = document();
+        assert!(foreign.read_binding(&lease, tick(2)).is_err());
+        let revoke = rows.revoke(&lease).unwrap();
+        assert!(rows.read_binding(&lease, tick(2)).is_err());
+        let _ = rows.settle_observation(snapshot(request), tick(2)).unwrap();
+        let _ = rows.settle_at(revoke.complete(drained()), tick(2)).unwrap();
+        let request = rows
+            .acquire(&resource, ContextRunId::generate(), tick(2), tick(100))
+            .unwrap();
+        let next = request.lease().unwrap().clone();
+        let _ = rows
+            .settle_at(
+                request.complete(WorkBrowserResourceNativeOutcome::Acquired),
+                tick(2),
+            )
+            .unwrap();
+        assert!(rows.read_binding(&lease, tick(2)).is_err());
+        assert_ne!(
+            rows.read_binding(&next, tick(2)).unwrap().frame(),
+            binding.frame()
+        );
+        assert!(rows.read_binding(&next, tick(100)).is_err());
+    }
+
     #[test]
     fn two_runs_have_distinct_correlation_and_document_sequence_without_source_mutation() {
         let (mut rows, resource) = document();

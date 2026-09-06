@@ -442,8 +442,11 @@ impl WorkResourceGuard {
         lease: &WorkBrowserExecutionLease,
         callback_returned: bool,
         permit_released: bool,
-        delivery: Option<WorkBrowserLeaseDeliveryCompletion>,
+        mut delivery: Option<WorkBrowserLeaseDeliveryCompletion>,
     ) {
+        let notification = delivery
+            .as_mut()
+            .and_then(|delivery| delivery.take_notification());
         let port_open = self.port_open();
         let mut state = self
             .state
@@ -462,14 +465,34 @@ impl WorkResourceGuard {
             && state.callbacks == 0;
         // Publication only mutates the exact fixed atomic slot. No callback or
         // wake runs here. Acquire cannot observe an open gate before publication.
-        let published = retained && delivery.is_none_or(|owner| owner.publish_returned());
+        let published = if retained {
+            delivery.is_none_or(|owner| owner.publish_returned())
+        } else {
+            drop(delivery);
+            false
+        };
         if !published {
             state.uncertain = true;
             if !matches!(state.phase, Phase::Destroying | Phase::Destroyed) {
                 state.phase = Phase::Quarantined;
             }
         }
-        if exact && permit_released {
+        // The physical receipt is published, but this exact retirement owner
+        // still seals Acquire/destruction drain across notification reentrancy.
+        // Never invoke a listener while holding the native guard mutex.
+        drop(state);
+        let notified = notification.is_none_or(|notification| notification.notify());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !notified {
+            state.uncertain = true;
+            if !matches!(state.phase, Phase::Destroying | Phase::Destroyed) {
+                state.phase = Phase::Quarantined;
+            }
+        }
+        if exact && permit_released && state.retirement_delivery.as_ref() == Some(lease) {
             // Failure still remains quarantined; physical return may release
             // this debt so original resource destruction can subsequently drain.
             state.retirement_delivery = None;

@@ -78,6 +78,34 @@ The runtime declares no transport feature or development dependency. Its default
 unit tests exercise held callback ingress and queued-terminal refusal directly.
 No empty legacy native registries are substituted for retained-resource proof.
 
+The retained-controller join additionally needs account binding before a read
+and a wake after physical native delivery. The original resource registry now
+issues a move-only `WorkBrowserReadBinding` only for its current exact lease and
+fixed document. It contains descriptive frame/lease coordinates; it reserves no
+read or invocation and cannot enter legacy context dispatch. Each actual read
+independently rechecks the row and uses the same correlation helper.
+
+The delivery ticket optionally registers one immutable, coalesced listener.
+Registration precedes a state recheck; terminal consumption remains an exact
+acquire-consuming compare/exchange. Registration and notifier loss share one
+monotonic RMW bitset so concurrent publication cannot miss both sides. The native
+guard publishes the physical fact without invoking code under its lock, then
+notifies outside that lock while its
+exact retirement reservation still blocks Acquire/destruction/global drain.
+That notification has no receipt or execution authority. Its failure independently
+quarantines the resource; it cannot replace or retroactively rewrite a physical
+returned receipt. A future product successor still needs current resource health
+and native admission, not just that immutable receipt. Legacy non-listening
+poll/consume users retain their existing contract and fixed payload ceilings.
+
+Prerequisite regressions exercise binding without reserving an invocation,
+foreign/stale/expired leases, publication both before and after registration,
+duplicate/lost/poisoned/panicking listeners, missing and early notification,
+unproven terminals and single consumption. The native-ledger reentrant listener
+checks that its guard is unlocked but exact Acquire and global/successor absence
+remain closed until notification returns. This is deterministic native-adapter
+evidence, not a new rendering or provider-workflow witness.
+
 Adversarial schedules cover post-claim blocking/deadline, polling panic,
 future-destructor panic, lost lifecycle, lost/no claim, accepted callback held across a manually
 polled Pending claim, queued terminal refusal, exact cancellation/shutdown class,

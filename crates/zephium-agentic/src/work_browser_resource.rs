@@ -945,14 +945,16 @@ mod observation;
 pub use observation::{
     WorkBrowserObservationCompletion, WorkBrowserObservationCompletionCallback,
     WorkBrowserObservationDispatch, WorkBrowserObservationEvent, WorkBrowserObservationRequest,
+    WorkBrowserReadBinding,
 };
 
 #[path = "work_browser_delivery.rs"]
 mod delivery;
 pub use delivery::{
-    WorkBrowserLeaseDeliveryCompletion, WorkBrowserLeaseDeliveryPollError,
-    WorkBrowserLeaseDeliveryProof, WorkBrowserLeaseDeliveryReceipt,
-    WorkBrowserLeaseDeliveryRefusal, WorkBrowserLeaseDeliveryTicket,
+    WorkBrowserLeaseDeliveryCompletion, WorkBrowserLeaseDeliveryNotification,
+    WorkBrowserLeaseDeliveryPollError, WorkBrowserLeaseDeliveryProof,
+    WorkBrowserLeaseDeliveryReceipt, WorkBrowserLeaseDeliveryRefusal,
+    WorkBrowserLeaseDeliveryTicket,
 };
 
 #[path = "work_browser_health.rs"]
