@@ -1,8 +1,9 @@
 # Actual-application foreground rendering qualification
 
-Status: actual-application foreground admission is reached, but native rendering
-has refused before any semantic/RAF sample. A qualified rendering measurement
-remains pending; no RAF or commercial-site success is claimed. The prior
+Status: one exact provider-free actual-application foreground witness qualifies
+RAF-driven semantic content, preserved human ownership and full native closure.
+This does not qualify background rendering, commercial sites or an open-objective
+agent. The preceding refusals are retained below. The prior
 standalone evidence and its event-loop limitations remain in
 [macos-rendering-readiness.md](macos-rendering-readiness.md).
 
@@ -554,3 +555,47 @@ No GUI launch, provider call or public-site attempt was performed for this
 correction checkpoint. The paired AppKit evidence supports the placement fix
 on the observed display; actual Work RAF/semantic rendering remains unqualified
 until the full native witness and its unchanged cleanup requirements pass.
+
+## Qualified actual-application foreground witness
+
+On 2026-09-06, the independently reviewed correction at clean source
+`66655bddfefecd487371e950d1c29a9853c18ba9` was launched once through LaunchServices
+with the creator-side reviewer establishing the exact application's foreground
+ownership. The executable SHA-256 was
+`8fca3ceb6d8de8cccf11caf3aa85813ef85828c2f2b4c96bc038739fdbfa04a4`.
+The reviewer confirmed a fresh isolated diagnostic data root. Exact start UTC
+was not retained and is not inferred from the sample clock. `open -n -W`
+completed with exit status 0; this is the launcher/wait status, not a separately
+captured child exit status. stdout was empty. The complete stderr was:
+
+```text
+work-rendering-admission: outcome=Admitted waited_ms=0 checks=1
+work-rendering-sample: index=0 elapsed_ms=358 nodes=7 controls=true animation_frame=true
+work-rendering-native-failures: available=true primary=None cleanup=None
+work-rendering-provisional: outcome=AnimationFrameObserved cleanup_failure=None native_cohort_clean=true human_ownership_preserved=true fixture_clean=true elapsed_ms=2123
+work-rendering-closure: qualified=true normal_shutdown_clean=true exact_native_weak_drain=Some(true)
+```
+
+The reviewer preserved the local stdout artifact (0 bytes), stderr artifact
+(498 bytes), and exact isolated diagnostic profile. Machine-local paths and
+profile locations are deliberately not committed. These artifacts are local
+diagnostic evidence, not repository fixtures or reusable profile state. The
+run performed no provider, public-site or credential operation.
+
+This is the first positive full actual-application measurement in this record.
+The first bounded production-adapter sample contained the exact current-document
+controls and RAF reveal in seven semantic nodes. No native or cleanup failure
+predicate was recorded. The ordinary Tauri event loop, exact human foreground
+ownership, fixed presentation geometry, native cohort, fixture and post-shutdown
+weak-native owner drain all met the unchanged qualification contract. The
+provisional elapsed time includes diagnostic teardown work and is not a page
+readiness latency; the sample's 358 ms is measured on the driver's clock.
+
+The supported, observed conclusion is narrow: one already-foreground Zephium
+application can temporarily present its exact owned WKWebView using public
+AppKit APIs, obtain RAF-driven semantic content, preserve key/main/responder/input
+authority and retire every tracked native owner cleanly. This is not evidence
+that permanently hidden views render fully, that inactive Zephium may activate
+itself, that arbitrary dynamic sites are ready, or that the current task-authored
+Work runner supports open objectives. The five-second bounded lease, explicit
+foreground prerequisite and release-excluded fixture restrictions remain.
