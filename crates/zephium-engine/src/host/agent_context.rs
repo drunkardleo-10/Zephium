@@ -1558,7 +1558,7 @@ impl EngineHost {
         let result_rendering = binding
             .rendering_probe
             .as_ref()
-            .map(|probe| probe.lease.clone());
+            .and_then(|probe| probe.lease().cloned());
         let dispatched = binding.view.dispatch_semantic(invocation, move |outcome| {
             drop(watchdog);
             let outcome = if result_navigation.location_stable_for_result() {

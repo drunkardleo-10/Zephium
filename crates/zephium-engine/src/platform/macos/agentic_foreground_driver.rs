@@ -538,7 +538,8 @@ impl Driver {
                         self.acquired = true;
                         self.phase = Phase::WaitingSample;
                     }
-                    ForegroundRenderingState::Acquiring => {
+                    ForegroundRenderingState::AwaitingDocument
+                    | ForegroundRenderingState::Acquiring => {
                         self.acquired = true;
                         self.render(ForegroundRenderingProbeOperation::Poll)?;
                     }

@@ -745,6 +745,120 @@ mod tests {
         }
     }
 
+    #[cfg(all(target_os = "macos", feature = "native-agentic-foreground-probe"))]
+    #[test]
+    fn foreground_readiness_distinguishes_exact_commit_finish_and_location_reconciliation() {
+        let gate = super::AgentNavigationController::default();
+        let operation = operation(zephium_agentic::ContextOperationKind::Navigate);
+        let context = operation.context();
+        let target =
+            zephium_agentic::ContextNavigationTarget::parse("https://example.test/render").unwrap();
+        assert_eq!(gate.rendering_document_ready(context), None);
+        gate.arm(operation, target.clone(), Arc::new(AtomicBool::new(false)))
+            .unwrap();
+        gate.observe(event(
+            71,
+            wry::NavigationEventPhase::Started,
+            target.as_url().as_str(),
+        ))
+        .unwrap();
+        let committed = gate
+            .observe(event(
+                71,
+                wry::NavigationEventPhase::Committed,
+                target.as_url().as_str(),
+            ))
+            .unwrap()
+            .expect("commit terminal");
+        assert!(committed.into_outcome().is_ok());
+        assert_eq!(
+            gate.rendering_document_ready(context),
+            None,
+            "unsettled arm is not a wait"
+        );
+        assert!(gate.disarm(operation));
+        assert_eq!(gate.rendering_document_ready(context), Some(false));
+        assert!(!gate.location_stable_for_result());
+        assert_eq!(gate.request_location_check(), Ok(false));
+        gate.observe(event(
+            72,
+            wry::NavigationEventPhase::Finished,
+            target.as_url().as_str(),
+        ))
+        .unwrap();
+        assert_eq!(
+            gate.rendering_document_ready(context),
+            Some(false),
+            "foreign finish is not readiness"
+        );
+        gate.observe(event(
+            71,
+            wry::NavigationEventPhase::Finished,
+            target.as_url().as_str(),
+        ))
+        .unwrap();
+        assert_eq!(
+            gate.rendering_document_ready(context),
+            Some(false),
+            "location receipt still owns reconciliation"
+        );
+        gate.finish_location_check(false).unwrap();
+        assert_eq!(gate.rendering_document_ready(context), Some(true));
+        assert!(gate.location_stable_for_result());
+        let foreign = self::operation(zephium_agentic::ContextOperationKind::Navigate).context();
+        assert_eq!(gate.rendering_document_ready(foreign), None);
+        gate.request_location_check().unwrap();
+        gate.finish_location_check(true).unwrap();
+        assert_eq!(
+            gate.rendering_document_ready(context),
+            None,
+            "replacement cannot become a wait"
+        );
+    }
+
+    #[cfg(all(target_os = "macos", feature = "native-agentic-foreground-probe"))]
+    #[test]
+    fn foreground_readiness_never_waits_through_cancellation_or_renderer_loss() {
+        for cancel in [true, false] {
+            let gate = super::AgentNavigationController::default();
+            let operation = operation(zephium_agentic::ContextOperationKind::Navigate);
+            let target =
+                zephium_agentic::ContextNavigationTarget::parse("https://example.test/render")
+                    .unwrap();
+            gate.arm(operation, target.clone(), Arc::new(AtomicBool::new(false)))
+                .unwrap();
+            gate.observe(event(
+                81,
+                wry::NavigationEventPhase::Started,
+                target.as_url().as_str(),
+            ))
+            .unwrap();
+            gate.observe(event(
+                81,
+                wry::NavigationEventPhase::Committed,
+                target.as_url().as_str(),
+            ))
+            .unwrap();
+            assert!(gate.disarm(operation));
+            assert_eq!(
+                gate.rendering_document_ready(operation.context()),
+                Some(false)
+            );
+            if cancel {
+                assert!(gate.seal_location_observation());
+            } else {
+                assert_eq!(gate.claim_renderer_loss(), Ok(true));
+            }
+            gate.observe(event(
+                81,
+                wry::NavigationEventPhase::Finished,
+                target.as_url().as_str(),
+            ))
+            .unwrap();
+            assert_eq!(gate.rendering_document_ready(operation.context()), None);
+        }
+    }
+
     #[test]
     fn location_check_can_defer_without_creating_a_second_queue_entry() {
         let gate = super::AgentNavigationController::default();
@@ -1470,6 +1584,33 @@ impl AgentNavigationController {
                 && !state.renderer_lost
                 && state.armed.is_none()
         })
+    }
+
+    /// Closed readiness for the one release-excluded rendering acquisition.
+    /// Commit alone is pending, not failure or render authority. An unknown,
+    /// replaced, cancelled or lost exact document cannot become a wait/retry.
+    #[cfg(all(target_os = "macos", feature = "native-agentic-foreground-probe"))]
+    pub(crate) fn rendering_document_ready(
+        &self,
+        context: zephium_agentic::ContextJoin,
+    ) -> Option<bool> {
+        let state = self.state.lock().ok()?;
+        if state.renderer_lost
+            || state.observation_sealed
+            || state.armed.is_some()
+            || state.location_replacement_pending
+        {
+            return None;
+        }
+        let committed = state.last_committed.as_ref().filter(|committed| {
+            committed.operation.context() == context && committed.observes_web_location
+        })?;
+        if !committed.finished {
+            return (!state.location_ready && !state.location_callback_pending).then_some(false);
+        }
+        state
+            .location_ready
+            .then_some(!state.location_callback_pending && !state.location_dirty)
     }
 
     /// Permanently closes location observation for a cancelled or retiring

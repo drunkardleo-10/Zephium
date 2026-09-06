@@ -104,6 +104,8 @@ impl EngineAgentBrowserPort {
 }
 
 fn dispatch_to_host(task: AgentForegroundProbeTask) {
+    let context = task.request().context();
+    crate::platform::imp::ForegroundRenderingLease::begin_attempt(context);
     let slot = Arc::new(Mutex::new(Some(task)));
     let for_host = slot.clone();
     if !crate::host::try_with_agent_context(move |host| {
@@ -120,7 +122,10 @@ fn dispatch_to_host(task: AgentForegroundProbeTask) {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
         {
-            task.complete(ForegroundRenderingState::Failed);
+            task.complete(crate::platform::imp::ForegroundRenderingLease::host_failed(
+                context,
+                crate::platform::macos::agentic_foreground_driver::ForegroundFailurePredicate::HostDispatch,
+            ));
         }
     }
 }

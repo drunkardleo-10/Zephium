@@ -7,7 +7,8 @@ use crate::ContextJoin;
 pub enum ForegroundRenderingProbeOperation {
     /// Admit one presentation owner; cannot reacquire or reset its deadline.
     Acquire,
-    /// Read the exact owner's current state, without extending its lifetime.
+    /// Continue/read the exact acquisition owner, without reacquiring or
+    /// extending its lifetime; a finished document may permit preparation.
     Poll,
     /// Hide, restore and drain the exact presentation owner.
     Retire,
@@ -40,6 +41,9 @@ impl ForegroundRenderingProbeRequest {
 /// Presentation lifecycle is independent from human input authority.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ForegroundRenderingState {
+    /// Exact acquisition is owned, awaiting native finish/location reconciliation.
+    /// Poll continues that owner under its original deadline; it is not a retry.
+    AwaitingDocument,
     /// Hidden owner prepared before the native presentation effect.
     Prepared,
     /// Awaiting public occlusion visibility under the original deadline.

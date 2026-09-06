@@ -22,9 +22,11 @@ sealing are shared with ordinary context operations.
 
 Acquisition requires the sole exact native cohort member, an ephemeral owned
 context, exactly Observe/Navigate capabilities, the fixed loopback rendering
-fixture, stable completed navigation, and no prior semantic invocation or
-pending native operation. The acquisition opportunity is consumed before
-native preparation, including DeferredForeground. Navigation/recovery and other
+fixture, and no prior semantic invocation or pending native operation. Native
+preparation additionally requires the exact finished, stable document; a
+committed document may first retain a bounded AwaitingDocument acquisition.
+The acquisition opportunity is consumed before preflight or native preparation,
+including refusal and DeferredForeground. Navigation/recovery and other
 lifecycle expansion are then refused; only cancellation and close remain.
 
 The same existing WKWebView is reparented into one opaque fixed 1280×800 public
@@ -36,7 +38,8 @@ responder must match the exact original human surface. No bootstrap, activation,
 focus restoration, private SPI, scheduling-policy change, event pump or page
 script is introduced.
 
-The native lease has one original five-second admission deadline. A single
+The native lease has one original five-second admission deadline covering
+document waiting, native preparation and presentation. A single
 coalesced 50 ms main-queue watchdog revalidates foreground/deadline ownership
 without resetting it; actual servicing is subject to the normal application
 event loop and the existing dispatch-timer leeway. This is not a hard realtime
@@ -300,9 +303,9 @@ cleanup evidence before any behavior correction or newly authorized rerun.
 
 ## Exact failed-predicate refinement, without an acceptance change
 
-The release-excluded native lease now records the first refused fixed predicate
-with a closed phase: Prepare, Present, Poll or Cleanup. Host watchdog setup and
-lease-owner failures are distinguished as Host. Each existing native condition
+At checkpoint `40e654c`, the release-excluded native lease recorded the first
+refused fixed predicate with a closed phase: Prepare, Present, Poll or Cleanup.
+Host watchdog setup and lease-owner failures are distinguished as Host. Each existing native condition
 still executes in its original order and short-circuits at the same first
 refusal. No visibility, geometry, input, foreground, deadline, scope or cleanup
 condition has been removed, widened or converted into a retry.
@@ -383,3 +386,77 @@ therefore refuses a valid committed document. The supplied run did not retain
 the failed host predicate, so this schedule is a source-proven defect and a
 candidate cause, not a retrospectively observed live predicate. No rendering
 acceptance check may be relaxed on the basis of this output.
+
+## Exact acquisition ownership and document-readiness correction
+
+The earlier acquisition contract was incorrect: scheduled work could refuse
+before owning a cleanup receipt, and the driver treated a committed-document
+receipt as if it implied finished/stable readiness. The correction separates
+those lifecycle facts without changing navigation settlement, rendering
+acceptance, or semantic completeness.
+
+The first exact host acquisition consumes its opportunity and publishes one
+cleanup owner before fallible preflight. Its original five-second deadline is
+created once. Only that same owner may enter AwaitingDocument and advance on
+Poll. The native navigation controller distinguishes the exact committed but
+unfinished document and unfinished location reconciliation from a replaced,
+sealed, lost, unknown or still-armed document. Only the first two are pending;
+the others refuse. Native preparation requires the same finished/stable facts
+as before, plus an exact committed ContextJoin. All other preconditions still
+refuse and now retain fixed host-predicate evidence.
+
+The existing coalesced watchdog covers the waiting owner as well as the native
+lease. No additional timer, surface or resource class is introduced. Waiting
+has a maximum of 201 checks independently from the clock, matching the normal
+25 ms driver's opportunities over five seconds. Deadline/check exhaustion wins
+over readiness; neither Poll nor native preparation creates a new deadline.
+Preparation is consumed before calling the native adapter, and the original
+deadline is checked again before allocation and presentation. No arbitrary sleep,
+native recapture, visibility/role/viewport relaxation, page shim, or new model
+operation is added. Pending owners cannot admit semantic work.
+
+A waiting owner or explicit pre-native refusal can positively attest that it
+has no auxiliary native owner, acknowledge exact Retire, and continue through
+ordinary Close and Seal. Retire also handles an accepted acquisition discarded
+before host entry: an exact matching binding with no rendering owner seals the
+unused acquisition opportunity before acknowledging retirement, so a delayed
+Acquire cannot revive it. An unsettled Preparing phase cannot make that claim;
+it remains Failed and owned. A retained native lease still requires its real
+hide/restore/weak-drain path and cannot be erased through a no-owner terminal.
+The driver still fails and preserves debt if retirement cannot be proven, and
+global shutdown still refuses to call a nonempty cohort clean.
+
+The bounded content-free trace now begins when the exact request enters native
+host dispatch, before queue/host/preflight refusal. Its availability no longer
+means native preparation ran. It retains fixed HostDispatch, binding, preflight
+and document predicates alongside the existing native/cleanup predicates, with
+the same exact-context binding and immutable first-cause slots. A failure before
+that dispatch frontier can still have unavailable evidence; absence never
+proves native emptiness or qualifies a run.
+
+Deterministic regressions exercise commit-before-finish and location receipt
+ordering, stale/foreign/armed/replaced/sealed/lost documents, one preparation,
+unchanged deadlines, readiness after expiry, check exhaustion, cancellation,
+early-refusal retirement and uncertain preparation. Architecture mutation tests
+guard the exact readiness conjunction, cleanup/native-owner publication,
+unchanged admission ceilings and both pre-effect deadline checks. Final gates
+pass: all 502 engine library tests, core `probe-harness` 494 library tests and
+3 + 5 evidence-review binary tests, seven isolated admission/configuration tests, five
+foreground architecture adversaries, strict all-target engine and desktop
+Clippy, both architecture commands and hostile semantic JavaScript smoke,
+ordinary non-probe engine check, workspace fmt and diff checks. The core fixture
+suite initially encountered sandbox loopback-bind denials; the exact suite
+passed with local-listener permission and no source relaxation. The default
+desktop graph remains free of the diagnostic/probe features and Work provider,
+controller, runtime and composition dependencies (existing Store/core contracts
+are not claimed absent).
+
+The isolated debug application was rebuilt through the same pinned
+Node/pnpm/Tauri flow, without signing or launch. Info.plist identity is still
+`app.zephium.work-rendering-probe`; executable SHA-256 is
+`5daae5d8a740fdfee748acf1e614862c878acc659ccacb09f2763b3a11a59f31`.
+No new native launch, provider call or public-site attempt has run at this
+checkpoint; the concrete fourth witness's uncaptured preflight predicate is
+still not retroactively assigned. The next independently reviewed native run
+must use this exact bundle and preserve all original qualification and teardown
+requirements, including the separate first-failure and cleanup evidence.

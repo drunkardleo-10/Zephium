@@ -63,6 +63,23 @@ pub enum ForegroundFailurePredicate {
     PriorCleanupFailure,
     WatchdogScheduled,
     LeaseOwner,
+    HostDispatch,
+    ContextBinding,
+    AcquisitionAvailable,
+    SoleCohort,
+    RendererLive,
+    EphemeralProfile,
+    NoPendingNavigation,
+    NoPendingRecovery,
+    NoPendingScreenshot,
+    NoSemanticInvocation,
+    NoSemanticSnapshot,
+    SemanticIdle,
+    FixedFixture,
+    ObserveCapability,
+    NavigateCapability,
+    ExactCapabilities,
+    ExactDocument,
 }
 
 /// One exact failed predicate, without a native handle or caller-controlled text.
@@ -268,11 +285,27 @@ pub(crate) struct ForegroundRenderingLease {
 }
 
 impl ForegroundRenderingLease {
+    pub(crate) fn begin_attempt(context: ContextJoin) {
+        begin_failure_trace(context);
+    }
+
+    pub(crate) fn admission_deadline(now: Instant) -> Option<Instant> {
+        now.checked_add(RENDERING_BUDGET)
+    }
+
+    pub(crate) fn host_failed(
+        context: ContextJoin,
+        predicate: ForegroundFailurePredicate,
+    ) -> ForegroundRenderingState {
+        failed(context, ForegroundFailurePhase::Host, predicate)
+    }
+
     /// Prepare a hidden auxiliary container; the host must retain this owner
     /// before calling present. No page or human focus changes at preparation.
     pub(crate) fn prepare(
         context: ContextJoin,
         view: &wry::WebView,
+        deadline: Instant,
     ) -> Result<Self, ForegroundRenderingState> {
         use ForegroundFailurePhase::Prepare;
         use ForegroundFailurePredicate as P;
@@ -307,9 +340,9 @@ impl ForegroundRenderingLease {
             .visibleFrame();
         let frame =
             surface_frame(screen).ok_or_else(|| failed(context, Prepare, P::ScreenViewportFit))?;
-        let deadline = Instant::now()
-            .checked_add(RENDERING_BUDGET)
-            .ok_or_else(|| failed(context, Prepare, P::Deadline))?;
+        if Instant::now() >= deadline {
+            return Err(ForegroundRenderingState::Expired);
+        }
         // SAFETY: the main-thread marker owns AppKit allocation; all frame
         // components are finite and the retained window remains Rust-owned.
         let surface = unsafe {
@@ -385,6 +418,10 @@ impl ForegroundRenderingLease {
         let Some(parent) = surface.contentView() else {
             return self.refuse(Present, P::ContentView);
         };
+        if Instant::now() >= self.deadline {
+            self.state = ForegroundRenderingState::Expired;
+            return self.state;
+        }
         // Publish the effect phase before native hierarchy/presentation calls.
         self.state = ForegroundRenderingState::Acquiring;
         parent.addSubview(&self.page);

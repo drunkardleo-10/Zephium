@@ -11,6 +11,9 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
     let host = read("crates/zephium-engine/src/host/agent_foreground_probe.rs")?;
     let port = read("crates/zephium-engine/src/agent_foreground_probe_port.rs")?;
     validate(&native, &host, &port)?;
+    validate_document_readiness(&read(
+        "crates/zephium-engine/src/platform/agent_navigation.rs",
+    )?)?;
     validate_driver(
         &read("crates/zephium-engine/src/platform/macos/agentic_foreground_driver.rs")?,
         &read("desktop/src/foreground_rendering_probe.rs")?,
@@ -170,6 +173,27 @@ fn require(source: &str, needle: &str) -> Result<(), String> {
     }
 }
 
+fn validate_document_readiness(source: &str) -> Result<(), String> {
+    let source = compact(source);
+    let method = source
+        .split("pub(crate)fnrendering_document_ready(")
+        .nth(1)
+        .and_then(|method| {
+            method
+                .split("pub(crate)fnseal_location_observation(")
+                .next()
+        })
+        .ok_or("foreground document readiness method missing")?;
+    for required in [
+        "state.renderer_lost||state.observation_sealed||state.armed.is_some()||state.location_replacement_pending",
+        "committed.operation.context()==context&&committed.observes_web_location",
+        "if!committed.finished",
+        "(!state.location_ready&&!state.location_callback_pending).then_some(false)",
+        "state.location_ready.then_some(!state.location_callback_pending&&!state.location_dirty)",
+    ] { require(method, required)?; }
+    Ok(())
+}
+
 fn validate(native: &str, host: &str, port: &str) -> Result<(), String> {
     let native = compact(native);
     let host = compact(host);
@@ -218,6 +242,8 @@ fn validate(native: &str, host: &str, port: &str) -> Result<(), String> {
         "P::NoMainCapability=>!surface.canBecomeMainWindow()",
         "P::VisibleSurface=>surface.isVisible()",
         "P::ExactPageWindow=>self.page.window().is_some_and(|window|std::ptr::eq(&*window,&**surface))",
+        "ifInstant::now()>=deadline",
+        "ifInstant::now()>=self.deadline",
     ] {
         require(&native, required)?;
     }
@@ -228,10 +254,26 @@ fn validate(native: &str, host: &str, port: &str) -> Result<(), String> {
         "probe.watchdog=None",
         "samples<8",
         "ContextProfileStorageClass::Ephemeral",
-        "binding.capabilities.len()!=2",
+        "self.capabilities.len()!=2",
         "lease.guard(context)",
         "try_with_agent_context_terminal",
         "/semantic-rendering-v1.html",
+        "MAX_DOCUMENT_CHECKS:u16=201",
+        "now>=self.deadline||self.document_checks>=MAX_DOCUMENT_CHECKS",
+        "self.owner=RenderingOwner::Preparing",
+        "self.owner=RenderingOwner::Terminal(state)",
+        "RenderingOwner::Native(lease)",
+        "probe.owner=RenderingOwner::Native(lease.clone())",
+        "seal_absent_rendering_owner(&mutbinding.rendering_probe_attempted,binding.rendering_probe.is_none(),)",
+        "if!owner_absent{returnfalse;}",
+        "*attempted=true",
+        "RenderingOwner::Preparing=>ForegroundRenderingLease::owner_unavailable(self.context)",
+        "ifself.lease().is_some()",
+        "self.view.navigation().rendering_document_ready(context)",
+        "probe.document_ready(context,Instant::now(),ready)",
+        "ForegroundRenderingLease::prepare(context,self.view.view(),deadline)",
+        "Some(false)=>Err(State::AwaitingDocument)",
+        "None=>Err(self.refuse_before_native(P::ExactDocument))",
     ] {
         require(&host, required)?;
     }
@@ -241,11 +283,26 @@ fn validate(native: &str, host: &str, port: &str) -> Result<(), String> {
         "completion(self.request,state)",
         "cancel_without_completion",
         "executed.load(Ordering::Acquire)",
+        "ForegroundRenderingLease::begin_attempt(context)",
+        "ForegroundFailurePredicate::HostDispatch",
     ] {
         require(&port, required)?;
     }
-    if host.find("binding.rendering_probe=Some(") >= host.find("lease.present(context)") {
+    if host.find("probe.owner=RenderingOwner::Native(") >= host.find("lease.present(context)") {
         return Err("foreground rendering owner must precede presentation".into());
+    }
+    if host.find("binding.rendering_probe_attempted=true")
+        >= host.find("binding.rendering_probe=Some(")
+        || host.find("binding.rendering_probe=Some(")
+            >= host.find("binding.advance_foreground_acquisition(context)")
+    {
+        return Err("foreground acquisition cleanup owner must precede preflight/wait".into());
+    }
+    if native.find("ifInstant::now()>=deadline") >= native.find("NSWindow::initWithContentRect_")
+        || native.find("ifInstant::now()>=self.deadline")
+            >= native.find("self.state=ForegroundRenderingState::Acquiring")
+    {
+        return Err("original rendering deadline must precede allocation and presentation".into());
     }
     Ok(())
 }
@@ -324,6 +381,58 @@ mod tests {
         include_str!("../../crates/zephium-engine/src/host/agent_foreground_probe.rs");
     const PORT: &str =
         include_str!("../../crates/zephium-engine/src/agent_foreground_probe_port.rs");
+
+    #[test]
+    fn foreground_document_wait_keeps_exact_identity_original_budget_and_cleanup_owner() {
+        const NAVIGATION: &str =
+            include_str!("../../crates/zephium-engine/src/platform/agent_navigation.rs");
+        validate_document_readiness(NAVIGATION).unwrap();
+        for changed in [
+            NAVIGATION.replace("committed.operation.context() == context", "true"),
+            NAVIGATION.replace(
+                "!state.location_callback_pending && !state.location_dirty",
+                "true",
+            ),
+            NAVIGATION.replace("if !committed.finished", "if false"),
+        ] {
+            assert!(validate_document_readiness(&changed).is_err());
+        }
+        for changed in [
+            HOST.replace(
+                "MAX_DOCUMENT_CHECKS: u16 = 201",
+                "MAX_DOCUMENT_CHECKS: u16 = 999",
+            ),
+            HOST.replace("now >= self.deadline", "false"),
+            HOST.replace(
+                "self.owner = RenderingOwner::Preparing",
+                "self.owner = RenderingOwner::AwaitingDocument",
+            ),
+            HOST.replace("if self.lease().is_some()", "if false"),
+            HOST.replace("*attempted = true", "*attempted = false"),
+            HOST.replace("if !owner_absent", "if false"),
+            HOST.replace(
+                "probe.document_ready(context, Instant::now(), ready)",
+                "Ok(Instant::now())",
+            ),
+        ] {
+            assert!(validate(NATIVE, &changed, PORT).is_err());
+        }
+        assert!(validate(
+            &NATIVE.replace("if Instant::now() >= self.deadline", "if false"),
+            HOST,
+            PORT
+        )
+        .is_err());
+        assert!(validate(
+            NATIVE,
+            HOST,
+            &PORT.replace(
+                "ForegroundRenderingLease::begin_attempt(context)",
+                "drop(context)"
+            )
+        )
+        .is_err());
+    }
 
     #[test]
     fn foreground_failures_require_exact_context_sticky_causes_and_unchanged_predicates() {
