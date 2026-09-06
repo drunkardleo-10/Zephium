@@ -70,6 +70,28 @@ reload the page, or call the legacy cancellation path.
 
 ## Native fixed-document slice
 
+### Stable native health (deterministic integration)
+
+Tracked construction can install one move-only, private-resource/incarnation-bound
+health reporter with the original native guard. Its one application receiver and
+immutable registered wake outlive leases; no actor mailbox or first-run closure
+is retained or rebound. The finite sticky states are Pending, Current, Retired
+and Uncertain. Publication precedes a coalesced wake. Missing registration,
+foreign installation, duplicate installation/registration, receiver loss, poison
+and wake panic fail closed; Uncertain cannot heal. Retired describes the reporting
+owner's retirement, not native absence or global shutdown proof.
+
+Native acquisition, execution and successful lease-delivery settlement independently
+recheck this exact health binding. Native uncertainty publishes outside ingress
+and resource-state locks. A tracked resource retains one counted reporting lane
+within the existing native task ceiling (at most `MAX_LIVE_CONTEXTS` such lanes);
+this intentionally reduces available task slots, without a ceiling increase or
+new thread/timer. The reporter drops before that lane's permit. Deterministic
+destruction evidence checks callback return, operation-permit release, ingress
+removal, then a Retired wake that still observes the reporting permit before its
+release. Rejected construction breaks its original admission/guard ownership
+cycle without native allocation. Untracked legacy qualification remains unchanged.
+
 `construct_document` freezes the exact HTTP(S) source in the original move-only
 construction request. Parsing a URL alone is not admission. The trusted caller
 must already own Work/profile/source authority; no model-facing operation mints

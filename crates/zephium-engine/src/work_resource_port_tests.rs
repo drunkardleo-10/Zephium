@@ -94,6 +94,143 @@ fn zero() -> ContextNativeResourceSnapshot {
     .unwrap()
 }
 
+#[derive(Default)]
+struct HealthWake(std::sync::atomic::AtomicUsize);
+impl std::task::Wake for HealthWake {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+fn tracked() -> (
+    WorkBrowserResources,
+    Arc<AgentPortAdmission>,
+    Arc<WorkResourceGuard>,
+    zephium_agentic::WorkBrowserResourceHealth,
+) {
+    tracked_wake(|_| Arc::new(HealthWake::default()).into())
+}
+fn tracked_wake(
+    wake: impl FnOnce(&Arc<AgentPortAdmission>) -> std::task::Waker,
+) -> (
+    WorkBrowserResources,
+    Arc<AgentPortAdmission>,
+    Arc<WorkResourceGuard>,
+    zephium_agentic::WorkBrowserResourceHealth,
+) {
+    let (mut rows, request) = source();
+    let (mut request, mut health) = request.track_resource_health().unwrap();
+    let admission = admission();
+    health.register(wake(&admission));
+    let mut guard = WorkResourceGuard::new(&request, &admission);
+    guard.health = request.take_resource_health_reporter();
+    guard.health_permit = Some(admission.reserve().unwrap());
+    let guard = Arc::new(guard);
+    admission
+        .work
+        .lock()
+        .unwrap()
+        .rows
+        .insert(request.resource().identity().context(), guard.clone());
+    guard.install_health();
+    assert!(guard.health_current());
+    guard.outcome(&request, Outcome::Constructed);
+    let _ = rows
+        .settle_at(request.complete(Outcome::Constructed), tick(0))
+        .unwrap();
+    (rows, admission, guard, health)
+}
+
+#[test]
+fn idle_resource_health_is_sticky_without_an_actor_and_receiver_loss_closes_native_admission() {
+    for lose_receiver in [false, true] {
+        let (mut rows, admission, guard, health) = tracked();
+        if lose_receiver {
+            drop(health);
+        } else {
+            guard.fail();
+            assert_eq!(
+                health.snapshot(),
+                zephium_agentic::WorkBrowserResourceHealthState::Uncertain
+            );
+        }
+        let request = rows
+            .acquire(
+                guard.resource(),
+                ContextRunId::generate(),
+                tick(1),
+                tick(100),
+            )
+            .unwrap();
+        assert!(guard.admit_lifecycle(&request, tick(1)).is_err());
+        assert!(!guard.is_healthy());
+        assert_eq!(admission.pending(), Some(1));
+    }
+}
+
+#[test]
+fn reporter_installation_independently_rejects_a_foreign_resource_guard() {
+    let (_, request) = source();
+    let (mut request, mut health) = request.track_resource_health().unwrap();
+    health.register(Arc::new(HealthWake::default()).into());
+    let (_, foreign) = source();
+    let mut guard = WorkResourceGuard::new(&foreign, &admission());
+    guard.health = request.take_resource_health_reporter();
+    guard.install_health();
+    assert!(!guard.is_healthy());
+    assert!(!guard.construction_current());
+    assert_eq!(
+        health.snapshot(),
+        zephium_agentic::WorkBrowserResourceHealthState::Uncertain
+    );
+}
+
+#[test]
+fn destruction_retirement_waits_for_exact_callback_task_ingress_and_reporter_lane() {
+    use zephium_agentic::WorkBrowserResourceHealthState as H;
+    struct CountWake(std::sync::Weak<AgentPortAdmission>, Arc<Mutex<Vec<usize>>>);
+    impl std::task::Wake for CountWake {
+        fn wake(self: Arc<Self>) {
+            let admission = self.0.upgrade().unwrap();
+            self.1.lock().unwrap().push(admission.pending().unwrap());
+        }
+    }
+    let samples = Arc::new(Mutex::new(Vec::new()));
+    let (mut rows, admission, guard, mut health) = tracked_wake(|admission| {
+        Arc::new(CountWake(Arc::downgrade(admission), samples.clone())).into()
+    });
+    let request = rows.destroy(guard.resource()).unwrap();
+    guard.admit_lifecycle(&request, tick(1)).unwrap();
+    let observed = Arc::new(AtomicBool::new(false));
+    let callback_observed = observed.clone();
+    let callback_admission = admission.clone();
+    let task = WorkLifecycleTask {
+        request: Some(request),
+        completion: Some(Box::new(move |terminal| {
+            assert_eq!(callback_admission.pending(), Some(2));
+            assert_eq!(callback_admission.work.lock().unwrap().rows.len(), 1);
+            assert!(matches!(
+                rows.settle_at(terminal, tick(1)).unwrap(),
+                WorkBrowserResourceEvent::Destroyed(_)
+            ));
+            callback_observed.store(true, Ordering::SeqCst);
+        })),
+        guard: guard.clone(),
+        permit: admission.reserve().unwrap(),
+    };
+    task.complete(Outcome::Destroyed);
+    assert!(observed.load(Ordering::SeqCst));
+    assert!(admission.work.lock().unwrap().rows.is_empty());
+    assert_eq!(health.poll(), H::Current);
+    assert_eq!(admission.pending(), Some(1));
+    admission.verify_native_shutdown(zero());
+    assert!(!admission.state.lock().unwrap().native_shutdown_verified);
+    samples.lock().unwrap().clear();
+    drop(guard);
+    assert_eq!(*samples.lock().unwrap(), [1]);
+    assert_eq!(health.poll(), H::Retired);
+    assert_eq!(admission.pending(), Some(0));
+}
+
 #[test]
 fn queue_seal_revokes_an_already_admitted_read_before_native_execution() {
     let (mut rows, admission, guard) = setup();
@@ -110,6 +247,32 @@ fn queue_seal_revokes_an_already_admitted_read_before_native_execution() {
     guard.read_terminal_end();
     assert!(guard.lease_drained(&lease));
     assert_eq!(admission.pending(), Some(0));
+}
+
+#[test]
+fn tracked_rejected_construct_breaks_original_reporter_admission_cycle_without_native_allocation() {
+    let (mut rows, request) = source();
+    let (request, mut health) = request.track_resource_health().unwrap();
+    health.register(Arc::new(HealthWake::default()).into());
+    let admission = admission();
+    let weak = Arc::downgrade(&admission);
+    let port = port(admission.clone(), Arc::new(|_| false));
+    let dispatch = port.schedule_work_lifecycle(request, Box::new(|_| panic!("rejected callback")));
+    let WorkBrowserResourceDispatch::Rejected { request, failure } = dispatch else {
+        panic!("dispatch refusal");
+    };
+    assert_eq!(admission.pending(), Some(0));
+    assert!(admission.work.lock().unwrap().rows.is_empty());
+    assert_eq!(
+        health.poll(),
+        zephium_agentic::WorkBrowserResourceHealthState::Retired
+    );
+    let _ = rows.dispatch_refused(*request, failure).unwrap();
+    rows.seal();
+    assert!(rows.is_quiescent());
+    drop(port);
+    drop(admission);
+    assert!(weak.upgrade().is_none());
 }
 
 #[test]

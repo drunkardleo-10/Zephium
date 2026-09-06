@@ -217,8 +217,24 @@ pub struct WorkBrowserResourceRequest {
     storage: ContextProfileStorageClass,
     document: Option<Arc<ContextNavigationTarget>>,
     delivery: Option<delivery::DeliveryDispatch>,
+    health: Option<Box<WorkBrowserResourceHealthReporter>>,
 }
 impl WorkBrowserResourceRequest {
+    /// Attaches one stable resource-health observer to original construction.
+    /// Other operations and repeated attachment return the request losslessly.
+    pub fn track_resource_health(mut self) -> Result<(Self, WorkBrowserResourceHealth), Box<Self>> {
+        if self.operation.kind != WorkBrowserResourceOperation::Construct || self.health.is_some() {
+            return Err(Box::new(self));
+        }
+        let (observer, reporter) = health::track(self.operation.resource.clone());
+        self.health = Some(Box::new(reporter));
+        Ok((self, observer))
+    }
+    /// Transfers the stable reporting owner once to the trusted native resource.
+    /// Unhandled observers fail closed when the original request is consumed.
+    pub fn take_resource_health_reporter(&mut self) -> Option<WorkBrowserResourceHealthReporter> {
+        self.health.take().map(|reporter| *reporter)
+    }
     /// Exact persistent and process-local resource coordinates.
     pub const fn resource(&self) -> &WorkBrowserResourceJoin {
         &self.operation.resource
@@ -533,6 +549,7 @@ impl WorkBrowserResources {
             storage,
             document,
             delivery: None,
+            health: None,
         })
     }
     /// Reserve one run-bound native lease without transferring page ownership.
@@ -586,6 +603,7 @@ impl WorkBrowserResources {
             storage: row.storage,
             document: row.document.clone(),
             delivery: None,
+            health: None,
         })
     }
     /// Check exact current native-lease membership and immutable deadline.
@@ -644,6 +662,7 @@ impl WorkBrowserResources {
             storage: row.storage,
             document: row.document.clone(),
             delivery: None,
+            health: None,
         })
     }
     /// Revokes the exact lease and additionally tracks physical delivery of its
@@ -706,6 +725,7 @@ impl WorkBrowserResources {
             storage: row.storage,
             document: row.document.clone(),
             delivery: None,
+            health: None,
         })
     }
     /// Settle the exact owned terminal. Wrong authority/phase cannot be replaced
@@ -933,6 +953,12 @@ pub use delivery::{
     WorkBrowserLeaseDeliveryCompletion, WorkBrowserLeaseDeliveryPollError,
     WorkBrowserLeaseDeliveryProof, WorkBrowserLeaseDeliveryReceipt,
     WorkBrowserLeaseDeliveryRefusal, WorkBrowserLeaseDeliveryTicket,
+};
+
+#[path = "work_browser_health.rs"]
+mod health;
+pub use health::{
+    WorkBrowserResourceHealth, WorkBrowserResourceHealthReporter, WorkBrowserResourceHealthState,
 };
 
 /// Move-only terminal callback for an accepted resource operation. A synchronous

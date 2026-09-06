@@ -18,6 +18,18 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
 
 const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
     (
+        "crates/zephium-agentic/src/work_browser_health.rs",
+        &[
+            "resource:WorkBrowserResourceJoin,state:Arc<HealthState>,installed:AtomicBool",
+            "resource!=&self.resource", "self.installed.swap(true,Ordering::AcqRel)",
+            "self.state.fetch_max(state,Ordering::AcqRel)",
+            "self.pending_wake.swap(true,Ordering::AcqRel)",
+            "waker:Mutex<Option<Arc<Waker>>>", "std::panic::catch_unwind",
+            "self.state.receiver_alive.store(false,Ordering::Release)",
+        ],
+        &["ContextJoin", "ContextIdentity", "Serialize", "VecDeque", "std::thread", "AgentNativeShutdownProof"],
+    ),
+    (
         "crates/zephium-agentic/src/work_browser_delivery.rs",
         &[
             "Arc::ptr_eq(&self.0,&other.0)",
@@ -118,7 +130,11 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "state.phase==Phase::Acquiring&&state.retirement_delivery.is_none()",
             "state.lease.is_some()||state.retirement_delivery.is_some()",
             "state.retirement_delivery.as_ref()==Some(lease)",
-            "exact&&callback_returned&&permit_released&&port_open&&!state.uncertain&&state.phase==Phase::Retained",
+            "exact&&callback_returned&&permit_released&&port_open&&self.health_current()&&!state.uncertain&&state.phase==Phase::Retained",
+            "health:Option<WorkBrowserResourceHealthReporter>,health_permit:Option<AgentTaskPermit>",
+            "guard.health=health;guard.health_permit=health_permit",
+            "health.is_current(&self.resource)",
+            "ifrequest.operation()==Operation::Construct{guard.install_health();}",
             "letpublished=retained&&delivery.is_none_or(|owner|owner.publish_returned())",
             "ifexact&&permit_released{",
             "self.permit.release();ifletSome(lease)=&revocation{self.guard.finish_revocation_delivery(",

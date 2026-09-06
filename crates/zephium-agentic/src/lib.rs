@@ -55,7 +55,8 @@ pub use work_browser_resource::{
     WorkBrowserObservationDispatch, WorkBrowserObservationEvent, WorkBrowserObservationRequest,
     WorkBrowserResourceCompletion, WorkBrowserResourceCompletionCallback,
     WorkBrowserResourceDispatch, WorkBrowserResourceError, WorkBrowserResourceEvent,
-    WorkBrowserResourceFailure, WorkBrowserResourceId, WorkBrowserResourceIdentity,
+    WorkBrowserResourceFailure, WorkBrowserResourceHealth, WorkBrowserResourceHealthReporter,
+    WorkBrowserResourceHealthState, WorkBrowserResourceId, WorkBrowserResourceIdentity,
     WorkBrowserResourceJoin, WorkBrowserResourceNativeOutcome, WorkBrowserResourceOperation,
     WorkBrowserResourcePhase, WorkBrowserResourceRequest, WorkBrowserResources, WorkId,
 };

@@ -10,7 +10,7 @@ use zephium_agentic::{
     WorkBrowserExecutionLease, WorkBrowserLeaseDeliveryCompletion,
     WorkBrowserObservationCompletionCallback, WorkBrowserObservationDispatch,
     WorkBrowserObservationRequest, WorkBrowserResourceCompletionCallback,
-    WorkBrowserResourceDispatch, WorkBrowserResourceJoin,
+    WorkBrowserResourceDispatch, WorkBrowserResourceHealthReporter, WorkBrowserResourceJoin,
     WorkBrowserResourceNativeOutcome as Outcome, WorkBrowserResourceOperation as Operation,
     WorkBrowserResourceRequest, MAX_LIVE_CONTEXTS,
 };
@@ -54,6 +54,10 @@ pub(crate) struct WorkResourceGuard {
     storage: ContextProfileStorageClass,
     document: Option<ContextNavigationTarget>,
     state: Mutex<State>,
+    // Drop order is deliberate: the original native reporting owner retires
+    // before its counted delivery lane. No audit may overlook a live reporter.
+    health: Option<WorkBrowserResourceHealthReporter>,
+    health_permit: Option<AgentTaskPermit>,
     #[cfg(test)]
     notification_dispatch: Mutex<Option<MainThreadDispatch>>,
 }
@@ -67,6 +71,8 @@ impl WorkResourceGuard {
             resource: request.resource().clone(),
             storage: request.storage(),
             document: request.document().cloned(),
+            health: None,
+            health_permit: None,
             #[cfg(test)]
             notification_dispatch: Mutex::new(None),
             state: Mutex::new(State {
@@ -83,6 +89,28 @@ impl WorkResourceGuard {
     }
     pub(crate) fn resource(&self) -> &WorkBrowserResourceJoin {
         &self.resource
+    }
+    fn health_current(&self) -> bool {
+        self.health
+            .as_ref()
+            .is_none_or(|health| health.is_current(&self.resource))
+    }
+    fn install_health(&self) {
+        if self
+            .health
+            .as_ref()
+            .is_some_and(|health| !health.install(&self.resource))
+        {
+            self.fail();
+        }
+    }
+    fn report_uncertainty(&self) {
+        let uncertain = self.state.lock().map_or(true, |state| state.uncertain);
+        if uncertain {
+            if let Some(health) = &self.health {
+                health.invalidate();
+            }
+        }
     }
     pub(crate) fn dispatch_notification(&self, task: impl FnOnce() + Send + 'static) {
         #[cfg(test)]
@@ -109,6 +137,7 @@ impl WorkResourceGuard {
     }
     pub(crate) fn construction_current(&self) -> bool {
         self.port_open()
+            && self.health_current()
             && self.state.lock().is_ok_and(|state| {
                 state.phase == Phase::Constructing && state.construction_pending && !state.uncertain
             })
@@ -134,6 +163,11 @@ impl WorkResourceGuard {
         self.document.as_ref()
     }
     pub(crate) fn fail(&self) {
+        // Invalidate the stable application observation before waking it. No
+        // native ownership lock is held while invoking its coalesced wake.
+        if let Some(health) = &self.health {
+            health.invalidate();
+        }
         let mut state = self
             .state
             .lock()
@@ -160,7 +194,8 @@ impl WorkResourceGuard {
             .map_err(|_| ContextPortFailure::NativeRefused)?;
         match request.operation() {
             Operation::Acquire
-                if state.phase == Phase::Retained
+                if self.health_current()
+                    && state.phase == Phase::Retained
                     && !state.uncertain
                     && state.lease.is_none()
                     && state.retirement_delivery.is_none()
@@ -196,6 +231,7 @@ impl WorkResourceGuard {
         now: AgentPolicyInstant,
     ) -> bool {
         self.port_open()
+            && self.health_current()
             && self.state.lock().is_ok_and(|state| {
                 !state.uncertain
                     && state.phase == Phase::Leased
@@ -211,6 +247,7 @@ impl WorkResourceGuard {
         now: AgentPolicyInstant,
     ) -> bool {
         self.port_open()
+            && self.health_current()
             && self.state.lock().is_ok_and(|state| {
                 !state.uncertain
                     && state.phase == Phase::Acquiring
@@ -226,14 +263,15 @@ impl WorkResourceGuard {
         })
     }
     pub(crate) fn lease_drained(&self, lease: &WorkBrowserExecutionLease) -> bool {
-        self.state.lock().is_ok_and(|state| {
-            !state.uncertain
-                && state.phase == Phase::Revoking
-                && state.lease.as_ref() == Some(lease)
-                && state.retirement_delivery.as_ref() == Some(lease)
-                && state.reads == 0
-                && state.callbacks == 0
-        })
+        self.health_current()
+            && self.state.lock().is_ok_and(|state| {
+                !state.uncertain
+                    && state.phase == Phase::Revoking
+                    && state.lease.as_ref() == Some(lease)
+                    && state.retirement_delivery.as_ref() == Some(lease)
+                    && state.reads == 0
+                    && state.callbacks == 0
+            })
     }
     pub(crate) fn callbacks_drained(&self) -> bool {
         self.state.lock().is_ok_and(|state| {
@@ -278,9 +316,11 @@ impl WorkResourceGuard {
             state.uncertain = true;
         }
         state.notification_pending = false;
+        drop(state);
+        self.report_uncertainty();
     }
     pub(crate) fn is_healthy(&self) -> bool {
-        self.state.lock().is_ok_and(|state| !state.uncertain)
+        self.health_current() && self.state.lock().is_ok_and(|state| !state.uncertain)
     }
     fn admit_read(
         &self,
@@ -292,6 +332,7 @@ impl WorkResourceGuard {
             .lock()
             .map_err(|_| ContextPortFailure::NativeRefused)?;
         if state.uncertain
+            || !self.health_current()
             || state.phase != Phase::Leased
             || state.lease.as_ref() != Some(request.lease())
         {
@@ -315,6 +356,8 @@ impl WorkResourceGuard {
             state.uncertain = true;
         }
         state.callbacks = 1;
+        drop(state);
+        self.report_uncertainty();
     }
     fn read_terminal_end(&self) {
         let mut state = self
@@ -326,6 +369,8 @@ impl WorkResourceGuard {
         }
         state.reads = 0;
         state.callbacks = 0;
+        drop(state);
+        self.report_uncertainty();
     }
     fn outcome(&self, request: &WorkBrowserResourceRequest, outcome: Outcome) {
         let mut state = self
@@ -389,6 +434,8 @@ impl WorkResourceGuard {
                 }
             }
         }
+        drop(state);
+        self.report_uncertainty();
     }
     fn finish_revocation_delivery(
         &self,
@@ -407,6 +454,7 @@ impl WorkResourceGuard {
             && callback_returned
             && permit_released
             && port_open
+            && self.health_current()
             && !state.uncertain
             && state.phase == Phase::Retained
             && state.lease.is_none()
@@ -426,6 +474,8 @@ impl WorkResourceGuard {
             // this debt so original resource destruction can subsequently drain.
             state.retirement_delivery = None;
         }
+        drop(state);
+        self.report_uncertainty();
     }
     fn not_admitted(&self, request: &WorkBrowserResourceRequest) {
         let mut state = self
@@ -450,6 +500,8 @@ impl WorkResourceGuard {
                 state.phase = Phase::Quarantined;
             }
         }
+        drop(state);
+        self.report_uncertainty();
     }
 }
 
@@ -498,6 +550,7 @@ impl AgentPortAdmission {
                 true
             }
         };
+        guard.report_uncertainty();
         if wake {
             crate::host::notify_work_resource(guard.clone());
         }
@@ -570,7 +623,7 @@ impl WorkLifecycleTask {
                 .work
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if ingress
+            let matched = if ingress
                 .rows
                 .get(&self.guard.resource.identity().context())
                 .is_some_and(|guard| Arc::ptr_eq(guard, &self.guard))
@@ -578,7 +631,12 @@ impl WorkLifecycleTask {
                 ingress
                     .rows
                     .remove(&self.guard.resource.identity().context());
+                true
             } else {
+                false
+            };
+            drop(ingress);
+            if !matched {
                 self.guard.fail();
             }
         }
@@ -702,7 +760,7 @@ impl Drop for WorkObservationTask {
 impl EngineAgentBrowserPort {
     pub(super) fn schedule_work_lifecycle(
         &self,
-        request: WorkBrowserResourceRequest,
+        mut request: WorkBrowserResourceRequest,
         completion: WorkBrowserResourceCompletionCallback,
     ) -> WorkBrowserResourceDispatch {
         let reject = |request, failure| WorkBrowserResourceDispatch::Rejected {
@@ -711,6 +769,15 @@ impl EngineAgentBrowserPort {
         };
         let Some(now) = work_browser_monotonic_now() else {
             return reject(request, ContextPortFailure::NativeRefused);
+        };
+        let health = request.take_resource_health_reporter();
+        let health_permit = if health.is_some() {
+            match self.admission.reserve() {
+                Ok(permit) => Some(permit),
+                Err(failure) => return reject(request, failure),
+            }
+        } else {
+            None
         };
         let guard = {
             let Ok(mut ingress) = self.admission.work.lock() else {
@@ -724,7 +791,10 @@ impl EngineAgentBrowserPort {
                 if ingress.rows.len() >= MAX_LIVE_CONTEXTS {
                     return reject(request, ContextPortFailure::ResourceExhausted);
                 }
-                let guard = Arc::new(WorkResourceGuard::new(&request, &self.admission));
+                let mut guard = WorkResourceGuard::new(&request, &self.admission);
+                guard.health = health;
+                guard.health_permit = health_permit;
+                let guard = Arc::new(guard);
                 ingress.rows.insert(id, guard.clone());
                 guard
             } else {
@@ -747,6 +817,12 @@ impl EngineAgentBrowserPort {
                 guard
             }
         };
+        // The immutable resource observer is installed only after releasing
+        // ingress. Its wake may reenter trusted application code, never while
+        // holding the native admission map or a resource-state mutex.
+        if request.operation() == Operation::Construct {
+            guard.install_health();
+        }
         let permit = match self.admission.reserve() {
             Ok(permit) => permit,
             Err(failure) => {

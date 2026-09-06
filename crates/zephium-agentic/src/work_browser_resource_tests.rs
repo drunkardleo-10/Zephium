@@ -19,6 +19,139 @@ impl WorkBrowserResources {
 fn tick(value: u64) -> AgentPolicyInstant {
     AgentPolicyInstant::from_millis(value)
 }
+
+#[derive(Default)]
+struct HealthWake(std::sync::atomic::AtomicUsize);
+impl std::task::Wake for HealthWake {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn health_is_exact_private_resource_bound_and_finite_sticky_coalesced() {
+    use WorkBrowserResourceHealthState as H;
+    let mut rows = registry();
+    let resource = create(&mut rows, 701);
+    let (mut health, reporter) = health::track(resource.clone());
+    let wake = Arc::new(HealthWake::default());
+    assert_eq!(health.register(wake.clone().into()), H::Pending);
+    assert!(reporter.install(&resource));
+    assert_eq!(health.snapshot(), H::Current);
+    assert_eq!(wake.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    for _ in 0..10_000 {
+        reporter.invalidate();
+    }
+    assert_eq!(health.snapshot(), H::Uncertain);
+    assert_eq!(wake.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(health.poll(), H::Uncertain);
+    reporter.invalidate();
+    assert_eq!(wake.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+    drop(reporter);
+    assert_eq!(health.poll(), H::Uncertain);
+    assert!(!rows.is_quiescent());
+
+    let mut identical_ids = registry();
+    let foreign = create(&mut identical_ids, 701);
+    assert_eq!(resource.identity(), foreign.identity());
+    assert_ne!(resource, foreign);
+    let (mut health, reporter) = health::track(resource.clone());
+    health.register(wake.clone().into());
+    assert!(!reporter.install(&foreign));
+    assert!(!reporter.is_current(&resource));
+    assert_eq!(health.poll(), H::Uncertain);
+}
+
+#[test]
+fn health_original_registration_cannot_be_rebound_and_retirement_is_not_absence() {
+    use WorkBrowserResourceHealthState as H;
+    let mut rows = registry();
+    let resource = create(&mut rows, 702);
+    let (mut health, reporter) = health::track(resource.clone());
+    health.register(Arc::new(HealthWake::default()).into());
+    assert!(reporter.install(&resource));
+    health.poll();
+    drop(reporter);
+    assert_eq!(health.poll(), H::Retired);
+    assert!(!rows.is_quiescent());
+    let (mut health, reporter) = health::track(resource.clone());
+    health.register(Arc::new(HealthWake::default()).into());
+    assert!(reporter.install(&resource));
+    assert_eq!(
+        health.register(Arc::new(HealthWake::default()).into()),
+        H::Uncertain
+    );
+    assert!(!reporter.is_current(&resource));
+}
+
+#[test]
+fn health_missing_registration_receiver_or_reporter_and_duplicate_install_close_admission() {
+    use WorkBrowserResourceHealthState as H;
+    let mut rows = registry();
+    let resource = create(&mut rows, 703);
+    let (mut health, reporter) = health::track(resource.clone());
+    assert!(!reporter.install(&resource));
+    // Register-then-recheck observes a publication preceding registration;
+    // it cannot heal the original missing delivery owner.
+    let wake = Arc::new(HealthWake::default());
+    assert_eq!(health.register(wake.clone().into()), H::Uncertain);
+    assert_eq!(wake.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let (mut health, reporter) = health::track(resource.clone());
+    health.register(wake.clone().into());
+    assert!(reporter.install(&resource));
+    assert!(!reporter.install(&resource));
+    assert_eq!(health.poll(), H::Uncertain);
+    let (mut health, reporter) = health::track(resource.clone());
+    health.register(wake.into());
+    assert!(reporter.install(&resource));
+    drop(health);
+    assert!(!reporter.is_current(&resource));
+    let (health, reporter) = health::track(resource);
+    drop(reporter);
+    assert_eq!(health.snapshot(), H::Uncertain);
+}
+
+#[test]
+fn health_wake_panic_is_contained_and_cannot_authorize_native_execution() {
+    struct Panics;
+    impl std::task::Wake for Panics {
+        fn wake(self: Arc<Self>) {
+            panic!("intentional health wake failure");
+        }
+    }
+    let mut rows = registry();
+    let resource = create(&mut rows, 704);
+    let (mut health, reporter) = health::track(resource.clone());
+    health.register(Arc::new(Panics).into());
+    assert!(!reporter.install(&resource));
+    assert_eq!(health.poll(), WorkBrowserResourceHealthState::Uncertain);
+    assert!(!reporter.is_current(&resource));
+}
+
+#[test]
+fn health_request_attachment_is_construct_only_move_only_and_unhandled_fails_closed() {
+    let mut rows = registry();
+    let request = rows
+        .construct(
+            WorkBrowserResourceId::from_raw(705),
+            ContextId::from_raw(805),
+            ContextProfileStorageClass::Ephemeral,
+            tick(0),
+        )
+        .unwrap();
+    let (request, mut health) = request.track_resource_health().unwrap();
+    let request = *request.track_resource_health().unwrap_err();
+    health.register(Arc::new(HealthWake::default()).into());
+    let resource = request.resource().clone();
+    let _ = rows
+        .settle(request.complete(WorkBrowserResourceNativeOutcome::Constructed))
+        .unwrap();
+    assert_eq!(health.poll(), WorkBrowserResourceHealthState::Uncertain);
+    let request = rows
+        .acquire(&resource, ContextRunId::from_raw(706), tick(1), tick(100))
+        .unwrap();
+    assert!(request.track_resource_health().is_err());
+}
 fn registry() -> WorkBrowserResources {
     WorkBrowserResources::new(WorkId::from_raw(1), ProfileId::from(2))
 }
