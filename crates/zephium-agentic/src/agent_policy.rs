@@ -401,6 +401,40 @@ const _: () = assert!(
     std::mem::size_of::<AgentRunPolicySettlement>() <= MAX_AGENT_RUN_POLICY_SETTLEMENT_BYTES
 );
 
+/// Non-authorizing expected settlement stamp for one immutable manifest.
+/// It borrows approval only to freeze identity/fingerprint; the original
+/// move-only manifest still belongs to its policy. No serialization or
+/// authority reconstruction is provided.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct AgentRunPolicySettlementBinding {
+    manifest: AgentRunManifestId,
+    guard: [u8; 32],
+}
+
+const _: () = assert!(std::mem::size_of::<AgentRunPolicySettlementBinding>() <= 64);
+
+impl AgentRunPolicySettlementBinding {
+    /// Freezes the exact approved manifest without cloning its authority owner.
+    pub fn new(manifest: &AgentRunManifest) -> Self {
+        Self {
+            manifest: manifest.id(),
+            guard: manifest.guard(),
+        }
+    }
+
+    /// Checks both identity and full immutable authority fingerprint.
+    pub fn matches(self, settlement: AgentRunPolicySettlement) -> bool {
+        settlement.closure.manifest() == self.manifest
+            && settlement.closure.manifest_guard() == self.guard
+    }
+}
+
+impl fmt::Debug for AgentRunPolicySettlementBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AgentRunPolicySettlementBinding([non-authorizing, redacted])")
+    }
+}
+
 impl AgentRunPolicySettlement {
     /// Exact terminal metric closure joined before consuming the policy.
     pub const fn closure(self) -> AgentRunMetricClosure {

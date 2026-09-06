@@ -527,6 +527,11 @@ impl AgentRuntimeMailbox {
     pub(crate) fn publish_test_signal(&self) -> Result<(), AgentRuntimeMailboxFault> {
         self.publish_signal(SignalItem::Test)
     }
+
+    #[cfg(test)]
+    pub(crate) fn hold_test_callback(&self) -> Result<impl Drop, AgentRuntimeMailboxFault> {
+        self.reserve_ingress(true)
+    }
 }
 
 struct IngressReservation {

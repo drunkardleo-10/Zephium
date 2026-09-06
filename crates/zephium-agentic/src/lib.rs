@@ -174,11 +174,11 @@ pub use agent_policy::{
     AgentNavigationAuthorizationRequest, AgentNavigationPermit, AgentNavigationProgressId,
     AgentNavigationReceipt, AgentNavigationSettlement, AgentNeedsHumanReason,
     AgentNeedsHumanTransition, AgentPlanLeaseBinding, AgentPolicyAccounting, AgentPolicyError,
-    AgentRunPolicy, AgentRunPolicySettlement, AgentRunPolicySettlementError,
-    AgentRunPolicySettlementRefusal, AgentTaintCohort, AgentVerifiedSemanticEffect,
-    MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS, MAX_AGENT_PENDING_EFFECTS,
-    MAX_AGENT_PENDING_MODEL_CALLS, MAX_AGENT_RUN_POLICY_SETTLEMENT_BYTES, MAX_AGENT_TAINT_COHORTS,
-    MAX_AGENT_TAINT_REFERENCES,
+    AgentRunPolicy, AgentRunPolicySettlement, AgentRunPolicySettlementBinding,
+    AgentRunPolicySettlementError, AgentRunPolicySettlementRefusal, AgentTaintCohort,
+    AgentVerifiedSemanticEffect, MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS,
+    MAX_AGENT_PENDING_EFFECTS, MAX_AGENT_PENDING_MODEL_CALLS,
+    MAX_AGENT_RUN_POLICY_SETTLEMENT_BYTES, MAX_AGENT_TAINT_COHORTS, MAX_AGENT_TAINT_REFERENCES,
 };
 pub use agent_progress_metrics::{
     AgentDurationMetrics, AgentNeedsHumanMetrics, AgentProgressMetricError,

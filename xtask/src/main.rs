@@ -1085,6 +1085,7 @@ fn check_agentic_probe_boundary() {
         .and_then(|()| work_composition_boundary::check(&repository))
         .and_then(|()| work_persistence_boundary::check(&repository))
         .and_then(|()| work_resource_boundary::check(&repository))
+        .and_then(|()| agent_runtime_boundary::check(&repository))
     {
         eprintln!("agentic diagnostic release boundary failed: {error}");
         exit(1);

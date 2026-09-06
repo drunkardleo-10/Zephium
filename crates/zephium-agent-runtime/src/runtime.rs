@@ -31,6 +31,16 @@ use crate::mailbox::{
 };
 use crate::{AgentRuntimeMailboxConfig, AgentRuntimeMailboxFault, NativeEventSink};
 
+mod scoped;
+#[cfg(test)]
+mod scoped_tests;
+pub use scoped::{
+    AgentRuntimeScopedBinding, AgentRuntimeScopedBindingRefusal, AgentRuntimeScopedClaim,
+    AgentRuntimeScopedCommitRefusal, AgentRuntimeScopedComposition, AgentRuntimeScopedController,
+    AgentRuntimeScopedDrain, AgentRuntimeScopedDrained, AgentRuntimeScopedLifecycle,
+    PendingScopedAgentRuntime,
+};
+
 const RUN_IDLE: u8 = 0;
 const RUN_ACTIVE: u8 = 1;
 const RUN_SEALED: u8 = 2;
@@ -333,6 +343,27 @@ pub trait AgentRuntimeController: Send + 'static {
     ) -> AgentRuntimeControllerFuture;
 }
 
+enum RuntimeController {
+    Legacy(Box<dyn AgentRuntimeController>),
+    Scoped(Box<dyn AgentRuntimeScopedController>),
+}
+
+impl RuntimeController {
+    fn run(
+        self,
+        worker: AgentRuntimeWorker,
+        binding: StartupBinding,
+    ) -> Option<AgentRuntimeControllerFuture> {
+        match (self, binding) {
+            (Self::Legacy(controller), StartupBinding::Browser(port)) => {
+                Some(controller.run(worker, AgentRuntimeBrowser::new(port)))
+            }
+            (Self::Scoped(controller), StartupBinding::Scoped) => Some(controller.run(worker)),
+            _ => None,
+        }
+    }
+}
+
 /// Closed event vocabulary delivered to one runtime controller.
 ///
 /// Control and cancellation/shutdown observations take priority over all
@@ -413,6 +444,9 @@ pub enum AgentRuntimeWorkerFault {
 /// Content-free reason a controller could not atomically claim success.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum AgentRuntimeControllerTerminalRefusal {
+    /// The requested proof class does not match the runtime's frozen scope.
+    #[error("agent runtime controller terminal claim has the wrong scope")]
+    Scope,
     /// The run was no longer in its sole active controller state.
     #[error("agent runtime controller terminal claim is no longer active")]
     Inactive,
@@ -490,7 +524,7 @@ impl AgentRuntimeControllerTerminalClaim {
 
     /// Commits the previously linearized clean controller terminal claim.
     pub fn commit(mut self) {
-        self.commit_inner(None);
+        self.commit_inner(None, None);
     }
 
     /// Commits terminal policy/audit consumption and exact native shutdown.
@@ -505,19 +539,27 @@ impl AgentRuntimeControllerTerminalClaim {
         policy: AgentRunPolicySettlement,
         provider: AgentProviderShutdownProof,
     ) {
-        self.commit_inner(Some(RuntimeShutdownClosure {
-            native,
-            _policy: policy,
-            _provider: provider,
-        }));
+        self.commit_inner(
+            Some(RuntimeShutdownClosure {
+                native,
+                _policy: policy,
+                _provider: provider,
+            }),
+            None,
+        );
     }
 
-    fn commit_inner(&mut self, closure: Option<RuntimeShutdownClosure>) {
+    fn commit_inner(
+        &mut self,
+        closure: Option<RuntimeShutdownClosure>,
+        scoped: Option<scoped::ScopedClosure>,
+    ) {
         let _gate = recover_lock(&self.inner.terminal_claim_gate);
         // `self` is the sole move-only owner created by CLAIMING->CLAIMED.
         // Lifecycle control cannot revoke CLAIMED and no other API can create
         // or consume this proof, so this is an infallible typestate edge.
         *recover_lock(&self.inner.shutdown_closure) = closure;
+        *recover_lock(&self.inner.scoped_closure) = scoped;
         self.inner.run_state.store(RUN_SUCCEEDED, Ordering::Release);
         self.inner
             .terminal_claim_class
@@ -721,6 +763,16 @@ impl AgentRuntimeWorker {
         &mut self,
         class: AgentRuntimeControllerTerminalClass,
     ) -> Result<AgentRuntimeControllerTerminalClaim, AgentRuntimeControllerTerminalRefusal> {
+        if self.inner.scope.is_some() {
+            return Err(AgentRuntimeControllerTerminalRefusal::Scope);
+        }
+        self.claim_terminal(class).await
+    }
+
+    async fn claim_terminal(
+        &mut self,
+        class: AgentRuntimeControllerTerminalClass,
+    ) -> Result<AgentRuntimeControllerTerminalClaim, AgentRuntimeControllerTerminalRefusal> {
         // Even a control-class refusal is a terminal controller decision: seal
         // ingress and wait preexisting writers before returning it so the
         // caller can synchronously retain every queued move-only settlement.
@@ -792,9 +844,15 @@ enum WorkerCommand {
     Start(AgentRunTicket),
 }
 
+#[derive(Clone)]
+enum StartupBinding {
+    Browser(Arc<dyn AgentBrowserPort>),
+    Scoped,
+}
+
 enum StartupState {
     Suspended,
-    Bound(Arc<dyn AgentBrowserPort>),
+    Bound(StartupBinding),
     Stop,
 }
 
@@ -813,7 +871,13 @@ impl StartupGate {
 
     fn bind(&self, browser: Arc<dyn AgentBrowserPort>) {
         let mut state = recover_lock(&self.state);
-        *state = StartupState::Bound(browser);
+        *state = StartupState::Bound(StartupBinding::Browser(browser));
+        self.changed.notify_waiters();
+    }
+
+    fn bind_scoped(&self) {
+        let mut state = recover_lock(&self.state);
+        *state = StartupState::Bound(StartupBinding::Scoped);
         self.changed.notify_waiters();
     }
 
@@ -823,7 +887,7 @@ impl StartupGate {
         self.changed.notify_waiters();
     }
 
-    async fn wait(&self) -> Option<Arc<dyn AgentBrowserPort>> {
+    async fn wait(&self) -> Option<StartupBinding> {
         loop {
             let mut notified = std::pin::pin!(self.changed.notified());
             notified.as_mut().enable();
@@ -831,7 +895,7 @@ impl StartupGate {
                 let state = recover_lock(&self.state);
                 match &*state {
                     StartupState::Suspended => None,
-                    StartupState::Bound(browser) => Some(Some(Arc::clone(browser))),
+                    StartupState::Bound(binding) => Some(Some(binding.clone())),
                     StartupState::Stop => Some(None),
                 }
             };
@@ -915,6 +979,8 @@ struct RuntimeShutdownClosure {
 }
 
 struct RuntimeInner {
+    scope: Option<AgentRuntimeScopedBinding>,
+    scoped_closure: Mutex<Option<scoped::ScopedClosure>>,
     mailbox: AgentRuntimeMailbox,
     commands: ArrayQueue<WorkerCommand>,
     control_wake: Notify,
@@ -1333,7 +1399,7 @@ pub struct PendingAgentRuntime {
 impl PendingAgentRuntime {
     /// Starts one named current-thread Tokio worker behind a startup gate.
     pub fn spawn_suspended(config: AgentRuntimeConfig) -> Result<Self, RuntimeSpawnError> {
-        Self::spawn_suspended_inner(config, None)
+        Self::spawn_suspended_inner(config, None, None)
     }
 
     /// Starts the suspended worker with one controller moved to that worker.
@@ -1346,14 +1412,17 @@ impl PendingAgentRuntime {
         config: AgentRuntimeConfig,
         controller: Box<dyn AgentRuntimeController>,
     ) -> Result<Self, RuntimeSpawnError> {
-        Self::spawn_suspended_inner(config, Some(controller))
+        Self::spawn_suspended_inner(config, Some(RuntimeController::Legacy(controller)), None)
     }
 
     fn spawn_suspended_inner(
         config: AgentRuntimeConfig,
-        controller: Option<Box<dyn AgentRuntimeController>>,
+        controller: Option<RuntimeController>,
+        scope: Option<AgentRuntimeScopedBinding>,
     ) -> Result<Self, RuntimeSpawnError> {
         let inner = Arc::new(RuntimeInner {
+            scope,
+            scoped_closure: Mutex::new(None),
             mailbox: AgentRuntimeMailbox::new(config.mailbox),
             commands: ArrayQueue::new(config.command_capacity),
             control_wake: Notify::new(),
@@ -1498,18 +1567,7 @@ struct RuntimeLifecycle {
 
 impl AgentBrowserLifecycle for RuntimeLifecycle {
     fn shutdown_until(mut self: Box<Self>, deadline: Instant) -> AgentBrowserShutdownOutcome {
-        self.inner.request_cooperative_shutdown_until(deadline);
-        if !self.inner.completion.wait_until(deadline) {
-            if let Some(worker) = self.worker.take() {
-                schedule_reap(worker);
-            }
-            return AgentBrowserShutdownOutcome::Unclean;
-        }
-        let joined = self.worker.take().is_some_and(RuntimeWorkerOwnership::join);
-        if joined
-            && self.inner.controller_returned.load(Ordering::Acquire)
-            && self.inner.run_state.load(Ordering::Acquire) == RUN_SUCCEEDED
-            && self.inner.mailbox.fault().is_none()
+        if join_worker_until(&self.inner, &mut self.worker, deadline) && self.inner.scope.is_none()
         {
             if let Some(closure) = recover_lock(&self.inner.shutdown_closure).take() {
                 return AgentBrowserShutdownOutcome::Clean(closure.native);
@@ -1517,6 +1575,24 @@ impl AgentBrowserLifecycle for RuntimeLifecycle {
         }
         AgentBrowserShutdownOutcome::Unclean
     }
+}
+
+fn join_worker_until(
+    inner: &RuntimeInner,
+    worker: &mut Option<RuntimeWorkerOwnership>,
+    deadline: Instant,
+) -> bool {
+    inner.request_cooperative_shutdown_until(deadline);
+    if !inner.completion.wait_until(deadline) {
+        if let Some(worker) = worker.take() {
+            schedule_reap(worker);
+        }
+        return false;
+    }
+    worker.take().is_some_and(RuntimeWorkerOwnership::join)
+        && inner.controller_returned.load(Ordering::Acquire)
+        && inner.run_state.load(Ordering::Acquire) == RUN_SUCCEEDED
+        && inner.mailbox.fault().is_none()
 }
 
 impl Drop for RuntimeLifecycle {
@@ -1596,7 +1672,7 @@ fn worker_main(
     gate: Arc<StartupGate>,
     startup_sender: mpsc::SyncSender<Result<(), ()>>,
     permit: Arc<WorkerPermit>,
-    controller: Option<Box<dyn AgentRuntimeController>>,
+    controller: Option<RuntimeController>,
 ) {
     // This is intentionally scoped across every actual worker operation,
     // including startup failure and post-loop thread teardown. The permit
@@ -1624,10 +1700,11 @@ fn worker_main(
 async fn worker_loop(
     inner: Arc<RuntimeInner>,
     gate: Arc<StartupGate>,
-    mut controller: Option<Box<dyn AgentRuntimeController>>,
+    mut controller: Option<RuntimeController>,
 ) {
-    // Keeping the move-only browser authority in this one worker is the
-    // ownership seam. The optional controller performs every port operation.
+    // Legacy browser authority stays in this one worker. A scoped controller
+    // receives no native port; its captured facade cannot transfer the original
+    // Work resource owner's port/sink/destruction ownership into this substrate.
     // Without it, this remains the conservative staged shell: every callback
     // is unexpected and forces a recorded fail-stop.
     let mut browser: Option<Arc<dyn AgentBrowserPort>> = None;
@@ -1667,7 +1744,7 @@ async fn worker_loop(
                     biased;
                     _ = &mut notified => {}
                     startup = &mut startup_wait => match startup {
-                        Some(port) => {
+                        Some(binding) => {
                             if let Some(controller) = controller.take() {
                                 run_controller_no_unwind(
                                     &inner,
@@ -1678,7 +1755,7 @@ async fn worker_loop(
                                         shutdown_delivered: false,
                                         not_send: PhantomData,
                                     },
-                                    AgentRuntimeBrowser::new(port),
+                                    binding,
                                 )
                                 .await;
                                 // A controller return or unwind never grants
@@ -1707,7 +1784,12 @@ async fn worker_loop(
                         break;
                     }
                     startup = &mut startup_wait => match startup {
-                        Some(port) => browser = Some(port),
+                        Some(StartupBinding::Browser(port)) => browser = Some(port),
+                        Some(StartupBinding::Scoped) => {
+                            inner.request_final_shutdown();
+                            inner.mailbox.close_and_drain().await;
+                            break;
+                        }
                         None => {
                             inner.request_final_shutdown();
                             inner.mailbox.close_and_drain().await;
@@ -1737,13 +1819,13 @@ async fn worker_loop(
 
 async fn run_controller_no_unwind(
     inner: &RuntimeInner,
-    controller: Box<dyn AgentRuntimeController>,
+    controller: RuntimeController,
     worker: AgentRuntimeWorker,
-    browser: AgentRuntimeBrowser,
+    binding: StartupBinding,
 ) {
-    let mut future = match catch_unwind(AssertUnwindSafe(|| controller.run(worker, browser))) {
-        Ok(future) => future,
-        Err(_) => return,
+    let mut future = match catch_unwind(AssertUnwindSafe(|| controller.run(worker, binding))) {
+        Ok(Some(future)) => future,
+        Ok(None) | Err(_) => return,
     };
     // Lifecycle shutdown is stronger than controller cooperation, but it does
     // not immediately destroy controller-owned active work. It first grants
@@ -1813,6 +1895,7 @@ async fn run_controller_no_unwind(
         .store(returned && dropped, Ordering::Release);
     if !returned || !dropped {
         recover_lock(&inner.shutdown_closure).take();
+        recover_lock(&inner.scoped_closure).take();
     }
 }
 
@@ -2090,7 +2173,7 @@ mod tests {
         }
     }
 
-    fn runtime_test_guard() -> MutexGuard<'static, ()> {
+    pub(super) fn runtime_test_guard() -> MutexGuard<'static, ()> {
         recover_lock(&RUNTIME_TEST_SERIALIZER)
     }
 
@@ -2396,6 +2479,8 @@ mod tests {
 
     fn controller_test_inner() -> Arc<RuntimeInner> {
         Arc::new(RuntimeInner {
+            scope: None,
+            scoped_closure: Mutex::new(None),
             mailbox: AgentRuntimeMailbox::new(AgentRuntimeMailboxConfig::STANDARD),
             commands: ArrayQueue::new(MIN_AGENT_RUNTIME_COMMAND_CAPACITY),
             control_wake: Notify::new(),
@@ -2938,7 +3023,7 @@ mod tests {
         }
     }
 
-    fn wait_stopped(completion: &AgentRuntimeCompletion) {
+    pub(super) fn wait_stopped(completion: &AgentRuntimeCompletion) {
         for _ in 0..300 {
             if completion.is_stopped() {
                 return;
@@ -3773,6 +3858,8 @@ mod tests {
         );
 
         let inner = RuntimeInner {
+            scope: None,
+            scoped_closure: Mutex::new(None),
             mailbox,
             commands: ArrayQueue::new(MIN_AGENT_RUNTIME_COMMAND_CAPACITY),
             control_wake: Notify::new(),

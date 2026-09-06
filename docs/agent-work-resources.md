@@ -429,8 +429,10 @@ retirement. No GUI, provider, public site, result artifact or
 native rendering claim is added by these fixtures. The existing controller,
 runtime, journal, Store layout, lifecycle enums and legacy successor are unchanged.
 
-Next joins remain separately reviewable: scoped runtime/worker closure distinct
-from global Clean; retained backing in the existing controller; versioned durable
+The [scoped runtime foundation](agent-work-scoped-runtime.md) now adds a separate
+actual-worker drain proof without moving this owner's native port or changing
+global Clean. It remains unconnected to this private owner. Next joins remain
+separately reviewable: retained backing in the existing controller; versioned durable
 scope and original Store ACK; and fresh task/manifest/account admission for B.
 ModelMapped extraction validity is not user-objective success. The eventual
 end-to-end proof must retrieve accepted artifacts before resource destruction,

@@ -688,8 +688,26 @@ fn validate_inventory(crate_root: &Path) -> Result<(), String> {
         .iter()
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect::<BTreeSet<_>>();
-    if names != BTreeSet::from(["Cargo.toml".to_owned(), "src".to_owned()]) {
+    if names
+        != BTreeSet::from([
+            "Cargo.toml".to_owned(),
+            "src".to_owned(),
+            "tests".to_owned(),
+        ])
+    {
         return Err("controller crate root inventory drifted".to_owned());
+    }
+    let entries = std::fs::read_dir(crate_root.join("tests"))
+        .map_err(|error| format!("cannot inspect controller integration tests: {error}"))?;
+    let names = entries
+        .map(|entry| {
+            entry
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .map_err(|error| error.to_string())
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if names != BTreeSet::from(["scoped_runtime.rs".to_owned()]) {
+        return Err("controller integration-test inventory drifted".to_owned());
     }
     let source = crate_root.join("src");
     let entries = std::fs::read_dir(&source)
