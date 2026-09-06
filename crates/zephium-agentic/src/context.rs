@@ -70,6 +70,7 @@ macro_rules! durable_id {
         }
     };
 }
+pub(crate) use durable_id;
 
 durable_id!(
     ContextId,

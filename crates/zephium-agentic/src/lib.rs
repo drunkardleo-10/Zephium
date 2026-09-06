@@ -45,6 +45,15 @@ pub use agent_work_artifact::{
 mod context;
 mod context_port;
 mod context_registry;
+mod work_browser_resource;
+pub use work_browser_resource::{
+    WorkBrowserExecutionLease, WorkBrowserLeaseEnded, WorkBrowserLeaseNativeDebt,
+    WorkBrowserResourceCompletion, WorkBrowserResourceCompletionCallback,
+    WorkBrowserResourceDispatch, WorkBrowserResourceError, WorkBrowserResourceEvent,
+    WorkBrowserResourceFailure, WorkBrowserResourceId, WorkBrowserResourceIdentity,
+    WorkBrowserResourceJoin, WorkBrowserResourceNativeOutcome, WorkBrowserResourceOperation,
+    WorkBrowserResourcePhase, WorkBrowserResourceRequest, WorkBrowserResources, WorkId,
+};
 #[cfg(feature = "probe-harness")]
 mod contract;
 #[cfg(feature = "probe-harness")]

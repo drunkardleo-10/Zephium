@@ -206,6 +206,12 @@ current presentation/rendering lease, not permanently to one actor run.
 
 ### 3.3 Independent lifecycle axes
 
+The initial [persistent Work-resource and execution-lease boundary](agent-work-resources.md)
+now expresses separate resource identity, scoped lease drain and quarantine in
+the functional core. Its native port remains Unsupported; current qualification
+controllers still use their original run-owned/all-zero lifetime. This is a
+contract checkpoint, not native persistent-page or human-takeover evidence.
+
 Do not encode browser execution as a hidden/headless Boolean. These states are
 independent and policy-controlled:
 

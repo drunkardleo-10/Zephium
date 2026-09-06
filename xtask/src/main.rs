@@ -20,6 +20,7 @@ mod macos_process_family;
 mod webview2_extension_boundary;
 mod work_composition_boundary;
 mod work_persistence_boundary;
+mod work_resource_boundary;
 
 use std::process::{exit, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1083,6 +1084,7 @@ fn check_agentic_probe_boundary() {
     if let Err(error) = agentic_probe_boundary::check(&repository)
         .and_then(|()| work_composition_boundary::check(&repository))
         .and_then(|()| work_persistence_boundary::check(&repository))
+        .and_then(|()| work_resource_boundary::check(&repository))
     {
         eprintln!("agentic diagnostic release boundary failed: {error}");
         exit(1);

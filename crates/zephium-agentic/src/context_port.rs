@@ -975,6 +975,20 @@ pub type SemanticActionNativeCompletion =
 /// never project owned contexts into tab/session/extension inventories and
 /// must retain no queue, worker, timer, or page when no contexts exist.
 pub trait AgentBrowserPort: Send + Sync {
+    /// Product resource-lifetime seam, unsupported until an adapter proves
+    /// persistent resource ownership and exact scoped lease drain. This does
+    /// not reuse legacy cancellation, unseal a port or grant a model tool.
+    fn work_resource_lifecycle(
+        &self,
+        request: crate::WorkBrowserResourceRequest,
+        _completion: crate::WorkBrowserResourceCompletionCallback,
+    ) -> crate::WorkBrowserResourceDispatch {
+        crate::WorkBrowserResourceDispatch::Rejected {
+            request: Box::new(request),
+            failure: ContextPortFailure::Unsupported,
+        }
+    }
+
     /// Release-excluded fixed native diagnostic, unsupported by default.
     /// This is not a production rendering API or model-visible tool.
     #[cfg(feature = "probe-harness")]
@@ -1484,5 +1498,28 @@ mod tests {
             port.seal_for_shutdown(ContextResourceAuditId::new(2).expect("shutdown audit")),
             ContextShutdownDispatch::AuditScheduled
         );
+        let mut resources =
+            crate::WorkBrowserResources::new(crate::WorkId::from_raw(99), ProfileId::from(9));
+        let resource_request = resources
+            .construct(
+                crate::WorkBrowserResourceId::from_raw(100),
+                ContextId::from_raw(101),
+                ContextProfileStorageClass::Ephemeral,
+                crate::AgentPolicyInstant::from_millis(0),
+            )
+            .unwrap();
+        let expected = resource_request.resource().clone();
+        let result = port.work_resource_lifecycle(
+            resource_request,
+            Box::new(|_| panic!("unsupported adapter cannot emit a native callback")),
+        );
+        let crate::WorkBrowserResourceDispatch::Rejected { request, failure } = result else {
+            panic!("legacy adapter must remain unsupported");
+        };
+        assert_eq!(failure, ContextPortFailure::Unsupported);
+        assert_eq!(request.resource(), &expected);
+        let _ = resources.dispatch_refused(*request, failure).unwrap();
+        resources.seal();
+        assert!(resources.is_quiescent());
     }
 }

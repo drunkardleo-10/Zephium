@@ -1,0 +1,856 @@
+//! Work-owned browser identity and revocable, run-bound native lease protocol.
+//!
+//! This is not a task, account, navigation or effect capability. The trusted
+//! application must supply those separately. No native adapter is enabled by
+//! this functional core; unsupported adapters cannot manufacture drain proof.
+
+use std::collections::BTreeMap;
+use std::fmt;
+use std::sync::Arc;
+
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use thiserror::Error;
+use ulid::Ulid;
+use zephium_core::ids::ProfileId;
+
+use crate::{
+    AgentPolicyInstant, ContextId, ContextPortFailure, ContextProfileStorageClass, ContextRunId,
+    MAX_EXECUTING_CONTEXTS, MAX_LIVE_CONTEXTS, MAX_PENDING_NATIVE_CONTEXT_TASKS,
+};
+
+crate::context::durable_id!(WorkId, "Durable identity of one profile-owned Work.");
+crate::context::durable_id!(
+    WorkBrowserResourceId,
+    "Durable identity of one browser resource, independent of every actor run."
+);
+
+/// Persistent, non-executing identity. Restoring it restores no native lease.
+#[derive(Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkBrowserResourceIdentity {
+    work: WorkId,
+    resource: WorkBrowserResourceId,
+    profile: ProfileId,
+    context: ContextId,
+}
+
+impl WorkBrowserResourceIdentity {
+    /// Owning Work, not the current actor run.
+    pub const fn work(self) -> WorkId {
+        self.work
+    }
+    /// Stable browser resource identity.
+    pub const fn resource(self) -> WorkBrowserResourceId {
+        self.resource
+    }
+    /// Profile retained for the entire resource lifetime.
+    pub const fn profile(self) -> ProfileId {
+        self.profile
+    }
+    /// Stable native-page identity, never replaced by a lease identity.
+    pub const fn context(self) -> ContextId {
+        self.context
+    }
+}
+
+impl fmt::Debug for WorkBrowserResourceIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("WorkBrowserResourceIdentity([redacted])")
+    }
+}
+
+// The private allocation prevents an identically reconstructed registry from
+// accepting another registry's receipts. It is never serialized or exposed.
+#[derive(Clone)]
+struct Authority(Arc<()>);
+impl PartialEq for Authority {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for Authority {}
+impl fmt::Debug for Authority {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("[redacted]")
+    }
+}
+
+/// Exact process-local incarnation of a persistent resource; not a capability.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkBrowserResourceJoin {
+    identity: WorkBrowserResourceIdentity,
+    authority: Authority,
+    incarnation: u64,
+}
+impl WorkBrowserResourceJoin {
+    /// Persistent ownership coordinates.
+    pub const fn identity(&self) -> WorkBrowserResourceIdentity {
+        self.identity
+    }
+}
+
+/// Exact run-bound lease coordinates. No page ownership is transferred.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkBrowserExecutionLease {
+    resource: WorkBrowserResourceJoin,
+    run: ContextRunId,
+    generation: u64,
+    deadline: AgentPolicyInstant,
+}
+impl WorkBrowserExecutionLease {
+    /// Same persistent resource throughout this lease and its retirement.
+    pub const fn resource(&self) -> &WorkBrowserResourceJoin {
+        &self.resource
+    }
+    /// Actor run holding this exact execution lease only.
+    pub const fn run(&self) -> ContextRunId {
+        self.run
+    }
+    /// Original absolute deadline; observations and renewals cannot reset it.
+    pub const fn deadline(&self) -> AgentPolicyInstant {
+        self.deadline
+    }
+}
+
+/// Resource lifecycle, independent of presentation and full run completion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkBrowserResourcePhase {
+    /// Native construction has not yet proven its result.
+    Constructing,
+    /// Native resource is retained with no executing actor lease.
+    Retained,
+    /// One exact native lease binding is awaiting acknowledgement.
+    Acquiring,
+    /// The exact acknowledged execution lease is active.
+    Leased,
+    /// Native acquisition finished after expiry or shutdown admission sealing;
+    /// execution is forbidden and its exact lease still requires revocation.
+    RevocationRequired,
+    /// Execution admission is closed; exact native drain remains owed.
+    Revoking,
+    /// This resource has uncertain native state and cannot execute again.
+    Quarantined,
+    /// Native destruction and all resource callbacks remain owed.
+    Destroying,
+    /// Exact destruction or synchronous non-construction proves native absence;
+    /// persistent metadata remains and old callback debt may still be retained.
+    Destroyed,
+}
+
+/// Content-free cause retained without poisoning unrelated resource rows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkBrowserResourceFailure {
+    /// The exact native adapter refused or could not prove its operation.
+    NativeRefused,
+    /// A native terminal did not match its requested operation class.
+    Contract,
+    /// Lease-owned native work or the retained page was not proven drained.
+    DrainUnproven,
+    /// An accepted native callback did not arrive within the owner's budget.
+    CallbackUncertain,
+    /// Trusted monotonic time regressed for this resource.
+    ClockRegression,
+}
+
+/// Functional-core refusal. No error grants retry or native authority.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum WorkBrowserResourceError {
+    /// No matching resource or private authority exists.
+    #[error("stale Work browser resource authority")]
+    Stale,
+    /// A resource/context identifier is already present.
+    #[error("duplicate Work browser resource identity")]
+    Duplicate,
+    /// Resource or execution capacity is retained by other exact owners.
+    #[error("Work browser resource capacity exhausted")]
+    Capacity,
+    /// Required phase or callback disposition is absent.
+    #[error("Work browser resource phase mismatch")]
+    Phase,
+    /// The immutable lease deadline was reached or is invalid.
+    #[error("Work browser execution lease expired")]
+    Expired,
+    /// This resource's native state is uncertain.
+    #[error("Work browser resource is quarantined")]
+    Quarantined,
+    /// An exact native callback is still owned.
+    #[error("Work browser resource callback is pending")]
+    Pending,
+    /// Monotonic identity space cannot wrap or be reset.
+    #[error("Work browser resource identity exhausted")]
+    Exhausted,
+    /// Work shutdown has permanently closed acquisition/construction.
+    #[error("Work browser resource admission is sealed")]
+    Sealed,
+}
+
+/// Closed operation classes; none grants page-level or model authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkBrowserResourceOperation {
+    /// Construct one extension-free resource under its selected profile.
+    Construct,
+    /// Bind one run lease to the existing exact page.
+    Acquire,
+    /// Revoke and drain only the exact run lease, retaining the page.
+    Revoke,
+    /// Explicitly destroy the exact resource and its resource-owned channels.
+    Destroy,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct OperationJoin {
+    resource: WorkBrowserResourceJoin,
+    sequence: u64,
+    kind: WorkBrowserResourceOperation,
+    lease: Option<WorkBrowserExecutionLease>,
+}
+
+/// Move-only exact native request, minted after publishing its pending owner.
+#[must_use]
+#[derive(Debug)]
+pub struct WorkBrowserResourceRequest {
+    operation: OperationJoin,
+    storage: ContextProfileStorageClass,
+}
+impl WorkBrowserResourceRequest {
+    /// Exact persistent and process-local resource coordinates.
+    pub const fn resource(&self) -> &WorkBrowserResourceJoin {
+        &self.operation.resource
+    }
+    /// Closed requested transition.
+    pub const fn operation(&self) -> WorkBrowserResourceOperation {
+        self.operation.kind
+    }
+    /// Exact lease when acquiring or revoking; destruction may retain old debt.
+    pub const fn lease(&self) -> Option<&WorkBrowserExecutionLease> {
+        self.operation.lease.as_ref()
+    }
+    /// Immutable selected-profile persistence class; never inferred by a model.
+    pub const fn storage(&self) -> ContextProfileStorageClass {
+        self.storage
+    }
+    /// Consume the native request to settle once. The trusted adapter must
+    /// inspect its original physical owners; constructing a value is not proof.
+    pub fn complete(
+        self,
+        outcome: WorkBrowserResourceNativeOutcome,
+    ) -> WorkBrowserResourceCompletion {
+        WorkBrowserResourceCompletion {
+            operation: self.operation,
+            outcome,
+        }
+    }
+}
+
+/// Lease-owned native debt only. Resource-owned page/profile/document channels
+/// remain live and counted separately; policy/provider/audit debt is not native.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WorkBrowserLeaseNativeDebt {
+    /// Accepted lease tasks not yet consumed by the native executor.
+    pub queued_tasks: u8,
+    /// Lease observation requests still physically owned.
+    pub observations: u8,
+    /// Native actions without an exact terminal receipt.
+    pub actions: u8,
+    /// Lease navigations or their terminal ownership still in flight.
+    pub navigations: u8,
+    /// Physical captures or cancellation receipts still owned.
+    pub captures: u8,
+    /// Completion callbacks still able to refer to this lease.
+    pub callbacks: u8,
+}
+impl WorkBrowserLeaseNativeDebt {
+    fn is_empty(self) -> bool {
+        self == Self::default()
+    }
+    fn bounded(self) -> bool {
+        [
+            self.queued_tasks,
+            self.observations,
+            self.actions,
+            self.navigations,
+            self.captures,
+            self.callbacks,
+        ]
+        .into_iter()
+        .all(|count| usize::from(count) <= MAX_PENDING_NATIVE_CONTEXT_TASKS)
+    }
+}
+
+/// Trusted native facts, bound by consuming the exact original request.
+/// Unsupported/refused/unknown facts must never be represented as success.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkBrowserResourceNativeOutcome {
+    /// Exact page/profile/channel construction and ownership were attested.
+    Constructed,
+    /// Same exact page was bound to the requested lease, without recreation.
+    Acquired,
+    /// Admission is sealed; report exact lease debt and unchanged resource
+    /// ownership. A missing page is not successful lease-only retirement.
+    Revoked {
+        /// Exact lease-owned debt from the native adapter.
+        debt: WorkBrowserLeaseNativeDebt,
+        /// Original page/profile/resource ownership still exists unchanged.
+        resource_retained: bool,
+    },
+    /// Exact page, retained profile lease, resource channels and callbacks
+    /// retired. This never means erasing the selected profile's stored data.
+    Destroyed,
+    /// No exact successful native result could be proven.
+    Refused,
+}
+
+/// Non-cloneable native terminal; ordinary audits cannot mint this receipt.
+#[must_use]
+#[derive(Debug)]
+pub struct WorkBrowserResourceCompletion {
+    operation: OperationJoin,
+    outcome: WorkBrowserResourceNativeOutcome,
+}
+
+/// Exact ended native lease, not run success, resource destruction or permission
+/// to start a successor. Fresh product/policy/account admission remains required.
+#[must_use]
+#[derive(Debug)]
+pub struct WorkBrowserLeaseEnded {
+    lease: WorkBrowserExecutionLease,
+}
+impl WorkBrowserLeaseEnded {
+    /// Ended lease and its still-owned resource.
+    pub const fn lease(&self) -> &WorkBrowserExecutionLease {
+        &self.lease
+    }
+}
+
+/// Exact bounded state transition delivered to the trusted application.
+#[must_use]
+#[derive(Debug)]
+pub enum WorkBrowserResourceEvent {
+    /// Resource construction is acknowledged without actor authority.
+    Retained(WorkBrowserResourceJoin),
+    /// An exact native lease binding was acknowledged.
+    Acquired(WorkBrowserExecutionLease),
+    /// Exact binding exists but was not activated because expiry or shutdown
+    /// won. The original native lease remains owned for explicit revocation.
+    RevocationRequired(WorkBrowserExecutionLease),
+    /// Only the named native lease drained; its resource remains retained.
+    LeaseEnded(WorkBrowserLeaseEnded),
+    /// Native uncertainty blocks only this exact resource.
+    Quarantined(WorkBrowserResourceFailure),
+    /// Exact resource destruction acknowledged.
+    Destroyed(WorkBrowserResourceJoin),
+    /// An old exact callback settled while destruction owned the resource.
+    /// This cannot restore the old lease or alter the destruction result.
+    DebtSettled(WorkBrowserResourceJoin),
+    /// Exact synchronous non-admission, not a native completion or success.
+    AdmissionRefused {
+        /// Resource whose unmodified request was returned.
+        resource: WorkBrowserResourceJoin,
+        /// Closed request class that transferred no new native obligation.
+        operation: WorkBrowserResourceOperation,
+        /// Native adapter's exact admission failure.
+        failure: ContextPortFailure,
+    },
+}
+
+struct Resource {
+    join: WorkBrowserResourceJoin,
+    storage: ContextProfileStorageClass,
+    phase: WorkBrowserResourcePhase,
+    pending: Option<OperationJoin>,
+    destruction: Option<OperationJoin>,
+    destruction_attempted: bool,
+    lease: Option<WorkBrowserExecutionLease>,
+    failure: Option<WorkBrowserResourceFailure>,
+    last_tick: AgentPolicyInstant,
+}
+impl Resource {
+    fn quarantine(&mut self, failure: WorkBrowserResourceFailure) {
+        self.failure.get_or_insert(failure);
+        self.phase = WorkBrowserResourcePhase::Quarantined;
+        // Keep both callback and execution-capacity debt. Quarantine is not
+        // native drain, destruction or permission to recycle capacity.
+    }
+    fn tick(&mut self, now: AgentPolicyInstant) -> Result<(), WorkBrowserResourceError> {
+        if now < self.last_tick {
+            self.quarantine(WorkBrowserResourceFailure::ClockRegression);
+            return Err(WorkBrowserResourceError::Quarantined);
+        }
+        self.last_tick = now;
+        Ok(())
+    }
+}
+
+/// Explicit opt-in, profile-bound Work resource authority. Pure state only:
+/// no native object, worker, timer, provider, page data or implicit renewal.
+/// The native adapter must additionally enforce the shared process ceiling.
+pub struct WorkBrowserResources {
+    work: WorkId,
+    profile: ProfileId,
+    authority: Authority,
+    rows: BTreeMap<WorkBrowserResourceId, Resource>,
+    sequence: u64,
+    sealed: bool,
+}
+impl WorkBrowserResources {
+    /// The trusted application supplies its actual durable Work/profile owner.
+    /// This constructor is not persistence, account or native-profile proof.
+    pub fn new(work: WorkId, profile: ProfileId) -> Self {
+        Self {
+            work,
+            profile,
+            authority: Authority(Arc::new(())),
+            rows: BTreeMap::new(),
+            sequence: 0,
+            sealed: false,
+        }
+    }
+    fn next(&mut self) -> Result<u64, WorkBrowserResourceError> {
+        self.sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or(WorkBrowserResourceError::Exhausted)?;
+        Ok(self.sequence)
+    }
+    fn row_mut(
+        &mut self,
+        join: &WorkBrowserResourceJoin,
+    ) -> Result<&mut Resource, WorkBrowserResourceError> {
+        self.rows
+            .get_mut(&join.identity.resource)
+            .filter(|row| row.join == *join)
+            .ok_or(WorkBrowserResourceError::Stale)
+    }
+    /// Reserve one resource and its exact construction callback before dispatch.
+    pub fn construct(
+        &mut self,
+        resource: WorkBrowserResourceId,
+        context: ContextId,
+        storage: ContextProfileStorageClass,
+        now: AgentPolicyInstant,
+    ) -> Result<WorkBrowserResourceRequest, WorkBrowserResourceError> {
+        if self.sealed {
+            return Err(WorkBrowserResourceError::Sealed);
+        }
+        if self.rows.contains_key(&resource)
+            || self
+                .rows
+                .values()
+                .any(|row| row.join.identity.context == context)
+        {
+            return Err(WorkBrowserResourceError::Duplicate);
+        }
+        if self.rows.len() >= MAX_LIVE_CONTEXTS {
+            return Err(WorkBrowserResourceError::Capacity);
+        }
+        let sequence = self.next()?;
+        let join = WorkBrowserResourceJoin {
+            identity: WorkBrowserResourceIdentity {
+                work: self.work,
+                resource,
+                profile: self.profile,
+                context,
+            },
+            authority: self.authority.clone(),
+            incarnation: sequence,
+        };
+        let operation = OperationJoin {
+            resource: join.clone(),
+            sequence,
+            kind: WorkBrowserResourceOperation::Construct,
+            lease: None,
+        };
+        self.rows.insert(
+            resource,
+            Resource {
+                join,
+                storage,
+                phase: WorkBrowserResourcePhase::Constructing,
+                pending: Some(operation.clone()),
+                destruction: None,
+                destruction_attempted: false,
+                lease: None,
+                failure: None,
+                last_tick: now,
+            },
+        );
+        Ok(WorkBrowserResourceRequest { operation, storage })
+    }
+    /// Reserve one run-bound native lease without transferring page ownership.
+    /// The only offered capability here is lifecycle binding, not page access.
+    pub fn acquire(
+        &mut self,
+        resource: &WorkBrowserResourceJoin,
+        run: ContextRunId,
+        now: AgentPolicyInstant,
+        deadline: AgentPolicyInstant,
+    ) -> Result<WorkBrowserResourceRequest, WorkBrowserResourceError> {
+        if self.sealed {
+            return Err(WorkBrowserResourceError::Sealed);
+        }
+        if deadline <= now {
+            return Err(WorkBrowserResourceError::Expired);
+        }
+        if self.rows.values().filter(|row| row.lease.is_some()).count() >= MAX_EXECUTING_CONTEXTS {
+            return Err(WorkBrowserResourceError::Capacity);
+        }
+        let sequence = self.next()?;
+        let row = self.row_mut(resource)?;
+        if row.failure.is_some() {
+            return Err(WorkBrowserResourceError::Quarantined);
+        }
+        if row.phase != WorkBrowserResourcePhase::Retained
+            || row.pending.is_some()
+            || row.lease.is_some()
+        {
+            return Err(WorkBrowserResourceError::Phase);
+        }
+        row.tick(now)?;
+        let lease = WorkBrowserExecutionLease {
+            resource: resource.clone(),
+            run,
+            generation: sequence,
+            deadline,
+        };
+        let operation = OperationJoin {
+            resource: resource.clone(),
+            sequence,
+            kind: WorkBrowserResourceOperation::Acquire,
+            lease: Some(lease.clone()),
+        };
+        row.lease = Some(lease);
+        row.phase = WorkBrowserResourcePhase::Acquiring;
+        row.pending = Some(operation.clone());
+        Ok(WorkBrowserResourceRequest {
+            operation,
+            storage: row.storage,
+        })
+    }
+    /// Check exact current native-lease membership and immutable deadline.
+    /// This is necessary but never sufficient for any page operation.
+    pub fn admits_lease(
+        &mut self,
+        lease: &WorkBrowserExecutionLease,
+        now: AgentPolicyInstant,
+    ) -> Result<(), WorkBrowserResourceError> {
+        if self.sealed {
+            return Err(WorkBrowserResourceError::Sealed);
+        }
+        let row = self.row_mut(&lease.resource)?;
+        if row.lease.as_ref() != Some(lease) {
+            return Err(WorkBrowserResourceError::Stale);
+        }
+        row.tick(now)?;
+        if row.failure.is_some() {
+            return Err(WorkBrowserResourceError::Quarantined);
+        }
+        if now >= lease.deadline {
+            return Err(WorkBrowserResourceError::Expired);
+        }
+        if row.phase != WorkBrowserResourcePhase::Leased || row.pending.is_some() {
+            return Err(WorkBrowserResourceError::Phase);
+        }
+        Ok(())
+    }
+    /// Seal this exact lease before dispatching its native revoke/drain request.
+    /// Expiry does not erase this cleanup owner or grant a replacement lease.
+    pub fn revoke(
+        &mut self,
+        lease: &WorkBrowserExecutionLease,
+    ) -> Result<WorkBrowserResourceRequest, WorkBrowserResourceError> {
+        let row = self.row_mut(&lease.resource)?;
+        if row.lease.as_ref() != Some(lease) {
+            return Err(WorkBrowserResourceError::Stale);
+        }
+        if !matches!(
+            row.phase,
+            WorkBrowserResourcePhase::Leased | WorkBrowserResourcePhase::RevocationRequired
+        ) || row.pending.is_some()
+        {
+            return Err(WorkBrowserResourceError::Phase);
+        }
+        let operation = OperationJoin {
+            resource: lease.resource.clone(),
+            sequence: lease.generation,
+            kind: WorkBrowserResourceOperation::Revoke,
+            lease: Some(lease.clone()),
+        };
+        row.phase = WorkBrowserResourcePhase::Revoking;
+        row.pending = Some(operation.clone());
+        Ok(WorkBrowserResourceRequest {
+            operation,
+            storage: row.storage,
+        })
+    }
+    /// Quarantine one resource without discarding callback or capacity debt.
+    /// A late exact terminal can settle debt but cannot unquarantine the page.
+    pub fn quarantine(
+        &mut self,
+        resource: &WorkBrowserResourceJoin,
+    ) -> Result<(), WorkBrowserResourceError> {
+        let row = self.row_mut(resource)?;
+        if row.phase == WorkBrowserResourcePhase::Destroyed {
+            return Err(WorkBrowserResourceError::Phase);
+        }
+        row.quarantine(WorkBrowserResourceFailure::CallbackUncertain);
+        Ok(())
+    }
+    /// Explicit resource destruction is separate from lease completion. One
+    /// reserved cleanup slot remains usable even with an uncertain callback or
+    /// exhausted acquisition identities. It never erases that callback debt.
+    pub fn destroy(
+        &mut self,
+        resource: &WorkBrowserResourceJoin,
+    ) -> Result<WorkBrowserResourceRequest, WorkBrowserResourceError> {
+        let row = self.row_mut(resource)?;
+        if row.destruction_attempted {
+            return Err(WorkBrowserResourceError::Phase);
+        }
+        if !matches!(
+            row.phase,
+            WorkBrowserResourcePhase::Retained | WorkBrowserResourcePhase::Quarantined
+        ) {
+            return Err(WorkBrowserResourceError::Phase);
+        }
+        let operation = OperationJoin {
+            resource: resource.clone(),
+            sequence: resource.incarnation,
+            kind: WorkBrowserResourceOperation::Destroy,
+            lease: row.lease.clone(),
+        };
+        row.phase = WorkBrowserResourcePhase::Destroying;
+        row.destruction_attempted = true;
+        row.destruction = Some(operation.clone());
+        Ok(WorkBrowserResourceRequest {
+            operation,
+            storage: row.storage,
+        })
+    }
+    /// Settle the exact owned terminal. Wrong authority/phase cannot be replaced
+    /// by a zero audit, guessed emptiness or a different resource's receipt.
+    pub fn settle_at(
+        &mut self,
+        completion: WorkBrowserResourceCompletion,
+        now: AgentPolicyInstant,
+    ) -> Result<WorkBrowserResourceEvent, WorkBrowserResourceError> {
+        let sealed = self.sealed;
+        let row = self.row_mut(&completion.operation.resource)?;
+        if row.destruction.as_ref() != Some(&completion.operation)
+            && row.pending.as_ref() != Some(&completion.operation)
+        {
+            return Err(WorkBrowserResourceError::Stale);
+        }
+        // A clock failure revokes execution but cannot discard the exact native
+        // terminal or block physical cleanup. Native absence is not a clean
+        // time/accounting claim; its original failure remains retained.
+        let phase_before_tick = row.phase;
+        let _ = row.tick(now);
+        if matches!(
+            phase_before_tick,
+            WorkBrowserResourcePhase::Destroying | WorkBrowserResourcePhase::Destroyed
+        ) {
+            row.phase = phase_before_tick;
+        }
+        if row.destruction.as_ref() == Some(&completion.operation) {
+            row.destruction = None;
+            if completion.outcome == WorkBrowserResourceNativeOutcome::Destroyed {
+                row.phase = WorkBrowserResourcePhase::Destroyed;
+                row.lease = None;
+                return Ok(WorkBrowserResourceEvent::Destroyed(row.join.clone()));
+            }
+            row.quarantine(
+                if completion.outcome == WorkBrowserResourceNativeOutcome::Refused {
+                    WorkBrowserResourceFailure::NativeRefused
+                } else {
+                    WorkBrowserResourceFailure::Contract
+                },
+            );
+            return Ok(WorkBrowserResourceEvent::Quarantined(
+                row.failure.unwrap_or(WorkBrowserResourceFailure::Contract),
+            ));
+        }
+        if row.pending.as_ref() != Some(&completion.operation) {
+            return Err(WorkBrowserResourceError::Stale);
+        }
+        row.pending = None;
+        if matches!(
+            row.phase,
+            WorkBrowserResourcePhase::Destroying | WorkBrowserResourcePhase::Destroyed
+        ) {
+            return Ok(WorkBrowserResourceEvent::DebtSettled(row.join.clone()));
+        }
+        if let Some(failure) = row.failure {
+            row.phase = WorkBrowserResourcePhase::Quarantined;
+            return Ok(WorkBrowserResourceEvent::Quarantined(failure));
+        }
+        let failure = match (completion.operation.kind, completion.outcome) {
+            (
+                WorkBrowserResourceOperation::Construct,
+                WorkBrowserResourceNativeOutcome::Constructed,
+            ) => {
+                row.phase = WorkBrowserResourcePhase::Retained;
+                return Ok(WorkBrowserResourceEvent::Retained(row.join.clone()));
+            }
+            (WorkBrowserResourceOperation::Acquire, WorkBrowserResourceNativeOutcome::Acquired) => {
+                if let Some(lease) = row.lease.as_ref() {
+                    if sealed || now >= lease.deadline {
+                        row.phase = WorkBrowserResourcePhase::RevocationRequired;
+                        return Ok(WorkBrowserResourceEvent::RevocationRequired(lease.clone()));
+                    }
+                    row.phase = WorkBrowserResourcePhase::Leased;
+                    return Ok(WorkBrowserResourceEvent::Acquired(lease.clone()));
+                }
+                WorkBrowserResourceFailure::Contract
+            }
+            (
+                WorkBrowserResourceOperation::Revoke,
+                WorkBrowserResourceNativeOutcome::Revoked {
+                    debt,
+                    resource_retained,
+                },
+            ) => {
+                if debt.bounded() && debt.is_empty() && resource_retained {
+                    if let Some(lease) = row.lease.take() {
+                        row.phase = WorkBrowserResourcePhase::Retained;
+                        return Ok(WorkBrowserResourceEvent::LeaseEnded(
+                            WorkBrowserLeaseEnded { lease },
+                        ));
+                    }
+                }
+                WorkBrowserResourceFailure::DrainUnproven
+            }
+            (_, WorkBrowserResourceNativeOutcome::Refused) => {
+                WorkBrowserResourceFailure::NativeRefused
+            }
+            _ => WorkBrowserResourceFailure::Contract,
+        };
+        row.quarantine(failure);
+        Ok(WorkBrowserResourceEvent::Quarantined(failure))
+    }
+    /// Account a returned unmodified request after synchronous non-admission.
+    /// No callback is synthesized. A rejected revoke/destroy cannot erase the
+    /// already-existing native resource or its preceding lease obligations.
+    pub fn dispatch_refused(
+        &mut self,
+        request: WorkBrowserResourceRequest,
+        failure: ContextPortFailure,
+    ) -> Result<WorkBrowserResourceEvent, WorkBrowserResourceError> {
+        let row = self.row_mut(&request.operation.resource)?;
+        let operation = request.operation.kind;
+        if row.destruction.as_ref() == Some(&request.operation) {
+            row.destruction = None;
+            row.quarantine(WorkBrowserResourceFailure::NativeRefused);
+        } else {
+            if row.pending.as_ref() != Some(&request.operation) {
+                return Err(WorkBrowserResourceError::Stale);
+            }
+            row.pending = None;
+            if operation == WorkBrowserResourceOperation::Acquire {
+                // The returned request proves that this lease never acquired
+                // native ownership, even if a clock/control race quarantined
+                // the resource while dispatch was being decided.
+                row.lease = None;
+            }
+            if matches!(
+                row.phase,
+                WorkBrowserResourcePhase::Destroying | WorkBrowserResourcePhase::Destroyed
+            ) {
+                // Cleanup already owns/retired the resource; settle only debt.
+            } else if operation == WorkBrowserResourceOperation::Construct {
+                // Exact non-admission proves absence without pretending the
+                // prior clock/control ambiguity or task failure disappeared.
+                row.phase = WorkBrowserResourcePhase::Destroyed;
+            } else if row.failure.is_some() {
+                row.phase = WorkBrowserResourcePhase::Quarantined;
+            } else {
+                match operation {
+                    WorkBrowserResourceOperation::Construct => {
+                        row.phase = WorkBrowserResourcePhase::Destroyed
+                    }
+                    WorkBrowserResourceOperation::Acquire => {
+                        row.phase = WorkBrowserResourcePhase::Retained;
+                    }
+                    WorkBrowserResourceOperation::Revoke
+                    | WorkBrowserResourceOperation::Destroy => {
+                        row.quarantine(WorkBrowserResourceFailure::NativeRefused)
+                    }
+                }
+            }
+        }
+        Ok(WorkBrowserResourceEvent::AdmissionRefused {
+            resource: row.join.clone(),
+            operation,
+            failure,
+        })
+    }
+    /// Read-only exact phase. It does not disclose page or profile contents.
+    pub fn phase(
+        &self,
+        resource: &WorkBrowserResourceJoin,
+    ) -> Result<WorkBrowserResourcePhase, WorkBrowserResourceError> {
+        self.rows
+            .get(&resource.identity.resource)
+            .filter(|row| row.join == *resource)
+            .map(|row| row.phase)
+            .ok_or(WorkBrowserResourceError::Stale)
+    }
+    /// Permanently forbid new construction/acquisition. Existing native leases
+    /// still require explicit revocation/drain and every resource destruction.
+    pub fn seal(&mut self) {
+        self.sealed = true;
+    }
+    /// True only after sealing and exact destruction of every retained resource.
+    /// This is local registry closure, never the engine's global shutdown proof.
+    pub fn is_quiescent(&self) -> bool {
+        self.sealed
+            && self.rows.values().all(|row| {
+                row.phase == WorkBrowserResourcePhase::Destroyed
+                    && row.pending.is_none()
+                    && row.destruction.is_none()
+                    && row.lease.is_none()
+            })
+    }
+    /// Release runtime bookkeeping only after exact resource destruction and
+    /// every retained callback. The returned durable identity is not deleted.
+    pub fn reap(
+        &mut self,
+        resource: &WorkBrowserResourceJoin,
+    ) -> Result<WorkBrowserResourceIdentity, WorkBrowserResourceError> {
+        let row = self.row_mut(resource)?;
+        if row.pending.is_some() || row.destruction.is_some() {
+            return Err(WorkBrowserResourceError::Pending);
+        }
+        if row.phase != WorkBrowserResourcePhase::Destroyed || row.lease.is_some() {
+            return Err(WorkBrowserResourceError::Phase);
+        }
+        self.rows
+            .remove(&resource.identity.resource)
+            .map(|row| row.join.identity)
+            .ok_or(WorkBrowserResourceError::Stale)
+    }
+}
+
+/// Move-only terminal callback for an accepted resource operation. A synchronous
+/// refusal transfers no callback obligation and must not pretend to be success.
+pub type WorkBrowserResourceCompletionCallback =
+    Box<dyn FnOnce(WorkBrowserResourceCompletion) + Send + 'static>;
+
+/// Lossless admission result. Rejected requests retain their exact owner so
+/// the caller can account a synchronous refusal without a fabricated callback.
+#[must_use]
+#[derive(Debug)]
+pub enum WorkBrowserResourceDispatch {
+    /// The adapter owns exactly one completion callback for the consumed request.
+    Scheduled,
+    /// No callback/effect obligation transferred; the exact request is returned.
+    Rejected {
+        /// Original unmodified request, never a reconstructed replacement.
+        request: Box<WorkBrowserResourceRequest>,
+        /// Closed native admission failure.
+        failure: ContextPortFailure,
+    },
+}
+
+#[cfg(test)]
+#[path = "work_browser_resource_tests.rs"]
+mod tests;
