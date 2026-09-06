@@ -122,6 +122,27 @@ request another lease, but cannot produce reentrant global-zero or successor
 proof while native delivery is still active. Read callbacks, unlike this
 ownership-transfer terminal, retain explicit lease callback debt through return.
 
+Construction admission publishes an outstanding-constructor obligation before
+calling the main-thread dispatcher. Destruction seals that exact resource's
+construction phase synchronously; both host entry and native construction
+recheck it. FIFO dispatch alone is insufficient: concurrent port callers may
+publish Construct, then deliver Destroy to the host before Construct is queued.
+An absent host row in that schedule is not an absence proof. Destroy retains one
+bounded, no-view cleanup reservation in the existing native resource pool until
+the original constructor and its callback barrier drain. Stale Construct cannot
+create a view, start a load or allocate an additional native reservation. If the
+constructor is already retained by the host, destruction first settles that
+original task with Refused, then waits for its barrier; it must not wait for an
+obligation whose terminal it still owns. No sleep or new capacity is added.
+
+A synchronous Construct non-admission uses the same ingress mutex as Destroy
+admission. It removes ingress only when no destruction owner has been admitted;
+otherwise it drains the original construction obligation and wakes the retained
+cleanup owner. A refusal or lost wake cannot erase that owner or reopen native
+construction. If the existing cleanup reservation or five-second drain bound
+cannot be satisfied, destruction refuses and retains uncertainty, not a false
+Destroyed receipt or a replacement empty cohort.
+
 ## Failure, cleanup and bounds
 
 Uncertain/refused/malformed native results quarantine only the exact resource.
@@ -208,3 +229,19 @@ concurrent compilation; the isolated schedule and subsequent full suite passed
 without code or deadline changes. The precise transient cause is not proven.
 This record is build/deterministic evidence only; it contains no native
 two-lease, real-site, provider, product rendering or human-takeover claim.
+
+Construction/destruction ordering correction (2026-09-06): independent review
+found that a delayed constructor could outlive an overtaking destruction's
+absence receipt. The adapter now retains and rechecks that original obligation
+as described above. All 18 focused native ingress/ownership schedules, 23 core
+resource/read schedules, 486 ordinary engine tests and 527 foreground-feature
+engine tests pass, together with strict all-target Clippy for both engine
+configurations, the `macos-work` desktop check, both architecture commands and
+hostile semantic JavaScript smoke, resource/foreground architecture mutations,
+fmt/diff checks and default Browse dependency isolation. The new deterministic
+ownership tests use actual move-only task delivery, the native resource ledger
+and an explicitly held callback barrier: no view or additional construction
+reservation, no early Destroyed event, and exact final original-owner zero are
+asserted. They cover overtaking construction, host-retained construction and
+synchronous non-admission; they do not execute a real AppKit page or qualify
+the pending two-lease witness. No GUI or provider run accompanied this fix.

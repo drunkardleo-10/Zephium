@@ -436,3 +436,154 @@ fn shared_ingress_counts_acquiring_leases_from_distinct_work_registries() {
     assert!(!guard.execution_reserved());
     assert_eq!(admission.pending(), Some(0));
 }
+
+#[test]
+fn destroy_before_queued_construct_cannot_attest_absence_or_admit_late_allocation() {
+    let (mut rows, request) = source();
+    let admission = admission();
+    let guard = Arc::new(WorkResourceGuard::new(&request, &admission));
+    admission
+        .work
+        .lock()
+        .unwrap()
+        .rows
+        .insert(guard.resource().identity().context(), guard.clone());
+    // Construct has published ingress but has not yet called MainThreadDispatch.
+    rows.quarantine(guard.resource()).unwrap();
+    let destroy = rows.destroy(guard.resource()).unwrap();
+    guard.admit_lifecycle(&destroy, tick(1)).unwrap();
+    assert!(
+        !guard.callbacks_drained(),
+        "the original Construct task can still arrive"
+    );
+    assert!(
+        guard.port_open(),
+        "shared port admission alone was the insufficient construction guard"
+    );
+    assert!(!guard.construction_current());
+    // The stale construction now refuses without a view/load. Its exact
+    // terminal drains the original obligation, not a replacement operation.
+    guard.outcome(&request, Outcome::Refused);
+    assert!(matches!(
+        rows.settle_at(request.complete(Outcome::Refused), tick(1))
+            .unwrap(),
+        WorkBrowserResourceEvent::DebtSettled(_)
+    ));
+    assert!(guard.callbacks_drained());
+    assert!(guard.destruction_started());
+    assert!(!guard.construction_current());
+    assert!(!admission.work_is_absent());
+    WorkLifecycleTask {
+        request: Some(destroy),
+        completion: Some(Box::new(move |completion| {
+            assert!(matches!(
+                rows.settle_at(completion, tick(1)).unwrap(),
+                WorkBrowserResourceEvent::Destroyed(_)
+            ));
+            rows.seal();
+            assert!(rows.is_quiescent());
+        })),
+        guard: guard.clone(),
+        permit: admission.reserve().unwrap(),
+    }
+    .complete(Outcome::Destroyed);
+    assert!(!guard.construction_current());
+    assert!(admission.work_is_absent());
+    assert_eq!(admission.pending(), Some(0));
+}
+
+#[test]
+fn never_dispatched_constructor_cannot_remove_an_already_admitted_destruction_owner() {
+    let (mut rows, request) = source();
+    let admission = admission();
+    let guard = Arc::new(WorkResourceGuard::new(&request, &admission));
+    admission
+        .work
+        .lock()
+        .unwrap()
+        .rows
+        .insert(guard.resource().identity().context(), guard.clone());
+    let queue = Arc::new(Mutex::new(Vec::<Box<dyn FnOnce() + Send>>::new()));
+    let queued = queue.clone();
+    *guard.notification_dispatch.lock().unwrap() = Some(Arc::new(move |task| {
+        queued.lock().unwrap().push(task);
+        true
+    }));
+    assert!(guard.construction_current());
+    rows.quarantine(guard.resource()).unwrap();
+    let destroy = rows.destroy(guard.resource()).unwrap();
+    guard.admit_lifecycle(&destroy, tick(1)).unwrap();
+    // This decision is made under the same ingress mutex as Destroy admission.
+    // Returning Construct must retain the cleanup row, not erase its authority.
+    admission.work_construction_returned(&guard);
+    assert!(!admission.work_is_absent());
+    assert!(!guard.callbacks_drained());
+    assert!(!guard.construction_current());
+    assert!(guard.destruction_started());
+    assert_eq!(admission.pending(), Some(1));
+    let _ = rows
+        .dispatch_refused(request, ContextPortFailure::Shutdown)
+        .unwrap();
+    queue.lock().unwrap().pop().unwrap()();
+    assert!(guard.callbacks_drained());
+    WorkLifecycleTask {
+        request: Some(destroy),
+        completion: Some(Box::new(move |completion| {
+            assert!(matches!(
+                rows.settle_at(completion, tick(1)).unwrap(),
+                WorkBrowserResourceEvent::Destroyed(_)
+            ));
+            rows.seal();
+            assert!(rows.is_quiescent());
+        })),
+        guard,
+        permit: admission.reserve().unwrap(),
+    }
+    .complete(Outcome::Destroyed);
+    assert!(admission.work_is_absent());
+    assert_eq!(admission.pending(), Some(0));
+}
+
+// Test-only construction of the real move-only native envelopes. The queued
+// resource notification remains explicit so adversarial tests can hold/release
+// the same callback barrier without running AppKit or a replacement event loop.
+impl WorkLifecycleTask {
+    pub(crate) fn construction_for_test(
+        request: WorkBrowserResourceRequest,
+        completion: WorkBrowserResourceCompletionCallback,
+        dispatch: MainThreadDispatch,
+    ) -> Self {
+        let admission = admission();
+        let guard = Arc::new(WorkResourceGuard::new(&request, &admission));
+        *guard.notification_dispatch.lock().unwrap() = Some(dispatch);
+        admission
+            .work
+            .lock()
+            .unwrap()
+            .rows
+            .insert(guard.resource().identity().context(), guard.clone());
+        Self {
+            request: Some(request),
+            completion: Some(completion),
+            guard,
+            permit: admission.reserve().unwrap(),
+        }
+    }
+    pub(crate) fn followup_for_test(
+        &self,
+        request: WorkBrowserResourceRequest,
+        completion: WorkBrowserResourceCompletionCallback,
+    ) -> Self {
+        self.guard.admit_lifecycle(&request, tick(1)).unwrap();
+        Self {
+            request: Some(request),
+            completion: Some(completion),
+            guard: self.guard.clone(),
+            permit: self.permit.admission.reserve().unwrap(),
+        }
+    }
+    pub(crate) fn closure_for_test(&self) -> impl Fn() -> (bool, Option<usize>) {
+        let admission = self.permit.admission.clone();
+        move || (admission.work_is_absent(), admission.pending())
+    }
+}

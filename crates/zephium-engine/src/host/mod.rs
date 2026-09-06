@@ -27,6 +27,8 @@ mod scripts;
 mod stages;
 #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
 mod work_resource;
+#[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+pub(crate) use work_resource::notify_work_resource;
 
 #[cfg(test)]
 pub(crate) use dispatch::make_unavailable_for_test;

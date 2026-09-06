@@ -46,6 +46,24 @@ pub(super) struct WorkNativeResource {
     native_resource: Option<NativeResourceLease>,
 }
 impl WorkNativeResource {
+    fn unconstructed(guard: Arc<WorkResourceGuard>, native_resource: NativeResourceLease) -> Self {
+        Self {
+            guard,
+            construction: None,
+            revocation: None,
+            destruction: None,
+            watchdog: None,
+            observation: None,
+            last_invocation: 0,
+            document_started: false,
+            retirement_clean: true,
+            deadline_expired: false,
+            lifecycle_deadline: None,
+            content_policy: None,
+            view: None,
+            native_resource: Some(native_resource),
+        }
+    }
     pub(super) fn guard(&self) -> Arc<WorkResourceGuard> {
         self.guard.clone()
     }
@@ -69,6 +87,17 @@ impl WorkNativeResource {
     }
     pub(super) fn resident(&self) -> bool {
         self.view.is_some()
+    }
+    fn destruction_drained(&self) -> bool {
+        self.retirement_clean
+            && self.view.is_none()
+            && self.guard.callbacks_drained()
+            && self.observation.is_none()
+    }
+    fn retire_construction(&mut self) {
+        if let Some(task) = self.construction.take() {
+            task.complete(Outcome::Refused);
+        }
     }
     pub(super) fn consistent(&self, id: ContextId) -> bool {
         self.guard.resource().identity().context() == id
@@ -115,6 +144,9 @@ impl WorkNativeResource {
 }
 
 fn resource_callback(guard: Arc<WorkResourceGuard>) {
+    notify_work_resource(guard);
+}
+pub(crate) fn notify_work_resource(guard: Arc<WorkResourceGuard>) {
     if !guard.begin_notification() {
         return;
     }
@@ -123,7 +155,8 @@ fn resource_callback(guard: Arc<WorkResourceGuard>) {
     };
     // Coalesced one-slot resource notification, after the original WebKit
     // callback unwinds. This is a callback barrier, not a readiness delay.
-    dispatch2::DispatchQueue::main().exec_async(move || {
+    let dispatch_guard = guard.clone();
+    dispatch_guard.dispatch_notification(move || {
         guard.consume_notification();
         let rejected = guard.clone();
         if !crate::host::try_with_agent_context_terminal(move |host| {
@@ -188,8 +221,35 @@ impl EngineHost {
         let guard = task.guard();
         let id = guard.resource().identity().context();
         if operation == Operation::Construct {
+            if !guard.construction_current() {
+                task.complete(Outcome::Refused);
+                return;
+            }
             self.construct_work_resource(task);
             return;
+        }
+        if operation == Operation::Destroy
+            && !self.work_resources.contains_key(&id)
+            && !guard.callbacks_drained()
+        {
+            if self.agent_contexts.contains_key(&id) {
+                task.complete(Outcome::Refused);
+                return;
+            }
+            // Destroy overtook the original Construct before host entry.
+            // Retain the cleanup task below under the same bounded native
+            // reservation; an absent view is not absence of that constructor.
+            let reservation = self
+                .native_resources
+                .try_acquire(NativeResourceClass::AgentContext);
+            let Ok(reservation) = reservation else {
+                task.complete(Outcome::Refused);
+                return;
+            };
+            self.work_resources.insert(
+                id,
+                WorkNativeResource::unconstructed(guard.clone(), reservation),
+            );
         }
         let execution_count = self.agent_contexts.len()
             + self
@@ -289,7 +349,7 @@ impl EngineHost {
     ) -> Result<WorkNativeResource, ContextPortFailure> {
         let id = guard.resource().identity().context();
         let profile = guard.resource().identity().profile();
-        if !guard.port_open() {
+        if !guard.construction_current() {
             return Err(ContextPortFailure::Shutdown);
         }
         if self.agent_contexts.contains_key(&id) || self.work_resources.contains_key(&id) {
@@ -432,20 +492,17 @@ impl EngineHost {
             guard.fail();
         }
         if resource.destruction.is_some() {
-            if resource.retirement_clean
-                && resource.view.is_none()
-                && guard.callbacks_drained()
-                && resource.observation.is_none()
-            {
+            // A constructor already retained by this host must settle before
+            // testing its drain barrier. A not-yet-dispatched constructor is
+            // still owned by ingress and will settle itself when it arrives.
+            resource.retire_construction();
+            if resource.destruction_drained() {
                 let Some(mut resource) = self.work_resources.remove(&id) else {
                     guard.fail();
                     return;
                 };
                 resource.watchdog = None;
                 resource.lifecycle_deadline = None;
-                if let Some(task) = resource.construction.take() {
-                    task.complete(Outcome::Refused);
-                }
                 if let Some(task) = resource.revocation.take() {
                     task.complete(Outcome::Refused);
                 }
@@ -481,7 +538,7 @@ impl EngineHost {
             return;
         }
         if resource.construction.is_some() {
-            if !guard.port_open() {
+            if !guard.construction_current() {
                 guard.fail();
                 resource.watchdog = None;
                 resource.lifecycle_deadline = None;
@@ -731,10 +788,136 @@ impl EngineHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use zephium_agentic::{
         AgentPolicyInstant, ContextNavigationTarget, ContextRunId, WorkBrowserResourceId,
         WorkBrowserResources, WorkId,
     };
+    #[test]
+    fn overtaking_destroy_retains_no_view_owner_until_constructor_and_barrier_drain() {
+        destroy_construction_schedule(false);
+    }
+    #[test]
+    fn destroy_settles_host_retained_constructor_before_waiting_for_its_barrier() {
+        destroy_construction_schedule(true);
+    }
+    fn destroy_construction_schedule(constructor_at_host: bool) {
+        use super::super::resources::NativeResourceLedger;
+        use zephium_agentic::WorkBrowserResourceEvent;
+
+        let tick = AgentPolicyInstant::from_millis;
+        let rows = Arc::new(Mutex::new(WorkBrowserResources::new(
+            WorkId::generate(),
+            ProfileId::generate(),
+        )));
+        let construct = rows
+            .lock()
+            .unwrap()
+            .construct_document(
+                WorkBrowserResourceId::generate(),
+                ContextId::generate(),
+                ContextProfileStorageClass::Ephemeral,
+                ContextNavigationTarget::parse("https://example.test/").unwrap(),
+                tick(0),
+            )
+            .unwrap();
+        let join = construct.resource().clone();
+        let queue = Arc::new(Mutex::new(Vec::<Box<dyn FnOnce() + Send>>::new()));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let callback = || {
+            let rows = rows.clone();
+            let events = events.clone();
+            Box::new(move |completion| {
+                events
+                    .lock()
+                    .unwrap()
+                    .push(rows.lock().unwrap().settle_at(completion, tick(1)).unwrap());
+            }) as zephium_agentic::WorkBrowserResourceCompletionCallback
+        };
+        let queued = queue.clone();
+        let construction = WorkLifecycleTask::construction_for_test(
+            construct,
+            callback(),
+            Arc::new(move |task| {
+                queued.lock().unwrap().push(task);
+                true
+            }),
+        );
+        let guard = construction.guard();
+        let closure = construction.closure_for_test();
+        rows.lock().unwrap().quarantine(&join).unwrap();
+        let destroy = rows.lock().unwrap().destroy(&join).unwrap();
+        let destruction = construction.followup_for_test(destroy, callback());
+
+        // The overtaking host task owns one bounded cleanup reservation, not
+        // a page. The original Construct has not reached native execution.
+        let ledger = NativeResourceLedger::default();
+        assert!(ledger.is_quiescent());
+        let reservation = ledger
+            .try_acquire(NativeResourceClass::AgentContext)
+            .unwrap();
+        let mut resource = WorkNativeResource::unconstructed(guard.clone(), reservation);
+        resource.destruction = Some(destruction);
+        assert!(!guard.construction_current());
+        assert!(resource.view.is_none());
+        assert!(!resource.destruction_drained());
+        assert!(events.lock().unwrap().is_empty());
+        assert_eq!(closure(), (false, Some(2)));
+        assert_eq!(
+            ledger.count_for_audit(NativeResourceClass::AgentContext),
+            Some(1)
+        );
+
+        // The actual stale-construction terminal cannot create a view or a
+        // second reservation. Its queued physical callback barrier still
+        // prevents Destroyed, even after core has accounted Construct debt.
+        if constructor_at_host {
+            resource.construction = Some(construction);
+            resource.retire_construction();
+            assert!(resource.construction.is_none());
+        } else {
+            resource.retire_construction();
+            assert!(!resource.destruction_drained());
+            construction.complete(Outcome::Refused);
+        }
+        assert!(matches!(
+            events.lock().unwrap().as_slice(),
+            [WorkBrowserResourceEvent::DebtSettled(_)]
+        ));
+        assert!(resource.view.is_none());
+        assert_eq!(
+            ledger.count_for_audit(NativeResourceClass::AgentContext),
+            Some(1)
+        );
+        assert_eq!(queue.lock().unwrap().len(), 1);
+        assert_eq!(closure(), (false, Some(2)));
+        assert!(!resource.destruction_drained());
+
+        // A missing host at the deferred wake is itself fail-closed. It may
+        // quarantine this resource, but cannot erase the destruction owner.
+        queue.lock().unwrap().pop().unwrap()();
+        assert!(resource.destruction_drained());
+        assert_eq!(closure(), (false, Some(1)));
+        assert!(matches!(
+            events.lock().unwrap().as_slice(),
+            [WorkBrowserResourceEvent::DebtSettled(_)]
+        ));
+        let destruction = resource.destruction.take().unwrap();
+        drop(resource);
+        assert!(ledger.is_quiescent());
+        destruction.complete(Outcome::Destroyed);
+        assert!(matches!(
+            events.lock().unwrap().as_slice(),
+            [
+                WorkBrowserResourceEvent::DebtSettled(_),
+                WorkBrowserResourceEvent::Destroyed(_)
+            ]
+        ));
+        assert_eq!(closure(), (true, Some(0)));
+        rows.lock().unwrap().seal();
+        assert!(rows.lock().unwrap().is_quiescent());
+        assert!(!guard.construction_current());
+    }
     #[test]
     fn cancelled_revoke_deadline_cannot_quarantine_a_successor_lease() {
         let tick = AgentPolicyInstant::from_millis;

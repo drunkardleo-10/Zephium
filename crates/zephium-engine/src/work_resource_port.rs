@@ -36,6 +36,7 @@ enum Phase {
 }
 struct State {
     phase: Phase,
+    construction_pending: bool,
     lease: Option<WorkBrowserExecutionLease>,
     reads: usize,
     callbacks: usize,
@@ -49,6 +50,8 @@ pub(crate) struct WorkResourceGuard {
     storage: ContextProfileStorageClass,
     document: Option<ContextNavigationTarget>,
     state: Mutex<State>,
+    #[cfg(test)]
+    notification_dispatch: Mutex<Option<MainThreadDispatch>>,
 }
 pub(crate) struct WorkNotificationPermit {
     _permit: AgentTaskPermit,
@@ -60,8 +63,11 @@ impl WorkResourceGuard {
             resource: request.resource().clone(),
             storage: request.storage(),
             document: request.document().cloned(),
+            #[cfg(test)]
+            notification_dispatch: Mutex::new(None),
             state: Mutex::new(State {
                 phase: Phase::Constructing,
+                construction_pending: true,
                 lease: None,
                 reads: 0,
                 callbacks: 0,
@@ -72,6 +78,16 @@ impl WorkResourceGuard {
     }
     pub(crate) fn resource(&self) -> &WorkBrowserResourceJoin {
         &self.resource
+    }
+    pub(crate) fn dispatch_notification(&self, task: impl FnOnce() + Send + 'static) {
+        #[cfg(test)]
+        if let Some(dispatch) = self.notification_dispatch.lock().unwrap().clone() {
+            if !dispatch(Box::new(task)) {
+                self.fail();
+            }
+            return;
+        }
+        dispatch2::DispatchQueue::main().exec_async(task);
     }
     pub(crate) fn port_open(&self) -> bool {
         self.admission.upgrade().is_some_and(|admission| {
@@ -86,6 +102,29 @@ impl WorkResourceGuard {
     pub(crate) fn storage(&self) -> ContextProfileStorageClass {
         self.storage
     }
+    pub(crate) fn construction_current(&self) -> bool {
+        self.port_open()
+            && self.state.lock().is_ok_and(|state| {
+                state.phase == Phase::Constructing && state.construction_pending && !state.uncertain
+            })
+    }
+    fn destruction_started(&self) -> bool {
+        self.state
+            .lock()
+            .is_ok_and(|state| state.phase == Phase::Destroying)
+    }
+    fn construction_returned(&self) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.construction_pending {
+            state.uncertain = true;
+            return false;
+        }
+        state.construction_pending = false;
+        state.phase == Phase::Constructing
+    }
     pub(crate) fn document(&self) -> Option<&ContextNavigationTarget> {
         self.document.as_ref()
     }
@@ -95,7 +134,7 @@ impl WorkResourceGuard {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.uncertain = true;
-        if state.phase != Phase::Destroyed {
+        if !matches!(state.phase, Phase::Destroying | Phase::Destroyed) {
             state.phase = Phase::Quarantined;
         }
     }
@@ -188,7 +227,10 @@ impl WorkResourceGuard {
     }
     pub(crate) fn callbacks_drained(&self) -> bool {
         self.state.lock().is_ok_and(|state| {
-            state.reads == 0 && state.callbacks == 0 && !state.notification_pending
+            !state.construction_pending
+                && state.reads == 0
+                && state.callbacks == 0
+                && !state.notification_pending
         })
     }
     pub(crate) fn begin_notification(&self) -> bool {
@@ -279,6 +321,12 @@ impl WorkResourceGuard {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if request.operation() == Operation::Construct {
+            if !state.construction_pending {
+                state.uncertain = true;
+            }
+            state.construction_pending = false;
+        }
         match (request.operation(), outcome) {
             (Operation::Construct, Outcome::Constructed)
                 if state.phase == Phase::Constructing && !state.uncertain =>
@@ -313,14 +361,14 @@ impl WorkResourceGuard {
                 state.lease = None;
             }
             (Operation::Destroy, Outcome::Destroyed)
-                if state.reads == 0 && state.callbacks == 0 =>
+                if !state.construction_pending && state.reads == 0 && state.callbacks == 0 =>
             {
                 state.phase = Phase::Destroyed;
                 state.lease = None;
             }
             _ => {
                 state.uncertain = true;
-                if state.phase != Phase::Destroyed {
+                if !matches!(state.phase, Phase::Destroying | Phase::Destroyed) {
                     state.phase = Phase::Quarantined;
                 }
             }
@@ -356,6 +404,32 @@ impl AgentPortAdmission {
         self.work
             .lock()
             .is_ok_and(|ingress| ingress.rows.is_empty())
+    }
+    fn work_construction_returned(&self, guard: &Arc<WorkResourceGuard>) {
+        let wake = {
+            let mut ingress = self
+                .work
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Same ingress lock as Destroy admission: a returned Construct
+            // cannot erase the cleanup owner admitted during dispatch setup.
+            let remove = guard.construction_returned();
+            let id = guard.resource.identity().context();
+            if remove
+                && ingress
+                    .rows
+                    .get(&id)
+                    .is_some_and(|current| Arc::ptr_eq(current, guard))
+            {
+                ingress.rows.remove(&id);
+                false
+            } else {
+                true
+            }
+        };
+        if wake {
+            crate::host::notify_work_resource(guard.clone());
+        }
     }
 }
 
@@ -393,6 +467,7 @@ impl WorkLifecycleTask {
         let Some(request) = self.request.take() else {
             return;
         };
+        let construction = request.operation() == Operation::Construct;
         self.guard.outcome(&request, outcome);
         // Moving this request into the FnOnce argument transfers its sole
         // lease-bearing terminal owner to the application at callback entry.
@@ -428,6 +503,9 @@ impl WorkLifecycleTask {
             }
         }
         self.permit.release();
+        if construction && self.guard.destruction_started() {
+            crate::host::notify_work_resource(self.guard.clone());
+        }
     }
     fn rejected(mut self) -> Option<WorkBrowserResourceRequest> {
         self.completion = None;
@@ -436,15 +514,9 @@ impl WorkLifecycleTask {
             .as_ref()
             .is_some_and(|request| request.operation() == Operation::Construct)
         {
-            let mut ingress = self
-                .permit
+            self.permit
                 .admission
-                .work
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            ingress
-                .rows
-                .remove(&self.guard.resource.identity().context());
+                .work_construction_returned(&self.guard);
         } else {
             if let Some(request) = &request {
                 self.guard.not_admitted(request);
@@ -591,11 +663,7 @@ impl EngineAgentBrowserPort {
             Ok(permit) => permit,
             Err(failure) => {
                 if request.operation() == Operation::Construct {
-                    if let Ok(mut ingress) = self.admission.work.lock() {
-                        ingress
-                            .rows
-                            .remove(&request.resource().identity().context());
-                    }
+                    self.admission.work_construction_returned(&guard);
                 } else {
                     guard.not_admitted(&request);
                 }
