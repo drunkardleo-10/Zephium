@@ -2631,6 +2631,10 @@ impl AgentWorkController {
                 }
             }
             Self::begin_recovery_close(state, browser);
+            // A mailbox fault can have moved the exact audit terminal into the
+            // bounded deferred lane before cleanup starts. Consume it there,
+            // preserving foreign or otherwise unaccounted terminals in order.
+            Self::reconcile_deferred_audit(state);
         }
         // Drain already-dispatched callbacks only; no action or provider retry.
         while state.native.operation.is_some()
@@ -2726,11 +2730,7 @@ impl AgentWorkController {
                     settled && applied && Self::release_closed_context(state).is_ok()
                 }
                 AgentRuntimeEvent::AuditTerminal(settlement) => {
-                    state.journal_mut().is_ok_and(|journal| {
-                        journal.audit.current_delivery().is_ok_and(|delivery| {
-                            delivery.is_some_and(|delivery| delivery.proof() == settlement.proof())
-                        }) && journal.audit.settle_delivery(*settlement).is_ok()
-                    })
+                    Self::settle_recovery_audit(state, *settlement)
                 }
                 AgentRuntimeEvent::NativeTerminal(ContextNativeEvent::ShutdownAuditSettled(
                     settlement,
@@ -2752,6 +2752,35 @@ impl AgentWorkController {
             }
         }
         deadline
+    }
+
+    fn reconcile_deferred_audit(state: &mut WorkState) {
+        let mut index = 0;
+        while index < state.native.deferred.len() {
+            let accounted = match &state.native.deferred[index] {
+                AgentRuntimeEvent::AuditTerminal(settlement) => {
+                    let settlement = *settlement;
+                    Self::settle_recovery_audit(state, settlement)
+                }
+                _ => false,
+            };
+            if accounted {
+                state.native.deferred.remove(index);
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    fn settle_recovery_audit(
+        state: &mut WorkState,
+        settlement: AgentAuditDeliverySettlement,
+    ) -> bool {
+        state.journal_mut().is_ok_and(|journal| {
+            journal.audit.current_delivery().is_ok_and(|delivery| {
+                delivery.is_some_and(|delivery| delivery.proof() == settlement.proof())
+            }) && journal.audit.settle_delivery(settlement).is_ok()
+        })
     }
 }
 

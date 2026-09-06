@@ -16,7 +16,6 @@ pub(super) struct LeaseSignal {
     retired: Arc<AtomicBool>,
     waker: Waker,
     pending: AtomicBool,
-    running: AtomicBool,
     failed: AtomicBool,
 }
 impl LeaseSignal {
@@ -35,17 +34,15 @@ impl LeaseSignal {
         if self.failed.load(Ordering::Acquire) {
             return false;
         }
-        if self.running.swap(true, Ordering::AcqRel) {
-            self.fail();
-            return false;
-        }
+        // Scalar publications coalesce before arbitrary wake code. A worker may
+        // rearm while another publisher's wake is returning; Waker is Send+Sync,
+        // so that legitimate overlap is not evidence of authority failure.
         if !self.pending.swap(true, Ordering::AcqRel)
             && std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.waker.wake_by_ref()))
                 .is_err()
         {
             self.fail();
         }
-        self.running.store(false, Ordering::Release);
         !self.failed.load(Ordering::Acquire)
     }
     fn rearm(&self) -> Result<(), Refusal> {
@@ -158,7 +155,6 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
             retired: self.browser.retired.clone(),
             waker,
             pending: AtomicBool::new(false),
-            running: AtomicBool::new(false),
             failed: AtomicBool::new(false),
         });
         {

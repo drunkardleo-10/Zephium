@@ -316,6 +316,18 @@ fn prepared(
     AgentRuntimeScopedBinding,
     std::thread::JoinHandle<usize>,
 ) {
+    prepared_with_audit(browser, responses, Arc::new(Audit(audit_lost)))
+}
+fn prepared_with_audit(
+    browser: Box<dyn AgentWorkRetainedBrowser>,
+    responses: Vec<String>,
+    audit: Arc<dyn AgentAuditPort>,
+) -> (
+    AgentWorkRetainedController,
+    AgentWorkRetainedHandle,
+    AgentRuntimeScopedBinding,
+    std::thread::JoinHandle<usize>,
+) {
     let input = input(browser.binding(), Arc::new(Clock(AtomicU64::new(2))));
     let (transport, server) = fixture_provider_responses(responses);
     let (controller, handle, scope) = AgentWorkRetainedController::try_new_for_probe(
@@ -327,11 +339,122 @@ fn prepared(
             "fixture-not-a-secret".into(),
         )
         .unwrap(),
-        Arc::new(Audit(audit_lost)),
+        audit,
         Box::new(task()),
     )
     .unwrap();
     (controller, handle, scope, server)
+}
+
+struct GatedAudit {
+    dispatched: mpsc::SyncSender<(AgentAuditDeliveryProof, AgentAuditCompletion)>,
+    release: Mutex<mpsc::Receiver<()>>,
+    calls: AtomicUsize,
+}
+impl AgentAuditPort for GatedAudit {
+    fn append(
+        &self,
+        delivery: AgentAuditDelivery,
+        completion: AgentAuditCompletion,
+    ) -> AgentAuditDispatch {
+        self.calls.fetch_add(1, Ordering::AcqRel);
+        let proof = delivery.proof();
+        self.dispatched.send((proof, completion)).unwrap();
+        self.release
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        AgentAuditDispatch::Accepted(proof)
+    }
+}
+
+#[test]
+fn queued_original_audit_is_accounted_after_cancelled_initial_retained_close() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for (cancel, deliver) in [(false, true), (true, true), (true, false)] {
+        let (owner, native, resource, browser) = setup();
+        let (dispatched, dispatch) = mpsc::sync_channel(1);
+        let (release, released) = mpsc::sync_channel(1);
+        let audit = Arc::new(GatedAudit {
+            dispatched,
+            release: Mutex::new(released),
+            calls: AtomicUsize::new(0),
+        });
+        let (controller, mut result, scope, server) = prepared_with_audit(
+            Box::new(browser),
+            vec![response_stream(1), response_stream(2)],
+            audit.clone(),
+        );
+        let (handle, lifecycle) = start(controller, scope);
+        // append can only start after the exact session/provider/delivery owners
+        // entered WorkDrained and supervisor completion was recorded. Hold the
+        // worker here so control necessarily wins ahead of its queued terminal.
+        let (proof, completion) = dispatch.recv_timeout(Duration::from_secs(5)).unwrap();
+        if cancel {
+            handle.stop_and_seal(AgentRuntimeStopReason::Cancelled);
+        }
+        if deliver {
+            completion(proof.settle(AgentAuditDeliveryOutcome::Committed));
+        } else {
+            drop(completion);
+        }
+        release.send(()).unwrap();
+        let mut outcome = None;
+        wait_until(|| {
+            while result.take_event().is_some() {}
+            outcome = result.take_outcome();
+            outcome.is_some()
+        });
+        if cancel {
+            let AgentWorkRetainedOutcome::Recovery(mut recovery) = outcome.unwrap() else {
+                panic!("late cancellation must not relabel prior supervisor success");
+            };
+            let status = recovery.audit_status().unwrap();
+            assert!(status.shutdown_sealed());
+            assert!(!status.fail_stopped());
+            if deliver {
+                assert_eq!(status.in_flight(), 0);
+                assert_eq!(status.pending(), 0);
+                assert_eq!(status.committed(), u64::from(proof.events()));
+            } else {
+                assert_eq!(status.in_flight(), proof.events());
+                assert_eq!(status.pending(), proof.events());
+                assert_eq!(status.committed(), 0);
+            }
+            assert!(matches!(
+                lifecycle.drain_until(Instant::now() + Duration::from_secs(2)),
+                AgentRuntimeScopedDrain::Unproven
+            ));
+        } else {
+            assert!(matches!(
+                outcome,
+                Some(AgentWorkRetainedOutcome::Accepted { .. })
+            ));
+            assert!(matches!(
+                lifecycle.drain_until(Instant::now() + Duration::from_secs(2)),
+                AgentRuntimeScopedDrain::Drained(_)
+            ));
+        }
+        native.join();
+        assert_eq!(audit.calls.load(Ordering::Acquire), 1);
+        assert_eq!(native.reads.load(Ordering::Acquire), 1);
+        assert_eq!(native.tasks.lock().unwrap().len(), 0);
+        assert_eq!(native.destructions.load(Ordering::Acquire), 0);
+        assert_eq!(native.reporters.lock().unwrap().len(), 1);
+        let mut destroy = owner.destroy(&resource).unwrap();
+        assert!(matches!(
+            destroy.poll(now()).unwrap(),
+            Some(LifecycleResult::Event(WorkBrowserResourceEvent::Destroyed(
+                _
+            )))
+        ));
+        owner.seal_resources().unwrap();
+        assert!(owner.locally_retired());
+        assert_eq!(server.join().unwrap(), 2);
+    }
 }
 fn start(
     controller: AgentWorkRetainedController,
@@ -543,23 +666,105 @@ impl Wake for HostileWake {
     }
 }
 #[test]
-fn panicking_and_reentrant_worker_listener_fail_closed_without_holding_owner_locks() {
+fn panicking_listener_fails_closed_and_reentrant_scalar_publication_coalesces() {
     for reentrant in [false, true] {
         let (owner, native, _resource, mut browser) = setup();
         let wake = HostileWake(reentrant.then(|| Arc::downgrade(&owner.shared.notifications)));
         browser.register_listener(Arc::new(wake).into()).unwrap();
-        assert!(!browser.listener().unwrap().notify());
-        assert!(browser.check_health(now()).is_err());
-        assert!(browser.begin_observation(now()).is_err());
+        assert_eq!(browser.listener().unwrap().notify(), reentrant);
+        assert_eq!(browser.check_health(now()).is_ok(), reentrant);
+        if !reentrant {
+            assert!(browser.begin_observation(now()).is_err());
+        }
         assert_eq!(native.reads.load(Ordering::Acquire), 0);
+    }
+}
+
+struct ConcurrentSignalWake {
+    calls: AtomicUsize,
+    entered: mpsc::SyncSender<()>,
+    release: Mutex<mpsc::Receiver<()>>,
+    notifications: Weak<Notifications>,
+    panic_after: bool,
+}
+impl Wake for ConcurrentSignalWake {
+    fn wake(self: Arc<Self>) {
+        // Genuine concurrent Shared publishers, without an owner lock across
+        // user wake code. Only the first invocation is held; a rearmed second
+        // publication is allowed to call the thread-safe Waker concurrently.
+        assert!(self
+            .notifications
+            .upgrade()
+            .unwrap()
+            .actors
+            .try_lock()
+            .is_ok());
+        if self.calls.fetch_add(1, Ordering::AcqRel) == 0 {
+            self.entered.send(()).unwrap();
+            self.release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+            assert!(!self.panic_after, "injected concurrent wake panic");
+        }
+    }
+}
+
+#[test]
+fn concurrent_shared_publications_coalesce_or_rewake_after_rearm_without_quarantine() {
+    for rearm in [false, true] {
+        for panic_after in [false, true] {
+            let (owner, native, _resource, mut browser) = setup();
+            let (entered, entry) = mpsc::sync_channel(1);
+            let (release, released) = mpsc::sync_channel(1);
+            let wake = Arc::new(ConcurrentSignalWake {
+                calls: AtomicUsize::new(0),
+                entered,
+                release: Mutex::new(released),
+                notifications: Arc::downgrade(&owner.shared.notifications),
+                panic_after,
+            });
+            browser.register_listener(wake.clone().into()).unwrap();
+            let notifications = owner.shared.notifications.clone();
+            let first = std::thread::spawn(move || notifications.publish());
+            entry.recv_timeout(Duration::from_secs(5)).unwrap();
+            if rearm {
+                browser.listener().unwrap().rearm().unwrap();
+            }
+            let notifications = owner.shared.notifications.clone();
+            let second = std::thread::spawn(move || notifications.publish());
+            assert!(second.join().unwrap());
+            assert_eq!(
+                wake.calls.load(Ordering::Acquire),
+                if rearm { 2 } else { 1 }
+            );
+            assert!(!browser.listener().unwrap().failed.load(Ordering::Acquire));
+            assert!(!browser.browser.resource.failed.load(Ordering::Acquire));
+            release.send(()).unwrap();
+            assert!(first.join().unwrap());
+            assert_eq!(browser.check_health(now()).is_err(), panic_after);
+            assert_eq!(native.reads.load(Ordering::Acquire), 0);
+        }
     }
 }
 
 #[test]
 fn retired_a_listener_and_facade_cannot_poison_or_read_a_separately_acquired_b_lease() {
     let (owner, native, resource, mut a) = setup();
-    a.register_listener(Arc::new(CountWake(AtomicUsize::new(0))).into())
-        .unwrap();
+    let (entered, entry) = mpsc::sync_channel(1);
+    let (release, released) = mpsc::sync_channel(1);
+    let wake = Arc::new(ConcurrentSignalWake {
+        calls: AtomicUsize::new(0),
+        entered,
+        release: Mutex::new(released),
+        notifications: Arc::downgrade(&owner.shared.notifications),
+        panic_after: true,
+    });
+    a.register_listener(wake.into()).unwrap();
+    let notifications = owner.shared.notifications.clone();
+    let old_publisher = std::thread::spawn(move || notifications.publish());
+    entry.recv_timeout(Duration::from_secs(5)).unwrap();
     a.begin_revocation().unwrap();
     let mut delivered = None;
     wait_until(|| {
@@ -587,6 +792,12 @@ fn retired_a_listener_and_facade_cannot_poison_or_read_a_separately_acquired_b_l
     assert!(a.check_health(now()).is_err());
     assert!(a.begin_observation(now()).is_err());
     assert!(a.listener().unwrap().notify());
+    // This generic A publication entered before retirement and returns with a
+    // panic after separate primitive B acquisition. It is not the original
+    // native delivery notification (which returned and was joined above).
+    release.send(()).unwrap();
+    assert!(old_publisher.join().unwrap());
+    assert!(a.listener().unwrap().failed.load(Ordering::Acquire));
     drop(a);
     b.check_health(now()).unwrap();
     b.begin_observation(now()).unwrap();

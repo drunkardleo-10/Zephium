@@ -163,8 +163,14 @@ dispatch, including registration on the original delivery ticket before native
 revocation. A bounded weak listener lane fans out scalar wakes while preserving
 the stable application sink. Publication precedes wake; polling acquire-consumes
 the coalescing signal and rearms the original health observer. Duplicate, poisoned,
-lost-owner, panicking or reentrant listener authority fails closed. Arbitrary wake
-and final Waker destruction happen outside the owner lane/slot-collection locks.
+lost-owner or panicking listener authority fails closed. Scalar publication first
+sets the pending signal; concurrent or reentrant publications coalesce while it
+is pending. If the worker rearms while a publisher's wake is still returning, a
+new publication may invoke the thread-safe Waker concurrently. Overlap itself is
+not a resource fault; each invocation still catches panic and fail-latches its
+exact non-retired resource. The scalar signal is never a delivery receipt or a
+native notification-return proof. Arbitrary wake and final Waker destruction
+happen outside the owner lane/slot-collection locks.
 Expired/stale A facades cannot read B; A's exact retired marker prevents a late
 old wake or facade drop from poisoning B.
 
@@ -173,6 +179,18 @@ task accepted an exactly source-bound, schema-valid but ModelMapped result, not 
 factual-verification or user-objective-success proof. The actual scoped worker
 drain remains a separate operand. Recovery has no durable admission or global
 native shutdown adapter. No public application admission API is added.
+
+The retained error path always runs the common bounded recovery drain, including
+when initial close already moved the original session, provider and lease receipt
+into `WorkDrained`. Already-dispatched audit terminals are reconciled from their
+original runtime queue or bounded deferred lane, with exact ledger/proof matching;
+foreign and duplicate terminals stay retained. Cleanup neither reissues provider
+or native work nor repeats supervisor completion/audit dispatch. A quiescent
+original audit may proceed through the existing metric/policy/runtime claim using
+the originally chosen supervisor outcome. A late cancellation that defeats that
+ordinary claim remains Recovery/Unproven, even if its audit is now fully accounted;
+lost delivery retains the original in-flight debt. Scoped recovery exposes only
+content-free audit status, not reconciliation or admission authority.
 
 Physical delivery may be consumed while the native notifier is Running. The
 scoped worker can therefore drain before that notification returns; it proves
@@ -186,8 +204,11 @@ Deterministic application fixtures cover the actual two-call extraction and
 three-call model-selected baseline-read loop; result retrieval before original
 resource destruction; exact original scoped worker drain; foreign-source
 rejection; lost audit; cancellation and lost/late read callbacks; idle native
-health waking the worker; duplicate/poisoned/panicking/reentrant listeners; and
-stale-A isolation. Their native adapter is synthetic: original macOS retention,
+health waking the worker; duplicate/poisoned/panicking listeners; truly concurrent
+held wake/coalescing/rearm/late-panic schedules; reentrant scalar coalescing; queued
+audit delivery after cancellation of initial close (with no-cancel and lost-delivery
+controls); deferred foreign/duplicate audit isolation; and late-panic stale-A
+isolation. Their native adapter is synthetic: original macOS retention,
 rendering and full application/global weak closure remain the separate previously
 qualified evidence, not claims of this loopback fixture.
 

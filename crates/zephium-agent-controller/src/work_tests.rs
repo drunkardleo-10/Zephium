@@ -9,6 +9,72 @@ use zephium_agent_runtime::{
 static SERIAL: Mutex<()> = Mutex::new(());
 
 #[test]
+fn deferred_audit_recovery_consumes_only_original_inflight_terminal_once() {
+    let _serial = lock(&SERIAL);
+    fn fixture() -> (AgentWorkController, AgentAuditDeliverySettlement) {
+        let input = input();
+        let attempt = input.settings.ids.attempt;
+        let (mut controller, _) = AgentWorkController::try_new(
+            input,
+            AgentProviderTransportConfig::STANDARD,
+            AgentProviderCredential::try_new(
+                AgentProviderKind::OpenAiResponses,
+                "fixture-not-a-secret".into(),
+            )
+            .unwrap(),
+            Arc::new(Audit(Fault::None)),
+            Box::new(Task),
+        )
+        .unwrap();
+        let journal = controller.state.as_mut().unwrap().journal_mut().unwrap();
+        journal.start(attempt).unwrap();
+        journal.audit.seal_for_shutdown().unwrap();
+        let delivery = journal
+            .audit
+            .begin_delivery(
+                AgentAuditDeliveryId::new(1).unwrap(),
+                MAX_AGENT_AUDIT_DELIVERY_EVENTS,
+            )
+            .unwrap();
+        let settlement = delivery
+            .proof()
+            .settle(AgentAuditDeliveryOutcome::Committed);
+        (controller, settlement)
+    }
+    for foreign_first in [false, true] {
+        let (mut controller, original) = fixture();
+        let (_foreign_owner, foreign) = fixture();
+        assert_ne!(original.proof(), foreign.proof());
+        let state = controller.state.as_mut().unwrap();
+        let first = if foreign_first { foreign } else { original };
+        let second = if foreign_first { original } else { foreign };
+        state.native.deferred = vec![
+            AgentRuntimeEvent::AuditTerminal(first),
+            AgentRuntimeEvent::AuditTerminal(second),
+            AgentRuntimeEvent::AuditTerminal(original),
+        ];
+        AgentWorkController::reconcile_deferred_audit(state);
+        let status = state.journal_mut().unwrap().audit.status();
+        assert_eq!(status.in_flight(), 0);
+        assert_eq!(status.pending(), 0);
+        assert_eq!(status.committed(), u64::from(original.proof().events()));
+        assert!(!status.fail_stopped());
+        assert_eq!(state.native.deferred.len(), 2);
+        assert!(
+            matches!(&state.native.deferred[0], AgentRuntimeEvent::AuditTerminal(value)
+            if value.proof() == foreign.proof())
+        );
+        assert!(
+            matches!(&state.native.deferred[1], AgentRuntimeEvent::AuditTerminal(value)
+            if value.proof() == original.proof())
+        );
+        AgentWorkController::reconcile_deferred_audit(state);
+        assert_eq!(state.journal_mut().unwrap().audit.status(), status);
+        assert_eq!(state.native.deferred.len(), 2);
+    }
+}
+
+#[test]
 fn main_document_keeps_unadmitted_frames_explicit_without_child_native_calls() {
     struct MainTask;
     impl AgentWorkTask for MainTask {

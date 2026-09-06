@@ -57,6 +57,10 @@ impl AgentWorkRetainedRecovery {
     pub const fn failure(&self) -> AgentWorkFailure {
         self.0.failure
     }
+    /// Content-free original audit debt; not reconciliation or closure authority.
+    pub fn audit_status(&mut self) -> Result<AgentAuditLedgerStatus, AgentWorkFailure> {
+        self.0.audit_reconciliation_status()
+    }
 }
 
 /// Content-free progress plus a move-only non-durable scoped outcome.
@@ -270,10 +274,32 @@ impl zephium_agent_runtime::AgentRuntimeScopedController for AgentWorkRetainedCo
                         session.cancel();
                     }
                 }
-                let deadline = worker
-                    .shutdown_deadline()
-                    .unwrap_or_else(|| Instant::now() + Duration::from_secs(1));
-                let _ = controller.close_retained(&mut worker, Some(deadline)).await;
+                // Closing the session already transferred its original owners
+                // into WorkDrained before audit dispatch. Always reconcile that
+                // accepted callback, including after control/mailbox failure.
+                let deadline = controller
+                    .drain_recovery(&mut worker, &WorkBrowser::Retained)
+                    .await;
+                if controller
+                    .state
+                    .as_ref()
+                    .is_some_and(|state| state.drained.is_some())
+                {
+                    // The initial ordinary close already chose its supervisor
+                    // outcome. Do not complete it again or relabel it on stop.
+                    // Original metric/audit/runtime guards may still refuse.
+                    if Instant::now() < deadline
+                        && controller.state.as_mut().is_some_and(|state| {
+                            state
+                                .journal_mut()
+                                .is_ok_and(|journal| journal.audit.is_quiescent())
+                        })
+                    {
+                        let _ = controller.publish_terminal(&mut worker, false).await;
+                    }
+                } else {
+                    let _ = controller.close_retained(&mut worker, Some(deadline)).await;
+                }
             }
         })
     }
