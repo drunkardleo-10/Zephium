@@ -608,6 +608,73 @@ fn resource_and_global_wakes_rearm_only_after_draining_their_published_state() {
 }
 
 #[test]
+fn poisoned_first_observer_does_not_suppress_later_resources_idle_failure_wake() {
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let counter = wakes.clone();
+    let (owner, native) = setup(Arc::new(move || {
+        counter.fetch_add(1, Ordering::AcqRel);
+        true
+    }));
+    let _ = construct(&owner);
+    let _ = construct(&owner);
+    // Select the actual ordered-map first entry; generated IDs or insertion
+    // order must not decide whether this adversarial schedule exercises the bug.
+    let resources: Vec<_> = owner
+        .shared
+        .lock_resources()
+        .unwrap()
+        .values()
+        .cloned()
+        .collect();
+    let [a, b] = resources.as_slice() else {
+        panic!("exactly two resources")
+    };
+    assert!(a.join.identity().resource() < b.join.identity().resource());
+    assert_eq!(wakes.load(Ordering::Acquire), 1);
+    assert!(owner.shared.notifications.pending.load(Ordering::Acquire));
+    assert_eq!(a.flights.load(Ordering::Acquire), 0);
+    assert_eq!(b.flights.load(Ordering::Acquire), 0);
+    poison(&a.health);
+    assert_eq!(owner.poll_native_event().err(), Some(Refusal::Uncertain));
+    assert!(a.failed.load(Ordering::Acquire));
+    assert!(!b.failed.load(Ordering::Acquire));
+    assert!(!owner.shared.notifications.failed.load(Ordering::Acquire));
+    assert!(!owner.shared.notifications.pending.load(Ordering::Acquire));
+    assert!(owner.shared.current(b).is_ok());
+    let baseline = wakes.load(Ordering::Acquire);
+    native
+        .reporters
+        .lock()
+        .unwrap()
+        .get(&b.join.identity().context())
+        .unwrap()
+        .invalidate();
+    assert_eq!(wakes.load(Ordering::Acquire), baseline + 1);
+    assert!(owner.shared.notifications.pending.load(Ordering::Acquire));
+    // Even repeated failure of A cannot prevent accounting B's published fault.
+    assert_eq!(owner.poll_native_event().err(), Some(Refusal::Uncertain));
+    assert!(b.failed.load(Ordering::Acquire));
+    assert!(!owner.shared.notifications.failed.load(Ordering::Acquire));
+    assert_eq!(a.flights.load(Ordering::Acquire), 0);
+    assert_eq!(b.flights.load(Ordering::Acquire), 0);
+    assert!(!owner.locally_retired());
+    // A local observer error must not consume/discard original global terminals.
+    for id in 1..=2 {
+        let _ = native.audit_resources(ContextResourceAuditId::new(id).unwrap());
+    }
+    assert!(matches!(
+        owner.poll_native_event().unwrap(),
+        Some(ContextNativeEvent::ResourceAuditSettled(_))
+    ));
+    assert!(matches!(
+        owner.poll_native_event().unwrap(),
+        Some(ContextNativeEvent::ResourceAuditSettled(_))
+    ));
+    assert_eq!(owner.poll_native_event().err(), Some(Refusal::Uncertain));
+    assert!(!owner.shared.notifications.failed.load(Ordering::Acquire));
+}
+
+#[test]
 fn late_a_read_after_exact_destruction_still_settles_its_original_owner_slot() {
     let (owner, native) = setup(Arc::new(|| true));
     let resource = construct(&owner);

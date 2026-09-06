@@ -217,15 +217,26 @@ impl WorkResourceOwner {
         // Drain/re-arm each stable observer too. Otherwise its initial pending
         // health wake could suppress an idle renderer failure after A exits.
         let resources: Vec<_> = self.shared.lock_resources()?.values().cloned().collect();
+        let mut failure = None;
         for resource in resources {
-            let state = resource.lock_local(&resource.health)?.poll();
+            let state = match resource.lock_local(&resource.health) {
+                Ok(mut health) => health.poll(),
+                Err(error) => {
+                    // A local fault cannot leave later healthy observers'
+                    // pending signals armed and suppress their next idle wake.
+                    failure = Some(error);
+                    continue;
+                }
+            };
             if state == WorkBrowserResourceHealthState::Uncertain {
                 resource.fail();
             }
         }
         match self.native_events.try_recv() {
+            // Preserve a raced global terminal. The resource fault is sticky
+            // and is reported on the next empty poll, never by losing this event.
             Ok(event) => Ok(Some(event)),
-            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Empty) => failure.map_or(Ok(None), Err),
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.shared
                     .notifications

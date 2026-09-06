@@ -41,6 +41,7 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "drop(request.take_resource_health_reporter());}letmutstate=resource.lock_local(&slot)?",
             "Err(TryLockError::WouldBlock)=>false",
             "letmutslot=resource.lock_local(slot)?",
+            "Err(mpsc::TryRecvError::Empty)=>failure.map_or(Ok(None),Err)",
         ],
         &[
             "pubstruct", "pubfn", "pub(crate)", "ContextRegistry", "ContextIdentity::",

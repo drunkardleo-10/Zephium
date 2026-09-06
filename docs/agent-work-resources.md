@@ -371,6 +371,10 @@ facade, including facades that do not traverse that map. Poison of one resource'
 health, facade, slots collection or exact pending operation instead latches only
 that resource's failure. Lock-error handling never invokes the application wake
 under an owner mutex. Poison is not repaired or treated as callback absence.
+Observer rearming continues across resource-local errors before reporting
+uncertainty, so a poisoned early map entry cannot suppress a later resource's
+idle-failure wake. Raced global terminals remain intact and take delivery
+priority; sticky local uncertainty is reported on the next empty poll.
 
 The move-only actor facade exposes only exact lease/deadline-bound health,
 the existing bounded initial read, and cleanup revocation. It cannot extract
