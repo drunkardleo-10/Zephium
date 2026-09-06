@@ -42,6 +42,8 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "controller.execute(&mutworker,&WorkBrowser::Retained).await",
             "AgentWorkController::with_transport(",
             "browser.register_listener(cx.waker().clone())",
+            "binding.document()!=&input.context.target",
+            "binding.storage()!=input.context.storage",
             "session.try_finish_unsuccessful()", "session.try_finish()",
             "provider:Some(terminal.provider)",
             "state.native.retained_delivery=Some(delivery)",
@@ -72,10 +74,10 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
     (
         "crates/zephium-agentic/src/work_browser_observation.rs",
         &[
-            "#[derive(Debug)]pubstructWorkBrowserReadBinding{lease:WorkBrowserExecutionLease,frame:SemanticFrameJoin,}",
+            "#[derive(Debug)]pubstructWorkBrowserReadBinding{lease:WorkBrowserExecutionLease,frame:SemanticFrameJoin,document:Arc<ContextNavigationTarget>,storage:ContextProfileStorageClass,}",
             "self.admits_lease(lease,now)?;letrow=self.row_mut(lease.resource())?;letdocument=row.document.as_ref()",
             "ContextJoin::work_execution(ContextIdentity::new(row.join.identity.context,lease.run,row.join.identity.profile,ContextKind::Owned,)",
-            "Ok(WorkBrowserReadBinding{lease:lease.clone(),frame,})",
+            "Ok(WorkBrowserReadBinding{lease:lease.clone(),frame,document:Arc::clone(document),storage:row.storage,})",
             "letbinding=self.read_binding(lease,now)?;letrow=self.row_mut(lease.resource())?;ifrow.observation.is_some()",
             "letframe=binding.frame;letcontext=frame.context();",
             "SemanticObservationId::new(u64::from(sequence))",

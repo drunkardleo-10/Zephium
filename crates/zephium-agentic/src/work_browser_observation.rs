@@ -26,6 +26,8 @@ pub(super) struct ObservationJoin {
 pub struct WorkBrowserReadBinding {
     lease: WorkBrowserExecutionLease,
     frame: SemanticFrameJoin,
+    document: Arc<ContextNavigationTarget>,
+    storage: ContextProfileStorageClass,
 }
 
 impl WorkBrowserReadBinding {
@@ -36,6 +38,15 @@ impl WorkBrowserReadBinding {
     /// Original fixed-document correlation, not a legacy context capability.
     pub const fn frame(&self) -> &SemanticFrameJoin {
         &self.frame
+    }
+    /// Original admission-frozen target, not origin-only or page-authored data.
+    /// This descriptive URL grants no read or navigation authority.
+    pub fn document(&self) -> &ContextNavigationTarget {
+        &self.document
+    }
+    /// Immutable selected-profile persistence class from the original row.
+    pub const fn storage(&self) -> ContextProfileStorageClass {
+        self.storage
     }
 }
 
@@ -135,6 +146,8 @@ impl WorkBrowserResources {
         Ok(WorkBrowserReadBinding {
             lease: lease.clone(),
             frame,
+            document: Arc::clone(document),
+            storage: row.storage,
         })
     }
 
@@ -259,12 +272,17 @@ mod tests {
         AgentPolicyInstant::from_millis(value)
     }
     fn document() -> (WorkBrowserResources, WorkBrowserResourceJoin) {
+        document_with_storage(ContextProfileStorageClass::Ephemeral)
+    }
+    fn document_with_storage(
+        storage: ContextProfileStorageClass,
+    ) -> (WorkBrowserResources, WorkBrowserResourceJoin) {
         let mut rows = WorkBrowserResources::new(WorkId::generate(), ProfileId::generate());
         let request = rows
             .construct_document(
                 WorkBrowserResourceId::generate(),
                 ContextId::generate(),
-                ContextProfileStorageClass::Ephemeral,
+                storage,
                 ContextNavigationTarget::parse("https://example.test/frozen").unwrap(),
                 tick(0),
             )
@@ -319,6 +337,11 @@ mod tests {
         let lease = acquire(&mut rows, &resource, ContextRunId::generate());
         let binding = rows.read_binding(&lease, tick(2)).unwrap();
         assert_eq!(binding.lease(), &lease);
+        assert_eq!(
+            binding.document().as_url().as_str(),
+            "https://example.test/frozen"
+        );
+        assert_eq!(binding.storage(), ContextProfileStorageClass::Ephemeral);
         assert_eq!(binding.frame().context().identity().owner(), lease.run());
         assert_eq!(
             binding.frame().origin(),
@@ -326,6 +349,7 @@ mod tests {
         );
         let second_binding = rows.read_binding(&lease, tick(2)).unwrap();
         assert_eq!(second_binding.frame(), binding.frame());
+        assert!(Arc::ptr_eq(&second_binding.document, &binding.document));
         let request = rows.observe_initial(&lease, tick(2)).unwrap();
         assert_eq!(request.invocation().invocation().get(), 1);
         assert_eq!(request.invocation().frame(), binding.frame());
@@ -351,6 +375,37 @@ mod tests {
             binding.frame()
         );
         assert!(rows.read_binding(&next, tick(100)).is_err());
+    }
+
+    #[test]
+    fn descriptive_target_and_storage_share_original_bounded_row_without_read_authority() {
+        for storage in [
+            ContextProfileStorageClass::Ephemeral,
+            ContextProfileStorageClass::Durable,
+        ] {
+            let (mut rows, resource) = document_with_storage(storage);
+            let lease = acquire(&mut rows, &resource, ContextRunId::generate());
+            let binding = rows.read_binding(&lease, tick(2)).unwrap();
+            assert_eq!(binding.storage(), storage);
+            let row = rows.row_mut(&resource).unwrap();
+            assert!(Arc::ptr_eq(
+                &binding.document,
+                row.document.as_ref().unwrap()
+            ));
+            assert_eq!(row.observation_sequence, 0);
+            assert!(row.observation.is_none());
+            assert!(!format!("{binding:?}").contains("example.test"));
+            let request = rows.observe_initial(&lease, tick(2)).unwrap();
+            assert_eq!(request.invocation().invocation().get(), 1);
+            rows.observation_dispatch_refused(request).unwrap();
+        }
+        // The URL shares the existing allocation; only a pointer and storage
+        // discriminant are added, with at most two words of inline overhead.
+        assert!(
+            std::mem::size_of::<WorkBrowserReadBinding>()
+                <= std::mem::size_of::<(WorkBrowserExecutionLease, SemanticFrameJoin)>()
+                    + 2 * std::mem::size_of::<usize>()
+        );
     }
 
     #[test]

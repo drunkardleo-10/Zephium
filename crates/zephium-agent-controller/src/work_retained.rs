@@ -191,6 +191,8 @@ impl AgentWorkRetainedController {
         let binding = browser.binding();
         if binding.frame().context().identity() != input.context.identity
             || binding.frame().origin() != &input.context.origin
+            || binding.document() != &input.context.target
+            || binding.storage() != input.context.storage
             || binding.lease().deadline()
                 > input
                     .manifest

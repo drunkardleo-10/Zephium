@@ -82,9 +82,16 @@ No empty legacy native registries are substituted for retained-resource proof.
 The retained-controller join additionally needs account binding before a read
 and a wake after physical native delivery. The original resource registry now
 issues a move-only `WorkBrowserReadBinding` only for its current exact lease and
-fixed document. It contains descriptive frame/lease coordinates; it reserves no
+fixed document. It contains descriptive frame/lease coordinates, the original
+frozen exact target and selected-profile storage class; it reserves no
 read or invocation and cannot enter legacy context dispatch. Each actual read
 independently rechecks the row and uses the same correlation helper.
+The target shares the original immutable URL allocation and stays redacted in
+Debug. Controller admission requires exact target and storage equality with the
+trusted run input, in addition to context/origin/lease checks. Same-origin path,
+query or fragment substitution and either-direction storage mismatch refuse
+before listener registration, native read or provider execution. Describing a
+Durable resource does not enable durable result admission in this slice.
 
 The delivery ticket optionally registers one immutable listener before native
 dispatch. Registration never runs arbitrary wake code, even for a ready terminal.

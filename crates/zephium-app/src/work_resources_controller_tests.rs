@@ -195,6 +195,16 @@ fn setup() -> (
     WorkBrowserResourceJoin,
     RetainedBrowser,
 ) {
+    setup_with_storage(ContextProfileStorageClass::Ephemeral)
+}
+fn setup_with_storage(
+    storage: ContextProfileStorageClass,
+) -> (
+    WorkResourceOwner,
+    Arc<Native>,
+    WorkBrowserResourceJoin,
+    RetainedBrowser,
+) {
     let native = Arc::new(Native::default());
     let port = native.clone();
     let owner = WorkResourceOwner::new(
@@ -208,7 +218,7 @@ fn setup() -> (
         .construct(
             WorkBrowserResourceId::generate(),
             ContextId::generate(),
-            ContextProfileStorageClass::Ephemeral,
+            storage,
             ContextNavigationTarget::parse("https://retained-fixture.invalid/frozen").unwrap(),
             now(),
         )
@@ -235,6 +245,19 @@ fn setup() -> (
     (owner, native, resource, browser)
 }
 fn input(binding: &WorkBrowserReadBinding, clock: Arc<Clock>) -> AgentWorkRunInput {
+    input_with_source(
+        binding,
+        clock,
+        binding.storage(),
+        binding.document().clone(),
+    )
+}
+fn input_with_source(
+    binding: &WorkBrowserReadBinding,
+    clock: Arc<Clock>,
+    storage: ContextProfileStorageClass,
+    target: ContextNavigationTarget,
+) -> AgentWorkRunInput {
     let identity = binding.frame().context().identity();
     let origin = binding.frame().origin().clone();
     let effects = AgentEffectScope::try_new(&[SemanticEffectClass::Read]).unwrap();
@@ -283,12 +306,7 @@ fn input(binding: &WorkBrowserReadBinding, clock: Arc<Clock>) -> AgentWorkRunInp
     AgentWorkRunInput::try_new(
         manifest,
         AgentPlanLeaseBinding::new(AgentPlanLeaseId::generate(), node),
-        AgentWorkContextSpec::try_new(
-            identity,
-            ContextProfileStorageClass::Ephemeral,
-            ContextNavigationTarget::parse("https://retained-fixture.invalid/frozen").unwrap(),
-        )
-        .unwrap(),
+        AgentWorkContextSpec::try_new(identity, storage, target).unwrap(),
         "Read the current page and extract its label with source evidence.".into(),
         AgentWorkRunSettings::new(
             AgentBrowserModel::Luna,
@@ -298,6 +316,83 @@ fn input(binding: &WorkBrowserReadBinding, clock: Arc<Clock>) -> AgentWorkRunInp
         ),
     )
     .unwrap()
+}
+
+#[test]
+fn retained_admission_requires_exact_frozen_target_and_original_storage_class() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for storage in [
+        ContextProfileStorageClass::Ephemeral,
+        ContextProfileStorageClass::Durable,
+    ] {
+        let other = if storage == ContextProfileStorageClass::Ephemeral {
+            ContextProfileStorageClass::Durable
+        } else {
+            ContextProfileStorageClass::Ephemeral
+        };
+        for (url, requested_storage, accepted) in [
+            ("https://retained-fixture.invalid/frozen", storage, true),
+            ("https://retained-fixture.invalid/other", storage, false),
+            (
+                "https://retained-fixture.invalid/frozen?other=1",
+                storage,
+                false,
+            ),
+            (
+                "https://retained-fixture.invalid/frozen#other",
+                storage,
+                false,
+            ),
+            ("https://retained-fixture.invalid/frozen", other, false),
+        ] {
+            let (owner, native, resource, browser) = setup_with_storage(storage);
+            let target = ContextNavigationTarget::parse(url).unwrap();
+            // Manifest and account can legitimately match this same origin;
+            // only the original descriptive row closes the exact-source join.
+            assert_eq!(
+                &SemanticOrigin::parse(url).unwrap(),
+                browser.binding().frame().origin()
+            );
+            let input = input_with_source(
+                browser.binding(),
+                Arc::new(Clock(AtomicU64::new(2))),
+                requested_storage,
+                target,
+            );
+            let result = AgentWorkRetainedController::try_new(
+                input,
+                Box::new(browser),
+                AgentProviderTransportConfig::STANDARD,
+                AgentProviderCredential::try_new(
+                    AgentProviderKind::OpenAiResponses,
+                    "fixture-not-a-secret".into(),
+                )
+                .unwrap(),
+                Arc::new(Audit(false)),
+                Box::new(task()),
+            );
+            assert_eq!(result.is_ok(), accepted);
+            if let Err(error) = &result {
+                assert_eq!(*error, AgentWorkFailure::Contract);
+            }
+            drop(result);
+            assert_eq!(native.reads.load(Ordering::Acquire), 0);
+            assert_eq!(native.acquisitions.load(Ordering::Acquire), 1);
+            assert!(native.tasks.lock().unwrap().is_empty());
+            assert_eq!(native.destructions.load(Ordering::Acquire), 0);
+            let mut destroy = owner.destroy(&resource).unwrap();
+            assert!(matches!(
+                destroy.poll(now()).unwrap(),
+                Some(LifecycleResult::Event(WorkBrowserResourceEvent::Destroyed(
+                    _
+                )))
+            ));
+            owner.seal_resources().unwrap();
+            assert!(owner.locally_retired());
+        }
+    }
 }
 fn task() -> AgentWorkExtractionTask {
     AgentWorkExtractionTask::try_new(
