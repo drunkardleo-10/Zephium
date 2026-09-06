@@ -475,6 +475,8 @@ pub(crate) fn install(
                 any(target_os = "macos", target_os = "windows")
             ))]
             agent_contexts: HashMap::new(),
+            #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+            work_resources: HashMap::new(),
             #[cfg(all(feature = "agentic-browser", target_os = "windows"))]
             agent_cookie_transfers: HashMap::new(),
             #[cfg(all(feature = "agentic-browser", target_os = "windows"))]

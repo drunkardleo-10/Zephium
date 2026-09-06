@@ -48,6 +48,8 @@ mod context_registry;
 mod work_browser_resource;
 pub use work_browser_resource::{
     WorkBrowserExecutionLease, WorkBrowserLeaseEnded, WorkBrowserLeaseNativeDebt,
+    WorkBrowserObservationCompletion, WorkBrowserObservationCompletionCallback,
+    WorkBrowserObservationDispatch, WorkBrowserObservationEvent, WorkBrowserObservationRequest,
     WorkBrowserResourceCompletion, WorkBrowserResourceCompletionCallback,
     WorkBrowserResourceDispatch, WorkBrowserResourceError, WorkBrowserResourceEvent,
     WorkBrowserResourceFailure, WorkBrowserResourceId, WorkBrowserResourceIdentity,

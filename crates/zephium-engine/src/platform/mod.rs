@@ -13,6 +13,8 @@ mod agent_screenshot_buffer;
 mod agent_semantic_cdp_protocol;
 #[cfg(all(feature = "agentic-browser", any(target_os = "windows", test)))]
 pub(crate) mod agent_suspension;
+#[cfg(all(feature = "agentic-browser", any(target_os = "macos", test)))]
+pub(crate) mod work_document_navigation;
 
 #[cfg(target_os = "macos")]
 pub mod macos;

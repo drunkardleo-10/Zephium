@@ -386,6 +386,23 @@ pub struct ContextJoin {
 }
 
 impl ContextJoin {
+    /// Correlation encoding for a temporary Work execution lease over a fixed
+    /// document. This does not create/adopt a legacy native context or transfer
+    /// resource ownership. Only the Work port accepts the accompanying lease.
+    pub(crate) const fn work_execution(
+        identity: ContextIdentity,
+        generation: ContextGeneration,
+    ) -> Self {
+        Self {
+            identity,
+            context_generation: generation,
+            navigation_epoch: NavigationEpoch::INITIAL,
+            frame: FrameId::MAIN,
+            frame_generation: FrameGeneration::INITIAL,
+            cancellation_generation: RunCancellationGeneration::INITIAL,
+        }
+    }
+
     /// Immutable context identity.
     pub const fn identity(self) -> ContextIdentity {
         self.identity

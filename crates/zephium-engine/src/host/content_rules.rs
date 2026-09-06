@@ -1022,6 +1022,32 @@ impl EngineHost {
                     }
                 }
             }
+            #[cfg(target_os = "macos")]
+            if agent_failure.is_none() {
+                let mut resource_ids: Vec<_> = self
+                    .work_resources
+                    .iter()
+                    .filter_map(|(id, resource)| (resource.profile() == profile).then_some(*id))
+                    .collect();
+                resource_ids.sort();
+                for id in resource_ids {
+                    let Some(view) = self
+                        .work_resources
+                        .get(&id)
+                        .and_then(|resource| resource.view())
+                    else {
+                        agent_failure = Some(ContentRuleApplyFailure::NativeInstallation);
+                        break;
+                    };
+                    match crate::platform::imp::install_content_policy_on_view(view, &native) {
+                        Ok(registration) => agent_registrations.push((id, registration)),
+                        Err(failure) => {
+                            agent_failure = Some(failure);
+                            break;
+                        }
+                    }
+                }
+            }
             if let Some(failure) = agent_failure {
                 let agent_clean = self.rollback_agent_content_policy_cohort(agent_registrations);
                 let ordinary_clean =
@@ -1077,6 +1103,19 @@ impl EngineHost {
             any(target_os = "macos", target_os = "windows")
         ))]
         for (id, registration) in agent_registrations {
+            #[cfg(target_os = "macos")]
+            if let Some(resource) = self.work_resources.get_mut(&id) {
+                let Some(replaced) = resource.replace_content_policy_registration(registration)
+                else {
+                    self.fail_content_policy_retirement();
+                    return;
+                };
+                if replaced.retire().is_err() {
+                    self.fail_content_policy_retirement();
+                    return;
+                }
+                continue;
+            }
             let replaced = self
                 .agent_contexts
                 .get_mut(&id)

@@ -115,6 +115,7 @@ fn new_owned_agent_configuration(
 /// Exact native page and its closed navigation policy handle.
 pub(crate) struct AgentOwnedView {
     navigation: AgentNavigationController,
+    work_navigation: Option<crate::platform::work_document_navigation::WorkDocumentNavigation>,
     semantic: Option<AgentSemanticRuntimeRegistration>,
     viewport: ContextOwnedViewport,
     _navigation_observer: super::InstalledNavigationObserver,
@@ -128,6 +129,11 @@ impl AgentOwnedView {
 
     pub(crate) const fn navigation(&self) -> &AgentNavigationController {
         &self.navigation
+    }
+    pub(crate) fn work_navigation(
+        &self,
+    ) -> Option<&crate::platform::work_document_navigation::WorkDocumentNavigation> {
+        self.work_navigation.as_ref()
     }
 
     pub(crate) fn semantic(&self) -> Option<&AgentSemanticRuntimeController> {
@@ -297,6 +303,61 @@ where
     Invariant: Fn() + 'static,
     Panic: Fn() + 'static,
 {
+    build_private_agent_view(
+        parent,
+        viewport,
+        profile,
+        storage_class,
+        ephemeral_store,
+        callbacks,
+        None,
+    )
+}
+
+/// Same hardened selected-profile constructor with a distinct run-free,
+/// one-document Work navigation gate. It never uses the legacy controller.
+pub(crate) fn build_owned_work_view<Navigation, Location, RendererLost, Invariant, Panic>(
+    parent: &impl HasWindowHandle,
+    viewport: ContextOwnedViewport,
+    profile: ProfileId,
+    storage_class: ContextProfileStorageClass,
+    ephemeral_store: Option<&WebsiteDataStore>,
+    callbacks: AgentOwnedViewCallbacks<Navigation, Location, RendererLost, Invariant, Panic>,
+) -> Result<AgentOwnedView, AgentOwnedViewConstructionError>
+where
+    Navigation: Fn(AgentNavigationTerminal) + 'static,
+    Location: Fn() + 'static,
+    RendererLost: Fn() + 'static,
+    Invariant: Fn() + 'static,
+    Panic: Fn() + 'static,
+{
+    build_private_agent_view(
+        parent,
+        viewport,
+        profile,
+        storage_class,
+        ephemeral_store,
+        callbacks,
+        Some(crate::platform::work_document_navigation::WorkDocumentNavigation::default()),
+    )
+}
+
+fn build_private_agent_view<Navigation, Location, RendererLost, Invariant, Panic>(
+    parent: &impl HasWindowHandle,
+    viewport: ContextOwnedViewport,
+    profile: ProfileId,
+    storage_class: ContextProfileStorageClass,
+    ephemeral_store: Option<&WebsiteDataStore>,
+    callbacks: AgentOwnedViewCallbacks<Navigation, Location, RendererLost, Invariant, Panic>,
+    work_navigation: Option<crate::platform::work_document_navigation::WorkDocumentNavigation>,
+) -> Result<AgentOwnedView, AgentOwnedViewConstructionError>
+where
+    Navigation: Fn(AgentNavigationTerminal) + 'static,
+    Location: Fn() + 'static,
+    RendererLost: Fn() + 'static,
+    Invariant: Fn() + 'static,
+    Panic: Fn() + 'static,
+{
     let AgentOwnedViewCallbacks {
         navigation: on_navigation,
         location: on_location,
@@ -308,6 +369,9 @@ where
     let navigation_policy = navigation.clone();
     let navigation_events = navigation.clone();
     let renderer_events = navigation.clone();
+    let work_policy = work_navigation.clone();
+    let work_events = work_navigation.clone();
+    let work_renderer = work_navigation.clone();
     let navigation_callback = Rc::new(on_navigation);
     let location_callback = Rc::new(on_location);
     let navigation_event_location_callback = location_callback.clone();
@@ -348,32 +412,68 @@ where
         .with_fullscreen_enabled(false)
         .with_picture_in_picture_enabled(false)
         .with_general_autofill_enabled(false)
-        .with_navigation_handler(move |target| navigation_policy.allows(&target))
-        .with_navigation_event_handler(move |event| match navigation_events.observe(event) {
-            Ok(observation) => {
-                if observation.did_commit_document() {
-                    navigation_semantic.document_committed();
-                }
-                if observation.should_check_location() {
-                    invoke_owned_unit_callback(
-                        navigation_event_location_callback.as_ref(),
-                        location_callback_panicked.as_ref(),
-                    );
-                }
-                if let Some(terminal) = observation.into_terminal() {
-                    invoke_owned_navigation_callback(
-                        navigation_callback.as_ref(),
+        .with_navigation_handler(move |target| {
+            work_policy.as_ref().map_or_else(
+                || navigation_policy.allows(&target),
+                |gate| gate.allows(&target),
+            )
+        })
+        .with_navigation_event_handler(move |event| {
+            if let Some(gate) = &work_events {
+                match gate.observe(event) {
+                    Ok((committed, notify)) => {
+                        if committed {
+                            navigation_semantic.document_committed();
+                        }
+                        if notify {
+                            invoke_owned_unit_callback(
+                                navigation_event_location_callback.as_ref(),
+                                location_callback_panicked.as_ref(),
+                            );
+                        }
+                    }
+                    Err(()) => invoke_owned_unit_callback(
+                        navigation_invariant_failure.as_ref(),
                         navigation_callback_panicked.as_ref(),
-                        terminal,
-                    );
+                    ),
                 }
+                return;
             }
-            Err(()) => invoke_owned_unit_callback(
-                navigation_invariant_failure.as_ref(),
-                navigation_callback_panicked.as_ref(),
-            ),
+            match navigation_events.observe(event) {
+                Ok(observation) => {
+                    if observation.did_commit_document() {
+                        navigation_semantic.document_committed();
+                    }
+                    if observation.should_check_location() {
+                        invoke_owned_unit_callback(
+                            navigation_event_location_callback.as_ref(),
+                            location_callback_panicked.as_ref(),
+                        );
+                    }
+                    if let Some(terminal) = observation.into_terminal() {
+                        invoke_owned_navigation_callback(
+                            navigation_callback.as_ref(),
+                            navigation_callback_panicked.as_ref(),
+                            terminal,
+                        );
+                    }
+                }
+                Err(()) => invoke_owned_unit_callback(
+                    navigation_invariant_failure.as_ref(),
+                    navigation_callback_panicked.as_ref(),
+                ),
+            }
         })
         .with_on_web_content_process_terminate_handler(move || {
+            if let Some(gate) = &work_renderer {
+                gate.refuse();
+                renderer_semantic.renderer_lost();
+                invoke_owned_unit_callback(
+                    renderer_lost_callback.as_ref(),
+                    renderer_callback_panicked.as_ref(),
+                );
+                return;
+            }
             match renderer_events.claim_renderer_loss() {
                 Ok(true) => {
                     renderer_semantic.renderer_lost();
@@ -417,22 +517,28 @@ where
         ephemeral_store,
     )?;
     let location_events = navigation.clone();
+    let work_location = work_navigation.clone();
     let location_invariant = invariant_failure_callback.clone();
     let location_panic = on_callback_panic.clone();
-    let navigation_observer = super::install_navigation_observer(&view, move || {
-        match location_events.request_location_check() {
-            Ok(true) => {
-                invoke_owned_unit_callback(location_callback.as_ref(), location_panic.as_ref())
+    let navigation_observer =
+        super::install_navigation_observer(&view, move || {
+            match work_location.as_ref().map_or_else(
+                || location_events.request_location_check(),
+                crate::platform::work_document_navigation::WorkDocumentNavigation::location_changed,
+            ) {
+                Ok(true) => {
+                    invoke_owned_unit_callback(location_callback.as_ref(), location_panic.as_ref())
+                }
+                Ok(false) => {}
+                Err(()) => {
+                    invoke_owned_unit_callback(location_invariant.as_ref(), location_panic.as_ref())
+                }
             }
-            Ok(false) => {}
-            Err(()) => {
-                invoke_owned_unit_callback(location_invariant.as_ref(), location_panic.as_ref())
-            }
-        }
-    })
-    .map_err(|_| AgentOwnedViewConstructionError::Native)?;
+        })
+        .map_err(|_| AgentOwnedViewConstructionError::Native)?;
     Ok(AgentOwnedView {
         navigation,
+        work_navigation,
         semantic: Some(semantic),
         viewport,
         _navigation_observer: navigation_observer,

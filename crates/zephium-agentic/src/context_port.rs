@@ -989,6 +989,19 @@ pub trait AgentBrowserPort: Send + Sync {
         }
     }
 
+    /// Bounded initial observation through a separately admitted Work resource
+    /// lease. It never enters legacy context/action/navigation routing.
+    fn work_resource_observe(
+        &self,
+        request: crate::WorkBrowserObservationRequest,
+        _completion: crate::WorkBrowserObservationCompletionCallback,
+    ) -> crate::WorkBrowserObservationDispatch {
+        crate::WorkBrowserObservationDispatch::Rejected {
+            request: Box::new(request),
+            failure: ContextPortFailure::Unsupported,
+        }
+    }
+
     /// Release-excluded fixed native diagnostic, unsupported by default.
     /// This is not a production rendering API or model-visible tool.
     #[cfg(feature = "probe-harness")]

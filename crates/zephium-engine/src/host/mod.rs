@@ -25,6 +25,8 @@ mod profiles;
 mod resources;
 mod scripts;
 mod stages;
+#[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+mod work_resource;
 
 #[cfg(test)]
 pub(crate) use dispatch::make_unavailable_for_test;
@@ -655,6 +657,8 @@ pub(crate) struct EngineHost {
         any(target_os = "macos", target_os = "windows")
     ))]
     agent_contexts: HashMap<zephium_agentic::ContextId, agent_context::AgentOwnedContext>,
+    #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+    work_resources: HashMap<zephium_agentic::ContextId, work_resource::WorkNativeResource>,
     // Native cookie callbacks retain their exact port task and deadline owner
     // outside the context map. At most two exist and each destination context
     // carries the matching id, so navigation/lifecycle cannot race mutation.

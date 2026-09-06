@@ -14,8 +14,9 @@ use ulid::Ulid;
 use zephium_core::ids::ProfileId;
 
 use crate::{
-    AgentPolicyInstant, ContextId, ContextPortFailure, ContextProfileStorageClass, ContextRunId,
-    MAX_EXECUTING_CONTEXTS, MAX_LIVE_CONTEXTS, MAX_PENDING_NATIVE_CONTEXT_TASKS,
+    AgentPolicyInstant, ContextId, ContextNavigationTarget, ContextPortFailure,
+    ContextProfileStorageClass, ContextRunId, MAX_EXECUTING_CONTEXTS, MAX_LIVE_CONTEXTS,
+    MAX_PENDING_NATIVE_CONTEXT_TASKS,
 };
 
 crate::context::durable_id!(WorkId, "Durable identity of one profile-owned Work.");
@@ -182,6 +183,9 @@ pub enum WorkBrowserResourceError {
     /// Work shutdown has permanently closed acquisition/construction.
     #[error("Work browser resource admission is sealed")]
     Sealed,
+    /// The frozen initial source cannot be observed through the HTTP(S) model.
+    #[error("Work browser resource source is unsupported")]
+    Source,
 }
 
 /// Closed operation classes; none grants page-level or model authority.
@@ -211,6 +215,7 @@ struct OperationJoin {
 pub struct WorkBrowserResourceRequest {
     operation: OperationJoin,
     storage: ContextProfileStorageClass,
+    document: Option<Arc<ContextNavigationTarget>>,
 }
 impl WorkBrowserResourceRequest {
     /// Exact persistent and process-local resource coordinates.
@@ -228,6 +233,12 @@ impl WorkBrowserResourceRequest {
     /// Immutable selected-profile persistence class; never inferred by a model.
     pub const fn storage(&self) -> ContextProfileStorageClass {
         self.storage
+    }
+    /// Admission-frozen initial document, absent for an empty resource. Native
+    /// construction must install selected-profile policy before loading it and
+    /// refuse redirects, substitutions and any later page navigation.
+    pub fn document(&self) -> Option<&ContextNavigationTarget> {
+        self.document.as_deref()
     }
     /// Consume the native request to settle once. The trusted adapter must
     /// inspect its original physical owners; constructing a value is not proof.
@@ -363,6 +374,9 @@ struct Resource {
     lease: Option<WorkBrowserExecutionLease>,
     failure: Option<WorkBrowserResourceFailure>,
     last_tick: AgentPolicyInstant,
+    document: Option<Arc<ContextNavigationTarget>>,
+    observation_sequence: u16,
+    observation: Option<observation::ObservationJoin>,
 }
 impl Resource {
     fn quarantine(&mut self, failure: WorkBrowserResourceFailure) {
@@ -429,6 +443,31 @@ impl WorkBrowserResources {
         storage: ContextProfileStorageClass,
         now: AgentPolicyInstant,
     ) -> Result<WorkBrowserResourceRequest, WorkBrowserResourceError> {
+        self.construct_source(resource, context, storage, None, now)
+    }
+    /// Reserve one exact initial document at the trusted application edge.
+    /// This is task-authored source admission, not model navigation authority.
+    /// Redirects and successor navigation are unsupported in this first slice.
+    pub fn construct_document(
+        &mut self,
+        resource: WorkBrowserResourceId,
+        context: ContextId,
+        storage: ContextProfileStorageClass,
+        document: ContextNavigationTarget,
+        now: AgentPolicyInstant,
+    ) -> Result<WorkBrowserResourceRequest, WorkBrowserResourceError> {
+        crate::SemanticOrigin::parse(document.as_url().as_str())
+            .map_err(|_| WorkBrowserResourceError::Source)?;
+        self.construct_source(resource, context, storage, Some(Arc::new(document)), now)
+    }
+    fn construct_source(
+        &mut self,
+        resource: WorkBrowserResourceId,
+        context: ContextId,
+        storage: ContextProfileStorageClass,
+        document: Option<Arc<ContextNavigationTarget>>,
+        now: AgentPolicyInstant,
+    ) -> Result<WorkBrowserResourceRequest, WorkBrowserResourceError> {
         if self.sealed {
             return Err(WorkBrowserResourceError::Sealed);
         }
@@ -472,9 +511,16 @@ impl WorkBrowserResources {
                 lease: None,
                 failure: None,
                 last_tick: now,
+                document: document.clone(),
+                observation_sequence: 0,
+                observation: None,
             },
         );
-        Ok(WorkBrowserResourceRequest { operation, storage })
+        Ok(WorkBrowserResourceRequest {
+            operation,
+            storage,
+            document,
+        })
     }
     /// Reserve one run-bound native lease without transferring page ownership.
     /// The only offered capability here is lifecycle binding, not page access.
@@ -502,6 +548,7 @@ impl WorkBrowserResources {
         if row.phase != WorkBrowserResourcePhase::Retained
             || row.pending.is_some()
             || row.lease.is_some()
+            || row.observation.is_some()
         {
             return Err(WorkBrowserResourceError::Phase);
         }
@@ -524,6 +571,7 @@ impl WorkBrowserResources {
         Ok(WorkBrowserResourceRequest {
             operation,
             storage: row.storage,
+            document: row.document.clone(),
         })
     }
     /// Check exact current native-lease membership and immutable deadline.
@@ -580,6 +628,7 @@ impl WorkBrowserResources {
         Ok(WorkBrowserResourceRequest {
             operation,
             storage: row.storage,
+            document: row.document.clone(),
         })
     }
     /// Quarantine one resource without discarding callback or capacity debt.
@@ -624,6 +673,7 @@ impl WorkBrowserResources {
         Ok(WorkBrowserResourceRequest {
             operation,
             storage: row.storage,
+            document: row.document.clone(),
         })
     }
     /// Settle the exact owned terminal. Wrong authority/phase cannot be replaced
@@ -709,7 +759,11 @@ impl WorkBrowserResources {
                     resource_retained,
                 },
             ) => {
-                if debt.bounded() && debt.is_empty() && resource_retained {
+                if debt.bounded()
+                    && debt.is_empty()
+                    && resource_retained
+                    && row.observation.is_none()
+                {
                     if let Some(lease) = row.lease.take() {
                         row.phase = WorkBrowserResourcePhase::Retained;
                         return Ok(WorkBrowserResourceEvent::LeaseEnded(
@@ -808,6 +862,7 @@ impl WorkBrowserResources {
                     && row.pending.is_none()
                     && row.destruction.is_none()
                     && row.lease.is_none()
+                    && row.observation.is_none()
             })
     }
     /// Release runtime bookkeeping only after exact resource destruction and
@@ -817,7 +872,7 @@ impl WorkBrowserResources {
         resource: &WorkBrowserResourceJoin,
     ) -> Result<WorkBrowserResourceIdentity, WorkBrowserResourceError> {
         let row = self.row_mut(resource)?;
-        if row.pending.is_some() || row.destruction.is_some() {
+        if row.pending.is_some() || row.destruction.is_some() || row.observation.is_some() {
             return Err(WorkBrowserResourceError::Pending);
         }
         if row.phase != WorkBrowserResourcePhase::Destroyed || row.lease.is_some() {
@@ -829,6 +884,13 @@ impl WorkBrowserResources {
             .ok_or(WorkBrowserResourceError::Stale)
     }
 }
+
+#[path = "work_browser_observation.rs"]
+mod observation;
+pub use observation::{
+    WorkBrowserObservationCompletion, WorkBrowserObservationCompletionCallback,
+    WorkBrowserObservationDispatch, WorkBrowserObservationEvent, WorkBrowserObservationRequest,
+};
 
 /// Move-only terminal callback for an accepted resource operation. A synchronous
 /// refusal transfers no callback obligation and must not pretend to be success.

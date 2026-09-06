@@ -36,6 +36,13 @@ use crate::MainThreadDispatch;
 mod foreground_probe;
 #[cfg(all(target_os = "macos", feature = "native-agentic-foreground-probe"))]
 pub(crate) use foreground_probe::AgentForegroundProbeTask;
+#[cfg(target_os = "macos")]
+#[path = "work_resource_port.rs"]
+mod work_resource;
+#[cfg(target_os = "macos")]
+pub use work_resource::work_browser_monotonic_now;
+#[cfg(target_os = "macos")]
+pub(crate) use work_resource::{WorkLifecycleTask, WorkObservationTask, WorkResourceGuard};
 
 pub(crate) type AgentContextEventSink = Arc<dyn Fn(ContextNativeEvent) + Send + Sync>;
 
@@ -140,6 +147,8 @@ struct AgentPortAdmission {
     fatal: Arc<dyn Fn(&'static str) + Send + Sync>,
     fatal_reported: AtomicBool,
     lineage_failed: Option<Arc<AtomicBool>>,
+    #[cfg(target_os = "macos")]
+    work: Mutex<work_resource::WorkIngress>,
 }
 
 impl AgentPortAdmission {
@@ -149,6 +158,8 @@ impl AgentPortAdmission {
             fatal,
             fatal_reported: AtomicBool::new(false),
             lineage_failed: None,
+            #[cfg(target_os = "macos")]
+            work: Mutex::new(work_resource::WorkIngress::default()),
         }
     }
 
@@ -361,6 +372,10 @@ impl AgentPortAdmission {
     // Only the exact native shutdown task may attest its own sealed cohort.
     // Its permit is still held; every other request/capture must be absent.
     fn verify_native_shutdown(&self, snapshot: ContextNativeResourceSnapshot) {
+        #[cfg(target_os = "macos")]
+        if !self.work_is_absent() {
+            return;
+        }
         let Ok(mut state) = self.state.lock() else {
             self.report_fatal_once();
             return;
@@ -410,6 +425,10 @@ impl AgentPortAdmission {
     // Linearizes retirement with old read-only audit admission. An old port
     // never unseals, changes its sink, or audits a successor's native cohort.
     fn retire_for_successor(&self) -> Result<(), ContextPortFailure> {
+        #[cfg(target_os = "macos")]
+        if !self.work_is_absent() {
+            return Err(ContextPortFailure::ProfileBusy);
+        }
         let mut state = self.state.lock().map_err(|_| {
             if let Some(failed) = &self.lineage_failed {
                 failed.store(true, Ordering::Release);
@@ -1426,6 +1445,22 @@ impl EngineAgentBrowserPort {
 }
 
 impl AgentBrowserPort for EngineAgentBrowserPort {
+    #[cfg(target_os = "macos")]
+    fn work_resource_lifecycle(
+        &self,
+        request: zephium_agentic::WorkBrowserResourceRequest,
+        completion: zephium_agentic::WorkBrowserResourceCompletionCallback,
+    ) -> zephium_agentic::WorkBrowserResourceDispatch {
+        self.schedule_work_lifecycle(request, completion)
+    }
+    #[cfg(target_os = "macos")]
+    fn work_resource_observe(
+        &self,
+        request: zephium_agentic::WorkBrowserObservationRequest,
+        completion: zephium_agentic::WorkBrowserObservationCompletionCallback,
+    ) -> zephium_agentic::WorkBrowserObservationDispatch {
+        self.schedule_work_observation(request, completion)
+    }
     #[cfg(all(target_os = "macos", feature = "native-agentic-foreground-probe"))]
     fn probe_foreground_rendering(
         &self,

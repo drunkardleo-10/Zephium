@@ -1083,6 +1083,10 @@ impl EngineHost {
     ) {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let binding_count = u8::try_from(self.agent_contexts.len()).ok();
+        #[cfg(target_os = "macos")]
+        let binding_count = binding_count
+            .and_then(|count| usize::from(count).checked_add(self.work_resources.len()))
+            .and_then(|count| u8::try_from(count).ok());
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let binding_count = Some(0);
 
@@ -1094,6 +1098,17 @@ impl EngineHost {
                 .count(),
         )
         .ok();
+        #[cfg(target_os = "macos")]
+        let resident_view_count = resident_view_count
+            .and_then(|count| {
+                usize::from(count).checked_add(
+                    self.work_resources
+                        .values()
+                        .filter(|resource| resource.resident())
+                        .count(),
+                )
+            })
+            .and_then(|count| u8::try_from(count).ok());
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let resident_view_count = Some(0);
 
@@ -1104,6 +1119,17 @@ impl EngineHost {
             .try_fold(0usize, |count, binding| {
                 let pending = binding.pending_operation_for_audit()?;
                 count.checked_add(usize::from(pending))
+            })
+            .and_then(|count| u8::try_from(count).ok());
+        #[cfg(target_os = "macos")]
+        let pending_operations = pending_operations
+            .and_then(|count| {
+                usize::from(count).checked_add(
+                    self.work_resources
+                        .values()
+                        .filter(|resource| resource.pending())
+                        .count(),
+                )
             })
             .and_then(|count| u8::try_from(count).ok());
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -1151,6 +1177,18 @@ impl EngineHost {
             .agent_contexts
             .iter()
             .all(|(id, binding)| binding.is_consistent_with_key(*id));
+        #[cfg(target_os = "macos")]
+        let bindings_consistent = bindings_consistent
+            && self
+                .work_resources
+                .iter()
+                .all(|(id, resource)| resource.consistent(*id))
+            && task.work_ingress_matches(
+                self.work_resources
+                    .values()
+                    .map(|resource| resource.guard())
+                    .collect(),
+            );
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let bindings_consistent = true;
 
@@ -1263,10 +1301,14 @@ impl EngineHost {
         let identity = join.identity();
         let id = identity.id();
         let profile = identity.profile();
-        if self.agent_contexts.contains_key(&id) {
+        if self.agent_contexts.contains_key(&id) || self.work_resources.contains_key(&id) {
             return Err(ContextPortFailure::Stale);
         }
-        if self.agent_contexts.len() >= MAX_LIVE_CONTEXTS {
+        if self.agent_contexts.len() + self.work_resources.len() >= MAX_LIVE_CONTEXTS
+            || (!self.work_resources.is_empty()
+                && self.agent_contexts.len() + self.work_execution_reservations()
+                    >= zephium_agentic::MAX_EXECUTING_CONTEXTS)
+        {
             return Err(ContextPortFailure::ResourceExhausted);
         }
         if self.erasure_tombstones.contains(&profile) {
@@ -2816,6 +2858,10 @@ impl EngineHost {
         self.agent_contexts
             .values()
             .any(|binding| binding.profile() == profile)
+            || self
+                .work_resources
+                .values()
+                .any(|resource| resource.profile() == profile)
     }
 
     /// Physically destroys all remaining private contexts during shutdown.
@@ -2825,7 +2871,8 @@ impl EngineHost {
     /// shutdown is refused.
     #[cfg(target_os = "macos")]
     pub(super) fn force_shutdown_agent_contexts(&mut self) -> bool {
-        let shell_was_quiescent = self.agent_contexts.is_empty();
+        let shell_was_quiescent =
+            self.force_shutdown_work_resources() && self.agent_contexts.is_empty();
         let contexts = std::mem::take(&mut self.agent_contexts);
         let mut native_clean = true;
         for (_id, binding) in contexts {

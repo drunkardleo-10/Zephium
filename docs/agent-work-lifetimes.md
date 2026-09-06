@@ -83,6 +83,7 @@ battery/resource qualification or default-desktop enablement is implied.
 
 The subsequent [persistent Work-resource boundary](agent-work-resources.md)
 separates durable page ownership from run-bound execution leases. Its first
-functional-core/typed-port checkpoint is native-Unsupported and does not alter
-these accepted serial qualification lifetimes or reinterpret their all-zero
-terminal proofs.
+macOS native slice supports an explicit frozen document and bounded initial
+reads; two-lease native retention qualification remains pending. It does not
+reinterpret these accepted serial terminal proofs: retained Work pages and
+their delivery owners now explicitly block the same all-zero/successor gates.
