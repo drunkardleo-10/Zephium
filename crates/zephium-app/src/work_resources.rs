@@ -388,7 +388,9 @@ impl WorkResourceOwner {
         join: &WorkBrowserResourceJoin,
     ) -> Result<WorkBrowserResourceIdentity, Refusal> {
         let resource = self.shared.resource(join)?;
-        if resource.flights.load(Ordering::Acquire) != 0 {
+        if resource.flights.load(Ordering::Acquire) != 0
+            || !resource.lock_local(&resource.health)?.reporter_retired()
+        {
             return Err(Refusal::Busy);
         }
         let identity = self.shared.lock_rows()?.reap(join)?;
@@ -419,11 +421,12 @@ impl WorkResourceOwner {
                 resources.values().all(|resource| {
                     resource.flights.load(Ordering::Acquire) == 0
                         && resource.lock_local(&resource.health).is_ok_and(|health| {
-                            matches!(
-                                health.snapshot(),
-                                WorkBrowserResourceHealthState::Retired
-                                    | WorkBrowserResourceHealthState::Uncertain
-                            )
+                            health.reporter_retired()
+                                && matches!(
+                                    health.snapshot(),
+                                    WorkBrowserResourceHealthState::Retired
+                                        | WorkBrowserResourceHealthState::Uncertain
+                                )
                         })
                 })
             })

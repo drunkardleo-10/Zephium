@@ -1,8 +1,9 @@
 # macOS retained common-controller / Luna composition
 
-Status: **Not run**. Deterministic/build checks do not qualify native or provider
-behavior. The first candidate is one explicit synthetic-public fixture run in
-the isolated actual application, not a public-site matrix or product admission.
+Status: **Failed first actual-app run, 2026-09-07; corrective source pending live
+qualification**. Deterministic/build checks do not qualify native or provider
+behavior. This is one synthetic-public fixture in the isolated actual application,
+not a public-site matrix or product admission.
 
 ## Exact boundary
 
@@ -45,10 +46,14 @@ drain remain independently required.
 ## Resource, credential and evidence discipline
 
 One resource, one actor, one initial native observation; eight approved
-operations, 100,000 model tokens and 50,000 micro-USD maximum policy budget;
+operations, 100,000 model tokens and 100,000 micro-USD maximum policy budget;
 150-second absolute run bound; four diagnostic mailbox slots; one coalesced
 50-ms main-loop check; one five-second cleanup bound, never renewed by a late
 actor terminal. Existing provider/controller/native limits are unchanged.
+The corrected development-only cost ceiling admits Luna's existing 77,830
+micro-USD conservative call reservation before exact counting. It is not an
+expected charge; original exact provider accounting remains required. The first
+candidate's 50,000 micro-USD ceiling could not admit even the initial reservation.
 
 The existing fixed macOS probe credential loader runs on a one-shot preparation
 thread before the rendering opportunity. It retains the established Keychain
@@ -110,5 +115,48 @@ Completed checks on this source:
   agentic probe-harness exclusion, as required.
 
 All native tests above are deterministic tests/build evidence, not the actual
-foreground application witness. Status remains **Not run** pending independent
-review and a separately authorized single launch.
+foreground application witness. At the time of this build, the candidate had
+not been launched.
+
+## First actual-app run, 2026-09-07
+
+The explicitly authorized launch used source `2132574dce4065da7505145b74a201fdd9154192`
+and the exact executable SHA-256
+`929f62bd9e7541a7c6c29258f33f3be110ed88fbc73416ad51eaae1a34af7bb1`.
+Admission was Admitted; the trace then recorded Configured, Started,
+ContextActive and Observing. The one original native observation contained
+seven nodes, complete/current-document true, zero frame boundaries and all five
+readiness markers true. Terminal followed at 250 ms with
+`closed_unsuccessfully`, `Browser(Authority)`. Model calls, input/output tokens
+and cost were all zero. This proves the native fixture reached the task check;
+it supplies no provider extraction or end-to-end acceptance evidence.
+
+Presentation retirement, scoped worker drainage and the then-reported local
+original-resource retirement were true. The provisional cleanup failed with
+`native_resource_debt`, `native_cohort_clean=false`; the main thread subsequently
+reported `Work resource notification failed` at `work_resources.rs:71`.
+Final `exact_native_weak_drain=Some(true)` did not repair
+`normal_shutdown_clean=false`. The local retirement report was insufficient:
+reaping could remove the original receiver while its counted native reporter
+still lived beyond the Destroyed terminal.
+
+Source correction preserves the policy refusal and exact native audit. The
+development manifest/node cost ceiling now covers the existing conservative
+reservation. Local reaping and local retirement require retirement of the exact
+native reporter, including after sticky uncertainty. The qualification driver
+keeps its original owner/sink through a bounded post-Destroy drain before its
+single shutdown audit; it does not reinterpret a nonzero audit as clean, renew
+cleanup time, or suppress notification failure. Focused deterministic regression
+tests cover insufficient/exact reservation boundaries, pre-provider failure
+through the actual common scoped worker, and delayed native reporter retirement.
+No corrected GUI launch, Keychain access or provider call has been performed.
+
+Corrective candidate verification: the Luna reservation boundary test passed;
+all 45 application Work-resource tests and 38 native Work-resource tests passed;
+all five retained-composition tests passed. Strict all-targets Clippy passed for
+composition, application, engine and common controller with retained qualification
+enabled. Agentic-probe/controller/runtime architecture gates, the two resource
+boundary mutation tests, hostile JavaScript smoke, formatting and whitespace
+checks passed. Application loopback fixtures required sandbox escalation for
+localhost binding; they used no real provider endpoint or credential. These are
+deterministic source checks, not a new live qualification or a rebuilt executable.

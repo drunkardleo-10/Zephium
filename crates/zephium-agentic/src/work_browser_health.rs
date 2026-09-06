@@ -16,6 +16,7 @@ const UNCERTAIN: u8 = 3;
 struct HealthState {
     state: AtomicU8,
     receiver_alive: AtomicBool,
+    reporter_retired: AtomicBool,
     pending_wake: AtomicBool,
     waker: Mutex<Option<Arc<Waker>>>,
 }
@@ -74,6 +75,13 @@ pub struct WorkBrowserResourceHealth {
 }
 
 impl WorkBrowserResourceHealth {
+    /// The original native reporting owner has entered retirement. This remains
+    /// observable after sticky uncertainty; it is not callback-return or native
+    /// absence proof. Its counted native delivery lane must still be audited.
+    pub fn reporter_retired(&self) -> bool {
+        self.state.reporter_retired.load(Ordering::Acquire)
+    }
+
     /// Exact resource incarnation observed by this receiver, not a run identity.
     pub const fn resource(&self) -> &WorkBrowserResourceJoin {
         &self.resource
@@ -162,6 +170,9 @@ impl WorkBrowserResourceHealthReporter {
 }
 impl Drop for WorkBrowserResourceHealthReporter {
     fn drop(&mut self) {
+        // Publish ownership retirement before waking the original application.
+        // Health uncertainty remains sticky and cannot be healed by this fact.
+        self.state.reporter_retired.store(true, Ordering::Release);
         self.state
             .publish(if self.installed.load(Ordering::Acquire) {
                 RETIRED
@@ -182,6 +193,7 @@ pub(super) fn track(
     let state = Arc::new(HealthState {
         state: AtomicU8::new(PENDING),
         receiver_alive: AtomicBool::new(true),
+        reporter_retired: AtomicBool::new(false),
         pending_wake: AtomicBool::new(false),
         waker: Mutex::new(None),
     });

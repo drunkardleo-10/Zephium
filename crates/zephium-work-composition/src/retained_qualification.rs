@@ -180,6 +180,7 @@ enum Phase {
     Joining,
     Retire,
     Destroy,
+    NativeDrain,
     Seal,
     Done,
 }
@@ -525,9 +526,7 @@ impl Driver {
                     self.start_actor(lease)?
                 }
                 (Phase::Destroy, WorkBrowserResourceEvent::Destroyed(_)) => {
-                    self.owner
-                        .seal(ContextResourceAuditId::new(1).ok_or("audit")?)?;
-                    self.phase = Phase::Seal;
+                    self.phase = Phase::NativeDrain;
                 }
                 _ => return Err("lifecycle_phase"),
             }
@@ -562,6 +561,13 @@ impl Driver {
             self.render(kind)?;
         }
         match self.phase {
+            Phase::NativeDrain
+                if self
+                    .owner
+                    .poll_seal(ContextResourceAuditId::new(1).ok_or("audit")?)? =>
+            {
+                self.phase = Phase::Seal;
+            }
             Phase::Preparing
                 if self.policy_ready
                     && self
@@ -742,7 +748,11 @@ impl Driver {
     }
     fn begin_native_cleanup(&mut self) -> Result<(), &'static str> {
         self.owner.abandon_pending();
-        let _ = self.owner.drain_abandoned(now()?);
+        if let Err(reason) = self.owner.drain_abandoned(now()?) {
+            // Keep destruction available, but never erase an original slot's
+            // accounting failure from the independent cleanup verdict.
+            self.cleanup_failure.get_or_insert(reason);
+        }
         if self.render.is_some() {
             self.phase = Phase::Retire;
             if self.render_pending.is_none() && self.render_next != Some(Render::SnapshotRetire) {
@@ -758,9 +768,7 @@ impl Driver {
             self.owner.destroy()?;
             self.phase = Phase::Destroy;
         } else {
-            self.owner
-                .seal(ContextResourceAuditId::new(1).ok_or("audit")?)?;
-            self.phase = Phase::Seal;
+            self.phase = Phase::NativeDrain;
         }
         Ok(())
     }

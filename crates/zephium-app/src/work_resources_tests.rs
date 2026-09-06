@@ -319,6 +319,41 @@ fn original_work_owner_and_sink_survive_two_exact_lease_facades_without_global_r
 }
 
 #[test]
+fn destroyed_terminal_cannot_reap_a_living_native_reporter_even_after_uncertainty() {
+    for uncertain in [false, true] {
+        let (owner, native) = setup(Arc::new(|| true));
+        let resource = construct(&owner);
+        // Model a surviving native delegate/guard after physical page removal.
+        let reporter = native
+            .reporters
+            .lock()
+            .unwrap()
+            .remove(&resource.identity().context())
+            .unwrap();
+        if uncertain {
+            reporter.invalidate();
+        }
+        let mut destroy = owner.destroy(&resource).unwrap();
+        assert!(matches!(
+            destroy.poll(tick(6)).unwrap(),
+            Some(LifecycleResult::Event(WorkBrowserResourceEvent::Destroyed(
+                _
+            )))
+        ));
+        assert!(!owner.locally_retired());
+        assert_eq!(owner.reap_absent(&resource), Err(Refusal::Busy));
+        assert!(owner.shared.resource(&resource).is_ok());
+        // Retirement still wakes the original live receiver. Uncertainty must
+        // never masquerade as release of that reporting owner.
+        drop(reporter);
+        owner.seal_resources().unwrap();
+        assert!(owner.locally_retired());
+        assert_eq!(owner.reap_absent(&resource).unwrap(), resource.identity());
+        assert!(owner.shared.global_current());
+    }
+}
+
+#[test]
 fn idle_native_uncertainty_quarantines_only_its_resource_and_cannot_be_rebound() {
     let (owner, native) = setup(Arc::new(|| true));
     let a = construct(&owner);

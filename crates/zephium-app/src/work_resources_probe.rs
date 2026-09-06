@@ -196,22 +196,37 @@ impl RetainedWorkProbeOwner {
         );
         Ok(())
     }
-    /// Original native seal after resource destruction; no global proof minted.
-    pub fn seal(&mut self, audit: ContextResourceAuditId) -> Result<(), &'static str> {
+    /// Waits for the exact native reporter after resource destruction, then
+    /// schedules one original native seal. The unchanged audit still accounts
+    /// callback-return and queued-task debt; retirement alone mints no proof.
+    pub fn poll_seal(&mut self, audit: ContextResourceAuditId) -> Result<bool, &'static str> {
         if self.pending.is_some() {
             return Err("seal_phase");
         }
         if let Some(resource) = &self.resource {
-            self.owner
-                .reap_absent(resource)
-                .map_err(|_| "resource_reap")?;
+            if self
+                .owner
+                .shared
+                .lock_rows()
+                .map_err(|_| "resource_rows")?
+                .phase(resource)
+                .map_err(|_| "resource_phase")?
+                != WorkBrowserResourcePhase::Destroyed
+            {
+                return Err("seal_phase");
+            }
+            match self.owner.reap_absent(resource) {
+                Ok(_) => {}
+                Err(Refusal::Busy) => return Ok(false),
+                Err(_) => return Err("resource_reap"),
+            }
         }
         (self
             .owner
             .shutdown_audit(audit)
             .map_err(|_| "native_seal")?
             == ContextShutdownDispatch::AuditScheduled)
-            .then_some(())
+            .then_some(true)
             .ok_or("native_audit_dispatch")
     }
     /// Bounded original global event lane; never rebound to the worker.

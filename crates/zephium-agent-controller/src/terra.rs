@@ -3589,6 +3589,12 @@ mod tests {
     }
 
     fn browser_fixture() -> (AgentBrowserSession, SemanticObservation) {
+        browser_fixture_with_budget(AgentRunBudget::try_new(16, 300_000, 1_000_000, 1).unwrap())
+    }
+
+    fn browser_fixture_with_budget(
+        budget: AgentRunBudget,
+    ) -> (AgentBrowserSession, SemanticObservation) {
         let profile = 13_u128.into();
         let identity = ContextIdentity::new(
             ContextId::generate(),
@@ -3649,7 +3655,6 @@ mod tests {
         ])
         .expect("effects");
         let account_scope = AgentAccountScope::Anonymous;
-        let budget = AgentRunBudget::try_new(16, 300_000, 1_000_000, 1).expect("budget");
         let scope = AgentRunScope::try_new(
             vec![profile],
             vec![account_scope],
@@ -3756,6 +3761,57 @@ mod tests {
         )
         .expect("prepare")
         .into_transport_input()
+    }
+
+    #[test]
+    fn luna_initial_reservation_requires_sufficient_frozen_run_and_node_budget() {
+        use zephium_agentic::{AgentPolicyError, AgentProviderRequestError};
+        for cost in [
+            50_000,
+            LUNA_PROVIDER_EXACT_RESERVATION_COST_MICRO_USD - 1,
+            LUNA_PROVIDER_EXACT_RESERVATION_COST_MICRO_USD,
+            100_000,
+        ] {
+            let budget = AgentRunBudget::try_new(8, 100_000, cost, 1).unwrap();
+            let (mut session, observation) = browser_fixture_with_budget(budget);
+            let request = session.next_model_call_request().unwrap();
+            let payload = encode_semantic_observation(
+                &observation,
+                SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
+            )
+            .unwrap()
+            .admit_conservative_utf8(session.config.tokenizer())
+            .unwrap();
+            let prepared = AgentPreparedObservationRequest::try_openai_for_provider_exact_count(
+                &mut session.policy,
+                request,
+                &observation,
+                payload,
+                session.objective.as_ref().unwrap(),
+                session.config.clone(),
+            );
+            if cost < LUNA_PROVIDER_EXACT_RESERVATION_COST_MICRO_USD {
+                assert!(matches!(
+                    prepared,
+                    Err(AgentProviderRequestError::Policy(AgentPolicyError::Budget))
+                ));
+                assert_eq!(session.policy.pending_model_calls(), 0);
+            } else {
+                let prepared = prepared.unwrap();
+                assert_eq!(session.policy.pending_model_calls(), 1);
+                assert_eq!(
+                    session.policy.accounting().reserved_cost_micro_usd(),
+                    LUNA_PROVIDER_EXACT_RESERVATION_COST_MICRO_USD
+                );
+                let _outcome = prepared
+                    .into_transport_input()
+                    .cancel(&mut session.policy)
+                    .unwrap();
+                assert_eq!(session.policy.pending_model_calls(), 0);
+            }
+            // Preparation never dispatches counting or model generation.
+            assert!(session.try_finish_unsuccessful().is_ok());
+        }
     }
 
     #[test]

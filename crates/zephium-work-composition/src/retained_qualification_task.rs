@@ -211,7 +211,10 @@ pub(super) fn input(
 ) -> Result<AgentWorkRunInput, &'static str> {
     let origin = SemanticOrigin::parse(target.as_url().as_str()).map_err(|_| "origin")?;
     let effects = AgentEffectScope::try_new(&[SemanticEffectClass::Read]).map_err(|_| "effects")?;
-    let budget = AgentRunBudget::try_new(8, 100_000, 50_000, 1).map_err(|_| "budget")?;
+    // Luna reserves 77,830 micro-USD before exact whole-request counting. The
+    // development witness must admit that reservation; actual provider usage
+    // still settles against this same run/node ceiling and original ledger.
+    let budget = AgentRunBudget::try_new(8, 100_000, 100_000, 1).map_err(|_| "budget")?;
     let node = AgentPlanNodeId::generate();
     let authority = AgentPlanNodeAuthority::try_new(
         vec![identity.profile()],

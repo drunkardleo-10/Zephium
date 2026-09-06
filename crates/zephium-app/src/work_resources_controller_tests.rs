@@ -258,10 +258,24 @@ fn input_with_source(
     storage: ContextProfileStorageClass,
     target: ContextNavigationTarget,
 ) -> AgentWorkRunInput {
+    input_with_budget(
+        binding,
+        clock,
+        storage,
+        target,
+        AgentRunBudget::try_new(24, 1_000_000, 1_000_000, 1).unwrap(),
+    )
+}
+fn input_with_budget(
+    binding: &WorkBrowserReadBinding,
+    clock: Arc<Clock>,
+    storage: ContextProfileStorageClass,
+    target: ContextNavigationTarget,
+    budget: AgentRunBudget,
+) -> AgentWorkRunInput {
     let identity = binding.frame().context().identity();
     let origin = binding.frame().origin().clone();
     let effects = AgentEffectScope::try_new(&[SemanticEffectClass::Read]).unwrap();
-    let budget = AgentRunBudget::try_new(24, 1_000_000, 1_000_000, 1).unwrap();
     let node = AgentPlanNodeId::generate();
     let expires = AgentPolicyInstant::from_millis(600_002);
     let manifest = AgentRunManifest::try_new(
@@ -728,6 +742,93 @@ fn snapshot_probe_common_worker_cannot_start_model_until_native_release() {
 }
 
 #[test]
+fn pre_provider_budget_refusal_drains_worker_and_preserves_late_original_reporter() {
+    use super::snapshot_probe::{SnapshotRelease, SnapshotReleaseBrowser};
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (owner, native, resource, browser) = setup();
+    let input = input_with_budget(
+        browser.binding(),
+        Arc::new(Clock(AtomicU64::new(2))),
+        browser.binding().storage(),
+        browser.binding().document().clone(),
+        AgentRunBudget::try_new(8, 100_000, 50_000, 1).unwrap(),
+    );
+    let (tx, rx) = mpsc::sync_channel(1);
+    let release = SnapshotRelease::new(
+        resource.clone(),
+        Box::new(move |callback| {
+            tx.send(callback).unwrap();
+            true
+        }),
+    );
+    let browser = SnapshotReleaseBrowser::new(browser, release.clone()).unwrap();
+    let (transport, server) = fixture_provider_responses(Vec::new());
+    let (controller, mut result, scope) = AgentWorkRetainedController::try_new_for_probe(
+        input,
+        Box::new(browser),
+        transport,
+        AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "fixture-not-a-secret".into(),
+        )
+        .unwrap(),
+        Arc::new(Audit(false)),
+        Box::new(task()),
+    )
+    .unwrap();
+    let (_handle, lifecycle) = start(controller, scope);
+    rx.recv_timeout(Duration::from_secs(5)).unwrap()(true);
+    let mut outcome = None;
+    wait_until(|| {
+        while let Some(event) = result.take_event() {
+            assert!(!matches!(
+                event.kind(),
+                AgentWorkEventKind::ModelActive | AgentWorkEventKind::ModelSettled { .. }
+            ));
+        }
+        outcome = result.take_outcome();
+        outcome.is_some()
+    });
+    let Some(AgentWorkRetainedOutcome::ClosedUnsuccessfully(closed)) = outcome else {
+        panic!("budget must fail before provider dispatch");
+    };
+    assert_eq!(
+        closed.failure(),
+        AgentWorkFailure::Browser(AgentBrowserProviderError::Authority)
+    );
+    assert_eq!(closed.policy_settlement().closure().model_calls(), 0);
+    assert!(release.returned().unwrap());
+    assert!(matches!(
+        lifecycle.drain_until(Instant::now() + Duration::from_secs(2)),
+        AgentRuntimeScopedDrain::Drained(_)
+    ));
+    native.join();
+    let reporter = native
+        .reporters
+        .lock()
+        .unwrap()
+        .remove(&resource.identity().context())
+        .unwrap();
+    let mut destroy = owner.destroy(&resource).unwrap();
+    assert!(matches!(
+        destroy.poll(now()).unwrap(),
+        Some(LifecycleResult::Event(WorkBrowserResourceEvent::Destroyed(
+            _
+        )))
+    ));
+    assert_eq!(owner.reap_absent(&resource), Err(Refusal::Busy));
+    assert!(!owner.locally_retired());
+    drop(reporter);
+    owner.reap_absent(&resource).unwrap();
+    owner.seal_resources().unwrap();
+    assert!(owner.locally_retired());
+    assert!(owner.shared.global_current());
+    assert_eq!(server.join().unwrap(), 0);
+}
+
+#[test]
 fn opaque_probe_owner_uses_original_rows_and_refuses_second_resource_actor_or_early_seal() {
     use super::super::probe::RetainedWorkProbeOwner;
     let native = Arc::new(Native::default());
@@ -745,7 +846,9 @@ fn opaque_probe_owner_uses_original_rows_and_refuses_second_resource_actor_or_ea
     assert!(
         matches!(owner.poll_lifecycle(now()).unwrap(), Some(WorkBrowserResourceEvent::Retained(join)) if join == resource)
     );
-    assert!(owner.seal(ContextResourceAuditId::new(1).unwrap()).is_err());
+    assert!(owner
+        .poll_seal(ContextResourceAuditId::new(1).unwrap())
+        .is_err());
     assert!(!owner.locally_retired());
     owner
         .acquire(
@@ -766,14 +869,28 @@ fn opaque_probe_owner_uses_original_rows_and_refuses_second_resource_actor_or_ea
     );
     assert_eq!(native.acquisitions.load(Ordering::Acquire), 1);
     assert_eq!(native.reads.load(Ordering::Acquire), 0);
+    let reporter = native
+        .reporters
+        .lock()
+        .unwrap()
+        .remove(&resource.identity().context())
+        .unwrap();
     owner.destroy().unwrap();
     assert!(
         matches!(owner.poll_lifecycle(now()).unwrap(), Some(WorkBrowserResourceEvent::Destroyed(join)) if join == resource)
     );
     assert_eq!(native.destructions.load(Ordering::Acquire), 1);
+    assert_eq!(
+        owner.poll_seal(ContextResourceAuditId::new(1).unwrap()),
+        Ok(false)
+    );
+    assert!(!owner.locally_retired());
+    drop(reporter);
     // This fixture intentionally cannot mint a native global audit. The opaque
     // bridge preserves that refusal instead of converting local owner closure.
-    assert!(owner.seal(ContextResourceAuditId::new(1).unwrap()).is_err());
+    assert!(owner
+        .poll_seal(ContextResourceAuditId::new(1).unwrap())
+        .is_err());
     assert!(owner.locally_retired());
 }
 

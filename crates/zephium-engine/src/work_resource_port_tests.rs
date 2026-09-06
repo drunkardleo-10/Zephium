@@ -221,6 +221,7 @@ fn destruction_retirement_waits_for_exact_callback_task_ingress_and_reporter_lan
     assert!(observed.load(Ordering::SeqCst));
     assert!(admission.work.lock().unwrap().rows.is_empty());
     assert_eq!(health.poll(), H::Current);
+    assert!(!health.reporter_retired());
     assert_eq!(admission.pending(), Some(1));
     admission.verify_native_shutdown(zero());
     assert!(!admission.state.lock().unwrap().native_shutdown_verified);
@@ -228,6 +229,7 @@ fn destruction_retirement_waits_for_exact_callback_task_ingress_and_reporter_lan
     drop(guard);
     assert_eq!(*samples.lock().unwrap(), [1]);
     assert_eq!(health.poll(), H::Retired);
+    assert!(health.reporter_retired());
     assert_eq!(admission.pending(), Some(0));
 }
 
