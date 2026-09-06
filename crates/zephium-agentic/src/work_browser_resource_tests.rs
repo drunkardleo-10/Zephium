@@ -152,6 +152,30 @@ fn health_request_attachment_is_construct_only_move_only_and_unhandled_fails_clo
         .unwrap();
     assert!(request.track_resource_health().is_err());
 }
+
+#[test]
+fn health_consume_acquires_coalesced_publication_or_preserves_a_successor_wake() {
+    use std::sync::atomic::Ordering;
+    use WorkBrowserResourceHealthState as H;
+    let mut rows = registry();
+    let resource = create(&mut rows, 707);
+    for before in [false, true] {
+        let (mut health, reporter) = health::track(resource.clone());
+        let wake = Arc::new(HealthWake::default());
+        health.register(wake.clone().into());
+        assert!(reporter.install(&resource));
+        if before {
+            reporter.invalidate();
+            assert_eq!(health.poll(), H::Uncertain);
+            assert_eq!(wake.0.load(Ordering::Acquire), 1); // publication coalesced
+        } else {
+            assert_eq!(health.poll(), H::Current);
+            reporter.invalidate();
+            assert_eq!(health.poll(), H::Uncertain);
+            assert_eq!(wake.0.load(Ordering::Acquire), 2); // consume won; next wake
+        }
+    }
+}
 fn registry() -> WorkBrowserResources {
     WorkBrowserResources::new(WorkId::from_raw(1), ProfileId::from(2))
 }

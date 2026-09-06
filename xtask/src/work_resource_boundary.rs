@@ -24,6 +24,7 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "resource!=&self.resource", "self.installed.swap(true,Ordering::AcqRel)",
             "self.state.fetch_max(state,Ordering::AcqRel)",
             "self.pending_wake.swap(true,Ordering::AcqRel)",
+            "self.state.pending_wake.swap(false,Ordering::AcqRel)",
             "waker:Mutex<Option<Arc<Waker>>>", "std::panic::catch_unwind",
             "self.state.receiver_alive.store(false,Ordering::Release)",
         ],

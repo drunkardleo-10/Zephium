@@ -92,6 +92,12 @@ removal, then a Retired wake that still observes the reporting permit before its
 release. Rejected construction breaks its original admission/guard ownership
 cycle without native allocation. Untracked legacy qualification remains unchanged.
 
+Health polling consumes the pending signal with an acquire/release exchange,
+not a release-only store. This acquires a coalesced publisher's earlier sticky
+state update; publication after the exchange instead reserves the next wake.
+Both fixed linearizations and bounded concurrent races are tested, with the
+acquire-consuming operation independently pinned by the mutation gate.
+
 `construct_document` freezes the exact HTTP(S) source in the original move-only
 construction request. Parsing a URL alone is not admission. The trusted caller
 must already own Work/profile/source authority; no model-facing operation mints

@@ -276,6 +276,29 @@ fn tracked_rejected_construct_breaks_original_reporter_admission_cycle_without_n
 }
 
 #[test]
+fn resource_health_race_observes_publication_or_retains_a_successor_wake() {
+    use zephium_agentic::WorkBrowserResourceHealthState as H;
+    // Native test threads only: the functional core retains no thread/runtime
+    // authority. No join/barrier precedes the consumer snapshot in these races.
+    // The mutation gate additionally pins the acquire RMW instead of treating
+    // this machine's ordering as exhaustive weak-memory model evidence.
+    for _ in 0..128 {
+        let (_, request) = source();
+        let (mut request, mut health) = request.track_resource_health().unwrap();
+        let reporter = request.take_resource_health_reporter().unwrap();
+        let wake = Arc::new(HealthWake::default());
+        health.register(wake.clone().into());
+        assert!(reporter.install(request.resource()));
+        std::thread::scope(|scope| {
+            let publication = scope.spawn(|| reporter.invalidate());
+            let observed = health.poll();
+            publication.join().unwrap();
+            assert!(observed == H::Uncertain || wake.0.load(Ordering::Acquire) == 2);
+        });
+    }
+}
+
+#[test]
 fn acquisition_and_reads_recheck_original_expiry_and_shared_shutdown_seal() {
     let (mut rows, admission, guard) = setup();
     let request = rows

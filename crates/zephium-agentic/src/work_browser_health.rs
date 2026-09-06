@@ -95,7 +95,10 @@ impl WorkBrowserResourceHealth {
 
     /// Consumes the coalesced wake only, never the sticky resource-health fact.
     pub fn poll(&mut self) -> WorkBrowserResourceHealthState {
-        self.state.pending_wake.store(false, Ordering::Release);
+        // Consume the publisher's release on this signal atomic. A plain store
+        // could clear a coalesced publication without acquiring its state: if
+        // publication wins, snapshot sees it; if this exchange wins, it wakes.
+        self.state.pending_wake.swap(false, Ordering::AcqRel);
         self.snapshot()
     }
 
