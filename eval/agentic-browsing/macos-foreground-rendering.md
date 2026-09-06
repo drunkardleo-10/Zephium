@@ -499,3 +499,58 @@ zero-delay timer completed; RAF did not. This reinforces the earlier hidden-view
 boundary: foreground application ownership alone does not establish rendering
 opportunity for an unattached page. Neither throwaway comparison uses the Work
 adapter or qualifies Work semantic rendering, isolation or teardown.
+
+## Immutable integral-point placement and backing attestation
+
+The placement correction addresses the observed normalization rather than
+weakening acceptance. It chooses a whole-point origin nearest the previous
+center (rounding down), clamped to the exact integral-origin range contained in
+the visible screen rectangle. Positive, negative and fractional screen origins
+are handled explicitly. If that range is empty, preparation refuses; it never
+shrinks, scales or clips the required 1280-by-800-point viewport. Nonfinite bounds,
+overflow and coordinates at which the fixed extent cannot be represented exactly
+also refuse.
+
+Before allocating a surface, the exact main window's retained NSScreen must
+attest that the planned rectangle is unchanged by its public
+[`backingAlignedRect:options:`](https://developer.apple.com/documentation/appkit/nsscreen/backingalignedrect(_:options:)?language=objc)
+mapping from global screen points to pixel-aligned bounds. The backing scale must
+be positive and finite, with finite scaled extents. This uses the screen's own
+mapping rather than assuming an integer scale or manually translating between
+screen and window coordinates. A changed alignment result is a fixed
+Prepare/BackingAlignedFrame refusal, not a replacement geometry.
+
+The planned rectangle remains immutable after preparation. Native geometry
+must match it exactly both before presentation and on every existing poll.
+The previous assignment adopting `surface.frame()` after ordering is removed:
+AppKit normalization can no longer silently redefine the admitted plan. The
+original strict size, containment, visible hierarchy, occlusion, input/focus,
+deadline, semantic and retirement checks remain in force. No scheduling policy,
+script, viewport ceiling, model operation, surface count or provider input changes.
+All code remains within the existing release-excluded native qualification seam.
+
+Deterministic coverage includes the exact supplied 803-point screen/801-point
+expanded-frame pair, positive/negative/fractional screen origins, a screen with
+no contained integral placement, nonfinite/overflow/unrepresentable extents,
+scale validation, and changed native alignment results. Scale samples are unit
+contract inputs, not claims of native qualification on multiple displays.
+Architecture mutations reject fractional centering, clipping, size relaxation,
+invalid scale admission, skipped backing attestation and adoption of a changed
+native frame. Gates pass: 28 targeted foreground tests, all 506 engine library
+tests, six foreground architecture adversaries, seven isolated desktop
+admission/configuration tests, strict all-target engine and desktop Clippy,
+both architecture commands and hostile semantic JavaScript smoke, ordinary
+non-probe engine check, workspace fmt and diff checks. The default desktop graph
+still excludes diagnostic/probe features and Work provider/controller/runtime/
+composition dependencies.
+
+The isolated debug application was rebuilt without signing or launch using the
+same pinned Node 24.18.0/pnpm/Tauri flow. Its bundle identity remains
+`app.zephium.work-rendering-probe`; executable SHA-256 is
+`8fca3ceb6d8de8cccf11caf3aa85813ef85828c2f2b4c96bc038739fdbfa04a4`.
+The next reviewer-controlled actual-lifecycle witness must use this exact
+bundle, a fresh isolated diagnostic data root and user-established foreground.
+No GUI launch, provider call or public-site attempt was performed for this
+correction checkpoint. The paired AppKit evidence supports the placement fix
+on the observed display; actual Work RAF/semantic rendering remains unqualified
+until the full native witness and its unchanged cleanup requirements pass.

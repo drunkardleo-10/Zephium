@@ -11,7 +11,7 @@ use objc2_app_kit::{
     NSApplication, NSBackingStoreType, NSResponder, NSView, NSWindow, NSWindowOcclusionState,
     NSWindowStyleMask,
 };
-use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
+use objc2_foundation::{MainThreadMarker, NSAlignmentOptions, NSPoint, NSRect, NSSize};
 use objc2_web_kit::{WKWebView, WKWebsiteDataStore};
 use zephium_agentic::{ContextJoin, ForegroundRenderingState};
 
@@ -38,6 +38,7 @@ pub enum ForegroundFailurePredicate {
     HumanResponderNotPage,
     Screen,
     ScreenViewportFit,
+    BackingAlignedFrame,
     Deadline,
     ContextJoin,
     PreparedState,
@@ -232,12 +233,37 @@ fn surface_frame(screen: NSRect) -> Option<NSRect> {
     }
     let frame = NSRect::new(
         NSPoint::new(
-            screen.origin.x + (screen.size.width - 1280.0) / 2.0,
-            screen.origin.y + (screen.size.height - 800.0) / 2.0,
+            integral_origin(screen.origin.x, screen.size.width, 1280.0)?,
+            integral_origin(screen.origin.y, screen.size.height, 800.0)?,
         ),
         viewport().size,
     );
     admitted_frame(frame, screen).then_some(frame)
+}
+
+// A fractional-point origin can make AppKit expand a borderless window when
+// normalizing its edges. Choose an integral placement without changing size or
+// clipping a fractional/negative visible-frame boundary. No fitting placement
+// means refusal, not rounding the viewport or moving it outside that boundary.
+fn integral_origin(origin: f64, available: f64, required: f64) -> Option<f64> {
+    let first = origin.ceil();
+    let last = (origin + (available - required)).floor();
+    let center = (origin + (available - required) / 2.0).floor();
+    if ![first, last, center].into_iter().all(f64::is_finite) || first > last {
+        return None;
+    }
+    Some(center.clamp(first, last))
+}
+
+// NSScreen maps global screen points to backing pixels. Never accept its
+// normalized rectangle as a replacement: it must attest the immutable plan.
+fn backing_frame_admitted(frame: NSRect, screen: NSRect, scale: f64, aligned: NSRect) -> bool {
+    admitted_frame(frame, screen)
+        && scale.is_finite()
+        && scale > 0.0
+        && (frame.size.width * scale).is_finite()
+        && (frame.size.height * scale).is_finite()
+        && aligned == frame
 }
 
 fn admitted_frame(frame: NSRect, screen: NSRect) -> bool {
@@ -257,6 +283,8 @@ fn admitted_frame(frame: NSRect, screen: NSRect) -> bool {
     ];
     coordinates.into_iter().all(f64::is_finite)
         && frame.size == viewport().size
+        && (frame.origin.x + frame.size.width) - frame.origin.x == frame.size.width
+        && (frame.origin.y + frame.size.height) - frame.origin.y == frame.size.height
         && screen.size.width >= 1280.0
         && screen.size.height >= 800.0
         && frame.origin.x >= screen.origin.x
@@ -334,12 +362,21 @@ impl ForegroundRenderingLease {
         ) {
             return Err(failed(context, Prepare, predicate));
         }
-        let screen = main
+        let native_screen = main
             .screen()
-            .ok_or_else(|| failed(context, Prepare, P::Screen))?
-            .visibleFrame();
+            .ok_or_else(|| failed(context, Prepare, P::Screen))?;
+        let screen = native_screen.visibleFrame();
         let frame =
             surface_frame(screen).ok_or_else(|| failed(context, Prepare, P::ScreenViewportFit))?;
+        if !backing_frame_admitted(
+            frame,
+            screen,
+            native_screen.backingScaleFactor(),
+            native_screen
+                .backingAlignedRect_options(frame, NSAlignmentOptions::AlignAllEdgesNearest),
+        ) {
+            return Err(failed(context, Prepare, P::BackingAlignedFrame));
+        }
         if Instant::now() >= deadline {
             return Err(ForegroundRenderingState::Expired);
         }
@@ -409,6 +446,7 @@ impl ForegroundRenderingLease {
         // hidden native owner, so every refusal can prove exact retirement.
         if let Some(predicate) = first_failed_predicate!(
             P::HiddenSurface => !surface.isVisible(),
+            P::StableSurfaceFrame => surface.frame() == self.frame,
             P::NoKeyCapability => !surface.canBecomeKeyWindow(),
             P::NoMainCapability => !surface.canBecomeMainWindow(),
             P::SurfaceAlpha => surface.alphaValue() == 1.0,
@@ -428,7 +466,6 @@ impl ForegroundRenderingLease {
         self.page.setFrame(viewport());
         self.page.setHidden(false);
         surface.orderFrontRegardless();
-        self.frame = surface.frame();
         self.poll(context)
     }
 
@@ -909,5 +946,110 @@ mod tests {
             assert!(!admitted_frame(frame, screen));
         }
         assert!(surface_frame(NSRect::new(screen.origin, NSSize::new(1279.0, 800.0))).is_none());
+    }
+
+    #[test]
+    fn foreground_geometry_avoids_the_observed_half_point_expansion() {
+        let screen = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1280.0, 803.0));
+        let planned = surface_frame(screen).unwrap();
+        assert_eq!(
+            planned,
+            NSRect::new(NSPoint::new(0.0, 1.0), viewport().size)
+        );
+        // Exact supplied AppKit result for the old half-point placement. The
+        // viewport contract must continue refusing this enlarged rectangle.
+        let enlarged = NSRect::new(NSPoint::new(0.0, 1.0), NSSize::new(1280.0, 801.0));
+        assert!(!admitted_frame(enlarged, screen));
+        assert!(!backing_frame_admitted(planned, screen, 2.0, enlarged));
+    }
+
+    #[test]
+    fn foreground_geometry_integral_placement_respects_all_screen_origins() {
+        for (origin, size, expected) in [
+            ((1440.0, 23.0), (1440.0, 901.0), (1520.0, 73.0)),
+            ((-1440.0, -901.0), (1440.0, 901.0), (-1360.0, -851.0)),
+            ((-0.5, -0.5), (1281.0, 801.0), (0.0, 0.0)),
+            ((0.25, 0.25), (1281.0, 801.0), (1.0, 1.0)),
+            ((-1281.75, -801.75), (1281.0, 801.0), (-1281.0, -801.0)),
+            ((0.0, 0.0), (1280.0, 800.0), (0.0, 0.0)),
+        ] {
+            let screen = NSRect::new(
+                NSPoint::new(origin.0, origin.1),
+                NSSize::new(size.0, size.1),
+            );
+            let planned = surface_frame(screen).unwrap();
+            assert_eq!(planned.origin, NSPoint::new(expected.0, expected.1));
+            assert_eq!(planned.size, viewport().size);
+            assert!(admitted_frame(planned, screen));
+        }
+        // There is room for the nominal size but no integral-point origin.
+        // Flooring outside the screen or resizing to fit is not permitted.
+        for origin in [0.25, -0.25] {
+            assert!(
+                surface_frame(NSRect::new(NSPoint::new(origin, origin), viewport().size,))
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn foreground_geometry_refuses_nonfinite_overflow_and_unrepresentable_edges() {
+        for invalid in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MAX,
+            -f64::MAX,
+        ] {
+            for screen in [
+                NSRect::new(NSPoint::new(invalid, 0.0), viewport().size),
+                NSRect::new(NSPoint::new(0.0, invalid), viewport().size),
+                NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(invalid, 800.0)),
+                NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1280.0, invalid)),
+            ] {
+                assert!(surface_frame(screen).is_none());
+            }
+        }
+        assert!(surface_frame(NSRect::new(
+            NSPoint::new(f64::MAX, 0.0),
+            NSSize::new(f64::MAX, 800.0),
+        ))
+        .is_none());
+    }
+
+    #[test]
+    fn foreground_backing_alignment_attests_but_never_replaces_the_plan() {
+        let screen = NSRect::new(NSPoint::new(-1440.0, 20.0), NSSize::new(1440.0, 900.0));
+        let frame = surface_frame(screen).unwrap();
+        // These are deterministic samples of the alignment contract, not a
+        // claim that an AppKit display at each scale was exercised natively.
+        for scale in [1.0, 2.0, 1.25, 1.5, 3.0] {
+            assert!(backing_frame_admitted(frame, screen, scale, frame));
+            for changed in [
+                NSRect::new(
+                    NSPoint::new(frame.origin.x + 0.5, frame.origin.y),
+                    frame.size,
+                ),
+                NSRect::new(
+                    NSPoint::new(frame.origin.x, frame.origin.y - 0.5),
+                    frame.size,
+                ),
+                NSRect::new(frame.origin, NSSize::new(1280.0, 801.0)),
+                NSRect::new(frame.origin, NSSize::new(1279.0, 800.0)),
+                NSRect::new(NSPoint::new(f64::NAN, frame.origin.y), frame.size),
+            ] {
+                assert!(!backing_frame_admitted(frame, screen, scale, changed));
+            }
+        }
+        for scale in [
+            0.0,
+            -1.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MAX,
+        ] {
+            assert!(!backing_frame_admitted(frame, screen, scale, frame));
+        }
     }
 }

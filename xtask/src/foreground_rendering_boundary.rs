@@ -195,6 +195,7 @@ fn validate_document_readiness(source: &str) -> Result<(), String> {
 }
 
 fn validate(native: &str, host: &str, port: &str) -> Result<(), String> {
+    validate_geometry(native)?;
     let native = compact(native);
     let host = compact(host);
     let port = compact(port);
@@ -307,6 +308,45 @@ fn validate(native: &str, host: &str, port: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_geometry(native: &str) -> Result<(), String> {
+    let native = compact(native.split("#[cfg(test)]").next().unwrap_or(native));
+    for required in [
+        "integral_origin(screen.origin.x,screen.size.width,1280.0)?",
+        "integral_origin(screen.origin.y,screen.size.height,800.0)?",
+        "letfirst=origin.ceil()",
+        "letlast=(origin+(available-required)).floor()",
+        "letcenter=(origin+(available-required)/2.0).floor()",
+        "Some(center.clamp(first,last))",
+        "frame.size==viewport().size",
+        "frame.origin.x>=screen.origin.x",
+        "frame.origin.y>=screen.origin.y",
+        "frame.origin.x+frame.size.width<=screen.origin.x+screen.size.width",
+        "frame.origin.y+frame.size.height<=screen.origin.y+screen.size.height",
+        "scale.is_finite()&&scale>0.0",
+        "&&aligned==frame",
+        "if!backing_frame_admitted(frame,screen,native_screen.backingScaleFactor(),native_screen.backingAlignedRect_options(frame,NSAlignmentOptions::AlignAllEdgesNearest),)",
+        "P::OnScreenFrame=>admitted_frame(self.frame,self.screen)",
+        "P::StableSurfaceFrame=>surface.frame()==self.frame",
+    ] {
+        require(&native, required)?;
+    }
+    if native.contains("self.frame=") {
+        return Err("foreground geometry plan must remain immutable after preparation".into());
+    }
+    if native
+        .matches("P::StableSurfaceFrame=>surface.frame()==self.frame")
+        .count()
+        != 2
+    {
+        return Err("foreground frame must be exact before and after presentation".into());
+    }
+    require(&native, "NSWindow::initWithContentRect_")?;
+    if native.find("if!backing_frame_admitted(") >= native.find("NSWindow::initWithContentRect_") {
+        return Err("foreground backing attestation must precede surface allocation".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,6 +421,35 @@ mod tests {
         include_str!("../../crates/zephium-engine/src/host/agent_foreground_probe.rs");
     const PORT: &str =
         include_str!("../../crates/zephium-engine/src/agent_foreground_probe_port.rs");
+
+    #[test]
+    fn foreground_geometry_rejects_fractional_placement_resize_and_native_plan_substitution() {
+        validate_geometry(NATIVE).unwrap();
+        for changed in [
+            NATIVE.replace("origin.ceil()", "origin.floor()"),
+            NATIVE.replace(
+                "(origin + (available - required) / 2.0).floor()",
+                "origin + (available - required) / 2.0",
+            ),
+            NATIVE.replace("center.clamp(first, last)", "center"),
+            NATIVE.replace("frame.size == viewport().size", "true"),
+            NATIVE.replace("frame.origin.x >= screen.origin.x", "true"),
+            NATIVE.replace("scale.is_finite()", "true"),
+            NATIVE.replace("aligned == frame", "true"),
+            NATIVE.replace("native_screen.backingScaleFactor()", "1.0"),
+            NATIVE.replace("NSAlignmentOptions::AlignAllEdgesNearest", "options"),
+            NATIVE.replace(
+                "P::StableSurfaceFrame => surface.frame() == self.frame",
+                "P::StableSurfaceFrame => true",
+            ),
+            NATIVE.replace(
+                "surface.orderFrontRegardless();",
+                "surface.orderFrontRegardless(); self.frame = surface.frame();",
+            ),
+        ] {
+            assert!(validate_geometry(&changed).is_err());
+        }
+    }
 
     #[test]
     fn foreground_document_wait_keeps_exact_identity_original_budget_and_cleanup_owner() {
