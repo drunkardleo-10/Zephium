@@ -400,6 +400,19 @@ pub(super) struct WorkIngress {
     rows: BTreeMap<ContextId, Arc<WorkResourceGuard>>,
 }
 impl AgentPortAdmission {
+    #[cfg(feature = "native-agentic-work-resource-probe")]
+    pub(super) fn witness_resource(
+        &self,
+        resource: &WorkBrowserResourceJoin,
+    ) -> Option<Arc<WorkResourceGuard>> {
+        self.work
+            .lock()
+            .ok()?
+            .rows
+            .get(&resource.identity().context())
+            .filter(|guard| guard.resource() == resource)
+            .cloned()
+    }
     pub(super) fn work_is_absent(&self) -> bool {
         self.work
             .lock()

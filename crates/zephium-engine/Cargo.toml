@@ -66,6 +66,8 @@ native-agentic-semantic-probe = [
 ]
 # Actual desktop-lifecycle evidence only; never a product rendering capability.
 native-agentic-foreground-probe = ["native-agentic-semantic-probe"]
+# Two execution leases over one page in that same actual-app qualification shell.
+native-agentic-work-resource-probe = ["native-agentic-foreground-probe"]
 # Compiles the production, zero-idle agent-browser native port. The feature is
 # intentionally separate from the release-excluded probe vocabulary.
 agentic-browser = ["dep:zephium-agentic", "dep:zeroize"]

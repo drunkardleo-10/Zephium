@@ -1154,6 +1154,13 @@ impl EngineHost {
             .values()
             .filter(|binding| binding.foreground_probe_visible())
             .count();
+        #[cfg(all(target_os = "macos", feature = "native-agentic-work-resource-probe"))]
+        let visible_surfaces = visible_surfaces
+            + self
+                .work_resources
+                .values()
+                .filter(|resource| resource.witness_visible())
+                .count();
         #[cfg(not(all(target_os = "macos", feature = "native-agentic-foreground-probe")))]
         let visible_surfaces = 0usize;
         let queued_request_tasks = admission_counts

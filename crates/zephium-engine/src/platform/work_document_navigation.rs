@@ -44,6 +44,13 @@ impl Default for WorkDocumentNavigation {
 }
 
 impl WorkDocumentNavigation {
+    #[cfg(feature = "native-agentic-work-resource-probe")]
+    pub(crate) fn witness_document(&self) -> Option<wry::NavigationId> {
+        let state = self.0.lock().ok()?;
+        (state.phase == Phase::Ready)
+            .then_some(state.native_id)
+            .flatten()
+    }
     /// Called once after selected-profile policy and native owner publication.
     pub(crate) fn arm(&self, target: ContextNavigationTarget) -> Result<(), ()> {
         let mut state = self.0.lock().map_err(|_| ())?;

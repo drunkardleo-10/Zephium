@@ -4194,6 +4194,8 @@ pub fn run() {
                     },
                 ),
                 move |event| {
+                    #[cfg(all(feature = "macos-work-resource-probe", target_os = "macos"))]
+                    if zephium_engine::work_resource_policy_event(&event) { return; }
                     #[cfg(all(feature = "macos-work-rendering-probe", target_os = "macos"))]
                     if zephium_engine::foreground_rendering_policy_event(&event) { return; }
                     if let zephium_core::ports::engine::EngineEvent::ShortcutPressed {

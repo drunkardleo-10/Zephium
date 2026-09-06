@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+# Same isolated actual-application bundle, selected only at compile time.
+macos-work-resource-probe = [
+    "macos-work-rendering-probe",
+    "zephium-engine/native-agentic-work-resource-probe",
+]
 # Provider-free actual-application rendering witness; never optimized or ordinary Browse.
 macos-work-rendering-probe = [
     "zephium-engine/native-agentic-foreground-probe",

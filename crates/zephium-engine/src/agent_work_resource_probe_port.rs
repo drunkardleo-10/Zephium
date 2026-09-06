@@ -1,0 +1,281 @@
+//! Debug-only fixed resource rendering/evidence transport. Shares original
+//! native admission and task accounting; not an AgentBrowserPort capability.
+
+use super::*;
+use zephium_agentic::{ForegroundRenderingState, WorkBrowserResourceJoin};
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum Operation {
+    Acquire,
+    Poll,
+    Inspect,
+    Retire,
+}
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct Request {
+    pub(crate) resource: WorkBrowserResourceJoin,
+    pub(crate) operation: Operation,
+}
+
+/// In-memory comparison only: deliberately no Debug/Serialize or raw getters.
+pub(crate) struct RetentionStamp {
+    resource: WorkBrowserResourceJoin,
+    view: usize,
+    world: usize,
+    document: wry::NavigationId,
+    completed: u16,
+    invocation: u64,
+}
+impl RetentionStamp {
+    pub(crate) fn new(
+        resource: WorkBrowserResourceJoin,
+        identity: (usize, usize, u16),
+        document: wry::NavigationId,
+        invocation: u64,
+    ) -> Self {
+        Self {
+            resource,
+            view: identity.0,
+            world: identity.1,
+            completed: identity.2,
+            document,
+            invocation,
+        }
+    }
+    pub(crate) fn retained_after_one_read(&self, next: &Self) -> bool {
+        self.resource == next.resource
+            && self.view != 0
+            && self.world != 0
+            && self.view == next.view
+            && self.world == next.world
+            && self.document == next.document
+            && self.completed.checked_add(1) == Some(next.completed)
+            && next.invocation > self.invocation
+    }
+    pub(crate) fn completed(&self) -> u16 {
+        self.completed
+    }
+}
+pub(crate) struct Evidence {
+    pub(crate) state: ForegroundRenderingState,
+    pub(crate) stamp: Option<RetentionStamp>,
+}
+type Completion = Box<dyn FnOnce(Request, Evidence) + Send>;
+
+pub(crate) struct ResourceWitnessPort {
+    dispatch: MainThreadDispatch,
+    admission: Arc<AgentPortAdmission>,
+}
+impl AgentContextPortSlot {
+    pub(crate) fn resource_witness_port(&self) -> Option<ResourceWitnessPort> {
+        let state = self.state.lock().ok()?;
+        if !state.taken || state.sealed || state.factory.is_some() {
+            return None;
+        }
+        Some(ResourceWitnessPort {
+            dispatch: self.dispatch.clone(),
+            admission: state.admission.clone()?,
+        })
+    }
+}
+pub(crate) struct Task {
+    request: Request,
+    guard: Arc<WorkResourceGuard>,
+    completion: Option<Completion>,
+    permit: AgentTaskPermit,
+}
+impl Task {
+    pub(crate) fn request(&self) -> &Request {
+        &self.request
+    }
+    pub(crate) fn guard(&self) -> Arc<WorkResourceGuard> {
+        self.guard.clone()
+    }
+    pub(crate) fn complete(
+        mut self,
+        state: ForegroundRenderingState,
+        stamp: Option<RetentionStamp>,
+    ) {
+        self.deliver(Evidence { state, stamp });
+    }
+    fn deliver(&mut self, evidence: Evidence) {
+        if let Some(completion) = self.completion.take() {
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                completion(self.request.clone(), evidence)
+            }))
+            .is_err()
+            {
+                self.guard.fail();
+            }
+        }
+        self.permit.release();
+    }
+}
+impl Drop for Task {
+    fn drop(&mut self) {
+        if self.completion.is_some() {
+            self.deliver(Evidence {
+                state: ForegroundRenderingState::Failed,
+                stamp: None,
+            });
+        }
+    }
+}
+impl ResourceWitnessPort {
+    pub(crate) fn schedule(&self, request: Request, completion: Completion) -> bool {
+        let Some(guard) = self.admission.witness_resource(&request.resource) else {
+            return false;
+        };
+        let Ok(permit) = self.admission.reserve() else {
+            return false;
+        };
+        let slot = Arc::new(Mutex::new(Some(Task {
+            request,
+            guard,
+            completion: Some(completion),
+            permit,
+        })));
+        let queued = slot.clone();
+        let executed = Arc::new(AtomicBool::new(false));
+        let ran = executed.clone();
+        let admitted = contain_agent_port_panic(&self.admission, || {
+            (self.dispatch)(Box::new(move || {
+                ran.store(true, Ordering::Release);
+                let task = queued
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                let Some(task) = task else {
+                    return;
+                };
+                let owned = Arc::new(Mutex::new(Some(task)));
+                let for_host = owned.clone();
+                if !crate::host::try_with_agent_context(move |host| {
+                    if let Some(task) = for_host
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take()
+                    {
+                        host.handle_resource_witness(task);
+                    }
+                }) {
+                    if let Some(task) = owned
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take()
+                    {
+                        task.complete(ForegroundRenderingState::Failed, None);
+                    }
+                }
+            }))
+        })
+        .unwrap_or(false);
+        if admitted || executed.load(Ordering::Acquire) {
+            return true;
+        }
+        if let Some(mut task) = slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            task.completion = None;
+        }
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zephium_agentic::*;
+    fn source() -> (WorkBrowserResources, WorkBrowserResourceRequest) {
+        let mut rows =
+            WorkBrowserResources::new(WorkId::generate(), AgentWorkProfileId::generate());
+        let request = rows
+            .construct_document(
+                WorkBrowserResourceId::generate(),
+                ContextId::generate(),
+                ContextProfileStorageClass::Ephemeral,
+                ContextNavigationTarget::parse("http://127.0.0.1:12345/semantic-rendering-v1.html")
+                    .unwrap(),
+                AgentPolicyInstant::from_millis(0),
+            )
+            .unwrap();
+        (rows, request)
+    }
+    #[test]
+    fn retention_stamp_rejects_resource_view_document_world_counter_and_invocation_substitution() {
+        let (_, request) = source();
+        let join = request.resource().clone();
+        let stamp =
+            || RetentionStamp::new(join.clone(), (10, 20, 1), wry::NavigationId::from_raw(7), 1);
+        let next =
+            || RetentionStamp::new(join.clone(), (10, 20, 2), wry::NavigationId::from_raw(7), 3);
+        assert!(stamp().retained_after_one_read(&next()));
+        for change in 0..8 {
+            let mut wrong = next();
+            match change {
+                0 => wrong.resource = source().1.resource().clone(),
+                1 => wrong.view = 11,
+                2 => wrong.world = 21,
+                3 => wrong.document = wry::NavigationId::from_raw(8),
+                4 => wrong.completed = 1,
+                5 => wrong.completed = 3,
+                6 => wrong.completed = 0,
+                _ => wrong.invocation = 1,
+            }
+            assert!(!stamp().retained_after_one_read(&wrong));
+        }
+        let mut invalid = stamp();
+        invalid.world = 0;
+        assert!(!invalid.retained_after_one_read(&next()));
+        let mut invalid = stamp();
+        invalid.completed = u16::MAX;
+        assert!(!invalid.retained_after_one_read(&next()));
+    }
+    #[test]
+    fn diagnostic_terminal_holds_original_global_permit_through_callback_and_drops_once() {
+        let (mut rows, construction) = source();
+        let resource = construction.resource().clone();
+        let slot = AgentContextPortSlot::new(Arc::new(|_| true), Arc::new(|_| {}));
+        assert!(slot.resource_witness_port().is_none());
+        let port = slot.take(Arc::new(|_| {})).unwrap();
+        assert!(matches!(
+            port.work_resource_lifecycle(
+                construction,
+                Box::new(move |completion| {
+                    let _ = rows
+                        .settle_at(completion, AgentPolicyInstant::from_millis(1))
+                        .unwrap();
+                })
+            ),
+            WorkBrowserResourceDispatch::Scheduled
+        ));
+        let admission = slot.state.lock().unwrap().admission.clone().unwrap();
+        let guard = admission.witness_resource(&resource).unwrap();
+        let outputs = Arc::new(Mutex::new(Vec::new()));
+        let delivered = outputs.clone();
+        let callback_admission = admission.clone();
+        let expected = resource.clone();
+        let task = Task {
+            request: Request {
+                resource,
+                operation: Operation::Inspect,
+            },
+            guard,
+            permit: admission.reserve().unwrap(),
+            completion: Some(Box::new(move |request, evidence| {
+                assert_eq!(request.resource, expected);
+                assert_eq!(callback_admission.pending(), Some(1));
+                assert!(!callback_admission.work_is_absent());
+                assert!(evidence.stamp.is_none());
+                delivered.lock().unwrap().push(evidence.state);
+            })),
+        };
+        drop(task);
+        assert_eq!(*outputs.lock().unwrap(), [ForegroundRenderingState::Failed]);
+        assert_eq!(admission.pending(), Some(0));
+        slot.seal();
+        assert!(slot.resource_witness_port().is_none());
+    }
+}

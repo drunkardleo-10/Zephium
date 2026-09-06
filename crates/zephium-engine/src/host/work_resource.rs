@@ -26,6 +26,10 @@ const CONSTRUCTION_BUDGET: Duration = Duration::from_secs(30);
 const READ_BUDGET: Duration = Duration::from_secs(15);
 const DRAIN_BUDGET: Duration = Duration::from_secs(5);
 
+#[cfg(feature = "native-agentic-work-resource-probe")]
+#[path = "work_resource_witness.rs"]
+mod witness;
+
 pub(super) struct WorkNativeResource {
     guard: Arc<WorkResourceGuard>,
     construction: Option<WorkLifecycleTask>,
@@ -44,6 +48,10 @@ pub(super) struct WorkNativeResource {
     content_policy: Option<crate::platform::imp::ContentPolicyRegistration>,
     view: Option<crate::platform::imp::AgentOwnedView>,
     native_resource: Option<NativeResourceLease>,
+    #[cfg(feature = "native-agentic-work-resource-probe")]
+    witness: Option<witness::RenderingHolder>,
+    #[cfg(feature = "native-agentic-work-resource-probe")]
+    witness_attempted: bool,
 }
 impl WorkNativeResource {
     fn unconstructed(guard: Arc<WorkResourceGuard>, native_resource: NativeResourceLease) -> Self {
@@ -62,6 +70,10 @@ impl WorkNativeResource {
             content_policy: None,
             view: None,
             native_resource: Some(native_resource),
+            #[cfg(feature = "native-agentic-work-resource-probe")]
+            witness: None,
+            #[cfg(feature = "native-agentic-work-resource-probe")]
+            witness_attempted: false,
         }
     }
     pub(super) fn guard(&self) -> Arc<WorkResourceGuard> {
@@ -123,6 +135,12 @@ impl WorkNativeResource {
     }
     fn retire_page(&mut self) -> bool {
         self.watchdog = None;
+        #[cfg(feature = "native-agentic-work-resource-probe")]
+        if !self.retire_witness() {
+            self.retirement_clean = false;
+            self.guard.fail();
+            return false;
+        }
         let Some(view) = self.view.as_mut() else {
             return self.retirement_clean;
         };
@@ -432,6 +450,10 @@ impl EngineHost {
             content_policy: None,
             view: None,
             native_resource: Some(native_resource),
+            #[cfg(feature = "native-agentic-work-resource-probe")]
+            witness: None,
+            #[cfg(feature = "native-agentic-work-resource-probe")]
+            witness_attempted: false,
         };
         let view = crate::platform::imp::build_owned_work_view(
             &self.parent,
@@ -667,6 +689,11 @@ impl EngineHost {
             task.refuse(SemanticRuntimePortFailure::Stale);
             return;
         }
+        #[cfg(feature = "native-agentic-work-resource-probe")]
+        if !resource.admit_witness_read() {
+            task.refuse(SemanticRuntimePortFailure::Stale);
+            return;
+        }
         let Some(invocation) = task.take_invocation() else {
             guard.fail();
             return;
@@ -766,6 +793,8 @@ impl EngineHost {
         let usable = work_browser_monotonic_now().is_some_and(|now| guard.admits(&lease, now))
             && resource.ready()
             && !self.erasure_tombstones.contains(&resource.profile());
+        #[cfg(feature = "native-agentic-work-resource-probe")]
+        let usable = usable && resource.witness_ready();
         task.complete(if usable {
             outcome
         } else {

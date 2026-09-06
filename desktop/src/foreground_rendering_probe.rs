@@ -9,10 +9,29 @@ use std::sync::{
 };
 use std::time::Instant;
 use tauri::Manager;
+#[cfg(not(feature = "macos-work-resource-probe"))]
+use zephium_engine as witness;
 use zephium_engine::{
     ForegroundAdmissionWake, ForegroundRenderingAdmission, ForegroundRenderingWitnessReport,
     WebviewEngine,
 };
+#[cfg(feature = "macos-work-resource-probe")]
+mod witness {
+    pub use zephium_engine::{
+        cancel_work_resource_witness as cancel_foreground_rendering_witness,
+        start_work_resource_witness as start_foreground_rendering_witness,
+        work_resource_native_drain as foreground_rendering_native_drain,
+        work_resource_native_failures as foreground_rendering_native_failures,
+    };
+}
+
+fn qualified_outcome(outcome: &str) -> bool {
+    if cfg!(feature = "macos-work-resource-probe") {
+        outcome == "ResourceRetainedAcrossLeases"
+    } else {
+        outcome == "AnimationFrameObserved"
+    }
+}
 
 #[path = "../foreground_probe_admission.rs"]
 mod admission;
@@ -80,7 +99,7 @@ pub(super) fn on_run_event(app: &tauri::AppHandle, event: &tauri::RunEvent) -> b
             // Let the normal event loop keep servicing the exact native close.
             // The completion requests a fresh ordinary coordinator-owned exit.
             api.prevent_exit();
-            if !zephium_engine::cancel_foreground_rendering_witness() {
+            if !witness::cancel_foreground_rendering_witness() {
                 finish_unavailable(app, "cancellation_owner");
             }
             return true;
@@ -100,14 +119,14 @@ pub(super) fn on_run_event(app: &tauri::AppHandle, event: &tauri::RunEvent) -> b
             let shutdown_clean = app
                 .try_state::<super::ShutdownCoordinator>()
                 .is_some_and(|shutdown| shutdown.authorized_exit_code.load(Ordering::Acquire) == 0);
-            let native_drain = zephium_engine::foreground_rendering_native_drain();
+            let native_drain = witness::foreground_rendering_native_drain();
             let report = state
                 .report
                 .lock()
                 .ok()
                 .and_then(|mut report| report.take());
             let qualified = report.as_ref().is_some_and(|report| {
-                report.outcome == "AnimationFrameObserved"
+                qualified_outcome(report.outcome)
                     && report.native_cohort_clean
                     && report.human_ownership_preserved
                     && report.fixture_clean
@@ -203,11 +222,11 @@ fn advance_admission(app: &tauri::AppHandle) {
             };
             state.active.store(true, Ordering::Release);
             let completion_app = app.clone();
-            if let Err(reason) = zephium_engine::start_foreground_rendering_witness(
-                engine,
-                admission,
-                move |report| finish(&completion_app, report),
-            ) {
+            if let Err(reason) =
+                witness::start_foreground_rendering_witness(engine, admission, move |report| {
+                    finish(&completion_app, report)
+                })
+            {
                 finish_unavailable(app, reason);
             }
         }
@@ -314,7 +333,7 @@ fn record_report(
     for (index, sample) in report.samples.iter().enumerate() {
         super::write_diagnostic(format_args!("work-rendering-sample: index={index} elapsed_ms={} nodes={} controls={} animation_frame={}", sample.elapsed_ms, sample.nodes, sample.controls, sample.animation_frame));
     }
-    let evidence = zephium_engine::foreground_rendering_native_failures();
+    let evidence = witness::foreground_rendering_native_failures();
     let (primary, cleanup) = evidence.map_or((None, None), |evidence| {
         (evidence.primary, evidence.cleanup)
     });
@@ -327,13 +346,14 @@ fn record_report(
         && report.fixture_clean
         && (report.human_ownership_preserved || report.outcome == "DeferredForeground")
         && report.cleanup_failure.is_none()
-        && matches!(
-            report.outcome,
-            "DeferredForeground"
-                | "AnimationFrameObserved"
-                | "AnimationFrameNotObservedWithinWindow"
-                | "ControlsIncomplete"
-        );
+        && (qualified_outcome(report.outcome)
+            || matches!(
+                report.outcome,
+                "DeferredForeground"
+                    | "AnimationFrameObserved"
+                    | "AnimationFrameNotObservedWithinWindow"
+                    | "ControlsIncomplete"
+            ));
     if let Ok(mut retained) = state.report.lock() {
         *retained = Some(report);
     }

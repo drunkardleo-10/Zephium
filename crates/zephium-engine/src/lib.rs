@@ -22,6 +22,12 @@ pub use platform::macos::agentic_foreground_driver::{
     ForegroundFailurePredicate, ForegroundNativeFailure, ForegroundNativeFailures,
     ForegroundRenderingAdmission, ForegroundRenderingWitnessReport,
 };
+#[cfg(all(target_os = "macos", feature = "native-agentic-work-resource-probe"))]
+#[doc(hidden)]
+pub use platform::macos::agentic_resource_driver::{
+    cancel_work_resource_witness, start_work_resource_witness, work_resource_native_drain,
+    work_resource_native_failures, work_resource_policy_event,
+};
 
 #[cfg(all(feature = "native-agentic-input-probe", not(debug_assertions)))]
 compile_error!("the native agentic input probe is forbidden in optimized builds");

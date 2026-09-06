@@ -18,6 +18,48 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
 
 const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
     (
+        "crates/zephium-engine/src/agent_work_resource_probe_port.rs",
+        &[
+            "self.resource==next.resource", "self.view==next.view", "self.world==next.world", "self.document==next.document",
+            "self.completed.checked_add(1)==Some(next.completed)", "next.invocation>self.invocation",
+            "self.admission.witness_resource(&request.resource)", "self.admission.reserve()",
+            "completion(self.request.clone(),evidence)", "self.permit.release()",
+            "if!state.taken||state.sealed||state.factory.is_some()",
+        ],
+        &["ContextJoin::", "ContextIdentity::", "#[derive(Serialize", "reqwest::", "evaluateJavaScript"],
+    ),
+    (
+        "crates/zephium-engine/src/host/work_resource_witness.rs",
+        &[
+            "url.host_str()==Some(\"127.0.0.1\")", "url.path()==\"/semantic-rendering-v1.html\"",
+            "url.query().is_none()", "url.fragment().is_none()", "url.username().is_empty()", "url.password().is_none()",
+            "Arc::ptr_eq(&resource.guard,&guard)", "self.witness_attempted=true",
+            "self.retire_witness_state()==State::Retired", "ifstate==State::Retired", "holder.samples>=8", "holder.samples+=1",
+            "view.semantic()?.witness_identity()?", "view.work_navigation()?.witness_document()?",
+            "resource.last_invocation!=0||guard.execution_reserved()",
+            "resource.witness=Some(RenderingHolder", "lease.present_resource(guard.resource())",
+            "letSome(permit)=guard.notification_permit()", "Duration::from_millis(50)",
+            "self.action.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()",
+            "queued.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()",
+        ],
+        &["ContextJoin", "ContextIdentity", "cancel_run(", "evaluateJavaScript", "load_url(", "setActivationPolicy", "activateIgnoringOtherApps", "makeKeyAndOrderFront", "setInactiveSchedulingPolicy"],
+    ),
+    (
+        "crates/zephium-engine/src/platform/macos/agentic_resource_driver.rs",
+        &[
+            "letForegroundRenderingAdmission(human)=admission", "if!human.is_current()",
+            "mpsc::sync_channel(4)", "Duration::from_secs(15)", "Duration::from_secs(5)",
+            "[u64;7]=[0,50,100,200,400,800,1600]", "Vec::with_capacity(8)",
+            "self.rows.construct_document(", "self.rows.observation_dispatch_refused(*request)",
+            "failure:ContextPortFailure::Stale", "old.run()!=lease.run()", "old.resource()==lease.resource()",
+            "prior.retained_after_one_read(&stamp)", "self.ended!=2", "self.port.seal_for_shutdown(audit)",
+            "!rendering_reply_matches(&self.phase,request)", "*index<2&&request==expected&&request.operation==RenderOp::Inspect",
+            "sample_foreground_snapshot(&snapshot,correlation.frame().context(),&origin)",
+            "self.rows.is_quiescent()", "self.human.is_current()", "drop(self)",
+        ],
+        &["ContextIdentity::", "ContextRegistry::", "invoke_semantic(", "ContextNativeRequest::", "evaluateJavaScript", "NSApplication::", "reqwest::", "OPENAI_API_KEY", "std::thread::sleep", "runUntilDate", "activateIgnoringOtherApps", "makeKeyAndOrderFront"],
+    ),
+    (
         "crates/zephium-agentic/src/work_browser_observation.rs",
         &[
             "self.admits_lease(lease,now)?",

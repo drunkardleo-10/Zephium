@@ -115,7 +115,7 @@ fn validate_driver(driver: &str, desktop: &str) -> Result<(), String> {
         }
     }
     for required in [
-        "pubstructForegroundRenderingAdmission(HumanForegroundGuard);",
+        "pubstructForegroundRenderingAdmission(pub(crate)HumanForegroundGuard);",
         "HumanForegroundGuard::capture_exact(expected_main)",
         "admission:ForegroundRenderingAdmission",
         "letForegroundRenderingAdmission(human)=admission;",
@@ -233,8 +233,9 @@ fn validate(native: &str, host: &str, port: &str) -> Result<(), String> {
         "self.state=ForegroundRenderingState::DeferredForeground",
         "exact_foreground_admission(expected_main,&*main,foreground(&app,&main,&responder))",
         "!expected.is_null()&&expected==observed&&facts.admitted()",
-        "ifcontext!=self.context",
-        "(self.context==context).then_some(self.failures)",
+        "ifcontext.into()!=self.context",
+        "(self.context==context.into()).then_some(self.failures)",
+        "enumForegroundOwner{Legacy(ContextJoin),#[cfg(feature=\"native-agentic-work-resource-probe\")]Resource(zephium_agentic::WorkBrowserResourceJoin),}",
         "ifslot.is_none()",
         "iftrace.is_none()",
         "&mutself.failures.cleanup",
@@ -507,9 +508,9 @@ mod tests {
     fn foreground_failures_require_exact_context_sticky_causes_and_unchanged_predicates() {
         validate(NATIVE, HOST, PORT).unwrap();
         for changed in [
-            NATIVE.replace("context != self.context", "false"),
+            NATIVE.replace("context.into() != self.context", "false"),
             NATIVE.replace(
-                "(self.context == context).then_some(self.failures)",
+                "(self.context == context.into()).then_some(self.failures)",
                 "Some(self.failures)",
             ),
             NATIVE.replace("if slot.is_none()", "if true"),
@@ -524,6 +525,7 @@ mod tests {
                 "P::NoKeyCapability => true",
             ),
         ] {
+            assert_ne!(changed, NATIVE, "mutation must alter the current source");
             assert!(validate(&changed, HOST, PORT).is_err());
         }
     }

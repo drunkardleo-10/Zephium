@@ -1255,6 +1255,23 @@ impl AgentSemanticRuntimeController {
         valid.then_some(pending)
     }
 
+    // Private debug evidence only. Addresses never leave the in-memory witness.
+    #[cfg(feature = "native-agentic-work-resource-probe")]
+    pub(crate) fn witness_identity(&self) -> Option<(usize, usize, u16)> {
+        if self.pending_for_audit() != Some(false) {
+            return None;
+        }
+        let state = self.state.try_borrow().ok()?;
+        if state.phase != DocumentPhase::Ready {
+            return None;
+        }
+        Some((
+            state.expected_view?,
+            state.active_world?,
+            state.completed_invocations,
+        ))
+    }
+
     fn retire(&self) -> bool {
         let (actions, clean) = match self.state.try_borrow_mut() {
             Ok(mut state) => (state.retire(), true),

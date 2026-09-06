@@ -245,3 +245,39 @@ reservation, no early Destroyed event, and exact final original-owner zero are
 asserted. They cover overtaking construction, host-retained construction and
 synchronous non-admission; they do not execute a real AppKit page or qualify
 the pending two-lease witness. No GUI or provider run accompanied this fix.
+
+## Actual-application retention witness
+
+The compile-time-only `macos-work-resource-probe` selects the resource driver
+inside the existing isolated debug rendering bundle. The unchanged exact
+foreground admission precedes the loopback fixture and Work allocation. A
+private diagnostic transport shares the original native port's task permits;
+it does not add a presentation method to the production `AgentBrowserPort`.
+The renderer's closed owner key distinguishes a legacy context from an exact
+Work resource incarnation. Its native surface and watchdog are retained by
+that resource and included in native visibility, semantic admission/results,
+destruction and shutdown. No product rendering owner exists without this
+release-excluded feature.
+
+The fixed sequence is construction and rendering, lease A and a bounded
+complete observation, revocation with exact rejection/accounting of an original
+stale A read, lease B and a fresh observation, revocation, rendering retirement,
+resource destruction, original-port seal, and normal application shutdown.
+Both actor runs and execution leases must differ while the resource stays the
+same. Private in-memory stamps compare the native view, actual navigation ID,
+isolated world and document-wide completed-invocation counter. The second stamp
+must show exactly one additional native invocation; the stale refused read
+cannot increase that native counter. Stamps are not serialized, logged or
+offered as model authority. Exact fixture markers and current-document
+completeness are checked under both leases.
+
+The original five-second rendering opportunity, eight semantic-read ceiling,
+15-second driver bound, four-slot mailbox and five-second cleanup bound remain.
+The driver reserves one read for lease B; bounded readiness samples consume the
+remaining seven, not an increased ceiling. Its final outcome can qualify only
+after both exact `LeaseEnded` receipts, stale rejection, native identity/counter
+continuity, resource-core quiescence, original native-cohort zero, unchanged human
+ownership, fixture cleanup, normal application shutdown and exact native weak
+drain. See `eval/agentic-browsing/macos-work-resource-retention.md` for the evidence
+boundary and result. This is a provider-free ownership witness, not product
+presentation, open-objective task, authenticated session or restart durability.

@@ -97,18 +97,41 @@ pub struct ForegroundNativeFailures {
     pub cleanup: Option<ForegroundNativeFailure>,
 }
 
+/// Closed diagnostic owner identity. Presentation belongs to the exact page,
+/// never to a fabricated actor used to correlate the qualification run.
+#[derive(Clone, Eq, PartialEq)]
+enum ForegroundOwner {
+    Legacy(ContextJoin),
+    #[cfg(feature = "native-agentic-work-resource-probe")]
+    Resource(zephium_agentic::WorkBrowserResourceJoin),
+}
+impl From<ContextJoin> for ForegroundOwner {
+    fn from(context: ContextJoin) -> Self {
+        Self::Legacy(context)
+    }
+}
+impl From<&ForegroundOwner> for ForegroundOwner {
+    fn from(owner: &ForegroundOwner) -> Self {
+        owner.clone()
+    }
+}
+
 struct NativeFailureTrace {
-    context: ContextJoin,
+    context: ForegroundOwner,
     failures: ForegroundNativeFailures,
 }
 
 impl NativeFailureTrace {
-    fn evidence(&self, context: ContextJoin) -> Option<ForegroundNativeFailures> {
-        (self.context == context).then_some(self.failures)
+    fn evidence(&self, context: impl Into<ForegroundOwner>) -> Option<ForegroundNativeFailures> {
+        (self.context == context.into()).then_some(self.failures)
     }
 
-    fn record(&mut self, context: ContextJoin, failure: ForegroundNativeFailure) -> bool {
-        if context != self.context {
+    fn record(
+        &mut self,
+        context: impl Into<ForegroundOwner>,
+        failure: ForegroundNativeFailure,
+    ) -> bool {
+        if context.into() != self.context {
             return false;
         }
         let slot = if failure.phase == ForegroundFailurePhase::Cleanup {
@@ -126,6 +149,10 @@ impl NativeFailureTrace {
 thread_local! { static FAILURE_TRACE: std::cell::RefCell<Option<NativeFailureTrace>> = const { std::cell::RefCell::new(None) }; }
 
 pub(crate) fn native_failure_evidence(context: ContextJoin) -> Option<ForegroundNativeFailures> {
+    owner_failure_evidence(&context.into())
+}
+
+fn owner_failure_evidence(context: &ForegroundOwner) -> Option<ForegroundNativeFailures> {
     FAILURE_TRACE.with(|slot| {
         slot.try_borrow()
             .ok()
@@ -133,7 +160,8 @@ pub(crate) fn native_failure_evidence(context: ContextJoin) -> Option<Foreground
     })
 }
 
-fn begin_failure_trace(context: ContextJoin) {
+fn begin_failure_trace(context: impl Into<ForegroundOwner>) {
+    let context = context.into();
     FAILURE_TRACE.with(|slot| {
         if let Ok(mut trace) = slot.try_borrow_mut() {
             if trace.is_none() {
@@ -147,7 +175,7 @@ fn begin_failure_trace(context: ContextJoin) {
 }
 
 fn failed(
-    context: ContextJoin,
+    context: impl Into<ForegroundOwner>,
     phase: ForegroundFailurePhase,
     predicate: ForegroundFailurePredicate,
 ) -> ForegroundRenderingState {
@@ -169,7 +197,7 @@ macro_rules! first_failed_predicate {
 }
 
 struct WeakNativeWitness {
-    context: ContextJoin,
+    context: ForegroundOwner,
     page: Weak<WKWebView>,
     surface: Weak<NSWindow>,
     store: Weak<WKWebsiteDataStore>,
@@ -179,12 +207,16 @@ thread_local! { static WEAK_WITNESS: std::cell::RefCell<Option<WeakNativeWitness
 /// Weak observations own no native resource. The normal application shutdown
 /// must release the cached ephemeral store before the final drain can pass.
 pub(crate) fn native_witness_drained(context: ContextJoin) -> Option<bool> {
+    owner_witness_drained(&context.into())
+}
+
+fn owner_witness_drained(context: &ForegroundOwner) -> Option<bool> {
     MainThreadMarker::new()?;
     WEAK_WITNESS.with(|slot| {
         slot.try_borrow().ok().and_then(|witness| {
             witness
                 .as_ref()
-                .filter(|witness| witness.context == context)
+                .filter(|witness| &witness.context == context)
                 .map(|witness| {
                     witness.page.load().is_none()
                         && witness.surface.load().is_none()
@@ -293,9 +325,9 @@ fn admitted_frame(frame: NSRect, screen: NSRect) -> bool {
         && frame.origin.y + frame.size.height <= screen.origin.y + screen.size.height
 }
 
-/// Retained inside the existing exact AgentOwnedContext, never a parallel view.
+/// Retained inside the exact legacy context or Work resource, never a parallel view.
 pub(crate) struct ForegroundRenderingLease {
-    context: ContextJoin,
+    context: ForegroundOwner,
     app: Retained<NSApplication>,
     main: Retained<NSWindow>,
     responder: Retained<NSResponder>,
@@ -313,6 +345,28 @@ pub(crate) struct ForegroundRenderingLease {
 }
 
 impl ForegroundRenderingLease {
+    #[cfg(feature = "native-agentic-work-resource-probe")]
+    pub(crate) fn prepare_resource(
+        resource: &zephium_agentic::WorkBrowserResourceJoin,
+        view: &wry::WebView,
+        deadline: Instant,
+    ) -> Result<Self, ForegroundRenderingState> {
+        Self::prepare_owner(ForegroundOwner::Resource(resource.clone()), view, deadline)
+    }
+    #[cfg(feature = "native-agentic-work-resource-probe")]
+    pub(crate) fn present_resource(
+        &mut self,
+        resource: &zephium_agentic::WorkBrowserResourceJoin,
+    ) -> ForegroundRenderingState {
+        self.present_owner(&ForegroundOwner::Resource(resource.clone()))
+    }
+    #[cfg(feature = "native-agentic-work-resource-probe")]
+    pub(crate) fn guard_resource(
+        &mut self,
+        resource: &zephium_agentic::WorkBrowserResourceJoin,
+    ) -> ForegroundRenderingState {
+        self.guard_owner(&ForegroundOwner::Resource(resource.clone()))
+    }
     pub(crate) fn begin_attempt(context: ContextJoin) {
         begin_failure_trace(context);
     }
@@ -335,6 +389,15 @@ impl ForegroundRenderingLease {
         view: &wry::WebView,
         deadline: Instant,
     ) -> Result<Self, ForegroundRenderingState> {
+        Self::prepare_owner(context.into(), view, deadline)
+    }
+
+    fn prepare_owner(
+        owner: ForegroundOwner,
+        view: &wry::WebView,
+        deadline: Instant,
+    ) -> Result<Self, ForegroundRenderingState> {
+        let context = &owner;
         use ForegroundFailurePhase::Prepare;
         use ForegroundFailurePredicate as P;
         begin_failure_trace(context);
@@ -400,7 +463,7 @@ impl ForegroundRenderingLease {
         WEAK_WITNESS.with(|slot| {
             if let Ok(mut slot) = slot.try_borrow_mut() {
                 *slot = Some(WeakNativeWitness {
-                    context,
+                    context: context.clone(),
                     page: Weak::from_retained(&page),
                     surface: Weak::from_retained(&surface),
                     store: Weak::from_retained(&store),
@@ -408,7 +471,7 @@ impl ForegroundRenderingLease {
             }
         });
         Ok(Self {
-            context,
+            context: context.clone(),
             app,
             main,
             responder,
@@ -427,10 +490,14 @@ impl ForegroundRenderingLease {
     }
 
     pub(crate) fn present(&mut self, context: ContextJoin) -> ForegroundRenderingState {
+        self.present_owner(&context.into())
+    }
+
+    fn present_owner(&mut self, context: &ForegroundOwner) -> ForegroundRenderingState {
         use ForegroundFailurePhase::Present;
         use ForegroundFailurePredicate as P;
         if let Some(predicate) = first_failed_predicate!(
-            P::ContextJoin => self.context == context,
+            P::ContextJoin => &self.context == context,
             P::PreparedState => self.state == ForegroundRenderingState::Prepared,
         ) {
             return self.refuse(Present, predicate);
@@ -466,13 +533,13 @@ impl ForegroundRenderingLease {
         self.page.setFrame(viewport());
         self.page.setHidden(false);
         surface.orderFrontRegardless();
-        self.poll(context)
+        self.poll_owner(context)
     }
 
-    pub(crate) fn poll(&mut self, context: ContextJoin) -> ForegroundRenderingState {
+    fn poll_owner(&mut self, context: &ForegroundOwner) -> ForegroundRenderingState {
         use ForegroundFailurePhase::Poll;
         use ForegroundFailurePredicate as P;
-        if self.context != context {
+        if &self.context != context {
             return self.refuse(Poll, P::ContextJoin);
         }
         if self.state == ForegroundRenderingState::Retiring {
@@ -544,7 +611,7 @@ impl ForegroundRenderingLease {
                 ForegroundRenderingState::Retiring | ForegroundRenderingState::Retired
             )
         {
-            return self.poll(self.context);
+            return self.poll_owner(&self.context.clone());
         }
         let human_before = human_owners(&self.app);
         self.state = ForegroundRenderingState::Retiring;
@@ -571,13 +638,17 @@ impl ForegroundRenderingLease {
         if self.cleanup_failed {
             return self.refuse(Cleanup, P::PriorCleanupFailure);
         }
-        self.poll(self.context)
+        self.poll_owner(&self.context.clone())
     }
 
     /// Revalidate before each native step/completion. Revocation hides in the
     /// same main-thread step, while preserving the truthful reason to caller.
     pub(crate) fn guard(&mut self, context: ContextJoin) -> ForegroundRenderingState {
-        let state = self.revocation.unwrap_or_else(|| self.poll(context));
+        self.guard_owner(&context.into())
+    }
+
+    fn guard_owner(&mut self, context: &ForegroundOwner) -> ForegroundRenderingState {
+        let state = self.revocation.unwrap_or_else(|| self.poll_owner(context));
         if matches!(
             state,
             ForegroundRenderingState::DeferredForeground
@@ -605,7 +676,7 @@ impl ForegroundRenderingLease {
         phase: ForegroundFailurePhase,
         predicate: ForegroundFailurePredicate,
     ) -> ForegroundRenderingState {
-        self.state = failed(self.context, phase, predicate);
+        self.state = failed(&self.context, phase, predicate);
         self.state
     }
 
@@ -624,6 +695,19 @@ impl ForegroundRenderingLease {
             ForegroundFailurePredicate::LeaseOwner,
         )
     }
+}
+
+#[cfg(feature = "native-agentic-work-resource-probe")]
+pub(crate) fn resource_native_drain(
+    resource: &zephium_agentic::WorkBrowserResourceJoin,
+) -> Option<bool> {
+    owner_witness_drained(&ForegroundOwner::Resource(resource.clone()))
+}
+#[cfg(feature = "native-agentic-work-resource-probe")]
+pub(crate) fn resource_native_failures(
+    resource: &zephium_agentic::WorkBrowserResourceJoin,
+) -> Option<ForegroundNativeFailures> {
+    owner_failure_evidence(&ForegroundOwner::Resource(resource.clone()))
 }
 
 fn cleanup_state(failed: bool, drained: bool) -> ForegroundRenderingState {
@@ -720,6 +804,43 @@ fn exact_foreground_admission(
 mod tests {
     use super::*;
 
+    #[cfg(feature = "native-agentic-work-resource-probe")]
+    #[test]
+    fn resource_failure_trace_cannot_be_rebound_to_legacy_or_recreated_identity() {
+        use zephium_agentic::*;
+        let (_, identity, legacy) = failure_context();
+        let work = WorkId::generate();
+        let id = WorkBrowserResourceId::generate();
+        let resource = || {
+            WorkBrowserResources::new(work, identity.profile())
+                .construct(
+                    id,
+                    identity.id(),
+                    ContextProfileStorageClass::Ephemeral,
+                    AgentPolicyInstant::from_millis(0),
+                )
+                .unwrap()
+                .resource()
+                .clone()
+        };
+        let original = ForegroundOwner::Resource(resource());
+        let recreated = ForegroundOwner::Resource(resource());
+        let mut trace = NativeFailureTrace {
+            context: original.clone(),
+            failures: ForegroundNativeFailures::default(),
+        };
+        let failure = ForegroundNativeFailure {
+            phase: ForegroundFailurePhase::Poll,
+            predicate: ForegroundFailurePredicate::ExactPageWindow,
+        };
+        assert!(!trace.record(legacy, failure));
+        assert!(!trace.record(&recreated, failure));
+        assert!(trace.evidence(legacy).is_none());
+        assert!(trace.evidence(&recreated).is_none());
+        assert!(trace.record(&original, failure));
+        assert_eq!(trace.evidence(&original).unwrap().primary, Some(failure));
+    }
+
     fn failure_context() -> (
         zephium_agentic::ContextRegistry,
         zephium_agentic::ContextIdentity,
@@ -757,7 +878,7 @@ mod tests {
     fn native_failure_evidence_cannot_cross_context_or_document_identity() {
         let (mut registry, identity, context) = failure_context();
         let mut trace = NativeFailureTrace {
-            context,
+            context: context.into(),
             failures: ForegroundNativeFailures::default(),
         };
         let failure = ForegroundNativeFailure {
@@ -788,7 +909,7 @@ mod tests {
     fn native_failure_first_cause_and_cleanup_are_independently_sticky() {
         let (_, _, context) = failure_context();
         let mut trace = NativeFailureTrace {
-            context,
+            context: context.into(),
             failures: ForegroundNativeFailures::default(),
         };
         let primary = ForegroundNativeFailure {

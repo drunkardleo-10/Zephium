@@ -36,6 +36,9 @@ use crate::MainThreadDispatch;
 mod foreground_probe;
 #[cfg(all(target_os = "macos", feature = "native-agentic-foreground-probe"))]
 pub(crate) use foreground_probe::AgentForegroundProbeTask;
+#[cfg(all(target_os = "macos", feature = "native-agentic-work-resource-probe"))]
+#[path = "agent_work_resource_probe_port.rs"]
+pub(crate) mod resource_witness;
 #[cfg(target_os = "macos")]
 #[path = "work_resource_port.rs"]
 mod work_resource;
