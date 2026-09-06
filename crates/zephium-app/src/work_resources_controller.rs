@@ -1,7 +1,6 @@
 //! Private retained adapter; original Work ownership never enters the worker.
 
 use super::*;
-use std::sync::Weak;
 use std::task::Waker;
 use zephium_agent_controller::{AgentWorkFailure, AgentWorkRetainedBrowser};
 
@@ -12,8 +11,7 @@ mod tests;
 /// One immutable lease listener. It carries no terminal, registry or port.
 pub(super) struct LeaseSignal {
     lease: WorkBrowserExecutionLease,
-    resource: Weak<Resource>,
-    retired: Arc<AtomicBool>,
+    retired: Arc<LeaseRetirement>,
     waker: Waker,
     pending: AtomicBool,
     failed: AtomicBool,
@@ -21,14 +19,10 @@ pub(super) struct LeaseSignal {
 impl LeaseSignal {
     fn fail(&self) {
         self.failed.store(true, Ordering::Release);
-        if !self.retired.load(Ordering::Acquire) {
-            if let Some(resource) = self.resource.upgrade() {
-                resource.fail();
-            }
-        }
+        self.retired.fail();
     }
     fn notify(&self) -> bool {
-        if self.retired.load(Ordering::Acquire) {
+        if self.retired.is_retired() {
             return true;
         }
         if self.failed.load(Ordering::Acquire) {
@@ -118,7 +112,7 @@ impl RetainedBrowser {
         self.listener
             .as_ref()
             .filter(|listener| listener.lease == self.browser.lease)
-            .ok_or_else(|| self.browser.resource.refusal())
+            .ok_or_else(|| self.browser.refusal())
     }
     fn rearm(&self) -> Result<(), Refusal> {
         self.listener()?.rearm()?;
@@ -147,11 +141,11 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
     }
     fn register_listener(&mut self, waker: Waker) -> Result<(), AgentWorkFailure> {
         if self.listener.is_some() || self.read.is_some() || self.revoke.is_some() {
-            return Err(Self::error(self.browser.resource.refusal()));
+            return Err(Self::error(self.browser.refusal()));
         }
+        self.browser.retired.check_active().map_err(Self::error)?;
         let listener = Arc::new(LeaseSignal {
             lease: self.browser.lease.clone(),
-            resource: Arc::downgrade(&self.browser.resource),
             retired: self.browser.retired.clone(),
             waker,
             pending: AtomicBool::new(false),
@@ -167,7 +161,7 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
                 .map_err(|_| Self::error(self.browser.shared.refusal()))?;
             actors.retain(|actor| actor.strong_count() != 0);
             if actors.len() >= MAX_LIVE_CONTEXTS {
-                return Err(Self::error(self.browser.resource.refusal()));
+                return Err(Self::error(self.browser.refusal()));
             }
             actors.push(Arc::downgrade(&listener));
         }
@@ -274,7 +268,7 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
         // runs the wake and does not manufacture a physical delivery receipt.
         ticket
             .register_waker(listener.into())
-            .map_err(|_| Self::error(self.browser.resource.refusal()))?;
+            .map_err(|_| Self::error(self.browser.refusal()))?;
         self.revoke = Some(
             PendingLifecycle::dispatch(
                 self.browser.shared.clone(),

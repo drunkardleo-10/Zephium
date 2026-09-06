@@ -6,8 +6,8 @@
 #![allow(dead_code)] // Private until the independently reviewed product admission cut.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Mutex, MutexGuard, TryLockError};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard, TryLockError, Weak};
 use std::task::Wake;
 use zephium_agentic::*;
 use zephium_core::ids::ProfileId;
@@ -347,11 +347,12 @@ impl WorkResourceOwner {
             }
             *prior = Some(lease.clone());
         }
+        let retired = Arc::new(LeaseRetirement::new(&resource));
         Ok(LeaseBrowser {
             shared: self.shared.clone(),
             resource,
             lease,
-            retired: Arc::new(AtomicBool::new(false)),
+            retired,
         })
     }
 
@@ -468,6 +469,88 @@ impl Drop for WorkResourceOwner {
     }
 }
 
+/// Exact per-facade retirement/failure arbitration, independent of later leases.
+struct LeaseRetirement {
+    state: AtomicU8,
+    resource: Weak<Resource>,
+}
+impl LeaseRetirement {
+    const ACTIVE: u8 = 0;
+    const FAILED: u8 = 1;
+    const RETIRED: u8 = 2;
+
+    fn new(resource: &Arc<Resource>) -> Self {
+        Self {
+            state: AtomicU8::new(Self::ACTIVE),
+            resource: Arc::downgrade(resource),
+        }
+    }
+    fn is_retired(&self) -> bool {
+        self.state.load(Ordering::Acquire) == Self::RETIRED
+    }
+    fn check_active(&self) -> Result<(), Refusal> {
+        match self.state.load(Ordering::Acquire) {
+            Self::ACTIVE => Ok(()),
+            Self::FAILED => {
+                self.fail();
+                Err(Refusal::Uncertain)
+            }
+            _ => Err(Refusal::Core(WorkBrowserResourceError::Stale)),
+        }
+    }
+    fn claim_failure(&self) -> Option<LeaseFailure<'_>> {
+        // Failed and Retired are mutually exclusive and absorbing. Once a
+        // failure claims Active, retirement cannot publish reusable, even if
+        // this thread is paused before the exact resource failure is stored.
+        match self.state.compare_exchange(
+            Self::ACTIVE,
+            Self::FAILED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) | Err(Self::FAILED) => Some(LeaseFailure(self)),
+            Err(_) => None,
+        }
+    }
+    fn fail(&self) -> bool {
+        if let Some(failure) = self.claim_failure() {
+            drop(failure);
+            true
+        } else {
+            false
+        }
+    }
+    fn retire(&self) -> Result<(), Refusal> {
+        match self.state.compare_exchange(
+            Self::ACTIVE,
+            Self::RETIRED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => Ok(()),
+            Err(Self::FAILED) => {
+                self.fail();
+                Err(Refusal::Uncertain)
+            }
+            Err(_) => Err(Refusal::Consumed),
+        }
+    }
+}
+
+/// Exact failure publication owner, not a callback or native capability. Its
+/// Drop cannot be delayed past successful retirement: Failed already won the
+/// same atomic transition that retirement must consume. It only publishes the
+/// sticky failure. Actor/lifecycle callers retain a strong Resource; signal
+/// callers hold no owner lock when their temporary upgrade is dropped.
+struct LeaseFailure<'a>(&'a LeaseRetirement);
+impl Drop for LeaseFailure<'_> {
+    fn drop(&mut self) {
+        if let Some(resource) = self.0.resource.upgrade() {
+            resource.fail();
+        }
+    }
+}
+
 /// Actor receives precisely bounded initial-read, revoke and health operations.
 /// No port/registry extraction, construction, destruction, sealing or effects.
 struct LeaseBrowser {
@@ -475,10 +558,18 @@ struct LeaseBrowser {
     resource: Arc<Resource>,
     lease: WorkBrowserExecutionLease,
     // Exact facade/lease marker; never inferred from the resource's later B phase.
-    retired: Arc<AtomicBool>,
+    retired: Arc<LeaseRetirement>,
 }
 impl LeaseBrowser {
+    fn refusal(&self) -> Refusal {
+        if self.retired.fail() {
+            Refusal::Uncertain
+        } else {
+            Refusal::Core(WorkBrowserResourceError::Stale)
+        }
+    }
     fn health(&self, now: AgentPolicyInstant) -> Result<(), Refusal> {
+        self.retired.check_active()?;
         self.shared.current(&self.resource)?;
         self.shared.lock_rows()?.admits_lease(&self.lease, now)?;
         Ok(())
@@ -503,9 +594,7 @@ impl LeaseBrowser {
 }
 impl Drop for LeaseBrowser {
     fn drop(&mut self) {
-        if !self.retired.load(Ordering::Acquire) {
-            self.resource.fail();
-        }
+        self.retired.fail();
     }
 }
 
@@ -603,7 +692,7 @@ struct LifecycleOperation {
     refused: Option<(WorkBrowserResourceRequest, ContextPortFailure)>,
     delivery: Option<WorkBrowserLeaseDeliveryTicket>,
     ended: Option<WorkBrowserLeaseEnded>,
-    retirement: Option<Arc<AtomicBool>>,
+    retirement: Option<Arc<LeaseRetirement>>,
 }
 impl PendingLifecycle {
     fn dispatch(
@@ -611,7 +700,7 @@ impl PendingLifecycle {
         resource: Arc<Resource>,
         request: WorkBrowserResourceRequest,
         delivery: Option<WorkBrowserLeaseDeliveryTicket>,
-        retirement: Option<Arc<AtomicBool>>,
+        retirement: Option<Arc<LeaseRetirement>>,
     ) -> Result<Self, Refusal> {
         let (flight, callback) = Flight::new(&shared, &resource, false);
         let slot = Arc::new(Mutex::new(LifecycleOperation {
@@ -752,7 +841,7 @@ impl LifecycleOperation {
         })?;
         shared.current(resource)?;
         if let Some(retirement) = &self.retirement {
-            retirement.store(true, Ordering::Release);
+            retirement.retire()?;
         }
         resource.reusable.store(true, Ordering::Release);
         Ok(Some(LifecycleResult::Delivered(proof)))

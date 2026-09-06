@@ -24,6 +24,7 @@ struct Native {
     hold_revoke: AtomicBool,
     hold_read: AtomicBool,
     constructions: AtomicUsize,
+    acquisitions: AtomicUsize,
     observations: AtomicUsize,
     reject_construct: std::sync::atomic::AtomicU8,
     rejected_lifecycle_callback: Mutex<Option<WorkBrowserResourceCompletionCallback>>,
@@ -50,7 +51,10 @@ impl Native {
                 self.constructions.fetch_add(1, Ordering::SeqCst);
                 WorkBrowserResourceNativeOutcome::Constructed
             }
-            WorkBrowserResourceOperation::Acquire => WorkBrowserResourceNativeOutcome::Acquired,
+            WorkBrowserResourceOperation::Acquire => {
+                self.acquisitions.fetch_add(1, Ordering::SeqCst);
+                WorkBrowserResourceNativeOutcome::Acquired
+            }
             WorkBrowserResourceOperation::Revoke => {
                 *self.delivery.lock().unwrap() = request.take_lease_delivery_completion();
                 WorkBrowserResourceNativeOutcome::Revoked {
@@ -498,6 +502,98 @@ fn abandoned_revocation_accounts_exact_delivery_without_fictitious_flight_debt()
         owner.seal_resources().unwrap();
         assert!(owner.locally_retired());
         assert_eq!(owner.reap_absent(&resource).unwrap(), resource.identity());
+    }
+}
+
+#[test]
+fn failure_claim_and_facade_drop_linearize_against_retirement_and_b_admission() {
+    for failure_first in [true, false] {
+        let (owner, native) = setup(Arc::new(|| true));
+        let resource = construct(&owner);
+        let a = acquire(&owner, &resource, 1);
+        let state = a.resource.clone();
+        let retirement = a.retired.clone();
+        let mut revoke = a.revoke().unwrap();
+        assert!(native
+            .delivery
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap()
+            .publish_returned());
+        let (entered, entry) = mpsc::sync_channel(1);
+        let (release, released) = mpsc::sync_channel(1);
+        let failing_actor = std::thread::spawn(move || {
+            // Same failure claim used by LeaseSignal and LeaseBrowser::Drop.
+            // Pause precisely after winning the former check→act gap, before
+            // publication. No test-only hook changes production behavior.
+            let claim = failure_first.then(|| a.retired.claim_failure().unwrap());
+            entered.send(()).unwrap();
+            released
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            drop(claim);
+            drop(a);
+        });
+        entry
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let mut b = None;
+        if failure_first {
+            assert_eq!(
+                retirement.state.load(Ordering::Acquire),
+                LeaseRetirement::FAILED
+            );
+            assert!(!state.failed.load(Ordering::Acquire));
+            assert_eq!(
+                owner
+                    .acquire(&resource, run_id(2), tick(2), tick(100))
+                    .err(),
+                Some(Refusal::Busy)
+            );
+            assert_eq!(revoke.poll(tick(2)).err(), Some(Refusal::Uncertain));
+            assert!(state.failed.load(Ordering::Acquire));
+            assert!(!state.reusable.load(Ordering::Acquire));
+            assert_eq!(state.flights.load(Ordering::Acquire), 0);
+            assert_eq!(
+                owner
+                    .acquire(&resource, run_id(2), tick(2), tick(100))
+                    .err(),
+                Some(Refusal::Uncertain)
+            );
+            assert_eq!(native.acquisitions.load(Ordering::Acquire), 1);
+        } else {
+            assert!(matches!(
+                revoke.poll(tick(2)).unwrap(),
+                Some(LifecycleResult::Delivered(_))
+            ));
+            assert!(retirement.is_retired());
+            b = Some(acquire_at(&owner, &resource, 2, 2));
+            b.as_ref().unwrap().health(tick(2)).unwrap();
+            assert_eq!(native.acquisitions.load(Ordering::Acquire), 2);
+        }
+        release.send(()).unwrap();
+        failing_actor.join().unwrap();
+        if let Some(b) = b {
+            b.health(tick(2)).unwrap();
+            assert!(!state.failed.load(Ordering::Acquire));
+            let mut revoke_b = b.revoke().unwrap();
+            assert!(native
+                .delivery
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap()
+                .publish_returned());
+            assert!(revoke_b.poll(tick(2)).unwrap().is_some());
+            drop(b);
+        }
+        assert_eq!(native.observations.load(Ordering::Acquire), 0);
+        let mut destroy = owner.destroy(&resource).unwrap();
+        assert!(destroy.poll(tick(2)).unwrap().is_some());
+        owner.seal_resources().unwrap();
+        assert!(owner.locally_retired());
+        assert!(native.reporters.lock().unwrap().is_empty());
     }
 }
 
@@ -1033,7 +1129,7 @@ fn poisoned_revocation_slot_cannot_publish_delivery_or_readmit_its_lease() {
         .publish_returned());
     assert_eq!(owner.drain_abandoned(tick(3)), Err(Refusal::Uncertain));
     assert_eq!(browser.resource.flights.load(Ordering::Acquire), 1);
-    assert!(!browser.retired.load(Ordering::Acquire));
+    assert!(!browser.retired.is_retired());
     assert_eq!(
         owner.acquire(&join, run_id(2), tick(3), tick(100)).err(),
         Some(Refusal::Uncertain)

@@ -887,6 +887,15 @@ fn retired_a_listener_and_facade_cannot_poison_or_read_a_separately_acquired_b_l
     assert!(a.check_health(now()).is_err());
     assert!(a.begin_observation(now()).is_err());
     assert!(a.listener().unwrap().notify());
+    let lanes = owner.shared.notifications.actors.lock().unwrap().len();
+    assert!(a
+        .register_listener(Arc::new(CountWake(AtomicUsize::new(0))).into())
+        .is_err());
+    assert_eq!(
+        owner.shared.notifications.actors.lock().unwrap().len(),
+        lanes
+    );
+    b.check_health(now()).unwrap();
     // This generic A publication entered before retirement and returns with a
     // panic after separate primitive B acquisition. It is not the original
     // native delivery notification (which returned and was joined above).

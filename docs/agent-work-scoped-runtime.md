@@ -181,6 +181,18 @@ happen outside the owner lane/slot-collection locks.
 Expired/stale A facades cannot read B; A's exact retired marker prevents a late
 old wake or facade drop from poisoning B.
 
+The shared per-facade marker linearizes Active → Failed against Active → Retired;
+both terminal states are absorbing. A failure claim already blocks successful
+retirement before its exact resource-failure publication returns, so retirement
+cannot publish reusable in the former check-then-act gap. If retirement wins,
+late signal failure, facade Drop and duplicate listener registration refuse or
+become inert without touching B. Actor-local protocol refusals use this exact
+marker; actual resource-health/slot poison and original-owner/global failures
+retain their independently sticky scope. Barrier tests hold failure publication
+at that gap, attempt original retirement/B acquisition, and prove both legal
+orders with exact original-owner cleanup. No callback runs under marker locks
+(there are none), and this state is not a native or full actor-drain proof.
+
 `AgentWorkRetainedOutcome::Accepted` is explicitly **non-durable**: the trusted
 task accepted an exactly source-bound, schema-valid but ModelMapped result, not a
 factual-verification or user-objective-success proof. The actual scoped worker

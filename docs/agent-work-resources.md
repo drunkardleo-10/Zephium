@@ -382,7 +382,10 @@ the port or registry, construct/destroy/seal resources, navigate, act, transfer
 cookies or replace the wake/sink. Duplicate facade minting for a lease is refused.
 Dropping a facade before its own exact joined revocation marks that resource
 unavailable; an independently completed A marker cannot poison B when stale A
-is later dropped. Explicit destruction and original global-shutdown audit remain
+is later dropped. Active-to-Failed and Active-to-Retired share one atomic
+transition: a delayed failure publication blocks retirement/reuse, while a
+retirement winner makes old actor failures and duplicate registration inert.
+Explicit destruction and original global-shutdown audit remain
 with the Work owner. Dropping that owner immediately closes new actor authority
 without pretending to perform cleanup.
 
