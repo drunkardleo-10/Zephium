@@ -4194,6 +4194,8 @@ pub fn run() {
                     },
                 ),
                 move |event| {
+                    #[cfg(all(feature = "macos-work-retained-controller-probe", target_os = "macos"))]
+                    if zephium_work_composition::retained_qualification::retained_controller_policy_event(&event) { return; }
                     #[cfg(all(feature = "macos-work-resource-probe", target_os = "macos"))]
                     if zephium_engine::work_resource_policy_event(&event) { return; }
                     #[cfg(all(feature = "macos-work-rendering-probe", target_os = "macos"))]
@@ -4535,7 +4537,7 @@ pub fn run() {
                 return Err(error.into());
             }
             #[cfg(all(feature = "macos-work-rendering-probe", target_os = "macos"))]
-            if !foreground_rendering_probe::install(app.handle(), engine.clone()) {
+            if !foreground_rendering_probe::install(app.handle(), engine.clone(), store.clone()) {
                 return Err(std::io::Error::other("rendering probe owner already installed").into());
             }
             #[cfg(feature = "curated-extension-distribution")]

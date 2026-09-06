@@ -16,6 +16,13 @@ use zephium_core::ids::ProfileId;
 #[path = "work_resources_controller.rs"]
 mod controller;
 
+#[cfg(feature = "work-execution-probe")]
+#[path = "work_resources_probe.rs"]
+pub mod probe;
+#[cfg(feature = "work-execution-probe")]
+#[path = "work_resources_snapshot_probe.rs"]
+mod snapshot_probe;
+
 type NativeSink = Arc<dyn Fn(ContextNativeEvent) + Send + Sync>;
 type NativeFactory = Box<dyn FnOnce(NativeSink) -> Option<Arc<dyn AgentBrowserPort>>>;
 type WakeApplication = Arc<dyn Fn() -> bool + Send + Sync>;

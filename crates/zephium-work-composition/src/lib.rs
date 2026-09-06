@@ -15,3 +15,6 @@ pub use native::{MacosWorkComposition, TrustedWorkRequest};
 pub use zephium_agent_controller::AgentWorkFailure;
 #[cfg(feature = "public-qualification")]
 mod qualification;
+#[cfg(feature = "retained-qualification")]
+#[doc(hidden)]
+pub mod retained_qualification;

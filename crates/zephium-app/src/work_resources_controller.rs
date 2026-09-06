@@ -4,10 +4,6 @@ use super::*;
 use std::task::Waker;
 use zephium_agent_controller::{AgentWorkFailure, AgentWorkRetainedBrowser};
 
-#[cfg(feature = "work-execution-probe")]
-#[path = "work_resources_snapshot_probe.rs"]
-mod snapshot_probe;
-
 #[cfg(all(test, feature = "work-execution-probe"))]
 #[path = "work_resources_controller_tests.rs"]
 mod tests;
@@ -85,7 +81,7 @@ impl Notifications {
     }
 }
 
-struct RetainedBrowser {
+pub(super) struct RetainedBrowser {
     browser: LeaseBrowser,
     binding: WorkBrowserReadBinding,
     listener: Option<Arc<LeaseSignal>>,
@@ -94,7 +90,7 @@ struct RetainedBrowser {
     delivered: bool,
 }
 impl WorkResourceOwner {
-    fn retained_browser(
+    pub(super) fn retained_browser(
         &self,
         lease: WorkBrowserExecutionLease,
         now: AgentPolicyInstant,

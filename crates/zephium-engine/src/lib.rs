@@ -24,6 +24,12 @@ pub use platform::macos::agentic_foreground_driver::{
 };
 #[cfg(all(target_os = "macos", feature = "native-agentic-work-resource-probe"))]
 #[doc(hidden)]
+pub use platform::macos::agentic_resource_composition_probe::{
+    retained_resource_rendering_drain, retained_resource_rendering_failures,
+    WorkResourceRenderingProbe,
+};
+#[cfg(all(target_os = "macos", feature = "native-agentic-work-resource-probe"))]
+#[doc(hidden)]
 pub use platform::macos::agentic_resource_driver::{
     cancel_work_resource_witness, start_work_resource_witness, work_resource_native_drain,
     work_resource_native_failures, work_resource_policy_event,

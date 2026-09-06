@@ -44,6 +44,13 @@ pub fn foreground_rendering_native_failures() -> Option<ForegroundNativeFailures
 /// Move-only diagnostic admission; no native handle or mutable owner escapes.
 /// Captured by the desktop for its exact trusted main window, not ambient focus.
 pub struct ForegroundRenderingAdmission(pub(crate) HumanForegroundGuard);
+impl ForegroundRenderingAdmission {
+    /// Rechecks the original exact human owner without exposing native handles.
+    /// Diagnostic observation only; it cannot activate or renew admission.
+    pub fn remains_current(&self) -> bool {
+        self.0.is_current()
+    }
+}
 
 /// One cancellable normal-main-queue admission wake; not a Work/native context.
 pub struct ForegroundAdmissionWake {

@@ -63,6 +63,11 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
     let extension_lab = env::var_os("CARGO_FEATURE_LOCAL_EXTENSION_LAB").is_some();
     let rendering_probe = env::var_os("CARGO_FEATURE_MACOS_WORK_RENDERING_PROBE").is_some();
     if rendering_probe {
+        if env::var_os("CARGO_FEATURE_MACOS_WORK_RESOURCE_PROBE").is_some()
+            && env::var_os("CARGO_FEATURE_MACOS_WORK_RETAINED_CONTROLLER_PROBE").is_some()
+        {
+            return Err("provider-free retention and paid retained-controller witnesses are mutually exclusive".into());
+        }
         if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
             || env::var("PROFILE").as_deref() != Ok("debug")
             || extensions_staging

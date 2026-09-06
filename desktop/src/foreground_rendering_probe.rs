@@ -1,5 +1,6 @@
 //! Actual Tauri startup/event/shutdown composition for a fixed native witness.
-//! No IPC command, user task, provider, focus activation or replacement loop.
+//! No IPC command, user task, focus activation or replacement loop. A separate
+//! compile-time-only variant selects the explicit public-fixture Luna witness.
 
 use objc2_app_kit::NSWindow;
 use objc2_foundation::MainThreadMarker;
@@ -9,13 +10,19 @@ use std::sync::{
 };
 use std::time::Instant;
 use tauri::Manager;
-#[cfg(not(feature = "macos-work-resource-probe"))]
+#[cfg(not(any(
+    feature = "macos-work-resource-probe",
+    feature = "macos-work-retained-controller-probe"
+)))]
 use zephium_engine as witness;
 use zephium_engine::{
     ForegroundAdmissionWake, ForegroundRenderingAdmission, ForegroundRenderingWitnessReport,
     WebviewEngine,
 };
-#[cfg(feature = "macos-work-resource-probe")]
+#[cfg(all(
+    feature = "macos-work-resource-probe",
+    not(feature = "macos-work-retained-controller-probe")
+))]
 mod witness {
     pub use zephium_engine::{
         cancel_work_resource_witness as cancel_foreground_rendering_witness,
@@ -24,9 +31,20 @@ mod witness {
         work_resource_native_failures as foreground_rendering_native_failures,
     };
 }
+#[cfg(feature = "macos-work-retained-controller-probe")]
+mod witness {
+    pub use zephium_work_composition::retained_qualification::{
+        cancel_retained_controller_witness as cancel_foreground_rendering_witness,
+        retained_controller_native_drain as foreground_rendering_native_drain,
+        retained_controller_native_failures as foreground_rendering_native_failures,
+        start_retained_controller_witness as start_foreground_rendering_witness,
+    };
+}
 
 fn qualified_outcome(outcome: &str) -> bool {
-    if cfg!(feature = "macos-work-resource-probe") {
+    if cfg!(feature = "macos-work-retained-controller-probe") {
+        outcome == "RetainedControllerAccepted"
+    } else if cfg!(feature = "macos-work-resource-probe") {
         outcome == "ResourceRetainedAcrossLeases"
     } else {
         outcome == "AnimationFrameObserved"
@@ -52,6 +70,8 @@ struct State {
     admission: Mutex<AdmissionWait>,
     active: AtomicBool,
     report: Mutex<Option<ForegroundRenderingWitnessReport>>,
+    #[cfg(feature = "macos-work-retained-controller-probe")]
+    store: Mutex<Option<Arc<zephium_store::SqliteStore>>>,
 }
 
 #[derive(Default)]
@@ -60,12 +80,18 @@ struct AdmissionWait {
     wake: Option<ForegroundAdmissionWake>,
 }
 
-pub(super) fn install(app: &tauri::AppHandle, engine: Arc<WebviewEngine>) -> bool {
+pub(super) fn install(
+    app: &tauri::AppHandle,
+    engine: Arc<WebviewEngine>,
+    _store: Arc<zephium_store::SqliteStore>,
+) -> bool {
     app.manage(State {
         engine: Mutex::new(Some(engine)),
         admission: Mutex::new(AdmissionWait::default()),
         active: AtomicBool::new(false),
         report: Mutex::new(None),
+        #[cfg(feature = "macos-work-retained-controller-probe")]
+        store: Mutex::new(Some(_store)),
     })
 }
 
@@ -222,11 +248,26 @@ fn advance_admission(app: &tauri::AppHandle) {
             };
             state.active.store(true, Ordering::Release);
             let completion_app = app.clone();
-            if let Err(reason) =
+            #[cfg(not(feature = "macos-work-retained-controller-probe"))]
+            let started =
                 witness::start_foreground_rendering_witness(engine, admission, move |report| {
                     finish(&completion_app, report)
-                })
-            {
+                });
+            #[cfg(feature = "macos-work-retained-controller-probe")]
+            let started = {
+                let store = state.store.lock().ok().and_then(|mut store| store.take());
+                match store {
+                    Some(store) => witness::start_foreground_rendering_witness(
+                        engine,
+                        store,
+                        admission,
+                        Arc::new(trace_retained),
+                        move |report| finish(&completion_app, report),
+                    ),
+                    None => Err("store_owner"),
+                }
+            };
+            if let Err(reason) = started {
                 finish_unavailable(app, reason);
             }
         }
@@ -323,6 +364,12 @@ fn record_report(
         return;
     };
     close_admission_wait(app);
+    #[cfg(feature = "macos-work-retained-controller-probe")]
+    state
+        .store
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
     // The waiting phase never took this owner. Do not retain it past shutdown.
     state
         .engine
@@ -365,4 +412,23 @@ fn record_report(
     if request_exit {
         app.exit(if acceptable { 0 } else { 1 });
     }
+}
+
+#[cfg(feature = "macos-work-retained-controller-probe")]
+fn trace_retained(
+    trace: zephium_work_composition::retained_qualification::RetainedProbeTrace,
+) -> bool {
+    use std::io::Write as _;
+    use zephium_work_composition::retained_qualification::RetainedProbeTrace as Trace;
+    // Public event metadata contains counts/classes only, never provider text,
+    // request bodies, source quotes, URLs, account data or credentials.
+    let result = match trace {
+        Trace::Configured => writeln!(std::io::stderr().lock(), "work-retained-config: provider=OpenAIResponses model=gpt-5.6-luna retention=stateless fixture=semantic-rendering-v1"),
+        Trace::Event(event) => writeln!(std::io::stderr().lock(), "work-retained-event: sequence={} phase={:?} wall_ms={} content=redacted", event.sequence(), event.kind(), event.elapsed_millis()),
+        Trace::Outcome { state, failure } => writeln!(std::io::stderr().lock(), "work-retained-outcome: state={state} failure={failure:?} mapping_contract=ModelMapped durable_publication=false"),
+        Trace::Observation { nodes, complete, current_document, frame_boundaries, markers } => writeln!(std::io::stderr().lock(), "work-retained-observation: nodes={nodes} complete={complete} current_document={current_document} frame_boundaries={frame_boundaries} readiness_markers={markers:?}"),
+        Trace::Closure { accepted, fixture_mapping_verified, presentation_retired, scoped_worker_drained, original_resource_retired } => writeln!(std::io::stderr().lock(), "work-retained-closure: accepted={accepted} fixture_mapping_verified={fixture_mapping_verified} presentation_retired={presentation_retired} scoped_worker_drained={scoped_worker_drained} original_resource_retired={original_resource_retired} durable_publication=false successor_admission=false"),
+        Trace::Totals { model_calls, input_tokens, output_tokens, cost_micro_usd } => writeln!(std::io::stderr().lock(), "work-retained-totals: model_calls={model_calls} input_tokens={input_tokens} output_tokens={output_tokens} cost_micro_usd={cost_micro_usd}"),
+    };
+    result.is_ok()
 }

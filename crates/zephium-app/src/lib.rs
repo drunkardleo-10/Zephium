@@ -30,6 +30,10 @@ mod work;
 #[cfg(feature = "agentic-browser")]
 mod work_resources;
 
+#[cfg(feature = "work-execution-probe")]
+#[doc(hidden)]
+pub use work_resources::probe as retained_work_probe;
+
 #[cfg(feature = "work-execution")]
 pub use work::{
     AgentWorkApplicationConfig, AgentWorkApplicationHandle, AgentWorkApplicationPhase,

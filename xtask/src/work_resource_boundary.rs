@@ -18,6 +18,54 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
 
 const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
     (
+        "crates/zephium-app/src/work_resources_probe.rs",
+        &[
+            "owner:WorkResourceOwner", "WorkResourceOwner::new(WorkId::generate(),profile,wake,factory)",
+            "self.owner.retained_browser(lease,now)", "SnapshotReleaseBrowser::new(browser,release)",
+            "AgentWorkRetainedController::try_new(", "PendingScopedAgentRuntime::spawn_suspended(",
+            "AgentProviderTransportConfig::STANDARD", "self.owner.poll_native_event()", "self.owner.shutdown_audit(audit)",
+            "ifself.constructed||self.pending.is_some()", "ifself.acquired||self.pending.is_some()", "ifself.started||self.pending.is_some()",
+        ],
+        &["AgentNativeShutdownProof", "AgentBrowserShutdownOutcome", "ContextRegistry::new", "WorkBrowserResources::new", "Serialize", "Deserialize", "attach_successor", "browser_loop", "persist_extraction_result", "try_new_for_probe"],
+    ),
+    (
+        "crates/zephium-engine/src/platform/macos/agentic_resource_composition_probe.rs",
+        &[
+            "port:ResourceWitnessPort,resource:WorkBrowserResourceJoin", "MainThreadMarker::new()?",
+            "if!admission.remains_current()", "engine.agent_context_port.resource_witness_port()?",
+            "Request{resource:self.resource.clone(),operation,}", "ifactual==expected",
+            "self.schedule(Operation::Acquire,completion)", "self.schedule(Operation::Retire,completion)",
+        ],
+        &["AgentProvider", "AgentBrowserPort", "WorkBrowserResources", "evaluateJavaScript", "setActivationPolicy", "makeKey", "makeMain", "NSRunLoop", "requestAnimationFrame", "unsafe", "Serialize", "Deserialize"],
+    ),
+    (
+        "crates/zephium-work-composition/src/retained_qualification.rs",
+        &[
+            "owner:RetainedWorkProbeOwner", "admission:ForegroundRenderingAdmission",
+            "load_macos_probe_openai_credential()", "native.take_agent_browser_port(move|event|sink(event))",
+            "self.store.clone()", "self.owner.start(", "lifecycle.drain_until(deadline)",
+            "mpsc::sync_channel(4)", "TOTAL:Duration=Duration::from_secs(150)", "CLEANUP:Duration=Duration::from_secs(5)",
+            "ifstate==ForegroundRenderingState::Retiring{return;}",
+            "deliver_snapshot_retirement(&release,state,&signal)", "self.owner.presentation_returned()",
+            "task::verify_owned(extraction,expected)", "self.owner.seal(", "self.owner.locally_retired()",
+            "self.admission.remains_current()", "drop(self)", "fixture.shutdown()",
+            "fnpoll_actor(&mutself)->Result<(),&'staticstr>{self.drain_actor_metadata()?;if!self.completion.as_ref().is_some_and(AgentRuntimeCompletion::is_stopped){returnOk(());}",
+        ],
+        &["AgentNativeShutdownProof", "AgentBrowserShutdownOutcome", "ContextRegistry", "WorkBrowserResources", "browser_loop", "AgentBrowserSession", "evaluateJavaScript", "NSRunLoop", "std::thread::sleep", "OPENAI_API_KEY", "Command::new", "attach_successor", "persist_extraction_result"],
+    ),
+    (
+        "crates/zephium-work-composition/src/retained_qualification_task.rs",
+        &[
+            "snapshot.completeness()==SemanticCompleteness::Complete", "observation.request().context().identity()==self.context",
+            "!sample.current||!sample.complete||sample.boundaries!=0||sample.markers.into_iter().any(|present|!present)",
+            "node.role()==SemanticRole::Paragraph", "fragment.provenance().reference()!=expected.reference",
+            "fragment.provenance().frame()!=&expected.frame", "source.reference==expected.reference",
+            "source.frame==expected.frame", "source.role==SemanticRole::Paragraph",
+            "AgentRunBudget::try_new(8,100_000,50_000,1)", "AgentBrowserModel::Luna", "AgentAccountScope::Anonymous",
+        ],
+        &["allows_actions_before_extraction", "navigation_target", "with_source_roles", "with_subtree_extraction", "AgentBrowserPort", "Serialize", "Deserialize"],
+    ),
+    (
         "crates/zephium-app/src/work_resources_snapshot_probe.rs",
         &[
             "browser:RetainedBrowser",

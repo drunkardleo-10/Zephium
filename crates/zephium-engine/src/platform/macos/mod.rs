@@ -7,6 +7,8 @@ mod agentic_foreground_probe;
 #[cfg(feature = "native-agentic-input-probe")]
 mod agentic_input_probe;
 #[cfg(feature = "native-agentic-work-resource-probe")]
+pub(crate) mod agentic_resource_composition_probe;
+#[cfg(feature = "native-agentic-work-resource-probe")]
 pub(crate) mod agentic_resource_driver;
 #[cfg(feature = "native-agentic-semantic-probe")]
 mod agentic_semantic_probe;

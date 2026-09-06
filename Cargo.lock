@@ -6601,7 +6601,10 @@ version = "0.1.0"
 dependencies = [
  "zephium-agent-controller",
  "zephium-agent-provider-transport",
+ "zephium-agent-runtime",
+ "zephium-agentic",
  "zephium-app",
+ "zephium-core",
  "zephium-engine",
  "zephium-store",
 ]

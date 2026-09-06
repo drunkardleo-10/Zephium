@@ -5,7 +5,10 @@
 //! remain independent: this slot proves only that its exact retirement result
 //! arrived, not that the native callback returned or the page was destroyed.
 
+use super::controller::RetainedBrowser;
 use super::*;
+use std::task::Waker;
+use zephium_agent_controller::{AgentWorkFailure, AgentWorkRetainedBrowser};
 
 type Retire = Box<dyn FnOnce(Box<dyn FnOnce(bool) + Send>) -> bool + Send>;
 

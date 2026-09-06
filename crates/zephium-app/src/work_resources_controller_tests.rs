@@ -728,6 +728,56 @@ fn snapshot_probe_common_worker_cannot_start_model_until_native_release() {
 }
 
 #[test]
+fn opaque_probe_owner_uses_original_rows_and_refuses_second_resource_actor_or_early_seal() {
+    use super::super::probe::RetainedWorkProbeOwner;
+    let native = Arc::new(Native::default());
+    let port = native.clone();
+    let mut owner = RetainedWorkProbeOwner::new(
+        ProfileId::generate(),
+        Arc::new(|| true),
+        Box::new(move |_| Some(port)),
+    )
+    .unwrap();
+    let target = ContextNavigationTarget::parse("https://retained-fixture.invalid/frozen").unwrap();
+    owner.construct(target.clone(), now()).unwrap();
+    let resource = owner.resource().unwrap().clone();
+    assert!(owner.construct(target, now()).is_err());
+    assert!(
+        matches!(owner.poll_lifecycle(now()).unwrap(), Some(WorkBrowserResourceEvent::Retained(join)) if join == resource)
+    );
+    assert!(owner.seal(ContextResourceAuditId::new(1).unwrap()).is_err());
+    assert!(!owner.locally_retired());
+    owner
+        .acquire(
+            ContextRunId::generate(),
+            now(),
+            AgentPolicyInstant::from_millis(100),
+        )
+        .unwrap();
+    assert!(owner
+        .acquire(
+            ContextRunId::generate(),
+            now(),
+            AgentPolicyInstant::from_millis(100)
+        )
+        .is_err());
+    assert!(
+        matches!(owner.poll_lifecycle(now()).unwrap(), Some(WorkBrowserResourceEvent::Acquired(lease)) if lease.resource() == &resource)
+    );
+    assert_eq!(native.acquisitions.load(Ordering::Acquire), 1);
+    assert_eq!(native.reads.load(Ordering::Acquire), 0);
+    owner.destroy().unwrap();
+    assert!(
+        matches!(owner.poll_lifecycle(now()).unwrap(), Some(WorkBrowserResourceEvent::Destroyed(join)) if join == resource)
+    );
+    assert_eq!(native.destructions.load(Ordering::Acquire), 1);
+    // This fixture intentionally cannot mint a native global audit. The opaque
+    // bridge preserves that refusal instead of converting local owner closure.
+    assert!(owner.seal(ContextResourceAuditId::new(1).unwrap()).is_err());
+    assert!(owner.locally_retired());
+}
+
+#[test]
 fn actual_common_controller_returns_source_bound_result_before_original_resource_destruction() {
     let _serial = crate::WORK_RUNTIME_TEST_SERIAL
         .lock()
