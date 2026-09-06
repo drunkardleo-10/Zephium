@@ -767,6 +767,250 @@ fn concurrent_delivery_registration_and_notification_loss_cannot_miss_each_other
 }
 
 #[test]
+fn ready_registration_thread_cannot_execute_the_native_owned_listener() {
+    struct Listener {
+        native_thread: std::thread::ThreadId,
+        called: std::sync::atomic::AtomicBool,
+    }
+    impl std::task::Wake for Listener {
+        fn wake(self: Arc<Self>) {
+            assert_eq!(std::thread::current().id(), self.native_thread);
+            self.called.store(true, Ordering::Release);
+        }
+    }
+    let (mut rows, admission, guard) = setup();
+    let lease = leased(&mut rows, &guard);
+    let (mut request, ticket) = rows.revoke_with_delivery(&lease).unwrap();
+    let mut completion = request.take_lease_delivery_completion().unwrap();
+    let notification = completion.take_notification().unwrap();
+    assert!(completion.publish_returned());
+    let listener = Arc::new(Listener {
+        native_thread: std::thread::current().id(),
+        called: std::sync::atomic::AtomicBool::new(false),
+    });
+    let registration_listener = listener.clone();
+    let mut ticket = std::thread::spawn(move || {
+        let mut ticket = ticket;
+        ticket.register_waker(registration_listener.into()).unwrap();
+        ticket
+    })
+    .join()
+    .unwrap();
+    assert!(!listener.called.load(Ordering::Acquire));
+    assert!(notification.notify());
+    assert!(listener.called.load(Ordering::Acquire));
+    assert!(ticket.try_take().unwrap().unwrap().returned());
+    assert!(!admission.work_is_absent());
+}
+
+#[test]
+fn registration_never_owns_wake_and_native_reservation_covers_held_return_or_panic() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    struct HeldListener {
+        entered: mpsc::Sender<std::thread::ThreadId>,
+        release: Mutex<mpsc::Receiver<()>>,
+        panic: bool,
+    }
+    impl std::task::Wake for HeldListener {
+        fn wake(self: Arc<Self>) {
+            self.entered.send(std::thread::current().id()).unwrap();
+            self.release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .expect("bounded held notification");
+            assert!(!self.panic, "injected late listener panic");
+        }
+    }
+    struct Release(mpsc::Sender<()>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+    for fault in 0..3 {
+        let (mut rows, admission, guard, health) = tracked();
+        let lease = leased(&mut rows, &guard);
+        let (request, ticket) = rows.revoke_with_delivery(&lease).unwrap();
+        guard.admit_lifecycle(&request, tick(1)).unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release = Release(release_tx);
+        let listener = Arc::new(HeldListener {
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
+            panic: fault == 1,
+        });
+        let registration = std::thread::spawn(move || {
+            let mut ticket = ticket;
+            ticket.register_waker(listener.into()).unwrap();
+            (ticket, std::thread::current().id())
+        });
+        let (mut ticket, registration_thread) = registration.join().unwrap();
+        assert!(matches!(
+            entered_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        let rows = Arc::new(Mutex::new(rows));
+        let callback_rows = rows.clone();
+        let task = WorkLifecycleTask {
+            request: Some(request),
+            guard: guard.clone(),
+            permit: admission.reserve().unwrap(),
+            completion: Some(Box::new(move |completion| {
+                assert!(matches!(
+                    callback_rows
+                        .lock()
+                        .unwrap()
+                        .settle_at(completion, tick(2))
+                        .unwrap(),
+                    WorkBrowserResourceEvent::LeaseEnded(_)
+                ));
+            })),
+        };
+        let (returned_tx, returned_rx) = mpsc::channel();
+        let native = std::thread::spawn(move || {
+            task.complete(drained());
+            returned_tx.send(()).unwrap();
+        });
+        let waking_thread = entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_ne!(waking_thread, registration_thread);
+        assert!(guard.state.try_lock().is_ok(), "wake holds no native mutex");
+        assert!(guard.execution_reserved());
+        assert!(
+            !guard.callbacks_drained(),
+            "destruction cannot pass the held listener"
+        );
+        assert_eq!(
+            admission.pending(),
+            Some(1),
+            "only the resource reporter lane remains"
+        );
+        assert!(matches!(
+            returned_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        assert!(!admission.work_is_absent());
+        assert_eq!(
+            admission.retire_for_successor(),
+            Err(ContextPortFailure::ProfileBusy)
+        );
+        let next = rows
+            .lock()
+            .unwrap()
+            .acquire(
+                guard.resource(),
+                ContextRunId::generate(),
+                tick(3),
+                tick(100),
+            )
+            .unwrap();
+        assert_eq!(
+            guard.admit_lifecycle(&next, tick(3)),
+            Err(ContextPortFailure::Stale)
+        );
+        let _ = rows
+            .lock()
+            .unwrap()
+            .dispatch_refused(next, ContextPortFailure::Stale)
+            .unwrap();
+        if fault == 2 {
+            // The listener is running, but its coordination mutex is free.
+            assert!(matches!(
+                ticket.register_waker(Arc::new(HealthWake::default()).into()),
+                Err(zephium_agentic::WorkBrowserLeaseDeliveryPollError::RegistrationClosed)
+            ));
+        }
+        drop(release);
+        returned_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        native.join().unwrap();
+        assert!(guard.callbacks_drained());
+        assert!(!guard.execution_reserved());
+        assert_eq!(guard.is_healthy(), fault == 0);
+        if fault == 0 {
+            assert!(ticket.try_take().unwrap().unwrap().returned());
+        } else {
+            assert_eq!(
+                health.snapshot(),
+                zephium_agentic::WorkBrowserResourceHealthState::Uncertain
+            );
+            assert!(matches!(
+                ticket.try_take(),
+                Err(zephium_agentic::WorkBrowserLeaseDeliveryPollError::Notification)
+            ));
+        }
+        assert!(
+            !admission.work_is_absent(),
+            "retained resource is not global closure"
+        );
+    }
+}
+
+#[test]
+fn concurrent_missing_notifier_publication_and_registration_have_one_winner() {
+    struct Listener(std::sync::atomic::AtomicUsize);
+    impl std::task::Wake for Listener {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+    for notifier_present in [false, true] {
+        for register in [false, true] {
+            for _ in 0..64 {
+                let (mut rows, admission, guard) = setup();
+                let lease = leased(&mut rows, &guard);
+                let (mut request, mut ticket) = rows.revoke_with_delivery(&lease).unwrap();
+                let mut completion = request.take_lease_delivery_completion().unwrap();
+                let notification =
+                    notifier_present.then(|| completion.take_notification().unwrap());
+                let listener = Arc::new(Listener(std::sync::atomic::AtomicUsize::new(0)));
+                let barrier = Arc::new(std::sync::Barrier::new(2));
+                let published = std::thread::scope(|scope| {
+                    let publisher_barrier = barrier.clone();
+                    let publisher = scope.spawn(move || {
+                        publisher_barrier.wait();
+                        completion.publish_returned()
+                    });
+                    barrier.wait();
+                    let registration =
+                        register.then(|| ticket.register_waker(listener.clone().into()));
+                    (publisher.join().unwrap(), registration)
+                });
+                assert_eq!(
+                    listener.0.load(Ordering::Acquire),
+                    0,
+                    "registration cannot run a ready listener"
+                );
+                if register && !notifier_present {
+                    if published.0 {
+                        assert!(matches!(published.1.unwrap(), Err(zephium_agentic::WorkBrowserLeaseDeliveryPollError::RegistrationClosed)));
+                    } else {
+                        assert!(
+                            published.1.unwrap().is_ok(),
+                            "registration wins before missing-notifier refusal"
+                        );
+                    }
+                    assert!(matches!(
+                        ticket.try_take(),
+                        Err(zephium_agentic::WorkBrowserLeaseDeliveryPollError::Notification)
+                    ));
+                } else {
+                    assert!(published.0);
+                    assert!(published.1.is_none_or(|registration| registration.is_ok()));
+                    if let Some(notification) = notification {
+                        assert!(notification.notify());
+                    }
+                    assert_eq!(listener.0.load(Ordering::Acquire), usize::from(register));
+                    assert!(ticket.try_take().unwrap().unwrap().returned());
+                }
+                assert!(!admission.work_is_absent());
+            }
+        }
+    }
+}
+
+#[test]
 fn legacy_revoke_without_ticket_keeps_same_physical_delivery_admission_barrier() {
     let (mut rows, admission, guard) = setup();
     let lease = leased(&mut rows, &guard);

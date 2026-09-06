@@ -85,26 +85,39 @@ fixed document. It contains descriptive frame/lease coordinates; it reserves no
 read or invocation and cannot enter legacy context dispatch. Each actual read
 independently rechecks the row and uses the same correlation helper.
 
-The delivery ticket optionally registers one immutable, coalesced listener.
-Registration precedes a state recheck; terminal consumption remains an exact
-acquire-consuming compare/exchange. Registration and notifier loss share one
-monotonic RMW bitset so concurrent publication cannot miss both sides. The native
-guard publishes the physical fact without invoking code under its lock, then
-notifies outside that lock while its
-exact retirement reservation still blocks Acquire/destruction/global drain.
-That notification has no receipt or execution authority. Its failure independently
-quarantines the resource; it cannot replace or retroactively rewrite a physical
-returned receipt. A future product successor still needs current resource health
-and native admission, not just that immutable receipt. Legacy non-listening
-poll/consume users retain their existing contract and fixed payload ceilings.
+The delivery ticket optionally registers one immutable listener before native
+dispatch. Registration never runs arbitrary wake code, even for a ready terminal.
+Only the original move-only native notifier can run it. Notification progresses
+from Pending to Running to Completed/Failed; Running is not completed delivery.
+The registration window closes when that notifier starts, or when listener-free
+publication occurs without a notifier. Later registration returns the distinct
+fail-closed `RegistrationClosed` refusal. Registration after publication is only
+accepted while its original notifier is still pending.
+
+One coordination lock linearizes listener registration, notifier reservation and
+publication. If registration wins, missing-notifier publication refuses; if
+listener-free publication wins, registration refuses. There is no separate-load
+window that can silently lose a required wake. Terminal consumption still uses
+the original exact acquire-consuming compare/exchange. The native guard publishes
+the physical fact without invoking code under its lock, then notifies outside
+both locks while its exact retirement reservation blocks Acquire/destruction and
+global drain through the actual listener return. A held or reentrant listener
+cannot release that reservation; a late panic quarantines the exact resource.
+
+Notification has no receipt or execution authority. Its failure cannot replace
+or retroactively rewrite a physical returned receipt. A future product successor
+still needs current resource health and native admission, not just that immutable
+receipt. Listener-free legacy polling and fixed request-size ceilings are unchanged.
 
 Prerequisite regressions exercise binding without reserving an invocation,
 foreign/stale/expired leases, publication both before and after registration,
-duplicate/lost/poisoned/panicking listeners, missing and early notification,
-unproven terminals and single consumption. The native-ledger reentrant listener
-checks that its guard is unlocked but exact Acquire and global/successor absence
-remain closed until notification returns. This is deterministic native-adapter
-evidence, not a new rendering or provider-workflow witness.
+duplicate/lost/poisoned/panicking listeners, closed registration, missing and early
+notification, unproven terminals and single consumption. Threaded native-ledger
+schedules hold the original listener through successful return, late panic and
+late registration while checking unlocked coordination, exact Acquire refusal,
+destruction debt and global/successor refusal. Concurrent missing-notifier races
+also have present-notifier and listener-free positive controls. This is
+deterministic native-adapter evidence, not a new rendering or provider workflow.
 
 Adversarial schedules cover post-claim blocking/deadline, polling panic,
 future-destructor panic, lost lifecycle, lost/no claim, accepted callback held across a manually

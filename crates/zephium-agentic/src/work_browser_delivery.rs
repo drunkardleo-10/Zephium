@@ -11,8 +11,6 @@ const RETURNED: u8 = 1;
 const UNPROVEN: u8 = 2;
 const CONSUMED: u8 = 3;
 const ABANDONED: u8 = 4;
-const LISTENER_REQUIRED: u8 = 1;
-const NOTIFICATION_LOST: u8 = 2;
 
 #[derive(Clone)]
 pub(super) struct DeliveryBinding(Arc<DeliveryState>);
@@ -20,35 +18,62 @@ pub(super) struct DeliveryBinding(Arc<DeliveryState>);
 struct DeliveryState {
     state: AtomicU8,
     listener: DeliveryListener,
-    notification_taken: AtomicBool,
 }
 
 struct DeliveryListener {
-    waker: Mutex<Option<Arc<Waker>>>,
-    // One RMW order joins registration and loss. Separate release/acquire
-    // booleans could both miss the other side's concurrent publication.
-    status: AtomicU8,
-    signaled: AtomicBool,
+    coordination: Mutex<ListenerRegistration>,
     failed: AtomicBool,
 }
+struct ListenerRegistration {
+    waker: Option<Arc<Waker>>,
+    phase: NotificationPhase,
+    notifier_taken: bool,
+}
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum NotificationPhase {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+}
 impl DeliveryListener {
-    fn notify(&self) -> bool {
-        let waker = match self.waker.lock() {
-            Ok(slot) => slot.clone(),
+    fn fail(&self) {
+        self.failed.store(true, Ordering::Release);
+    }
+}
+impl DeliveryState {
+    fn publish(&self, terminal: u8) -> bool {
+        // This same lock linearizes listener registration, notifier ownership,
+        // and publication. No arbitrary code is invoked while it is held.
+        let mut registration = match self.listener.coordination.lock() {
+            Ok(registration) => registration,
             Err(_) => {
-                self.failed.store(true, Ordering::Release);
+                self.listener.fail();
+                if terminal == UNPROVEN {
+                    let _ = self.state.compare_exchange(
+                        PENDING,
+                        UNPROVEN,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    );
+                }
                 return false;
             }
         };
-        if let Some(waker) = waker {
-            if !self.signaled.swap(true, Ordering::AcqRel)
-                && std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake_by_ref()))
-                    .is_err()
-            {
-                self.failed.store(true, Ordering::Release);
-            }
+        if terminal == RETURNED && registration.waker.is_some() && !registration.notifier_taken {
+            self.listener.fail();
+            return false;
         }
-        !self.failed.load(Ordering::Acquire)
+        let published = self
+            .state
+            .compare_exchange(PENDING, terminal, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok();
+        if published && !registration.notifier_taken {
+            // Listener-free legacy publication is still valid. It atomically
+            // closes later listener admission instead of promising a lost wake.
+            registration.phase = NotificationPhase::Completed;
+        }
+        published
     }
 }
 
@@ -75,11 +100,12 @@ pub(super) fn track(
 ) -> (DeliveryDispatch, WorkBrowserLeaseDeliveryTicket) {
     let binding = DeliveryBinding(Arc::new(DeliveryState {
         state: AtomicU8::new(PENDING),
-        notification_taken: AtomicBool::new(false),
         listener: DeliveryListener {
-            waker: Mutex::new(None),
-            status: AtomicU8::new(0),
-            signaled: AtomicBool::new(false),
+            coordination: Mutex::new(ListenerRegistration {
+                waker: None,
+                phase: NotificationPhase::Pending,
+                notifier_taken: false,
+            }),
             failed: AtomicBool::new(false),
         },
     }));
@@ -106,44 +132,35 @@ pub struct WorkBrowserLeaseDeliveryTicket {
 }
 
 impl WorkBrowserLeaseDeliveryTicket {
-    /// Registers one immutable notification-only listener, then rechecks the
-    /// already-published terminal. Call outside application/native locks: a
-    /// ready slot may synchronously wake. Registration never consumes a receipt.
+    /// Installs one immutable notification-only listener before native dispatch.
+    /// Registration never invokes arbitrary wake code or consumes a receipt.
+    /// It can join a published terminal only while its original notifier has not
+    /// started; later registration is a typed fail-closed protocol refusal.
     pub fn register_waker(
         &mut self,
         waker: Waker,
     ) -> Result<(), WorkBrowserLeaseDeliveryPollError> {
         let waker = Arc::new(waker);
-        let registered = match self.binding.0.listener.waker.lock() {
-            Ok(mut slot) if slot.is_none() => {
-                *slot = Some(waker);
-                true
-            }
-            _ => false,
+        let result = match self.binding.0.listener.coordination.lock() {
+            Ok(mut registration) => match registration.phase {
+                NotificationPhase::Running | NotificationPhase::Completed => {
+                    Err(WorkBrowserLeaseDeliveryPollError::RegistrationClosed)
+                }
+                NotificationPhase::Pending
+                    if registration.waker.is_none()
+                        && !self.binding.0.listener.failed.load(Ordering::Acquire) =>
+                {
+                    registration.waker = Some(waker);
+                    Ok(())
+                }
+                _ => Err(WorkBrowserLeaseDeliveryPollError::Notification),
+            },
+            Err(_) => Err(WorkBrowserLeaseDeliveryPollError::Notification),
         };
-        let lost = self
-            .binding
-            .0
-            .listener
-            .status
-            .fetch_or(LISTENER_REQUIRED, Ordering::AcqRel)
-            & NOTIFICATION_LOST
-            != 0;
-        if !registered || lost {
-            self.binding
-                .0
-                .listener
-                .failed
-                .store(true, Ordering::Release);
+        if result.is_err() {
+            self.binding.0.listener.fail();
         }
-        if self.binding.0.state.load(Ordering::Acquire) != PENDING {
-            self.binding.0.listener.notify();
-        }
-        if self.binding.0.listener.failed.load(Ordering::Acquire) {
-            Err(WorkBrowserLeaseDeliveryPollError::Notification)
-        } else {
-            Ok(())
-        }
+        result
     }
     /// Takes the exact terminal once. `None` means delivery is still pending,
     /// not that no native debt exists. An unhandled completion yields an
@@ -151,7 +168,7 @@ impl WorkBrowserLeaseDeliveryTicket {
     pub fn try_take(
         &mut self,
     ) -> Result<Option<WorkBrowserLeaseDeliveryReceipt>, WorkBrowserLeaseDeliveryPollError> {
-        if self.binding.0.listener.waker.is_poisoned() {
+        if self.binding.0.listener.coordination.is_poisoned() {
             self.binding
                 .0
                 .listener
@@ -196,6 +213,10 @@ impl Drop for WorkBrowserLeaseDeliveryTicket {
 /// Polling cannot replay an already-consumed exact delivery terminal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
 pub enum WorkBrowserLeaseDeliveryPollError {
+    /// The original notifier has started/finished, or listener-free publication
+    /// has already closed registration. Register before dispatch, never rebind.
+    #[error("Work lease delivery listener registration is closed")]
+    RegistrationClosed,
     /// An explicitly registered listener was lost, poisoned, replaced or failed.
     #[error("Work lease delivery notification could not be proven")]
     Notification,
@@ -220,14 +241,17 @@ impl WorkBrowserLeaseDeliveryCompletion {
     /// fact under its exact guard, then invokes this notification outside every
     /// native lock. Native successor ingress remains closed until that returns.
     pub fn take_notification(&mut self) -> Option<WorkBrowserLeaseDeliveryNotification> {
-        if self
-            .binding
-            .0
-            .notification_taken
-            .swap(true, Ordering::AcqRel)
-        {
+        let mut registration = match self.binding.0.listener.coordination.lock() {
+            Ok(registration) => registration,
+            Err(_) => {
+                self.binding.0.listener.fail();
+                return None;
+            }
+        };
+        if registration.notifier_taken || registration.phase != NotificationPhase::Pending {
             return None;
         }
+        registration.notifier_taken = true;
         Some(WorkBrowserLeaseDeliveryNotification {
             binding: self.binding.clone(),
             notified: false,
@@ -238,21 +262,7 @@ impl WorkBrowserLeaseDeliveryCompletion {
     /// must then remain closed. This is a native attestation, not a global audit,
     /// current resource-health query, run outcome or worker-join proof.
     pub fn publish_returned(self) -> bool {
-        if self.binding.0.listener.status.load(Ordering::Acquire) & LISTENER_REQUIRED != 0
-            && !self.binding.0.notification_taken.load(Ordering::Acquire)
-        {
-            self.binding
-                .0
-                .listener
-                .failed
-                .store(true, Ordering::Release);
-            return false;
-        }
-        self.binding
-            .0
-            .state
-            .compare_exchange(PENDING, RETURNED, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+        self.binding.0.publish(RETURNED)
     }
 }
 
@@ -270,45 +280,65 @@ impl WorkBrowserLeaseDeliveryNotification {
     /// Reentrancy is safe: acquisition must still be sealed by the native guard.
     pub fn notify(mut self) -> bool {
         self.notified = true;
-        if self.binding.0.state.load(Ordering::Acquire) == PENDING {
-            self.binding
-                .0
-                .listener
-                .failed
-                .store(true, Ordering::Release);
+        let waker = {
+            let mut registration = match self.binding.0.listener.coordination.lock() {
+                Ok(registration) => registration,
+                Err(_) => {
+                    self.binding.0.listener.fail();
+                    return false;
+                }
+            };
+            if self.binding.0.state.load(Ordering::Acquire) == PENDING
+                || registration.phase != NotificationPhase::Pending
+            {
+                registration.phase = NotificationPhase::Failed;
+                self.binding.0.listener.fail();
+                return false;
+            }
+            registration.phase = NotificationPhase::Running;
+            registration.waker.clone()
+        };
+        // Only this original notifier may run the listener. Its native owner
+        // keeps the retirement reservation until this call actually returns.
+        let returned = waker.is_none_or(|waker| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake_by_ref())).is_ok()
+        });
+        let mut registration = match self.binding.0.listener.coordination.lock() {
+            Ok(registration) => registration,
+            Err(_) => {
+                self.binding.0.listener.fail();
+                return false;
+            }
+        };
+        if returned && !self.binding.0.listener.failed.load(Ordering::Acquire) {
+            registration.phase = NotificationPhase::Completed;
+            true
+        } else {
+            registration.phase = NotificationPhase::Failed;
+            self.binding.0.listener.fail();
+            false
         }
-        self.binding.0.listener.notify()
     }
 }
 impl Drop for WorkBrowserLeaseDeliveryNotification {
     fn drop(&mut self) {
-        if !self.notified
-            && self
-                .binding
-                .0
-                .listener
-                .status
-                .fetch_or(NOTIFICATION_LOST, Ordering::AcqRel)
-                & LISTENER_REQUIRED
-                != 0
-        {
-            self.binding
-                .0
-                .listener
-                .failed
-                .store(true, Ordering::Release);
+        if !self.notified {
+            match self.binding.0.listener.coordination.lock() {
+                Ok(mut registration) => {
+                    registration.phase = NotificationPhase::Failed;
+                    if registration.waker.is_some() {
+                        self.binding.0.listener.fail();
+                    }
+                }
+                Err(_) => self.binding.0.listener.fail(),
+            }
         }
     }
 }
 
 impl Drop for WorkBrowserLeaseDeliveryCompletion {
     fn drop(&mut self) {
-        let _ = self.binding.0.state.compare_exchange(
-            PENDING,
-            UNPROVEN,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
+        let _ = self.binding.0.publish(UNPROVEN);
     }
 }
 
@@ -455,10 +485,15 @@ mod tests {
             assert!(completion.publish_returned());
             // Atomic publication never invokes an arbitrary waker under a native guard.
             assert_eq!(count.0.load(Ordering::Acquire), 0);
-            assert!(notification.notify());
             if !before {
                 ticket.register_waker(count.clone().into()).unwrap();
             }
+            assert_eq!(
+                count.0.load(Ordering::Acquire),
+                0,
+                "registration cannot run the listener"
+            );
+            assert!(notification.notify());
             assert_eq!(count.0.load(Ordering::Acquire), 1);
             assert!(ticket.try_take().unwrap().unwrap().returned());
             assert!(matches!(
@@ -500,10 +535,10 @@ mod tests {
                 }
                 2 => {
                     let _ = std::panic::catch_unwind(|| {
-                        let _guard = ticket.binding.0.listener.waker.lock().unwrap();
+                        let _guard = ticket.binding.0.listener.coordination.lock().unwrap();
                         panic!("injected listener poison");
                     });
-                    assert!(completion.publish_returned());
+                    assert!(!completion.publish_returned());
                     assert!(!notification.notify());
                 }
                 3 => {
@@ -562,6 +597,32 @@ mod tests {
                 ticket.try_take(),
                 Err(WorkBrowserLeaseDeliveryPollError::Notification)
             ));
+        }
+    }
+
+    #[test]
+    fn listener_free_publication_and_completed_notice_close_registration_without_rewriting_receipts(
+    ) {
+        for native_notice in [false, true] {
+            let (mut completion, mut ticket) = pair();
+            let notification = native_notice.then(|| completion.take_notification().unwrap());
+            assert!(completion.publish_returned());
+            if let Some(notification) = notification {
+                assert!(notification.notify());
+            }
+            let receipt = ticket.try_take().unwrap().unwrap();
+            assert!(
+                receipt.returned(),
+                "listener-free legacy polling stays valid"
+            );
+            assert!(matches!(
+                ticket.register_waker(Arc::new(Count(AtomicUsize::new(0))).into()),
+                Err(WorkBrowserLeaseDeliveryPollError::RegistrationClosed)
+            ));
+            assert!(
+                receipt.returned(),
+                "late protocol refusal is not a rewritten physical fact"
+            );
         }
     }
 }

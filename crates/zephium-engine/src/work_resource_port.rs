@@ -463,8 +463,9 @@ impl WorkResourceGuard {
             && state.lease.is_none()
             && state.reads == 0
             && state.callbacks == 0;
-        // Publication only mutates the exact fixed atomic slot. No callback or
-        // wake runs here. Acquire cannot observe an open gate before publication.
+        // Publication joins the fixed slot with its short registration lock.
+        // Registration never invokes code, so it cannot call back into this
+        // guard. Acquire cannot observe an open gate before publication.
         let published = if retained {
             delivery.is_none_or(|owner| owner.publish_returned())
         } else {
