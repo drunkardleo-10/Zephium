@@ -21,6 +21,8 @@ mod shell;
 mod store_reads;
 #[cfg(feature = "work-execution")]
 mod work;
+#[cfg(feature = "agentic-browser")]
+mod work_resources;
 
 #[cfg(feature = "work-execution")]
 pub use work::{

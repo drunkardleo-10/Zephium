@@ -1,0 +1,853 @@
+//! Application-owned retained-page substrate, not product/run admission.
+//!
+//! This private cut deliberately has no runtime, controller, journal or Store
+//! authority. Those joins must precede exposing it from the application shell.
+#![allow(dead_code)] // Next composition cut consumes this privately tested seam.
+
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::task::Wake;
+use zephium_agentic::*;
+use zephium_core::ids::ProfileId;
+
+type NativeSink = Arc<dyn Fn(ContextNativeEvent) + Send + Sync>;
+type NativeFactory = Box<dyn FnOnce(NativeSink) -> Option<Arc<dyn AgentBrowserPort>>>;
+type WakeApplication = Arc<dyn Fn() -> bool + Send + Sync>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Refusal {
+    Uncertain,
+    Busy,
+    Consumed,
+    Core(WorkBrowserResourceError),
+    NativeAdmission(ContextPortFailure),
+}
+impl From<WorkBrowserResourceError> for Refusal {
+    fn from(error: WorkBrowserResourceError) -> Self {
+        Self::Core(error)
+    }
+}
+
+struct Notifications {
+    pending: AtomicBool,
+    failed: AtomicBool,
+    wake: WakeApplication,
+}
+impl Notifications {
+    fn publish(&self) -> bool {
+        // State/terminal publication always precedes this coalesced wake.
+        if !self.pending.swap(true, Ordering::AcqRel)
+            && !matches!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.wake)())),
+                Ok(true)
+            )
+        {
+            self.failed.store(true, Ordering::Release);
+        }
+        !self.failed.load(Ordering::Acquire)
+    }
+}
+impl Wake for Notifications {
+    fn wake(self: Arc<Self>) {
+        // The core reporter contains this panic and marks its exact resource
+        // uncertain too. No native admission can ignore a failed stable wake.
+        assert!(self.publish(), "Work resource notification failed");
+    }
+}
+
+struct Resource {
+    join: WorkBrowserResourceJoin,
+    health: Mutex<WorkBrowserResourceHealth>,
+    failed: AtomicBool,
+    flights: AtomicUsize,
+    reads: AtomicUsize,
+    reusable: AtomicBool,
+    slots: Mutex<Vec<OwnedSlot>>,
+    facade: Mutex<Option<WorkBrowserExecutionLease>>,
+}
+impl Resource {
+    fn current(&self) -> bool {
+        !self.failed.load(Ordering::Acquire)
+            && self
+                .health
+                .lock()
+                .is_ok_and(|health| health.snapshot() == WorkBrowserResourceHealthState::Current)
+    }
+    fn fail(&self) {
+        self.failed.store(true, Ordering::Release);
+    }
+    fn retain(&self, slot: OwnedSlot) -> Result<(), Refusal> {
+        let mut slots = self.slots.lock().map_err(|_| Refusal::Uncertain)?;
+        slots.retain(|slot| !slot.finished());
+        // One lifecycle, one read and one overtaking destruction maximum.
+        if slots.len() >= 3 {
+            self.fail();
+            return Err(Refusal::Busy);
+        }
+        slots.push(slot);
+        Ok(())
+    }
+}
+struct Shared {
+    // Original application/native owner; never extracted or rebound to actors.
+    port: Arc<dyn AgentBrowserPort>,
+    rows: Mutex<WorkBrowserResources>,
+    resources: Mutex<BTreeMap<WorkBrowserResourceId, Arc<Resource>>>,
+    notifications: Arc<Notifications>,
+}
+impl Shared {
+    fn lock_rows(&self) -> Result<std::sync::MutexGuard<'_, WorkBrowserResources>, Refusal> {
+        self.rows.lock().map_err(|_| {
+            self.notifications.failed.store(true, Ordering::Release);
+            Refusal::Uncertain
+        })
+    }
+    fn current(&self, resource: &Resource) -> Result<(), Refusal> {
+        if self.notifications.failed.load(Ordering::Acquire) || !resource.current() {
+            Err(Refusal::Uncertain)
+        } else {
+            Ok(())
+        }
+    }
+    fn resource(&self, join: &WorkBrowserResourceJoin) -> Result<Arc<Resource>, Refusal> {
+        let resources = self.resources.lock().map_err(|_| {
+            self.notifications.failed.store(true, Ordering::Release);
+            Refusal::Uncertain
+        })?;
+        resources
+            .get(&join.identity().resource())
+            .filter(|row| &row.join == join)
+            .cloned()
+            .ok_or(Refusal::Core(WorkBrowserResourceError::Stale))
+    }
+}
+
+/// Survives every actor and retains the original registry, native port and sink.
+/// Private until scoped runtime + durable admission are independently joined.
+struct WorkResourceOwner {
+    shared: Arc<Shared>,
+    native_events: mpsc::Receiver<ContextNativeEvent>,
+}
+impl WorkResourceOwner {
+    fn new(
+        work: WorkId,
+        profile: ProfileId,
+        wake: WakeApplication,
+        factory: NativeFactory,
+    ) -> Option<Self> {
+        let notifications = Arc::new(Notifications {
+            pending: AtomicBool::new(false),
+            failed: AtomicBool::new(false),
+            wake,
+        });
+        // Resource-local events use their exact sticky observer, not this lane.
+        // Only original global audit events belong here. Overflow/unexpected
+        // legacy events poison this owner; they never select an actor mailbox.
+        let (tx, native_events) = mpsc::sync_channel(2);
+        let sink_notifications = notifications.clone();
+        let sink: NativeSink = Arc::new(move |event| {
+            if !matches!(
+                event,
+                ContextNativeEvent::ResourceAuditSettled(_)
+                    | ContextNativeEvent::ShutdownAuditSettled(_)
+            ) || tx.try_send(event).is_err()
+            {
+                sink_notifications.failed.store(true, Ordering::Release);
+            }
+            sink_notifications.publish();
+        });
+        let port = factory(sink)?;
+        Some(Self {
+            shared: Arc::new(Shared {
+                port,
+                rows: Mutex::new(WorkBrowserResources::new(work, profile)),
+                resources: Mutex::new(BTreeMap::new()),
+                notifications,
+            }),
+            native_events,
+        })
+    }
+
+    // Caller drains until None. Empty is the re-arm point; clear then recheck
+    // ensures a concurrent publication is observed or arranges the next wake.
+    fn poll_native_event(&self) -> Result<Option<ContextNativeEvent>, Refusal> {
+        match self.native_events.try_recv() {
+            Ok(event) => return Ok(Some(event)),
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.shared
+                    .notifications
+                    .failed
+                    .store(true, Ordering::Release);
+                return Err(Refusal::Uncertain);
+            }
+        }
+        self.shared
+            .notifications
+            .pending
+            .swap(false, Ordering::AcqRel);
+        // Drain/re-arm each stable observer too. Otherwise its initial pending
+        // health wake could suppress an idle renderer failure after A exits.
+        let resources: Vec<_> = self
+            .shared
+            .resources
+            .lock()
+            .map_err(|_| Refusal::Uncertain)?
+            .values()
+            .cloned()
+            .collect();
+        for resource in resources {
+            let state = resource
+                .health
+                .lock()
+                .map_err(|_| Refusal::Uncertain)?
+                .poll();
+            if state == WorkBrowserResourceHealthState::Uncertain {
+                resource.fail();
+            }
+        }
+        match self.native_events.try_recv() {
+            Ok(event) => Ok(Some(event)),
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.shared
+                    .notifications
+                    .failed
+                    .store(true, Ordering::Release);
+                Err(Refusal::Uncertain)
+            }
+        }
+    }
+
+    fn construct(
+        &self,
+        id: WorkBrowserResourceId,
+        context: ContextId,
+        storage: ContextProfileStorageClass,
+        target: ContextNavigationTarget,
+        now: AgentPolicyInstant,
+    ) -> Result<PendingLifecycle, Refusal> {
+        if self.shared.notifications.failed.load(Ordering::Acquire) {
+            return Err(Refusal::Uncertain);
+        }
+        let request = self
+            .shared
+            .lock_rows()?
+            .construct_document(id, context, storage, target, now)?;
+        let (request, mut health) = request
+            .track_resource_health()
+            .map_err(|_| Refusal::Uncertain)?;
+        // This one immutable application wake predates native dispatch and is
+        // never replaced by actor A/B's executor or mailbox.
+        health.register(self.shared.notifications.clone().into());
+        let resource = Arc::new(Resource {
+            join: request.resource().clone(),
+            health: Mutex::new(health),
+            failed: AtomicBool::new(false),
+            flights: AtomicUsize::new(0),
+            reads: AtomicUsize::new(0),
+            reusable: AtomicBool::new(false),
+            slots: Mutex::new(Vec::with_capacity(3)),
+            facade: Mutex::new(None),
+        });
+        self.shared
+            .resources
+            .lock()
+            .map_err(|_| Refusal::Uncertain)?
+            .insert(id, resource.clone());
+        PendingLifecycle::dispatch(self.shared.clone(), resource, request, None, None)
+    }
+
+    // Native-primitive acquisition only. Future product admission must also
+    // consume scoped worker closure, fresh task/account and original Store ACK.
+    fn acquire(
+        &self,
+        join: &WorkBrowserResourceJoin,
+        run: ContextRunId,
+        now: AgentPolicyInstant,
+        deadline: AgentPolicyInstant,
+    ) -> Result<PendingLifecycle, Refusal> {
+        let resource = self.shared.resource(join)?;
+        self.shared.current(&resource)?;
+        if resource.flights.load(Ordering::Acquire) != 0
+            || !resource.reusable.load(Ordering::Acquire)
+        {
+            return Err(Refusal::Busy);
+        }
+        let request = self.shared.lock_rows()?.acquire(join, run, now, deadline)?;
+        resource.reusable.store(false, Ordering::Release);
+        PendingLifecycle::dispatch(self.shared.clone(), resource, request, None, None)
+    }
+
+    fn browser(
+        &self,
+        lease: WorkBrowserExecutionLease,
+        now: AgentPolicyInstant,
+    ) -> Result<LeaseBrowser, Refusal> {
+        let resource = self.shared.resource(lease.resource())?;
+        self.shared.current(&resource)?;
+        self.shared.lock_rows()?.admits_lease(&lease, now)?;
+        {
+            let mut prior = resource.facade.lock().map_err(|_| Refusal::Uncertain)?;
+            if prior.as_ref() == Some(&lease) {
+                return Err(Refusal::Busy);
+            }
+            *prior = Some(lease.clone());
+        }
+        Ok(LeaseBrowser {
+            shared: self.shared.clone(),
+            resource,
+            lease,
+            retired: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    fn destroy(&self, join: &WorkBrowserResourceJoin) -> Result<PendingLifecycle, Refusal> {
+        let resource = self.shared.resource(join)?;
+        if resource.failed.load(Ordering::Acquire)
+            || !resource.current()
+            || !matches!(
+                self.shared.lock_rows()?.phase(join)?,
+                WorkBrowserResourcePhase::Retained | WorkBrowserResourcePhase::Destroyed
+            )
+        {
+            self.shared.lock_rows()?.quarantine(join)?;
+        }
+        let request = self.shared.lock_rows()?.destroy(join)?;
+        PendingLifecycle::dispatch(self.shared.clone(), resource, request, None, None)
+    }
+
+    fn seal_resources(&self) -> Result<(), Refusal> {
+        self.shared.lock_rows()?.seal();
+        Ok(())
+    }
+
+    fn reap_absent(
+        &self,
+        join: &WorkBrowserResourceJoin,
+    ) -> Result<WorkBrowserResourceIdentity, Refusal> {
+        let resource = self.shared.resource(join)?;
+        if resource.flights.load(Ordering::Acquire) != 0 {
+            return Err(Refusal::Busy);
+        }
+        let identity = self.shared.lock_rows()?.reap(join)?;
+        self.shared
+            .resources
+            .lock()
+            .map_err(|_| Refusal::Uncertain)?
+            .remove(&join.identity().resource());
+        Ok(identity)
+    }
+
+    fn shutdown_audit(
+        &self,
+        audit: ContextResourceAuditId,
+    ) -> Result<ContextShutdownDispatch, Refusal> {
+        self.seal_resources()?;
+        // Original native cohort only. Returned/audited facts still need the
+        // existing global coordinator and application lifecycle join.
+        Ok(self.shared.port.seal_for_shutdown(audit))
+    }
+
+    fn locally_retired(&self) -> bool {
+        // Descriptive local accounting only. No global native proof is minted.
+        !self.shared.notifications.failed.load(Ordering::Acquire)
+            && self
+                .shared
+                .lock_rows()
+                .is_ok_and(|rows| rows.is_quiescent())
+            && self.shared.resources.lock().is_ok_and(|resources| {
+                resources.values().all(|resource| {
+                    resource.flights.load(Ordering::Acquire) == 0
+                        && resource.health.lock().is_ok_and(|health| {
+                            matches!(
+                                health.snapshot(),
+                                WorkBrowserResourceHealthState::Retired
+                                    | WorkBrowserResourceHealthState::Uncertain
+                            )
+                        })
+                })
+            })
+    }
+
+    fn poll_health(
+        &self,
+        join: &WorkBrowserResourceJoin,
+    ) -> Result<WorkBrowserResourceHealthState, Refusal> {
+        let resource = self.shared.resource(join)?;
+        let state = resource
+            .health
+            .lock()
+            .map_err(|_| Refusal::Uncertain)?
+            .poll();
+        if state == WorkBrowserResourceHealthState::Uncertain {
+            resource.fail();
+        }
+        Ok(state)
+    }
+
+    fn drain_abandoned(&self, now: AgentPolicyInstant) -> Result<(), Refusal> {
+        let resources: Vec<_> = self
+            .shared
+            .resources
+            .lock()
+            .map_err(|_| Refusal::Uncertain)?
+            .values()
+            .cloned()
+            .collect();
+        for resource in resources {
+            let slots = resource
+                .slots
+                .lock()
+                .map_err(|_| Refusal::Uncertain)?
+                .clone();
+            for slot in slots {
+                slot.drain_abandoned(&self.shared, &resource, now);
+            }
+        }
+        Ok(())
+    }
+}
+impl Drop for WorkResourceOwner {
+    fn drop(&mut self) {
+        self.shared
+            .notifications
+            .failed
+            .store(true, Ordering::Release);
+        self.shared.notifications.publish();
+    }
+}
+
+/// Actor receives precisely bounded initial-read, revoke and health operations.
+/// No port/registry extraction, construction, destruction, sealing or effects.
+struct LeaseBrowser {
+    shared: Arc<Shared>,
+    resource: Arc<Resource>,
+    lease: WorkBrowserExecutionLease,
+    // Exact facade/lease marker; never inferred from the resource's later B phase.
+    retired: Arc<AtomicBool>,
+}
+impl LeaseBrowser {
+    fn health(&self, now: AgentPolicyInstant) -> Result<(), Refusal> {
+        self.shared.current(&self.resource)?;
+        self.shared.lock_rows()?.admits_lease(&self.lease, now)?;
+        Ok(())
+    }
+    fn observe_initial(&self, now: AgentPolicyInstant) -> Result<PendingRead, Refusal> {
+        self.health(now)?;
+        let request = self.shared.lock_rows()?.observe_initial(&self.lease, now)?;
+        PendingRead::dispatch(self.shared.clone(), self.resource.clone(), request)
+    }
+    fn revoke(&self) -> Result<PendingLifecycle, Refusal> {
+        // Cleanup is permitted after health failure. It never invokes legacy
+        // cancellation or resets the document/world/invocation ceiling.
+        let (request, delivery) = self.shared.lock_rows()?.revoke_with_delivery(&self.lease)?;
+        PendingLifecycle::dispatch(
+            self.shared.clone(),
+            self.resource.clone(),
+            request,
+            Some(delivery),
+            Some(self.retired.clone()),
+        )
+    }
+}
+impl Drop for LeaseBrowser {
+    fn drop(&mut self) {
+        if !self.retired.load(Ordering::Acquire) {
+            self.resource.fail();
+        }
+    }
+}
+
+struct Flight<T> {
+    receiver: mpsc::Receiver<T>,
+    early: Option<T>,
+    finished: bool,
+    abandoned: bool,
+    contradictory: bool,
+    read: bool,
+}
+impl<T: Send + 'static> Flight<T> {
+    fn new(
+        shared: &Shared,
+        resource: &Arc<Resource>,
+        read: bool,
+    ) -> (Self, Box<dyn FnOnce(T) + Send>) {
+        // The functional registry separately admits at most one lifecycle and
+        // one read per resource. This count cannot grow from page/model input.
+        resource.flights.fetch_add(1, Ordering::AcqRel);
+        if read {
+            resource.reads.fetch_add(1, Ordering::AcqRel);
+        }
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let destination = Arc::downgrade(resource);
+        let notifications = shared.notifications.clone();
+        let callback = Box::new(move |terminal| {
+            if sender.try_send(terminal).is_err() {
+                if let Some(destination) = destination.upgrade() {
+                    destination.fail();
+                }
+            }
+            notifications.publish();
+        });
+        (
+            Self {
+                receiver,
+                early: None,
+                finished: false,
+                abandoned: false,
+                contradictory: false,
+                read,
+            },
+            callback,
+        )
+    }
+    fn rejected(&mut self, resource: &Resource) {
+        match self.receiver.try_recv() {
+            Err(mpsc::TryRecvError::Disconnected) => {}
+            result => {
+                self.contradictory = true;
+                resource.fail();
+                self.early = result.ok();
+            }
+        }
+    }
+    fn take(&mut self, resource: &Resource) -> Result<Option<T>, Refusal> {
+        if self.finished {
+            return Err(Refusal::Consumed);
+        }
+        if self.early.is_some() {
+            return Ok(self.early.take());
+        }
+        match self.receiver.try_recv() {
+            Ok(terminal) => Ok(Some(terminal)),
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                resource.fail();
+                Err(Refusal::Uncertain)
+            }
+        }
+    }
+    fn finish(&mut self, resource: &Resource) {
+        if !self.finished {
+            self.finished = true;
+            resource.flights.fetch_sub(1, Ordering::AcqRel);
+            if self.read {
+                resource.reads.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+    }
+}
+
+enum LifecycleResult {
+    Event(WorkBrowserResourceEvent),
+    Delivered(WorkBrowserLeaseDeliveryProof),
+}
+struct PendingLifecycle {
+    shared: Arc<Shared>,
+    resource: Arc<Resource>,
+    slot: Arc<Mutex<LifecycleOperation>>,
+}
+struct LifecycleOperation {
+    flight: Flight<WorkBrowserResourceCompletion>,
+    refused: Option<(WorkBrowserResourceRequest, ContextPortFailure)>,
+    delivery: Option<WorkBrowserLeaseDeliveryTicket>,
+    ended: Option<WorkBrowserLeaseEnded>,
+    retirement: Option<Arc<AtomicBool>>,
+}
+impl PendingLifecycle {
+    fn dispatch(
+        shared: Arc<Shared>,
+        resource: Arc<Resource>,
+        request: WorkBrowserResourceRequest,
+        delivery: Option<WorkBrowserLeaseDeliveryTicket>,
+        retirement: Option<Arc<AtomicBool>>,
+    ) -> Result<Self, Refusal> {
+        let (flight, callback) = Flight::new(&shared, &resource, false);
+        let slot = Arc::new(Mutex::new(LifecycleOperation {
+            flight,
+            refused: None,
+            delivery,
+            ended: None,
+            retirement,
+        }));
+        resource.retain(OwnedSlot::Lifecycle(slot.clone()))?;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            shared.port.work_resource_lifecycle(request, callback)
+        }));
+        let mut state = slot.lock().map_err(|_| Refusal::Uncertain)?;
+        state.refused = match result {
+            Ok(WorkBrowserResourceDispatch::Scheduled) => None,
+            Ok(WorkBrowserResourceDispatch::Rejected { request, failure }) => {
+                state.flight.rejected(&resource);
+                Some((*request, failure))
+            }
+            Err(_) => {
+                resource.fail();
+                None
+            }
+        };
+        drop(state);
+        Ok(Self {
+            shared,
+            resource,
+            slot,
+        })
+    }
+    fn poll(&mut self, now: AgentPolicyInstant) -> Result<Option<LifecycleResult>, Refusal> {
+        self.slot
+            .lock()
+            .map_err(|_| Refusal::Uncertain)?
+            .poll(&self.shared, &self.resource, now)
+    }
+}
+impl Drop for PendingLifecycle {
+    fn drop(&mut self) {
+        match self.slot.lock() {
+            Ok(mut slot) if !slot.flight.finished => {
+                slot.flight.abandoned = true;
+                self.resource.fail();
+            }
+            Err(_) => self.resource.fail(),
+            _ => {}
+        }
+    }
+}
+impl LifecycleOperation {
+    fn poll(
+        &mut self,
+        shared: &Shared,
+        resource: &Resource,
+        now: AgentPolicyInstant,
+    ) -> Result<Option<LifecycleResult>, Refusal> {
+        if self.flight.finished {
+            return Err(Refusal::Consumed);
+        }
+        // Native read callbacks can be physically returned but still queued in
+        // their original application slot. Settle those exact reads before the
+        // core's zero-read revocation terminal; never infer drain from order.
+        if self.delivery.is_some() && resource.reads.load(Ordering::Acquire) != 0 {
+            return Ok(None);
+        }
+        if self.ended.is_none() {
+            let event = if let Some((request, failure)) = self.refused.take() {
+                let event = shared.lock_rows()?.dispatch_refused(request, failure);
+                if self.flight.contradictory {
+                    let _ = event;
+                    return self.drain_contradiction(shared, resource, now);
+                }
+                event?
+            } else {
+                if self.flight.contradictory {
+                    return self.drain_contradiction(shared, resource, now);
+                }
+                let Some(terminal) = self.flight.take(resource)? else {
+                    return Ok(None);
+                };
+                match shared.lock_rows()?.settle_at(terminal, now) {
+                    Ok(event) => event,
+                    Err(error) => {
+                        resource.fail();
+                        self.flight.finish(resource);
+                        return Err(error.into());
+                    }
+                }
+            };
+            if let WorkBrowserResourceEvent::LeaseEnded(ended) = event {
+                self.ended = Some(ended);
+            } else {
+                if matches!(
+                    event,
+                    WorkBrowserResourceEvent::Retained(_)
+                        | WorkBrowserResourceEvent::AdmissionRefused {
+                            operation: WorkBrowserResourceOperation::Acquire,
+                            ..
+                        }
+                ) {
+                    resource.reusable.store(true, Ordering::Release);
+                }
+                self.flight.finish(resource);
+                return Ok(Some(LifecycleResult::Event(event)));
+            }
+        }
+        let ticket = self.delivery.as_mut().ok_or(Refusal::Uncertain)?;
+        let Some(receipt) = ticket.try_take().map_err(|_| Refusal::Uncertain)? else {
+            return Ok(None);
+        };
+        let ended = self.ended.take().ok_or(Refusal::Uncertain)?;
+        // Native terminal and one delivery receipt have both been accounted.
+        // A failed health/proof join is uncertainty, not fictitious callback debt.
+        self.flight.finish(resource);
+        let proof = ended.join_delivery(receipt).map_err(|_| {
+            resource.fail();
+            Refusal::Uncertain
+        })?;
+        shared.current(resource)?;
+        if let Some(retirement) = &self.retirement {
+            retirement.store(true, Ordering::Release);
+        }
+        resource.reusable.store(true, Ordering::Release);
+        Ok(Some(LifecycleResult::Delivered(proof)))
+    }
+    fn drain_contradiction(
+        &mut self,
+        shared: &Shared,
+        resource: &Resource,
+        now: AgentPolicyInstant,
+    ) -> Result<Option<LifecycleResult>, Refusal> {
+        match self.flight.take(resource) {
+            Ok(Some(terminal)) => {
+                let _ = shared.lock_rows()?.settle_at(terminal, now);
+                self.flight.finish(resource);
+                Err(Refusal::Uncertain)
+            }
+            Ok(None) => Ok(None),
+            Err(_) => {
+                self.flight.finish(resource);
+                Err(Refusal::Uncertain)
+            }
+        }
+    }
+}
+
+struct PendingRead {
+    shared: Arc<Shared>,
+    resource: Arc<Resource>,
+    slot: Arc<Mutex<ReadOperation>>,
+}
+struct ReadOperation {
+    flight: Flight<WorkBrowserObservationCompletion>,
+    refused: Option<(WorkBrowserObservationRequest, ContextPortFailure)>,
+}
+impl PendingRead {
+    fn dispatch(
+        shared: Arc<Shared>,
+        resource: Arc<Resource>,
+        request: WorkBrowserObservationRequest,
+    ) -> Result<Self, Refusal> {
+        let (flight, callback) = Flight::new(&shared, &resource, true);
+        let slot = Arc::new(Mutex::new(ReadOperation {
+            flight,
+            refused: None,
+        }));
+        resource.retain(OwnedSlot::Read(slot.clone()))?;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            shared.port.work_resource_observe(request, callback)
+        }));
+        let mut state = slot.lock().map_err(|_| Refusal::Uncertain)?;
+        state.refused = match result {
+            Ok(WorkBrowserObservationDispatch::Scheduled) => None,
+            Ok(WorkBrowserObservationDispatch::Rejected { request, failure }) => {
+                state.flight.rejected(&resource);
+                Some((*request, failure))
+            }
+            Err(_) => {
+                resource.fail();
+                None
+            }
+        };
+        drop(state);
+        Ok(Self {
+            shared,
+            resource,
+            slot,
+        })
+    }
+    fn poll(
+        &mut self,
+        now: AgentPolicyInstant,
+    ) -> Result<Option<WorkBrowserObservationEvent>, Refusal> {
+        self.slot
+            .lock()
+            .map_err(|_| Refusal::Uncertain)?
+            .poll(&self.shared, &self.resource, now)
+    }
+}
+impl Drop for PendingRead {
+    fn drop(&mut self) {
+        match self.slot.lock() {
+            Ok(mut slot) if !slot.flight.finished => {
+                slot.flight.abandoned = true;
+                self.resource.fail();
+            }
+            Err(_) => self.resource.fail(),
+            _ => {}
+        }
+    }
+}
+impl ReadOperation {
+    fn poll(
+        &mut self,
+        shared: &Shared,
+        resource: &Resource,
+        now: AgentPolicyInstant,
+    ) -> Result<Option<WorkBrowserObservationEvent>, Refusal> {
+        if let Some((request, failure)) = self.refused.take() {
+            let result = shared.lock_rows()?.observation_dispatch_refused(request);
+            if !self.flight.contradictory {
+                self.flight.finish(resource);
+                result?;
+                return Err(Refusal::NativeAdmission(failure));
+            }
+        }
+        let terminal = match self.flight.take(resource) {
+            Ok(Some(terminal)) => terminal,
+            Ok(None) => return Ok(None),
+            Err(error) if self.flight.contradictory => {
+                self.flight.finish(resource);
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
+        // Check sticky native/global failure before accepting page contents.
+        // Exact terminal still settles even after admission has been sealed.
+        if shared.current(resource).is_err()
+            && shared.lock_rows()?.phase(&resource.join)? != WorkBrowserResourcePhase::Destroyed
+        {
+            shared.lock_rows()?.quarantine(&resource.join)?;
+        }
+        let result = shared.lock_rows()?.settle_observation(terminal, now);
+        self.flight.finish(resource);
+        if self.flight.contradictory {
+            return Err(Refusal::Uncertain);
+        }
+        Ok(Some(result?))
+    }
+}
+
+#[derive(Clone)]
+enum OwnedSlot {
+    Lifecycle(Arc<Mutex<LifecycleOperation>>),
+    Read(Arc<Mutex<ReadOperation>>),
+}
+impl OwnedSlot {
+    fn finished(&self) -> bool {
+        match self {
+            Self::Lifecycle(slot) => slot.lock().is_ok_and(|slot| slot.flight.finished),
+            Self::Read(slot) => slot.lock().is_ok_and(|slot| slot.flight.finished),
+        }
+    }
+    fn drain_abandoned(&self, shared: &Shared, resource: &Resource, now: AgentPolicyInstant) {
+        match self {
+            Self::Lifecycle(slot) => {
+                if let Ok(mut slot) = slot.lock() {
+                    if slot.flight.abandoned && !slot.flight.finished {
+                        let _ = slot.poll(shared, resource, now);
+                    }
+                }
+            }
+            Self::Read(slot) => {
+                if let Ok(mut slot) = slot.lock() {
+                    if slot.flight.abandoned && !slot.flight.finished {
+                        let _ = slot.poll(shared, resource, now);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "work_resources_tests.rs"]
+mod tests;

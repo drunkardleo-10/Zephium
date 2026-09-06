@@ -356,6 +356,63 @@ Clippy for both engine configurations, both architecture commands with hostile
 semantic JavaScript smoke, resource-boundary mutations and workspace fmt/diff.
 This is provider-free deterministic evidence; no GUI or native app rerun occurred.
 
+## Private application ownership cut (deterministic only)
+
+`zephium-app::work_resources` now contains a private, dormant Work owner above
+actor leases. It creates the native port once with an immutable Work-lifetime
+sink, retains the exact functional registry and resource observers, and never
+captures or rebinds an actor/runtime mailbox. Resource failures remain sticky
+and local. The two-slot original global-audit lane is separate; unexpected
+legacy events, overflow, poisoned state, lost owner or failed application wake
+close admission. Consumers drain the global lane until Empty, acquire-consume
+its pending signal, drain/re-arm resource observers and recheck for raced events.
+
+The move-only actor facade exposes only exact lease/deadline-bound health,
+the existing bounded initial read, and cleanup revocation. It cannot extract
+the port or registry, construct/destroy/seal resources, navigate, act, transfer
+cookies or replace the wake/sink. Duplicate facade minting for a lease is refused.
+Dropping a facade before its own exact joined revocation marks that resource
+unavailable; an independently completed A marker cannot poison B when stale A
+is later dropped. Explicit destruction and original global-shutdown audit remain
+with the Work owner. Dropping that owner immediately closes new actor authority
+without pretending to perform cleanup.
+
+Each resource retains at most three exact operation slots: lifecycle, bounded
+read, and an overtaking destruction. Every slot owns its one terminal receiver,
+original refusal request, and any revocation ticket/terminal; actor handles only
+poll that original slot. Native callbacks publish into their immutable one-slot
+destination before waking. Dropping an actor handle cannot discard a late A
+terminal: the owner drains it, including after destruction, without offering its
+contents to B. Synchronous non-admission requires an already-disconnected callback
+sender with no queued terminal; a retained or synchronously delivered callback
+is an explicit contract failure whose debt remains recoverable. Native refusal
+classes are preserved.
+
+Read terminals are accounted before the core's zero-read revocation settlement.
+After an exact terminal and delivery receipt are consumed, failed health/delivery
+proof marks uncertainty but does not retain fictitious callback debt. Actual
+missing terminals stay owed. The private primitive acquisition gate requires
+healthy retained resource state, no retained operation debt and exact prior
+delivery proof. **It is not product B admission or scoped run completion.** Local
+resource retirement is separately named and cannot become a global native proof;
+global notification failure still refuses it. Proven-absent construction can be
+reaped without allocating or destroying a native page.
+
+Deterministic tests cover two exact leases under one original owner/sink,
+stale/foreign authority, idle failures, lost facade/owner, abandoned late reads
+and revocations, destruction overtaking reads, unproven delivery, queued and
+retained callbacks contradicting non-admission, wake rearming/overflow/failure,
+and exact local retirement. No GUI, provider, public site, result artifact or
+native rendering claim is added by these fixtures. The existing controller,
+runtime, journal, Store layout, lifecycle enums and legacy successor are unchanged.
+
+Next joins remain separately reviewable: scoped runtime/worker closure distinct
+from global Clean; retained backing in the existing controller; versioned durable
+scope and original Store ACK; and fresh task/manifest/account admission for B.
+ModelMapped extraction validity is not user-objective success. The eventual
+end-to-end proof must retrieve accepted artifacts before resource destruction,
+then join original destruction and global application closure afterward.
+
 ## Actual-application retention witness
 
 The compile-time-only `macos-work-resource-probe` selects the resource driver

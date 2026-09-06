@@ -18,6 +18,32 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
 
 const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
     (
+        "crates/zephium-app/src/work_resources.rs",
+        &[
+            "typeNativeFactory=Box<dynFnOnce(NativeSink)->Option<Arc<dynAgentBrowserPort>>>",
+            "slots:Mutex<Vec<OwnedSlot>>", "slots.len()>=3", "mpsc::sync_channel(1)",
+            "mpsc::sync_channel(2)", "self.pending.swap(true,Ordering::AcqRel)",
+            "self.shared.notifications.pending.swap(false,Ordering::AcqRel)",
+            "Arc::downgrade(resource)", "resource.retain(OwnedSlot::Lifecycle(slot.clone()))?",
+            "resource.retain(OwnedSlot::Read(slot.clone()))?", "state.flight.rejected(&resource)",
+            "self.shared.lock_rows()?.admits_lease(&self.lease,now)?",
+            "self.shared.lock_rows()?.revoke_with_delivery(&self.lease)?",
+            "self.delivery.is_some()&&resource.reads.load(Ordering::Acquire)!=0",
+            "self.flight.finish(resource);letproof=ended.join_delivery(receipt)",
+            "implDropforWorkResourceOwner", "implDropforLeaseBrowser",
+            "if!self.retired.load(Ordering::Acquire){self.resource.fail();}",
+            "fnlocally_retired(&self)->bool",
+            "!self.shared.notifications.failed.load(Ordering::Acquire)&&self.shared.lock_rows()",
+        ],
+        &[
+            "pubstruct", "pubfn", "pub(crate)", "ContextRegistry", "ContextIdentity::",
+            "NativeEventSink", "AgentNativeShutdownProof", "AgentBrowserShutdownOutcome",
+            "attach_successor_work", "Serialize", "Deserialize", "port.dispatch(",
+            "port.invoke_semantic(", "port.execute_semantic_action(", "port.transfer_cookies(",
+            "AgentWorkController", "PendingAgentRuntime", "AgentWorkJournal",
+        ],
+    ),
+    (
         "crates/zephium-agentic/src/work_browser_health.rs",
         &[
             "resource:WorkBrowserResourceJoin,state:Arc<HealthState>,installed:AtomicBool",
