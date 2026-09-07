@@ -25,6 +25,10 @@ mod application;
 #[path = "work_resources_shutdown.rs"]
 mod shutdown;
 
+#[cfg(feature = "work-execution")]
+#[path = "work_resources_wait.rs"]
+mod wait;
+
 #[cfg(feature = "work-execution-probe")]
 #[path = "work_resources_probe.rs"]
 pub mod probe;
@@ -56,6 +60,8 @@ struct Notifications {
     wake: WakeApplication,
     #[cfg(feature = "work-execution")]
     actors: Mutex<Vec<std::sync::Weak<controller::LeaseSignal>>>,
+    #[cfg(feature = "work-execution")]
+    epoch: wait::NotificationEpoch,
 }
 impl Notifications {
     fn publish(&self) -> bool {
@@ -70,6 +76,10 @@ impl Notifications {
         }
         #[cfg(feature = "work-execution")]
         self.publish_actor_wakes();
+        #[cfg(feature = "work-execution")]
+        if !self.epoch.publish() {
+            self.failed.store(true, Ordering::Release);
+        }
         !self.failed.load(Ordering::Acquire)
     }
 }
@@ -211,6 +221,8 @@ impl WorkResourceOwner {
             wake,
             #[cfg(feature = "work-execution")]
             actors: Mutex::new(Vec::with_capacity(MAX_LIVE_CONTEXTS)),
+            #[cfg(feature = "work-execution")]
+            epoch: wait::NotificationEpoch::default(),
         });
         // Resource-local events use their exact sticky observer, not this lane.
         // Only original global audit events belong here. Overflow/unexpected

@@ -293,9 +293,13 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "self.dispatch_attempt(flight.request,flight.phase,flight.reconciliations+1)",
             "self.owner.locally_retired()", "self.flight.is_none()", "self.unstarted.is_none()",
             "self.destruction_settled=true", "Err(Refusal::Busy)=>returnOk(false)",
-            "if!self.local_shutdown_settled(){returnOk(false);}",
+            "||!self.local_shutdown_settled(){returnOk(false);}",
             "RetainedNativeShutdown::new(&self.owner)?", "shutdown.settle(event)",
             "and_then(RetainedNativeShutdown::next_deadline)",
+            "notifications.epoch.snapshot()", "self.poll_shutdown_before(now,Some(deadline))",
+            "notifications.epoch.wait_until_changed(epoch,wake_at)",
+            "Ok(true)=>returnInstant::now()<deadline", "next.min(deadline)",
+            "ifInstant::now()>=deadline{returnfalse;}",
             "#[cfg(all(test,feature=\"work-execution-probe\"))]",
         ],
         &[
@@ -304,6 +308,19 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "std::thread", "tokio::spawn", "InspectablePublic", "AgentBrowserRetention",
             "AgentWorkJournalRequest::Read", "port.dispatch", "invoke_semantic",
             "execute_semantic_action", "attach_successor_work",
+        ],
+    ),
+    (
+        "crates/zephium-app/src/work_resources_wait.rs",
+        &[
+            "generation:Mutex<Option<u64>>", "changed:Condvar", "value.checked_add(1)",
+            "self.changed.notify_all()", "self.generation.lock().map_err(|_|Refusal::Uncertain)?",
+            "letcurrent=generation.ok_or(Refusal::Uncertain)?", "ifcurrent!=observed",
+            "deadline.checked_duration_since(Instant::now())", ".wait_timeout(generation,remaining)",
+        ],
+        &[
+            "pubstruct", "pubfn", "pub(crate)", "Serialize", "Deserialize", "std::thread",
+            "tokio::", "AgentBrowserPort", "ContextNativeEvent", "AgentWorkJournal", "CallbackHandle",
         ],
     ),
     (
@@ -368,6 +385,8 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "typeNativeFactory=Box<dynFnOnce(NativeSink)->Option<Arc<dynAgentBrowserPort>>>",
             "slots:Mutex<Vec<OwnedSlot>>", "slots.len()>=3", "mpsc::sync_channel(1)",
             "mpsc::sync_channel(2)", "self.pending.swap(true,Ordering::AcqRel)",
+            "epoch:wait::NotificationEpoch", "epoch:wait::NotificationEpoch::default()",
+            "if!self.epoch.publish(){self.failed.store(true,Ordering::Release);}",
             "self.shared.notifications.pending.swap(false,Ordering::AcqRel)",
             "Arc::downgrade(resource)", "resource.retain(OwnedSlot::Lifecycle(slot.clone()))?",
             "resource.retain(OwnedSlot::Read(slot.clone()))?", "state.flight.rejected(&resource)",

@@ -764,12 +764,23 @@ impl RetainedWork {
     }
 
     pub(super) fn poll_shutdown(&mut self, now: AgentPolicyInstant) -> Result<bool, Refusal> {
+        self.poll_shutdown_before(now, None)
+    }
+
+    fn poll_shutdown_before(
+        &mut self,
+        now: AgentPolicyInstant,
+        deadline: Option<Instant>,
+    ) -> Result<bool, Refusal> {
         if !self.stopping {
             return Err(Refusal::Busy);
         }
         self.poll(now);
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Ok(false);
+        }
         if self.destroyed {
-            return self.poll_native_shutdown();
+            return self.poll_native_shutdown(deadline);
         }
         if self.acquisition.is_some()
             || self.staged.is_some()
@@ -805,7 +816,7 @@ impl RetainedWork {
         }
         self.owner.seal_resources()?;
         self.destroyed = true;
-        self.poll_native_shutdown()
+        self.poll_native_shutdown(deadline)
     }
 
     fn local_shutdown_settled(&self) -> bool {
@@ -824,8 +835,10 @@ impl RetainedWork {
                 .is_none_or(|active| active.drained.is_some())
     }
 
-    fn poll_native_shutdown(&mut self) -> Result<bool, Refusal> {
-        if !self.local_shutdown_settled() {
+    fn poll_native_shutdown(&mut self, deadline: Option<Instant>) -> Result<bool, Refusal> {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline)
+            || !self.local_shutdown_settled()
+        {
             return Ok(false);
         }
         if self.native_shutdown.is_none() {
@@ -835,6 +848,53 @@ impl RetainedWork {
             .as_mut()
             .ok_or(Refusal::Uncertain)?
             .poll()
+    }
+
+    /// The caller's one absolute process deadline covers scoped worker, Store,
+    /// resource callbacks and global native audit retries. The Shell command
+    /// queue need not run: wait on the original callback epoch instead. Timeout
+    /// never consumes unresolved owners or authorizes a fresh actor.
+    pub(super) fn shutdown_until(
+        &mut self,
+        clock: &dyn TerraControllerClock,
+        deadline: Instant,
+    ) -> bool {
+        self.begin_shutdown();
+        let notifications = self.owner.shared.notifications.clone();
+        loop {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            // Snapshot before polling, not after: a final callback can race
+            // the empty poll and the beginning of the blocking wait.
+            let Ok(epoch) = notifications.epoch.snapshot() else {
+                self.fail(AgentWorkFailure::ContextLost);
+                return false;
+            };
+            let Ok(now) = clock.now() else {
+                self.fail(AgentWorkFailure::Contract);
+                return false;
+            };
+            if Instant::now() >= deadline {
+                return false;
+            }
+            match self.poll_shutdown_before(now, Some(deadline)) {
+                Ok(true) => return Instant::now() < deadline,
+                Err(_) => return false,
+                Ok(false) => {}
+            }
+            let wake_at = self
+                .next_deadline()
+                .map_or(deadline, |next| next.min(deadline));
+            if notifications
+                .epoch
+                .wait_until_changed(epoch, wake_at)
+                .is_err()
+            {
+                self.fail(AgentWorkFailure::ContextLost);
+                return false;
+            }
+        }
     }
 
     pub(super) fn resource_destroyed(&self) -> bool {

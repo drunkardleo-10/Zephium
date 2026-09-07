@@ -90,6 +90,31 @@ durable acknowledgements prevent global seal admission.
 This is a private lifecycle prerequisite, not Shell attachment or native
 qualification of the retained product workflow.
 
+The private `RetainedWork::shutdown_until` now supplies the caller-blocking
+barrier needed before Shell attachment. The same original notification owner
+increments a checked epoch after callback state publication, including when a
+Shell wake is already coalesced. The barrier snapshots that epoch before each
+poll and waits on its condition variable, not the Shell command queue (which
+cannot run during Shell teardown). A callback between poll and wait cannot be
+lost; spurious notifications recheck the original epoch without polling Work.
+No worker, periodic timer, provider path, or alternate cleanup proof is created.
+
+One caller-owned absolute deadline caps Store acknowledgement, scoped worker
+completion, retained resource cleanup, native audit waiting and the unchanged
+retry cadence. The trusted policy clock is refreshed each poll; expiration is
+rechecked before cleanup/native dispatch and before returning success. Epoch
+overflow/poison and clock failure remain fail-closed. Deadline expiry stops
+admission but retains every unfinished original owner; a later explicit cleanup
+attempt can settle the original callback rather than creating replacement
+authority. The barrier does not perform automatic Store reconciliation.
+
+Tests cover actual worker completion plus a held original terminal Store ACK
+and native proof without consuming Shell commands, callback-before-wait and
+coalesced/spurious wakes, deadline-capped retry, retained late native/Store ACKs,
+one deadline across delayed Store and native phases, and no cleanup dispatch
+after an already-expired deadline or a delayed policy clock. Shell/profile
+attachment remains the next independent product join.
+
 Deterministic real-SQLite/loopback tests hold Admitted, Running and successful
 terminal ACKs independently of actual commits. They exercise an accepted A,
 fresh observed/cancelled B, unread-result and progress ownership, wrong-guard

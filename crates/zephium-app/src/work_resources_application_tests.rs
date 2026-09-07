@@ -11,6 +11,7 @@ struct GatedStore {
     hold: Arc<AtomicU8>,
     pending: Arc<Mutex<Option<Held>>>,
     wakes: Arc<AtomicUsize>,
+    held_signal: Arc<Mutex<Option<mpsc::SyncSender<()>>>>,
 }
 impl AgentAuditPort for GatedStore {
     fn append(
@@ -34,6 +35,7 @@ impl AgentWorkJournalPort for GatedStore {
             _ => false,
         };
         let pending = self.pending.clone();
+        let held_signal = self.held_signal.clone();
         self.store.dispatch(
             request,
             Box::new(move |reply| {
@@ -43,6 +45,9 @@ impl AgentWorkJournalPort for GatedStore {
                         .unwrap()
                         .replace((reply, completion))
                         .is_none());
+                    if let Some(signal) = held_signal.lock().unwrap().as_ref() {
+                        signal.send(()).unwrap();
+                    }
                 } else {
                     completion(reply);
                 }
@@ -91,6 +96,7 @@ fn coordinator_with_wake(
         hold: Arc::new(AtomicU8::new(0)),
         pending: Arc::new(Mutex::new(None)),
         wakes: Arc::new(AtomicUsize::new(0)),
+        held_signal: Arc::new(Mutex::new(None)),
     });
     let wakes = store.wakes.clone();
     let (owner, native, resource) = construct_fixture_with_wake(
@@ -157,12 +163,26 @@ fn worker_exit_wakes_application_after_last_progress_wake_was_consumed() {
     if child("worker_exit_wakes_application_after_last_progress_wake_was_consumed") {
         return;
     }
+    worker_exit_wake(false);
+}
+
+#[test]
+fn blocking_shutdown_joins_original_worker_store_and_native_wakes_without_shell_commands() {
+    if child(
+        "blocking_shutdown_joins_original_worker_store_and_native_wakes_without_shell_commands",
+    ) {
+        return;
+    }
+    worker_exit_wake(true);
+}
+
+fn worker_exit_wake(blocking_shutdown: bool) {
     let _serial = crate::WORK_RUNTIME_TEST_SERIAL
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let directory = tempfile::tempdir().unwrap();
     let (wake, wakes) = mpsc::sync_channel(1);
-    let (mut work, native, _) = coordinator_with_wake(
+    let (mut work, native, store) = coordinator_with_wake(
         directory.path(),
         Arc::new(move || match wake.try_send(()) {
             Ok(()) | Err(mpsc::TrySendError::Full(())) => true,
@@ -240,6 +260,42 @@ fn worker_exit_wakes_application_after_last_progress_wake_was_consumed() {
         work.next_deadline().is_none(),
         "no timer may hide the missing completion wake"
     );
+    if blocking_shutdown {
+        assert!(!work.shutdown_until(
+            &Clock(AtomicU64::new(2)),
+            Instant::now() + Duration::from_millis(20)
+        ));
+        assert!(
+            !work.resource_destroyed(),
+            "unfinished original worker stays owned"
+        );
+        assert_eq!(native.destructions.load(Ordering::Acquire), 0);
+        let (held, holding) = mpsc::sync_channel(1);
+        *store.held_signal.lock().unwrap() = Some(held);
+        store
+            .hold
+            .store(AgentWorkDisposition::Succeeded as u8, Ordering::Release);
+        let deliver = std::thread::spawn(move || {
+            release.send(()).unwrap();
+            holding
+                .recv_timeout(Duration::from_secs(2))
+                .expect("original terminal CAS callback");
+            store.release(0);
+        });
+        assert!(work.shutdown_until(
+            &Clock(AtomicU64::new(2)),
+            Instant::now() + Duration::from_secs(3)
+        ));
+        deliver.join().unwrap();
+        assert!(work.resource_destroyed());
+        assert_eq!(native.global_audits.load(Ordering::Acquire), 1);
+        assert_eq!(
+            work.record().unwrap().disposition(),
+            AgentWorkDisposition::Succeeded
+        );
+        assert!(work.take_extraction().is_some());
+        return;
+    }
     release.send(()).unwrap();
     while work.phase() != AdmissionPhase::Terminal {
         wakes
@@ -565,6 +621,154 @@ fn timed_out_terminal_acknowledgement_never_reopens_retained_execution() {
     for server in servers.lock().unwrap().drain(..) {
         assert_eq!(server.join().unwrap(), 2);
     }
+}
+
+#[test]
+fn shutdown_deadline_caps_native_retry_without_consuming_the_original_coordinator() {
+    if child("shutdown_deadline_caps_native_retry_without_consuming_the_original_coordinator") {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let (mut work, native, _) = coordinator(directory.path());
+    poll_until(&mut work, |work| work.ready());
+    native.global_queued_debt.store(1, Ordering::Release);
+    let clock = Clock(AtomicU64::new(2));
+    let deadline = Instant::now() + Duration::from_millis(40);
+    assert!(!work.shutdown_until(&clock, deadline));
+    assert!(Instant::now() >= deadline);
+    assert!(Instant::now() < deadline + Duration::from_secs(1));
+    assert!(work.resource_destroyed());
+    assert!(!work.ready());
+    assert_eq!(native.global_audits.load(Ordering::Acquire), 1);
+    assert!(work.next_deadline().unwrap() > deadline);
+    native.global_queued_debt.store(0, Ordering::Release);
+    assert!(work.shutdown_until(&clock, Instant::now() + Duration::from_secs(2)));
+    assert_eq!(native.global_audits.load(Ordering::Acquire), 2);
+}
+
+#[test]
+fn shutdown_timeout_retains_the_exact_pending_native_terminal() {
+    if child("shutdown_timeout_retains_the_exact_pending_native_terminal") {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let (mut work, native, _) = coordinator(directory.path());
+    poll_until(&mut work, |work| work.ready());
+    native.hold_global_audit.store(true, Ordering::Release);
+    let clock = Clock(AtomicU64::new(2));
+    assert!(!work.shutdown_until(&clock, Instant::now() + Duration::from_millis(30)));
+    assert!(native.pending_global_audit.lock().unwrap().is_some());
+    assert!(work.resource_destroyed());
+    assert_eq!(native.global_audits.load(Ordering::Acquire), 1);
+    native.release_global_audit();
+    assert!(work.shutdown_until(&clock, Instant::now() + Duration::from_secs(1)));
+    assert_eq!(native.global_audits.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn shutdown_timeout_retains_the_original_terminal_store_acknowledgement() {
+    if child("shutdown_timeout_retains_the_original_terminal_store_acknowledgement") {
+        return;
+    }
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let directory = tempfile::tempdir().unwrap();
+    let (mut work, native, store) = coordinator(directory.path());
+    let servers = Servers::default();
+    poll_until(&mut work, |work| work.ready());
+    store
+        .hold
+        .store(AgentWorkDisposition::Succeeded as u8, Ordering::Release);
+    assert!(work
+        .submit(
+            request(
+                ContextRunId::generate(),
+                vec![response_stream(1), response_stream(2)],
+                servers.clone()
+            ),
+            now()
+        )
+        .is_ok());
+    poll_until(&mut work, |_| store.pending.lock().unwrap().is_some());
+    native.join();
+    let clock = Clock(AtomicU64::new(2));
+    assert!(!work.shutdown_until(&clock, Instant::now() + Duration::from_millis(30)));
+    assert!(store.pending.lock().unwrap().is_some());
+    assert!(work.resource_destroyed());
+    assert_eq!(native.global_audits.load(Ordering::Acquire), 0);
+    assert_eq!(
+        work.record().unwrap().disposition(),
+        AgentWorkDisposition::Running
+    );
+    assert!(!work.ready());
+    assert!(work.take_extraction().is_none());
+    native.hold_global_audit.store(true, Ordering::Release);
+    let deliver = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(20));
+        store.release(0);
+    });
+    let deadline = Instant::now() + Duration::from_millis(120);
+    assert!(!work.shutdown_until(&clock, deadline));
+    deliver.join().unwrap();
+    assert!(Instant::now() >= deadline);
+    assert!(Instant::now() < deadline + Duration::from_secs(1));
+    assert_eq!(native.global_audits.load(Ordering::Acquire), 1);
+    assert_eq!(
+        work.record().unwrap().disposition(),
+        AgentWorkDisposition::Succeeded
+    );
+    native.release_global_audit();
+    assert!(work.shutdown_until(&clock, Instant::now() + Duration::from_secs(1)));
+    assert_eq!(
+        work.record().unwrap().disposition(),
+        AgentWorkDisposition::Succeeded
+    );
+    assert!(work.take_extraction().is_some());
+    assert!(!work.ready());
+    for server in servers.lock().unwrap().drain(..) {
+        assert_eq!(server.join().unwrap(), 2);
+    }
+}
+
+#[test]
+fn expired_shutdown_deadline_stops_admission_without_dispatching_cleanup() {
+    if child("expired_shutdown_deadline_stops_admission_without_dispatching_cleanup") {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let (mut work, native, _) = coordinator(directory.path());
+    poll_until(&mut work, |work| work.ready());
+    let clock = Clock(AtomicU64::new(2));
+    assert!(!work.shutdown_until(&clock, Instant::now()));
+    assert!(!work.ready());
+    assert_eq!(native.destructions.load(Ordering::Acquire), 0);
+    assert_eq!(native.global_audits.load(Ordering::Acquire), 0);
+    assert!(work.shutdown_until(&clock, Instant::now() + Duration::from_secs(1)));
+}
+
+#[test]
+fn shutdown_deadline_is_rechecked_after_the_policy_clock_returns() {
+    if child("shutdown_deadline_is_rechecked_after_the_policy_clock_returns") {
+        return;
+    }
+    struct DelayedClock;
+    impl TerraControllerClock for DelayedClock {
+        fn now(&self) -> Result<AgentPolicyInstant, TerraControllerClockError> {
+            std::thread::sleep(Duration::from_millis(30));
+            Ok(now())
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let (mut work, native, _) = coordinator(directory.path());
+    poll_until(&mut work, |work| work.ready());
+    assert!(!work.shutdown_until(&DelayedClock, Instant::now() + Duration::from_millis(10)));
+    assert_eq!(native.destructions.load(Ordering::Acquire), 0);
+    assert_eq!(native.global_audits.load(Ordering::Acquire), 0);
+    assert!(work.shutdown_until(
+        &Clock(AtomicU64::new(2)),
+        Instant::now() + Duration::from_secs(1)
+    ));
 }
 
 #[test]
