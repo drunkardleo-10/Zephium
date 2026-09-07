@@ -163,8 +163,12 @@ deliberately restricts namespace creation; adding `SYS_ADMIN`, disabling WebKit'
 sandbox, or accepting that inherited filter as WebKit evidence is not a fix.
 
 Host-policy setup and native execution run only on an exact main-branch push or
-reviewed main release call. The native job checks out `github.sha` only and
-refuses a different `checkout_ref`; its helper independently checks event,
+reviewed main release call. The job admits `workflow_call` and the release
+caller's `workflow_dispatch` context to an explicit refusal step, so invalid
+release inputs fail rather than silently skipping the proof. Release calls
+require a nonempty lowercase 40-hex `checkout_ref` equal to `github.sha`; pushes
+require empty input. The native job checks out `github.sha` only, and its helper
+independently checks the same input contract, event,
 branch and actual checkout before **any** mode, including host-policy cleanup.
 Pull requests retain source/policy/platform-neutral gates and explicitly mint
 no Fedora native-runtime evidence. They never run this host-policy job.

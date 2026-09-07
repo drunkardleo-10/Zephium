@@ -240,7 +240,7 @@ end
 def linux_native_environment_errors(ci, dockerfile, launcher, preflight, profile)
   errors = []
   job = ci.fetch("jobs").fetch("linux-native-security")
-  trusted_if = "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')"
+  trusted_if = "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call')"
   errors << "host policy must be captive to an exact trusted-main event after source policy" unless
     job["if"] == trusted_if && job["needs"] == "workflow-policy"
   checkout = job.fetch("steps").find { |step| step["uses"]&.start_with?("actions/checkout@") }
@@ -249,8 +249,8 @@ def linux_native_environment_errors(ci, dockerfile, launcher, preflight, profile
   refusal = job.fetch("steps").first
   errors << "a differing native checkout must fail before checkout, not skip the native proof" unless
     refusal["name"] == "Refuse a caller-selected native checkout" && refusal["shell"] == "bash" &&
-    refusal["env"] == { "NATIVE_CHECKOUT_REF" => "${{ inputs.checkout_ref }}" } &&
-    refusal["run"] == 'test -z "${NATIVE_CHECKOUT_REF}" || test "${NATIVE_CHECKOUT_REF}" = "${GITHUB_SHA}"'
+    job["env"] == { "NATIVE_CHECKOUT_REF" => "${{ inputs.checkout_ref }}" } &&
+    !refusal.key?("env") && refusal["run"].include?('test "${NATIVE_CHECKOUT_REF}" = "${GITHUB_SHA}"')
   errors << "native gates must use the hosted VM, not an implicit Docker job" unless
     job["runs-on"] == "ubuntu-24.04" && !job.key?("container")
   errors << "native steps must stay inside their exact unprivileged executor" unless
@@ -296,7 +296,9 @@ def linux_native_environment_errors(ci, dockerfile, launcher, preflight, profile
     "target=/opt/rustup,readonly", "target=/opt/rust-bin,readonly",
     'docker network disconnect bridge "${native_name}"',
     'CARGO_NET_OFFLINE=${native_offline}',
-    '"${GITHUB_EVENT_NAME:?}" != push && "${GITHUB_EVENT_NAME}" != workflow_dispatch',
+    '"${GITHUB_EVENT_NAME:?}" != push && "${GITHUB_EVENT_NAME}" != workflow_dispatch && "${GITHUB_EVENT_NAME}" != workflow_call',
+    '"${NATIVE_CHECKOUT_REF:-}" =~ ^[0-9a-f]{40}$',
+    '"${NATIVE_CHECKOUT_REF}" = "${GITHUB_SHA}"',
     '"${GITHUB_REF:?}" != refs/heads/main',
     '"$(git rev-parse HEAD)" != "${GITHUB_SHA}"',
     'sudo apparmor_parser --remove scripts/ci/linux-native.apparmor'
@@ -320,16 +322,69 @@ def linux_native_environment_errors(ci, dockerfile, launcher, preflight, profile
   errors
 end
 
+def native_job_admitted?(expression, event, ref)
+  # Evaluate the actual workflow's deliberately closed equality/AND/OR grammar,
+  # not a second hard-coded admission list that could miss a skipped release.
+  parts = /\Agithub\.ref == '([^']+)' && \((.+)\)\z/.match(expression)
+  raise "unexpected native job expression grammar" unless parts
+  events = parts[2].split(" || ").map do |term|
+    match = /\Agithub\.event_name == '([^']+)'\z/.match(term)
+    raise "unexpected native event expression grammar" unless match
+    match[1]
+  end
+  ref == parts[1] && events.include?(event)
+end
+
+def assert_native_event_admission(job)
+  %w[push workflow_dispatch workflow_call pull_request pull_request_target schedule].each do |event|
+    ["refs/heads/main", "refs/heads/unreviewed", "refs/pull/1/merge", "refs/tags/v1"].each do |ref|
+      expected = ref == "refs/heads/main" && %w[push workflow_dispatch workflow_call].include?(event)
+      raise "native job event admission changed: #{event}/#{ref}" unless
+        native_job_admitted?(job.fetch("if"), event, ref) == expected
+    end
+  end
+  refusal = job.fetch("steps").first.fetch("run")
+  %w[push workflow_call workflow_dispatch pull_request].each do |event|
+    ["", "a" * 40, "b" * 40, "a" * 39, "A" * 40].each do |candidate|
+      expected = event == "push" ? candidate.empty? : %w[workflow_call workflow_dispatch].include?(event) && candidate == "a" * 40
+      env = { "NATIVE_CHECKOUT_REF" => candidate, "GITHUB_SHA" => "a" * 40,
+              "GITHUB_EVENT_NAME" => event, "GITHUB_REF" => "refs/heads/main" }
+      _, _, status = Open3.capture3(env, "bash", "-e", "-c", refusal)
+      raise "native checkout refusal changed: #{event}/#{candidate.inspect}" unless status.success? == expected
+    end
+  end
+end
+
 def assert_linux_native_environment(root)
   ci = parse_workflow(File.read(File.join(root, ".github/workflows/ci.yml")), "CI")
   paths = %w[linux-native.Dockerfile linux_native_container.sh prove_linux_native_namespaces.sh linux-native.apparmor]
   sources = paths.map { |path| File.read(File.join(root, "scripts/ci", path), encoding: "UTF-8") }
   errors = linux_native_environment_errors(ci, *sources)
   raise errors.join("\n") unless errors.empty?
-  refusal = ci.fetch("jobs").fetch("linux-native-security").fetch("steps").first.fetch("run")
-  [["", true], ["a" * 40, true], ["b" * 40, false]].each do |candidate, accepted|
-    _, _, status = Open3.capture3({ "NATIVE_CHECKOUT_REF" => candidate, "GITHUB_SHA" => "a" * 40 }, "bash", "-c", refusal)
-    raise "native checkout refusal changed" unless status.success? == accepted
+  job = ci.fetch("jobs").fetch("linux-native-security")
+  assert_native_event_admission(job)
+  mutation = Marshal.load(Marshal.dump(job))
+  mutation["if"] = mutation.fetch("if").sub(" || github.event_name == 'workflow_call'", "")
+  begin
+    assert_native_event_admission(mutation)
+  rescue RuntimeError => error
+    raise unless error.message.start_with?("native job event admission changed:")
+  else
+    raise "silent release-call skip escaped the expression regression"
+  end
+  ['test "${NATIVE_CHECKOUT_REF}" = "${GITHUB_SHA}"',
+   'test -z "${NATIVE_CHECKOUT_REF}"'].each do |check|
+    mutation = Marshal.load(Marshal.dump(job))
+    run = mutation.fetch("steps").first.fetch("run")
+    raise "missing checkout input mutation target" unless run.include?(check)
+    mutation.fetch("steps").first["run"] = run.sub(check, "true")
+    begin
+      assert_native_event_admission(mutation)
+    rescue RuntimeError => error
+      raise unless error.message.start_with?("native checkout refusal changed:")
+    else
+      raise "checkout input mutation escaped: #{check}"
+    end
   end
 
   [
@@ -371,13 +426,25 @@ def assert_linux_native_environment(root)
       ["pull_request", "refs/heads/main", "a trusted main event"],
       ["push", "refs/heads/unreviewed", "a trusted main event"],
       ["push", "refs/heads/main", "the exact event checkout"],
-      ["workflow_dispatch", "refs/heads/main", "the exact event checkout"]
+      ["workflow_dispatch", "refs/heads/main", "the exact event checkout"],
+      ["workflow_call", "refs/heads/main", "the exact event checkout"]
     ].each do |event, ref, expected|
       env = { "GITHUB_RUN_ID" => "1", "GITHUB_RUN_ATTEMPT" => "1",
-              "GITHUB_EVENT_NAME" => event, "GITHUB_REF" => ref, "GITHUB_SHA" => "0" * 40 }
+              "GITHUB_EVENT_NAME" => event, "GITHUB_REF" => ref, "GITHUB_SHA" => "0" * 40,
+              "NATIVE_CHECKOUT_REF" => %w[workflow_call workflow_dispatch].include?(event) ? "0" * 40 : "" }
       out, err, status = Open3.capture3(env, "bash", File.join(root, "scripts/ci/linux_native_container.sh"), mode, chdir: root)
       unless !status.success? && out.empty? && err.strip == "native host setup requires #{expected}"
         raise "native #{mode} failed to refuse #{event}/#{ref} at the trust boundary"
+      end
+    end
+    [["push", "a" * 40], ["workflow_call", ""], ["workflow_call", "b" * 40],
+     ["workflow_dispatch", ""], ["workflow_dispatch", "a" * 39]].each do |event, candidate|
+      env = { "GITHUB_RUN_ID" => "1", "GITHUB_RUN_ATTEMPT" => "1",
+              "GITHUB_EVENT_NAME" => event, "GITHUB_REF" => "refs/heads/main",
+              "GITHUB_SHA" => "a" * 40, "NATIVE_CHECKOUT_REF" => candidate }
+      out, err, status = Open3.capture3(env, "bash", File.join(root, "scripts/ci/linux_native_container.sh"), mode, chdir: root)
+      unless !status.success? && out.empty? && err.strip == "native host setup requires an event-bound checkout input"
+        raise "native #{mode} failed to refuse #{event} input before host policy"
       end
     end
   end
