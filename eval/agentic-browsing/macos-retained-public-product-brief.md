@@ -102,6 +102,18 @@ Work-resource/foreground mutation and agentic-probe/controller/runtime gates,
 formatting and whitespace checks. No live retry, credential access or provider
 request was used for this correction.
 
+Pre-launch follow-up: review found that first-wins publication alone still let
+duplicate failure causes sample the native URL before discarding their evidence.
+The original guard now atomically reserves its sole capture before invoking a
+lazy sampler. Native getters and evidence construction execute only for the
+winner, outside the publication lock. Reentrant, concurrent and late duplicate
+causes cannot sample again; a failed sampler does not reopen capture. The
+controlled regression counts exactly one sampler invocation while the first
+is held, permits reading unavailable evidence during construction, rejects
+foreign resources, and preserves the original result after publication/seal.
+No live run, authority, readiness, timeout or cleanup change accompanies this
+correction.
+
 ## Workflow and decision
 
 Prepare a source-backed product brief from the public

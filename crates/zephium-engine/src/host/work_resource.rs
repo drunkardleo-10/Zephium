@@ -58,18 +58,22 @@ pub(super) struct WorkNativeResource {
 impl WorkNativeResource {
     #[cfg(feature = "native-agentic-work-resource-probe")]
     fn record_construction_failure(&self, cause: &'static str) {
-        // One bounded native URL sample supplies both exact readiness and
-        // component relations. Raw values never enter the retained evidence.
-        let current = self
-            .view
-            .as_ref()
-            .zip(self.guard.document())
-            .and_then(|(view, expected)| {
-                view.work_navigation().map(|gate| {
-                    crate::platform::imp::current_document_evidence(view.view(), gate, expected)
-                })
-            });
-        self.guard.record_construction_evidence(
+        self.guard.record_construction_evidence(|| {
+            // Reserved before sampling: duplicate failure causes never enter
+            // this closure or read a second native URL.
+            let current =
+                self.view
+                    .as_ref()
+                    .zip(self.guard.document())
+                    .and_then(|(view, expected)| {
+                        view.work_navigation().map(|gate| {
+                            crate::platform::imp::current_document_evidence(
+                                view.view(),
+                                gate,
+                                expected,
+                            )
+                        })
+                    });
             crate::agent_context_port::resource_witness::ConstructionEvidence {
                 cause,
                 port_failure: None,
@@ -89,8 +93,8 @@ impl WorkNativeResource {
                     .view
                     .as_ref()
                     .and_then(|view| view.semantic_pending_for_audit()),
-            },
-        );
+            }
+        });
     }
     fn unconstructed(guard: Arc<WorkResourceGuard>, native_resource: NativeResourceLease) -> Self {
         Self {
@@ -395,7 +399,7 @@ impl EngineHost {
         let result = self.build_work_resource(guard.clone());
         let Ok(mut resource) = result else {
             #[cfg(feature = "native-agentic-work-resource-probe")]
-            guard.record_construction_evidence(
+            guard.record_construction_evidence(|| {
                 crate::agent_context_port::resource_witness::ConstructionEvidence {
                     cause: "build_refused",
                     port_failure: result.err(),
@@ -406,8 +410,8 @@ impl EngineHost {
                     current_document: false,
                     current_components: None,
                     semantic_pending: None,
-                },
-            );
+                }
+            });
             task.complete(Outcome::Refused);
             return;
         };

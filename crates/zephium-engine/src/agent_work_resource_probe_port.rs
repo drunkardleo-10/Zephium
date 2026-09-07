@@ -21,9 +21,22 @@ pub struct ConstructionEvidence {
 }
 
 impl WorkResourceGuard {
-    pub(crate) fn record_construction_evidence(&self, evidence: ConstructionEvidence) {
+    pub(crate) fn record_construction_evidence(
+        &self,
+        sample: impl FnOnce() -> ConstructionEvidence,
+    ) {
+        // Reserve before any native getter or evidence construction. Sampling
+        // runs outside the publication lock, including reentrant callbacks.
+        // A lost/panicking sample remains unavailable; it never permits retry.
+        if self
+            .construction_evidence_claimed
+            .swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        let evidence = sample();
         if let Ok(mut first) = self.construction_evidence.lock() {
-            first.get_or_insert(evidence);
+            *first = Some(evidence);
         }
     }
 }
@@ -341,11 +354,39 @@ mod tests {
             current_components: None,
             semantic_pending: None,
         };
-        guard.record_construction_evidence(first);
-        guard.record_construction_evidence(ConstructionEvidence {
-            cause: "late_cleanup",
-            ..first
+        let samples = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = samples.clone();
+        let sampling_guard = guard.clone();
+        let (entered, entry) = std::sync::mpsc::sync_channel(1);
+        let (release, proceed) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            sampling_guard.record_construction_evidence(|| {
+                counted.fetch_add(1, Ordering::AcqRel);
+                assert!(sampling_guard.construction_evidence.try_lock().is_ok());
+                sampling_guard
+                    .record_construction_evidence(|| panic!("reentrant sample must not run"));
+                entered.send(()).unwrap();
+                proceed
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .unwrap();
+                first
+            })
         });
+        entry
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(slot.construction_evidence(&resource).is_none());
+        guard.record_construction_evidence(|| {
+            samples.fetch_add(1, Ordering::AcqRel);
+            ConstructionEvidence {
+                cause: "native_health",
+                ..first
+            }
+        });
+        assert_eq!(samples.load(Ordering::Acquire), 1);
+        release.send(()).unwrap();
+        worker.join().unwrap();
+        guard.record_construction_evidence(|| panic!("late cleanup must not resample"));
         assert_eq!(slot.construction_evidence(&resource), Some(first));
         assert!(slot.construction_evidence(source().1.resource()).is_none());
         slot.seal();

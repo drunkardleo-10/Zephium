@@ -383,7 +383,8 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
     (
         "crates/zephium-engine/src/agent_work_resource_probe_port.rs",
         &[
-            "first.get_or_insert(evidence)", "admission.witness_resource(resource)?",
+            "ifself.construction_evidence_claimed.swap(true,Ordering::AcqRel){return;}",
+            "letevidence=sample()", "*first=Some(evidence)", "admission.witness_resource(resource)?",
             "letguard=admission.witness_resource(resource)?", "*guard.construction_evidence.lock().ok()?",
             "#[cfg(feature=\"native-agentic-public-resource-probe\")]PublicProductBrief",
             "Self::RenderingFixture=>fixed_fixture(target)", "Self::RenderingFixture=>8", "Self::PublicProductBrief=>1",
@@ -503,6 +504,7 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "resource.record_construction_failure(\"construction_deadline\")",
             "resource.record_construction_failure(\"navigation_gate\")",
             "resource.record_construction_failure(\"native_health\")",
+            "self.guard.record_construction_evidence(||{",
             "witness_admission:Option<witness::Admission>",
             "self.agent_contexts.len()+self.work_resources.len()>=MAX_LIVE_CONTEXTS",
             "execution_count<=MAX_EXECUTING_CONTEXTS",
