@@ -46,9 +46,9 @@ pub const SAFARI_SECURITY_SOURCE_URL: &str = "https://support.apple.com/en-us/14
 pub const TAHOE_SECURITY_SOURCE_URL: &str = "https://support.apple.com/en-us/148281";
 
 /// The last UTC date on which CI may accept this review without an update.
-pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-09-03";
-/// 2026-09-04T00:00:00Z. The human-readable review date above is inclusive.
-pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_788_480_000;
+pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-09-10";
+/// 2026-09-11T00:00:00Z. The human-readable review date above is inclusive.
+pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_789_084_800;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ProductVersion([u32; 3]);
