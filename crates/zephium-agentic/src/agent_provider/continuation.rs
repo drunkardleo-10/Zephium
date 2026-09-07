@@ -2887,7 +2887,7 @@ mod tests {
         assert_eq!(input[2]["name"], "read");
         assert_eq!(input[2]["arguments"], arguments);
         let output = input[3]["output"].as_str().expect("read output");
-        assert!(output.starts_with("ZREAD2 content=untrusted"));
+        assert!(output.starts_with("ZREAD3 content=untrusted"));
         assert!(output.contains("private readable state"));
         let debug = format!("{draft:?}");
         assert!(!debug.contains("private readable state"));
@@ -3070,7 +3070,7 @@ mod tests {
         let output = messages[2]["content"][0]["content"]
             .as_str()
             .expect("read output");
-        assert!(output.starts_with("ZREAD2 content=untrusted"));
+        assert!(output.starts_with("ZREAD3 content=untrusted"));
         assert!(output.contains("private readable state"));
         assert!(!format!("{draft:?}").contains("private readable state"));
     }

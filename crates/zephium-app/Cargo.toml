@@ -28,6 +28,7 @@ base64.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 zephium-store = { workspace = true, features = ["work-execution"] }
 tempfile.workspace = true
 

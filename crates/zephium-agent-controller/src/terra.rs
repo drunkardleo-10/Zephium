@@ -2456,7 +2456,7 @@ impl AgentBrowserSession {
         let payload = encode_semantic_extraction_request(
             schema,
             &read,
-            SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
+            SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE,
         )
         .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
         .map_err(AgentBrowserProviderError::InitialEncoding)?;

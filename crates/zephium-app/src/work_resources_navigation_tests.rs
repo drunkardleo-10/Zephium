@@ -42,7 +42,16 @@ pub(super) fn read_result(
     } else {
         wire
     };
-    let wire = if native.region_root.load(Ordering::Acquire) {
+    let wire = if expanded && native.dense_expansion.load(Ordering::Acquire) {
+        let mut nodes = vec![serde_json::json!({"k":1,"r":"landmark"})];
+        for index in 0..117 {
+            let length = if index == 116 { 89 } else { 78 };
+            let prefix = format!("Fixture result item {index}: ");
+            let text = format!("{prefix}{}", "x".repeat(length - prefix.len()));
+            nodes.push(serde_json::json!({"k":index+2,"p":0,"r":"paragraph","t":text}));
+        }
+        serde_json::json!({"v":1,"i":invocation.invocation().get(),"g":invocation.snapshot_generation().get(),"c":"scope_boundary","n":nodes}).to_string()
+    } else if native.region_root.load(Ordering::Acquire) {
         let wire = wire.replacen("\"r\":\"paragraph\"", "\"r\":\"landmark\"", 1);
         if expanded {
             wire.replace("\"c\":\"complete\"", "\"c\":\"node_limit\"")
@@ -323,7 +332,7 @@ fn retained_progressive_capture_retires_old_replay_and_keeps_navigation_live() {
     );
     assert!(!requests[1].contains("call_1") && !requests[1].contains("fc_1"));
     assert!(requests[1].contains("ZEPHIUM_HOST_INSPECTION_PROGRESS_V1"));
-    assert!(requests[2].contains("new_scoped_evidence") && requests[2].contains("ZREAD2"));
+    assert!(requests[2].contains("new_scoped_evidence") && requests[2].contains("ZREAD3"));
     assert!(requests[2].contains("ZEPHIUM_HOST_INSPECTION_PROGRESS_V1"));
     assert!(
         requests[3].contains("document_marker_1") && !requests[3].contains("new_scoped_evidence")
@@ -338,6 +347,74 @@ fn retained_progressive_capture_retires_old_replay_and_keeps_navigation_live() {
         )))
     ));
     owner.reap_absent(&resource).unwrap();
+    owner.seal_resources().unwrap();
+    assert!(owner.locally_retired());
+}
+
+#[test]
+fn retained_dense_region_reaches_counted_mapping_with_exact_sources_and_cleanup() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (owner, native, resource, browser) = setup();
+    native.discovery.store(true, Ordering::Release);
+    native.region_root.store(true, Ordering::Release);
+    native.dense_expansion.store(true, Ordering::Release);
+    let mut responses = vec![
+        navigation_stream(1, FIRST),
+        inspection_stream(r#"{"kind":"region","target":"@a1"}"#)
+            .replace("resp_1", "resp_2")
+            .replace("fc_1", "fc_2")
+            .replace("call_1", "call_2"),
+    ];
+    responses.extend(final_streams());
+    let (controller, mut result, scope, server, requests) = prepare(browser, responses);
+    let (_, lifecycle) = start(controller, scope);
+    let AgentWorkRetainedOutcome::Accepted {
+        settlement,
+        extraction,
+    } = finish(&mut result)
+    else {
+        panic!("legal dense scoped evidence did not reach source-backed mapping")
+    };
+    assert_eq!(settlement.closure().model_calls(), 4);
+    assert_eq!(settlement.closure().navigations(), 1);
+    assert_eq!(extraction.stats().source_edges(), 1);
+    assert_eq!(native.reads.load(Ordering::Acquire), 3);
+    assert_eq!(native.acquisitions.load(Ordering::Acquire), 1);
+    assert!(matches!(
+        lifecycle.drain_until(Instant::now() + Duration::from_secs(2)),
+        AgentRuntimeScopedDrain::Drained(_)
+    ));
+    native.join();
+    assert_eq!(server.join().unwrap(), 4);
+    let requests = requests.lock().unwrap();
+    let mapper_body = requests[3].split_once("\r\n\r\n").unwrap().1;
+    let mapper: serde_json::Value = serde_json::from_str(mapper_body).unwrap();
+    let evidence = mapper["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["output"].as_str())
+        .find(|text| text.starts_with("ZEXTRACT"))
+        .unwrap();
+    assert!(evidence.len() <= 16 * 1024);
+    assert!(evidence.contains("ZREAD3 content=untrusted"));
+    assert_eq!(
+        evidence
+            .lines()
+            .filter(|line| line.starts_with("R @r"))
+            .count(),
+        117
+    );
+    assert!(evidence.contains("R @r117 @a118 text paragraph"));
+    assert!(
+        !requests[3].contains("document_marker_0") && !requests[3].contains("document_marker_1")
+    );
+    assert!(mapper.get("tools").is_none());
+    eprintln!("retained dense mapping: snapshot_request_bytes={} mapper_request_bytes={} extraction_payload_bytes={}",requests[2].split_once("\r\n\r\n").unwrap().1.len(),mapper_body.len(),evidence.len());
+    let mut destroy = owner.destroy(&resource).unwrap();
+    assert!(destroy.poll(now()).unwrap().is_some());
     owner.seal_resources().unwrap();
     assert!(owner.locally_retired());
 }

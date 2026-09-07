@@ -518,7 +518,7 @@ later bounded turn. Refusal or pre-commit cancellation releases the reservation.
 carry bounded page strings. A read result records the exact full-observation
 fingerprint in addition to its context, generation, capture time, provenance,
 omissions, and content guard. Only the matching prior tool-only `read` stop may
-bind its token-admitted `ZREAD2` bytes to a newer same-plan call. The full
+bind its token-admitted `ZREAD3` bytes to a newer same-plan call. The full
 OpenAI or Anthropic replay must retain the exact semantic-delivery revision.
 The exact-local path requires an exact (`ExactLocal` or authenticated
 `ProviderExact`) latest-result measurement and an `ExactLocal` whole-input
@@ -547,7 +547,7 @@ other profile capability or continuation budget changes.
 turn. Only the exact prior tool-only `extract` correlation selecting the same
 trusted schema ID may bind a strictly newer same-plan call. Deterministic
 `ZEXTRACT1` input carries trusted, closed schema field declarations followed by
-the exact hostile `ZREAD2` evidence; one guard binds the full schema definition,
+the exact hostile `ZREAD3` evidence; one guard binds the full schema definition,
 read, observation fingerprint, context, generation, and capture time. The
 complete immutable replay must either receive an `ExactLocal` pinned
 provider/model/tokenizer count, or enter the OpenAI-only conservative-reserve
@@ -559,14 +559,26 @@ A trusted extraction schema may carry a nonempty, duplicate-free closed set of
 semantic source roles. Its default is all roles. Selection removes readable
 fields only after the same bounded native capture and sensitivity/secret
 checks; it is not a DOM selector, capture expansion, native call, or permission.
-Nondefault `ZREAD2` headers name the canonical `selected_roles`; excluded
+Nondefault `ZREAD3` headers name the canonical `selected_roles`; excluded
 otherwise-readable fields report `role_selection`, separately from
 `source_incomplete` and privacy/byte/item omissions. The added metadata consumes
 the same combined encoding budget. Both schema and read guards bind the exact
 selection even when two role sets happen to produce identical fragments.
 Encoding and output admission reject mismatched schema/read selections; only
 fragments in the exact delivered projection can be cited. Default all-role
-model bytes and baseline-read behavior are unchanged.
+source selection and baseline-read behavior are unchanged.
+
+`ZREAD3` declares row columns and default frame/page/public provenance once;
+nondefault frame, source and sensitivity remain explicit on each affected row.
+Every fragment, quoted value, source ID and receipt binding is preserved.
+Terminal extraction has its own 112-KiB conservative encoding envelope instead
+of reusing the 16-KiB initial-observation envelope: the existing STANDARD read
+can contain 32 KiB of values, which require up to 64 KiB after escaping, plus
+128 bounded rows, already-admitted frame provenance and the closed schema.
+This is not additional page disclosure or a larger native/read/turn/run budget.
+Only actual encoded bytes enter the original whole-request provider-exact
+counting path. The mapper receives the whole selected read, never an implicit
+evidence subset chosen after the model has committed to terminal extraction.
 
 The mapping call exposes no browser tools. OpenAI uses strict Responses
 `text.format` JSON Schema and Anthropic uses stable Messages

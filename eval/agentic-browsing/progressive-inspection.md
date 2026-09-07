@@ -204,3 +204,52 @@ answers the objective separately from mechanical success. Record actual tools,
 source provenance, tokens/latency and exact native/durable closure. Do not treat
 this fixture evidence as that live proof. General hidden/virtualized content,
 cross-page evidence synthesis, signed-in actions and Windows remain outside it.
+
+## Corrected live route: extraction encoding refusal
+
+The subsequent Luna run on `031d8c8` stopped oscillating and selected Navigate
+(`$state`) → Snapshot (region) → Extract. The scoped observation had 118 nodes,
+9,137 text bytes, a 16,159-byte semantic payload and `ScopeBoundary` completeness.
+It then refused with `Browser(InitialEncoding(OutputLimit))`, before any mapper
+provider call or durable success. Three calls consumed 15,731 input / 334 output
+tokens, 3,795 microUSD and approximately 11.2 seconds. Native/retained shutdown
+was clean. Preserved local store:
+`/private/tmp/zephium-retained-svelte-inspection-corrected.t3x1n8/failed-live-run-data`.
+This is a representation-budget defect, not model navigation or cleanup failure.
+
+The terminal encoder reused the 16-KiB initial-observation envelope for both
+its repeated per-fragment metadata and closed schema. A generic 118-node,
+9,137-byte fixture reproduced 19,890 read bytes + 352 schema bytes = 20,242
+bytes. Compact `ZREAD3` retains all 117 fragments with explicit column/default
+declarations and per-row nondefault provenance: 12,964 + 352 = 13,316 bytes.
+There is no site-specific selection or dropped evidence.
+
+Compaction alone does not make the old envelope correct for every STANDARD
+read. Terminal extraction now has a dedicated bounded 112-KiB conservative
+envelope, derived from the existing 32-KiB read-value limit with worst-case
+2x escaping, 128 rows, admitted frame provenance and closed schema. It keeps
+the entire selected read rather than losing potentially useful later sources
+after the model has chosen terminal extraction. Native text/node limits,
+source IDs, schema/read/receipt guards, transcript and cumulative run limits
+are unchanged. Only actual bytes are reserved and the existing immutable
+whole-provider-request exact count remains mandatory before generation.
+
+Focused deterministic measurements (not live-model token predictions):
+
+- Maximum STANDARD read: 128 fragments / 32,768 source bytes, all quote
+  characters, plus all 64 schema fields and 2,048 total field-name bytes.
+  Encoded read 69,702 bytes + schema 6,800 = 76,502 bytes; all sources survive.
+  The old 16-KiB envelope refuses, the dedicated envelope admits, and a cap
+  one byte below the exact composed size still refuses. Receipt bindings match.
+- Retained Navigate → dense Region → Extract → mapper loopback: four original
+  controller model calls, one navigation, one mapped source edge, one retained
+  acquisition, exact resource/debt cleanup. Snapshot-turn request 24,272 bytes;
+  full mapper request 34,264 bytes; extraction payload 13,153 bytes. Request
+  sizes include the unchanged current-document replay; fixture counter values
+  are not claimed as real provider token usage.
+- Six extraction-encoder and five read-encoder tests pass, including hostile
+  delimiter quoting, cross-frame/sensitive provenance and exact binding.
+
+The corrected encoder has not yet been live-qualified. A real mapper response,
+source validation, durable success and human-reviewed usefulness still need
+the unchanged open-objective Luna run after integration review.

@@ -83,7 +83,7 @@ impl ReadFault {
             assert_eq!(body.contains("\"name\":\"read\""), self != Self::Disabled);
         }
         if turns > u8::from(self == Self::AfterActionExtraction) {
-            assert!(body.contains("ZREAD2 content=untrusted"));
+            assert!(body.contains("ZREAD3 content=untrusted"));
             assert!(body.contains("Field"));
         }
     }

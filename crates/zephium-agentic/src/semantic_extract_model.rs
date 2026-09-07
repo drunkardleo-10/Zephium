@@ -1,7 +1,7 @@
 //! Deterministic, token-admitted extraction mapping input.
 //!
 //! Trusted Rust code serializes one closed extraction schema beside an exact
-//! bounded `ZREAD2` projection. The resulting payload is purpose-bound to that
+//! bounded `ZREAD3` projection. The resulting payload is purpose-bound to that
 //! schema and read; committing it proves only model disclosure, never browser
 //! authority or browser-attested truth.
 
@@ -402,7 +402,8 @@ impl fmt::Debug for SemanticExtractionDeliveryReceipt {
     }
 }
 
-/// Encodes one trusted closed schema beside one exact bounded `ZREAD2` input.
+/// Encodes one trusted closed schema beside one exact bounded `ZREAD3` input.
+/// This exact encoder never changes or silently filters the read.
 pub fn encode_semantic_extraction_request(
     schema: &SemanticExtractionSchema,
     read: &SemanticReadResult<'_>,
@@ -666,6 +667,207 @@ mod tests {
         )
         .expect("schema");
         (observation, schema)
+    }
+
+    fn dense_fixture() -> (SemanticObservation, SemanticExtractionSchema) {
+        let (previous, _) = fixture();
+        let mut nodes = vec![json!({"k": 1, "r": "document"})];
+        for index in 0..117 {
+            let length = if index == 116 { 89 } else { 78 };
+            nodes.push(json!({"k": index + 2, "p": 0, "r": "paragraph", "t": "x".repeat(length)}));
+        }
+        let snapshot = decode_semantic_snapshot(
+            SemanticDecodeContext::new(
+                SemanticInvocationId::new(43).unwrap(),
+                previous.frames()[0].frame().clone(),
+                SemanticSnapshotGeneration::new(43).unwrap(),
+            ),
+            &serde_json::to_vec(&json!({"v":1,"i":43,"g":43,"c":"scope_boundary","n":nodes}))
+                .unwrap(),
+        )
+        .unwrap();
+        let request = previous
+            .begin_expansion(
+                SemanticObservationId::new(44).unwrap(),
+                previous.frames()[0].nodes()[0].reference(),
+                previous.frames()[0].frame(),
+                crate::SemanticExpansionKind::Region,
+                SemanticObservationBudget::INITIAL_FILTERED,
+            )
+            .unwrap();
+        let observation = SemanticObservationAssembler::new(request, snapshot)
+            .unwrap()
+            .finish()
+            .unwrap();
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![
+                SemanticExtractionFieldSchema::try_text("summary".into(), true, 640).unwrap(),
+                SemanticExtractionFieldSchema::try_text_list("findings".into(), true, 8, 320)
+                    .unwrap(),
+                SemanticExtractionFieldSchema::try_text_list("caveats".into(), true, 4, 224)
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+        (observation, schema)
+    }
+
+    #[test]
+    fn dense_scoped_evidence_fits_original_combined_extraction_budget() {
+        let (observation, schema) = dense_fixture();
+        assert_eq!(observation.node_count(), 118);
+        assert_eq!(observation.frames()[0].total_text_bytes(), 9137);
+        let acknowledgement = crate::SemanticObservationAcknowledgement::from_fingerprint(
+            crate::semantic_diff::SemanticObservationFingerprint::from_observation(&observation),
+        );
+        let read = read_semantic_observation(
+            &observation,
+            SemanticReadAuthority::Acknowledged(&acknowledgement),
+            SemanticCaptureInstant::from_millis(45),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .unwrap();
+        let diagnostic_budget = SemanticModelEncodingBudget::try_new(
+            32 * 1024,
+            32 * 1024,
+            SemanticTokenCountRequirement::ConservativeAllowed,
+        )
+        .unwrap();
+        let diagnostic =
+            encode_semantic_extraction_request(&schema, &read, diagnostic_budget).unwrap();
+        eprintln!("dense extraction: nodes={} items={} source_bytes={} read_bytes={} schema_bytes={} combined_bytes={}", observation.node_count(), read.stats().items(), observation.frames()[0].total_text_bytes(), diagnostic.stats().read().bytes(), diagnostic.stats().bytes()-diagnostic.stats().read().bytes(), diagnostic.stats().bytes());
+        let encoded = encode_semantic_extraction_request(
+            &schema,
+            &read,
+            SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .unwrap();
+        assert_eq!(encoded.stats().bytes(), 13316);
+        assert_eq!(encoded.stats().read().items(), 117);
+        assert_eq!(
+            encoded
+                .content
+                .lines()
+                .filter(|line| line.starts_with("R @r"))
+                .count(),
+            117
+        );
+        assert!(encoded.content.contains("R @r117 @a118 text paragraph"));
+        let revision = SemanticTokenizerRevision::try_new("dense-extraction-v1".into()).unwrap();
+        let payload = encoded.admit_conservative_utf8(&revision).unwrap();
+        assert_eq!(
+            payload.token_measurement().quality(),
+            SemanticTokenCountQuality::Conservative
+        );
+        assert!(payload.matches(&schema, &read));
+        let (_, _, delivery) = payload.into_provider_parts();
+        assert!(delivery.matches(&schema, &read));
+        assert!(delivery.commit().matches(&schema, &read));
+    }
+
+    #[test]
+    fn extraction_envelope_preserves_maximum_standard_read_and_closed_schema() {
+        let (previous, _) = fixture();
+        let mut nodes = vec![json!({"k":1,"r":"document"})];
+        // Exercise the read contract beyond today's smaller native capture:
+        // 128 complete fragments, 32 KiB source, with worst-case 2x quoting.
+        for index in 0..128 {
+            nodes.push(json!({"k":index+2,"p":0,"r":"paragraph","t":"\"".repeat(256)}));
+        }
+        let snapshot = decode_semantic_snapshot(
+            SemanticDecodeContext::new(
+                SemanticInvocationId::new(43).unwrap(),
+                previous.frames()[0].frame().clone(),
+                SemanticSnapshotGeneration::new(43).unwrap(),
+            ),
+            &serde_json::to_vec(&json!({"v":1,"i":43,"g":43,"c":"complete","n":nodes})).unwrap(),
+        )
+        .unwrap();
+        let request = crate::SemanticObservationRequest::initial(
+            SemanticObservationId::new(44).unwrap(),
+            previous.request().context(),
+            SemanticObservationBudget::try_new(129, 32 * 1024, 1).unwrap(),
+        );
+        let observation = SemanticObservationAssembler::new(request, snapshot)
+            .unwrap()
+            .finish()
+            .unwrap();
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(45).unwrap(),
+            (0..64)
+                .map(|index| {
+                    SemanticExtractionFieldSchema::try_text_list(
+                        format!("field_{index:026}"),
+                        true,
+                        64,
+                        4096,
+                    )
+                    .unwrap()
+                })
+                .collect(),
+        )
+        .unwrap();
+        let read = read_semantic_observation(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(45),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .unwrap();
+        assert_eq!(read.stats().items(), 128);
+        assert_eq!(read.stats().content_bytes(), 32 * 1024);
+        assert_eq!(read.stats().omitted_items(), 0);
+        assert!(matches!(
+            encode_semantic_extraction_request(
+                &schema,
+                &read,
+                SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE
+            ),
+            Err(SemanticModelEncodingError::OutputLimit)
+        ));
+        let encoded = encode_semantic_extraction_request(
+            &schema,
+            &read,
+            SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .unwrap();
+        eprintln!("maximum STANDARD extraction: source_bytes={} read_bytes={} schema_bytes={} combined_bytes={}",
+            read.stats().content_bytes(),encoded.stats().read().bytes(),
+            encoded.stats().bytes()-encoded.stats().read().bytes(),encoded.stats().bytes());
+        assert_eq!(encoded.stats().read().items(), 128);
+        assert_eq!(encoded.stats().fields(), 64);
+        assert_eq!(
+            encoded
+                .content
+                .lines()
+                .filter(|line| line.starts_with("R @r"))
+                .count(),
+            128
+        );
+        assert!(encoded.content.contains("R @r128 @a129 text paragraph"));
+        let exact_bytes = encoded.stats().bytes();
+        assert!(matches!(
+            encode_semantic_extraction_request(
+                &schema,
+                &read,
+                SemanticModelEncodingBudget::try_new(
+                    exact_bytes - 1,
+                    exact_bytes,
+                    SemanticTokenCountRequirement::ConservativeAllowed
+                )
+                .unwrap()
+            ),
+            Err(SemanticModelEncodingError::OutputLimit)
+        ));
+        let revision = SemanticTokenizerRevision::try_new("maximum-extraction-v1".into()).unwrap();
+        let payload = encoded.admit_conservative_utf8(&revision).unwrap();
+        assert!(payload.matches(&schema, &read));
+        let (_, _, delivery) = payload.into_provider_parts();
+        assert!(delivery.matches(&schema, &read));
+        assert!(delivery.commit().matches(&schema, &read));
     }
 
     #[test]
