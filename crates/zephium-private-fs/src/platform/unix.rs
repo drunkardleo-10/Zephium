@@ -642,25 +642,34 @@ pub(crate) fn atomic_publish_noreplace_between(
     _destination_directory_path: &Path,
     destination: &str,
 ) -> Result<(), PrivateFsError> {
-    use rustix::fs::{renameat_with, RenameFlags};
+    rename_noreplace_between(source_directory, source, destination_directory, destination)
+        .map_err(|error| {
+            if error == rustix::io::Errno::EXIST {
+                PrivateFsError::AlreadyExists
+            } else {
+                PrivateFsError::Io
+            }
+        })?;
+    #[cfg(zephium_private_fs_operation_instrumentation)]
+    crate::instrumentation::record_rename();
+    Ok(())
+}
 
-    renameat_with(
+// Keep the raw native result at this one syscall seam for the platform
+// regression below. The public private-filesystem error contract is unchanged.
+fn rename_noreplace_between(
+    source_directory: &File,
+    source: &str,
+    destination_directory: &File,
+    destination: &str,
+) -> rustix::io::Result<()> {
+    rustix::fs::renameat_with(
         source_directory,
         source,
         destination_directory,
         destination,
-        RenameFlags::NOREPLACE,
+        rustix::fs::RenameFlags::NOREPLACE,
     )
-    .map_err(|error| {
-        if error == rustix::io::Errno::EXIST {
-            PrivateFsError::AlreadyExists
-        } else {
-            PrivateFsError::Io
-        }
-    })?;
-    #[cfg(zephium_private_fs_operation_instrumentation)]
-    crate::instrumentation::record_rename();
-    Ok(())
 }
 
 pub(crate) fn sync_directory(file: &File) -> Result<(), PrivateFsError> {
@@ -833,6 +842,102 @@ fn acl_is_private(_file: &File) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn nested_sealed_same_parent_publication_reports_native_operation_and_errno() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        // Match the repository's nested tree, seal modes and independently
+        // held same-parent descriptors. No writable-tree retry or rename
+        // fallback is permitted: this is evidence for the existing primitive.
+        let parent = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let mode = |path: &Path, mode| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        mode(parent.path(), 0o700);
+        let stage = parent.path().join("tree.stage");
+        std::fs::create_dir(&stage).unwrap();
+        for relative in ["assets", "assets/icons", "scripts"] {
+            std::fs::create_dir(stage.join(relative)).unwrap();
+            mode(&stage.join(relative), 0o700);
+        }
+        for relative in [
+            "assets/icons/icon.txt",
+            "manifest.json",
+            "scripts/content.js",
+        ] {
+            let path = stage.join(relative);
+            std::fs::write(&path, b"fixed test bytes").unwrap();
+            mode(&path, 0o400);
+            File::open(&path).unwrap().sync_all().unwrap();
+        }
+        for relative in ["assets/icons", "assets", "scripts", ""] {
+            let path = stage.join(relative);
+            mode(&path, 0o500);
+            File::open(&path).unwrap().sync_all().unwrap();
+        }
+        let source_parent = File::open(parent.path()).unwrap();
+        let destination_parent = File::open(parent.path()).unwrap();
+        let occupied = parent.path().join("occupied.object");
+        std::fs::create_dir(&occupied).unwrap();
+        std::fs::write(occupied.join("sentinel"), b"must remain").unwrap();
+        let sealed = File::open(&stage).unwrap();
+        let identity = sealed.metadata().unwrap().ino();
+        let mut destination_refusal = None;
+        let outcome = (|| -> Result<(), (&str, Option<i32>)> {
+            sealed
+                .sync_all()
+                .map_err(|error| ("pre_publish_sync", error.raw_os_error()))?;
+            rename_noreplace_between(
+                &source_parent,
+                "tree.stage",
+                &destination_parent,
+                "tree.object",
+            )
+            .map_err(|error| ("rename_noreplace", Some(error.raw_os_error())))?;
+            source_parent
+                .sync_all()
+                .map_err(|error| ("post_publish_parent_sync", error.raw_os_error()))?;
+            destination_refusal = Some(
+                rename_noreplace_between(
+                    &source_parent,
+                    "tree.object",
+                    &destination_parent,
+                    "occupied.object",
+                )
+                .map_err(|error| error.raw_os_error()),
+            );
+            Ok(())
+        })();
+        // Restore only this fixture's exact directories for TempDir cleanup,
+        // after the terminal outcome. This never authorizes a second attempt.
+        for name in ["tree.stage", "tree.object"] {
+            let root = parent.path().join(name);
+            if root.exists() {
+                for relative in ["", "assets", "assets/icons", "scripts"] {
+                    mode(&root.join(relative), 0o700);
+                }
+            }
+        }
+        assert!(outcome.is_ok(), "native publication failed: {outcome:?}");
+        assert_eq!(
+            destination_refusal,
+            Some(Err(rustix::io::Errno::EXIST.raw_os_error())),
+            "native existing-destination refusal changed"
+        );
+        assert_eq!(
+            std::fs::read(occupied.join("sentinel")).unwrap(),
+            b"must remain"
+        );
+        assert!(!stage.exists());
+        assert_eq!(
+            std::fs::metadata(parent.path().join("tree.object"))
+                .unwrap()
+                .ino(),
+            identity
+        );
+    }
 
     #[test]
     fn create_errors_are_clean_only_when_the_exact_name_is_absent() {
