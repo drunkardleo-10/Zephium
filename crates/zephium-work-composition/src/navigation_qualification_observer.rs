@@ -148,7 +148,9 @@ impl ApplicationObserver {
             }
             AgentWorkEventKind::ToolProposed(AgentBrowserToolKind::Extract) => {}
             AgentWorkEventKind::ToolProposed(
-                AgentBrowserToolKind::Read | AgentBrowserToolKind::Locate,
+                AgentBrowserToolKind::Read
+                | AgentBrowserToolKind::Locate
+                | AgentBrowserToolKind::Snapshot,
             ) if self.definition.inspection => {}
             AgentWorkEventKind::ToolProposed(_)
             | AgentWorkEventKind::ActionActive
@@ -174,6 +176,7 @@ mod tests {
         for kind in [
             AgentBrowserToolKind::Read,
             AgentBrowserToolKind::Locate,
+            AgentBrowserToolKind::Snapshot,
             AgentBrowserToolKind::Navigate,
             AgentBrowserToolKind::Navigate,
         ] {
@@ -252,6 +255,7 @@ mod tests {
             AgentWorkEventKind::Verified,
             AgentWorkEventKind::Recovery,
             AgentWorkEventKind::ToolProposed(AgentBrowserToolKind::Read),
+            AgentWorkEventKind::ToolProposed(AgentBrowserToolKind::Snapshot),
         ] {
             let mut observer = ApplicationObserver::default();
             observer.observe_kind(kind);

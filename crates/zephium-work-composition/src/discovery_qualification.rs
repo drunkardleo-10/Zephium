@@ -96,6 +96,9 @@ impl AgentWorkTask for PublicTask {
     fn allows_baseline_read(&self) -> bool {
         self.0.allows_baseline_read()
     }
+    fn allows_progressive_observation(&self) -> bool {
+        self.0.allows_progressive_observation()
+    }
     fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
         self.0.extraction_schema()
     }
@@ -172,4 +175,24 @@ pub fn verify_owned(result: &SemanticOwnedExtractionResult) -> bool {
                 && source.frame.frame() == FrameId::MAIN
                 && SemanticOrigin::parse(ORIGIN).as_ref() == Ok(source.frame.origin())
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn exact_discovery_definition_forwards_inspection_without_actions() {
+        let identity = ContextIdentity::new(
+            ContextId::generate(),
+            ContextRunId::generate(),
+            zephium_core::ids::ProfileId::generate(),
+            ContextKind::Owned,
+        );
+        let wrapped = (DEFINITION.task)(identity).unwrap();
+        assert!(wrapped.allows_progressive_observation());
+        assert!(wrapped.allows_baseline_read());
+        assert!(!wrapped.allows_actions_before_extraction());
+        assert!(!wrapped.allows_subtree_extraction());
+        assert_eq!(wrapped.navigation_discovery(), Some(&scope().unwrap()));
+    }
 }

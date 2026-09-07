@@ -70,6 +70,9 @@ impl AgentWorkTask for PublicTask {
     fn allows_baseline_read(&self) -> bool {
         self.0.allows_baseline_read()
     }
+    fn allows_progressive_observation(&self) -> bool {
+        self.0.allows_progressive_observation()
+    }
     fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
         self.0.extraction_schema()
     }
@@ -184,40 +187,7 @@ impl ApplicationObserver {
             self.failed |= event.run() != snapshot.run
                 || self.sequence.checked_add(1) != Some(event.sequence());
             self.sequence = event.sequence();
-            match event.kind() {
-                AgentWorkEventKind::ModelSettled {
-                    input_tokens,
-                    output_tokens,
-                    cost_micro_usd,
-                    ..
-                } => {
-                    for (total, delta) in [
-                        (&mut self.report.model_calls, 1),
-                        (&mut self.report.input_tokens, input_tokens),
-                        (&mut self.report.output_tokens, output_tokens),
-                        (&mut self.report.cost_micro_usd, cost_micro_usd),
-                    ] {
-                        if let Some(sum) = total.checked_add(delta) {
-                            *total = sum;
-                        } else {
-                            self.failed = true;
-                        }
-                    }
-                }
-                AgentWorkEventKind::ToolProposed(
-                    AgentBrowserToolKind::Read | AgentBrowserToolKind::Extract,
-                ) => {}
-                AgentWorkEventKind::ToolProposed(AgentBrowserToolKind::Navigate) => {
-                    self.report.navigation_proposals =
-                        self.report.navigation_proposals.saturating_add(1);
-                    self.failed |= self.report.navigation_proposals > DEFINITION.max_hops;
-                }
-                AgentWorkEventKind::ToolProposed(_)
-                | AgentWorkEventKind::ActionActive
-                | AgentWorkEventKind::NeedsHuman(_)
-                | AgentWorkEventKind::Recovery => self.failed = true,
-                _ => {}
-            }
+            self.observe_kind(event.kind());
             self.failed |= writeln!(
                 std::io::stdout().lock(),
                 "work-retained-product-event: sequence={} phase={:?} wall_ms={} content=redacted",
@@ -258,6 +228,49 @@ impl ApplicationObserver {
         self.report.accepted &= writeln!(std::io::stdout().lock(), "work-retained-product-terminal: phase={:?} failure={:?} persistence_failure={:?} answer=dashboard_inspectable_public factual_validation=false content=redacted", snapshot.phase, snapshot.failure, snapshot.persistence_failure).is_ok();
         Some(self.report)
     }
+
+    // The same handler is exercised by deterministic composition tests. It
+    // observes only content-free events; admission and lifecycle stay elsewhere.
+    fn observe_kind(&mut self, kind: AgentWorkEventKind) {
+        match kind {
+            AgentWorkEventKind::ModelSettled {
+                input_tokens,
+                output_tokens,
+                cost_micro_usd,
+                ..
+            } => {
+                for (total, delta) in [
+                    (&mut self.report.model_calls, 1),
+                    (&mut self.report.input_tokens, input_tokens),
+                    (&mut self.report.output_tokens, output_tokens),
+                    (&mut self.report.cost_micro_usd, cost_micro_usd),
+                ] {
+                    if let Some(sum) = total.checked_add(delta) {
+                        *total = sum;
+                    } else {
+                        self.failed = true;
+                    }
+                }
+            }
+            AgentWorkEventKind::ToolProposed(AgentBrowserToolKind::Extract) => {}
+            AgentWorkEventKind::ToolProposed(
+                AgentBrowserToolKind::Read
+                | AgentBrowserToolKind::Locate
+                | AgentBrowserToolKind::Snapshot,
+            ) if DEFINITION.inspection => {}
+            AgentWorkEventKind::ToolProposed(AgentBrowserToolKind::Navigate) => {
+                self.report.navigation_proposals =
+                    self.report.navigation_proposals.saturating_add(1);
+                self.failed |= self.report.navigation_proposals > DEFINITION.max_hops;
+            }
+            AgentWorkEventKind::ToolProposed(_)
+            | AgentWorkEventKind::ActionActive
+            | AgentWorkEventKind::Verified
+            | AgentWorkEventKind::NeedsHuman(_)
+            | AgentWorkEventKind::Recovery => self.failed = true,
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -271,11 +284,12 @@ mod tests {
             zephium_core::ids::ProfileId::generate(),
             ContextKind::Owned,
         );
-        let task = task(identity).unwrap();
+        let task = (DEFINITION.task)(identity).unwrap();
         assert!(task.navigation_target().is_none());
         assert_eq!(task.navigation_discovery(), Some(&discovery().unwrap()));
         assert!(task.navigation_route().is_none());
         assert!(task.allows_baseline_read());
+        assert!(task.allows_progressive_observation());
         assert!(!task.allows_subtree_extraction());
         assert!(configuration_diagnostic().contains("retention=inspectable-public"));
         assert!(configuration_diagnostic().contains(DEFINITION.task_name));
@@ -291,5 +305,112 @@ mod tests {
         assert_eq!(fields[1].max_list_item_bytes(), Some(320));
         assert_eq!(fields[2].max_list_items(), Some(4));
         assert_eq!(fields[2].max_list_item_bytes(), Some(224));
+    }
+
+    #[test]
+    fn retained_definition_and_observer_preserve_progressive_inspection_without_effects() {
+        let identity = ContextIdentity::new(
+            ContextId::generate(),
+            ContextRunId::generate(),
+            zephium_core::ids::ProfileId::generate(),
+            ContextKind::Owned,
+        );
+        let wrapped = (DEFINITION.task)(identity).unwrap();
+        assert!(wrapped.allows_progressive_observation());
+        assert!(wrapped.allows_baseline_read());
+        assert!(!wrapped.allows_actions_before_extraction());
+        assert!(!wrapped.allows_subtree_extraction());
+        let mut observer = ApplicationObserver::default();
+        for kind in [
+            AgentBrowserToolKind::Snapshot,
+            AgentBrowserToolKind::Read,
+            AgentBrowserToolKind::Locate,
+            AgentBrowserToolKind::Navigate,
+            AgentBrowserToolKind::Snapshot,
+            AgentBrowserToolKind::Navigate,
+            AgentBrowserToolKind::Extract,
+        ] {
+            observer.observe_kind(AgentWorkEventKind::ToolProposed(kind));
+            assert!(observer.healthy(), "{kind:?}");
+        }
+        assert_eq!(observer.report().navigation_proposals, 2);
+        assert!(
+            !observer.report().accepted,
+            "tool events never prove durable/source closure"
+        );
+        observer.observe_kind(AgentWorkEventKind::ToolProposed(
+            AgentBrowserToolKind::Navigate,
+        ));
+        assert!(!observer.healthy());
+        observer.observe_kind(AgentWorkEventKind::ToolProposed(
+            AgentBrowserToolKind::Snapshot,
+        ));
+        assert!(
+            !observer.healthy(),
+            "inspection cannot clear a previous failure"
+        );
+        for kind in [
+            AgentBrowserToolKind::Act,
+            AgentBrowserToolKind::Back,
+            AgentBrowserToolKind::Forward,
+            AgentBrowserToolKind::Reload,
+            AgentBrowserToolKind::Wait,
+            AgentBrowserToolKind::Screenshot,
+            AgentBrowserToolKind::ShowForHuman,
+            AgentBrowserToolKind::ResumeAfterHuman,
+        ] {
+            let mut observer = ApplicationObserver::default();
+            observer.observe_kind(AgentWorkEventKind::ToolProposed(kind));
+            assert!(!observer.healthy(), "{kind:?}");
+            assert!(!observer.report().accepted);
+        }
+        for kind in [
+            AgentWorkEventKind::ActionActive,
+            AgentWorkEventKind::Verified,
+            AgentWorkEventKind::Recovery,
+        ] {
+            let mut observer = ApplicationObserver::default();
+            observer.observe_kind(kind);
+            assert!(!observer.healthy());
+        }
+    }
+
+    #[test]
+    fn retained_observer_keeps_exact_usage_and_sticky_failure_across_inspection() {
+        let settled =
+            |input_tokens, output_tokens, cost_micro_usd| AgentWorkEventKind::ModelSettled {
+                call: AgentModelCallId::new(1).unwrap(),
+                input_tokens,
+                output_tokens,
+                cost_micro_usd,
+                request_bytes: 100,
+                semantic_bytes: 50,
+                accounting: AgentModelUsageAccounting::Exact,
+                elapsed_millis: 1,
+            };
+        let mut observer = ApplicationObserver::default();
+        observer.observe_kind(settled(720, 58, 214));
+        observer.observe_kind(AgentWorkEventKind::ToolProposed(
+            AgentBrowserToolKind::Snapshot,
+        ));
+        observer.observe_kind(settled(888, 88, 284));
+        let report = observer.report();
+        assert_eq!(
+            (
+                report.model_calls,
+                report.input_tokens,
+                report.output_tokens,
+                report.cost_micro_usd
+            ),
+            (2, 1608, 146, 498)
+        );
+        assert!(observer.healthy());
+        assert!(!report.accepted);
+        observer.observe_kind(settled(u64::MAX, 0, 0));
+        observer.observe_kind(AgentWorkEventKind::ToolProposed(
+            AgentBrowserToolKind::Snapshot,
+        ));
+        assert!(!observer.healthy());
+        assert!(!observer.report().accepted);
     }
 }

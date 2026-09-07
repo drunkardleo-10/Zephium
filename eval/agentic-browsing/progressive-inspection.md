@@ -78,6 +78,21 @@ Deterministic gates used for this slice:
 
 ## Remaining proof
 
+An independent exact-composition preflight after `a921e3b` found that the retained
+qualification's logging task wrapper had not forwarded progressive inspection,
+and its result observer rejected Snapshot. Those defects were corrected before
+any live launch. Both retained and legacy discovery definition factories now
+forward the capability; their actual observers accept Snapshot only alongside
+the approved read-only inspection set (Read/Locate), without relaxing effects,
+navigation-hop, durable-terminal or current-source checks. Exact-wrapper/observer
+and architecture mutation regressions cover this join rather than only the bare
+controller task. The original objective, destinations and answer schema are
+unchanged.
+Verification of that correction: 13 Work-composition tests with both
+`retained-product-qualification,discovery-qualification` enabled, seven composition
+boundary mutation tests, strict all-target Clippy and the complete agentic probe
+boundary check passed. No app or provider was launched for these checks.
+
 After deterministic review, run the unchanged open Svelte objective with Luna
 and diagnostic `store=true`, without revealing the answer or choosing its route.
 Review whether the model obtains useful evidence and whether the result actually

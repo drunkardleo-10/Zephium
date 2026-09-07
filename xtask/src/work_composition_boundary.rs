@@ -106,6 +106,29 @@ fn ordinary_navigation_observer(source: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn inspection_composition(retained: &str, discovery: &str, observer: &str) -> Result<(), String> {
+    for wrapper in [retained, discovery] {
+        let production = wrapper.split("\n#[cfg(test)]").next().unwrap_or(wrapper);
+        require(production, &[
+            "fn allows_progressive_observation(&self) -> bool { self.0.allows_progressive_observation() }",
+        ])?;
+    }
+    let retained = retained.split("\n#[cfg(test)]").next().unwrap_or(retained);
+    let observer = observer.split("\n#[cfg(test)]").next().unwrap_or(observer);
+    for source in [retained, observer] {
+        require(source, &[
+            "self.observe_kind(event.kind());",
+            "AgentBrowserToolKind::Read | AgentBrowserToolKind::Locate | AgentBrowserToolKind::Snapshot,",
+            "AgentWorkEventKind::ToolProposed(_)",
+            "AgentWorkEventKind::ActionActive",
+            "AgentWorkEventKind::Recovery => self.failed = true",
+        ])?;
+    }
+    require(retained, &[") if DEFINITION.inspection => {}"])?;
+    require(observer, &[") if self.definition.inspection => {}"])?;
+    Ok(())
+}
+
 pub(crate) fn check(root: &Path) -> Result<(), String> {
     let read = |path: &str| {
         fs::read_to_string(root.join(path))
@@ -128,6 +151,11 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
         "let profile = self.work_profile_binding(); if let Some(work) = &mut self.work { work.admit(submission, Some(profile)); }",
     ])?;
     ordinary_navigation_observer(&read("desktop/src/navigation_probe.rs")?)?;
+    inspection_composition(
+        &read("crates/zephium-work-composition/src/retained_product_qualification.rs")?,
+        &read("crates/zephium-work-composition/src/discovery_qualification.rs")?,
+        &read("crates/zephium-work-composition/src/navigation_qualification_observer.rs")?,
+    )?;
     require(&read("desktop/Cargo.toml")?, &[
         "macos-work-navigation-probe = [\"macos-work\", \"zephium-work-composition/navigation-qualification\", \"tauri/custom-protocol\"]",
     ])?;
@@ -301,6 +329,54 @@ fn combined_result_qualification(source: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn exact_discovery_wrappers_and_observers_cannot_drop_inspection() {
+        let retained = include_str!(
+            "../../crates/zephium-work-composition/src/retained_product_qualification.rs"
+        );
+        let discovery =
+            include_str!("../../crates/zephium-work-composition/src/discovery_qualification.rs");
+        let observer = include_str!(
+            "../../crates/zephium-work-composition/src/navigation_qualification_observer.rs"
+        );
+        inspection_composition(retained, discovery, observer).unwrap();
+        assert!(inspection_composition(
+            &retained.replace("self.0.allows_progressive_observation()", "false"),
+            discovery,
+            observer
+        )
+        .is_err());
+        assert!(inspection_composition(
+            retained,
+            &discovery.replace("self.0.allows_progressive_observation()", "false"),
+            observer
+        )
+        .is_err());
+        assert!(inspection_composition(
+            &retained.replace(
+                "AgentBrowserToolKind::Snapshot",
+                "AgentBrowserToolKind::Wait"
+            ),
+            discovery,
+            observer
+        )
+        .is_err());
+        assert!(inspection_composition(
+            retained,
+            discovery,
+            &observer.replace(
+                "AgentBrowserToolKind::Snapshot",
+                "AgentBrowserToolKind::Wait"
+            )
+        )
+        .is_err());
+        assert!(inspection_composition(
+            &retained.replace("self.observe_kind(event.kind());", ""),
+            discovery,
+            observer
+        )
+        .is_err());
+    }
     #[test]
     fn navigation_observer_cannot_bypass_admission_or_ordinary_shutdown() {
         let source = include_str!("../../desktop/src/navigation_probe.rs");
