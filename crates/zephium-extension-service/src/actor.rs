@@ -4188,11 +4188,13 @@ mod tests {
         ExtensionServiceLifecycle,
         ExtensionServiceShutdownOutcome as CoreExtensionServiceShutdownOutcome,
     };
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    use zephium_extension_runtime_api::ExtensionRuntimeHostProfileAbsenceDisposition;
     use zephium_extension_runtime_api::{
         ExtensionRuntimeHostActivationContext, ExtensionRuntimeHostActivationPorts,
         ExtensionRuntimeHostBindError, ExtensionRuntimeHostFactory,
         ExtensionRuntimeHostFactoryPort, ExtensionRuntimeHostOwnershipPort,
-        ExtensionRuntimeHostProfileAbsenceDisposition, ExtensionRuntimeHostRecoveryContext,
+        ExtensionRuntimeHostRecoveryContext,
     };
 
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
