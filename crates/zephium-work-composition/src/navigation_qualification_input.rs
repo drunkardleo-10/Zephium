@@ -154,6 +154,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn configuration_diagnostic_matches_selected_static_witness() {
+        assert_eq!(super::super::configuration_diagnostic(), "work-application-navigation-config: provider=OpenAIResponses model=gpt-5.6-luna retention=stateless task=react-one-hop-v1");
+        #[cfg(feature = "discovery-qualification")]
+        assert_eq!(crate::discovery_qualification::configuration_diagnostic(), "work-application-navigation-config: provider=OpenAIResponses model=gpt-5.6-luna retention=inspectable-public task=react-open-objective-v1");
+    }
+
+    #[test]
     fn frozen_owned_input_is_valid_without_provider_or_native_activity() {
         let started = Instant::now();
         let identity = ContextIdentity::new(

@@ -191,7 +191,7 @@ fn run(app: &tauri::AppHandle, control: &Control) -> Result<ApplicationReport, &
             Ok::<_, &'static str>(view)
         })
         .ok_or("cancelled_after_credential")??;
-    super::write_diagnostic(format_args!("work-application-navigation-config: provider=OpenAIResponses model=gpt-5.6-luna retention=stateless task=react-one-hop-v1"));
+    super::write_diagnostic(format_args!("{}", qualifier::configuration_diagnostic()));
     let mut observer = ApplicationObserver::default();
     loop {
         if control.admission.cancelled() || !observer.healthy() {

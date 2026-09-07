@@ -19,6 +19,8 @@ const MAX_HOPS: u64 = 1;
 const DISCOVERY: bool = false;
 
 pub(crate) struct QualificationDefinition {
+    pub task_name: &'static str,
+    pub retention_name: &'static str,
     pub objective: &'static str,
     pub task: fn(ContextIdentity) -> Result<Box<dyn AgentWorkTask>, AgentWorkFailure>,
     pub authority: fn(AgentPlanNodeAuthority) -> Result<AgentPlanNodeAuthority, &'static str>,
@@ -28,6 +30,8 @@ pub(crate) struct QualificationDefinition {
     pub verify_owned: fn(&SemanticOwnedExtractionResult) -> bool,
 }
 const DEFINITION: QualificationDefinition = QualificationDefinition {
+    task_name: "react-one-hop-v1",
+    retention_name: "stateless",
     objective: OBJECTIVE,
     task,
     authority,
@@ -36,6 +40,17 @@ const DEFINITION: QualificationDefinition = QualificationDefinition {
     inspection: DISCOVERY,
     verify_owned,
 };
+
+impl QualificationDefinition {
+    pub(crate) fn configuration_diagnostic(&self) -> String {
+        format!("work-application-navigation-config: provider=OpenAIResponses model=gpt-5.6-luna retention={} task={}", self.retention_name, self.task_name)
+    }
+}
+
+/// Content-free configuration of the exact statically selected witness.
+pub fn configuration_diagnostic() -> String {
+    DEFINITION.configuration_diagnostic()
+}
 
 fn authority(authority: AgentPlanNodeAuthority) -> Result<AgentPlanNodeAuthority, &'static str> {
     Ok(authority)

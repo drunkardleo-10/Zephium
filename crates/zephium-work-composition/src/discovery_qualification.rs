@@ -10,6 +10,8 @@ const ORIGIN: &str = "https://react.dev";
 const MAX_HOPS: u64 = 2;
 const DISCOVERY: bool = true;
 pub(crate) const DEFINITION: QualificationDefinition = QualificationDefinition {
+    task_name: "react-open-objective-v1",
+    retention_name: "inspectable-public",
     objective: OBJECTIVE,
     task,
     authority,
@@ -18,6 +20,11 @@ pub(crate) const DEFINITION: QualificationDefinition = QualificationDefinition {
     inspection: DISCOVERY,
     verify_owned,
 };
+
+/// Content-free configuration of the exact statically selected witness.
+pub fn configuration_diagnostic() -> String {
+    DEFINITION.configuration_diagnostic()
+}
 
 pub fn load_request(
     started: std::time::Instant,
