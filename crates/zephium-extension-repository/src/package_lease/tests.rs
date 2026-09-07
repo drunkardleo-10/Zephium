@@ -1,9 +1,9 @@
-use super::api::{
-    ActiveBundledPackageLease, ActiveBundledPackageReleaseRequest, RollbackBundledPackageLease,
-    RollbackBundledPackageReleaseRequest,
-};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-use super::api::{BundledPackageLeaseError, BundledPackageLeaseReleaseError};
+use super::api::BundledPackageLeaseReleaseError;
+use super::api::{
+    ActiveBundledPackageLease, ActiveBundledPackageReleaseRequest, BundledPackageLeaseError,
+    RollbackBundledPackageLease, RollbackBundledPackageReleaseRequest,
+};
 use super::policy::{map_snapshot_object_error, snapshot_object_error_requires_poison};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use super::runtime::{LocalLeaseError, PackageLeaseRuntime};

@@ -59,6 +59,9 @@ use x11_dl::xlib::*;
 
 pub use web_context::WebContextImpl;
 
+#[cfg(test)]
+pub(crate) use self::web_context::WebContextExt;
+
 use crate::{
   native_bounds::{
     bounded_utf8_bytes, bounded_utf8_c_string, IPC_PAYLOAD_LIMIT, PAGE_TITLE_LIMIT, PAGE_URL_LIMIT,
@@ -70,6 +73,7 @@ use crate::{
   WebViewAttributes, RGBA,
 };
 
+#[cfg(not(test))]
 use self::web_context::WebContextExt;
 
 const WEBVIEW_ID: &str = "webview_id";
