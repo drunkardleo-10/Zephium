@@ -452,6 +452,13 @@ pub struct WorkBrowserResources {
     rows: BTreeMap<WorkBrowserResourceId, Resource>,
     sequence: u64,
     sealed: bool,
+    native_shutdown_started: bool,
+}
+
+/// Crate-private, move-only admission from the actual permanently sealed row
+/// owner. It is not native zero, and cannot be reconstructed from durable IDs.
+pub(crate) struct WorkBrowserNativeShutdownAdmission {
+    _authority: Authority,
 }
 impl WorkBrowserResources {
     /// The trusted application supplies its actual durable Work/profile owner.
@@ -464,6 +471,7 @@ impl WorkBrowserResources {
             rows: BTreeMap::new(),
             sequence: 0,
             sealed: false,
+            native_shutdown_started: false,
         }
     }
     fn next(&mut self) -> Result<u64, WorkBrowserResourceError> {
@@ -1002,6 +1010,29 @@ impl WorkBrowserResources {
                     && row.lease.is_none()
                     && row.observation.is_none()
             })
+    }
+    /// Admits the existing global native seal/audit protocol once, only after
+    /// this original registry is permanently sealed and every resource and
+    /// logical callback is drained. The application must additionally prove
+    /// physical callback/health-owner retirement and use its original port.
+    /// No native-zero proof exists until that protocol accepts an exact audit.
+    pub fn begin_native_shutdown(
+        &mut self,
+    ) -> Result<crate::AgentNativeShutdownCoordinator, WorkBrowserResourceError> {
+        if self.native_shutdown_started {
+            return Err(WorkBrowserResourceError::Sealed);
+        }
+        if !self.is_quiescent() {
+            return Err(WorkBrowserResourceError::Phase);
+        }
+        self.native_shutdown_started = true;
+        Ok(
+            crate::AgentNativeShutdownCoordinator::from_retained_registry(
+                WorkBrowserNativeShutdownAdmission {
+                    _authority: self.authority.clone(),
+                },
+            ),
+        )
     }
     /// Release runtime bookkeeping only after exact resource destruction and
     /// every retained callback. The returned durable identity is not deleted.

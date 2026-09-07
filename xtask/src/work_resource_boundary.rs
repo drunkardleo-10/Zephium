@@ -293,6 +293,9 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "self.dispatch_attempt(flight.request,flight.phase,flight.reconciliations+1)",
             "self.owner.locally_retired()", "self.flight.is_none()", "self.unstarted.is_none()",
             "self.destruction_settled=true", "Err(Refusal::Busy)=>returnOk(false)",
+            "if!self.local_shutdown_settled(){returnOk(false);}",
+            "RetainedNativeShutdown::new(&self.owner)?", "shutdown.settle(event)",
+            "and_then(RetainedNativeShutdown::next_deadline)",
             "#[cfg(all(test,feature=\"work-execution-probe\"))]",
         ],
         &[
@@ -301,6 +304,26 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "std::thread", "tokio::spawn", "InspectablePublic", "AgentBrowserRetention",
             "AgentWorkJournalRequest::Read", "port.dispatch", "invoke_semantic",
             "execute_semantic_action", "attach_successor_work",
+        ],
+    ),
+    (
+        "crates/zephium-app/src/work_resources_shutdown.rs",
+        &[
+            "shared:Arc<Shared>", "coordinator:Option<AgentNativeShutdownCoordinator>",
+            "proof:Option<AgentNativeShutdownProof>", "if!owner.locally_retired()",
+            "owner.shared.lock_rows()?.begin_native_shutdown()?", "shared:owner.shared.clone()",
+            "self.shared.global_current()", "agent_native_shutdown_retry_delay(coordinator.status().attempts())",
+            "begin_port_seal(audit)", "self.shared.port.seal_for_shutdown(audit)",
+            "begin_resource_audit(audit)", "self.shared.port.audit_resources(audit)",
+            "coordinator.settle_shutdown_audit(*settlement)", "coordinator.settle_resource_audit(*settlement)",
+            "coordinator.finish()", "self.proof=Some(proof)", "self.failed=true", "returnErr(Box::new(event))",
+            "ifcoordinator.status().stage()==AgentNativeShutdownStage::ResourceAuditRequired{self.retry_at=Some(",
+            "elseifcoordinator.status().stage()==AgentNativeShutdownStage::Exhausted{",
+        ],
+        &[
+            "pubstruct", "pubfn", "pub(crate)", "Serialize", "Deserialize", "ContextRegistry",
+            "WorkBrowserResources::new", "AgentNativeShutdownResources", "ContextNativeResourceSnapshot",
+            "AgentWorkJournal", "std::thread", "tokio::spawn", "port.dispatch", "invoke_semantic",
         ],
     ),
     (
@@ -726,6 +749,11 @@ fn validate(source: &str, port: &str) -> Result<(), String> {
         "row.destruction.as_ref()==Some(&completion.operation)",
         "WorkBrowserResourceEvent::DebtSettled(row.join.clone())",
         "request:Box<WorkBrowserResourceRequest>",
+        "pub(crate)structWorkBrowserNativeShutdownAdmission{_authority:Authority,}",
+        "ifself.native_shutdown_started{returnErr(WorkBrowserResourceError::Sealed);}",
+        "if!self.is_quiescent(){returnErr(WorkBrowserResourceError::Phase);}",
+        "self.native_shutdown_started=true",
+        "WorkBrowserNativeShutdownAdmission{_authority:self.authority.clone(),}",
     ] {
         require(&source, needle)?;
     }
@@ -805,6 +833,11 @@ mod tests {
             source.replace("sealed||now>=lease.deadline", "false"),
             source.replace("row.destruction.is_none()", "true"),
             source.replace("sequence:lease.generation", "sequence:self.next()?"),
+            source.replace(
+                "self.native_shutdown_started=true",
+                "self.native_shutdown_started=false",
+            ),
+            source.replace("if!self.is_quiescent()", "iffalse"),
             format!("{source}\nlet fake = AgentNativeShutdownProof;"),
             format!("{source}\ncancel_run();"),
         ] {

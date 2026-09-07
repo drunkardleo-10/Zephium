@@ -4,6 +4,7 @@
 //! original Store acknowledgements, the common controller and scoped worker,
 //! and keeps the page/cleanup owner across fresh, explicitly supplied actors.
 
+use super::shutdown::RetainedNativeShutdown;
 use super::*;
 use std::collections::VecDeque;
 use std::task::Waker;
@@ -159,6 +160,7 @@ pub(super) struct RetainedWork {
     destruction_settled: bool,
     destroyed: bool,
     unexpected_native: Option<ContextNativeEvent>,
+    native_shutdown: Option<RetainedNativeShutdown>,
 }
 impl RetainedWork {
     /// Consumes the original owner, not a replacement port or a decoded row.
@@ -214,6 +216,7 @@ impl RetainedWork {
             destruction_settled: false,
             destroyed: false,
             unexpected_native: None,
+            native_shutdown: None,
         };
         work.rearm();
         if work.failure.is_some() {
@@ -674,15 +677,28 @@ impl RetainedWork {
         if self.unexpected_native.is_some() {
             return;
         }
-        match self.owner.poll_native_event() {
-            Ok(None) => {}
-            Ok(Some(event)) => {
-                // Global audit is outside this resource-only coordinator. Keep
-                // the original unexpected terminal; never drop/forge its proof.
-                self.unexpected_native = Some(event);
-                self.fail(AgentWorkFailure::ContextLost);
+        loop {
+            match self.owner.poll_native_event() {
+                Ok(None) => return,
+                Ok(Some(event)) => {
+                    let event = if let Some(shutdown) = &mut self.native_shutdown {
+                        match shutdown.settle(event) {
+                            Ok(()) => continue,
+                            Err(event) => *event,
+                        }
+                    } else {
+                        event
+                    };
+                    // Preserve any unadmitted/mismatched original global terminal.
+                    self.unexpected_native = Some(event);
+                    self.fail(AgentWorkFailure::ContextLost);
+                    return;
+                }
+                Err(_) => {
+                    self.fail(AgentWorkFailure::ContextLost);
+                    return;
+                }
             }
-            Err(_) => self.fail(AgentWorkFailure::ContextLost),
         }
     }
 
@@ -753,7 +769,7 @@ impl RetainedWork {
         }
         self.poll(now);
         if self.destroyed {
-            return Ok(self.shutdown_settled());
+            return self.poll_native_shutdown();
         }
         if self.acquisition.is_some()
             || self.staged.is_some()
@@ -789,10 +805,10 @@ impl RetainedWork {
         }
         self.owner.seal_resources()?;
         self.destroyed = true;
-        Ok(self.shutdown_settled())
+        self.poll_native_shutdown()
     }
 
-    fn shutdown_settled(&self) -> bool {
+    fn local_shutdown_settled(&self) -> bool {
         self.destroyed
             && self.owner.locally_retired()
             && self.flight.is_none()
@@ -808,6 +824,19 @@ impl RetainedWork {
                 .is_none_or(|active| active.drained.is_some())
     }
 
+    fn poll_native_shutdown(&mut self) -> Result<bool, Refusal> {
+        if !self.local_shutdown_settled() {
+            return Ok(false);
+        }
+        if self.native_shutdown.is_none() {
+            self.native_shutdown = Some(RetainedNativeShutdown::new(&self.owner)?);
+        }
+        self.native_shutdown
+            .as_mut()
+            .ok_or(Refusal::Uncertain)?
+            .poll()
+    }
+
     pub(super) fn resource_destroyed(&self) -> bool {
         self.destroyed
     }
@@ -820,6 +849,11 @@ impl RetainedWork {
             .map(|flight| flight.deadline)
             .into_iter()
             .chain(self.staged.as_ref().map(|staged| staged.deadline))
+            .chain(
+                self.native_shutdown
+                    .as_ref()
+                    .and_then(RetainedNativeShutdown::next_deadline),
+            )
             .min()
     }
 }

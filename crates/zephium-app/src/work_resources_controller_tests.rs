@@ -39,6 +39,16 @@ impl AgentAuditPort for Audit {
 #[derive(Default)]
 struct Native {
     resource_sink: Mutex<Option<NativeSink>>,
+    allow_global_shutdown: AtomicBool,
+    global_sealed: AtomicBool,
+    global_audits: AtomicUsize,
+    hold_global_audit: AtomicBool,
+    pending_global_audit: Mutex<Option<ContextNativeEvent>>,
+    global_queued_debt: AtomicU8,
+    wrong_global_audit_kind: AtomicBool,
+    wrong_global_audit_identity: AtomicBool,
+    synchronous_global_seal: AtomicBool,
+    reject_global_audit: AtomicBool,
     reporters: Arc<Mutex<BTreeMap<ContextId, WorkBrowserResourceHealthReporter>>>,
     gate: Arc<AtomicBool>,
     tasks: Mutex<Vec<std::thread::JoinHandle<()>>>,
@@ -58,6 +68,53 @@ struct Native {
     final_document: Mutex<Option<ContextNavigationTarget>>,
 }
 impl Native {
+    fn global_audit(&self, audit: ContextResourceAuditId, shutdown: bool) {
+        let audit = if self.wrong_global_audit_identity.load(Ordering::Acquire) {
+            ContextResourceAuditId::new(audit.get() + 1).unwrap()
+        } else {
+            audit
+        };
+        let live = u8::try_from(self.reporters.lock().unwrap().len()).unwrap();
+        let snapshot = ContextNativeResourceSnapshot::try_new(ContextNativeResourceCounts {
+            known_bindings: live,
+            resident_views: live,
+            owned_reservations: live,
+            borrowed_leases: 0,
+            visible_surfaces: 0,
+            suspended_views: 0,
+            pending_operations: u8::from(self.read.lock().unwrap().is_some()),
+            pending_captures: 0,
+            queued_tasks: self.global_queued_debt.load(Ordering::Acquire),
+        })
+        .unwrap();
+        self.global_audits.fetch_add(1, Ordering::AcqRel);
+        let event = if shutdown && !self.wrong_global_audit_kind.load(Ordering::Acquire) {
+            ContextNativeEvent::ShutdownAuditSettled(ContextShutdownAuditSettlement::new(
+                audit,
+                Ok(snapshot),
+            ))
+        } else {
+            ContextNativeEvent::ResourceAuditSettled(ContextResourceAuditSettlement::new(
+                audit,
+                Ok(snapshot),
+            ))
+        };
+        if self.hold_global_audit.load(Ordering::Acquire) {
+            assert!(self
+                .pending_global_audit
+                .lock()
+                .unwrap()
+                .replace(event)
+                .is_none());
+        } else {
+            self.resource_sink.lock().unwrap().as_ref().unwrap()(event);
+        }
+    }
+
+    fn release_global_audit(&self) {
+        let event = self.pending_global_audit.lock().unwrap().take().unwrap();
+        self.resource_sink.lock().unwrap().as_ref().unwrap()(event);
+    }
     fn read_result(
         request: WorkBrowserObservationRequest,
         callback: WorkBrowserObservationCompletionCallback,
@@ -196,8 +253,15 @@ impl AgentBrowserPort for Native {
     fn transfer_cookies(&self, _: ContextCookieTransferRequest) -> ContextDispatch {
         panic!("no retained cookie authority")
     }
-    fn audit_resources(&self, _: ContextResourceAuditId) -> ContextDispatch {
-        ContextDispatch::Unsupported
+    fn audit_resources(&self, audit: ContextResourceAuditId) -> ContextDispatch {
+        if !self.allow_global_shutdown.load(Ordering::Acquire)
+            || !self.global_sealed.load(Ordering::Acquire)
+            || self.reject_global_audit.load(Ordering::Acquire)
+        {
+            return ContextDispatch::Unsupported;
+        }
+        self.global_audit(audit, false);
+        ContextDispatch::Scheduled
     }
     fn capture_semantic_screenshot(
         &self,
@@ -206,8 +270,19 @@ impl AgentBrowserPort for Native {
     ) -> ContextDispatch {
         panic!("no retained screenshot authority")
     }
-    fn seal_for_shutdown(&self, _: ContextResourceAuditId) -> ContextShutdownDispatch {
-        // This fixture never manufactures a global native shutdown proof.
+    fn seal_for_shutdown(&self, audit: ContextResourceAuditId) -> ContextShutdownDispatch {
+        if self.allow_global_shutdown.load(Ordering::Acquire)
+            && !self.global_sealed.swap(true, Ordering::AcqRel)
+        {
+            if self.synchronous_global_seal.load(Ordering::Acquire) {
+                return ContextShutdownDispatch::SealedWithoutAudit(
+                    ContextPortFailure::NativeRefused,
+                );
+            }
+            self.global_audit(audit, true);
+            return ContextShutdownDispatch::AuditScheduled;
+        }
+        // Ordinary scoped fixtures do not opt into global native shutdown.
         ContextShutdownDispatch::SealedWithoutAudit(ContextPortFailure::NativeRefused)
     }
 }

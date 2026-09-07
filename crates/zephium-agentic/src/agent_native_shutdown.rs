@@ -1,7 +1,8 @@
 //! Bounded functional-core coordination for terminal native browser drain.
 //!
 //! The application actor first seals and drains every logical owner represented
-//! by [`AgentNativeShutdownResources`]. Only then may this coordinator linearize
+//! by [`AgentNativeShutdownResources`], or obtains the one-shot admission from
+//! its original sealed [`crate::WorkBrowserResources`]. Only then may it linearize
 //! the native port's mutation seal, distinguish its exact barrier settlement
 //! from ordinary audits, and require a validated all-zero resource snapshot.
 //! It owns no port, clock, timer, task, worker, channel, browser object, or I/O.
@@ -269,11 +270,23 @@ impl AgentNativeShutdownCoordinator {
                 resources,
             }));
         }
-        Ok(Self {
+        Ok(Self::ready())
+    }
+
+    /// Only the original sealed retained registry can construct this operand.
+    /// This reuses the same global seal, audit ceiling and all-zero predicate.
+    pub(crate) fn from_retained_registry(
+        _admission: crate::work_browser_resource::WorkBrowserNativeShutdownAdmission,
+    ) -> Self {
+        Self::ready()
+    }
+
+    fn ready() -> Self {
+        Self {
             state: NativeShutdownState::ReadyToSeal,
             attempts: 0,
             last_audit: None,
-        })
+        }
     }
 
     /// Reserves the sole atomic native-port seal attempt.

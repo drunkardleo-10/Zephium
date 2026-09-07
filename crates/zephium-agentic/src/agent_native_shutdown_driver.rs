@@ -82,8 +82,9 @@ pub enum AgentNativeShutdownDriveError {
 
 /// Consumes an admitted coordinator and drives native shutdown to exact zero.
 ///
-/// The caller must first use [`AgentNativeShutdownCoordinator::try_new`] and
-/// retain its lossless refusal for continued exact cleanup. `first_audit` is a
+/// The caller must first use [`AgentNativeShutdownCoordinator::try_new`] or
+/// [`crate::WorkBrowserResources::begin_native_shutdown`], retaining any refused
+/// original owner for continued exact cleanup. `first_audit` is a
 /// shell-minted process-local identity. Any retry uses its checked strictly
 /// increasing successor. The function performs at most the coordinator's
 /// fixed eight total audits and waits between retries with a 100 ms exponential
@@ -201,7 +202,7 @@ fn wait_for_retry(
         return Err(AgentNativeShutdownDriveError::Deadline);
     }
     let retry_wake = now
-        .checked_add(retry_delay(attempts))
+        .checked_add(agent_native_shutdown_retry_delay(attempts))
         .unwrap_or(deadline)
         .min(deadline);
     match events.wait_until(retry_wake) {
@@ -214,7 +215,9 @@ fn wait_for_retry(
     }
 }
 
-fn retry_delay(attempts: u8) -> Duration {
+/// Shared bounded cadence for blocking and application-polled adapters of the
+/// same native shutdown coordinator. It grants no additional audit attempts.
+pub fn agent_native_shutdown_retry_delay(attempts: u8) -> Duration {
     let shift = u32::from(attempts.saturating_sub(1).min(6));
     Duration::from_millis(
         AGENT_NATIVE_SHUTDOWN_RETRY_BASE_MILLIS
@@ -600,9 +603,21 @@ mod tests {
             format!("{:?}", AgentNativeShutdownWait::Event(Box::new(event))),
             "AgentNativeShutdownWait::Event([redacted])"
         );
-        assert_eq!(retry_delay(1), Duration::from_millis(100));
-        assert_eq!(retry_delay(2), Duration::from_millis(200));
-        assert_eq!(retry_delay(5), Duration::from_millis(1_000));
-        assert_eq!(retry_delay(u8::MAX), Duration::from_millis(1_000));
+        assert_eq!(
+            agent_native_shutdown_retry_delay(1),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            agent_native_shutdown_retry_delay(2),
+            Duration::from_millis(200)
+        );
+        assert_eq!(
+            agent_native_shutdown_retry_delay(5),
+            Duration::from_millis(1_000)
+        );
+        assert_eq!(
+            agent_native_shutdown_retry_delay(u8::MAX),
+            Duration::from_millis(1_000)
+        );
     }
 }

@@ -21,6 +21,10 @@ mod controller;
 #[path = "work_resources_application.rs"]
 mod application;
 
+#[cfg(feature = "work-execution")]
+#[path = "work_resources_shutdown.rs"]
+mod shutdown;
+
 #[cfg(feature = "work-execution-probe")]
 #[path = "work_resources_probe.rs"]
 pub mod probe;

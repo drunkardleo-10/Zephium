@@ -3,7 +3,8 @@
 Status: production runtime foundation and read-only retained backing in the
 existing Work controller, with deterministic actual-worker/loopback-provider
 tests through the private application resource owner. A scoped durable-terminal
-proof join and private application-owned admission coordinator now exist;
+proof join, private application-owned admission coordinator, and original-port
+global native shutdown join now exist;
 Shell attachment, selected-profile admission and product UI remain separate.
 No native, public-site or UI qualification
 is added by this integration.
@@ -34,8 +35,9 @@ cannot strand the coordinator. A task-destructor barrier regression consumes
 every last progress/native wake before permitting actual worker completion, then
 drives terminal persistence using only callbacks, without periodic polling.
 Wake-only assertions guard against fixtures hiding a lost wake
-by repeatedly polling. Unexpected global audit terminals remain retained and
-fail closed rather than being discarded or converted to resource proof.
+by repeatedly polling. Global audit terminals are admitted only by the original
+owner's active native shutdown coordinator; unexpected terminals remain retained
+and fail closed rather than being discarded or converted to resource proof.
 
 After accepted/failed/cancelled actor closure, it joins the original outcome,
 matching scoped worker drain and resource lease, prepares the existing terminal
@@ -63,6 +65,30 @@ the resource remains non-reusable recovery until explicit whole-owner shutdown.
 Late admission acknowledgements are reconciled to immutable FailedClosed with
 their debt intact. The original pre-start recovery owner remains retained;
 this slice does **not** claim a clean recover-and-reuse path for that case.
+
+After those local obligations settle, the original sealed/quiescent retained
+registry admits the existing `AgentNativeShutdownCoordinator` exactly once.
+The private `work_resources_shutdown` adapter retains the original native port
+and drives its seal barrier and subsequent resource audits through the original
+event lane. Completion requires that coordinator's constructor-closed native
+zero proof, not local resource absence or an empty replacement legacy registry.
+The existing exact audit identity/type checks, all-zero count predicate, eight
+attempt ceiling and 100–1000 ms backoff are shared unchanged. One application
+poll performs at most one native dispatch; its next retry deadline is exposed
+without a new thread or periodic busy poll. The caller still owns the absolute
+shutdown deadline; a missing native callback cannot produce completion.
+Synchronous seal/audit refusals arm their next deadline in the same dispatch
+poll, since no native callback can wake the application for those outcomes;
+the eighth synchronous refusal returns failure in that poll instead of waiting
+for a callback or retry that cannot exist.
+
+Deterministic regressions hold the original global terminal after local
+destruction, reject wrong seal-terminal kind and identity, retain nonzero queued
+native debt through the shared retry cadence, reject a queued duplicate before
+reporting completion, and stop after eight unsuccessful audits. Outstanding
+durable acknowledgements prevent global seal admission.
+This is a private lifecycle prerequisite, not Shell attachment or native
+qualification of the retained product workflow.
 
 Deterministic real-SQLite/loopback tests hold Admitted, Running and successful
 terminal ACKs independently of actual commits. They exercise an accepted A,

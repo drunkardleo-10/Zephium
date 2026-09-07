@@ -102,6 +102,7 @@ fn coordinator_with_wake(
             wake()
         }),
     );
+    native.allow_global_shutdown.store(true, Ordering::Release);
     let work = RetainedWork::new(owner, resource, store.clone(), store.clone())
         .unwrap_or_else(|_| panic!("original owner and Store join"));
     (work, native, store)
@@ -249,7 +250,11 @@ fn worker_exit_wakes_application_after_last_progress_wake_was_consumed() {
     }
     assert!(work.take_extraction().is_some());
     work.begin_shutdown();
-    assert!(work.poll_shutdown(now()).unwrap());
+    while !work.poll_shutdown(now()).unwrap() {
+        wakes
+            .recv_timeout(Duration::from_secs(2))
+            .expect("original native seal/audit wake");
+    }
 }
 
 type Servers = Arc<Mutex<Vec<std::thread::JoinHandle<usize>>>>;
@@ -411,10 +416,16 @@ fn original_acknowledgements_gate_retained_workers_results_and_successors() {
     assert!(work.ready());
     assert_eq!(native.acquisitions.load(Ordering::Acquire), 2);
     assert_eq!(native.destructions.load(Ordering::Acquire), 0);
+    assert_eq!(
+        native.global_audits.load(Ordering::Acquire),
+        0,
+        "the retained page cannot enter global shutdown between actors"
+    );
     work.begin_shutdown();
     wait_until(|| work.poll_shutdown(now()).unwrap());
     assert!(!work.ready());
     assert_eq!(native.destructions.load(Ordering::Acquire), 1);
+    assert_eq!(native.global_audits.load(Ordering::Acquire), 1);
     let calls: Vec<_> = servers
         .lock()
         .unwrap()
@@ -535,6 +546,11 @@ fn timed_out_terminal_acknowledgement_never_reopens_retained_execution() {
     });
     assert_eq!(native.destructions.load(Ordering::Acquire), 1);
     store.hold.store(0, Ordering::Release);
+    assert_eq!(
+        native.global_audits.load(Ordering::Acquire),
+        0,
+        "native global seal cannot precede the unresolved original terminal ACK"
+    );
     assert!(work.reconcile());
     poll_until(&mut work, |work| work.phase() == AdmissionPhase::Terminal);
     assert!(
@@ -542,13 +558,234 @@ fn timed_out_terminal_acknowledgement_never_reopens_retained_execution() {
         "reconciliation never clears the sticky execution stop"
     );
     assert!(work.take_extraction().is_none());
-    assert!(work.poll_shutdown(now()).unwrap());
+    wait_until(|| work.poll_shutdown(now()).unwrap());
     store.release(0); // The old callback cannot select/rewrite the reconciled lane.
     work.poll(now());
     assert!(work.poll_shutdown(now()).unwrap());
     for server in servers.lock().unwrap().drain(..) {
         assert_eq!(server.join().unwrap(), 2);
     }
+}
+
+#[test]
+fn local_resource_destruction_waits_for_original_global_native_zero_audit() {
+    if child("local_resource_destruction_waits_for_original_global_native_zero_audit") {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let (mut work, native, _) = coordinator(directory.path());
+    poll_until(&mut work, |work| work.ready());
+    native.hold_global_audit.store(true, Ordering::Release);
+    work.begin_shutdown();
+    assert!(!work.poll_shutdown(now()).unwrap());
+    assert!(work.resource_destroyed());
+    assert_eq!(native.destructions.load(Ordering::Acquire), 1);
+    assert_eq!(native.global_audits.load(Ordering::Acquire), 1);
+    assert!(
+        !work.poll_shutdown(now()).unwrap(),
+        "scheduled/held native audit is not proof"
+    );
+    native.release_global_audit();
+    assert!(work.poll_shutdown(now()).unwrap());
+    assert!(work.poll_shutdown(now()).unwrap());
+    assert_eq!(
+        native.global_audits.load(Ordering::Acquire),
+        1,
+        "seal/proof are consumed once"
+    );
+}
+
+#[test]
+fn duplicate_native_zero_terminal_is_retained_before_shutdown_can_complete() {
+    if child("duplicate_native_zero_terminal_is_retained_before_shutdown_can_complete") {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let (mut work, native, _) = coordinator(directory.path());
+    poll_until(&mut work, |work| work.ready());
+    native.hold_global_audit.store(true, Ordering::Release);
+    work.begin_shutdown();
+    assert!(!work.poll_shutdown(now()).unwrap());
+    native.hold_global_audit.store(false, Ordering::Release);
+    native.release_global_audit();
+    native.global_audit(ContextResourceAuditId::new(1).unwrap(), true);
+    assert!(!work.poll_shutdown(now()).unwrap());
+    assert_eq!(work.phase(), AdmissionPhase::Uncertain);
+    assert!(!work.poll_shutdown(now()).unwrap());
+}
+
+#[test]
+fn synchronous_native_refusals_arm_retry_without_an_extra_poll_or_callback() {
+    if child("synchronous_native_refusals_arm_retry_without_an_extra_poll_or_callback") {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let (wake, wakes) = mpsc::channel();
+    let (mut work, native, _) =
+        coordinator_with_wake(directory.path(), Arc::new(move || wake.send(()).is_ok()));
+    poll_until(&mut work, |work| work.ready());
+    native
+        .synchronous_global_seal
+        .store(true, Ordering::Release);
+    native.reject_global_audit.store(true, Ordering::Release);
+    work.begin_shutdown();
+    assert!(!work.poll_shutdown(now()).unwrap());
+    while wakes.try_recv().is_ok() {}
+    let first = work
+        .next_deadline()
+        .expect("synchronous seal must arm retry immediately");
+    std::thread::sleep(first.saturating_duration_since(Instant::now()));
+    assert!(!work.poll_shutdown(now()).unwrap());
+    assert!(
+        wakes.try_recv().is_err(),
+        "unsupported audit has no callback wake"
+    );
+    let second = work
+        .next_deadline()
+        .expect("synchronous audit refusal must rearm retry immediately");
+    assert!(second > first);
+    native.reject_global_audit.store(false, Ordering::Release);
+    std::thread::sleep(second.saturating_duration_since(Instant::now()));
+    assert!(!work.poll_shutdown(now()).unwrap());
+    wakes
+        .recv_timeout(Duration::from_secs(2))
+        .expect("original audit terminal wakes owner");
+    assert!(work.poll_shutdown(now()).unwrap());
+    assert_eq!(native.global_audits.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn synchronous_native_exhaustion_returns_without_an_unavailable_final_wake() {
+    if child("synchronous_native_exhaustion_returns_without_an_unavailable_final_wake") {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let (mut work, native, _) = coordinator(directory.path());
+    poll_until(&mut work, |work| work.ready());
+    native
+        .synchronous_global_seal
+        .store(true, Ordering::Release);
+    native.reject_global_audit.store(true, Ordering::Release);
+    work.begin_shutdown();
+    for attempt in 1..=8 {
+        let result = work.poll_shutdown(now());
+        if attempt == 8 {
+            assert!(
+                result.is_err(),
+                "last synchronous refusal must fail in its dispatch poll"
+            );
+        } else {
+            assert!(!result.unwrap());
+            let retry = work
+                .next_deadline()
+                .expect("no callbacks exist; retry must be armed");
+            std::thread::sleep(retry.saturating_duration_since(Instant::now()));
+        }
+    }
+    assert!(work.next_deadline().is_none());
+    assert_eq!(native.global_audits.load(Ordering::Acquire), 0);
+    assert!(work.poll_shutdown(now()).is_err());
+}
+
+#[test]
+fn retained_global_shutdown_reuses_nonzero_retry_cadence_and_exact_zero_predicate() {
+    if child("retained_global_shutdown_reuses_nonzero_retry_cadence_and_exact_zero_predicate") {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let (mut work, native, _) = coordinator(directory.path());
+    poll_until(&mut work, |work| work.ready());
+    native.global_queued_debt.store(1, Ordering::Release);
+    work.begin_shutdown();
+    assert!(!work.poll_shutdown(now()).unwrap());
+    assert!(!work.poll_shutdown(now()).unwrap());
+    assert!(work.resource_destroyed());
+    assert_eq!(native.global_audits.load(Ordering::Acquire), 1);
+    let retry = work
+        .next_deadline()
+        .expect("existing native retry cadence joins application timer");
+    assert!(!work.poll_shutdown(now()).unwrap());
+    assert_eq!(
+        native.global_audits.load(Ordering::Acquire),
+        1,
+        "no tight native audit loop"
+    );
+    native.global_queued_debt.store(0, Ordering::Release);
+    std::thread::sleep(retry.saturating_duration_since(Instant::now()));
+    assert!(!work.poll_shutdown(now()).unwrap());
+    assert!(work.poll_shutdown(now()).unwrap());
+    assert_eq!(native.global_audits.load(Ordering::Acquire), 2);
+}
+
+fn wrong_native_audit(identity: bool) {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut work, native, _) = coordinator(directory.path());
+    poll_until(&mut work, |work| work.ready());
+    if identity {
+        native
+            .wrong_global_audit_identity
+            .store(true, Ordering::Release);
+    } else {
+        native
+            .wrong_global_audit_kind
+            .store(true, Ordering::Release);
+    }
+    work.begin_shutdown();
+    assert!(!work.poll_shutdown(now()).unwrap());
+    assert!(!work.poll_shutdown(now()).unwrap());
+    assert!(work.resource_destroyed());
+    assert_eq!(work.phase(), AdmissionPhase::Uncertain);
+    assert!(!work.poll_shutdown(now()).unwrap());
+    assert_eq!(
+        native.global_audits.load(Ordering::Acquire),
+        1,
+        "mismatched original terminal stays retained"
+    );
+}
+
+#[test]
+fn ordinary_native_zero_cannot_replace_the_original_seal_barrier() {
+    if child("ordinary_native_zero_cannot_replace_the_original_seal_barrier") {
+        return;
+    }
+    wrong_native_audit(false);
+}
+
+#[test]
+fn wrong_native_zero_identity_cannot_settle_the_original_seal_barrier() {
+    if child("wrong_native_zero_identity_cannot_settle_the_original_seal_barrier") {
+        return;
+    }
+    wrong_native_audit(true);
+}
+
+#[test]
+fn retained_native_shutdown_never_exceeds_the_existing_eight_audit_ceiling() {
+    if child("retained_native_shutdown_never_exceeds_the_existing_eight_audit_ceiling") {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let (mut work, native, _) = coordinator(directory.path());
+    poll_until(&mut work, |work| work.ready());
+    native.global_queued_debt.store(1, Ordering::Release);
+    work.begin_shutdown();
+    loop {
+        match work.poll_shutdown(now()) {
+            Ok(false) => {}
+            Ok(true) => panic!("nonzero native tasks cannot prove shutdown"),
+            Err(Refusal::Uncertain) => break,
+            Err(error) => panic!("unexpected native refusal: {error:?}"),
+        }
+        if let Some(deadline) = work.next_deadline() {
+            std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+        }
+    }
+    assert_eq!(
+        native.global_audits.load(Ordering::Acquire),
+        usize::from(MAX_AGENT_NATIVE_SHUTDOWN_AUDITS)
+    );
+    assert!(work.poll_shutdown(now()).is_err());
+    assert_eq!(native.global_audits.load(Ordering::Acquire), 8);
 }
 
 fn stopped_before_start(expired: bool) {

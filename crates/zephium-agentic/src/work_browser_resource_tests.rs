@@ -179,6 +179,49 @@ fn health_consume_acquires_coalesced_publication_or_preserves_a_successor_wake()
 fn registry() -> WorkBrowserResources {
     WorkBrowserResources::new(WorkId::from_raw(1), ProfileId::from(2))
 }
+
+#[test]
+fn native_shutdown_joins_original_sealed_retained_registry_once_without_proving_zero() {
+    let mut rows = registry();
+    assert!(matches!(
+        rows.begin_native_shutdown(),
+        Err(WorkBrowserResourceError::Phase)
+    ));
+    let resource = create(&mut rows, 804);
+    rows.seal();
+    assert!(matches!(
+        rows.begin_native_shutdown(),
+        Err(WorkBrowserResourceError::Phase)
+    ));
+    let destruction = rows.destroy(&resource).unwrap();
+    assert!(matches!(
+        rows.begin_native_shutdown(),
+        Err(WorkBrowserResourceError::Phase)
+    ));
+    assert!(matches!(
+        rows.settle(destruction.complete(WorkBrowserResourceNativeOutcome::Destroyed))
+            .unwrap(),
+        WorkBrowserResourceEvent::Destroyed(_)
+    ));
+    let coordinator = rows.begin_native_shutdown().unwrap();
+    assert_eq!(
+        coordinator.status().stage(),
+        crate::AgentNativeShutdownStage::ReadyToSeal
+    );
+    assert_eq!(coordinator.status().attempts(), 0);
+    assert!(
+        coordinator.finish().is_err(),
+        "local destruction cannot manufacture native zero"
+    );
+    assert!(matches!(
+        rows.begin_native_shutdown(),
+        Err(WorkBrowserResourceError::Sealed)
+    ));
+    assert!(matches!(
+        rows.acquire(&resource, ContextRunId::from_raw(804), tick(3), tick(90)),
+        Err(WorkBrowserResourceError::Sealed)
+    ));
+}
 #[test]
 fn finalized_document_receipt_keeps_requested_lineage_and_binds_only_effective_source() {
     let mut rows = registry();

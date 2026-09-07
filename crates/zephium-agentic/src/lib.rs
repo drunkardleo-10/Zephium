@@ -163,8 +163,8 @@ pub use agent_native_shutdown::{
     MAX_AGENT_NATIVE_SHUTDOWN_PROOF_BYTES,
 };
 pub use agent_native_shutdown_driver::{
-    drive_agent_native_shutdown_until, AgentNativeShutdownDriveError,
-    AgentNativeShutdownEventSource, AgentNativeShutdownWait,
+    agent_native_shutdown_retry_delay, drive_agent_native_shutdown_until,
+    AgentNativeShutdownDriveError, AgentNativeShutdownEventSource, AgentNativeShutdownWait,
     AGENT_NATIVE_SHUTDOWN_RETRY_BASE_MILLIS, AGENT_NATIVE_SHUTDOWN_RETRY_MAX_MILLIS,
 };
 pub use agent_policy::{
