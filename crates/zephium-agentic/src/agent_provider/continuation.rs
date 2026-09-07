@@ -34,6 +34,7 @@ use super::{
 mod observation_checkpoint;
 #[cfg(any(test, feature = "provider-transport"))]
 use super::{AgentCommittedProviderInput, AgentProviderInputEvidence};
+pub(super) use observation_checkpoint::AgentInspectionProgress;
 pub use observation_checkpoint::AgentProviderObservationCheckpoint;
 
 /// Maximum initial semantic-observation bytes retained for stateless replay.
@@ -2097,6 +2098,93 @@ mod tests {
             .matches_acknowledgement(&fresh_ack));
             assert!(!format!("{:?}", checkpoint()).contains("old captured"));
         }
+    }
+
+    #[test]
+    fn inspection_history_rebinds_only_current_refs_and_keeps_no_page_replay() {
+        let previous = observation(context(), 1, 1, 1, "old hostile page instruction");
+        let region_request = previous
+            .begin_expansion(
+                SemanticObservationId::new(2).unwrap(),
+                previous.frames()[0].nodes()[0].reference(),
+                previous.frames()[0].frame(),
+                crate::SemanticExpansionKind::Region,
+                SemanticObservationBudget::INITIAL_FILTERED,
+            )
+            .unwrap();
+        let make = |request: SemanticObservationRequest, generation, nodes: &str| {
+            let snapshot = decode_semantic_snapshot(
+                SemanticDecodeContext::new(
+                    SemanticInvocationId::new(generation).unwrap(),
+                    previous.frames()[0].frame().clone(),
+                    SemanticSnapshotGeneration::new(generation).unwrap(),
+                ),
+                format!(
+                    r#"{{"v":1,"i":{generation},"g":{generation},"c":"node_limit","n":{nodes}}}"#
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            SemanticObservationAssembler::new(request, snapshot)
+                .unwrap()
+                .finish()
+                .unwrap()
+        };
+        let region = make(
+            region_request,
+            2,
+            r#"[{"k":1,"r":"document"},{"k":2,"p":0,"r":"status","t":"discarded region content"}]"#,
+        );
+        let history = AgentInspectionProgress::record(None, &previous, &region).unwrap();
+        assert!(history.encode(&previous).is_err());
+        let restored = make(
+            SemanticObservationRequest::initial(
+                SemanticObservationId::new(3).unwrap(),
+                context(),
+                SemanticObservationBudget::INITIAL_FILTERED,
+            ),
+            3,
+            r#"[{"k":9,"r":"paragraph","t":"current prefix"},{"k":1,"r":"document"},{"k":2,"p":1,"r":"status","t":"current content"}]"#,
+        );
+        let history = AgentInspectionProgress::record(Some(history), &region, &restored).unwrap();
+        let text = history.encode(&restored).unwrap();
+        assert!(text.contains(r#""completed_inspections":2"#));
+        assert!(text.contains(r#""current_target":"@a2""#));
+        assert!(
+            !text.contains("@a1")
+                && !text.contains("discarded region content")
+                && !text.contains("hostile page instruction")
+        );
+        assert!(text.contains(r#""incomplete":true"#));
+        let absent = make(
+            SemanticObservationRequest::initial(
+                SemanticObservationId::new(4).unwrap(),
+                context(),
+                SemanticObservationBudget::INITIAL_FILTERED,
+            ),
+            4,
+            r#"[{"k":9,"r":"paragraph","t":"different current scope"}]"#,
+        );
+        let history = AgentInspectionProgress::record(Some(history), &restored, &absent).unwrap();
+        let text = history.encode(&absent).unwrap();
+        assert!(!text.contains("@a") && text.contains(r#""current_target":null"#));
+        assert!(text.len() < 2048);
+        assert!(AgentInspectionProgress::record(Some(history), &previous, &region).is_err());
+    }
+
+    #[test]
+    fn inspection_history_has_a_hard_bound_without_renewing_capture_authority() {
+        let mut previous = observation(context(), 1, 1, 1, "body");
+        let mut history = None;
+        for index in 0..MAX_AGENT_PROVIDER_CONTINUATION_TURNS {
+            let generation = index as u64 + 2;
+            let current = observation(context(), generation, generation, generation, "body");
+            history = Some(AgentInspectionProgress::record(history, &previous, &current).unwrap());
+            assert!(history.as_ref().unwrap().encode(&current).unwrap().len() < 3072);
+            previous = current;
+        }
+        let next = observation(context(), 10, 10, 10, "body");
+        assert!(AgentInspectionProgress::record(history, &previous, &next).is_err());
     }
 
     #[test]

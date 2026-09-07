@@ -1659,6 +1659,15 @@
             sink = record.sink !== null ? index :
               descriptor.role === "link" && record.sensitivity === "public" &&
                 sink !== null && records[sink].sink === "text" ? sink : null;
+            // A region is one structural level, not a full-DOM subtree. Keep
+            // nested regions as current, independently expandable anchors so
+            // an earlier navigation/sidebar cannot consume the parent's prose
+            // budget. Subtree retains explicit recursive semantics.
+            if (anchored && state.request.s?.k === "region" && item.node !== root &&
+                (descriptor.role === "landmark" || descriptor.role === "document")) {
+              state.regionBoundary = true;
+              continue;
+            }
           } else {
             sink = null;
           }
@@ -2403,6 +2412,9 @@
       } else {
         records = traverse(anchor, state, true);
       }
+    }
+    if (state.regionBoundary && state.completeness === "complete") {
+      state.completeness = "scope_boundary";
     }
     return encodeSnapshot(request, records, state.completeness);
   }

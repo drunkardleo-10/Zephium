@@ -74,6 +74,7 @@ struct Native {
     >,
     hold_read: AtomicBool,
     hold_expansion: AtomicBool,
+    region_root: AtomicBool,
     reject_expansion: AtomicBool,
     not_ready: AtomicBool,
     reads: AtomicUsize,

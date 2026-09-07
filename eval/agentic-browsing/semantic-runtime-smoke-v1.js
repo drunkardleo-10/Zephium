@@ -1187,8 +1187,42 @@ async function finish() {
   assert(tight.n.some((node) => node.n === "Visible final action"), "offscreen headings spent visible content's text budget");
   const inventoryExtraBytes = Buffer.byteLength(inventoryWire) - Buffer.byteLength(JSON.stringify({ ...inventory, n: inventory.n.filter((node) => node !== sectionRef) }));
 
+  // A broad parent region with a long earlier nested navigation must expose
+  // its own prose and nested anchors, not exhaust its budget in that sidebar.
+  const page = new Element("main", { "aria-label": "Workspace" });
+  const navigation = page.append(new Element("nav", { "aria-label": "Reference index" }));
+  const items = navigation.append(new Element("ul"));
+  for (let index = 0; index < 180; index += 1) {
+    const item = items.append(new Element("li"));
+    item.rect.y = 2000 + index * 30;
+    const link = item.append(new Element("a", { href: `/guide/item-${index}` }));
+    link.rect.y = item.rect.y;
+    link.append(new CharacterData(`Index item ${index}`));
+  }
+  page.append(new Element("h2")).append(new CharacterData("Actual topic"));
+  page.append(new Element("p")).append(new CharacterData("Useful parent-region evidence beyond the index."));
+  const child = page.append(new Element("article", { "aria-label": "Independent article" }));
+  child.append(new Element("p")).append(new CharacterData("Nested article evidence."));
+  document._root = page; setOwner(page, document);
+  const beforeRegion = JSON.parse(invoke(115, 115, { k: "initial" }));
+  const parentKey = beforeRegion.n.find(node => node.n === "Workspace").k;
+  const regionWire = invoke(116, 116, { k: "region", a: parentKey }, { n: 128 });
+  const region = JSON.parse(regionWire);
+  assert(regionWire.includes("Useful parent-region evidence") && !regionWire.includes("Index item") && !regionWire.includes("Nested article evidence"), "nested regions starved or silently widened parent-region capture");
+  assert(region.c === "scope_boundary" && region.n.some(node => node.n === "Reference index") && region.n.some(node => node.n === "Independent article"), "region omission lost truthful boundaries or expandable anchors");
+  const nestedKey = region.n.find(node => node.n === "Independent article").k;
+  assert(invoke(117, 117, { k: "region", a: nestedKey }).includes("Nested article evidence"), "nested region anchor cannot be independently inspected");
+  const restored = JSON.parse(invoke(118, 118, { k: "initial" }));
+  const restoredKey = restored.n.find(node => node.n === "Workspace").k;
+  const recursive = JSON.parse(invoke(119, 119, { k: "subtree", a: restoredKey }, { n: 128 }));
+  assert(recursive.c === "node_limit" && !JSON.stringify(recursive).includes("Useful parent-region evidence"), "subtree no longer has explicit recursive semantics");
+  const limitedRegion = JSON.parse(invoke(120, 120, { k: "region", a: restoredKey }, { n: 3 }));
+  assert(limitedRegion.c === "node_limit", "intentional region boundaries hid actual node-budget exhaustion");
+
   process.stdout.write(`${JSON.stringify({
     offscreen_anchor_wire_bytes: inventoryExtraBytes,
+    parent_region_nodes: region.n.length,
+    parent_region_wire_bytes: Buffer.byteLength(regionWire),
     schema: "zephium.agentic.semantic-runtime-smoke.v1",
     initial_nodes: initial.n.length,
     expanded_nodes: expansion.n.length,

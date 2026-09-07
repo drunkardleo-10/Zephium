@@ -154,6 +154,15 @@ observed-link policy. No native ref or previous body survives the new baseline.
 Cancellation and missing callbacks remain owned by the original retained read;
 failure cannot convert unresolved native debt to clean lease delivery.
 
+Region traversal stops at nested landmark/document roots and leaves them as
+current, separately expandable anchors with scope-boundary completeness. This
+prevents a long nested navigation tree from exhausting a parent's prose budget.
+The policy-bound discovery checkpoint retains bounded content-free inspection
+progress across scope/initial refreshes, without old body text or ref authority.
+Any target hint is resolved again against the exact current native observation;
+navigation retires this document-local metadata. Metadata is encoded before the
+original model-input reservation and shares its existing ceilings.
+
 See [discovery semantics](agent-work-discovery.md) and
 [deterministic evidence](../eval/agentic-browsing/progressive-inspection.md).
 The reused rendering owner was previously RAF-qualified; the new scoped live

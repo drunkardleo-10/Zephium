@@ -69,7 +69,8 @@ pub const MAX_AGENT_PROVIDER_SCREENSHOT_PNG_BYTES: usize = 1_300_000;
 pub const MAX_AGENT_PROVIDER_SCREENSHOT_TRANSCRIPT_BYTES: usize = 64 * 1024;
 /// Maximum browser-navigation URL bytes proposed through a provider tool.
 pub const MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES: usize = 8 * 1024;
-// Frozen departure + at most two observed-link destinations and fixed prose.
+// Frozen departure + at most two observed-link destinations, fixed prose and
+// optional bounded, document-local inspection metadata.
 // Discovery destinations have the existing 2-KiB semantic link ceiling. This is
 // charged within, not added to, the existing request/transcript/token ceilings.
 pub(super) const MAX_AGENT_PROVIDER_NAVIGATION_CHECKPOINT_BYTES: usize =
@@ -1508,6 +1509,36 @@ pub struct AgentPreparedObservationRequest {
 }
 
 impl AgentPreparedObservationRequest {
+    /// Existing structured discovery accounting is the sole currently qualified
+    /// host-progress delivery path. Other provider adapters keep their explicit
+    /// navigation refusal instead of silently dropping or undercounting history.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_for_config_with_inspections(
+        policy: &mut AgentRunPolicy,
+        request: AgentModelCallRequest,
+        observation: &SemanticObservation,
+        payload: SemanticModelPayload,
+        objective: &AgentProviderObjective,
+        config: AgentProviderCallConfig,
+        inspections: Option<super::continuation::AgentInspectionProgress>,
+    ) -> Result<Self, AgentProviderRequestError> {
+        if let Some(inspections) = inspections {
+            if config.provider() != AgentProviderKind::OpenAiResponses
+                || config.input_accounting != super::AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation {
+                return Err(AgentProviderRequestError::Encoding);
+            }
+            return Self::try_openai_with_inspections(
+                policy,
+                request,
+                observation,
+                payload,
+                objective,
+                config,
+                Some(inspections),
+            );
+        }
+        Self::try_for_config(policy, request, observation, payload, objective, config)
+    }
     /// Selects the existing provider/accounting-specific observation adapter.
     /// Unsupported combinations retain their original explicit refusal; this
     /// does not invent counting or navigation support for another provider.
@@ -1603,10 +1634,41 @@ impl AgentPreparedObservationRequest {
         objective: &AgentProviderObjective,
         config: AgentProviderCallConfig,
     ) -> Result<Self, AgentProviderRequestError> {
-        let navigation_checkpoint = policy
+        Self::try_openai_with_inspections(
+            policy,
+            call_request,
+            observation,
+            payload,
+            objective,
+            config,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_openai_with_inspections(
+        policy: &mut AgentRunPolicy,
+        call_request: AgentModelCallRequest,
+        observation: &SemanticObservation,
+        payload: SemanticModelPayload,
+        objective: &AgentProviderObjective,
+        config: AgentProviderCallConfig,
+        inspections: Option<super::continuation::AgentInspectionProgress>,
+    ) -> Result<Self, AgentProviderRequestError> {
+        let mut navigation_checkpoint = policy
             .provider_navigation_checkpoint(call_request, observation)?
             .map(encode_navigation_checkpoint)
             .transpose()?;
+        if let Some(inspections) = inspections {
+            let checkpoint = navigation_checkpoint
+                .as_mut()
+                .ok_or(AgentProviderRequestError::Encoding)?;
+            checkpoint.text.push_str(&inspections.encode(observation)?);
+            if checkpoint.text.len() > MAX_AGENT_PROVIDER_NAVIGATION_CHECKPOINT_BYTES {
+                return Err(AgentProviderRequestError::Encoding);
+            }
+            checkpoint.inspections = Some(inspections);
+        }
         let semantic_payload_tokens =
             AgentProviderInputTokenCount::from_measurement(payload.token_measurement());
         let body = encode_openai_observation_body(
@@ -3594,6 +3656,7 @@ const NAVIGATION_CHECKPOINT_INSTRUCTIONS: &str = concat!(
 pub(super) struct AgentProviderNavigationContext {
     pub(super) binding: crate::agent_policy::AgentNavigationCheckpointBinding,
     pub(super) text: String,
+    pub(super) inspections: Option<super::continuation::AgentInspectionProgress>,
 }
 
 fn encode_navigation_checkpoint(
@@ -3661,6 +3724,7 @@ fn encode_navigation_checkpoint(
     Ok(AgentProviderNavigationContext {
         binding: checkpoint.binding(),
         text: encoded,
+        inspections: None,
     })
 }
 
@@ -4563,7 +4627,7 @@ static PROGRESSIVE_OBSERVATION_TOOL: LazyLock<BrowserToolDefinition> = LazyLock:
         });
     BrowserToolDefinition {
         kind: AgentBrowserToolKind::Snapshot,
-        description: "Inspect more of the same rendered page without clicking, scrolling or navigating. initial refreshes the viewport plus bounded offscreen heading anchors. region expands a named containing landmark; subtree expands only the target's descendants (a heading or TOC link subtree does NOT include its following section). surrounding_text reads a bounded before/after window around an actual heading or content ref, NOT a TOC link destination. Choose refs from the current observation only. The returned scoped observation replaces all earlier page refs/evidence; use its refs for later tools. Missing/truncated content is not evidence of absence. Hidden/unmounted content and frames are not supported.",
+        description: "Inspect more of the same rendered page without clicking, scrolling or navigating. initial restores the viewport plus heading anchors, NOT a next page of content. region reads a containing region's own content and leaves nested landmarks/documents as expandable anchors; subtree recursively reads descendants (a heading or TOC link subtree does NOT include following section prose). surrounding_text reads a bounded window around an actual heading/content ref, NOT a TOC destination. Prefer the smallest relevant current ref. Repeating a truncated scope does not advance it; inspect a narrower anchor. New scoped evidence replaces all earlier page refs/evidence. Use only current refs. Missing/truncated content is not absence. Hidden/unmounted content and frames are unsupported.",
         parameters: strict_object(vec![("scope", scopes)]),
     }
 });

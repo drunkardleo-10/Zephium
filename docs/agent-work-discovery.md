@@ -23,7 +23,7 @@ rejects malformed/non-link fields and omits sensitive, secret-shaped or
 noncanonical URLs. Destinations participate in observation fingerprints and
 semantic diffs. Model `navigate` proposals still dispatch the original exact
 native navigation operation, without invoking page click handlers.
-The pinned runtime is 93,187 source bytes; its installation cap is 92 KiB
+The pinned runtime is 93,863 source bytes; its installation cap is 92 KiB
 (previously 90 KiB). This accommodates the added fixed implementation, not
 additional observed page content or model input.
 
@@ -48,7 +48,11 @@ text. It retires the previous provider replay before native capture, then joins
 the exact requested same-document successor to a fresh acknowledged baseline.
 A heading's subtree does not include following sibling prose; surrounding text
 can include that prose, whereas a table-of-contents link does not resolve its
-destination. Tool descriptions state this distinction. Initial capture offers
+destination. A region capture reads its own structural level: nested landmarks
+and documents remain independently expandable roots, with truthful scope-boundary
+completeness. Their descendants cannot exhaust the parent capture inside an
+earlier sidebar. Subtree remains explicitly recursive. Tool descriptions state
+these distinctions. Initial capture offers
 up to 24 rendered off-viewport heading anchors, appended after normal viewport
 content using only spare original node/wire budgets and at most 2 KiB additional
 heading text. These anchors cannot displace visible controls/content. Hidden,
@@ -58,11 +62,21 @@ The same original policy, account attestation, model-turn/token budget and
 deadline apply to every inspection. Ordinary `read(initial)` never recaptures
 native content or upgrades stale refs. Only evidence from the fresh current
 observation can supply citations; previous page/scope content is not replayed.
+The existing policy-bound discovery checkpoint also keeps up to eight
+content-free inspection outcomes (scope/window, snapshot, node count and
+incompleteness). A prior target is mentioned only if its private identity can be
+matched to a ref in the exact current observation; otherwise the target is null.
+No old text, tool replay or capability is restored. Initial refresh does not erase
+this history or pretend to scroll/page through results. Navigation clears this
+document-local history. The full host checkpoint is serialized before the
+original structured-input reservation; all bytes count within existing ceilings.
 The checkpoint and tool schema are provider-neutral. The existing desktop
 discovery composition still selects Luna/Terra via OpenAI Responses; Anthropic
 navigation manifests remain explicitly unsupported until their existing
 checkpoint/accounting seam is implemented, rather than claiming parity from
-the generic checkpoint alone. Actions, cross-origin browsing and cross-document
+the generic checkpoint alone. Inspection history uses that same qualified
+structured discovery checkpoint path, not an uncounted provider-specific side
+channel. Actions, cross-origin browsing and cross-document
 evidence synthesis are not supported.
 The shared Rust contracts are platform-neutral. Actual desktop composition
 and live evidence remain macOS-only until the Windows composition is qualified.
@@ -80,9 +94,10 @@ and clean retained-resource closure. Human review found the route rational but
 answer usefulness partial because a relevant subsection body was absent from
 model-visible evidence. This qualifies the navigation/lifecycle seam, not complete
 semantic content access, cross-page synthesis or general reliability.
-The [progressive inspection deterministic evidence](../eval/agentic-browsing/progressive-inspection.md)
-records the generic repair for this content-access gap. Its real Svelte/Luna
-qualification is still pending; the earlier live result is not retroactively
+The [progressive inspection evidence](../eval/agentic-browsing/progressive-inspection.md)
+records the first live inspection failure (repeated broad-region/viewport
+captures) and its generic deterministic correction. The corrected Svelte/Luna
+qualification is still pending; neither earlier result is retroactively
 upgraded by passing fixtures.
 
 Production/BYOK construction remains `store:false`. The development-only

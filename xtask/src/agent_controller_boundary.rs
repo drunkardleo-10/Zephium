@@ -340,10 +340,24 @@ fn validate_navigation_progress(
     let encoding = initial
         .find("encode_openai_observation_body(")
         .ok_or("missing checkpoint encoding")?;
+    let inspection = initial
+        .find("checkpoint.text.push_str(&inspections.encode(observation)?);")
+        .ok_or("missing bounded inspection projection")?;
+    let bound = initial
+        .find("checkpoint.text.len() > MAX_AGENT_PROVIDER_NAVIGATION_CHECKPOINT_BYTES")
+        .ok_or("missing inspection checkpoint size bound")?;
+    let measurement = initial
+        .find("conservative_request_measurement(&config, &body)?")
+        .ok_or("missing whole-input measurement")?;
     let admission = initial
         .find("policy.prepare_provider_observation_input(")
         .ok_or("missing whole-input admission")?;
-    if !(projection < encoding && encoding < admission) {
+    if !(projection < inspection
+        && inspection < bound
+        && bound < encoding
+        && encoding < measurement
+        && measurement < admission)
+    {
         return Err("navigation progress serialized after policy reservation".into());
     }
     Ok(())
@@ -913,9 +927,14 @@ fn validate_progressive_observation(inspection: &str, checkpoint: &str) -> Resul
         ".matches_manifest_revision(policy.manifest().id(), policy.manifest().guard())",
         "request.lease() != self.prior_call.lease()",
         "self.validate_successor(previous, current, request, &config)",
-        "AgentPreparedObservationRequest::try_for_config(",
+        "AgentPreparedObservationRequest::try_for_config_with_inspections(",
         "previous.frames()[0].generation().next()",
         "node.parent().is_none()",
+        "self.context == observation.request().context()",
+        "capture.snapshot == observation.frames()[0].generation().get()",
+        "progress.captures.len() >= MAX_AGENT_PROVIDER_CONTINUATION_TURNS",
+        ".find(|node| node.key() == key)",
+        "node.reference().model_token()",
     ] {
         if !checkpoint.contains(required) {
             return Err(format!(
@@ -1131,6 +1150,11 @@ mod tests {
             "request.lease() != self.prior_call.lease()",
             "previous.frames()[0].generation().next()",
             "node.parent().is_none()",
+            "self.context == observation.request().context()",
+            "capture.snapshot == observation.frames()[0].generation().get()",
+            "progress.captures.len() >= MAX_AGENT_PROVIDER_CONTINUATION_TURNS",
+            ".find(|node| node.key() == key)",
+            "node.reference().model_token()",
         ] {
             assert!(super::validate_progressive_observation(
                 inspection,
@@ -1156,6 +1180,9 @@ mod tests {
             "policy.reject_unstructured_navigation_input(call_request)?;",
             "openai_text_message(\"developer\", checkpoint)",
             "target.is_some_and(looks_like_secret_value)",
+            "checkpoint.text.push_str(&inspections.encode(observation)?);",
+            "checkpoint.text.len() > MAX_AGENT_PROVIDER_NAVIGATION_CHECKPOINT_BYTES",
+            "conservative_request_measurement(&config, &body)?",
         ] {
             assert!(validate_navigation_progress(
                 NAVIGATION_POLICY,

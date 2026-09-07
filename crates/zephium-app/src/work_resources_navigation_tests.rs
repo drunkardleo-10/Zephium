@@ -42,6 +42,16 @@ pub(super) fn read_result(
     } else {
         wire
     };
+    let wire = if native.region_root.load(Ordering::Acquire) {
+        let wire = wire.replacen("\"r\":\"paragraph\"", "\"r\":\"landmark\"", 1);
+        if expanded {
+            wire.replace("\"c\":\"complete\"", "\"c\":\"node_limit\"")
+        } else {
+            wire
+        }
+    } else {
+        wire
+    };
     callback(completion.settle(Ok(invocation.decode_result(wire.as_bytes()).unwrap())));
 }
 fn navigation_stream(turn: usize, url: &str) -> String {
@@ -312,11 +322,14 @@ fn retained_progressive_capture_retires_old_replay_and_keeps_navigation_live() {
         requests[1].contains("new_scoped_evidence") && !requests[1].contains("document_marker_0")
     );
     assert!(!requests[1].contains("call_1") && !requests[1].contains("fc_1"));
+    assert!(requests[1].contains("ZEPHIUM_HOST_INSPECTION_PROGRESS_V1"));
     assert!(requests[2].contains("new_scoped_evidence") && requests[2].contains("ZREAD2"));
+    assert!(requests[2].contains("ZEPHIUM_HOST_INSPECTION_PROGRESS_V1"));
     assert!(
         requests[3].contains("document_marker_1") && !requests[3].contains("new_scoped_evidence")
     );
     assert_host_checkpoint(&requests[1], "https://retained-fixture.invalid/frozen", &[]);
+    assert!(!requests[3].contains("ZEPHIUM_HOST_INSPECTION_PROGRESS_V1"));
     let mut destroy = owner.destroy(&resource).unwrap();
     assert!(matches!(
         destroy.poll(now()).unwrap(),
@@ -325,6 +338,70 @@ fn retained_progressive_capture_retires_old_replay_and_keeps_navigation_live() {
         )))
     ));
     owner.reap_absent(&resource).unwrap();
+    owner.seal_resources().unwrap();
+    assert!(owner.locally_retired());
+}
+
+#[test]
+fn retained_region_initial_oscillation_preserves_progress_not_old_authority() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (owner, native, resource, browser) = setup();
+    native.discovery.store(true, Ordering::Release);
+    native.region_root.store(true, Ordering::Release);
+    let mut responses = Vec::new();
+    for (index, scope) in [
+        r#"{"kind":"region","target":"@a1"}"#,
+        r#"{"kind":"initial"}"#,
+        r#"{"kind":"region","target":"@a1"}"#,
+        r#"{"kind":"initial"}"#,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        responses.push(
+            inspection_stream(scope)
+                .replace("resp_1", &format!("resp_{}", index + 1))
+                .replace("fc_1", &format!("fc_{}", index + 1))
+                .replace("call_1", &format!("call_{}", index + 1)),
+        );
+    }
+    responses.push(navigation_stream(5, FIRST));
+    responses.extend(final_streams());
+    let (controller, mut result, scope, server, requests) = prepare(browser, responses);
+    let (_, lifecycle) = start(controller, scope);
+    let AgentWorkRetainedOutcome::Accepted { settlement, .. } = finish(&mut result) else {
+        panic!("bounded inspection history did not survive the observed scope cycle")
+    };
+    assert_eq!(settlement.closure().model_calls(), 7);
+    assert_eq!(settlement.closure().navigations(), 1);
+    assert_eq!(native.reads.load(Ordering::Acquire), 6);
+    assert_eq!(native.acquisitions.load(Ordering::Acquire), 1);
+    assert!(matches!(
+        lifecycle.drain_until(Instant::now() + Duration::from_secs(2)),
+        AgentRuntimeScopedDrain::Drained(_)
+    ));
+    native.join();
+    assert_eq!(server.join().unwrap(), 7);
+    let requests = requests.lock().unwrap();
+    assert!(!requests[0].contains("ZEPHIUM_HOST_INSPECTION_PROGRESS_V1"));
+    for (index, request) in requests.iter().enumerate().take(5).skip(1) {
+        assert!(request.contains("ZEPHIUM_HOST_INSPECTION_PROGRESS_V1"));
+        assert!(request.contains(&format!(r#"\"completed_inspections\":{index}"#)));
+        assert!(request.contains(r#"\"current_target\":\"@a1\""#));
+        assert!(request.contains(r#"\"incomplete\":true"#));
+        assert!(!request.contains("fc_1") && !request.contains("call_1"));
+    }
+    assert!(
+        requests[2].contains("document_marker_0") && !requests[2].contains("new_scoped_evidence")
+    );
+    assert!(
+        requests[3].contains("new_scoped_evidence") && !requests[3].contains("document_marker_0")
+    );
+    assert!(!requests[5].contains("ZEPHIUM_HOST_INSPECTION_PROGRESS_V1"));
+    let mut destroy = owner.destroy(&resource).unwrap();
+    assert!(destroy.poll(now()).unwrap().is_some());
     owner.seal_resources().unwrap();
     assert!(owner.locally_retired());
 }
