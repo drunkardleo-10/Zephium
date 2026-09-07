@@ -1,12 +1,14 @@
 # Persistent Work browser resources and execution leases
 
-Status: functional core, typed ports and opt-in macOS native integration;
-**one native two-lease retention witness is qualified** under the separately
-qualified, release-excluded foreground holder. Other adapters remain explicitly
-Unsupported. This proves one fixed native document survived two actor leases,
-not product rendering authority or general task execution. The existing
-run-owned qualification path remains available, and its all-zero proof now also
-excludes retained Work resources and their outstanding delivery owners.
+Status: functional core, typed ports and opt-in macOS native integration.
+The shipping retained product entry has mechanically qualified one bounded,
+model-selected two-hop public objective, retaining the same healthy resource
+through durable completion and clean original shutdown. Answer usefulness was
+partial because relevant subsection content was absent from model-visible
+evidence; this is not general task or product readiness. Other native adapters
+remain explicitly Unsupported. The existing run-owned qualification path remains
+available, and its all-zero proof also excludes retained Work resources and their
+outstanding delivery owners.
 
 The actual-app retained WKWebView/common-controller join additionally qualified
 one [frozen public product brief](../eval/agentic-browsing/macos-retained-public-product-brief.md)
@@ -16,9 +18,12 @@ That one-page read-only result is not general task or shipping-product readiness
 The shared controller/application now joins observed-link public discovery to
 execution-lease-bound document transitions on that same retained resource. Its
 deterministic provider/controller regressions cover two selected hops, transcript
-retirement and exact cancellation accounting. Successor navigation has **not**
-yet been qualified with a live retained page/model. Observation-owned native
-rendering is separately [RAF-qualified](../eval/agentic-browsing/macos-retained-observation-rendering.md).
+retirement and exact cancellation accounting. The corrected
+[retained public workflow](../eval/agentic-browsing/macos-retained-open-objective.md)
+completed two Luna-selected Svelte documentation hops and source-mapped output
+in 28.934 seconds on 2026-09-07. Mechanical completion and partial semantic
+usefulness are recorded separately. Observation-owned native rendering is also
+independently [RAF-qualified](../eval/agentic-browsing/macos-retained-observation-rendering.md).
 
 ## Production selected-profile attachment
 
@@ -64,18 +69,19 @@ unsupported. Default Browse does not enable this optional graph.
 Deterministic actual-Shell/SQLite/loopback tests cover durable result before
 destruction, original global shutdown, foreign Engine/Store and changed profile,
 duplicate/legacy attachment, pre-attachment stop, and stop/expiry during original
-construction with no acquisition/provider work. These tests and build gates do
-not qualify a new live native/provider run. The next live witness must invoke
-this production entry in the actual `macos-work` application, manually judge a
-bounded one-page objective, retain its page after terminal result, and verify
-normal original Shell/native shutdown. No live invocation was performed here.
+construction with no acquisition/provider work. Separate actual-app evidence
+now exercises this production entry for a
+[one-page result](../eval/agentic-browsing/macos-retained-product-workflow.md) and
+the bounded two-hop public workflow above, retaining the page after terminal
+result and verifying normal original Shell/native shutdown. Those isolated
+witnesses do not establish broad website coverage or production reliability.
 
 ## Why this boundary exists
 
 The actual-application foreground witness establishes a bounded supported
-rendering opportunity for one exact page. It does not solve ownership: current
-`ContextIdentity` permanently owns a run, normal cancellation stops loading and
-fails the isolated document channel, and current successful runs destroy every
+rendering opportunity for one exact page. It does not solve ownership: legacy
+`ContextIdentity` permanently owns a run, its normal cancellation stops loading
+and fails the isolated document channel, and successful legacy runs destroy every
 native context. Reusing those mechanisms as persistent Work resource lifetimes
 would either lose the useful page or silently change the meaning of Clean.
 
@@ -168,9 +174,10 @@ pre-dispatch invalidation versus committed epoch publication, fresh successor
 observation, foreign/stale terminals, refusal, expiry, revocation/destruction,
 physical callback-return barriers and exact native gate event ordering. The
 shared port defaults to lossless Unsupported outside the concrete macOS adapter.
-Controller transcript retirement, fresh account evidence, production rendering
-opportunities and a genuine unfamiliar multi-page live witness remain the next
-integration work; these tests do not qualify those capabilities.
+Controller transcript retirement, fresh account evidence and production rendering
+opportunities are now integrated through the shared controller join above. Its
+separate bounded macOS live evidence qualifies two unfamiliar model-selected
+documentation hops; these primitive tests alone make no such live claim.
 
 ## Rendering as part of retained observation
 

@@ -1,10 +1,12 @@
 # Retained public multi-page objective
 
-Status: the first live retained page/model attempt completed one model-selected
-hop, then refused a later navigation proposal before native dispatch. The open
-objective is **not qualified**. Dashboard review confirmed a repeated current
-destination: policy refusal was correct; trusted progress had omitted current
-and prior document URLs after retiring the old transcript.
+Status: the corrected retained-page workflow is **mechanically qualified once**
+on macOS: Luna selected two documentation hops and completed source-mapped
+extraction through the original durable controller and clean native shutdown.
+Human review judged the route rational but answer usefulness **partial**: the
+model-visible evidence omitted a relevant subsection body. This is a demonstrated
+content-access/projection gap, not complete factual qualification or general
+agent reliability. The earlier failed attempt remains recorded below.
 
 This reuses the existing `macos-work-retained-product-probe` and shipping
 `admit_retained_trusted_work` entry, original selected Ready profile, Engine,
@@ -134,5 +136,88 @@ budgets; this is not extra run budget. Actual ordinary URLs add only short host
 state. Tests cover substituted/missing/reordered URL/receipt/current-context
 bindings, initial/one/two-hop wire context, unchanged rejection of self-links and
 prior visits, and retained Navigate → Read → Navigate authority/transcript state.
-The corrected candidate requires a new no-oracle live run; prior failed evidence
-is not relabeled successful.
+The correction was qualified in the new no-oracle run below; prior failed
+evidence is not relabeled successful.
+
+## Corrected retained workflow — 2026-09-07
+
+Clean source `4f9fc583b56135d447970cf48e1a69cf3566daf2` was bundled with the same
+pinned toolchain. Executable SHA-256:
+`f57de833c4f1652eb3fd3882a4e1cee0c57fd78210796c1e16880d5b61e6fed8`.
+Whole-bundle [inventory](macos-retained-open-objective.bundle.json) SHA-256:
+`6f505eb6937d6ea0591ef87acf8e9b9563eaaeb9ec0edf23b79e727e7589f8ad`.
+Objective, frozen departure, approved scope, extraction schema and budgets were
+unchanged. No destination, expected answer or page-specific validator was added.
+
+The first corrected launch deferred at the original foreground gate after
+15,026 ms / 262 checks, before credential lookup or Work admission. The observer
+joined, ordinary shutdown was clean, and the immutable Store passed integrity
+and foreign-key checks with zero Work runs, audit events or artifacts. Original
+data/logs/inventories remain at
+`/private/tmp/zephium-retained-svelte-progress.Q8A7b7` (`app-data-original`).
+There was no automatic retry or foreground-policy relaxation.
+
+After explicit user readiness, the next launch admitted foreground after
+1,498 ms / 29 checks. The original selected Ready profile was checked before
+and after credential lookup. It invoked the same shipping retained product entry
+with observed-link discovery and observation-owned rendering. Dashboard review
+confirmed the model-selected route:
+
+`/docs/svelte/overview` → `/docs/svelte/$state` → `/docs/svelte/$derived`.
+
+| Call | Decision | Input tokens | Output tokens | Cost micro-USD | Request bytes | Semantic bytes | Elapsed ms |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | Navigate | 3,772 | 66 | 193 | 14,993 | 7,551 | 3,301 |
+| 2 | Read | 4,270 | 60 | 198 | 16,566 | 9,030 | 3,342 |
+| 3 | Navigate | 6,987 | 68 | 897 | 28,040 | 9,346 | 2,827 |
+| 4 | Read | 4,227 | 45 | 1,100 | 16,433 | 8,862 | 2,129 |
+| 5 | Extract | 6,865 | 262 | 1,112 | 27,531 | 9,087 | 5,057 |
+| 6 | Source-mapped extraction | 9,684 | 1,104 | 3,746 | 40,257 | 9,447 | 10,745 |
+| Total | | 35,805 | 1,605 | 7,246 | | | |
+
+The reported PricedCeiling total is approximately $0.007246, not an independent
+billing audit. Controller elapsed time was 28,934 ms, excluding the earlier
+foreground/credential preparation. The initial observation contained 81 nodes /
+2,204 text bytes; successors contained 100 / 2,618 and 97 / 2,630 respectively.
+Each had one Complete main frame and zero boundaries. Complete is a bounded
+projection status, **not full-page content completeness**, as the review below
+demonstrates. Each provider turn followed retirement of its observation-owned
+native presentation; there was no release-excluded rendering holder.
+
+Both model-selected native transitions completed, retired old transcript/ref
+authority, joined their original resource and policy/audit receipts, and required
+fresh document observations/account attestations. The original resource/profile/
+incarnation/lease and cumulative controller budget remained the same throughout.
+The run reached Terminal without controller or persistence failure;
+`accepted`, `source_mapping_verified` and `durable_terminal_verified` were true.
+Before original shutdown, the same row was Retained, healthy, idle, reusable and
+destruction-not-started. The observer joined, `normal_shutdown_clean` and the
+mechanical `qualified` result were true, and the process exited 0.
+
+The stopped original Store passed integrity and foreign-key checks. It contains
+one Succeeded terminal at revision 3 with debt NONE, 19 audit events, two audit
+deliveries, one profile and zero artifacts. Result delivery is source-bound but
+this slice does not persist its content as an artifact. The complete bundle and
+executable remained unchanged after shutdown, and no app process remained.
+Original log, before/after inventories and intact Store/profile are preserved at
+`/private/tmp/zephium-retained-svelte-confirmed.B1z2oO` (`app-data-original`).
+The normal isolated app-data root was vacated only after shutdown and verification.
+
+### Separate answer-quality review
+
+Review of the six retained public Responses judged the navigation route rational
+and the trusted progress correction effective. The final answer was only partly
+useful. The official [$derived Destructuring section](https://svelte.dev/docs/svelte/$derived#Destructuring)
+contains the relevant explanation and example: destructuring a `$derived`
+declaration keeps the resulting variables reactive. The reviewed model-visible
+evidence exposed the subsection heading without its substantive body. The mapper
+therefore caveated its answer instead of inventing unsupported detail.
+
+This qualifies the retained multi-page execution/lifecycle seam, not a complete
+answer to the user's objective. The next demonstrated gap is generic semantic
+content access/projection: relevant section bodies must be reachable within the
+bounded tool surface and evidence budgets. Navigation scope, repeat checks,
+account/deadline rules and exact native ownership do not need loosening. No
+automatic retry, model substitution or page-specific answer injection followed
+the review. Authenticated work, actions, cross-page citations, human takeover,
+Windows and repeat reliability remain outside this evidence.

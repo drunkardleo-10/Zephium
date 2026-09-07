@@ -52,7 +52,13 @@ the existing policy/audit receipt, including after cancellation; it does not
 allocate a legacy context or restart the session. The successor's observation
 owns its bounded native rendering episode and retires presentation before the
 next provider call. See [retained resource ownership](agent-work-resources.md).
-Deterministic two-hop and interruption regressions are not live qualification.
+Beyond deterministic two-hop/interruption regressions, one
+[retained macOS public workflow](../eval/agentic-browsing/macos-retained-open-objective.md)
+now completed two Luna-selected Svelte documentation hops with durable success
+and clean retained-resource closure. Human review found the route rational but
+answer usefulness partial because a relevant subsection body was absent from
+model-visible evidence. This qualifies the navigation/lifecycle seam, not complete
+semantic content access, cross-page synthesis or general reliability.
 
 Production/BYOK construction remains `store:false`. The development-only
 `discovery-qualification` feature explicitly opts into retained public Responses
