@@ -149,7 +149,7 @@ impl AgentBrowserPort for Native {
         callback: WorkBrowserObservationCompletionCallback,
     ) -> WorkBrowserObservationDispatch {
         self.reads.fetch_add(1, Ordering::AcqRel);
-        if self.not_ready.load(Ordering::Acquire) {
+        if self.not_ready.swap(false, Ordering::AcqRel) {
             let (_, completion) = request.into_parts();
             callback(completion.settle(Err(SemanticRuntimePortFailure::NotReady)));
             return WorkBrowserObservationDispatch::Scheduled;
@@ -659,7 +659,14 @@ fn snapshot_probe_release_is_resource_bound_and_owner_survives_actor_loss() {
             true
         }),
     );
-    assert!(SnapshotReleaseBrowser::new(wrong_browser, release.clone()).is_err());
+    assert!(SnapshotReleaseBrowser::from_capture(
+        wrong_browser,
+        resource.clone(),
+        super::super::probe::RetainedProbeCapture::OneShot(Box::new(|_| panic!(
+            "foreign resource cannot retire"
+        ))),
+    )
+    .is_err());
     assert_ne!(resource, wrong_resource);
     let mut browser = SnapshotReleaseBrowser::new(browser, release.clone()).unwrap();
     browser
@@ -684,82 +691,94 @@ fn snapshot_probe_release_is_resource_bound_and_owner_survives_actor_loss() {
 
 #[test]
 fn snapshot_probe_common_worker_cannot_start_model_until_native_release() {
-    use super::snapshot_probe::{SnapshotRelease, SnapshotReleaseBrowser};
+    use super::super::probe::RetainedProbeCapture;
+    use super::snapshot_probe::SnapshotReleaseBrowser;
     let _serial = crate::WORK_RUNTIME_TEST_SERIAL
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let (owner, native, resource, browser) = setup();
-    let (tx, rx) = mpsc::sync_channel(1);
-    let release = SnapshotRelease::new(
-        resource.clone(),
-        Box::new(move |callback| {
-            tx.send(callback).unwrap();
-            true
-        }),
-    );
-    let browser = SnapshotReleaseBrowser::new(browser, release.clone()).unwrap();
-    let (controller, mut result, scope, server) = prepared(
-        Box::new(browser),
-        vec![response_stream(1), response_stream(2)],
-        false,
-    );
-    let (_handle, lifecycle) = start(controller, scope);
-    let callback = rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    while let Some(event) = result.take_event() {
-        assert!(!matches!(
-            event.kind(),
-            AgentWorkEventKind::ModelActive
-                | AgentWorkEventKind::ModelSettled { .. }
-                | AgentWorkEventKind::ToolProposed(_)
+    for first_not_ready in [false, true] {
+        let (owner, native, resource, browser) = setup();
+        native.not_ready.store(first_not_ready, Ordering::Release);
+        let (tx, rx) = mpsc::sync_channel(1);
+        let (browser, release) = SnapshotReleaseBrowser::from_capture(
+            browser,
+            resource.clone(),
+            RetainedProbeCapture::BoundedReadiness(Box::new(move |callback| {
+                tx.send(callback).unwrap();
+                true
+            })),
+        )
+        .unwrap();
+        assert!(browser.allows_readiness_retry());
+        let (controller, mut result, scope, server) = prepared(
+            Box::new(browser),
+            vec![response_stream(1), response_stream(2)],
+            false,
+        );
+        let (_handle, lifecycle) = start(controller, scope);
+        let callback = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        while let Some(event) = result.take_event() {
+            assert!(!matches!(
+                event.kind(),
+                AgentWorkEventKind::ModelActive
+                    | AgentWorkEventKind::ModelSettled { .. }
+                    | AgentWorkEventKind::ToolProposed(_)
+            ));
+        }
+        assert!(result.take_outcome().is_none());
+        assert_eq!(
+            native.reads.load(Ordering::Acquire),
+            1 + usize::from(first_not_ready)
+        );
+        callback(true);
+        let mut outcome = None;
+        wait_until(|| {
+            while result.take_event().is_some() {}
+            outcome = result.take_outcome();
+            outcome.is_some()
+        });
+        assert!(matches!(
+            outcome,
+            Some(AgentWorkRetainedOutcome::Accepted { .. })
         ));
+        assert!(release.returned().unwrap());
+        assert!(matches!(
+            lifecycle.drain_until(Instant::now() + Duration::from_secs(2)),
+            AgentRuntimeScopedDrain::Drained(_)
+        ));
+        native.join();
+        assert_eq!(native.destructions.load(Ordering::Acquire), 0);
+        assert!(!owner.locally_retired());
+        let mut destroy = owner.destroy(&resource).unwrap();
+        assert!(matches!(
+            destroy.poll(now()).unwrap(),
+            Some(LifecycleResult::Event(WorkBrowserResourceEvent::Destroyed(
+                _
+            )))
+        ));
+        owner.reap_absent(&resource).unwrap();
+        owner.seal_resources().unwrap();
+        assert!(owner.locally_retired());
+        assert_eq!(server.join().unwrap(), 2);
     }
-    assert!(result.take_outcome().is_none());
-    assert_eq!(native.reads.load(Ordering::Acquire), 1);
-    callback(true);
-    let mut outcome = None;
-    wait_until(|| {
-        while result.take_event().is_some() {}
-        outcome = result.take_outcome();
-        outcome.is_some()
-    });
-    assert!(matches!(
-        outcome,
-        Some(AgentWorkRetainedOutcome::Accepted { .. })
-    ));
-    assert!(release.returned().unwrap());
-    assert!(matches!(
-        lifecycle.drain_until(Instant::now() + Duration::from_secs(2)),
-        AgentRuntimeScopedDrain::Drained(_)
-    ));
-    native.join();
-    assert_eq!(native.destructions.load(Ordering::Acquire), 0);
-    assert!(!owner.locally_retired());
-    let mut destroy = owner.destroy(&resource).unwrap();
-    assert!(matches!(
-        destroy.poll(now()).unwrap(),
-        Some(LifecycleResult::Event(WorkBrowserResourceEvent::Destroyed(
-            _
-        )))
-    ));
-    owner.reap_absent(&resource).unwrap();
-    owner.seal_resources().unwrap();
-    assert!(owner.locally_retired());
-    assert_eq!(server.join().unwrap(), 2);
 }
 
 #[test]
 fn snapshot_probe_not_ready_consumes_one_dispatch_and_drains_without_provider() {
-    use super::snapshot_probe::{SnapshotRelease, SnapshotReleaseBrowser};
+    use super::super::probe::RetainedProbeCapture;
+    use super::snapshot_probe::SnapshotReleaseBrowser;
     let _serial = crate::WORK_RUNTIME_TEST_SERIAL
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let (owner, native, resource, browser) = setup();
     native.not_ready.store(true, Ordering::Release);
-    let release = SnapshotRelease::new(
+    let (browser, release) = SnapshotReleaseBrowser::from_capture(
+        browser,
         resource.clone(),
-        Box::new(|_| panic!("no successful snapshot to retire")),
-    );
-    let browser = SnapshotReleaseBrowser::new(browser, release.clone()).unwrap();
+        RetainedProbeCapture::OneShot(Box::new(|_| panic!("no successful snapshot to retire"))),
+    )
+    .unwrap();
+    assert!(!browser.allows_readiness_retry());
     let (controller, mut result, scope, server) = prepared(Box::new(browser), Vec::new(), false);
     let (_handle, lifecycle) = start(controller, scope);
     let mut outcome = None;

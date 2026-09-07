@@ -148,6 +148,7 @@ pub(super) struct SnapshotReleaseBrowser {
     release: Arc<SnapshotRelease>,
     observation: Option<SemanticObservation>,
     observed: bool,
+    readiness_retry: bool,
 }
 impl SnapshotReleaseBrowser {
     pub(super) fn new(
@@ -162,12 +163,28 @@ impl SnapshotReleaseBrowser {
             release,
             observation: None,
             observed: false,
+            readiness_retry: true,
         })
+    }
+    pub(super) fn from_capture(
+        browser: RetainedBrowser,
+        resource: WorkBrowserResourceJoin,
+        capture: super::probe::RetainedProbeCapture,
+    ) -> Result<(Self, Arc<SnapshotRelease>), AgentWorkFailure> {
+        use super::probe::RetainedProbeCapture;
+        let (retire, readiness_retry) = match capture {
+            RetainedProbeCapture::OneShot(retire) => (retire, false),
+            RetainedProbeCapture::BoundedReadiness(retire) => (retire, true),
+        };
+        let release = SnapshotRelease::new(resource, retire);
+        let mut browser = Self::new(browser, release.clone())?;
+        browser.readiness_retry = readiness_retry;
+        Ok((browser, release))
     }
 }
 impl AgentWorkRetainedBrowser for SnapshotReleaseBrowser {
     fn allows_readiness_retry(&self) -> bool {
-        false
+        self.readiness_retry
     }
     fn binding(&self) -> &WorkBrowserReadBinding {
         self.browser.binding()
@@ -192,7 +209,20 @@ impl AgentWorkRetainedBrowser for SnapshotReleaseBrowser {
         now: AgentPolicyInstant,
     ) -> Result<Option<SemanticObservation>, AgentWorkFailure> {
         if self.observation.is_none() {
-            let Some(observation) = self.browser.poll_observation(now)? else {
+            let result = self.browser.poll_observation(now);
+            // Only an original pre-dispatch refusal restores this attempt.
+            // A successful observation permanently consumes capture.
+            if self.readiness_retry
+                && matches!(
+                    result,
+                    Err(AgentWorkFailure::Observation(
+                        SemanticRuntimePortFailure::NotReady
+                    ))
+                )
+            {
+                self.observed = false;
+            }
+            let Some(observation) = result? else {
                 return Ok(None);
             };
             self.observation = Some(observation);

@@ -13,7 +13,9 @@ use std::{
 use zephium_agent_controller::*;
 use zephium_agent_runtime::*;
 use zephium_agentic::*;
-use zephium_app::retained_work_probe::RetainedWorkProbeOwner;
+use zephium_app::retained_work_probe::{
+    RetainedProbeCapture, RetainedProbeRetire, RetainedWorkProbeOwner,
+};
 use zephium_core::{
     blocker::{ContentPolicyGeneration, ContentRuleDigest, ContentRules},
     ports::engine::{ContentRuleSettlement, Engine, EngineEvent, NativeDispatch},
@@ -834,7 +836,7 @@ impl Driver {
             self.store.clone(),
             Box::new(task),
             now()?,
-            retire,
+            task::capture(retire),
         )?;
         self.result = Some(result);
         self.control = Some(control);

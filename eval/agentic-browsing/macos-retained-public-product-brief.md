@@ -53,10 +53,13 @@ source, not supplied in the objective or copied from web research. Missing,
 duplicate, wrong-role, foreign or incomplete evidence fails before a model call.
 A changed introduction can correctly fail this frozen contract; no automatic
 wait, recapture, predicate relaxation or budget increase follows a refusal.
-The one-shot capture adapter explicitly disables readiness retry in the common
+The public task's explicit one-shot capture policy disables readiness retry in the common
 controller: a first `NotReady` closes with that original typed cause, no second
 semantic dispatch and zero provider calls. Other retained adapters keep the
-existing bounded readiness retry by default. The public native resource owns a
+existing bounded readiness retry by default. The synthetic task explicitly
+selects bounded readiness in the same owner/wrapper construction; only an
+original `NotReady` resets its failed attempt, never a successful capture or
+another refusal. The public native resource owns a
 one-read admission budget that survives presentation retirement; the synthetic
 rendering probe retains its original eight-read budget. An admitted dispatch
 may fail before JavaScript executes, so one attempted read is not a claim of a
@@ -134,6 +137,23 @@ Audit also identified ambiguous readiness wording: the existing one-shot
 wrapper already blocked a second native dispatch, but a common-controller
 retry would have replaced `NotReady` with `Contract`. The explicit adapter
 contract preserves the original cause and removes that retry attempt.
+
+Follow-up audit caught the first correction applying `false` to both tasks'
+shared capture wrapper. Capture policy is now an explicit release-excluded
+task choice passed through the actual owner constructor: public `OneShot`,
+synthetic `BoundedReadiness`. Composition tests pin both choices, and scoped
+controller tests use that same wrapper factory to assert public false/synthetic
+true, one public refusal with zero provider calls, and synthetic success after
+one `NotReady` without releasing its snapshot before presentation retirement.
+The synthetic wrapper now rearms only that original failed attempt; its former
+second-begin guard would otherwise have changed `NotReady` to `Contract`.
+Generic controller retry limits and native presentation/read bounds are unchanged.
+
+Host coverage limit: deterministic tests cover the exact public/fixture document
+predicate, request/purpose binding and native read budget, with mutation guards
+on the host's original resource/guard checks. They do not create a ready
+`AgentOwnedView` and drive public acceptance through `handle_resource_witness`;
+that native foreground seam still requires the separately authorized live run.
 
 Correction checks: 47 application Work-resource tests passed, including the
 scoped common-controller first-`NotReady` test (one original native dispatch,

@@ -1,6 +1,10 @@
 //! Frozen synthetic public task; never page-authored policy or a success claim.
 use super::*;
 
+pub(super) fn capture(retire: RetainedProbeRetire) -> RetainedProbeCapture {
+    RetainedProbeCapture::BoundedReadiness(retire)
+}
+
 const MARKERS: [&str; 5] = [
     "Document complete",
     "Load ready",
@@ -300,6 +304,10 @@ mod tests {
     }
     #[test]
     fn fixture_task_requires_complete_current_unique_paragraph_markers() {
+        assert!(matches!(
+            capture(Box::new(|_| false)),
+            RetainedProbeCapture::BoundedReadiness(_)
+        ));
         let good = observation(&MARKERS, "paragraph", "complete");
         let expected = Arc::new(Mutex::new(None));
         let mut task = Task::new(

@@ -1,6 +1,10 @@
 //! Closed, read-only real-storefront brief. Page/model text never grants authority.
 use super::*;
 
+pub(super) fn capture(retire: RetainedProbeRetire) -> RetainedProbeCapture {
+    RetainedProbeCapture::OneShot(retire)
+}
+
 const TARGET: &str = "https://shop.pimoroni.com/products/raspberry-pi-pico-2";
 const ORIGIN: &str = "https://shop.pimoroni.com";
 const PRODUCT: &str = "Raspberry Pi Pico 2";
@@ -436,6 +440,10 @@ mod tests {
     }
     #[test]
     fn public_brief_has_one_fixed_target_and_no_effect_or_expansion_authority() {
+        assert!(matches!(
+            capture(Box::new(|_| false)),
+            RetainedProbeCapture::OneShot(_)
+        ));
         let (fixture, target) = document().unwrap();
         assert!(fixture.is_none());
         assert_eq!(target.as_url().as_str(), TARGET);

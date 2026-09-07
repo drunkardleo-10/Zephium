@@ -13,6 +13,15 @@ pub type RetainedProbeNativeFactory = Box<
 /// Exact platform holder retirement; no page/script/model authority.
 pub type RetainedProbeRetire = Box<dyn FnOnce(Box<dyn FnOnce(bool) + Send>) -> bool + Send>;
 
+/// Frozen diagnostic capture policy; neither variant permits recapturing a
+/// successful snapshot or retrying any failure other than pre-dispatch NotReady.
+pub enum RetainedProbeCapture {
+    /// Close on the first unsuccessful read attempt.
+    OneShot(RetainedProbeRetire),
+    /// Use the common controller's existing bounded readiness checks.
+    BoundedReadiness(RetainedProbeRetire),
+}
+
 /// Application-side owner retained independently of controller/worker results.
 pub struct RetainedWorkProbeOwner {
     owner: WorkResourceOwner,
@@ -128,7 +137,7 @@ impl RetainedWorkProbeOwner {
         audit: Arc<dyn AgentAuditPort>,
         task: Box<dyn AgentWorkTask>,
         now: AgentPolicyInstant,
-        retire: RetainedProbeRetire,
+        capture: RetainedProbeCapture,
     ) -> Result<
         (
             AgentWorkRetainedHandle,
@@ -147,10 +156,13 @@ impl RetainedWorkProbeOwner {
             .owner
             .retained_browser(lease, now)
             .map_err(|_| "original_facade")?;
-        let release = SnapshotRelease::new(self.resource.clone().ok_or("resource")?, retire);
+        let (browser, release) = SnapshotReleaseBrowser::from_capture(
+            browser,
+            self.resource.clone().ok_or("resource")?,
+            capture,
+        )
+        .map_err(|_| "presentation_binding")?;
         self.release = Some(release.clone());
-        let browser =
-            SnapshotReleaseBrowser::new(browser, release).map_err(|_| "presentation_binding")?;
         let (controller, result, binding) = AgentWorkRetainedController::try_new(
             input,
             Box::new(browser),
