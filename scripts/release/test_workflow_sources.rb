@@ -236,10 +236,110 @@ def assert_macos_runtime_evidence_boundary(root)
   end
 end
 
+def linux_native_environment_errors(ci, dockerfile, launcher, preflight, profile)
+  errors = []
+  job = ci.fetch("jobs").fetch("linux-native-security")
+  errors << "native gates must use the hosted VM, not an implicit Docker job" unless
+    job["runs-on"] == "ubuntu-24.04" && !job.key?("container")
+  errors << "native steps must stay inside their exact unprivileged executor" unless
+    job.fetch("defaults").fetch("run")["shell"] == "bash scripts/ci/linux_native_container.sh exec {0}"
+  ordered = [
+    "Start capability-free Fedora native test environment",
+    "Fetch exact locked Linux blocker graph",
+    "Seal native test network after dependency acquisition",
+    "Prove unprivileged native sandbox prerequisites",
+    "Prove native WebKitGTK sandbox package prerequisites",
+    "Prove the exact bundled blocker seed compiles in native WebKitGTK",
+    "Prove Wry WebKitWebProcess confinement"
+  ]
+  indices = ordered.map { |name| named_step(ci, "linux-native-security", name).first }
+  errors << "native acquisition, network seal and proofs are out of order" unless indices == indices.sort
+  host_steps = {
+    ordered[0] => "start",
+    ordered[2] => "seal",
+    "Retire exact Fedora native test environment" => "stop"
+  }
+  job.fetch("steps").each do |step|
+    next unless step.key?("run")
+
+    mode = host_steps[step["name"]]
+    if mode
+      errors << "host helper mode changed" unless step["shell"] == "bash" &&
+        step["run"] == "bash scripts/ci/linux_native_container.sh #{mode}"
+    elsif step.key?("shell") || step.key?("container") || step.key?("continue-on-error") || step.key?("if")
+      errors << "native proof escaped or bypassed the exact executor"
+    end
+  end
+  _, cleanup = named_step(ci, "linux-native-security", host_steps.keys.last)
+  errors << "native environment cleanup must be unconditional" unless cleanup["if"] == "always()"
+  validate_image(dockerfile[/^FROM (.+)$/, 1], "Fedora native Dockerfile", errors)
+  errors << "native image must stay unprivileged and exact-toolchain-bound" unless
+    dockerfile.include?("USER 10001:10001") && dockerfile.include?("RUSTUP_TOOLCHAIN=1.95.0")
+  [
+    "--user 10001:10001 --cap-drop ALL --security-opt no-new-privileges",
+    "--security-opt seccomp=unconfined --security-opt apparmor=zephium-native-ci",
+    "--read-only --pids-limit 2048", "target=/workspace,readonly",
+    "docker exec --interactive --user 10001:10001",
+    "target=/opt/rustup,readonly", "target=/opt/rust-bin,readonly",
+    'docker network disconnect bridge "${native_name}"',
+    'CARGO_NET_OFFLINE=${native_offline}',
+    'sudo apparmor_parser --remove scripts/ci/linux-native.apparmor'
+  ].each do |required|
+    errors << "native launcher lost #{required}" unless launcher.include?(required)
+  end
+  errors << "native launcher must mount only its four reviewed paths" unless launcher.scan(/--mount\b/).length == 4
+  ["--privileged", "--cap-add", "--device", "--pid host", "--network host",
+   "docker.sock", "GITHUB_TOKEN", "sysctl -w", "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS"].each do |forbidden|
+    errors << "native launcher adds forbidden authority #{forbidden}" if launcher.include?(forbidden)
+  end
+  ["CapInh CapPrm CapEff CapBnd CapAmb", "NoNewPrivs:", "Seccomp_filters:",
+   "--unshare-user --unshare-pid --unshare-net", '"${native_interface##*/}" = lo',
+   '"$(id -u)" = 10001'].each do |required|
+    errors << "native preflight lost #{required}" unless preflight.include?(required)
+  end
+  declarations = profile.lines.reject { |line| line.start_with?("#") || line.strip.empty? }.join
+  unless declarations == "abi <abi/4.0>,\nprofile zephium-native-ci flags=(unconfined) {\n  userns,\n}\n"
+    errors << "scoped native userns profile changed"
+  end
+  errors
+end
+
+def assert_linux_native_environment(root)
+  ci = parse_workflow(File.read(File.join(root, ".github/workflows/ci.yml")), "CI")
+  paths = %w[linux-native.Dockerfile linux_native_container.sh prove_linux_native_namespaces.sh linux-native.apparmor]
+  sources = paths.map { |path| File.read(File.join(root, "scripts/ci", path), encoding: "UTF-8") }
+  errors = linux_native_environment_errors(ci, *sources)
+  raise errors.join("\n") unless errors.empty?
+
+  [
+    [0, "@sha256:", "@mutable:"],
+    [0, "USER 10001:10001", "USER 0:0"],
+    [1, "--cap-drop ALL", "--cap-add SYS_ADMIN"],
+    [1, "target=/workspace,readonly", "target=/workspace"],
+    [1, "docker network disconnect bridge", "echo skipped"],
+    [1, "--security-opt no-new-privileges", "--privileged"],
+    [2, "--unshare-user", "--unshare-user-try"],
+    [2, "Seccomp_filters:", "Unrelated:"],
+    [3, "zephium-native-ci", "unconfined"]
+  ].each do |index, before, after|
+    mutation = sources.dup
+    raise "missing Linux policy mutation target #{before}" unless mutation[index].include?(before)
+    mutation[index] = mutation[index].sub(before, after)
+    if linux_native_environment_errors(ci, *mutation).empty?
+      raise "Linux native authority mutation escaped: #{before}"
+    end
+  end
+  escaped = Marshal.load(Marshal.dump(ci))
+  _, gate = named_step(escaped, "linux-native-security", "Prove Wry WebKitWebProcess confinement")
+  gate["shell"] = "bash"
+  raise "native gate escaped onto the host" if linux_native_environment_errors(escaped, *sources).empty?
+end
+
 assert_fixture_policy
 root = File.expand_path("../..", __dir__)
 assert_ci_dependency_staging(root)
 assert_macos_runtime_evidence_boundary(root)
+assert_linux_native_environment(root)
 workflows = Dir[File.join(root, ".github/workflows/*.{yml,yaml}")].sort
 raise "repository contains no GitHub Actions workflows" if workflows.empty?
 

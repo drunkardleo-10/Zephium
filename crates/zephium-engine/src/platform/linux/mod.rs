@@ -1245,8 +1245,15 @@ mod tests {
     }
 
     fn prove_web_process_confinement(pid: u32, host_only_file: &Path) {
+        let parent =
+            std::fs::read_to_string("/proc/self/status").expect("read browser process status");
         let status = std::fs::read_to_string(format!("/proc/{pid}/status"))
             .expect("read WebKitWebProcess status");
+        assert_eq!(
+            proc_status_value(&parent, "NoNewPrivs:"),
+            Some("1"),
+            "native confinement probe must enter through a no-new-privileges launcher"
+        );
         assert_eq!(
             proc_status_value(&status, "NoNewPrivs:"),
             Some("1"),
@@ -1256,6 +1263,10 @@ mod tests {
             proc_status_value(&status, "Seccomp:"),
             Some("2"),
             "WebKitWebProcess must run under a seccomp filter"
+        );
+        assert!(
+            renderer_added_seccomp_filter(&parent, &status),
+            "WebKitWebProcess must add a filter; an inherited container filter is not evidence"
         );
 
         for namespace in ["mnt", "user", "pid"] {
@@ -1280,6 +1291,31 @@ mod tests {
             "WebKitWebProcess can read a host-only path through its sandbox root: {}",
             renderer_path.display()
         );
+    }
+
+    fn renderer_added_seccomp_filter(parent: &str, renderer: &str) -> bool {
+        let count = |status| {
+            proc_status_value(status, "Seccomp_filters:")
+                .and_then(|value| value.parse::<u64>().ok())
+        };
+        matches!((count(parent), count(renderer)), (Some(parent), Some(renderer)) if renderer > parent)
+    }
+
+    #[test]
+    fn renderer_seccomp_evidence_rejects_inherited_missing_or_invalid_filters() {
+        let status = |count| format!("Seccomp:\t2\nSeccomp_filters:\t{count}\n");
+        assert!(renderer_added_seccomp_filter(&status(0), &status(1)));
+        assert!(renderer_added_seccomp_filter(&status(2), &status(3)));
+        for (parent, renderer) in [
+            (status(1), status(1)),
+            (status(2), status(1)),
+            (status(0), "Seccomp:\t2\n".into()),
+            ("".into(), status(1)),
+            ("Seccomp_filters:\tinvalid\n".into(), status(1)),
+            (status(0), "Seccomp_filters:\t18446744073709551616\n".into()),
+        ] {
+            assert!(!renderer_added_seccomp_filter(&parent, &renderer));
+        }
     }
 
     #[test]

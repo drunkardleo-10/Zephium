@@ -1326,7 +1326,10 @@ These inherited properties must not be overstated:
 - CI's ignored hostile native test is invoked explicitly on the supported Fedora image.
   It spawns a real WebProcess, identifies it, inspects `/proc` for no-new-privileges,
   seccomp filtering, and distinct mount/user/PID namespaces, and proves that the
-  renderer root cannot read a host-only path. This is evidence for that exact CI image,
+  renderer adds a filter beyond its parent's count and its root cannot read a
+  host-only path. The [native CI environment](security-maintenance.md#fedora-native-ci-sandbox-environment)
+  requires an unprivileged, capability-free, network-sealed launcher and does not
+  count an outer Docker filter as WebKit confinement. A successful execution is evidence for that exact CI image,
   not attestation of an arbitrary installed machine or packaged application.
 - **Release gates:** rerun the confinement probe through the packaged application on
   supported hosts and inspect its actual process tree. Also validate private-context and

@@ -153,6 +153,45 @@ and fails closed until an admitted runner is available. Never lower a floor,
 ignore a build mismatch, or relabel hosted source coverage as release evidence
 to make branch CI green.
 
+### Fedora native CI sandbox environment
+
+The 2026-09-07 hosted run at `fd9010f` compiled the Linux native test binary but
+aborted when bubblewrap could not create a nested namespace inside GitHub's
+default Docker job. This was an environment refusal, not passing confinement
+evidence. [Docker's default seccomp policy](https://docs.docker.com/engine/security/seccomp/)
+deliberately restricts namespace creation; adding `SYS_ADMIN`, disabling WebKit's
+sandbox, or accepting that inherited filter as WebKit evidence is not a fix.
+
+The native job now builds its pinned Fedora dependency image under ordinary Docker
+policies, then runs the existing gates as UID/GID 10001 in a separate container:
+all capability sets dropped, no-new-privileges, read-only root and source/toolchain
+mounts, isolated writable home/build/temp, no host devices, Docker socket, tokens,
+or host PID/network namespace. Dependency acquisition has network access; the
+bridge is explicitly disconnected and Cargo goes offline before native gates.
+The unchanged Fedora package/vendor/signature/integrity and engine-floor checks
+still precede WebKit execution.
+
+That test container intentionally has no outer seccomp filter and uses one named
+AppArmor user-namespace grant, without changing host-wide AppArmor/sysctl policy.
+The disposable hosted VM is the outer boundary for repository test code, as for
+ordinary non-container CI; this container is a controlled Fedora userspace, **not
+a claimed additional hostile-code sandbox**. This explicit exception is scoped
+to the capability-free, network-sealed native test job, never release artifacts
+or product startup. A custom partial syscall allowlist would still require the
+mount/pivot/user-namespace LSM exceptions while obscuring which filter the probe
+actually measured. See Ubuntu's [user-namespace policy](https://documentation.ubuntu.com/security/security-features/privilege-restriction/apparmor/)
+and bubblewrap's [unprivileged namespace model](https://github.com/containers/bubblewrap).
+
+An early timed bubblewrap preflight must demonstrate different user/mount/PID
+namespaces, non-root identity, zero capabilities, no-new-privileges, no external
+interface and zero inherited seccomp filters. The renderer test independently
+requires an added seccomp filter relative to its parent as well as its original
+namespace and filesystem-denial checks. A refusal remains red; no fallback,
+automatic retry, conditional skip or replacement context-property proof exists.
+Workflow-policy mutations pin these restrictions. Local macOS source checks do
+not qualify this Linux environment: the next hosted execution must supply the
+actual namespace and native-test evidence before it is called green.
+
 The Linux Wayland device pass must also force GlobalShortcuts portal denial
 (and separately restart the portal process) and verify that the configured
 launcher chord still opens from the focused main window and closes from the
