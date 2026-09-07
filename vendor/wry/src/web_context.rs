@@ -121,7 +121,7 @@ impl Default for WebContext {
 #[cfg(all(test, gtk))]
 mod tests {
   use super::*;
-  use crate::webkitgtk::WebContextExt as _;
+  use crate::webkitgtk::web_context::WebContextExt as _;
   use crate::{
     NavigationEventPhase, WebViewBuilder, WebViewBuilderExtUnix as _, WebViewExtUnix as _,
   };

@@ -179,7 +179,7 @@ fn validate_context_security(sandbox: bool, process_swap: bool) -> crate::Result
 }
 
 #[cfg(test)]
-mod tests {
+mod download_filename_tests {
   use super::*;
 
   #[test]
