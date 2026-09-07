@@ -11,6 +11,9 @@ const PROBE: &str = "crates/zephium-agent-controller/src/probe.rs";
 const TERRA: &str = "crates/zephium-agent-controller/src/terra.rs";
 const ACTION: &str = "crates/zephium-agent-controller/src/action.rs";
 const WORK: &str = "crates/zephium-agent-controller/src/work.rs";
+const INSPECTION: &str = "crates/zephium-agent-controller/src/work_inspection.rs";
+const OBSERVATION_CHECKPOINT: &str =
+    "crates/zephium-agentic/src/agent_provider/observation_checkpoint.rs";
 const FORM: &str = "crates/zephium-agent-controller/src/work_form.rs";
 const NAVIGATION: &str = "crates/zephium-agent-controller/src/work_navigation.rs";
 const NAVIGATION_POLICY: &str = "crates/zephium-agentic/src/agent_policy/navigation.rs";
@@ -59,6 +62,10 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_terra(&terra)?;
     validate_action(&action)?;
     validate_work(&read(repository.join(WORK))?)?;
+    validate_progressive_observation(
+        &read(repository.join(INSPECTION))?,
+        &read(repository.join(OBSERVATION_CHECKPOINT))?,
+    )?;
     validate_account_refresh(
         &terra,
         &read(repository.join(WORK))?,
@@ -629,7 +636,7 @@ fn validate_terra(source: &str) -> Result<(), String> {
         "!self.config.permits_baseline_read()",
         "AgentBrowserScopeProposal::Initial",
         "read_semantic_observation",
-        "SemanticReadAuthority::Initial",
+        "SemanticReadAuthority::Acknowledged(continuation.baseline())",
         "SemanticReadSensitivityLimit::PublicOnly",
         "SemanticReadBudget::STANDARD",
         ".bind_read_request(request, &self.config, &read, payload)",
@@ -778,6 +785,7 @@ fn validate_inventory(crate_root: &Path) -> Result<(), String> {
             "work_read_tests.rs".to_owned(),
             "work_account_tests.rs".to_owned(),
             "work_navigation.rs".to_owned(),
+            "work_inspection.rs".to_owned(),
             "work_navigation_tests.rs".to_owned(),
             "work_route_tests.rs".to_owned(),
             "work_form.rs".to_owned(),
@@ -876,6 +884,49 @@ fn validate_action(source: &str) -> Result<(), String> {
         if source.contains(forbidden) {
             return Err(format!(
                 "controller action contains forbidden authority: {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_progressive_observation(inspection: &str, checkpoint: &str) -> Result<(), String> {
+    for required in [
+        "state.check_task_contract()?",
+        ".retire_for_observation(previous, &session.config)",
+        "checkpoint.baseline()",
+        ".observe_retained_scope(worker, expansion)",
+        "state.refresh_account(worker, browser)?",
+        "Self::provider(",
+        ".prepare_successor(",
+        "self.drive(prepared.into_transport_input())",
+    ] {
+        if !inspection.contains(required) {
+            return Err(format!(
+                "progressive observation lost original owner join: {required}"
+            ));
+        }
+    }
+    for required in [
+        "config != &self.config",
+        "!self.baseline.matches(observation)",
+        ".matches_manifest_revision(policy.manifest().id(), policy.manifest().guard())",
+        "request.lease() != self.prior_call.lease()",
+        "self.validate_successor(previous, current, request, &config)",
+        "AgentPreparedObservationRequest::try_for_config(",
+        "previous.frames()[0].generation().next()",
+        "node.parent().is_none()",
+    ] {
+        if !checkpoint.contains(required) {
+            return Err(format!(
+                "progressive observation lost delivery authority: {required}"
+            ));
+        }
+    }
+    for forbidden in FORBIDDEN_TERRA_TOKENS {
+        if inspection.contains(forbidden) {
+            return Err(format!(
+                "progressive observation owns forbidden integration: {forbidden}"
             ));
         }
     }
@@ -1058,6 +1109,38 @@ mod tests {
         include_str!("../../crates/zephium-agentic/src/agent_policy/navigation.rs");
 
     #[test]
+    fn progressive_observation_cannot_bypass_the_original_delivery_or_native_owners() {
+        let inspection =
+            include_str!("../../crates/zephium-agent-controller/src/work_inspection.rs");
+        let checkpoint = include_str!(
+            "../../crates/zephium-agentic/src/agent_provider/observation_checkpoint.rs"
+        );
+        super::validate_progressive_observation(inspection, checkpoint).unwrap();
+        for boundary in [
+            ".retire_for_observation(previous, &session.config)",
+            ".prepare_successor(",
+            "state.refresh_account(worker, browser)?",
+        ] {
+            assert!(super::validate_progressive_observation(
+                &inspection.replace(boundary, "removed"),
+                checkpoint
+            )
+            .is_err());
+        }
+        for boundary in [
+            "request.lease() != self.prior_call.lease()",
+            "previous.frames()[0].generation().next()",
+            "node.parent().is_none()",
+        ] {
+            assert!(super::validate_progressive_observation(
+                inspection,
+                &checkpoint.replace(boundary, "removed")
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
     fn navigation_progress_cannot_lose_trust_replay_or_whole_input_admission() {
         validate_navigation_progress(NAVIGATION_POLICY, CONTINUATION, PROVIDER_REQUEST).unwrap();
         for boundary in ["receipt.hop != hop", "checkpoint.binding == binding"] {
@@ -1171,8 +1254,8 @@ mod tests {
         }
         assert!(validate_navigation(
             &NAVIGATION.replace(
-                "let dispatch = browser.dispatch",
-                "journal.navigation_active(active); let dispatch = browser.dispatch"
+                "let dispatch = if let Some(retained)",
+                "journal.navigation_active(active); let dispatch = if let Some(retained)"
             ),
             NAVIGATION_POLICY,
             CONTINUATION

@@ -1508,6 +1508,38 @@ pub struct AgentPreparedObservationRequest {
 }
 
 impl AgentPreparedObservationRequest {
+    /// Selects the existing provider/accounting-specific observation adapter.
+    /// Unsupported combinations retain their original explicit refusal; this
+    /// does not invent counting or navigation support for another provider.
+    pub fn try_for_config(
+        policy: &mut AgentRunPolicy,
+        request: AgentModelCallRequest,
+        observation: &SemanticObservation,
+        payload: SemanticModelPayload,
+        objective: &AgentProviderObjective,
+        config: AgentProviderCallConfig,
+    ) -> Result<Self, AgentProviderRequestError> {
+        match (config.provider(), config.input_accounting) {
+            (
+                AgentProviderKind::OpenAiResponses,
+                super::AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation,
+            ) => Self::try_openai_for_provider_exact_count(
+                policy,
+                request,
+                observation,
+                payload,
+                objective,
+                config,
+            ),
+            (
+                AgentProviderKind::OpenAiResponses,
+                super::AgentProviderInputAccountingMode::ExactLocal { .. },
+            ) => Self::try_openai(policy, request, observation, payload, objective, config),
+            (AgentProviderKind::AnthropicMessages, _) => {
+                Self::try_anthropic(policy, request, observation, payload, objective, config)
+            }
+        }
+    }
     /// Atomically admits and builds one fixed OpenAI observation request.
     ///
     /// Every fallible provider validation/serialization step runs before policy
@@ -3662,6 +3694,11 @@ fn encode_openai_observation_body(
     let tools = browser_tool_definitions_for(config)
         .iter()
         .chain(config.adds_baseline_read().then(|| &*BASELINE_READ_TOOL))
+        .chain(
+            config
+                .adds_progressive_observation()
+                .then(|| &*PROGRESSIVE_OBSERVATION_TOOL),
+        )
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| OpenAiToolWire {
             r#type: "function",
@@ -3757,6 +3794,11 @@ fn encode_openai_continuation_body(
     let tools = browser_tool_definitions_for(config)
         .iter()
         .chain(config.adds_baseline_read().then(|| &*BASELINE_READ_TOOL))
+        .chain(
+            config
+                .adds_progressive_observation()
+                .then(|| &*PROGRESSIVE_OBSERVATION_TOOL),
+        )
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| OpenAiToolWire {
             r#type: "function",
@@ -3941,6 +3983,11 @@ fn encode_openai_screenshot_continuation_body(
     let tools = browser_tool_definitions_for(config)
         .iter()
         .chain(config.adds_baseline_read().then(|| &*BASELINE_READ_TOOL))
+        .chain(
+            config
+                .adds_progressive_observation()
+                .then(|| &*PROGRESSIVE_OBSERVATION_TOOL),
+        )
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| OpenAiToolWire {
             r#type: "function",
@@ -3983,13 +4030,22 @@ fn encode_anthropic_body(
         return Err(AgentProviderContractError::ProviderKind.into());
     }
     let definitions = anthropic_browser_tool_definitions(config);
-    validate_anthropic_tool_definitions(definitions, config.adds_baseline_read())?;
+    validate_anthropic_tool_definitions(
+        definitions,
+        config.adds_baseline_read(),
+        config.adds_progressive_observation(),
+    )?;
     let tools = definitions
         .iter()
         .chain(
             config
                 .adds_baseline_read()
                 .then(|| &*ANTHROPIC_BASELINE_READ_TOOL),
+        )
+        .chain(
+            config
+                .adds_progressive_observation()
+                .then(|| &*ANTHROPIC_PROGRESSIVE_OBSERVATION_TOOL),
         )
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| AnthropicToolWire {
@@ -4042,7 +4098,11 @@ fn encode_anthropic_continuation_body(
         return Err(AgentProviderContractError::ProviderKind.into());
     }
     let definitions = anthropic_browser_tool_definitions(config);
-    validate_anthropic_tool_definitions(definitions, config.adds_baseline_read())?;
+    validate_anthropic_tool_definitions(
+        definitions,
+        config.adds_baseline_read(),
+        config.adds_progressive_observation(),
+    )?;
     let message_count = 1_usize
         .checked_add(
             transcript
@@ -4107,6 +4167,11 @@ fn encode_anthropic_continuation_body(
             config
                 .adds_baseline_read()
                 .then(|| &*ANTHROPIC_BASELINE_READ_TOOL),
+        )
+        .chain(
+            config
+                .adds_progressive_observation()
+                .then(|| &*ANTHROPIC_PROGRESSIVE_OBSERVATION_TOOL),
         )
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| AnthropicToolWire {
@@ -4237,7 +4302,11 @@ fn encode_anthropic_screenshot_continuation_body(
         return Err(AgentProviderContractError::ProviderKind.into());
     }
     let definitions = anthropic_browser_tool_definitions(config);
-    validate_anthropic_tool_definitions(definitions, config.adds_baseline_read())?;
+    validate_anthropic_tool_definitions(
+        definitions,
+        config.adds_baseline_read(),
+        config.adds_progressive_observation(),
+    )?;
     let transcript = continuation.transcript();
     if transcript.navigation_checkpoint().is_some() {
         return Err(AgentProviderRequestError::Encoding);
@@ -4349,6 +4418,11 @@ fn encode_anthropic_screenshot_continuation_body(
                 .adds_baseline_read()
                 .then(|| &*ANTHROPIC_BASELINE_READ_TOOL),
         )
+        .chain(
+            config
+                .adds_progressive_observation()
+                .then(|| &*ANTHROPIC_PROGRESSIVE_OBSERVATION_TOOL),
+        )
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| AnthropicToolWire {
             name: tool.kind.as_str(),
@@ -4417,14 +4491,17 @@ fn encode_png_base64_with_prefix(
 fn validate_anthropic_tool_definitions(
     definitions: &[AnthropicBrowserToolDefinition],
     baseline_read: bool,
+    progressive_observation: bool,
 ) -> Result<(), AgentProviderRequestError> {
     let union_parameters = definitions
         .iter()
         .chain(baseline_read.then(|| &*ANTHROPIC_BASELINE_READ_TOOL))
+        .chain(progressive_observation.then(|| &*ANTHROPIC_PROGRESSIVE_OBSERVATION_TOOL))
         .try_fold(0_usize, |total, tool| {
             total.checked_add(count_schema_unions(&tool.input_schema))
         });
-    if definitions.len() + usize::from(baseline_read) > MAX_ANTHROPIC_STRICT_TOOLS
+    if definitions.len() + usize::from(baseline_read) + usize::from(progressive_observation)
+        > MAX_ANTHROPIC_STRICT_TOOLS
         || union_parameters.is_none_or(|count| count > MAX_ANTHROPIC_SCHEMA_UNIONS)
     {
         return Err(AgentProviderRequestError::Encoding);
@@ -4463,7 +4540,7 @@ static LOCATE_ACT_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolDefinition>> =
 static BASELINE_READ_TOOL: LazyLock<BrowserToolDefinition> = LazyLock::new(|| {
     BrowserToolDefinition {
     kind: AgentBrowserToolKind::Read,
-    description: "Read bounded public semantic detail from the current acknowledged initial observation, including collapsed option labels and their source refs. This does not refresh the page, expand a subtree, verify an effect or create new refs. Omissions remain explicit. Use only when more detail is needed before choosing the next tool; every read consumes the same turn budget.",
+    description: "Read bounded public semantic detail from the current acknowledged observation, including collapsed option labels and their source refs. This only reformats captured evidence: it cannot reveal an omitted below-viewport section. It does not refresh, expand, verify an effect or create refs. Use snapshot when available to inspect missing content. Every read consumes the same turn budget.",
     parameters: strict_object(vec![("scope", strict_object(vec![("kind", string_enum(&["initial"]))]))]),
 }
 });
@@ -4473,6 +4550,29 @@ static ANTHROPIC_BASELINE_READ_TOOL: LazyLock<AnthropicBrowserToolDefinition> =
         kind: BASELINE_READ_TOOL.kind,
         description: BASELINE_READ_TOOL.description,
         input_schema: project_anthropic_schema(&BASELINE_READ_TOOL.parameters),
+    });
+
+static PROGRESSIVE_OBSERVATION_TOOL: LazyLock<BrowserToolDefinition> = LazyLock::new(|| {
+    let mut scopes = scope_schema();
+    scopes["anyOf"]
+        .as_array_mut()
+        .expect("fixed scope schema")
+        .retain(|scope| {
+            let kind = &scope["properties"]["kind"]["enum"][0];
+            kind != "table" && kind != "frame"
+        });
+    BrowserToolDefinition {
+        kind: AgentBrowserToolKind::Snapshot,
+        description: "Inspect more of the same rendered page without clicking, scrolling or navigating. initial refreshes the viewport plus bounded offscreen heading anchors. region expands a named containing landmark; subtree expands only the target's descendants (a heading or TOC link subtree does NOT include its following section). surrounding_text reads a bounded before/after window around an actual heading or content ref, NOT a TOC link destination. Choose refs from the current observation only. The returned scoped observation replaces all earlier page refs/evidence; use its refs for later tools. Missing/truncated content is not evidence of absence. Hidden/unmounted content and frames are not supported.",
+        parameters: strict_object(vec![("scope", scopes)]),
+    }
+});
+
+static ANTHROPIC_PROGRESSIVE_OBSERVATION_TOOL: LazyLock<AnthropicBrowserToolDefinition> =
+    LazyLock::new(|| AnthropicBrowserToolDefinition {
+        kind: PROGRESSIVE_OBSERVATION_TOOL.kind,
+        description: PROGRESSIVE_OBSERVATION_TOOL.description,
+        input_schema: project_anthropic_schema(&PROGRESSIVE_OBSERVATION_TOOL.parameters),
     });
 
 static EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolDefinition>> = LazyLock::new(|| {
@@ -4605,7 +4705,7 @@ static NAVIGATION_EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolDefinitio
             .collect();
         tools.push(BrowserToolDefinition {
         kind: AgentBrowserToolKind::Extract,
-        description: "After the one approved exact navigation commits and the destination task predicate holds, extract the approved fields with trusted schema 1 from the fresh current initial observation. Earlier document references are revoked. No actions, redirects, history or repeated navigation are available.",
+        description: "Extract approved fields with trusted schema 1 only when the trusted host checkpoint and task readiness permit completion. initial means the current acknowledged observation, including completed scoped inspection. Cite only its evidence; earlier document/scope references are revoked. No actions, redirects, history or repeated navigation are available.",
         parameters: EXTRACTION_TOOL_DEFINITIONS[0].parameters.clone(),
     });
         tools
@@ -5388,6 +5488,44 @@ mod tests {
             )
             .expect("config");
             let restricted = config.clone().restrict_to_locate_and_act();
+            let progressive = config
+                .clone()
+                .restrict_to_navigation_and_extraction()
+                .with_baseline_read()
+                .with_progressive_observation();
+            let progressive_body = match provider {
+                AgentProviderKind::OpenAiResponses => {
+                    encode_openai_body(&progressive, "objective", "observation")
+                }
+                AgentProviderKind::AnthropicMessages => {
+                    encode_anthropic_body(&progressive, "objective", "observation")
+                }
+            }
+            .unwrap();
+            let progressive_wire: Value = serde_json::from_slice(&progressive_body).unwrap();
+            let snapshots: Vec<_> = progressive_wire["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|tool| tool["name"] == "snapshot")
+                .collect();
+            assert_eq!(snapshots.len(), 1);
+            let parameters = if provider == AgentProviderKind::OpenAiResponses {
+                &snapshots[0]["parameters"]
+            } else {
+                &snapshots[0]["input_schema"]
+            };
+            let schema = parameters.to_string();
+            assert!(
+                schema.contains("surrounding_text")
+                    && schema.contains("region")
+                    && schema.contains("subtree")
+            );
+            assert!(!schema.contains("\"frame\"") && !schema.contains("\"table\""));
+            assert!(snapshots[0]["description"]
+                .as_str()
+                .unwrap()
+                .contains("TOC link"));
             let extraction = config.clone().restrict_to_extraction();
             let combined = config.clone().restrict_to_actions_and_extraction();
             for base in [

@@ -20,6 +20,19 @@ const MAX_WAKES: u8 = 104;
 type Result = std::result::Result<SemanticSnapshot, SemanticRuntimePortFailure>;
 type WakeAction = Box<dyn FnOnce() + Send>;
 
+fn current_scope(scope: &zephium_agentic::SemanticScope, last_invocation: u64) -> bool {
+    use zephium_agentic::SemanticScope;
+    match scope {
+        SemanticScope::Initial => true,
+        SemanticScope::Region(anchor)
+        | SemanticScope::Subtree(anchor)
+        | SemanticScope::SurroundingText { anchor, .. } => {
+            anchor.snapshot_generation().get() == last_invocation
+        }
+        SemanticScope::Table(_) | SemanticScope::Frame(_) => false,
+    }
+}
+
 pub(super) struct WorkObservation {
     task: Option<WorkObservationTask>,
     lease: WorkBrowserExecutionLease,
@@ -206,7 +219,7 @@ impl EngineHost {
             && request.invocation().invocation().get() > resource.last_invocation
             && request.invocation().budget()
                 == zephium_agentic::SemanticRuntimeBudget::INITIAL_FILTERED
-            && request.invocation().scope() == zephium_agentic::SemanticRuntimeScopeClass::Initial;
+            && current_scope(request.observation().scope(), resource.last_invocation);
         if !admitted {
             task.refuse(SemanticRuntimePortFailure::Stale);
             return;
@@ -537,6 +550,46 @@ mod tests {
             refusal: None,
             wake: None,
             wakes: 0,
+        }
+    }
+    #[test]
+    fn scoped_observation_requires_the_exact_last_native_snapshot_generation() {
+        let read = observation();
+        let snapshot = decode_semantic_snapshot(
+            SemanticDecodeContext::new(
+                read.correlation.invocation(),
+                read.correlation.frame().clone(),
+                SemanticSnapshotGeneration::new(1).unwrap(),
+            ),
+            br#"{"v":1,"i":1,"g":1,"c":"complete","n":[{"k":1,"r":"landmark","n":"Article"}]}"#,
+        )
+        .unwrap();
+        let request = SemanticObservationRequest::initial(
+            SemanticObservationId::new(1).unwrap(),
+            read.correlation.frame().context(),
+            SemanticObservationBudget::INITIAL_FILTERED,
+        );
+        let observed = SemanticObservationAssembler::new(request, snapshot)
+            .unwrap()
+            .finish()
+            .unwrap();
+        for kind in [
+            SemanticExpansionKind::Region,
+            SemanticExpansionKind::Subtree,
+            SemanticExpansionKind::SurroundingText(SemanticTextWindow::try_new(0, 1024).unwrap()),
+        ] {
+            let request = observed
+                .begin_expansion(
+                    SemanticObservationId::new(2).unwrap(),
+                    observed.frames()[0].nodes()[0].reference(),
+                    observed.frames()[0].frame(),
+                    kind,
+                    SemanticObservationBudget::INITIAL_FILTERED,
+                )
+                .unwrap();
+            assert!(current_scope(request.scope(), 1));
+            assert!(!current_scope(request.scope(), 0));
+            assert!(!current_scope(request.scope(), 2));
         }
     }
     #[test]

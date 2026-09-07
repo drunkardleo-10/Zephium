@@ -73,6 +73,8 @@ struct Native {
         )>,
     >,
     hold_read: AtomicBool,
+    hold_expansion: AtomicBool,
+    reject_expansion: AtomicBool,
     not_ready: AtomicBool,
     reads: AtomicUsize,
     acquisitions: AtomicUsize,
@@ -269,12 +271,21 @@ impl AgentBrowserPort for Native {
         callback: WorkBrowserObservationCompletionCallback,
     ) -> WorkBrowserObservationDispatch {
         self.reads.fetch_add(1, Ordering::AcqRel);
+        let expansion = request.invocation().scope() != SemanticRuntimeScopeClass::Initial;
+        if expansion && self.reject_expansion.load(Ordering::Acquire) {
+            return WorkBrowserObservationDispatch::Rejected {
+                request: Box::new(request),
+                failure: ContextPortFailure::NativeRefused,
+            };
+        }
         if self.not_ready.swap(false, Ordering::AcqRel) {
             let (_, completion) = request.into_parts();
             callback(completion.settle(Err(SemanticRuntimePortFailure::NotReady)));
             return WorkBrowserObservationDispatch::Scheduled;
         }
-        if self.hold_read.load(Ordering::Acquire) {
+        if self.hold_read.load(Ordering::Acquire)
+            || (expansion && self.hold_expansion.load(Ordering::Acquire))
+        {
             *self.read.lock().unwrap() = Some((request, callback));
         } else {
             if self.discovery.load(Ordering::Acquire) {

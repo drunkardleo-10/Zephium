@@ -6501,7 +6501,7 @@ fn validate_semantic_read_continuation_contract(
     for required in [
         "pubfnbind_read_request(",
         "self.correlation.kind()!=AgentBrowserToolKind::Read",
-        "self.correlation.read_scope.as_ref(),read.scope()",
+        "self.correlation.read_scope.as_ref(),Some(super::AgentBrowserScopeProposal::Initial)",
         "Some(super::AgentBrowserScopeProposal::Initial)",
         "returnErr(AgentProviderContinuationError::Scope)",
         "if!read.matches_acknowledgement(&self.baseline)",
@@ -6640,7 +6640,7 @@ fn validate_semantic_extraction_provider_contract(
     for required in [
         "AgentBrowserToolProposal::Extract{schema,..}=>Some(*schema)",
         "extraction_schema:Option<SemanticExtractionSchemaId>",
-        "extraction_schema,extraction_scope,read_scope,navigation_target,provider_item_id:self.provider_item_id",
+        "extraction_schema,extraction_scope,read_scope,snapshot_scope,navigation_target,provider_item_id:self.provider_item_id",
         "AgentBrowserToolProposal::Read(scope)=>Some(scope.clone())",
     ] {
         if !provider_tool.contains(required) {

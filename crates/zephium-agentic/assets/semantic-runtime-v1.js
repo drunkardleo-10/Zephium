@@ -1546,6 +1546,10 @@
 
   function traverse(root, state, anchored) {
     const records = [];
+    // Only metadata is queued during the ordinary viewport traversal. Deferred
+    // headings consume spare output capacity afterward, never displacing a
+    // visible control or prose record that appears later in document order.
+    const headings = [];
     const focused = focusedElements();
     const stack = [];
 
@@ -1626,6 +1630,10 @@
               ? optionOfAdmittedSelect || (rect !== null && (initialPriority || inViewport(rect)))
               : true
           );
+          if (!anchored && !admitted && visible && descriptor.role === "heading") {
+            if (headings.length < 24) headings.push({ element: item.node, descriptor, parent, rect, disabled });
+            else mark(state, "node_limit", false);
+          }
           if (admitted) {
             const semanticDepth = parent === null ? 0 : records[parent].depth + 1;
             if (semanticDepth > MAX_TREE_DEPTH) {
@@ -1664,6 +1672,26 @@
           state
         );
       }
+    }
+    if (!anchored && !state.stopped) {
+      const original = state.request;
+      state.request = { ...original, b: { ...original.b, t: mathMin(original.b.t, state.textBytes + 2048) } };
+      for (const heading of headings) {
+        if (state.stopped || records.length >= original.b.n) {
+          if (!state.stopped) mark(state, "node_limit", false);
+          break;
+        }
+        // Reuse the ordinary name-inheritance fences (including editable and
+        // credential descendants), not a textContent/flat-text shortcut.
+        const scoped = traverse(heading.element, state, true);
+        const record = scoped[0];
+        if (record === undefined) continue;
+        if (heading.parent !== null) record.wire.p = heading.parent;
+        record.depth = heading.parent === null ? 0 : records[heading.parent].depth + 1;
+        if (record.depth > MAX_TREE_DEPTH) { mark(state, "depth_limit"); break; }
+        addRecord(records, record, state);
+      }
+      state.request = original;
     }
     return records;
   }

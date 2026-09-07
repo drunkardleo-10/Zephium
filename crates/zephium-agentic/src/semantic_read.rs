@@ -199,6 +199,10 @@ pub enum SemanticReadSensitivityLimit {
 pub enum SemanticReadAuthority<'a> {
     /// First filtered observation for the current context.
     Initial,
+    /// Read the exact current observation already delivered to the model,
+    /// including a previously admitted scoped observation. This neither widens
+    /// that scope nor authorizes a fresh capture.
+    Acknowledged(&'a SemanticObservationAcknowledgement),
     /// Progressive observation anchored in an exact acknowledged predecessor.
     AcknowledgedExpansion {
         /// Exact predecessor that supplied the scope anchor.
@@ -212,6 +216,7 @@ impl fmt::Debug for SemanticReadAuthority<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Initial => formatter.write_str("Initial"),
+            Self::Acknowledged(_) => formatter.write_str("Acknowledged([redacted])"),
             Self::AcknowledgedExpansion { previous, .. } => formatter
                 .debug_struct("AcknowledgedExpansion")
                 .field("previous", previous.request())
@@ -613,7 +618,6 @@ impl SemanticReadStats {
 /// Bounded borrowed readable projection of one exact semantic observation.
 pub struct SemanticReadResult<'a> {
     roles: SemanticReadRoleSelection,
-    scope: &'a crate::SemanticScope,
     observation: SemanticObservationId,
     observation_generation: SemanticObservationGeneration,
     context: ContextJoin,
@@ -638,9 +642,6 @@ impl<'a> SemanticReadResult<'a> {
     /// Exact trusted role selection used by this projection and its guard.
     pub const fn source_roles(&self) -> SemanticReadRoleSelection {
         self.roles
-    }
-    pub(crate) const fn scope(&self) -> &crate::SemanticScope {
-        self.scope
     }
     /// Exact observation request projected by this result.
     pub const fn observation(&self) -> SemanticObservationId {
@@ -803,6 +804,12 @@ fn validate_authority(
 ) -> Result<Option<SemanticReadSubtreeProof>, SemanticReadError> {
     let request = observation.request();
     match (request.parent(), request.scope().anchor(), authority) {
+        (_, _, SemanticReadAuthority::Acknowledged(acknowledgement)) => {
+            if !acknowledgement.matches(observation) {
+                return Err(SemanticReadError::BaselineNotAcknowledged);
+            }
+            Ok(None)
+        }
         (None, None, SemanticReadAuthority::Initial) => Ok(None),
         (
             Some(parent),
@@ -1084,7 +1091,6 @@ impl<'a> SemanticReadBuilder<'a> {
         }
         SemanticReadResult {
             roles: self.roles,
-            scope: self.observation.request().scope(),
             observation: self.observation.request().id(),
             observation_generation: self.observation.request().generation(),
             context: self.observation.request().context(),

@@ -56,12 +56,14 @@ impl WorkBrowserReadBinding {
 }
 
 /// Move-only request produced after publishing the exact read callback owner.
-/// There is no caller-supplied script, selector, role set, scope or ceiling.
+/// There is no caller-supplied script, selector, role set or ceiling. Structural
+/// scopes are admitted only from exact current acknowledged references.
 #[must_use]
 #[derive(Debug)]
 pub struct WorkBrowserObservationRequest {
     join: ObservationJoin,
     invocation: SemanticRuntimeInvocation,
+    observation: SemanticObservationRequest,
 }
 impl WorkBrowserObservationRequest {
     /// Exact temporary execution lease, not durable page ownership.
@@ -71,6 +73,10 @@ impl WorkBrowserObservationRequest {
     /// Existing closed, bounded semantic grammar for the native isolated world.
     pub const fn invocation(&self) -> &SemanticRuntimeInvocation {
         &self.invocation
+    }
+    /// Exact core-admitted scope/lineage used to assemble the native result.
+    pub const fn observation(&self) -> &SemanticObservationRequest {
+        &self.observation
     }
     /// Transfer the actual invocation while retaining its exact terminal owner.
     pub fn into_parts(self) -> (SemanticRuntimeInvocation, WorkBrowserObservationCompletion) {
@@ -173,6 +179,41 @@ impl WorkBrowserResources {
         lease: &WorkBrowserExecutionLease,
         now: AgentPolicyInstant,
     ) -> Result<WorkBrowserObservationRequest, WorkBrowserResourceError> {
+        self.observe(lease, now, None)
+    }
+
+    /// Captures only an exact current, provider-acknowledged structural scope.
+    /// No new account, effect, navigation or model admission is conferred.
+    pub fn observe_expansion(
+        &mut self,
+        lease: &WorkBrowserExecutionLease,
+        previous: &crate::SemanticObservation,
+        acknowledgement: &crate::SemanticObservationAcknowledgement,
+        target: crate::SemanticReferenceId,
+        kind: crate::SemanticExpansionKind,
+        now: AgentPolicyInstant,
+    ) -> Result<WorkBrowserObservationRequest, WorkBrowserResourceError> {
+        if !acknowledgement.matches(previous)
+            || matches!(
+                kind,
+                crate::SemanticExpansionKind::Frame | crate::SemanticExpansionKind::Table
+            )
+        {
+            return Err(WorkBrowserResourceError::Stale);
+        }
+        self.observe(lease, now, Some((previous, target, kind)))
+    }
+
+    fn observe(
+        &mut self,
+        lease: &WorkBrowserExecutionLease,
+        now: AgentPolicyInstant,
+        expansion: Option<(
+            &crate::SemanticObservation,
+            crate::SemanticReferenceId,
+            crate::SemanticExpansionKind,
+        )>,
+    ) -> Result<WorkBrowserObservationRequest, WorkBrowserResourceError> {
         let binding = self.read_binding(lease, now)?;
         let row = self.row_mut(lease.resource())?;
         if row.observation.is_some() {
@@ -185,12 +226,36 @@ impl WorkBrowserResources {
             .ok_or(WorkBrowserResourceError::Exhausted)?;
         let frame = binding.frame;
         let context = frame.context();
-        let observation = SemanticObservationRequest::initial(
-            SemanticObservationId::new(u64::from(sequence))
-                .ok_or(WorkBrowserResourceError::Exhausted)?,
-            context,
-            SemanticObservationBudget::INITIAL_FILTERED,
-        );
+        let id = SemanticObservationId::new(u64::from(sequence))
+            .ok_or(WorkBrowserResourceError::Exhausted)?;
+        let observation = if let Some((previous, target, kind)) = expansion {
+            let [source] = previous.frames() else {
+                return Err(WorkBrowserResourceError::Stale);
+            };
+            if !row.observed
+                || previous.request().context() != context
+                || source.frame() != &frame
+                || source.generation().get() != u64::from(row.observation_sequence)
+                || source.invocation().get() != u64::from(row.observation_sequence)
+            {
+                return Err(WorkBrowserResourceError::Stale);
+            }
+            previous
+                .begin_expansion(
+                    id,
+                    target,
+                    &frame,
+                    kind,
+                    SemanticObservationBudget::INITIAL_FILTERED,
+                )
+                .map_err(|_| WorkBrowserResourceError::Stale)?
+        } else {
+            SemanticObservationRequest::initial(
+                id,
+                context,
+                SemanticObservationBudget::INITIAL_FILTERED,
+            )
+        };
         let invocation = encode_semantic_runtime_invocation(
             &observation,
             frame,
@@ -207,7 +272,11 @@ impl WorkBrowserResources {
         };
         row.observation_sequence = sequence;
         row.observation = Some(join.clone());
-        Ok(WorkBrowserObservationRequest { join, invocation })
+        Ok(WorkBrowserObservationRequest {
+            join,
+            invocation,
+            observation,
+        })
     }
 
     /// Account the exact owned callback before exposing any page-derived data.
@@ -285,6 +354,7 @@ pub enum WorkBrowserObservationDispatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::semantic_diff::SemanticObservationFingerprint;
     fn tick(value: u64) -> AgentPolicyInstant {
         AgentPolicyInstant::from_millis(value)
     }
@@ -348,6 +418,126 @@ mod tests {
             resource_retained: true,
         }
     }
+    #[test]
+    fn expansion_requires_current_acknowledged_lease_and_keeps_original_callback_debt() {
+        use crate::{
+            SemanticExpansionKind, SemanticObservationAcknowledgement,
+            SemanticObservationAssembler, SemanticReferenceId,
+        };
+        let (mut rows, resource) = document();
+        let lease = acquire(&mut rows, &resource, ContextRunId::generate());
+        let initial = rows.observe_initial(&lease, tick(2)).unwrap();
+        let request = initial.observation().clone();
+        let WorkBrowserObservationEvent::Snapshot(initial) =
+            rows.settle_observation(snapshot(initial), tick(2)).unwrap()
+        else {
+            panic!("initial")
+        };
+        let initial = SemanticObservationAssembler::new(request, *initial)
+            .unwrap()
+            .finish()
+            .unwrap();
+        let ack = SemanticObservationAcknowledgement::from_fingerprint(
+            SemanticObservationFingerprint::from_observation(&initial),
+        );
+        let target = SemanticReferenceId::new(1).unwrap();
+        let kind = SemanticExpansionKind::Region;
+        assert!(rows
+            .observe_expansion(
+                &lease,
+                &initial,
+                &ack,
+                SemanticReferenceId::new(99).unwrap(),
+                kind,
+                tick(2)
+            )
+            .is_err());
+        let expanded = rows
+            .observe_expansion(&lease, &initial, &ack, target, kind, tick(2))
+            .unwrap();
+        assert_eq!(expanded.lease(), &lease);
+        assert_eq!(expanded.invocation().frame(), initial.frames()[0].frame());
+        assert_eq!(expanded.invocation().snapshot_generation().get(), 2);
+        assert_eq!(
+            expanded.observation().parent().unwrap().id(),
+            initial.request().id()
+        );
+        assert!(rows
+            .observe_expansion(&lease, &initial, &ack, target, kind, tick(2))
+            .is_err());
+        let revoke = rows.revoke(&lease).unwrap();
+        assert!(rows.observe_initial(&lease, tick(2)).is_err());
+        assert!(matches!(
+            rows.settle_observation(snapshot(expanded), tick(2))
+                .unwrap(),
+            WorkBrowserObservationEvent::DebtSettled
+        ));
+        let _ = rows.settle_at(revoke.complete(drained()), tick(2)).unwrap();
+        let successor_request = rows
+            .acquire(&resource, ContextRunId::generate(), tick(2), tick(100))
+            .unwrap();
+        let successor = successor_request.lease().unwrap().clone();
+        let _ = rows
+            .settle_at(
+                successor_request.complete(WorkBrowserResourceNativeOutcome::Acquired),
+                tick(2),
+            )
+            .unwrap();
+        assert!(rows
+            .observe_expansion(&successor, &initial, &ack, target, kind, tick(2))
+            .is_err());
+        assert!(rows
+            .observe_expansion(&lease, &initial, &ack, target, kind, tick(2))
+            .is_err());
+    }
+
+    #[test]
+    fn refused_expansion_cannot_reuse_a_stale_snapshot_generation() {
+        use crate::{
+            SemanticExpansionKind, SemanticObservationAcknowledgement,
+            SemanticObservationAssembler, SemanticReferenceId,
+        };
+        let (mut rows, resource) = document();
+        let lease = acquire(&mut rows, &resource, ContextRunId::generate());
+        let initial = rows.observe_initial(&lease, tick(2)).unwrap();
+        let request = initial.observation().clone();
+        let WorkBrowserObservationEvent::Snapshot(initial) =
+            rows.settle_observation(snapshot(initial), tick(2)).unwrap()
+        else {
+            panic!("initial")
+        };
+        let initial = SemanticObservationAssembler::new(request, *initial)
+            .unwrap()
+            .finish()
+            .unwrap();
+        let ack = SemanticObservationAcknowledgement::from_fingerprint(
+            SemanticObservationFingerprint::from_observation(&initial),
+        );
+        let expanded = rows
+            .observe_expansion(
+                &lease,
+                &initial,
+                &ack,
+                SemanticReferenceId::new(1).unwrap(),
+                SemanticExpansionKind::Region,
+                tick(2),
+            )
+            .unwrap();
+        rows.observation_dispatch_refused(expanded).unwrap();
+        assert!(rows
+            .observe_expansion(
+                &lease,
+                &initial,
+                &ack,
+                SemanticReferenceId::new(1).unwrap(),
+                SemanticExpansionKind::Region,
+                tick(2)
+            )
+            .is_err());
+        let fresh = rows.observe_initial(&lease, tick(2)).unwrap();
+        assert_eq!(fresh.invocation().snapshot_generation().get(), 3);
+    }
+
     #[test]
     fn descriptive_binding_is_original_current_and_does_not_reserve_a_read() {
         let (mut rows, resource) = document();

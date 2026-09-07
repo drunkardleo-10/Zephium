@@ -55,6 +55,21 @@ pub trait AgentWorkRetainedBrowser: Send {
     }
     /// Reserves and dispatches one exact bounded initial read.
     fn begin_observation(&mut self, now: AgentPolicyInstant) -> Result<(), AgentWorkFailure>;
+    /// Whether the original observation owner supports acknowledged expansions.
+    fn supports_expansion(&self) -> bool {
+        false
+    }
+    /// One exact same-document capture; no ordinary read or native effect.
+    fn begin_expansion(
+        &mut self,
+        _previous: &SemanticObservation,
+        _acknowledgement: &SemanticObservationAcknowledgement,
+        _target: SemanticReferenceId,
+        _kind: SemanticExpansionKind,
+        _now: AgentPolicyInstant,
+    ) -> Result<(), AgentWorkFailure> {
+        Err(AgentWorkFailure::Contract)
+    }
     /// Accounts the original terminal and returns its original observation.
     fn poll_observation(
         &mut self,
@@ -500,6 +515,19 @@ impl WorkNative {
         &mut self,
         worker: &mut AgentRuntimeWorker,
     ) -> Result<SemanticObservation, AgentWorkFailure> {
+        self.observe_retained_scope(worker, None).await
+    }
+
+    pub(super) async fn observe_retained_scope(
+        &mut self,
+        worker: &mut AgentRuntimeWorker,
+        expansion: Option<(
+            &SemanticObservation,
+            &SemanticObservationAcknowledgement,
+            SemanticReferenceId,
+            SemanticExpansionKind,
+        )>,
+    ) -> Result<SemanticObservation, AgentWorkFailure> {
         self.check_control(worker, &WorkBrowser::Retained)?;
         let clock = self
             .clock
@@ -507,7 +535,13 @@ impl WorkNative {
             .ok_or(AgentWorkFailure::Contract)?
             .clone();
         let browser = self.retained.as_mut().ok_or(AgentWorkFailure::Contract)?;
-        browser.begin_observation(clock.now().map_err(|_| AgentWorkFailure::Contract)?)?;
+        let now = clock.now().map_err(|_| AgentWorkFailure::Contract)?;
+        match expansion {
+            Some((previous, acknowledgement, target, kind)) => {
+                browser.begin_expansion(previous, acknowledgement, target, kind, now)?
+            }
+            None => browser.begin_observation(now)?,
+        }
         let result =
             tokio::time::timeout_at(tokio::time::Instant::from_std(self.deadline), async {
                 let event = worker.next_event();

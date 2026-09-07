@@ -24,6 +24,8 @@ use super::{
 #[path = "work_tests.rs"]
 mod tests;
 
+#[path = "work_inspection.rs"]
+mod inspection;
 #[path = "work_navigation.rs"]
 mod navigation;
 
@@ -75,6 +77,10 @@ pub trait AgentWorkTask: Send {
     /// grant no task progress, new observation/ref or native effect authority.
     /// This setting is frozen at admission with the other task capabilities.
     fn allows_baseline_read(&self) -> bool {
+        false
+    }
+    /// Frozen opt-in to exact-reference native inspection and fresh delivery.
+    fn allows_progressive_observation(&self) -> bool {
         false
     }
     /// Explicitly permits one terminal native subtree read anchored to the
@@ -733,9 +739,19 @@ impl AgentWorkController {
         let actions_before_extraction = task.allows_actions_before_extraction();
         let subtree_extraction = task.allows_subtree_extraction();
         let baseline_read = task.allows_baseline_read();
+        let progressive_observation = task.allows_progressive_observation();
         let navigation_target = task.navigation_target().cloned();
         let navigation_route = task.navigation_route().cloned();
         let navigation_discovery = task.navigation_discovery().cloned();
+        if progressive_observation
+            && (navigation_discovery.is_none()
+                || !baseline_read
+                || retained
+                    .as_ref()
+                    .is_some_and(|browser| !browser.supports_expansion()))
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
         if retained.is_some()
             && (input.durable_result
                 || extraction_schema.is_none()
@@ -835,6 +851,7 @@ impl AgentWorkController {
                     actions_before_extraction,
                     subtree_extraction,
                     baseline_read,
+                    progressive_observation,
                     navigation_target,
                     navigation_route,
                     navigation_discovery,
@@ -858,6 +875,7 @@ struct WorkState {
     navigation_discovery: Option<AgentNavigationDiscovery>,
     navigation_hops: usize,
     baseline_read: bool,
+    progressive_observation: bool,
     extraction_schema: Option<SemanticExtractionSchema>,
     actions_before_extraction: bool,
     subtree_extraction: bool,
@@ -970,6 +988,7 @@ impl WorkState {
             || self.task.allows_actions_before_extraction() != self.actions_before_extraction
             || self.task.allows_subtree_extraction() != self.subtree_extraction
             || self.task.allows_baseline_read() != self.baseline_read
+            || self.task.allows_progressive_observation() != self.progressive_observation
         {
             return Err(AgentWorkFailure::Contract);
         }
@@ -1549,6 +1568,9 @@ impl AgentWorkController {
         if state.baseline_read {
             session.config = session.config.with_baseline_read();
         }
+        if state.progressive_observation {
+            session.config = session.config.with_progressive_observation();
+        }
         state.session = Some(session);
         Ok(())
     }
@@ -1775,6 +1797,20 @@ impl AgentWorkController {
             .collect::<Vec<_>>();
         loop {
             state.check_task_contract()?;
+            if turn.turn.proposal().kind() == AgentBrowserToolKind::Snapshot {
+                let next =
+                    Self::inspect_current(state, worker, browser, turn, &observation).await?;
+                observation = next.0;
+                captured_at = next.1;
+                progress = next.2;
+                turn = next.3;
+                frames = observation
+                    .frames()
+                    .iter()
+                    .map(|snapshot| snapshot.frame().clone())
+                    .collect();
+                continue;
+            }
             if matches!(
                 turn.turn.proposal().kind(),
                 AgentBrowserToolKind::Locate | AgentBrowserToolKind::Read

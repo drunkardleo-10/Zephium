@@ -2348,7 +2348,7 @@ impl AgentBrowserSession {
         }
         let read = read_semantic_observation(
             observation,
-            SemanticReadAuthority::Initial,
+            SemanticReadAuthority::Acknowledged(continuation.baseline()),
             captured_at,
             SemanticReadSensitivityLimit::PublicOnly,
             SemanticReadBudget::STANDARD,
@@ -2445,7 +2445,7 @@ impl AgentBrowserSession {
                     previous,
                     acknowledgement: continuation.baseline(),
                 },
-                None => SemanticReadAuthority::Initial,
+                None => SemanticReadAuthority::Acknowledged(continuation.baseline()),
             },
             captured_at,
             SemanticReadSensitivityLimit::PublicOnly,

@@ -37,7 +37,7 @@ pub use continuation::{
     AgentProviderBoundLocateContinuation, AgentProviderBoundReadContinuation,
     AgentProviderBoundScreenshotContinuation, AgentProviderContinuation,
     AgentProviderContinuationError, AgentProviderNavigationCheckpoint,
-    MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES,
+    AgentProviderObservationCheckpoint, MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES,
     MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES, MAX_AGENT_PROVIDER_CONTINUATION_TURNS,
 };
 pub use extraction::{
@@ -730,6 +730,7 @@ pub struct AgentProviderCallConfig {
     store_response: bool,
     tools: BrowserToolProfile,
     baseline_read: bool,
+    progressive_observation: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -778,6 +779,7 @@ impl AgentProviderCallConfig {
             store_response: false,
             tools: BrowserToolProfile::Full,
             baseline_read: false,
+            progressive_observation: false,
         })
     }
 
@@ -806,6 +808,23 @@ impl AgentProviderCallConfig {
 
     pub(super) fn adds_baseline_read(&self) -> bool {
         self.baseline_read && self.tools != BrowserToolProfile::Full
+    }
+
+    /// Enables closed, reference-bound native inspection of the current page.
+    /// This freezes tool availability only; each request still needs exact
+    /// acknowledged predecessor, native scope, account and provider admission.
+    pub fn with_progressive_observation(mut self) -> Self {
+        self.progressive_observation = true;
+        self
+    }
+
+    /// Whether this fixed provider lineage permits progressive inspection.
+    pub const fn permits_progressive_observation(&self) -> bool {
+        self.progressive_observation
+    }
+
+    pub(super) fn adds_progressive_observation(&self) -> bool {
+        self.progressive_observation && self.tools != BrowserToolProfile::Full
     }
 
     /// Restricts browser planning to the one trusted run-local extraction
@@ -858,6 +877,9 @@ impl AgentProviderCallConfig {
 
     pub(super) fn permits_tool(&self, kind: AgentBrowserToolKind) -> bool {
         if self.baseline_read && kind == AgentBrowserToolKind::Read {
+            return true;
+        }
+        if self.progressive_observation && kind == AgentBrowserToolKind::Snapshot {
             return true;
         }
         match self.tools {

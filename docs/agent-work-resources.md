@@ -132,6 +132,34 @@ callback admission cannot become a false zero. A journal failure retains explici
 Recovery even when native terminal debt is known drained. An undispatched or
 synchronously refused successor never restores the old document's authority.
 
+## Progressive same-document inspection
+
+Discovery can request the existing closed `snapshot` operation on an acknowledged
+region, subtree or bounded surrounding-text anchor, or refresh the initial
+viewport. This is a separate nonterminal observation checkpoint, not a widening
+of ordinary `read`. The exact settled tool/configuration and predecessor
+acknowledgement are consumed before native dispatch; old provider replay is
+retired. A new capture still uses the original `PendingRead`, rendering episode,
+lease, committed document, callback/notification debt and absolute deadlines.
+The registry and native adapter independently require the current invocation /
+snapshot generation. A refused or uncertain invocation cannot reuse an old anchor.
+
+Fresh provider delivery requires the requested scope/context/frame, the exact
+next snapshot generation and private anchor key, a connected scoped subtree
+(one text-root for surrounding text), original manifest revision, refreshed
+account and original cumulative admission. It never manufactures an
+acknowledgement for undisclosed data. Once delivered, `read(initial)` may format
+that exact scoped baseline, and subsequent navigation still uses the original
+observed-link policy. No native ref or previous body survives the new baseline.
+Cancellation and missing callbacks remain owned by the original retained read;
+failure cannot convert unresolved native debt to clean lease delivery.
+
+See [discovery semantics](agent-work-discovery.md) and
+[deterministic evidence](../eval/agentic-browsing/progressive-inspection.md).
+The reused rendering owner was previously RAF-qualified; the new scoped live
+workflow itself still requires qualification. Windows native composition is not
+claimed by macOS or loopback tests.
+
 ## Retained document transitions: deterministic native primitive
 
 An execution lease may prepare one successor only after a successful observation

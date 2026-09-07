@@ -720,6 +720,10 @@ impl AgentBrowserToolCall {
             AgentBrowserToolProposal::Read(scope) => Some(scope.clone()),
             _ => None,
         };
+        let snapshot_scope = match self.proposal.as_ref() {
+            AgentBrowserToolProposal::Snapshot(scope) => Some(scope.clone()),
+            _ => None,
+        };
         let navigation_target = match self.proposal.as_ref() {
             AgentBrowserToolProposal::Navigate(target) => Some(target.clone()),
             _ => None,
@@ -732,6 +736,7 @@ impl AgentBrowserToolCall {
                 extraction_schema,
                 extraction_scope,
                 read_scope,
+                snapshot_scope,
                 navigation_target,
                 provider_item_id: self.provider_item_id,
                 arguments: self.arguments,
@@ -772,6 +777,7 @@ pub(crate) struct AgentProviderToolCallCorrelation {
     pub(super) extraction_schema: Option<SemanticExtractionSchemaId>,
     pub(super) extraction_scope: Option<AgentBrowserScopeProposal>,
     pub(super) read_scope: Option<AgentBrowserScopeProposal>,
+    pub(super) snapshot_scope: Option<AgentBrowserScopeProposal>,
     pub(super) navigation_target: Option<ContextNavigationTarget>,
     pub(super) provider_item_id: Option<String>,
     pub(super) arguments: String,

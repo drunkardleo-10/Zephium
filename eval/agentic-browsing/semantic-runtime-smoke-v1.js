@@ -1146,7 +1146,49 @@ async function finish() {
   const largeProseSnapshot = JSON.parse(invoke(109, 109, { k: "initial" }));
   assert(largeProseSnapshot.c === "text_limit" && largeProseSnapshot.n.some((node) => node.r === "paragraph" && Buffer.byteLength(node.t) <= 4096), "inline copies escaped the original per-prose-field ceiling");
 
+  // Generic below-viewport evidence: TOC links are not section bodies. The
+  // initial inventory may expose actual rendered headings at spare capacity;
+  // exact surrounding-text capture reaches their following sibling prose.
+  const article = new Element("main");
+  article.append(new HTMLAnchorElement({ href: "https://example.test/article#details" }))
+    .append(new CharacterData("Details in this page"));
+  const sectionHeading = article.append(new Element("h2"));
+  sectionHeading.rect.y = 1800;
+  sectionHeading.append(new CharacterData("Detailed behavior"));
+  const editableHeading = sectionHeading.append(new Element("span", { contenteditable: "true", "aria-label": "Private key" }));
+  editableHeading.rect.y = 1800;
+  editableHeading.append(new CharacterData("editable-heading-secret"));
+  const sectionBody = article.append(new Element("p"));
+  sectionBody.rect.y = 1840;
+  sectionBody.append(new CharacterData("New scoped evidence from a following sibling."));
+  article.append(new Element("p", { hidden: "" })).append(new CharacterData("hidden-section-body"));
+  document._root = article;
+  setOwner(article, document);
+  const inventoryWire = invoke(110, 110, { k: "initial" });
+  const inventory = JSON.parse(inventoryWire);
+  const sectionRef = inventory.n.find((node) => node.r === "heading" && node.n === "Detailed behavior");
+  assert(sectionRef && !inventoryWire.includes("New scoped evidence") && !inventoryWire.includes("editable-heading-secret"), "offscreen anchor leaked its body/credential descendants or was undiscoverable");
+  const sectionWire = invoke(111, 111, { k: "surrounding_text", a: sectionRef.k, p: 0, n: 1024 });
+  assert(sectionWire.includes("New scoped evidence from a following sibling.") && !sectionWire.includes("hidden-section-body"), "exact heading expansion omitted the body or included hidden text");
+  const subtreeWire = invoke(112, 112, { k: "subtree", a: sectionRef.k });
+  assert(!subtreeWire.includes("New scoped evidence"), "a heading subtree silently widened into sibling content");
+  const crowd = new Element("main");
+  for (let index = 0; index < 200; index += 1) {
+    const h = crowd.append(new Element("h2")); h.rect.y = 2000 + index * 40;
+    h.append(new CharacterData(`Offscreen heading ${index}`));
+  }
+  crowd.append(new Element("button")).append(new CharacterData("Visible final action"));
+  crowd.append(new Element("p")).append(new CharacterData("Visible final evidence"));
+  document._root = crowd; setOwner(crowd, document);
+  const crowded = JSON.parse(invoke(113, 113, { k: "initial" }, { n: 8, t: 1024 }));
+  assert(crowded.n.some((node) => node.n === "Visible final action") && crowded.n.some((node) => node.t === "Visible final evidence"), "offscreen heading inventory starved later viewport content");
+  assert(crowded.n.length <= 8 && crowded.c === "node_limit", "structural inventory escaped its bound or hid omission");
+  const tight = JSON.parse(invoke(114, 114, { k: "initial" }, { t: 64 }));
+  assert(tight.n.some((node) => node.n === "Visible final action"), "offscreen headings spent visible content's text budget");
+  const inventoryExtraBytes = Buffer.byteLength(inventoryWire) - Buffer.byteLength(JSON.stringify({ ...inventory, n: inventory.n.filter((node) => node !== sectionRef) }));
+
   process.stdout.write(`${JSON.stringify({
+    offscreen_anchor_wire_bytes: inventoryExtraBytes,
     schema: "zephium.agentic.semantic-runtime-smoke.v1",
     initial_nodes: initial.n.length,
     expanded_nodes: expansion.n.length,

@@ -284,13 +284,52 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
             .observe_initial(&self.browser.lease, now)
             .map_err(Refusal::from)
             .map_err(Self::error)?;
-        let correlation = request.invocation().correlation();
-        let observation = SemanticObservationRequest::initial(
-            SemanticObservationId::new(correlation.invocation().get())
-                .ok_or(AgentWorkFailure::Contract)?,
-            correlation.frame().context(),
-            SemanticObservationBudget::INITIAL_FILTERED,
-        );
+        let observation = request.observation().clone();
+        let pending = PendingRead::dispatch(
+            self.browser.shared.clone(),
+            self.browser.resource.clone(),
+            request,
+        )
+        .map_err(Self::error)?;
+        self.read = Some((pending, observation));
+        Ok(())
+    }
+    fn supports_expansion(&self) -> bool {
+        true
+    }
+    fn begin_expansion(
+        &mut self,
+        previous: &SemanticObservation,
+        acknowledgement: &SemanticObservationAcknowledgement,
+        target: SemanticReferenceId,
+        kind: SemanticExpansionKind,
+        now: AgentPolicyInstant,
+    ) -> Result<(), AgentWorkFailure> {
+        self.listener().map_err(Self::error)?;
+        self.check_health(now)?;
+        if self.read.is_some()
+            || self.navigation.is_some()
+            || self.revoke.is_some()
+            || self.delivered
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
+        let request = self
+            .browser
+            .shared
+            .lock_rows()
+            .map_err(Self::error)?
+            .observe_expansion(
+                &self.browser.lease,
+                previous,
+                acknowledgement,
+                target,
+                kind,
+                now,
+            )
+            .map_err(Refusal::from)
+            .map_err(Self::error)?;
+        let observation = request.observation().clone();
         let pending = PendingRead::dispatch(
             self.browser.shared.clone(),
             self.browser.resource.clone(),

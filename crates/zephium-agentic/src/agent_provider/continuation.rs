@@ -30,8 +30,11 @@ use super::{
     AgentProviderCallIdentity, AgentProviderCompletion, AgentProviderKind, AgentProviderStopReason,
     AgentProviderToolCallCorrelation,
 };
+#[path = "observation_checkpoint.rs"]
+mod observation_checkpoint;
 #[cfg(any(test, feature = "provider-transport"))]
 use super::{AgentCommittedProviderInput, AgentProviderInputEvidence};
+pub use observation_checkpoint::AgentProviderObservationCheckpoint;
 
 /// Maximum initial semantic-observation bytes retained for stateless replay.
 ///
@@ -721,16 +724,12 @@ impl AgentProviderContinuation {
         if self.correlation.kind() != AgentBrowserToolKind::Read {
             return Err(AgentProviderContinuationError::ToolKind);
         }
-        // A scope-expansion request cannot be answered from the existing
-        // baseline merely because opaque ref ordinals happen to coincide.
-        // Fresh scoped read-to-tool continuation needs its own host protocol;
-        // today only an initial-baseline read can preserve action authority.
+        // Read(initial) formats the exact acknowledged baseline, whether that
+        // baseline was initial or separately captured/delivered by Snapshot.
+        // It never answers an expansion request or creates new references.
         if !matches!(
-            (self.correlation.read_scope.as_ref(), read.scope()),
-            (
-                Some(super::AgentBrowserScopeProposal::Initial),
-                crate::SemanticScope::Initial
-            )
+            self.correlation.read_scope.as_ref(),
+            Some(super::AgentBrowserScopeProposal::Initial)
         ) {
             return Err(AgentProviderContinuationError::Scope);
         }
@@ -1959,6 +1958,145 @@ mod tests {
         }
         .join_terminal_tool(completion(prior, 2), correlation)
         .expect("screenshot terminal join")
+    }
+
+    #[test]
+    fn progressive_checkpoint_requires_exact_native_scope_before_fresh_delivery() {
+        for provider in [
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderKind::AnthropicMessages,
+        ] {
+            let previous = observation(context(), 1, 1, 1, "old captured state");
+            let acknowledgement = SemanticObservationAcknowledgement::from_fingerprint(
+                SemanticObservationFingerprint::from_observation(&previous),
+            );
+            let config = config(provider)
+                .restrict_to_navigation_and_extraction()
+                .with_baseline_read()
+                .with_progressive_observation();
+            let continuation = |scope: serde_json::Value| {
+                let arguments = json!({"scope":scope}).to_string();
+                let tool = match provider {
+                    AgentProviderKind::OpenAiResponses => {
+                        super::super::AgentBrowserToolCall::decode_openai(
+                            call(1),
+                            "fc_inspection".into(),
+                            "call_inspection".into(),
+                            "snapshot",
+                            arguments.clone(),
+                        )
+                    }
+                    AgentProviderKind::AnthropicMessages => {
+                        super::super::AgentBrowserToolCall::decode(
+                            call(1),
+                            "toolu_inspection".into(),
+                            "snapshot",
+                            arguments.clone(),
+                        )
+                    }
+                }
+                .unwrap();
+                AgentProviderContinuationSeed {
+                    call: call(1),
+                    config: config.clone(),
+                    baseline: acknowledgement.clone(),
+                    transcript: transcript(),
+                }
+                .join_terminal_tool(
+                    completion(call(1), arguments.len() as u32),
+                    tool.into_continuation_parts().0,
+                )
+                .unwrap()
+            };
+            let scope = || json!({"kind":"surrounding_text","target":"@a2","before_bytes":0,"after_bytes":1024});
+            let checkpoint = || {
+                continuation(scope())
+                    .retire_for_observation(&previous, &config)
+                    .unwrap()
+            };
+            assert!(continuation(json!({"kind":"subtree","target":"@a99"}))
+                .retire_for_observation(&previous, &config)
+                .is_err());
+            assert!(continuation(json!({"kind":"frame","target":"@a2"}))
+                .retire_for_observation(&previous, &config)
+                .is_err());
+            assert!(continuation(scope())
+                .retire_for_observation(
+                    &observation(context(), 1, 1, 1, "substituted state"),
+                    &config
+                )
+                .is_err());
+            let mut changed = config.clone();
+            changed.progressive_observation = false;
+            assert!(continuation(scope())
+                .retire_for_observation(&previous, &changed)
+                .is_err());
+            let request = checkpoint()
+                .request(&previous, SemanticObservationId::new(2).unwrap())
+                .unwrap();
+            let fresh = |key: u64| {
+                let snapshot = decode_semantic_snapshot(SemanticDecodeContext::new(SemanticInvocationId::new(2).unwrap(), previous.frames()[0].frame().clone(), SemanticSnapshotGeneration::new(2).unwrap()),
+                    format!(r#"{{"v":1,"i":2,"g":2,"c":"complete","n":[{{"k":{key},"r":"status","t":"newly scoped evidence"}}]}}"#).as_bytes()).unwrap();
+                SemanticObservationAssembler::new(request.clone(), snapshot)
+                    .unwrap()
+                    .finish()
+                    .unwrap()
+            };
+            assert!(checkpoint()
+                .validate_successor(&previous, &fresh(99), model_request(context(), 2), &config)
+                .is_err());
+            let widened = decode_semantic_snapshot(
+                SemanticDecodeContext::new(
+                    SemanticInvocationId::new(2).unwrap(),
+                    previous.frames()[0].frame().clone(),
+                    SemanticSnapshotGeneration::new(2).unwrap(),
+                ),
+                br#"{"v":1,"i":2,"g":2,"c":"complete","n":[{"k":2,"r":"status","t":"requested"},{"k":3,"r":"paragraph","t":"unrequested sibling"}]}"#,
+            ).unwrap();
+            let widened = SemanticObservationAssembler::new(request.clone(), widened)
+                .unwrap()
+                .finish()
+                .unwrap();
+            assert!(checkpoint()
+                .validate_successor(&previous, &widened, model_request(context(), 2), &config)
+                .is_err());
+            let fresh = fresh(2);
+            assert!(checkpoint()
+                .validate_successor(&previous, &fresh, model_request(context(), 1), &config)
+                .is_err());
+            assert!(checkpoint()
+                .validate_successor(
+                    &previous,
+                    &observation(context(), 2, 2, 2, "unscoped widening"),
+                    model_request(context(), 2),
+                    &config
+                )
+                .is_err());
+            checkpoint()
+                .validate_successor(&previous, &fresh, model_request(context(), 2), &config)
+                .unwrap();
+            assert!(read_semantic_observation(
+                &fresh,
+                SemanticReadAuthority::Acknowledged(&acknowledgement),
+                SemanticCaptureInstant::from_millis(1551),
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::STANDARD
+            )
+            .is_err());
+            let fresh_ack = SemanticObservationAcknowledgement::from_fingerprint(
+                SemanticObservationFingerprint::from_observation(&fresh),
+            );
+            assert!(read_semantic_observation(
+                &fresh,
+                SemanticReadAuthority::Acknowledged(&fresh_ack),
+                SemanticCaptureInstant::from_millis(1551),
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::STANDARD
+            )
+            .unwrap()
+            .matches_acknowledgement(&fresh_ack));
+            assert!(!format!("{:?}", checkpoint()).contains("old captured"));
+        }
     }
 
     #[test]

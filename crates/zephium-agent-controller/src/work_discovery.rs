@@ -43,6 +43,9 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
     fn allows_baseline_read(&self) -> bool {
         true
     }
+    fn allows_progressive_observation(&self) -> bool {
+        true
+    }
     fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
         self.extraction.extraction_schema()
     }

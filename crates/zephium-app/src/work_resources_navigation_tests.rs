@@ -21,12 +21,27 @@ pub(super) fn read_result(
     callback: WorkBrowserObservationCompletionCallback,
 ) {
     let stage = native.navigation_count.load(Ordering::Acquire);
+    let expanded = request.invocation().scope() != SemanticRuntimeScopeClass::Initial;
     let (invocation, completion) = request.into_parts();
     let wire = format!(
         r#"{{"v":1,"i":{},"g":{},"c":"complete","n":[{{"k":1,"r":"paragraph","t":"Fixture result document_marker_{stage}"}},{{"k":2,"r":"link","n":"First source","u":"{FIRST}"}},{{"k":3,"r":"link","n":"Second source","u":"{SECOND}"}},{{"k":4,"r":"link","n":"Out of scope source","u":"https://other.invalid/source"}},{{"k":5,"r":"link","n":"Original source","u":"https://retained-fixture.invalid/frozen"}}]}}"#,
         invocation.invocation().get(),
         invocation.snapshot_generation().get()
     );
+    let wire = if expanded {
+        if invocation.scope() == SemanticRuntimeScopeClass::SurroundingText {
+            format!(
+                r#"{{"v":1,"i":{},"g":{},"c":"complete","n":[{{"k":1,"r":"paragraph","t":"Fixture result new_scoped_evidence"}}]}}"#,
+                invocation.invocation().get(),
+                invocation.snapshot_generation().get()
+            )
+        } else {
+            wire.replace(&format!("document_marker_{stage}"), "new_scoped_evidence")
+                .replace("\"r\":\"link\"", "\"p\":0,\"r\":\"link\"")
+        }
+    } else {
+        wire
+    };
     callback(completion.settle(Ok(invocation.decode_result(wire.as_bytes()).unwrap())));
 }
 fn navigation_stream(turn: usize, url: &str) -> String {
@@ -51,6 +66,15 @@ fn final_streams() -> Vec<String> {
             .replace("resp_2", "resp_4")
             .replace("msg_2", "msg_4"),
     ]
+}
+fn inspection_stream(scope: &str) -> String {
+    let args = format!("{{\"scope\":{scope}}}").replace('"', "\\\"");
+    response_stream(1)
+        .replace("\"extract\"", "\"snapshot\"")
+        .replace(
+            r#"{\"scope\":{\"kind\":\"initial\"},\"schema_id\":1}"#,
+            &args,
+        )
 }
 type PreparedDiscovery = (
     AgentWorkRetainedController,
@@ -118,6 +142,193 @@ fn finish(result: &mut AgentWorkRetainedHandle) -> AgentWorkRetainedOutcome {
     });
     outcome.unwrap()
 }
+#[test]
+fn retained_surrounding_inspection_is_citable_only_after_fresh_delivery() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (owner, native, resource, browser) = setup();
+    native.discovery.store(true, Ordering::Release);
+    let mut responses = vec![inspection_stream(
+        r#"{"kind":"surrounding_text","target":"@a1","before_bytes":0,"after_bytes":1024}"#,
+    )];
+    responses.extend(final_streams());
+    let (controller, mut result, scope, server, requests) = prepare(browser, responses);
+    let (_, lifecycle) = start(controller, scope);
+    let AgentWorkRetainedOutcome::Accepted {
+        settlement,
+        extraction,
+    } = finish(&mut result)
+    else {
+        panic!("scoped extraction failed")
+    };
+    assert_eq!(settlement.closure().model_calls(), 3);
+    assert_eq!(extraction.stats().source_edges(), 1);
+    assert_eq!(native.reads.load(Ordering::Acquire), 2);
+    assert!(matches!(
+        lifecycle.drain_until(Instant::now() + Duration::from_secs(2)),
+        AgentRuntimeScopedDrain::Drained(_)
+    ));
+    native.join();
+    assert_eq!(server.join().unwrap(), 3);
+    let requests = requests.lock().unwrap();
+    assert!(!requests[0].contains("new_scoped_evidence"));
+    assert!(
+        requests[1].contains("new_scoped_evidence") && !requests[1].contains("document_marker_0")
+    );
+    assert!(
+        requests[2].contains("new_scoped_evidence") && !requests[2].contains("document_marker_0")
+    );
+    let mut destroy = owner.destroy(&resource).unwrap();
+    assert!(destroy.poll(now()).unwrap().is_some());
+    owner.seal_resources().unwrap();
+    assert!(owner.locally_retired());
+}
+
+#[test]
+fn retained_expansion_cancellation_and_lost_callback_keep_original_native_owners() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for (reason, lost) in [
+        (AgentRuntimeStopReason::Cancelled, false),
+        (AgentRuntimeStopReason::HumanTakeover, false),
+        (AgentRuntimeStopReason::PolicyRevoked, false),
+        (AgentRuntimeStopReason::Cancelled, true),
+    ] {
+        let (owner, native, resource, browser) = setup();
+        native.discovery.store(true, Ordering::Release);
+        native.hold_expansion.store(true, Ordering::Release);
+        let responses = vec![inspection_stream(r#"{"kind":"subtree","target":"@a1"}"#)];
+        let (controller, mut result, scope, server, _) = prepare(browser, responses);
+        let (handle, lifecycle) = start(controller, scope);
+        wait_until(|| native.read.lock().unwrap().is_some());
+        assert_eq!(native.reads.load(Ordering::Acquire), 2);
+        handle.stop_and_seal(reason);
+        let (request, callback) = native.read.lock().unwrap().take().unwrap();
+        if lost {
+            drop((request, callback));
+        } else {
+            read_result(&native, request, callback);
+        }
+        assert!(!matches!(
+            finish(&mut result),
+            AgentWorkRetainedOutcome::Accepted { .. }
+        ));
+        let drain = lifecycle.drain_until(Instant::now() + Duration::from_secs(2));
+        assert_eq!(matches!(drain, AgentRuntimeScopedDrain::Drained(_)), !lost);
+        native.join();
+        assert_eq!(server.join().unwrap(), 1);
+        let mut destroy = owner.destroy(&resource).unwrap();
+        assert!(destroy.poll(now()).unwrap().is_some());
+        owner.seal_resources().unwrap();
+        assert_eq!(owner.locally_retired(), !lost);
+    }
+}
+
+#[test]
+fn retained_inspection_rejects_bad_refs_scopes_and_synchronous_refusal_without_retry() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for (scope_json, reject, reads) in [
+        (r#"{"kind":"subtree","target":"@a99"}"#, false, 1),
+        (r#"{"kind":"region","target":"@a2"}"#, false, 1),
+        (r#"{"kind":"frame","target":"@a1"}"#, false, 1),
+        (
+            r#"{"kind":"surrounding_text","target":"@a1","before_bytes":8192,"after_bytes":1}"#,
+            false,
+            1,
+        ),
+        (r#"{"kind":"subtree","target":"@a1"}"#, true, 2),
+    ] {
+        let (owner, native, resource, browser) = setup();
+        native.discovery.store(true, Ordering::Release);
+        native.reject_expansion.store(reject, Ordering::Release);
+        let (controller, mut result, scope, server, _) =
+            prepare(browser, vec![inspection_stream(scope_json)]);
+        let (_, lifecycle) = start(controller, scope);
+        assert!(!matches!(
+            finish(&mut result),
+            AgentWorkRetainedOutcome::Accepted { .. }
+        ));
+        assert_eq!(native.reads.load(Ordering::Acquire), reads, "{scope_json}");
+        assert!(matches!(
+            lifecycle.drain_until(Instant::now() + Duration::from_secs(2)),
+            AgentRuntimeScopedDrain::Drained(_)
+        ));
+        native.join();
+        assert_eq!(server.join().unwrap(), 1);
+        let mut destroy = owner.destroy(&resource).unwrap();
+        assert!(destroy.poll(now()).unwrap().is_some());
+        owner.seal_resources().unwrap();
+        assert!(owner.locally_retired());
+    }
+}
+
+#[test]
+fn retained_progressive_capture_retires_old_replay_and_keeps_navigation_live() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (owner, native, resource, browser) = setup();
+    native.discovery.store(true, Ordering::Release);
+    let lease = browser.binding().lease().clone();
+    let inspect = response_stream(1)
+        .replace("\"extract\"", "\"snapshot\"")
+        .replace(
+            r#"{\"scope\":{\"kind\":\"initial\"},\"schema_id\":1}"#,
+            r#"{\"scope\":{\"kind\":\"subtree\",\"target\":\"@a1\"}}"#,
+        );
+    let read = response_stream(1)
+        .replace("\"extract\"", "\"read\"")
+        .replace(
+            r#"{\"scope\":{\"kind\":\"initial\"},\"schema_id\":1}"#,
+            r#"{\"scope\":{\"kind\":\"initial\"}}"#,
+        )
+        .replace("resp_1", "resp_2")
+        .replace("fc_1", "fc_2")
+        .replace("call_1", "call_2");
+    let mut responses = vec![inspect, read, navigation_stream(3, FIRST)];
+    responses.extend(final_streams());
+    let (controller, mut result, scope, server, requests) = prepare(browser, responses);
+    let (_, lifecycle) = start(controller, scope);
+    let AgentWorkRetainedOutcome::Accepted { settlement, .. } = finish(&mut result) else {
+        panic!("progressive capture did not accept")
+    };
+    assert_eq!(settlement.closure().navigations(), 1);
+    assert_eq!(settlement.closure().model_calls(), 5);
+    assert_eq!(native.reads.load(Ordering::Acquire), 3);
+    assert_eq!(native.acquisitions.load(Ordering::Acquire), 1);
+    assert_eq!(native.destructions.load(Ordering::Acquire), 0);
+    assert!(
+        matches!(lifecycle.drain_until(Instant::now() + Duration::from_secs(2)), AgentRuntimeScopedDrain::Drained(ref proof) if proof.lease() == &lease)
+    );
+    native.join();
+    assert_eq!(server.join().unwrap(), 5);
+    let requests = requests.lock().unwrap();
+    assert!(requests[0].contains("document_marker_0"));
+    assert!(
+        requests[1].contains("new_scoped_evidence") && !requests[1].contains("document_marker_0")
+    );
+    assert!(!requests[1].contains("call_1") && !requests[1].contains("fc_1"));
+    assert!(requests[2].contains("new_scoped_evidence") && requests[2].contains("ZREAD2"));
+    assert!(
+        requests[3].contains("document_marker_1") && !requests[3].contains("new_scoped_evidence")
+    );
+    assert_host_checkpoint(&requests[1], "https://retained-fixture.invalid/frozen", &[]);
+    let mut destroy = owner.destroy(&resource).unwrap();
+    assert!(matches!(
+        destroy.poll(now()).unwrap(),
+        Some(LifecycleResult::Event(WorkBrowserResourceEvent::Destroyed(
+            _
+        )))
+    ));
+    owner.reap_absent(&resource).unwrap();
+    owner.seal_resources().unwrap();
+    assert!(owner.locally_retired());
+}
+
 #[test]
 fn retained_two_selected_hops_use_original_policy_and_retire_previous_transcripts() {
     let _serial = crate::WORK_RUNTIME_TEST_SERIAL
