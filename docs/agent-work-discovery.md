@@ -45,3 +45,12 @@ Production/BYOK construction remains `store:false`. The development-only
 `discovery-qualification` feature explicitly opts into retained public Responses
 through the same profile-bound application preparation and is compile-refused
 in optimized builds. See the [actual-app evidence protocol](../eval/agentic-browsing/macos-open-objective.md).
+
+The first actual-app qualification passed on macOS at source `e792f6f`. Luna
+chose two previously observed React documentation links, recognized when the
+current page supported the answer, requested a schema-bound extraction, and
+terminated through the ordinary durable controller path. The retained trace was
+manually reviewed for route independence, answer usefulness, and source mapping.
+This proves the bounded public single-agent slice; it does not yet prove signed-in
+work, mutations, general cross-origin discovery, concurrent Browse, Windows, or
+multi-agent orchestration.

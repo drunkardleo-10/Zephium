@@ -1463,31 +1463,39 @@ violation, or uncontrolled side effect.
 
 ### 13.2 Held-out open-objective qualification
 
-Before expanding site coverage, prove that the model can make the decisions
-that task-authored qualifiers currently make for it. The actor receives only:
+The open-objective gate proves that the model can make the decisions that
+task-authored qualifiers otherwise make for it. The actor receives only:
 
 - the user's bounded natural-language objective;
 - the immutable capability envelope and resource ceilings;
 - the initial Work-owned browser resource and its current observation; and
 - the small model-facing capability profile admitted for the current phase.
 
-The route, expected answer, completion predicate, evidence requirements, and
-recovery path are withheld from the actor. They are retained by a separate
-validator that cannot grant browser authority or contribute instructions to the
-model context. A successful run must independently choose what to inspect,
-follow at least one previously observed navigation opportunity, recognize when
-evidence is sufficient, and terminate through a bounded `finish` proposal that
-names the retained evidence it relies on. The validator then evaluates the
-result and provenance; a model's declaration of success is never the verdict.
+The route and answer are withheld from the actor. Trusted host policy supplies
+only the approved origin/path scope, maximum hop allowance, operation budgets,
+and extraction schema; it cannot turn page content into authority. A successful
+run must independently choose what to inspect, follow at least one previously
+observed navigation opportunity, recognize when the current document contains
+sufficient evidence, and request a source-bound extraction. Mechanical
+completion verifies provenance and lifecycle. A separate human review judges
+factual correctness and usefulness; a model's declaration of success is never
+the verdict.
 
-The first objective uses versioned loopback documents with an unfamiliar
-route, distractors, dynamic state, and a hidden ground-truth value. This keeps
-the decision problem real while making failures reproducible. Subsequent
-objectives add same-origin SPA transitions, cross-origin scope boundaries,
-multiple pages, contradictory sources, insufficient evidence, and a required
-human-takeover branch. At least one successful page and its evidence remain
-owned by Work after the actor lease ends, proving that run completion and
-resource destruction are not the same lifetime.
+The first actual-app objective is now qualified on macOS at source `e792f6f`.
+Starting at React's public Learn index, Luna discovered an unknown two-hop route,
+selected the relevant documentation page, and returned the correct functional
+updater solution with current-page evidence. The run used the actual bundled
+application, ordinary Work controller, native WKWebView, provider adapter,
+durable Store, audit path, and normal shutdown. Full identities, metrics,
+retained response IDs, manual judgment, and scoped limits are recorded in the
+[qualification evidence](../eval/agentic-browsing/macos-open-objective.md).
+
+Subsequent objectives add deterministic loopback tasks with hidden ground truth,
+same-origin SPA transitions, cross-origin scope boundaries, multiple pages,
+contradictory sources, insufficient evidence, and a required human-takeover
+branch. At least one successful page and its evidence must remain owned by Work
+after the actor lease ends, proving that run completion and resource destruction
+are not the same lifetime.
 
 Every run records a content-free decision trace: offered capability profile,
 chosen capability, observation/evidence identifiers, verification level,
