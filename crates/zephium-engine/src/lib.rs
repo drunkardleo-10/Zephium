@@ -13,6 +13,9 @@ mod navigation_epoch;
 mod pane_geometry;
 mod platform;
 
+#[cfg(all(target_os = "macos", feature = "native-agentic-work-resource-probe"))]
+#[doc(hidden)]
+pub use agent_context_port::resource_witness::ConstructionEvidence as WorkResourceConstructionEvidence;
 #[cfg(all(target_os = "macos", feature = "native-agentic-foreground-probe"))]
 #[doc(hidden)]
 pub use platform::macos::agentic_foreground_driver::{

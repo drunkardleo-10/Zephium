@@ -69,6 +69,7 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "Document::PublicProductBrief.admits(target)",
             "Self::with_document(engine,admission,resource,Document::PublicProductBrief)",
             "self.schedule(Operation::Acquire,completion)", "self.schedule(Operation::Retire,completion)",
+            "engine.agent_context_port.construction_evidence(resource)",
         ],
         &["AgentProvider", "AgentBrowserPort", "WorkBrowserResources", "evaluateJavaScript", "setActivationPolicy", "makeKey", "makeMain", "NSRunLoop", "requestAnimationFrame", "unsafe", "Serialize", "Deserialize"],
     ),
@@ -80,6 +81,9 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "task::capture(retire)",
             "self.store.clone()", "self.owner.start(", "lifecycle.drain_until(deadline)",
             "let(fixture,target)=task::document()?", "input::input(", "task::OBJECTIVE", "sample.trace()",
+            "EXPECTED_RESOURCE.with(|r|*r.borrow_mut()=self.owner.resource().cloned())",
+            "lifecycle_trace(self.phase,&event,construction)",
+            "WorkResourceRenderingProbe::construction_evidence(&self.engine,resource)",
             "#[cfg(feature=\"retained-public-qualification\")]#[path=\"retained_qualification_public.rs\"]modtask;",
             "mpsc::sync_channel(4)", "TOTAL:Duration=Duration::from_secs(150)", "CLEANUP:Duration=Duration::from_secs(5)",
             "ifstate==ForegroundRenderingState::Retiring{return;}",
@@ -379,6 +383,8 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
     (
         "crates/zephium-engine/src/agent_work_resource_probe_port.rs",
         &[
+            "first.get_or_insert(evidence)", "admission.witness_resource(resource)?",
+            "letguard=admission.witness_resource(resource)?", "*guard.construction_evidence.lock().ok()?",
             "#[cfg(feature=\"native-agentic-public-resource-probe\")]PublicProductBrief",
             "Self::RenderingFixture=>fixed_fixture(target)", "Self::RenderingFixture=>8", "Self::PublicProductBrief=>1",
             "target.as_url().as_str()==\"https://shop.pimoroni.com/products/raspberry-pi-pico-2\"",
@@ -493,6 +499,10 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
     (
         "crates/zephium-engine/src/host/work_resource.rs",
         &[
+            "CONSTRUCTION_BUDGET:Duration=Duration::from_secs(30)",
+            "resource.record_construction_failure(\"construction_deadline\")",
+            "resource.record_construction_failure(\"navigation_gate\")",
+            "resource.record_construction_failure(\"native_health\")",
             "witness_admission:Option<witness::Admission>",
             "self.agent_contexts.len()+self.work_resources.len()>=MAX_LIVE_CONTEXTS",
             "execution_count<=MAX_EXECUTING_CONTEXTS",

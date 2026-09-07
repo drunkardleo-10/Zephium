@@ -23,6 +23,23 @@ struct State {
     target: Option<ContextNavigationTarget>,
     native_id: Option<wry::NavigationId>,
     requested: bool,
+    #[cfg(feature = "native-agentic-work-resource-probe")]
+    evidence: NavigationEvidence,
+}
+
+/// Content-free milestones only; descriptive, never navigation authority.
+#[cfg(feature = "native-agentic-work-resource-probe")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NavigationEvidence {
+    pub bootstrap_started: bool,
+    pub bootstrap_committed: bool,
+    pub bootstrap_finished: bool,
+    pub requested: bool,
+    pub started: bool,
+    pub committed: bool,
+    pub finished: bool,
+    pub refused: bool,
+    pub last_event: Option<wry::NavigationEventPhase>,
 }
 
 /// Immutable source comes only from an admitted Work construction request.
@@ -39,11 +56,26 @@ impl Default for WorkDocumentNavigation {
             target: None,
             native_id: None,
             requested: false,
+            #[cfg(feature = "native-agentic-work-resource-probe")]
+            evidence: NavigationEvidence::default(),
         })))
     }
 }
 
 impl WorkDocumentNavigation {
+    #[cfg(feature = "native-agentic-work-resource-probe")]
+    pub(crate) fn construction_evidence(&self) -> Option<NavigationEvidence> {
+        let state = self.0.lock().ok()?;
+        Some(NavigationEvidence {
+            bootstrap_started: state.bootstrap_id.is_some() || state.bootstrap_finished,
+            bootstrap_committed: state.bootstrap_committed,
+            bootstrap_finished: state.bootstrap_finished,
+            requested: state.requested,
+            started: state.native_id.is_some(),
+            refused: state.phase == Phase::Refused,
+            ..state.evidence
+        })
+    }
     #[cfg(feature = "native-agentic-work-resource-probe")]
     pub(crate) fn witness_document(&self) -> Option<wry::NavigationId> {
         let state = self.0.lock().ok()?;
@@ -91,6 +123,10 @@ impl WorkDocumentNavigation {
         if matches!(state.phase, Phase::Refused | Phase::Retired) {
             return Ok((false, false));
         }
+        #[cfg(feature = "native-agentic-work-resource-probe")]
+        {
+            state.evidence.last_event = Some(event.phase);
+        }
         if state.phase == Phase::Bootstrap {
             if event.url != "about:blank" {
                 state.phase = Phase::Refused;
@@ -132,10 +168,18 @@ impl WorkDocumentNavigation {
                 Ok((false, false))
             }
             (Phase::Loading, E::Committed) if exact && state.native_id == Some(event.id) => {
+                #[cfg(feature = "native-agentic-work-resource-probe")]
+                {
+                    state.evidence.committed = true;
+                }
                 state.phase = Phase::Committed;
                 Ok((true, false))
             }
             (Phase::Committed, E::Finished) if exact && state.native_id == Some(event.id) => {
+                #[cfg(feature = "native-agentic-work-resource-probe")]
+                {
+                    state.evidence.finished = true;
+                }
                 state.phase = Phase::Ready;
                 Ok((false, true))
             }
@@ -195,6 +239,37 @@ mod tests {
     use super::*;
     use wry::NavigationEventPhase as E;
     const URL: &str = "https://example.test/frozen";
+    #[cfg(feature = "native-agentic-work-resource-probe")]
+    #[test]
+    fn construction_milestones_distinguish_waits_and_freeze_first_navigation_refusal() {
+        let empty = WorkDocumentNavigation::default()
+            .construction_evidence()
+            .unwrap();
+        assert_eq!(empty, NavigationEvidence::default());
+        let gate = armed();
+        let bootstrap = gate.construction_evidence().unwrap();
+        assert!(
+            bootstrap.bootstrap_started
+                && bootstrap.bootstrap_committed
+                && bootstrap.bootstrap_finished
+                && bootstrap.requested
+        );
+        assert!(
+            !bootstrap.started && !bootstrap.committed && !bootstrap.finished && !bootstrap.refused
+        );
+        gate.observe(event(1, E::Started, URL)).unwrap();
+        assert!(gate.construction_evidence().unwrap().started);
+        gate.observe(event(1, E::Committed, URL)).unwrap();
+        let committed = gate.construction_evidence().unwrap();
+        assert!(committed.committed && !committed.finished && !committed.refused);
+        gate.observe(event(1, E::Redirected, URL)).unwrap();
+        let refused = gate.construction_evidence().unwrap();
+        assert!(refused.refused && refused.committed && !refused.finished);
+        assert_eq!(refused.last_event, Some(E::Redirected));
+        gate.observe(event(1, E::Finished, URL)).unwrap();
+        assert_eq!(gate.construction_evidence(), Some(refused));
+        assert!(!gate.ready(Some(URL)));
+    }
     fn event(id: u64, phase: E, url: &str) -> wry::NavigationEvent {
         wry::NavigationEvent {
             id: wry::NavigationId::from_raw(id),

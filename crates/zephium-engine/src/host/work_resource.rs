@@ -56,6 +56,28 @@ pub(super) struct WorkNativeResource {
     witness_admission: Option<witness::Admission>,
 }
 impl WorkNativeResource {
+    #[cfg(feature = "native-agentic-work-resource-probe")]
+    fn record_construction_failure(&self, cause: &'static str) {
+        self.guard.record_construction_evidence(
+            crate::agent_context_port::resource_witness::ConstructionEvidence {
+                cause,
+                port_failure: None,
+                navigation: self
+                    .view
+                    .as_ref()
+                    .and_then(|view| view.work_navigation())
+                    .and_then(|gate| gate.construction_evidence()),
+                document_started: self.document_started,
+                deadline_expired: self.deadline_expired,
+                guard_healthy: self.guard.is_healthy(),
+                current_document: self.ready(),
+                semantic_pending: self
+                    .view
+                    .as_ref()
+                    .and_then(|view| view.semantic_pending_for_audit()),
+            },
+        );
+    }
     fn unconstructed(guard: Arc<WorkResourceGuard>, native_resource: NativeResourceLease) -> Self {
         Self {
             guard,
@@ -358,6 +380,19 @@ impl EngineHost {
         let original_deadline = Instant::now().checked_add(CONSTRUCTION_BUDGET);
         let result = self.build_work_resource(guard.clone());
         let Ok(mut resource) = result else {
+            #[cfg(feature = "native-agentic-work-resource-probe")]
+            guard.record_construction_evidence(
+                crate::agent_context_port::resource_witness::ConstructionEvidence {
+                    cause: "build_refused",
+                    port_failure: result.err(),
+                    navigation: None,
+                    document_started: false,
+                    deadline_expired: false,
+                    guard_healthy: guard.is_healthy(),
+                    current_document: false,
+                    semantic_pending: None,
+                },
+            );
             task.complete(Outcome::Refused);
             return;
         };
@@ -368,6 +403,8 @@ impl EngineHost {
             deadline.and_then(|deadline| timeout(guard.clone(), deadline, CONSTRUCTION_BUDGET));
         if resource.watchdog.is_none() || resource.lifecycle_deadline.is_none() {
             resource.deadline_expired = true;
+            #[cfg(feature = "native-agentic-work-resource-probe")]
+            resource.record_construction_failure("construction_watchdog");
             guard.fail();
         }
         self.work_resources
@@ -498,6 +535,8 @@ impl EngineHost {
             ),
         );
         let Ok(view) = view else {
+            #[cfg(feature = "native-agentic-work-resource-probe")]
+            resource.record_construction_failure("view_build");
             guard.fail();
             return Ok(resource);
         };
@@ -505,6 +544,8 @@ impl EngineHost {
             crate::platform::imp::install_content_policy_on_view(view.view(), &policy);
         resource.view = Some(view);
         let Ok(registration) = registration else {
+            #[cfg(feature = "native-agentic-work-resource-probe")]
+            resource.record_construction_failure("content_policy_install");
             guard.fail();
             return Ok(resource);
         };
@@ -527,6 +568,10 @@ impl EngineHost {
             .is_some_and(|deadline| Instant::now() >= deadline)
         {
             resource.deadline_expired = true;
+            #[cfg(feature = "native-agentic-work-resource-probe")]
+            if resource.construction.is_some() {
+                resource.record_construction_failure("construction_deadline");
+            }
             guard.fail();
         }
         if resource.destruction.is_some() {
@@ -555,9 +600,17 @@ impl EngineHost {
             .and_then(|view| view.work_navigation())
             .is_none_or(|gate| gate.failed())
         {
+            #[cfg(feature = "native-agentic-work-resource-probe")]
+            if resource.construction.is_some() {
+                resource.record_construction_failure("navigation_gate");
+            }
             guard.fail();
         }
         if !guard.is_healthy() {
+            #[cfg(feature = "native-agentic-work-resource-probe")]
+            if resource.construction.is_some() {
+                resource.record_construction_failure("native_health");
+            }
             resource.watchdog = None;
             resource.lifecycle_deadline = None;
             if let Some(task) = resource.construction.take() {
@@ -570,6 +623,8 @@ impl EngineHost {
         }
         if resource.construction.is_some() {
             if !guard.construction_current() {
+                #[cfg(feature = "native-agentic-work-resource-probe")]
+                resource.record_construction_failure("construction_authority");
                 guard.fail();
                 resource.watchdog = None;
                 resource.lifecycle_deadline = None;
@@ -596,6 +651,8 @@ impl EngineHost {
                         || gate.arm(document.clone()).is_err()
                         || view.view().load_url(document.as_url().as_str()).is_err()
                     {
+                        #[cfg(feature = "native-agentic-work-resource-probe")]
+                        resource.record_construction_failure("document_dispatch");
                         guard.fail();
                     }
                     return;
@@ -665,6 +722,10 @@ impl EngineHost {
                 .is_some_and(|task| deadline.matches(task))
         {
             resource.deadline_expired = true;
+            #[cfg(feature = "native-agentic-work-resource-probe")]
+            if resource.construction.is_some() {
+                resource.record_construction_failure("construction_deadline");
+            }
             guard.fail();
             self.progress_work_resource(guard);
         }

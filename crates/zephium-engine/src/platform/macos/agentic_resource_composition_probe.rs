@@ -16,6 +16,14 @@ pub struct WorkResourceRenderingProbe {
     document: Document,
 }
 impl WorkResourceRenderingProbe {
+    /// Original first construction failure, queryable before a holder exists.
+    /// This immutable diagnostic neither schedules work nor admits rendering.
+    pub fn construction_evidence(
+        engine: &WebviewEngine,
+        resource: &WorkBrowserResourceJoin,
+    ) -> Option<crate::agent_context_port::resource_witness::ConstructionEvidence> {
+        engine.agent_context_port.construction_evidence(resource)
+    }
     /// Must be composed on the actual app loop after exact foreground admission
     /// and original application-owned native port acquisition.
     pub fn new(

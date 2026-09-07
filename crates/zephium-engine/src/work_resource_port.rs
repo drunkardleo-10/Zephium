@@ -49,6 +49,8 @@ struct State {
 }
 
 pub(crate) struct WorkResourceGuard {
+    #[cfg(feature = "native-agentic-work-resource-probe")]
+    pub(super) construction_evidence: Mutex<Option<super::resource_witness::ConstructionEvidence>>,
     admission: std::sync::Weak<AgentPortAdmission>,
     resource: WorkBrowserResourceJoin,
     storage: ContextProfileStorageClass,
@@ -67,6 +69,8 @@ pub(crate) struct WorkNotificationPermit {
 impl WorkResourceGuard {
     fn new(request: &WorkBrowserResourceRequest, admission: &Arc<AgentPortAdmission>) -> Self {
         Self {
+            #[cfg(feature = "native-agentic-work-resource-probe")]
+            construction_evidence: Mutex::new(None),
             admission: Arc::downgrade(admission),
             resource: request.resource().clone(),
             storage: request.storage(),

@@ -1,10 +1,55 @@
 # Actual-app retained public product brief
 
-Status: **Prepared source; no actual-app public-site qualification yet.** The
+Status: **One unsuccessful actual-app public attempt; not qualified.** The
 [qualified Luna fixture](macos-retained-controller-luna.md) proves the retained
 native/controller/closure composition only on its frozen loopback page. This
 candidate is a separately selected real-storefront task, not a promotion of
 that fixture result or the older hidden-AppKit qualifiers.
+
+## First actual-app attempt — 2026-09-07
+
+The single authorized run used source
+`7aee8488bae9673e687b72442439ee98a9313965`, isolated bundle
+`app.zephium.work-rendering-probe`, and arm64 executable SHA-256
+`0ba093e8c7c858a2793831b43ef183e4bd4f5ac00045f29b41d8dbeab939452f`.
+Foreground admission succeeded after 14,558 ms and 102 checks. The retained
+driver ended after 30,528 ms with provisional `outcome=lifecycle_phase`.
+
+Content-free terminal evidence: `model_calls=0`; accepted, source mapping,
+presentation retirement and scoped-worker drain all false; original resource
+retired true. Native failure evidence was unavailable (primary/cleanup `None`).
+Native cohort clean, human ownership preserved, no fixture owed and shutdown
+owner closed were all true. Final qualification and normal-shutdown-clean were
+false; exact native weak drain was `None`. No audit/run rows were persisted.
+The failed data root was preserved outside the repository. No retry followed.
+
+Source diagnosis: the native rendering holder and controller were not reached.
+The construction phase only advances on the original `Retained` terminal; its
+refusal/quarantine was collapsed into `lifecycle_phase`. Elapsed time is
+consistent with the existing 30-second construction watchdog, but the trace
+does **not** establish whether bootstrap, navigation start/commit/finish,
+current-document binding, semantic drainage, navigation refusal, or another
+native-health failure prevented construction. It does not prove a site redirect
+or justify expanding authority, extending a timeout or retrying the workflow.
+
+The corrective candidate adds diagnostic precision only: an exact-resource,
+first-failure native snapshot records fixed cause classes, bootstrap/navigation
+milestones, last navigation event class, guard health, deadline, current-document
+and semantic-pending facts. It carries no URL, DOM, native identity or page/model
+content. The original resource join is available immediately after construction
+admission, and the driver reports phase plus terminal/failure class before
+cleanup. This does not grant native admission or change the 30-second bound,
+read/retry policy, resource accounting or cleanup. These new facts cannot be
+retroactively attributed to the failed run. A native cause remains unproven.
+
+Diagnostic correction checks passed: exact first-wins resource-slot test;
+four navigation tests including refusal/milestone preservation; 13 public and
+10 fixture composition tests; 39 original engine resource regressions; strict
+public composition/engine all-targets and public desktop library Clippy;
+non-probe engine compilation; Work-resource/composition/foreground mutation
+guards, agentic-probe/controller/runtime architecture gates, formatting and
+whitespace checks. No live run or credential/provider access was used to prepare
+or test this diagnostic correction.
 
 ## Workflow and decision
 

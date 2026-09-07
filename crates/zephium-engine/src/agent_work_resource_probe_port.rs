@@ -4,6 +4,28 @@
 use super::*;
 use zephium_agentic::{ForegroundRenderingState, WorkBrowserResourceJoin};
 
+/// First construction failure on the original native guard. No URL, page data,
+/// native identity, or retry/cleanup authority is carried by this snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ConstructionEvidence {
+    pub cause: &'static str,
+    pub port_failure: Option<ContextPortFailure>,
+    pub navigation: Option<crate::platform::work_document_navigation::NavigationEvidence>,
+    pub document_started: bool,
+    pub deadline_expired: bool,
+    pub guard_healthy: bool,
+    pub current_document: bool,
+    pub semantic_pending: Option<bool>,
+}
+
+impl WorkResourceGuard {
+    pub(crate) fn record_construction_evidence(&self, evidence: ConstructionEvidence) {
+        if let Ok(mut first) = self.construction_evidence.lock() {
+            first.get_or_insert(evidence);
+        }
+    }
+}
+
 /// Closed diagnostic purpose, bound to the exact original resource request.
 /// Public rendering is absent unless its separate excluded feature is selected.
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -106,6 +128,15 @@ pub(crate) struct ResourceWitnessPort {
     admission: Arc<AgentPortAdmission>,
 }
 impl AgentContextPortSlot {
+    pub(crate) fn construction_evidence(
+        &self,
+        resource: &WorkBrowserResourceJoin,
+    ) -> Option<ConstructionEvidence> {
+        let admission = self.state.lock().ok()?.admission.clone()?;
+        let guard = admission.witness_resource(resource)?;
+        let evidence = *guard.construction_evidence.lock().ok()?;
+        evidence
+    }
     pub(crate) fn resource_witness_port(&self) -> Option<ResourceWitnessPort> {
         let state = self.state.lock().ok()?;
         if !state.taken || state.sealed || state.factory.is_some() {
@@ -276,6 +307,49 @@ mod tests {
             )
             .unwrap();
         (rows, request)
+    }
+    #[test]
+    fn construction_evidence_is_first_wins_exact_and_available_before_retained_or_holder() {
+        let (mut rows, construction) = source();
+        let resource = construction.resource().clone();
+        let slot = AgentContextPortSlot::new(Arc::new(|_| true), Arc::new(|_| {}));
+        let port = slot.take(Arc::new(|_| {})).unwrap();
+        assert!(matches!(
+            port.work_resource_lifecycle(
+                construction,
+                Box::new(move |completion| {
+                    let _ = rows
+                        .settle_at(completion, AgentPolicyInstant::from_millis(1))
+                        .unwrap();
+                })
+            ),
+            WorkBrowserResourceDispatch::Scheduled
+        ));
+        let admission = slot.state.lock().unwrap().admission.clone().unwrap();
+        let guard = admission.witness_resource(&resource).unwrap();
+        assert!(slot.construction_evidence(&resource).is_none());
+        let first = ConstructionEvidence {
+            cause: "construction_deadline",
+            port_failure: None,
+            navigation: None,
+            document_started: false,
+            deadline_expired: true,
+            guard_healthy: false,
+            current_document: false,
+            semantic_pending: None,
+        };
+        guard.record_construction_evidence(first);
+        guard.record_construction_evidence(ConstructionEvidence {
+            cause: "late_cleanup",
+            ..first
+        });
+        assert_eq!(slot.construction_evidence(&resource), Some(first));
+        assert!(slot.construction_evidence(source().1.resource()).is_none());
+        slot.seal();
+        assert_eq!(slot.construction_evidence(&resource), Some(first));
+        assert!(!guard.port_open());
+        assert!(!guard.is_healthy());
+        assert_eq!(admission.pending(), Some(0));
     }
     #[test]
     fn retention_stamp_rejects_resource_view_document_world_counter_and_invocation_substitution() {

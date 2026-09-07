@@ -432,6 +432,7 @@ fn trace_retained(
     // Public event metadata contains counts/classes only, never provider text,
     // request bodies, source quotes, URLs, account data or credentials.
     let result = match trace {
+        Trace::Lifecycle { phase, terminal, failure, admission_failure, construction } => writeln!(std::io::stderr().lock(), "work-retained-lifecycle: phase={phase} terminal={terminal} failure={failure:?} admission_failure={admission_failure:?} construction={construction:?}"),
         Trace::Configured => writeln!(std::io::stderr().lock(), "work-retained-config: provider=OpenAIResponses model=gpt-5.6-luna retention=stateless fixture=semantic-rendering-v1"),
         Trace::ConfiguredPublic => writeln!(std::io::stderr().lock(), "work-retained-config: provider=OpenAIResponses model=gpt-5.6-luna retention=stateless workflow=pimoroni-pico2-brief-v1"),
         Trace::PublicObservation { nodes, complete, current_document, frame_boundaries, product_title, product_summary } => writeln!(std::io::stderr().lock(), "work-retained-public-observation: nodes={nodes} complete={complete} current_document={current_document} frame_boundaries={frame_boundaries} product_title={product_title} product_summary={product_summary}"),

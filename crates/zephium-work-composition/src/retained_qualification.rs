@@ -79,6 +79,13 @@ fn begin_cleanup_deadline(
 }
 /// Only reviewed content-free controller metadata and bounded witness counters.
 pub enum RetainedProbeTrace {
+    Lifecycle {
+        phase: &'static str,
+        terminal: &'static str,
+        failure: Option<WorkBrowserResourceFailure>,
+        admission_failure: Option<ContextPortFailure>,
+        construction: Option<zephium_engine::WorkResourceConstructionEvidence>,
+    },
     Configured,
     ConfiguredPublic,
     Event(AgentWorkEvent),
@@ -242,6 +249,64 @@ enum Phase {
     Done,
 }
 
+fn lifecycle_trace(
+    phase: Phase,
+    event: &WorkBrowserResourceEvent,
+    construction: Option<zephium_engine::WorkResourceConstructionEvidence>,
+) -> RetainedProbeTrace {
+    let phase = match phase {
+        Phase::Preparing => "preparing",
+        Phase::Construct => "construct",
+        Phase::Rendering => "rendering",
+        Phase::Acquire => "acquire",
+        Phase::Actor => "actor",
+        Phase::Stopping => "stopping",
+        Phase::Joining => "joining",
+        Phase::Retire => "retire",
+        Phase::Destroy => "destroy",
+        Phase::NativeDrain => "native_drain",
+        Phase::Seal => "seal",
+        Phase::Done => "done",
+    };
+    let (terminal, failure, admission_failure) = match event {
+        WorkBrowserResourceEvent::Retained(_) => ("retained", None, None),
+        WorkBrowserResourceEvent::Acquired(_) => ("acquired", None, None),
+        WorkBrowserResourceEvent::RevocationRequired(_) => ("revocation_required", None, None),
+        WorkBrowserResourceEvent::LeaseEnded(_) => ("lease_ended", None, None),
+        WorkBrowserResourceEvent::Quarantined(failure) => ("quarantined", Some(*failure), None),
+        WorkBrowserResourceEvent::Destroyed(_) => ("destroyed", None, None),
+        WorkBrowserResourceEvent::DebtSettled(_) => ("debt_settled", None, None),
+        WorkBrowserResourceEvent::AdmissionRefused { failure, .. } => {
+            ("admission_refused", None, Some(*failure))
+        }
+    };
+    RetainedProbeTrace::Lifecycle {
+        phase,
+        terminal,
+        failure,
+        admission_failure,
+        construction,
+    }
+}
+
+fn lifecycle_failure(phase: Phase, event: &WorkBrowserResourceEvent) -> &'static str {
+    match (phase, event) {
+        (Phase::Construct, WorkBrowserResourceEvent::Quarantined(_)) => "construct_quarantined",
+        (Phase::Construct, WorkBrowserResourceEvent::AdmissionRefused { .. }) => {
+            "construct_admission_refused"
+        }
+        (Phase::Acquire, WorkBrowserResourceEvent::Quarantined(_)) => "acquire_quarantined",
+        (Phase::Acquire, WorkBrowserResourceEvent::AdmissionRefused { .. }) => {
+            "acquire_admission_refused"
+        }
+        (Phase::Destroy, WorkBrowserResourceEvent::Quarantined(_)) => "destroy_quarantined",
+        (Phase::Destroy, WorkBrowserResourceEvent::AdmissionRefused { .. }) => {
+            "destroy_admission_refused"
+        }
+        _ => "lifecycle_phase",
+    }
+}
+
 fn cleanup_window(now: Instant, deadline: Instant, cleaning: bool) -> Result<bool, &'static str> {
     if now < deadline {
         return Ok(false);
@@ -279,9 +344,10 @@ fn progress_native_close(
 ) -> Result<bool, &'static str> {
     let mut clean = false;
     if let Some(event) = owner.poll_lifecycle(now)? {
+        let refused = lifecycle_failure(*phase, &event);
         match (*phase, event) {
             (Phase::Destroy, WorkBrowserResourceEvent::Destroyed(_)) => *phase = Phase::NativeDrain,
-            _ => return Err("lifecycle_phase"),
+            _ => return Err(refused),
         }
     }
     while let Some(event) = owner.poll_native_event()? {
@@ -723,9 +789,15 @@ impl Driver {
             self.native_clean = progress_native_close(&mut self.owner, &mut self.phase, now()?)?;
         } else {
             if let Some(event) = self.owner.poll_lifecycle(now()?)? {
+                let construction = self.owner.resource().and_then(|resource| {
+                    WorkResourceRenderingProbe::construction_evidence(&self.engine, resource)
+                });
+                if !(self.trace)(lifecycle_trace(self.phase, &event, construction)) {
+                    return Err("trace_output");
+                }
+                let refused = lifecycle_failure(self.phase, &event);
                 match (self.phase, event) {
                     (Phase::Construct, WorkBrowserResourceEvent::Retained(resource)) => {
-                        EXPECTED_RESOURCE.with(|r| *r.borrow_mut() = Some(resource.clone()));
                         self.render = Some(Arc::new(
                             task::rendering(&self.engine, &self.admission, resource)
                                 .ok_or("render_admission")?,
@@ -736,7 +808,7 @@ impl Driver {
                     (Phase::Acquire, WorkBrowserResourceEvent::Acquired(lease)) => {
                         self.start_actor(lease)?
                     }
-                    _ => return Err("lifecycle_phase"),
+                    _ => return Err(refused),
                 }
             }
             if self.owner.poll_native_event()?.is_some() {
@@ -762,6 +834,7 @@ impl Driver {
                         .map_err(|_| "credential_worker_panic")??,
                 );
                 self.owner.construct(self.target.clone(), now()?)?;
+                EXPECTED_RESOURCE.with(|r| *r.borrow_mut() = self.owner.resource().cloned());
                 self.phase = Phase::Construct;
             }
             Phase::Actor | Phase::Stopping => self.poll_actor()?,
@@ -1092,6 +1165,38 @@ impl Driver {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lifecycle_refusal_preserves_original_phase_and_terminal_without_resource_debug() {
+        use super::*;
+        let event =
+            WorkBrowserResourceEvent::Quarantined(WorkBrowserResourceFailure::NativeRefused);
+        assert_eq!(
+            lifecycle_failure(Phase::Construct, &event),
+            "construct_quarantined"
+        );
+        assert_eq!(
+            lifecycle_failure(Phase::Acquire, &event),
+            "acquire_quarantined"
+        );
+        assert_eq!(
+            lifecycle_failure(Phase::Destroy, &event),
+            "destroy_quarantined"
+        );
+        let RetainedProbeTrace::Lifecycle {
+            phase,
+            terminal,
+            failure,
+            admission_failure,
+            construction,
+        } = lifecycle_trace(Phase::Construct, &event, None)
+        else {
+            panic!("lifecycle trace");
+        };
+        assert_eq!(phase, "construct");
+        assert_eq!(terminal, "quarantined");
+        assert_eq!(failure, Some(WorkBrowserResourceFailure::NativeRefused));
+        assert!(admission_failure.is_none() && construction.is_none());
+    }
     use super::*;
     type TestNativeSink = Arc<dyn Fn(ContextNativeEvent) + Send + Sync>;
     #[derive(Default)]
