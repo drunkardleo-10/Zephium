@@ -23,14 +23,14 @@ mod runtime;
 #[cfg(target_os = "windows")]
 pub use runtime::{RuntimeCleanupTicket, RuntimeGeneration, RuntimeGenerationKind};
 
-/// Windows Stable security release published by Microsoft on 2026-08-24.
-pub const SECURITY_FLOOR: WebView2Version = WebView2Version::stable(151, 0, 4129, 107);
-pub const SECURITY_FLOOR_TEXT: &str = "151.0.4129.107";
-pub const SECURITY_FLOOR_PUBLISHED_ON: &str = "2026-08-24";
-/// 2026-08-24T00:00:00Z. A wall clock before the reviewed release cannot
+/// Windows Stable security release published by Microsoft on 2026-09-04.
+pub const SECURITY_FLOOR: WebView2Version = WebView2Version::stable(152, 0, 4191, 66);
+pub const SECURITY_FLOOR_TEXT: &str = "152.0.4191.66";
+pub const SECURITY_FLOOR_PUBLISHED_ON: &str = "2026-09-04";
+/// 2026-09-04T00:00:00Z. A wall clock before the reviewed release cannot
 /// establish that the floor is current and must fail closed just like an
 /// expired review.
-pub const SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS: u64 = 1_787_529_600;
+pub const SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS: u64 = 1_788_480_000;
 pub const SECURITY_FLOOR_SOURCE_URL: &str =
     "https://learn.microsoft.com/en-us/deployedge/microsoft-edge-relnotes-security";
 /// Microsoft's first-party update catalog proves the exact reviewed WebView2
@@ -44,33 +44,35 @@ pub const RUNTIME_AVAILABILITY_SOURCE_URL: &str =
 /// separate from the hard floor: falling behind by one serviced patch produces
 /// an actionable advisory rather than a wall-clock or latest-version kill
 /// switch.
-pub const LATEST_REVIEWED: WebView2Version = WebView2Version::stable(151, 0, 4129, 107);
-pub const LATEST_REVIEWED_TEXT: &str = "151.0.4129.107";
-pub const LATEST_REVIEWED_PUBLISHED_ON: &str = "2026-08-24";
-/// 2026-08-24T00:00:00Z.
-pub const LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS: u64 = 1_787_529_600;
+pub const LATEST_REVIEWED: WebView2Version = WebView2Version::stable(152, 0, 4191, 66);
+pub const LATEST_REVIEWED_TEXT: &str = "152.0.4191.66";
+pub const LATEST_REVIEWED_PUBLISHED_ON: &str = "2026-09-04";
+/// 2026-09-04T00:00:00Z.
+pub const LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS: u64 = 1_788_480_000;
 /// First-party Stable-channel release evidence for [`LATEST_REVIEWED`].
 pub const LATEST_REVIEWED_SOURCE_URL: &str =
     "https://learn.microsoft.com/en-us/deployedge/microsoft-edge-relnote-stable-channel";
-pub const REVIEWED_STABLE_MAJOR: u32 = 151;
+pub const REVIEWED_STABLE_MAJOR: u32 = 152;
 
 /// Microsoft reported a pending Chromium security update on 2026-07-14 and
 /// subsequently published fixed Stable releases beginning with 150.0.4078.80
-/// on 2026-07-16. The hard floor is now the later 151.0.4129.107 security
-/// release from 2026-08-24, so the historical release blocker remains
+/// on 2026-07-16. Microsoft then listed CVE-2026-85046 as exploited in the
+/// wild in Stable 152.0.4191.62 on 2026-09-02, followed by the reviewed
+/// 152.0.4191.66 Stable release on 2026-09-04. The hard floor is now that
+/// later security release, so the historical release blocker remains
 /// resolved. Keep the notice date and post-notice review check: clearing the
 /// flag alone must never turn older evidence into release proof.
 pub const PRODUCTION_RELEASE_BLOCKED_ON_OUTSTANDING_VENDOR_FIX: bool = false;
 /// 2026-07-14T00:00:00Z, the date of Microsoft's pending-fix notice.
 pub const OUTSTANDING_VENDOR_FIX_NOTICE_UNIX_SECONDS: u64 = 1_783_987_200;
 pub const OUTSTANDING_VENDOR_FIX_NOTICE_ON: &str = "2026-07-14";
-pub const OUTSTANDING_VENDOR_FIX_REVIEWED_ON: &str = "2026-08-28";
+pub const OUTSTANDING_VENDOR_FIX_REVIEWED_ON: &str = "2026-09-04";
 pub const OUTSTANDING_VENDOR_FIX_SOURCE_URL: &str = SECURITY_FLOOR_SOURCE_URL;
 
 /// The last UTC date on which CI may accept this review without an update.
-pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-09-03";
-/// 2026-09-04T00:00:00Z. The human-readable review date above is inclusive.
-pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_788_480_000;
+pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-09-10";
+/// 2026-09-11T00:00:00Z. The human-readable review date above is inclusive.
+pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_789_084_800;
 
 /// Loader/debugger environment variables that can replace the selected
 /// runtime or UDF, change channel selection, append browser flags (including
@@ -471,11 +473,11 @@ mod tests {
         assert_eq!(admit_runtime(SECURITY_FLOOR_TEXT), Ok(SECURITY_FLOOR));
         assert!(admit_runtime(LATEST_REVIEWED_TEXT).is_ok());
         assert!(matches!(
-            admit_runtime("151.0.4129.85"),
+            admit_runtime("152.0.4191.65"),
             Err(AdmissionError::BelowSecurityFloor { .. })
         ));
         assert_eq!(
-            admit_runtime("151.0.4129.86 beta"),
+            admit_runtime("152.0.4191.66 beta"),
             Err(AdmissionError::PreviewChannel(Channel::Beta))
         );
         assert!(matches!(
@@ -513,9 +515,9 @@ mod tests {
             Ok((LATEST_REVIEWED, RuntimeSecurityAdvisories::new()))
         );
         assert_eq!(
-            assess_runtime("152.0.4170.0", LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS),
+            assess_runtime("153.0.4170.0", LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS),
             Ok((
-                WebView2Version::stable(152, 0, 4170, 0),
+                WebView2Version::stable(153, 0, 4170, 0),
                 RuntimeSecurityAdvisories::from_advisory(
                     RuntimeSecurityAdvisory::unreviewed_runtime(),
                 )
@@ -533,7 +535,7 @@ mod tests {
         );
 
         let (_, combined) = assess_runtime(
-            "152.0.4170.0",
+            "153.0.4170.0",
             SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS,
         )
         .unwrap();
