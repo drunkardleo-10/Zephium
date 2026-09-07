@@ -216,6 +216,7 @@ pub struct WorkBrowserResourceRequest {
     operation: OperationJoin,
     storage: ContextProfileStorageClass,
     document: Option<Arc<ContextNavigationTarget>>,
+    document_policy: crate::WorkBrowserDocumentPolicy,
     delivery: Option<delivery::DeliveryDispatch>,
     health: Option<Box<WorkBrowserResourceHealthReporter>>,
 }
@@ -257,6 +258,20 @@ impl WorkBrowserResourceRequest {
     pub fn document(&self) -> Option<&ContextNavigationTarget> {
         self.document.as_deref()
     }
+    /// Immutable construction policy, never supplied by a page or model.
+    pub const fn document_policy(&self) -> crate::WorkBrowserDocumentPolicy {
+        self.document_policy
+    }
+    /// Attest the frozen native location after the exact initial navigation.
+    /// The original operation owner binds the requested/effective lineage.
+    pub fn complete_document(
+        self,
+        effective: ContextNavigationTarget,
+    ) -> WorkBrowserResourceCompletion {
+        let mut completion = self.complete(WorkBrowserResourceNativeOutcome::Constructed);
+        completion.effective_document = Some(Arc::new(effective));
+        completion
+    }
     /// Transfers the optional exact delivery-barrier owner to the native task.
     /// It must stay beside the original task permit until the terminal callback
     /// returns. Leaving it unhandled fails closed, including on older adapters.
@@ -273,6 +288,7 @@ impl WorkBrowserResourceRequest {
             operation: self.operation,
             outcome,
             delivery: self.delivery.map(|delivery| delivery.binding),
+            effective_document: None,
         }
     }
 }
@@ -342,6 +358,7 @@ pub struct WorkBrowserResourceCompletion {
     operation: OperationJoin,
     outcome: WorkBrowserResourceNativeOutcome,
     delivery: Option<delivery::DeliveryBinding>,
+    effective_document: Option<Arc<ContextNavigationTarget>>,
 }
 
 /// Exact ended native lease, not physical terminal-callback return, run success,
@@ -403,6 +420,8 @@ struct Resource {
     failure: Option<WorkBrowserResourceFailure>,
     last_tick: AgentPolicyInstant,
     document: Option<Arc<ContextNavigationTarget>>,
+    document_policy: crate::WorkBrowserDocumentPolicy,
+    effective_document: Option<Arc<ContextNavigationTarget>>,
     observation_sequence: u16,
     observation: Option<observation::ObservationJoin>,
 }
@@ -471,7 +490,14 @@ impl WorkBrowserResources {
         storage: ContextProfileStorageClass,
         now: AgentPolicyInstant,
     ) -> Result<WorkBrowserResourceRequest, WorkBrowserResourceError> {
-        self.construct_source(resource, context, storage, None, now)
+        self.construct_source(
+            resource,
+            context,
+            storage,
+            None,
+            crate::WorkBrowserDocumentPolicy::Exact,
+            now,
+        )
     }
     /// Reserve one exact initial document at the trusted application edge.
     /// This is task-authored source admission, not model navigation authority.
@@ -484,16 +510,48 @@ impl WorkBrowserResources {
         document: ContextNavigationTarget,
         now: AgentPolicyInstant,
     ) -> Result<WorkBrowserResourceRequest, WorkBrowserResourceError> {
+        self.construct_document_with_policy(
+            resource,
+            context,
+            storage,
+            document,
+            crate::WorkBrowserDocumentPolicy::Exact,
+            now,
+        )
+    }
+    /// Trusted opt-in initial finalization. This grants no successor navigation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn construct_document_with_policy(
+        &mut self,
+        resource: WorkBrowserResourceId,
+        context: ContextId,
+        storage: ContextProfileStorageClass,
+        document: ContextNavigationTarget,
+        policy: crate::WorkBrowserDocumentPolicy,
+        now: AgentPolicyInstant,
+    ) -> Result<WorkBrowserResourceRequest, WorkBrowserResourceError> {
         crate::SemanticOrigin::parse(document.as_url().as_str())
             .map_err(|_| WorkBrowserResourceError::Source)?;
-        self.construct_source(resource, context, storage, Some(Arc::new(document)), now)
+        if !policy.admits_request(&document) {
+            return Err(WorkBrowserResourceError::Source);
+        }
+        self.construct_source(
+            resource,
+            context,
+            storage,
+            Some(Arc::new(document)),
+            policy,
+            now,
+        )
     }
+    #[allow(clippy::too_many_arguments)]
     fn construct_source(
         &mut self,
         resource: WorkBrowserResourceId,
         context: ContextId,
         storage: ContextProfileStorageClass,
         document: Option<Arc<ContextNavigationTarget>>,
+        document_policy: crate::WorkBrowserDocumentPolicy,
         now: AgentPolicyInstant,
     ) -> Result<WorkBrowserResourceRequest, WorkBrowserResourceError> {
         if self.sealed {
@@ -540,6 +598,8 @@ impl WorkBrowserResources {
                 failure: None,
                 last_tick: now,
                 document: document.clone(),
+                document_policy,
+                effective_document: None,
                 observation_sequence: 0,
                 observation: None,
             },
@@ -548,6 +608,7 @@ impl WorkBrowserResources {
             operation,
             storage,
             document,
+            document_policy,
             delivery: None,
             health: None,
         })
@@ -602,6 +663,7 @@ impl WorkBrowserResources {
             operation,
             storage: row.storage,
             document: row.document.clone(),
+            document_policy: row.document_policy,
             delivery: None,
             health: None,
         })
@@ -661,6 +723,7 @@ impl WorkBrowserResources {
             operation,
             storage: row.storage,
             document: row.document.clone(),
+            document_policy: row.document_policy,
             delivery: None,
             health: None,
         })
@@ -724,6 +787,7 @@ impl WorkBrowserResources {
             operation,
             storage: row.storage,
             document: row.document.clone(),
+            document_policy: row.document_policy,
             delivery: None,
             health: None,
         })
@@ -790,6 +854,25 @@ impl WorkBrowserResources {
                 WorkBrowserResourceOperation::Construct,
                 WorkBrowserResourceNativeOutcome::Constructed,
             ) => {
+                let effective = completion.effective_document.or_else(|| {
+                    (row.document_policy == crate::WorkBrowserDocumentPolicy::Exact)
+                        .then(|| row.document.clone())
+                        .flatten()
+                });
+                let valid = match (&row.document, &effective) {
+                    (Some(requested), Some(effective)) => row
+                        .document_policy
+                        .admits_final_document(requested, effective),
+                    (None, None) => row.document_policy == crate::WorkBrowserDocumentPolicy::Exact,
+                    _ => false,
+                };
+                if !valid {
+                    row.quarantine(WorkBrowserResourceFailure::Contract);
+                    return Ok(WorkBrowserResourceEvent::Quarantined(
+                        WorkBrowserResourceFailure::Contract,
+                    ));
+                }
+                row.effective_document = effective;
                 row.phase = WorkBrowserResourcePhase::Retained;
                 return Ok(WorkBrowserResourceEvent::Retained(row.join.clone()));
             }

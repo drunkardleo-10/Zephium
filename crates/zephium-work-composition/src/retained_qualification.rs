@@ -833,7 +833,11 @@ impl Driver {
                         .join()
                         .map_err(|_| "credential_worker_panic")??,
                 );
-                self.owner.construct(self.target.clone(), now()?)?;
+                self.owner.construct_with_policy(
+                    self.target.clone(),
+                    task::document_policy(),
+                    now()?,
+                )?;
                 EXPECTED_RESOURCE.with(|r| *r.borrow_mut() = self.owner.resource().cloned());
                 self.phase = Phase::Construct;
             }
@@ -883,7 +887,7 @@ impl Driver {
         );
         let input = input::input(
             identity,
-            self.target.clone(),
+            self.owner.document(now()?)?,
             self.issued,
             self.expires,
             self.deadline,

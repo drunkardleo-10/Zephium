@@ -667,7 +667,9 @@ impl EngineHost {
                 if let Some(document) = guard.document() {
                     resource.document_started = true;
                     if view.prepare_semantic_document_load().is_err()
-                        || gate.arm(document.clone()).is_err()
+                        || gate
+                            .arm_with_policy(document.clone(), guard.document_policy())
+                            .is_err()
                         || view.view().load_url(document.as_url().as_str()).is_err()
                     {
                         #[cfg(feature = "native-agentic-work-resource-probe")]
@@ -675,6 +677,56 @@ impl EngineHost {
                         guard.fail();
                     }
                     return;
+                }
+            }
+            if resource
+                .view
+                .as_ref()
+                .is_some_and(|view| view.semantic_pending_for_audit() == Some(false))
+            {
+                if let Some(view) = resource.view.as_ref() {
+                    if let Some(gate) = view
+                        .work_navigation()
+                        .filter(|gate| gate.finalization_pending())
+                    {
+                        // No lease/read exists here. Freeze one revision-fenced
+                        // native location under the original navigation identity.
+                        match gate.finalize(|| crate::platform::imp::current_url(view.view())) {
+                            Ok(effective) if guard.construction_current() => {
+                                resource.watchdog = None;
+                                resource.lifecycle_deadline = None;
+                                if let Some(task) = resource.construction.take() {
+                                    task.complete_document(effective);
+                                }
+                            }
+                            _ => {
+                                #[cfg(feature = "native-agentic-work-resource-probe")]
+                                guard.record_construction_evidence(|| {
+                                    // Finalization already consumed its sole
+                                    // sample. Do not inspect the URL again to
+                                    // describe a failed/raced attempt.
+                                    crate::agent_context_port::resource_witness::ConstructionEvidence {
+                                        cause: "document_finalization",
+                                        port_failure: None,
+                                        navigation: gate.construction_evidence(),
+                                        document_started: resource.document_started,
+                                        deadline_expired: resource.deadline_expired,
+                                        guard_healthy: guard.is_healthy(),
+                                        current_document: false,
+                                        current_components: None,
+                                        semantic_pending: view.semantic_pending_for_audit(),
+                                    }
+                                });
+                                guard.fail();
+                                resource.watchdog = None;
+                                resource.lifecycle_deadline = None;
+                                if let Some(task) = resource.construction.take() {
+                                    task.complete(Outcome::Refused);
+                                }
+                            }
+                        }
+                        return;
+                    }
                 }
             }
             if resource.ready()

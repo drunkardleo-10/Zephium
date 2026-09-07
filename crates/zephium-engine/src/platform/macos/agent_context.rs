@@ -422,6 +422,13 @@ where
             if let Some(gate) = &work_events {
                 match gate.observe(event) {
                     Ok((committed, notify)) => {
+                        if gate.failed() {
+                            invoke_owned_unit_callback(
+                                navigation_invariant_failure.as_ref(),
+                                navigation_callback_panicked.as_ref(),
+                            );
+                            navigation_semantic.cancel();
+                        }
                         if committed {
                             navigation_semantic.document_committed();
                         }
@@ -520,6 +527,7 @@ where
     let work_location = work_navigation.clone();
     let location_invariant = invariant_failure_callback.clone();
     let location_panic = on_callback_panic.clone();
+    let work_location_semantic = semantic.controller().clone();
     let navigation_observer =
         super::install_navigation_observer(&view, move || {
             match work_location.as_ref().map_or_else(
@@ -527,6 +535,13 @@ where
                 crate::platform::work_document_navigation::WorkDocumentNavigation::location_changed,
             ) {
                 Ok(true) => {
+                    if work_location.as_ref().is_some_and(|gate| gate.failed()) {
+                        invoke_owned_unit_callback(
+                            location_invariant.as_ref(),
+                            location_panic.as_ref(),
+                        );
+                        work_location_semantic.cancel();
+                    }
                     invoke_owned_unit_callback(location_callback.as_ref(), location_panic.as_ref())
                 }
                 Ok(false) => {}

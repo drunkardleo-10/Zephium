@@ -27,6 +27,7 @@ pub struct WorkBrowserReadBinding {
     lease: WorkBrowserExecutionLease,
     frame: SemanticFrameJoin,
     document: Arc<ContextNavigationTarget>,
+    requested_document: Arc<ContextNavigationTarget>,
     storage: ContextProfileStorageClass,
 }
 
@@ -39,10 +40,14 @@ impl WorkBrowserReadBinding {
     pub const fn frame(&self) -> &SemanticFrameJoin {
         &self.frame
     }
-    /// Original admission-frozen target, not origin-only or page-authored data.
+    /// Native-finalized exact target, not origin-only authority.
     /// This descriptive URL grants no read or navigation authority.
     pub fn document(&self) -> &ContextNavigationTarget {
         &self.document
+    }
+    /// Original user/task-authored request; never replaced by finalization.
+    pub fn requested_document(&self) -> &ContextNavigationTarget {
+        &self.requested_document
     }
     /// Immutable selected-profile persistence class from the original row.
     pub const fn storage(&self) -> ContextProfileStorageClass {
@@ -122,7 +127,7 @@ impl WorkBrowserResources {
         self.admits_lease(lease, now)?;
         let row = self.row_mut(lease.resource())?;
         let document = row
-            .document
+            .effective_document
             .as_ref()
             .ok_or(WorkBrowserResourceError::Phase)?;
         let context = ContextJoin::work_execution(
@@ -147,6 +152,10 @@ impl WorkBrowserResources {
             lease: lease.clone(),
             frame,
             document: Arc::clone(document),
+            requested_document: row
+                .document
+                .clone()
+                .ok_or(WorkBrowserResourceError::Phase)?,
             storage: row.storage,
         })
     }
@@ -404,7 +413,8 @@ mod tests {
         assert!(
             std::mem::size_of::<WorkBrowserReadBinding>()
                 <= std::mem::size_of::<(WorkBrowserExecutionLease, SemanticFrameJoin)>()
-                    + 2 * std::mem::size_of::<usize>()
+                    + 2 * std::mem::size_of::<Arc<ContextNavigationTarget>>()
+                    + std::mem::align_of::<WorkBrowserReadBinding>()
         );
     }
 

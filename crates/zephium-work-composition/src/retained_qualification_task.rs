@@ -4,6 +4,9 @@ use super::*;
 pub(super) fn capture(retire: RetainedProbeRetire) -> RetainedProbeCapture {
     RetainedProbeCapture::BoundedReadiness(retire)
 }
+pub(super) fn document_policy() -> zephium_agentic::WorkBrowserDocumentPolicy {
+    zephium_agentic::WorkBrowserDocumentPolicy::Exact
+}
 
 const MARKERS: [&str; 5] = [
     "Document complete",
@@ -304,6 +307,10 @@ mod tests {
     }
     #[test]
     fn fixture_task_requires_complete_current_unique_paragraph_markers() {
+        assert_eq!(
+            document_policy(),
+            zephium_agentic::WorkBrowserDocumentPolicy::Exact
+        );
         assert!(matches!(
             capture(Box::new(|_| false)),
             RetainedProbeCapture::BoundedReadiness(_)

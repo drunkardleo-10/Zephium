@@ -45,7 +45,9 @@ pub use agent_work_artifact::{
 mod context;
 mod context_port;
 mod context_registry;
+mod work_browser_document;
 mod work_browser_resource;
+pub use work_browser_document::WorkBrowserDocumentPolicy;
 pub use work_browser_resource::{
     WorkBrowserExecutionLease, WorkBrowserLeaseDeliveryCompletion,
     WorkBrowserLeaseDeliveryNotification, WorkBrowserLeaseDeliveryPollError,

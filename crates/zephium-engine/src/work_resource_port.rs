@@ -57,6 +57,7 @@ pub(crate) struct WorkResourceGuard {
     resource: WorkBrowserResourceJoin,
     storage: ContextProfileStorageClass,
     document: Option<ContextNavigationTarget>,
+    document_policy: zephium_agentic::WorkBrowserDocumentPolicy,
     state: Mutex<State>,
     // Drop order is deliberate: the original native reporting owner retires
     // before its counted delivery lane. No audit may overlook a live reporter.
@@ -79,6 +80,7 @@ impl WorkResourceGuard {
             resource: request.resource().clone(),
             storage: request.storage(),
             document: request.document().cloned(),
+            document_policy: request.document_policy(),
             health: None,
             health_permit: None,
             #[cfg(test)]
@@ -170,6 +172,9 @@ impl WorkResourceGuard {
     pub(crate) fn document(&self) -> Option<&ContextNavigationTarget> {
         self.document.as_ref()
     }
+    pub(crate) fn document_policy(&self) -> zephium_agentic::WorkBrowserDocumentPolicy {
+        self.document_policy
+    }
     pub(crate) fn fail(&self) {
         // Invalidate the stable application observation before waking it. No
         // native ownership lock is held while invoking its coalesced wake.
@@ -193,6 +198,7 @@ impl WorkResourceGuard {
         if request.resource() != &self.resource
             || request.storage() != self.storage
             || request.document() != self.document.as_ref()
+            || request.document_policy() != self.document_policy
         {
             return Err(ContextPortFailure::Stale);
         }
@@ -619,7 +625,13 @@ impl WorkLifecycleTask {
     pub(crate) fn complete(mut self, outcome: Outcome) {
         self.deliver(outcome);
     }
+    pub(crate) fn complete_document(mut self, effective: ContextNavigationTarget) {
+        self.deliver_document(Outcome::Constructed, Some(effective));
+    }
     fn deliver(&mut self, outcome: Outcome) {
+        self.deliver_document(outcome, None);
+    }
+    fn deliver_document(&mut self, outcome: Outcome, effective: Option<ContextNavigationTarget>) {
         let Some(mut request) = self.request.take() else {
             return;
         };
@@ -636,7 +648,10 @@ impl WorkLifecycleTask {
         // drain, native acquisition, destruction, or global-zero proof.
         let callback_returned = if let Some(completion) = self.completion.take() {
             if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                completion(request.complete(outcome))
+                completion(match effective {
+                    Some(document) => request.complete_document(document),
+                    None => request.complete(outcome),
+                })
             }))
             .is_err()
             {

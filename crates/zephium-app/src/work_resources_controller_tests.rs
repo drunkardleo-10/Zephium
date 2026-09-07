@@ -46,6 +46,7 @@ struct Native {
     destructions: AtomicUsize,
     arm_notification: Mutex<Option<Arc<AtomicBool>>>,
     before_publication: Mutex<Option<mpsc::Receiver<()>>>,
+    final_document: Mutex<Option<ContextNavigationTarget>>,
 }
 impl Native {
     fn read_result(
@@ -140,7 +141,16 @@ impl AgentBrowserPort for Native {
                 return WorkBrowserResourceDispatch::Scheduled;
             }
         };
-        callback(request.complete(outcome));
+        callback(
+            if outcome == WorkBrowserResourceNativeOutcome::Constructed {
+                match self.final_document.lock().unwrap().take() {
+                    Some(document) => request.complete_document(document),
+                    None => request.complete(outcome),
+                }
+            } else {
+                request.complete(outcome)
+            },
+        );
         WorkBrowserResourceDispatch::Scheduled
     }
     fn work_resource_observe(
@@ -211,7 +221,24 @@ fn setup_with_storage(
     WorkBrowserResourceJoin,
     RetainedBrowser,
 ) {
+    setup_with_document_policy(
+        storage,
+        zephium_agentic::WorkBrowserDocumentPolicy::Exact,
+        None,
+    )
+}
+fn setup_with_document_policy(
+    storage: ContextProfileStorageClass,
+    policy: zephium_agentic::WorkBrowserDocumentPolicy,
+    effective: Option<ContextNavigationTarget>,
+) -> (
+    WorkResourceOwner,
+    Arc<Native>,
+    WorkBrowserResourceJoin,
+    RetainedBrowser,
+) {
     let native = Arc::new(Native::default());
+    *native.final_document.lock().unwrap() = effective;
     let port = native.clone();
     let owner = WorkResourceOwner::new(
         WorkId::generate(),
@@ -221,11 +248,12 @@ fn setup_with_storage(
     )
     .unwrap();
     let mut construct = owner
-        .construct(
+        .construct_with_policy(
             WorkBrowserResourceId::generate(),
             ContextId::generate(),
             storage,
             ContextNavigationTarget::parse("https://retained-fixture.invalid/frozen").unwrap(),
+            policy,
             now(),
         )
         .unwrap();
@@ -412,6 +440,71 @@ fn retained_admission_requires_exact_frozen_target_and_original_storage_class() 
             owner.seal_resources().unwrap();
             assert!(owner.locally_retired());
         }
+    }
+}
+#[test]
+fn startup_finalized_binding_reaches_common_controller_without_rebasing_original_request() {
+    let requested = "https://retained-fixture.invalid/frozen";
+    let final_url = "https://retained-fixture.invalid/frozen?opaque=one";
+    for (input_url, invalidate, accepted) in [
+        (final_url, false, true),
+        (requested, false, false),
+        (
+            "https://retained-fixture.invalid/frozen?opaque=two",
+            false,
+            false,
+        ),
+        (final_url, true, false),
+    ] {
+        let (owner, native, resource, browser) = setup_with_document_policy(
+            ContextProfileStorageClass::Ephemeral,
+            zephium_agentic::WorkBrowserDocumentPolicy::InitialQueryFinalization,
+            Some(ContextNavigationTarget::parse(final_url).unwrap()),
+        );
+        assert_eq!(
+            browser.binding().requested_document().as_url().as_str(),
+            requested
+        );
+        assert_eq!(browser.binding().document().as_url().as_str(), final_url);
+        let input = input_with_source(
+            browser.binding(),
+            Arc::new(Clock(AtomicU64::new(2))),
+            ContextProfileStorageClass::Ephemeral,
+            ContextNavigationTarget::parse(input_url).unwrap(),
+        );
+        if invalidate {
+            native
+                .reporters
+                .lock()
+                .unwrap()
+                .get(&resource.identity().context())
+                .unwrap()
+                .invalidate();
+        }
+        let result = AgentWorkRetainedController::try_new(
+            input,
+            Box::new(browser),
+            AgentProviderTransportConfig::STANDARD,
+            AgentProviderCredential::try_new(
+                AgentProviderKind::OpenAiResponses,
+                "fixture-not-a-secret".into(),
+            )
+            .unwrap(),
+            Arc::new(Audit(false)),
+            Box::new(task()),
+        );
+        assert_eq!(result.is_ok(), accepted);
+        drop(result);
+        assert_eq!(native.reads.load(Ordering::Acquire), 0);
+        let mut destroy = owner.destroy(&resource).unwrap();
+        assert!(matches!(
+            destroy.poll(now()).unwrap(),
+            Some(LifecycleResult::Event(WorkBrowserResourceEvent::Destroyed(
+                _
+            )))
+        ));
+        owner.seal_resources().unwrap();
+        assert!(owner.locally_retired());
     }
 }
 fn task() -> AgentWorkExtractionTask {

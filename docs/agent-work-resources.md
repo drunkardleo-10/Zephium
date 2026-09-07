@@ -110,6 +110,38 @@ reloads, unsolicited destinations and observed post-ready location changes
 cannot authorize a replacement document. The empty-source construction path is
 retained but cannot issue an observation.
 
+`construct_document_with_policy` additionally offers the explicit trusted
+`InitialQueryFinalization` startup policy. `Exact` remains the default (and the
+synthetic retained fixture policy). This opt-in accepts only an initially
+query-free, fragment-free, credential-free HTTPS request. After the same exact
+native start/commit/finish lineage, a separate non-dispatching finalization state
+freezes one bounded native current-URL sample: either the exact request or one
+opaque nonempty query addition with all other URL bytes unchanged. There is no
+query-name/value whitelist, interpretation, second load, redirect allowance,
+general same-document continuation, or origin-only fallback. Noncanonical raw
+URLs, missing/oversized samples and changed components fail closed.
+
+Sampling is claimed once and fenced by the native location revision; a callback
+during sampling refuses rather than resampling. The original move-only
+construction completion carries the effective document to the original core
+row, which independently checks the frozen policy. A missing receipt cannot
+complete opt-in construction. The original requested document remains immutable
+in lifecycle requests and is exposed separately from the effective document in
+the read binding. The common controller/account input must match the effective
+document exactly; neither the original query-free target nor another query may
+substitute for it. Finalization does not reset deadlines, invocation budgets,
+resource identity or the original navigation identity.
+
+No lease, invocation, snapshot or actor reference exists before this barrier.
+The actual initial commit already retired the bootstrap world and installed the
+new document's isolated runtime; finalization must not fabricate another native
+commit. After finalization, a location callback permanently closes the gate and
+synchronously invalidates the exact native health owner and semantic work before
+queued reconciliation. Dispatch and completion both require that same immutable
+ready gate and current lease/health; even a change back to the frozen URL cannot
+revive old references. Continuing a later SPA/history transition is unsupported
+and requires a future explicit generation/account/ref-invalidation protocol.
+
 The page lives in a separate resource map; native callbacks capture only its
 stable private incarnation guard. They never capture the first actor's run and
 then switch to a successor. A temporary `ContextJoin` exists only inside each

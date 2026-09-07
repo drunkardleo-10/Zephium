@@ -61,17 +61,31 @@ impl RetainedWorkProbeOwner {
         target: ContextNavigationTarget,
         now: AgentPolicyInstant,
     ) -> Result<(), &'static str> {
+        self.construct_with_policy(
+            target,
+            zephium_agentic::WorkBrowserDocumentPolicy::Exact,
+            now,
+        )
+    }
+    /// Explicit trusted startup policy; never inferred from the loaded page.
+    pub fn construct_with_policy(
+        &mut self,
+        target: ContextNavigationTarget,
+        policy: zephium_agentic::WorkBrowserDocumentPolicy,
+        now: AgentPolicyInstant,
+    ) -> Result<(), &'static str> {
         if self.constructed || self.pending.is_some() {
             return Err("construct_phase");
         }
         self.constructed = true;
         let pending = self
             .owner
-            .construct(
+            .construct_with_policy(
                 WorkBrowserResourceId::generate(),
                 ContextId::generate(),
                 ContextProfileStorageClass::Ephemeral,
                 target,
+                policy,
                 now,
             )
             .map_err(|_| "construct_admission")?;
@@ -83,6 +97,19 @@ impl RetainedWorkProbeOwner {
     /// Descriptive identity only; no port, row or facade is exposed.
     pub fn resource(&self) -> Option<&WorkBrowserResourceJoin> {
         self.resource.as_ref()
+    }
+    /// Original core-accounted final document, available only after acquisition.
+    pub fn document(
+        &self,
+        now: AgentPolicyInstant,
+    ) -> Result<ContextNavigationTarget, &'static str> {
+        self.owner
+            .shared
+            .lock_rows()
+            .map_err(|_| "document_rows")?
+            .read_binding(self.lease.as_ref().ok_or("document_lease")?, now)
+            .map(|binding| binding.document().clone())
+            .map_err(|_| "document_binding")
     }
     /// Settles the original app-owned operation slot, never a synthetic receipt.
     pub fn poll_lifecycle(

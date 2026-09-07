@@ -291,13 +291,32 @@ impl WorkResourceOwner {
         target: ContextNavigationTarget,
         now: AgentPolicyInstant,
     ) -> Result<PendingLifecycle, Refusal> {
+        self.construct_with_policy(
+            id,
+            context,
+            storage,
+            target,
+            zephium_agentic::WorkBrowserDocumentPolicy::Exact,
+            now,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn construct_with_policy(
+        &self,
+        id: WorkBrowserResourceId,
+        context: ContextId,
+        storage: ContextProfileStorageClass,
+        target: ContextNavigationTarget,
+        policy: zephium_agentic::WorkBrowserDocumentPolicy,
+        now: AgentPolicyInstant,
+    ) -> Result<PendingLifecycle, Refusal> {
         if !self.shared.global_current() {
             return Err(Refusal::Uncertain);
         }
         let request = self
             .shared
             .lock_rows()?
-            .construct_document(id, context, storage, target, now)?;
+            .construct_document_with_policy(id, context, storage, target, policy, now)?;
         let (request, mut health) = request
             .track_resource_health()
             .map_err(|_| Refusal::Uncertain)?;

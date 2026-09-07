@@ -1,6 +1,6 @@
 # Actual-app retained public product brief
 
-Status: **One unsuccessful actual-app public attempt; not qualified.** The
+Status: **Three unsuccessful actual-app public attempts; not qualified.** The
 [qualified Luna fixture](macos-retained-controller-luna.md) proves the retained
 native/controller/closure composition only on its frozen loopback page. This
 candidate is a separately selected real-storefront task, not a promotion of
@@ -113,6 +113,64 @@ is held, permits reading unavailable evidence during construction, rejects
 foreign resources, and preserves the original result after publication/seal.
 No live run, authority, readiness, timeout or cleanup change accompanies this
 correction.
+
+## Third diagnostic attempt and startup correction — 2026-09-07
+
+Source `9175d05799862f52096c8b56fc579357b83795ae`, arm64 executable SHA-256
+`43c4f8b096c42a45bd7db74fa7706cc1670d522d2f2a7b00f7de0336322daf52`.
+Admission succeeded after 5,872 ms/44 checks. At 30,627 ms the exact terminal
+was `construct_quarantined`, `NativeRefused`, construction deadline. All
+bootstrap/request/start/commit/finish milestones were true; refused false;
+last event `Finished`; post-commit/pre-ready location callback true. The one
+native current-URL sample was present and parsed: raw/canonical equality false;
+scheme, host, effective port, path, fragment and credentials equal; query unequal,
+present and nonempty; no fragment or credentials. Semantic pending was false;
+guard healthy. Zero provider calls; cleanup and shutdown owner closed. The
+failed data root was preserved separately. No query content was retained here.
+
+This establishes a post-commit/pre-ready query-only location mutation, not an
+observed redirect, normalization or absent URL. It does not identify the query's
+meaning or prove which site script caused it. Wry's terminal event retaining
+the committed URL explains why exact navigation events passed while current
+location did not. The failed run remains unqualified; no further live run is
+included in the correction below.
+
+The prepared correction explicitly selects `InitialQueryFinalization` for this
+public witness only; the synthetic task retains `Exact`. The original exact
+query-free HTTPS request and original native navigation remain mandatory. After
+Finished, a non-dispatching startup barrier freezes one bounded, revision-fenced
+native sample, accepting only the unchanged request or an opaque nonempty query
+addition with every other URL byte unchanged. No query key/value is recognized,
+rewritten or whitelisted. No new load, redirect, later history continuation,
+retry, timeout extension or additional semantic read is authorized.
+
+An original move-only completion carries requested→effective lineage into the
+core row; the controller/account input uses the independently checked effective
+document exactly. The requested target stays available separately and remains
+the native holder's fixed admission join. No actor reference exists before this
+barrier. Later location callbacks synchronously fail native health and cancel
+semantic work; dispatch and completion require the same permanently frozen
+document gate. Returning to an earlier URL cannot revive references. See
+[the resource contract](../../docs/agent-work-resources.md) for the invariant.
+
+Correction checks: 47 core Work-resource tests, 10 native document-gate tests,
+40 native resource tests, 48 application Work-resource tests and 13 public/10
+synthetic composition tests passed. The app regression constructs through the
+original resource owner and common controller: the effective document is
+accepted, the requested or another query is refused, and native health loss
+refuses before any read/provider execution. Gate regressions cover single-use
+sampling, reentrant sampling and raced location callbacks, missing/foreign/
+redirected native lineage, noncanonical/missing/changed URLs and permanent
+post-finalization refusal. Existing target parsing rejects oversized and
+credential-bearing receipts; no new URL-size allowance was introduced.
+
+Strict all-targets Clippy passed for core, engine, app and public composition;
+the isolated public desktop library also passed strict Clippy. Non-probe engine
+compilation, four Work-resource/four composition/six foreground mutation tests,
+agentic-probe/controller/runtime architecture gates, hostile JavaScript smoke,
+formatting and whitespace checks passed. These are deterministic and compile
+checks, not live public-site qualification. No GUI, credentials or external
+provider were accessed, and no remote state was changed.
 
 ## Workflow and decision
 

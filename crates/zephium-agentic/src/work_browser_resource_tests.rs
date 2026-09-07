@@ -179,6 +179,120 @@ fn health_consume_acquires_coalesced_publication_or_preserves_a_successor_wake()
 fn registry() -> WorkBrowserResources {
     WorkBrowserResources::new(WorkId::from_raw(1), ProfileId::from(2))
 }
+#[test]
+fn finalized_document_receipt_keeps_requested_lineage_and_binds_only_effective_source() {
+    let mut rows = registry();
+    let requested = ContextNavigationTarget::parse("https://example.test/product").unwrap();
+    let effective =
+        ContextNavigationTarget::parse("https://example.test/product?opaque=one").unwrap();
+    let request = rows
+        .construct_document_with_policy(
+            WorkBrowserResourceId::from_raw(40),
+            ContextId::from_raw(140),
+            ContextProfileStorageClass::Ephemeral,
+            requested.clone(),
+            crate::WorkBrowserDocumentPolicy::InitialQueryFinalization,
+            tick(0),
+        )
+        .unwrap();
+    let resource = request.resource().clone();
+    assert!(rows
+        .acquire(&resource, ContextRunId::from_raw(1), tick(0), tick(100))
+        .is_err());
+    assert!(matches!(
+        rows.settle(request.complete_document(effective.clone()))
+            .unwrap(),
+        WorkBrowserResourceEvent::Retained(_)
+    ));
+    let acquire_request = rows
+        .acquire(&resource, ContextRunId::from_raw(1), tick(0), tick(100))
+        .unwrap();
+    assert_eq!(acquire_request.document(), Some(&requested));
+    assert_eq!(
+        acquire_request.document_policy(),
+        crate::WorkBrowserDocumentPolicy::InitialQueryFinalization
+    );
+    let WorkBrowserResourceEvent::Acquired(lease) = rows
+        .settle(acquire_request.complete(WorkBrowserResourceNativeOutcome::Acquired))
+        .unwrap()
+    else {
+        panic!("exact lease")
+    };
+    let binding = rows.read_binding(&lease, tick(0)).unwrap();
+    assert_eq!(binding.requested_document(), &requested);
+    assert_eq!(binding.document(), &effective);
+    assert_eq!(binding.lease().resource(), &resource);
+}
+#[test]
+fn missing_changed_or_foreign_finalization_receipts_never_retain() {
+    for policy in [
+        crate::WorkBrowserDocumentPolicy::Exact,
+        crate::WorkBrowserDocumentPolicy::InitialQueryFinalization,
+    ] {
+        for final_url in [
+            None,
+            Some("https://example.test/product?opaque=one"),
+            Some("https://example.test/other?opaque=one"),
+        ] {
+            let mut rows = registry();
+            let request = rows
+                .construct_document_with_policy(
+                    WorkBrowserResourceId::from_raw(40),
+                    ContextId::from_raw(140),
+                    ContextProfileStorageClass::Ephemeral,
+                    ContextNavigationTarget::parse("https://example.test/product").unwrap(),
+                    policy,
+                    tick(0),
+                )
+                .unwrap();
+            let completion = match final_url {
+                Some(url) => {
+                    request.complete_document(ContextNavigationTarget::parse(url).unwrap())
+                }
+                None => request.complete(WorkBrowserResourceNativeOutcome::Constructed),
+            };
+            let accepted = matches!(
+                rows.settle(completion).unwrap(),
+                WorkBrowserResourceEvent::Retained(_)
+            );
+            assert_eq!(
+                accepted,
+                (policy == crate::WorkBrowserDocumentPolicy::Exact && final_url.is_none())
+                    || (policy == crate::WorkBrowserDocumentPolicy::InitialQueryFinalization
+                        && final_url == Some("https://example.test/product?opaque=one"))
+            );
+        }
+    }
+    let mut rows = registry();
+    let mut foreign = registry();
+    let make = |rows: &mut WorkBrowserResources| {
+        rows.construct_document_with_policy(
+            WorkBrowserResourceId::from_raw(40),
+            ContextId::from_raw(140),
+            ContextProfileStorageClass::Ephemeral,
+            ContextNavigationTarget::parse("https://example.test/product").unwrap(),
+            crate::WorkBrowserDocumentPolicy::InitialQueryFinalization,
+            tick(0),
+        )
+        .unwrap()
+    };
+    let original = make(&mut rows);
+    let other = make(&mut foreign);
+    assert_eq!(
+        rows.settle(other.complete_document(
+            ContextNavigationTarget::parse("https://example.test/product?opaque=one").unwrap()
+        ))
+        .unwrap_err(),
+        WorkBrowserResourceError::Stale
+    );
+    assert!(matches!(
+        rows.settle(original.complete_document(
+            ContextNavigationTarget::parse("https://example.test/product").unwrap()
+        ))
+        .unwrap(),
+        WorkBrowserResourceEvent::Retained(_)
+    ));
+}
 fn create(registry: &mut WorkBrowserResources, id: u128) -> WorkBrowserResourceJoin {
     let request = registry
         .construct(
@@ -623,6 +737,7 @@ fn wrong_phase_duplicate_and_old_incarnation_receipts_cannot_reopen_resources() 
         .acquire(&resource, ContextRunId::from_raw(4), tick(1), tick(100))
         .unwrap();
     let duplicate = WorkBrowserResourceCompletion {
+        effective_document: None,
         operation: request.operation.clone(),
         outcome: WorkBrowserResourceNativeOutcome::Acquired,
         delivery: None,

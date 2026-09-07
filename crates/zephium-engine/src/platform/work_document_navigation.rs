@@ -10,6 +10,8 @@ enum Phase {
     Armed,
     Loading,
     Committed,
+    Finalizing,
+    Sampling,
     Ready,
     Refused,
     Retired,
@@ -21,6 +23,9 @@ struct State {
     bootstrap_committed: bool,
     bootstrap_finished: bool,
     target: Option<ContextNavigationTarget>,
+    effective: Option<ContextNavigationTarget>,
+    policy: zephium_agentic::WorkBrowserDocumentPolicy,
+    location_revision: u64,
     native_id: Option<wry::NavigationId>,
     requested: bool,
     #[cfg(feature = "native-agentic-work-resource-probe")]
@@ -107,6 +112,9 @@ impl Default for WorkDocumentNavigation {
             bootstrap_committed: false,
             bootstrap_finished: false,
             target: None,
+            effective: None,
+            policy: zephium_agentic::WorkBrowserDocumentPolicy::Exact,
+            location_revision: 0,
             native_id: None,
             requested: false,
             #[cfg(feature = "native-agentic-work-resource-probe")]
@@ -137,14 +145,27 @@ impl WorkDocumentNavigation {
             .flatten()
     }
     /// Called once after selected-profile policy and native owner publication.
+    #[cfg(test)]
     pub(crate) fn arm(&self, target: ContextNavigationTarget) -> Result<(), ()> {
+        self.arm_with_policy(target, zephium_agentic::WorkBrowserDocumentPolicy::Exact)
+    }
+    pub(crate) fn arm_with_policy(
+        &self,
+        target: ContextNavigationTarget,
+        policy: zephium_agentic::WorkBrowserDocumentPolicy,
+    ) -> Result<(), ()> {
         let mut state = self.0.lock().map_err(|_| ())?;
-        if state.phase != Phase::Bootstrap || !state.bootstrap_finished || state.target.is_some() {
+        if state.phase != Phase::Bootstrap
+            || !state.bootstrap_finished
+            || state.target.is_some()
+            || !policy.admits_request(&target)
+        {
             return Err(());
         }
         state.bootstrap_available = false;
         state.bootstrap_id = None;
         state.target = Some(target);
+        state.policy = policy;
         state.phase = Phase::Armed;
         Ok(())
     }
@@ -233,7 +254,12 @@ impl WorkDocumentNavigation {
                 {
                     state.evidence.finished = true;
                 }
-                state.phase = Phase::Ready;
+                state.phase = if state.policy == zephium_agentic::WorkBrowserDocumentPolicy::Exact {
+                    state.effective = state.target.clone();
+                    Phase::Ready
+                } else {
+                    Phase::Finalizing
+                };
                 Ok((false, true))
             }
             _ => {
@@ -256,7 +282,54 @@ impl WorkDocumentNavigation {
             state.phase = Phase::Refused;
             return Ok(true);
         }
+        if matches!(state.phase, Phase::Finalizing | Phase::Sampling) {
+            let Some(revision) = state.location_revision.checked_add(1) else {
+                state.phase = Phase::Refused;
+                return Err(());
+            };
+            state.location_revision = revision;
+        }
         Ok(false)
+    }
+    pub(crate) fn finalization_pending(&self) -> bool {
+        self.0
+            .lock()
+            .is_ok_and(|state| state.phase == Phase::Finalizing)
+    }
+    /// One native sample outside the lock. A callback racing the getter closes
+    /// this attempt; it never authorizes a retry or a second location sample.
+    pub(crate) fn finalize(
+        &self,
+        sample: impl FnOnce() -> Option<String>,
+    ) -> Result<ContextNavigationTarget, ()> {
+        let revision = {
+            let mut state = self.0.lock().map_err(|_| ())?;
+            if state.phase != Phase::Finalizing {
+                return Err(());
+            }
+            state.phase = Phase::Sampling;
+            state.location_revision
+        };
+        let sampled = sample();
+        let mut state = self.0.lock().map_err(|_| ())?;
+        let effective = sampled.as_deref().and_then(|raw| {
+            ContextNavigationTarget::parse(raw)
+                .ok()
+                .filter(|target| target.as_url().as_str() == raw)
+        });
+        if state.phase != Phase::Sampling
+            || state.location_revision != revision
+            || !effective.as_ref().zip(state.target.as_ref()).is_some_and(
+                |(effective, requested)| state.policy.admits_final_document(requested, effective),
+            )
+        {
+            state.phase = Phase::Refused;
+            return Err(());
+        }
+        let effective = effective.ok_or(())?;
+        state.effective = Some(effective.clone());
+        state.phase = Phase::Ready;
+        Ok(effective)
     }
     pub(crate) fn refuse(&self) {
         if let Ok(mut state) = self.0.lock() {
@@ -267,7 +340,7 @@ impl WorkDocumentNavigation {
         self.0.lock().is_ok_and(|state| {
             state.phase == Phase::Ready
                 && state
-                    .target
+                    .effective
                     .as_ref()
                     .is_some_and(|target| Some(target.as_url().as_str()) == current)
         })
@@ -463,15 +536,108 @@ mod tests {
         }
     }
     fn armed() -> WorkDocumentNavigation {
+        armed_policy(zephium_agentic::WorkBrowserDocumentPolicy::Exact)
+    }
+    fn armed_policy(policy: zephium_agentic::WorkBrowserDocumentPolicy) -> WorkDocumentNavigation {
         let gate = WorkDocumentNavigation::default();
         assert!(gate.allows("about:blank"));
         for phase in [E::Started, E::Committed, E::Finished] {
             gate.observe(event(99, phase, "about:blank")).unwrap();
         }
-        gate.arm(ContextNavigationTarget::parse(URL).unwrap())
+        gate.arm_with_policy(ContextNavigationTarget::parse(URL).unwrap(), policy)
             .unwrap();
         assert!(gate.allows(URL));
         gate
+    }
+    fn finalizing() -> WorkDocumentNavigation {
+        let gate =
+            armed_policy(zephium_agentic::WorkBrowserDocumentPolicy::InitialQueryFinalization);
+        for phase in [E::Started, E::Committed] {
+            gate.observe(event(1, phase, URL)).unwrap();
+        }
+        assert_eq!(gate.location_changed(), Ok(false));
+        gate.observe(event(1, E::Finished, URL)).unwrap();
+        assert!(gate.finalization_pending());
+        assert!(!gate.ready(Some(URL)));
+        gate
+    }
+    #[test]
+    fn startup_finalization_freezes_original_navigation_before_any_dispatch() {
+        let current = "https://example.test/frozen?opaque=one";
+        let gate = finalizing();
+        assert!(!gate.allows(current));
+        let effective = gate.finalize(|| Some(current.into())).unwrap();
+        assert_eq!(effective.as_url().as_str(), current);
+        assert!(gate.ready(Some(current)));
+        assert!(!gate.ready(Some(URL)));
+        assert!(!gate.allows(current));
+        assert!(!gate.finalization_pending());
+        assert!(gate
+            .finalize(|| panic!("never resample a sealed document"))
+            .is_err());
+        // This is the same permanent fence used before dispatch and after the
+        // next-main-queue result barrier. Returning to the URL cannot revive refs.
+        assert_eq!(gate.location_changed(), Ok(true));
+        assert!(!gate.ready(Some(current)));
+        assert!(gate.failed());
+        gate.observe(event(1, E::Finished, URL)).unwrap();
+        assert!(!gate.ready(Some(current)));
+    }
+    #[test]
+    fn startup_sampling_is_first_attempt_only_and_revision_fenced() {
+        let gate = finalizing();
+        let count = std::cell::Cell::new(0);
+        assert!(gate
+            .finalize(|| {
+                count.set(count.get() + 1);
+                assert!(!gate.ready(Some(URL)));
+                assert!(gate.finalize(|| panic!("reentrant sample")).is_err());
+                gate.location_changed().unwrap();
+                Some(URL.into())
+            })
+            .is_err());
+        assert_eq!(count.get(), 1);
+        assert!(gate.failed());
+        assert!(gate.finalize(|| panic!("retry sample")).is_err());
+        assert!(!gate.ready(Some(URL)));
+    }
+    #[test]
+    fn startup_refuses_missing_noncanonical_and_changed_documents() {
+        for current in [
+            None,
+            Some("https://EXAMPLE.TEST/frozen?x=1"),
+            Some("https://example.test/other?x=1"),
+            Some("https://else.test/frozen?x=1"),
+            Some("https://example.test/frozen?"),
+            Some("https://example.test/frozen?x=1#fragment"),
+        ] {
+            let gate = finalizing();
+            assert!(gate.finalize(|| current.map(str::to_owned)).is_err());
+            assert!(gate.failed());
+        }
+    }
+    #[test]
+    fn startup_never_finalizes_missing_foreign_or_redirected_native_lineage() {
+        for events in [
+            vec![event(1, E::Finished, URL)],
+            vec![event(1, E::Started, URL), event(2, E::Committed, URL)],
+            vec![event(1, E::Started, URL), event(1, E::Redirected, URL)],
+            vec![
+                event(1, E::Started, URL),
+                event(1, E::Committed, URL),
+                event(2, E::Finished, URL),
+            ],
+        ] {
+            let gate =
+                armed_policy(zephium_agentic::WorkBrowserDocumentPolicy::InitialQueryFinalization);
+            for event in events {
+                gate.observe(event).unwrap();
+            }
+            assert!(gate.failed());
+            assert!(gate
+                .finalize(|| panic!("unproved lineage cannot sample"))
+                .is_err());
+        }
     }
     #[test]
     fn exact_frozen_source_requires_start_commit_finish_and_never_rearms() {

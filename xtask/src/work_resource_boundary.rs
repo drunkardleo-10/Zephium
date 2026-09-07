@@ -45,6 +45,24 @@ fn validate_preflight_order(source: &str) -> Result<(), String> {
 
 const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
     (
+        "crates/zephium-agentic/src/work_browser_document.rs",
+        &[
+            "#[default]Exact", "url.scheme()==\"https\"", "url.query().is_none()",
+            "url.fragment().is_none()", "url.username().is_empty()", "url.password().is_none()",
+            "query|!query.is_empty()", "effective.as_url().fragment().is_none()",
+            "Some(requested.as_url().as_str())",
+        ],
+        &["Serialize", "Deserialize", "reqwest", "WKWebView", "ContextNavigationRequest"],
+    ),
+    (
+        "crates/zephium-engine/src/platform/macos/agent_context.rs",
+        &[
+            "ifgate.failed(){invoke_owned_unit_callback(navigation_invariant_failure.as_ref(),navigation_callback_panicked.as_ref(),);navigation_semantic.cancel();}",
+            "ifwork_location.as_ref().is_some_and(|gate|gate.failed()){invoke_owned_unit_callback(location_invariant.as_ref(),location_panic.as_ref(),);work_location_semantic.cancel();}",
+        ],
+        &[],
+    ),
+    (
         "crates/zephium-app/src/work_resources_probe.rs",
         &[
             "owner:WorkResourceOwner", "WorkResourceOwner::new(WorkId::generate(),profile,wake,factory)",
@@ -79,6 +97,8 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "owner:RetainedWorkProbeOwner", "admission:ForegroundRenderingAdmission",
             "load_macos_probe_openai_credential()", "native.take_agent_browser_port(move|event|sink(event))",
             "task::capture(retire)",
+            "self.owner.construct_with_policy(self.target.clone(),task::document_policy(),now()?,)",
+            "self.owner.document(now()?)?",
             "self.store.clone()", "self.owner.start(", "lifecycle.drain_until(deadline)",
             "let(fixture,target)=task::document()?", "input::input(", "task::OBJECTIVE", "sample.trace()",
             "EXPECTED_RESOURCE.with(|r|*r.borrow_mut()=self.owner.resource().cloned())",
@@ -115,6 +135,7 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "source.frame==expected.frame", "source.role==SemanticRole::Paragraph",
             "AgentAccountScope::Anonymous", "FixtureServer::start()", "Some(fixture)",
             "RetainedProbeCapture::BoundedReadiness(retire)",
+            "zephium_agentic::WorkBrowserDocumentPolicy::Exact",
         ],
         &["allows_actions_before_extraction", "navigation_target", "with_source_roles", "with_subtree_extraction", "AgentBrowserPort", "Serialize", "Deserialize"],
     ),
@@ -147,6 +168,7 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "WorkResourceRenderingProbe::admits_public_product(&target)",
             "WorkResourceRenderingProbe::for_public_product(engine,admission,resource)",
             "RetainedProbeCapture::OneShot(retire)",
+            "zephium_agentic::WorkBrowserDocumentPolicy::InitialQueryFinalization",
             "RetainedProbeTrace::ConfiguredPublic",
             "RetainedProbeTrace::PublicObservation",
             "context.kind()!=ContextKind::Owned",
@@ -271,10 +293,10 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
     (
         "crates/zephium-agentic/src/work_browser_observation.rs",
         &[
-            "#[derive(Debug)]pubstructWorkBrowserReadBinding{lease:WorkBrowserExecutionLease,frame:SemanticFrameJoin,document:Arc<ContextNavigationTarget>,storage:ContextProfileStorageClass,}",
-            "self.admits_lease(lease,now)?;letrow=self.row_mut(lease.resource())?;letdocument=row.document.as_ref()",
+            "#[derive(Debug)]pubstructWorkBrowserReadBinding{lease:WorkBrowserExecutionLease,frame:SemanticFrameJoin,document:Arc<ContextNavigationTarget>,requested_document:Arc<ContextNavigationTarget>,storage:ContextProfileStorageClass,}",
+            "self.admits_lease(lease,now)?;letrow=self.row_mut(lease.resource())?;letdocument=row.effective_document.as_ref()",
             "ContextJoin::work_execution(ContextIdentity::new(row.join.identity.context,lease.run,row.join.identity.profile,ContextKind::Owned,)",
-            "Ok(WorkBrowserReadBinding{lease:lease.clone(),frame,document:Arc::clone(document),storage:row.storage,})",
+            "Ok(WorkBrowserReadBinding{lease:lease.clone(),frame,document:Arc::clone(document),requested_document:row.document.clone().ok_or(WorkBrowserResourceError::Phase)?,storage:row.storage,})",
             "letbinding=self.read_binding(lease,now)?;letrow=self.row_mut(lease.resource())?;ifrow.observation.is_some()",
             "letframe=binding.frame;letcontext=frame.context();",
             "SemanticObservationId::new(u64::from(sequence))",
@@ -455,6 +477,7 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
         &[
             "request.resource()!=&self.resource",
             "request.document()!=self.document.as_ref()",
+            "request.document_policy()!=self.document_policy",
             "construction_pending:true",
             "state.phase==Phase::Constructing&&state.construction_pending&&!state.uncertain",
             "!state.construction_pending&&state.retirement_delivery.is_none()&&state.reads==0&&state.callbacks==0&&!state.notification_pending",
@@ -466,7 +489,7 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "state.reads==0&&state.callbacks==0&&!state.notification_pending",
             "admission.reserve_audit().ok()",
             "state.notification_pending||state.phase==Phase::Destroyed",
-            "completion(request.complete(outcome))",
+            "completion(matcheffective{Some(document)=>request.complete_document(document),None=>request.complete(outcome),})",
             "self.guard.read_terminal_begin()",
             "self.guard.read_terminal_end()",
             "self.permit.release()",
@@ -510,6 +533,10 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "execution_count<=MAX_EXECUTING_CONTEXTS",
             "guard.acquisition_current(lease,now)",
             "if!guard.construction_current()",
+            "gate.arm_with_policy(document.clone(),guard.document_policy())",
+            "gate.finalize(||crate::platform::imp::current_url(view.view()))",
+            "Ok(effective)ifguard.construction_current()",
+            "task.complete_document(effective)",
             "operation==Operation::Destroy&&!self.work_resources.contains_key(&id)&&!guard.callbacks_drained()",
             "WorkNativeResource::unconstructed(guard.clone(),reservation)",
             "ifresource.prepare_destruction()",
@@ -556,6 +583,11 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "Some(target.as_url().as_str())==current",
             "ifstate.phase==Phase::Ready{state.phase=Phase::Refused",
             "state.phase=Phase::Retired",
+            "state.phase=Phase::Sampling",
+            "state.location_revision!=revision",
+            "target.as_url().as_str()==raw",
+            "state.policy.admits_final_document(requested,effective)",
+            "state.effective=Some(effective.clone())",
         ],
         &[
             "ContextRunId",
@@ -658,6 +690,8 @@ fn validate(source: &str, port: &str) -> Result<(), String> {
         "resource_retained&&row.observation.is_none()",
         "row.pending.is_none()&&row.destruction.is_none()&&row.lease.is_none()",
         "row.pending.as_ref()!=Some(&completion.operation)",
+        "row.document_policy.admits_final_document(requested,effective)",
+        "row.effective_document=effective",
         "row.destruction.as_ref()==Some(&completion.operation)",
         "WorkBrowserResourceEvent::DebtSettled(row.join.clone())",
         "request:Box<WorkBrowserResourceRequest>",

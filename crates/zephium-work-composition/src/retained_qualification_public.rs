@@ -4,6 +4,9 @@ use super::*;
 pub(super) fn capture(retire: RetainedProbeRetire) -> RetainedProbeCapture {
     RetainedProbeCapture::OneShot(retire)
 }
+pub(super) fn document_policy() -> zephium_agentic::WorkBrowserDocumentPolicy {
+    zephium_agentic::WorkBrowserDocumentPolicy::InitialQueryFinalization
+}
 
 const TARGET: &str = "https://shop.pimoroni.com/products/raspberry-pi-pico-2";
 const ORIGIN: &str = "https://shop.pimoroni.com";
@@ -440,6 +443,10 @@ mod tests {
     }
     #[test]
     fn public_brief_has_one_fixed_target_and_no_effect_or_expansion_authority() {
+        assert_eq!(
+            document_policy(),
+            zephium_agentic::WorkBrowserDocumentPolicy::InitialQueryFinalization
+        );
         assert!(matches!(
             capture(Box::new(|_| false)),
             RetainedProbeCapture::OneShot(_)
