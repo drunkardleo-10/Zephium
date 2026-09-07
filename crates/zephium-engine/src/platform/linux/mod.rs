@@ -1244,7 +1244,7 @@ mod tests {
             .find_map(|line| line.strip_prefix(key).map(str::trim))
     }
 
-    fn prove_web_process_confinement(pid: u32, host_only_file: &Path) {
+    fn prove_web_process_namespace_and_filter_state(pid: u32) {
         let parent =
             std::fs::read_to_string("/proc/self/status").expect("read browser process status");
         let status = std::fs::read_to_string(format!("/proc/{pid}/status"))
@@ -1265,8 +1265,8 @@ mod tests {
             "WebKitWebProcess must run under a seccomp filter"
         );
         assert!(
-            renderer_added_seccomp_filter(&parent, &status),
-            "WebKitWebProcess must add a filter; an inherited container filter is not evidence"
+            renderer_filter_count_exceeds_parent(&parent, &status),
+            "renderer filter count must exceed its parent; inheritance alone is not evidence"
         );
 
         for namespace in ["mnt", "user", "pid"] {
@@ -1282,18 +1282,14 @@ mod tests {
             );
         }
 
-        let relative = host_only_file
-            .strip_prefix("/")
-            .expect("host-only test path must be absolute");
-        let renderer_path = PathBuf::from(format!("/proc/{pid}/root")).join(relative);
-        assert!(
-            std::fs::read(&renderer_path).is_err(),
-            "WebKitWebProcess can read a host-only path through its sandbox root: {}",
-            renderer_path.display()
-        );
+        // Reading /proc/<pid>/root from this observer cannot prove renderer
+        // path denial: ptrace/userns access checks may reject the observer even
+        // when the renderer can read the file. Filesystem denial still needs
+        // an in-renderer (or equivalent-credential) native qualification probe.
+        // Filter counts likewise identify neither the installer nor its policy.
     }
 
-    fn renderer_added_seccomp_filter(parent: &str, renderer: &str) -> bool {
+    fn renderer_filter_count_exceeds_parent(parent: &str, renderer: &str) -> bool {
         let count = |status| {
             proc_status_value(status, "Seccomp_filters:")
                 .and_then(|value| value.parse::<u64>().ok())
@@ -1304,8 +1300,8 @@ mod tests {
     #[test]
     fn renderer_seccomp_evidence_rejects_inherited_missing_or_invalid_filters() {
         let status = |count| format!("Seccomp:\t2\nSeccomp_filters:\t{count}\n");
-        assert!(renderer_added_seccomp_filter(&status(0), &status(1)));
-        assert!(renderer_added_seccomp_filter(&status(2), &status(3)));
+        assert!(renderer_filter_count_exceeds_parent(&status(0), &status(1)));
+        assert!(renderer_filter_count_exceeds_parent(&status(2), &status(3)));
         for (parent, renderer) in [
             (status(1), status(1)),
             (status(2), status(1)),
@@ -1314,7 +1310,7 @@ mod tests {
             ("Seccomp_filters:\tinvalid\n".into(), status(1)),
             (status(0), "Seccomp_filters:\t18446744073709551616\n".into()),
         ] {
-            assert!(!renderer_added_seccomp_filter(&parent, &renderer));
+            assert!(!renderer_filter_count_exceeds_parent(&parent, &renderer));
         }
     }
 
@@ -1627,13 +1623,6 @@ mod tests {
         enforce_runtime_security_floor().expect("test runner must use supported WebKitGTK");
         gtk::init().expect("GTK requires an Xvfb/Wayland display for native WebView tests");
 
-        let host_only = tempfile::Builder::new()
-            .prefix("zephium-host-only-")
-            .tempfile()
-            .expect("host-only sandbox probe");
-        std::fs::write(host_only.path(), b"renderer sandbox boundary")
-            .expect("write host-only sandbox probe");
-
         let window = gtk::Window::new(gtk::WindowType::Toplevel);
         let container = gtk::Fixed::new();
         window.add(&container);
@@ -1683,7 +1672,7 @@ mod tests {
             )
             .expect("start a real WebKitWebProcess");
         let web_process = wait_for_web_process(std::process::id());
-        prove_web_process_confinement(web_process, host_only.path());
+        prove_web_process_namespace_and_filter_state(web_process);
 
         let ipc_deadline = Instant::now() + Duration::from_secs(5);
         let first_ipc = loop {

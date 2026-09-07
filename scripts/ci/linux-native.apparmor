@@ -1,8 +1,8 @@
 # One explicit non-root, capability-free CI container, not a host-wide sysctl.
 # Docker's default LSM policy denies the mounts needed inside WebKit's userns.
 # Ubuntu's unconfined-userns restriction also needs an explicit named grant.
-# Outer confinement is not claimed by this profile; the native test attests
-# WebKit's own namespaces, seccomp filter and filesystem denial independently.
+# This unconfined profile supplies no outer LSM confinement. The native test
+# checks namespaces and an additional filter, not filter provenance or path denial.
 abi <abi/4.0>,
 profile zephium-native-ci flags=(unconfined) {
   userns,

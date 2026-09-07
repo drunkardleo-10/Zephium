@@ -162,17 +162,30 @@ evidence. [Docker's default seccomp policy](https://docs.docker.com/engine/secur
 deliberately restricts namespace creation; adding `SYS_ADMIN`, disabling WebKit's
 sandbox, or accepting that inherited filter as WebKit evidence is not a fix.
 
-The native job now builds its pinned Fedora dependency image under ordinary Docker
-policies, then runs the existing gates as UID/GID 10001 in a separate container:
+Host-policy setup and native execution run only on an exact main-branch push or
+reviewed main release call. The native job checks out `github.sha` only and
+refuses a different `checkout_ref`; its helper independently checks event,
+branch and actual checkout before **any** mode, including host-policy cleanup.
+Pull requests retain source/policy/platform-neutral gates and explicitly mint
+no Fedora native-runtime evidence. They never run this host-policy job.
+
+The native job pins the Fedora **base image digest**, then live-resolves packages
+with `dnf upgrade` and the explicit WebKitGTK/JSC updates-testing transaction.
+Those dependency versions and repository state are not pinned or reproducible
+from the base digest alone. Package installation uses ordinary Docker policies,
+then the native gates run as UID/GID 10001 in a separate container:
 all capability sets dropped, no-new-privileges, read-only root and source/toolchain
 mounts, isolated writable home/build/temp, no host devices, Docker socket, tokens,
 or host PID/network namespace. Dependency acquisition has network access; the
 bridge is explicitly disconnected and Cargo goes offline before native gates.
 The unchanged Fedora package/vendor/signature/integrity and engine-floor checks
-still precede WebKit execution.
+still precede WebKit execution. The job logs the installed package NEVRAs and
+actual shared host-kernel release for traceability, not as a repository pin.
 
-That test container intentionally has no outer seccomp filter and uses one named
-AppArmor user-namespace grant, without changing host-wide AppArmor/sysctl policy.
+That test container intentionally has no outer seccomp filter and uses a named
+`flags=(unconfined)` AppArmor user-namespace grant. It has **no outer container
+seccomp or LSM confinement**. Loading that profile modifies host policy only in
+this trusted job; it does not change global AppArmor settings or userns sysctls.
 The disposable hosted VM is the outer boundary for repository test code, as for
 ordinary non-container CI; this container is a controlled Fedora userspace, **not
 a claimed additional hostile-code sandbox**. This explicit exception is scoped
@@ -185,9 +198,16 @@ and bubblewrap's [unprivileged namespace model](https://github.com/containers/bu
 An early timed bubblewrap preflight must demonstrate different user/mount/PID
 namespaces, non-root identity, zero capabilities, no-new-privileges, no external
 interface and zero inherited seccomp filters. The renderer test independently
-requires an added seccomp filter relative to its parent as well as its original
-namespace and filesystem-denial checks. A refusal remains red; no fallback,
-automatic retry, conditional skip or replacement context-property proof exists.
+requires no-new-privileges, different user/mount/PID namespaces, and a filter
+count above its parent. The count excludes inheritance alone; it does **not**
+identify the filter's installer, content or WebKit provenance. The former
+observer-side `/proc/<renderer>/root/path` read denial was invalid as renderer
+filesystem evidence: userns/ptrace rules can deny the observer even when the
+renderer could read the file. That assertion and its evidence claim are removed.
+A real in-renderer or equivalent-credential filesystem-denial probe remains a
+separate qualification requirement. These native state checks do not prove it.
+Within an admitted trusted job, a refusal remains red; no fallback, automatic
+retry or replacement context-property proof exists.
 Workflow-policy mutations pin these restrictions. Local macOS source checks do
 not qualify this Linux environment: the next hosted execution must supply the
 actual namespace and native-test evidence before it is called green.

@@ -252,9 +252,11 @@ Any change that breaks one of these invariants must fail review and release:
     requested Web-process sandbox flag and the construct-only swap policy are read back
     and asserted before the context can own a WebView. Those properties alone are
     configuration invariants, not confinement attestation. CI separately starts a real
-    WebProcess on the supported Fedora image and checks its namespaces,
-    no-new-privileges, seccomp state, and denial of a host-only path; that evidence is
-    scoped to that image.
+    WebProcess on the supported Fedora userspace and checks its namespaces,
+    no-new-privileges and a seccomp filter count above its parent. Those observations
+    neither identify the filter's installer/policy nor prove filesystem denial;
+    an in-renderer or equivalent-credential filesystem probe remains unqualified.
+    Successful evidence is scoped to the exact executed environment.
 11. On Windows, privileged native hardening requires `ICoreWebView2Environment10`, and
     every privileged or raw view requires `ICoreWebView2_18` so external URI schemes can
     be cancelled natively. Raw views additionally require `ICoreWebView2Settings7` to
@@ -1323,16 +1325,21 @@ These inherited properties must not be overstated:
   the floor and a Fedora-built AppImage would silently raise its glibc baseline without
   Tauri's supported complete media bundling. This package-chain proof is not runtime
   sandbox attestation.
-- CI's ignored hostile native test is invoked explicitly on the supported Fedora image.
+- Trusted-main CI invokes the ignored native test explicitly on Fedora userspace
+  built from a pinned base digest with live-resolved packages; PRs run source gates only.
   It spawns a real WebProcess, identifies it, inspects `/proc` for no-new-privileges,
-  seccomp filtering, and distinct mount/user/PID namespaces, and proves that the
-  renderer adds a filter beyond its parent's count and its root cannot read a
-  host-only path. The [native CI environment](security-maintenance.md#fedora-native-ci-sandbox-environment)
+  distinct mount/user/PID namespaces and a filter count above its parent's.
+  That does not establish filter provenance or renderer filesystem denial.
+  Observer access to `/proc/<renderer>/root` is not renderer-credential evidence.
+  The [native CI environment](security-maintenance.md#fedora-native-ci-sandbox-environment)
   requires an unprivileged, capability-free, network-sealed launcher and does not
-  count an outer Docker filter as WebKit confinement. A successful execution is evidence for that exact CI image,
+  supply outer container seccomp/LSM confinement; its disposable VM is the outer
+  boundary. A successful execution is evidence for that exact observed state,
   not attestation of an arbitrary installed machine or packaged application.
 - **Release gates:** rerun the confinement probe through the packaged application on
-  supported hosts and inspect its actual process tree. Also validate private-context and
+  supported hosts and inspect its actual process tree. Add an in-renderer or
+  equivalent-credential host-file denial probe and identify the filter policy before
+  claiming filesystem confinement or filter provenance. Also validate private-context and
   context-global-handler lifetime. Native erasure tests must write
   cookies, local storage, IndexedDB, Cache API data, and cacheable responses; destroy
   every view/context; clear and drain GLib callbacks; reopen the exact profile; and prove

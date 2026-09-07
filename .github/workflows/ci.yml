@@ -37,6 +37,10 @@ jobs:
       - name: Enforce immutable workflow action and container sources
         run: ruby scripts/release/test_workflow_sources.rb
 
+      - name: Record pull-request native-runtime evidence boundary
+        if: github.event_name == 'pull_request'
+        run: echo 'Pull requests retain Fedora source, policy and platform-neutral gates; Fedora host-policy setup and native execution require an exact trusted main push or release call and mint no Fedora PR runtime evidence.'
+
       - name: Test WebKitGTK version proof helper
         run: bash scripts/ci/test_verify_webkitgtk_version.sh
 
@@ -595,6 +599,11 @@ jobs:
           -- --exact
 
   linux-native-security:
+    # This job installs host policy. Never consume a PR checkout here. The
+    # release caller independently proves its reviewed main SHA; this gate also
+    # refuses any checkout_ref that differs from the main event commit.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: workflow-policy
     # Ubuntu's currently published WebKitGTK is below WSA-2026-0004's fixed
     # boundary. Fedora 44 updates-testing currently carries Fedora's signed
     # 2.52.5 build while stable promotion is pending, so this non-artifact job
@@ -608,9 +617,15 @@ jobs:
       run:
         shell: bash scripts/ci/linux_native_container.sh exec {0}
     steps:
+      - name: Refuse a caller-selected native checkout
+        shell: bash
+        env:
+          NATIVE_CHECKOUT_REF: ${{ inputs.checkout_ref }}
+        run: test -z "${NATIVE_CHECKOUT_REF}" || test "${NATIVE_CHECKOUT_REF}" = "${GITHUB_SHA}"
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
-          ref: ${{ inputs.checkout_ref || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
@@ -676,6 +691,10 @@ jobs:
             fi
           done
           rpm -V webkit2gtk4.1 webkit2gtk4.1-devel bubblewrap libseccomp
+          # Base digest is pinned; DNF packages are live-resolved, not a pinned
+          # repository snapshot. Retain the actual installed NEVRAs and kernel.
+          uname -sr
+          rpm -qa --qf '%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\n' | LC_ALL=C sort
 
       # The platform-neutral seed gate first authenticates the exact bundled
       # EasyList/EasyPrivacy bytes and reproduces their recorded WebKit
@@ -700,12 +719,10 @@ jobs:
             platform::linux::content_filter::tests::exact_bundled_easylist_and_easyprivacy_compile_and_reload_natively \
             -- --ignored --exact --test-threads=1
 
-      # This launches a real renderer and fails unless the process has
-      # no-new-privileges, seccomp filtering, distinct mount/user/PID
-      # namespaces, and denial of a host-only path. Context properties alone
-      # are not accepted as evidence that WebKit's renderer confinement
-      # actually engaged.
-      - name: Prove Wry WebKitWebProcess confinement
+      # Inspect a real renderer's no-new-privileges, distinct mount/user/PID
+      # namespaces and filter count above its parent. This does not identify
+      # the added filter's installer/policy or prove renderer filesystem denial.
+      - name: Prove Wry WebKitWebProcess namespace and filter state
         run: >-
           xvfb-run -a cargo test --locked -p zephium-engine --lib
           platform::linux::tests::wry_contexts_enable_sandbox_and_cross_site_process_swap

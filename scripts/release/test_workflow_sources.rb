@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require "yaml"
+require "open3"
 
 ACTION = %r{\A[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*@[0-9a-f]{40}\z}
 IMAGE = /\A\S+@sha256:[0-9a-f]{64}\z/
@@ -239,6 +240,17 @@ end
 def linux_native_environment_errors(ci, dockerfile, launcher, preflight, profile)
   errors = []
   job = ci.fetch("jobs").fetch("linux-native-security")
+  trusted_if = "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')"
+  errors << "host policy must be captive to an exact trusted-main event after source policy" unless
+    job["if"] == trusted_if && job["needs"] == "workflow-policy"
+  checkout = job.fetch("steps").find { |step| step["uses"]&.start_with?("actions/checkout@") }
+  errors << "native checkout must be the exact event SHA, never a PR/caller-selected ref" unless
+    checkout&.fetch("with") == { "ref" => "${{ github.sha }}", "persist-credentials" => false }
+  refusal = job.fetch("steps").first
+  errors << "a differing native checkout must fail before checkout, not skip the native proof" unless
+    refusal["name"] == "Refuse a caller-selected native checkout" && refusal["shell"] == "bash" &&
+    refusal["env"] == { "NATIVE_CHECKOUT_REF" => "${{ inputs.checkout_ref }}" } &&
+    refusal["run"] == 'test -z "${NATIVE_CHECKOUT_REF}" || test "${NATIVE_CHECKOUT_REF}" = "${GITHUB_SHA}"'
   errors << "native gates must use the hosted VM, not an implicit Docker job" unless
     job["runs-on"] == "ubuntu-24.04" && !job.key?("container")
   errors << "native steps must stay inside their exact unprivileged executor" unless
@@ -250,7 +262,7 @@ def linux_native_environment_errors(ci, dockerfile, launcher, preflight, profile
     "Prove unprivileged native sandbox prerequisites",
     "Prove native WebKitGTK sandbox package prerequisites",
     "Prove the exact bundled blocker seed compiles in native WebKitGTK",
-    "Prove Wry WebKitWebProcess confinement"
+    "Prove Wry WebKitWebProcess namespace and filter state"
   ]
   indices = ordered.map { |name| named_step(ci, "linux-native-security", name).first }
   errors << "native acquisition, network seal and proofs are out of order" unless indices == indices.sort
@@ -261,6 +273,7 @@ def linux_native_environment_errors(ci, dockerfile, launcher, preflight, profile
   }
   job.fetch("steps").each do |step|
     next unless step.key?("run")
+    next if step.equal?(refusal)
 
     mode = host_steps[step["name"]]
     if mode
@@ -283,6 +296,9 @@ def linux_native_environment_errors(ci, dockerfile, launcher, preflight, profile
     "target=/opt/rustup,readonly", "target=/opt/rust-bin,readonly",
     'docker network disconnect bridge "${native_name}"',
     'CARGO_NET_OFFLINE=${native_offline}',
+    '"${GITHUB_EVENT_NAME:?}" != push && "${GITHUB_EVENT_NAME}" != workflow_dispatch',
+    '"${GITHUB_REF:?}" != refs/heads/main',
+    '"$(git rev-parse HEAD)" != "${GITHUB_SHA}"',
     'sudo apparmor_parser --remove scripts/ci/linux-native.apparmor'
   ].each do |required|
     errors << "native launcher lost #{required}" unless launcher.include?(required)
@@ -310,6 +326,11 @@ def assert_linux_native_environment(root)
   sources = paths.map { |path| File.read(File.join(root, "scripts/ci", path), encoding: "UTF-8") }
   errors = linux_native_environment_errors(ci, *sources)
   raise errors.join("\n") unless errors.empty?
+  refusal = ci.fetch("jobs").fetch("linux-native-security").fetch("steps").first.fetch("run")
+  [["", true], ["a" * 40, true], ["b" * 40, false]].each do |candidate, accepted|
+    _, _, status = Open3.capture3({ "NATIVE_CHECKOUT_REF" => candidate, "GITHUB_SHA" => "a" * 40 }, "bash", "-c", refusal)
+    raise "native checkout refusal changed" unless status.success? == accepted
+  end
 
   [
     [0, "@sha256:", "@mutable:"],
@@ -330,9 +351,41 @@ def assert_linux_native_environment(root)
     end
   end
   escaped = Marshal.load(Marshal.dump(ci))
-  _, gate = named_step(escaped, "linux-native-security", "Prove Wry WebKitWebProcess confinement")
+  _, gate = named_step(escaped, "linux-native-security", "Prove Wry WebKitWebProcess namespace and filter state")
   gate["shell"] = "bash"
   raise "native gate escaped onto the host" if linux_native_environment_errors(escaped, *sources).empty?
+  %w[if needs].each do |field|
+    mutation = Marshal.load(Marshal.dump(ci))
+    mutation.fetch("jobs").fetch("linux-native-security").delete(field)
+    raise "trusted native gate lost #{field}" if linux_native_environment_errors(mutation, *sources).empty?
+  end
+  mutation = Marshal.load(Marshal.dump(ci))
+  checkout = mutation.fetch("jobs").fetch("linux-native-security").fetch("steps").find { |step| step["uses"]&.start_with?("actions/checkout@") }
+  checkout.fetch("with")["ref"] = "${{ inputs.checkout_ref || github.sha }}"
+  raise "native checkout regained caller authority" if linux_native_environment_errors(mutation, *sources).empty?
+
+  # Invoke every helper mode in refused contexts. Exact diagnostics prove the
+  # trust guard ran before any Docker, AppArmor or other host-policy operation.
+  %w[start seal exec stop].each do |mode|
+    [
+      ["pull_request", "refs/heads/main", "a trusted main event"],
+      ["push", "refs/heads/unreviewed", "a trusted main event"],
+      ["push", "refs/heads/main", "the exact event checkout"],
+      ["workflow_dispatch", "refs/heads/main", "the exact event checkout"]
+    ].each do |event, ref, expected|
+      env = { "GITHUB_RUN_ID" => "1", "GITHUB_RUN_ATTEMPT" => "1",
+              "GITHUB_EVENT_NAME" => event, "GITHUB_REF" => ref, "GITHUB_SHA" => "0" * 40 }
+      out, err, status = Open3.capture3(env, "bash", File.join(root, "scripts/ci/linux_native_container.sh"), mode, chdir: root)
+      unless !status.success? && out.empty? && err.strip == "native host setup requires #{expected}"
+        raise "native #{mode} failed to refuse #{event}/#{ref} at the trust boundary"
+      end
+    end
+  end
+
+  linux = File.read(File.join(root, "crates/zephium-engine/src/platform/linux/mod.rs"))
+  if linux.include?("fn prove_web_process_confinement(") || linux.include?('format!("/proc/{pid}/root")')
+    raise "observer-side procfs access cannot return as renderer filesystem-denial evidence"
+  end
 end
 
 assert_fixture_policy

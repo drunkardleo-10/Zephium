@@ -11,7 +11,8 @@ for field in CapInh CapPrm CapEff CapBnd CapAmb; do
   grep -Eq "^${field}:[[:space:]]+0+$" <<< "${native_status}"
 done
 grep -Eq '^NoNewPrivs:[[:space:]]+1$' <<< "${native_status}"
-# No inherited Docker filter may masquerade as WebKit's seccomp filter.
+# Exclude inheritance as the reason for the renderer's later nonzero filter count.
+# A count difference alone does not identify a filter's installer or policy.
 grep -Eq '^Seccomp:[[:space:]]+0$' <<< "${native_status}"
 grep -Eq '^Seccomp_filters:[[:space:]]+0$' <<< "${native_status}"
 for field in user mnt pid; do

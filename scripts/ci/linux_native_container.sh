@@ -7,6 +7,19 @@ set -euo pipefail
 native_name="zephium-native-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 native_volume="${native_name}-home"
 
+# Every mode, including cleanup, is host-policy-sensitive. Never run it against
+# a PR or a caller-selected checkout, even if invoked outside the job gate.
+if [[ "${GITHUB_EVENT_NAME:?}" != push && "${GITHUB_EVENT_NAME}" != workflow_dispatch ]] \
+  || [[ "${GITHUB_REF:?}" != refs/heads/main ]] \
+  || [[ ! "${GITHUB_SHA:?}" =~ ^[0-9a-f]{40}$ ]]; then
+  echo 'native host setup requires a trusted main event' >&2
+  exit 1
+fi
+if [[ "$(git rev-parse HEAD)" != "${GITHUB_SHA}" ]]; then
+  echo 'native host setup requires the exact event checkout' >&2
+  exit 1
+fi
+
 case "${1:-}" in
   start)
     [[ "$#" == 1 ]]
@@ -16,7 +29,8 @@ case "${1:-}" in
     native_rustup="$(rustup show home)"
     native_rust_bin="$(dirname "$(command -v rustup)")"
     test -d "${native_rustup}/toolchains/1.95.0-x86_64-unknown-linux-gnu"
-    # No source, credentials or host sockets are passed to this package build.
+    # Only checked-in CI build definitions form the context; no workspace mount,
+    # credentials or host sockets are passed to this package build.
     docker build --file scripts/ci/linux-native.Dockerfile --tag "${native_name}" scripts/ci
     sudo apparmor_parser --replace scripts/ci/linux-native.apparmor
     docker volume create "${native_volume}" >/dev/null
