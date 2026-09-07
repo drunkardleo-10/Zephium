@@ -1580,12 +1580,14 @@
           // their nearest retained semantic parent is an already-admitted native
           // select. This exposes bounded, ref-addressable choices without making
           // arbitrary non-rendered DOM actionable or treating offscreen selects
-          // as visible.
+          // as visible. A filtered select can leave the Document as its option's
+          // nearest retained parent; brand-check before using an Element getter.
           const optionOfAdmittedSelect =
             descriptor.role === "option" &&
             descriptor.tag === "option" &&
             parent !== null &&
             records[parent] !== undefined &&
+            nodeType(records[parent].element) === 1 &&
             tagName(records[parent].element) === "select";
           const visible =
             visibleStyle && (rect !== null || optionInExpansion || optionOfAdmittedSelect);

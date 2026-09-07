@@ -104,7 +104,12 @@ class Element extends Node {
     this._shadow = null;
     this.rect = { x: 10, y: 10, width: 160, height: 32 };
   }
-  get tagName() { return this._tag; }
+  get tagName() {
+    // Web IDL getters reject non-implementing receivers. In particular a
+    // retained Document ancestor is a Node, never an Element.
+    if (!(this instanceof Element)) throw new TypeError("Element receiver required");
+    return this._tag;
+  }
   get shadowRoot() { return this._shadow; }
   getAttribute(name) {
     return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null;
@@ -313,6 +318,11 @@ offscreenSelect.rect = { x: 10, y: 900, width: 160, height: 32 };
 const offscreenOption = new HTMLOptionElement({}, 0, false, "Must stay filtered");
 offscreenOption.rect = { x: 0, y: 0, width: 0, height: 0 };
 offscreenSelect.append(offscreenOption);
+const documentParentSelect = new HTMLSelectElement({ "aria-label": "Document-parent select" });
+documentParentSelect.rect = { x: 10, y: 900, width: 160, height: 32 };
+const documentParentOption = new HTMLOptionElement({}, 0, false, "Document-parent option must stay filtered");
+documentParentOption.rect = { x: 0, y: 0, width: 0, height: 0 };
+documentParentSelect.append(documentParentOption);
 
 const openHost = new Element("div");
 openHost._shadow = new ShadowRoot();
@@ -448,6 +458,9 @@ main.append(offscreenSelect);
 main.append(openHost);
 main.append(closedHost);
 body.append(main);
+// A filtered select need not have a retained Element ancestor. Its nearest
+// semantic parent here is the Document record, which cannot receive tagName.
+body.append(documentParentSelect);
 html.append(body);
 document._root = html;
 document.append(html);
@@ -462,6 +475,8 @@ const sourcePath = path.resolve(
 );
 const source = fs.readFileSync(sourcePath, "utf8");
 vm.runInThisContext(source, { filename: sourcePath });
+Object.defineProperty(document, "nodeType", { value: 1 });
+Object.defineProperty(document, "tagName", { value: "SELECT" });
 globalThis.getComputedStyle = () => { throw new Error("late global poisoning"); };
 Object.defineProperty(textInput, "value", {
   get() { throw new Error("own input getter poison"); },
@@ -521,6 +536,10 @@ assert(
 assert(
   !initial.n.some((node) => node.n === "Must stay filtered"),
   "option of an offscreen native select escaped initial filtering"
+);
+assert(
+  !initial.n.some((node) => node.n === "Document-parent option must stay filtered"),
+  "a Document ancestor was mistaken for an admitted native select"
 );
 const passwordNode = initial.n.find((node) => node.r === "password");
 assert(passwordNode && passwordNode.v.k === "redacted", "password not redacted");
@@ -1061,6 +1080,7 @@ async function finish() {
     fixed_action_execution: true,
     fixed_fill_execution: true,
     fixed_select_execution: true,
+    document_parent_option_brand_guard: true,
     select_rewrite_nonretryable: true,
     fill_native_primitives_captured: true,
     fill_input_event_contract: true,

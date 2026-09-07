@@ -1,6 +1,6 @@
 # Actual-app retained public product brief
 
-Status: **Three unsuccessful actual-app public attempts; not qualified.** The
+Status: **Four unsuccessful actual-app public attempts; not qualified.** The
 [qualified Luna fixture](macos-retained-controller-luna.md) proves the retained
 native/controller/closure composition only on its frozen loopback page. This
 candidate is a separately selected real-storefront task, not a promotion of
@@ -171,6 +171,62 @@ agentic-probe/controller/runtime architecture gates, hostile JavaScript smoke,
 formatting and whitespace checks passed. These are deterministic and compile
 checks, not live public-site qualification. No GUI, credentials or external
 provider were accessed, and no remote state was changed.
+
+## First semantic invocation attempt — 2026-09-07
+
+Source `ec68cdf043a7b2de772482c8639cd560020ad4c8`, arm64 executable SHA-256
+`4b3593338db3def4491ae45399a936a92bd6c6034c4a6548b7405abac5e914d5`.
+Admission succeeded after 9,314 ms/68 checks. Construction returned `Retained`,
+acquisition returned `Acquired`, and the Luna configuration was printed. The
+controller emitted Started, ContextActive and Observing, then closed
+unsuccessfully at wall time 6 ms with
+`Observation(Result(Runtime(Internal)))`. Model calls and tokens were zero;
+ModelMapped was the configured interpretation mode, not accepted mapping.
+Native primary/cleanup failures were `None`; cohort clean, exact weak drain and
+shutdown-owner closure were true. The preserved failed database had three audit
+events, one delivery, and zero Work runs/artifacts/owners. Its data root remains
+outside the repository. This was one authorized run, not public qualification.
+
+The typed result establishes that the isolated runtime accepted the invocation
+and returned its closed `E1:internal` fault through the original native reply
+channel and decoder. It is not a provider, startup URL, rendering-admission or
+missing-channel error. The observation catch maps unexpected traversal/encoding
+exceptions to this same content-free fault, so the live trace alone does not
+identify the throwing operation. No exception message, stack, DOM or page text
+was retained to fill that gap.
+
+Source inspection found a reproducible production defect: for an option under
+a filtered/offscreen select outside any retained landmark, the nearest retained
+semantic parent can be the Document record. The option-admission predicate
+called the captured `Element.tagName` getter on that Document. Document is a
+Node, not an Element; Web IDL getters reject a receiver that does not implement
+their interface. See the [DOM interface definitions](https://dom.spec.whatwg.org/#interface-element)
+and [Web IDL accessor contract](https://webidl.spec.whatwg.org/#es-attributes).
+The previous synthetic getter silently returned an undefined field instead.
+
+Before changing production source, enforcing the mock's native Element brand
+check and adding that ordinary DOM shape reproduced `E1:internal`. The narrow
+fix checks the captured Node type before applying the Element getter. It does
+not discard an exception as success: a Document simply cannot establish that
+an option belongs to an admitted native select. The strengthened smoke keeps
+both the original landmark case and the Document-parent case, poisons the
+Document's own `nodeType`/`tagName` properties, and verifies offscreen options
+remain excluded while visible native-select options remain available. Original
+22 initial/23 expanded node counts and semantic byte counts are unchanged.
+
+This defect is proven and compatible with the live refusal, but its occurrence
+on the live page is not independently proven. The correction does not add
+diagnostic wire codes, exception content, retry, another read, provider calls,
+new authority or larger budgets. The immutable runtime source digest is updated
+with the reviewed change. No live retry is included here.
+
+Correction checks passed: nine runtime encoding/decoding, exact-correlation,
+budget and pinned-program tests; six native macOS channel-state/owner tests;
+the complete hostile JavaScript smoke; strict core all-targets and isolated
+public desktop library Clippy; agentic-probe/controller/runtime architecture
+gates; formatting and whitespace checks. An in-memory negative control removing
+only the new receiver guard reproduced `E1:internal` in the strengthened smoke.
+These checks did not launch a GUI, read credentials or contact a provider.
 
 ## Workflow and decision
 
