@@ -125,6 +125,7 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
         &manifest,
         &[
             "default = []",
+            "navigation-qualification = [\"macos-work\", \"dep:zephium-agentic\", \"dep:zephium-core\", \"dep:zephium-agent-runtime\"]",
             "public-qualification = [\"macos-work\", \"zephium-app/work-execution-probe\"]",
             "retained-public-qualification = [\"retained-qualification\", \"zephium-engine/native-agentic-public-resource-probe\"]",
         ],
@@ -146,6 +147,8 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
         &[
             "#[cfg(feature = \"macos-work\")] mod native;",
             "#[cfg(feature = \"public-qualification\")] mod qualification;",
+            "#[cfg(all(feature = \"navigation-qualification\", not(debug_assertions)))] compile_error!",
+            "#[cfg(feature = \"navigation-qualification\")] #[doc(hidden)] pub mod navigation_qualification;",
             "#[cfg(all(feature = \"public-qualification\", not(debug_assertions)))] compile_error!",
         ],
     )?;

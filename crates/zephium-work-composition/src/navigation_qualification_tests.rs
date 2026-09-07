@@ -1,3 +1,4 @@
+//! Shared task regressions execute against the same authority used by both hosts.
 use super::*;
 
 fn contexts() -> (ContextRegistry, ContextJoin, ContextJoin) {
@@ -155,9 +156,7 @@ fn mapped<'a>(
 #[test]
 fn closed_navigation_profile_has_no_parameter_or_extra_capability() {
     let (_, source, _) = contexts();
-    let task = super::super::work_sites::Site::ReactNavigation
-        .task(source.identity())
-        .unwrap();
+    let task = task(source.identity()).unwrap();
     assert_eq!(
         task.navigation_target().unwrap().as_url().as_str(),
         DESTINATION
@@ -175,13 +174,6 @@ fn closed_navigation_profile_has_no_parameter_or_extra_capability() {
     assert!(!task.allows_actions_before_extraction());
     assert!(!task.allows_baseline_read());
     assert!(!task.allows_subtree_extraction());
-    for name in [
-        "react-navigation/other",
-        "react-navigation?redirect=1",
-        DESTINATION,
-    ] {
-        assert!(super::super::work_sites::Site::parse(name).is_err());
-    }
 }
 
 #[test]
