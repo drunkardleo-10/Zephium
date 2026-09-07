@@ -708,6 +708,10 @@ pub fn encode_semantic_observation(
             if let Some(level) = node.heading_level() {
                 checked_write(&mut output, format_args!(" level={}", level.get()))?;
             }
+            if let Some(target) = node.link_destination() {
+                output.push(" destination=")?;
+                write_quoted(&mut output, target.as_url().as_str())?;
+            }
             write_states(&mut output, node.states())?;
             write_operations(&mut output, node.operations())?;
             if let Some(name) = node.name() {

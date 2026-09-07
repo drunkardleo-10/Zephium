@@ -16,6 +16,10 @@ use zephium_core::ids::ProfileId;
 
 use crate::{ContextJoin, ContextRunId, SemanticEffectClass, SemanticOrigin, SemanticSensitivity};
 
+#[path = "agent_manifest_discovery.rs"]
+mod discovery;
+pub use discovery::AgentNavigationDiscovery;
+
 /// Maximum browser profiles named by one approved run.
 pub const MAX_AGENT_RUN_PROFILES: usize = 4;
 /// Maximum explicit account states named by one approved run.
@@ -621,6 +625,7 @@ pub struct AgentPlanNodeAuthority {
     max_sensitivity: SemanticSensitivity,
     effects: AgentEffectScope,
     navigation_route: Option<AgentNavigationRoute>,
+    navigation_discovery: Option<AgentNavigationDiscovery>,
 }
 
 impl AgentPlanNodeAuthority {
@@ -663,6 +668,7 @@ impl AgentPlanNodeAuthority {
             max_sensitivity,
             effects,
             navigation_route: None,
+            navigation_discovery: None,
         })
     }
 
@@ -672,7 +678,10 @@ impl AgentPlanNodeAuthority {
         mut self,
         route: AgentNavigationRoute,
     ) -> Result<Self, AgentManifestContractError> {
-        if self.navigation_route.is_some() || self.origins.binary_search(route.origin()).is_err() {
+        if self.navigation_route.is_some()
+            || self.navigation_discovery.is_some()
+            || self.origins.binary_search(route.origin()).is_err()
+        {
             return Err(AgentManifestContractError::NavigationRoute);
         }
         self.navigation_route = Some(route);
@@ -682,6 +691,29 @@ impl AgentPlanNodeAuthority {
     /// Optional immutable route approved with this node, not a dynamic counter.
     pub const fn navigation_route(&self) -> Option<&AgentNavigationRoute> {
         self.navigation_route.as_ref()
+    }
+
+    /// Freezes public read-only discovered-link authority, excluding fixed routes.
+    pub fn with_navigation_discovery(
+        mut self,
+        discovery: AgentNavigationDiscovery,
+    ) -> Result<Self, AgentManifestContractError> {
+        if self.navigation_route.is_some()
+            || self.navigation_discovery.is_some()
+            || self.origins.binary_search(discovery.origin()).is_err()
+            || self.accounts != [AgentAccountScope::Anonymous]
+            || self.max_sensitivity != SemanticSensitivity::Public
+            || self.effects != AgentEffectScope::try_new(&[SemanticEffectClass::Read])?
+        {
+            return Err(AgentManifestContractError::NavigationRoute);
+        }
+        self.navigation_discovery = Some(discovery);
+        Ok(self)
+    }
+
+    /// Immutable discovery scope approved with this node.
+    pub const fn navigation_discovery(&self) -> Option<&AgentNavigationDiscovery> {
+        self.navigation_discovery.as_ref()
     }
 
     /// Canonical profiles allowed by this node.
@@ -720,6 +752,7 @@ impl fmt::Debug for AgentPlanNodeAuthority {
             .field("max_sensitivity", &self.max_sensitivity)
             .field("effects", &self.effects)
             .field("navigation_route", &self.navigation_route)
+            .field("navigation_discovery", &self.navigation_discovery)
             .finish()
     }
 }
@@ -736,6 +769,11 @@ impl AgentPlanNodeScope {
     /// Optional exact ordered route inherited from this node's authority.
     pub const fn navigation_route(&self) -> Option<&AgentNavigationRoute> {
         self.authority.navigation_route()
+    }
+
+    /// Immutable discovery scope approved with this node.
+    pub const fn navigation_discovery(&self) -> Option<&AgentNavigationDiscovery> {
+        self.authority.navigation_discovery()
     }
     /// Constructs one node; its containing manifest checks non-widening inheritance.
     pub const fn new(
@@ -1137,6 +1175,27 @@ fn manifest_guard(
             }
         }
     }
+    let discovered = nodes
+        .iter()
+        .filter(|node| node.navigation_discovery().is_some())
+        .count();
+    if discovered != 0 {
+        hasher.update(b"ZEPHIUM-AGENT-NAVIGATION-DISCOVERY-1\0");
+        hasher.update((discovered as u64).to_be_bytes());
+        for node in nodes {
+            if let Some(discovery) = node.navigation_discovery() {
+                hasher.update(node.id().bytes());
+                hasher.update((discovery.max_hops() as u64).to_be_bytes());
+                for value in [
+                    discovery.departure().as_url().as_str(),
+                    discovery.path_prefix(),
+                ] {
+                    hasher.update((value.len() as u64).to_be_bytes());
+                    hasher.update(value.as_bytes());
+                }
+            }
+        }
+    }
     hasher.finalize().into()
 }
 
@@ -1500,6 +1559,67 @@ mod tests {
         assert_eq!(AgentRunManifestId::parse(&Ulid(123).to_string()), Some(id));
         assert_eq!(AgentRunManifestId::parse("not-an-id"), None);
         assert_eq!(format!("{id:?}"), "AgentRunManifestId([redacted])");
+    }
+
+    #[test]
+    fn discovery_scope_is_fingerprinted_and_cannot_combine_with_a_route() {
+        let target = |path: &str| {
+            crate::ContextNavigationTarget::parse(&format!("https://sink.example.test/{path}"))
+                .unwrap()
+        };
+        let mut guards = vec![manifest().guard()];
+        for (departure, prefix, hops) in [
+            ("start", "/", 1),
+            ("start", "/", 2),
+            ("other", "/", 2),
+            ("start", "/docs/", 2),
+        ] {
+            let mut candidate = manifest();
+            let discovery =
+                AgentNavigationDiscovery::try_new(target(departure), prefix.into(), hops).unwrap();
+            let authority = authority(
+                vec![profile(1)],
+                vec![AgentAccountScope::Anonymous],
+                vec![origin("sink")],
+                SemanticSensitivity::Public,
+                effects(&[SemanticEffectClass::Read]),
+            );
+            let authority = authority
+                .with_navigation_discovery(discovery.clone())
+                .unwrap();
+            assert!(authority
+                .with_navigation_route(
+                    AgentNavigationRoute::try_new(target(departure), vec![target("final")])
+                        .unwrap()
+                )
+                .is_err());
+            candidate.plan_nodes[0].authority.navigation_discovery = Some(discovery);
+            let guard = manifest_guard(
+                candidate.id,
+                candidate.run,
+                &candidate.scope,
+                candidate.budget,
+                candidate.issued_at,
+                candidate.expires_at,
+                &candidate.plan_nodes,
+            );
+            assert!(!guards.contains(&guard));
+            guards.push(guard);
+        }
+        for sensitivity in [SemanticSensitivity::Public, SemanticSensitivity::Sensitive] {
+            let authority = authority(
+                vec![profile(1)],
+                vec![account(1)],
+                vec![origin("sink")],
+                sensitivity,
+                effects(&[SemanticEffectClass::Read]),
+            );
+            assert!(authority
+                .with_navigation_discovery(
+                    AgentNavigationDiscovery::try_new(target("start"), "/".into(), 1).unwrap()
+                )
+                .is_err());
+        }
     }
 
     #[test]

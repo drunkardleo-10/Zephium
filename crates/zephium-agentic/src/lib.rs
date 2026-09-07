@@ -139,13 +139,13 @@ pub use agent_lifecycle::{
 };
 pub use agent_manifest::{
     AgentAccountAttestationId, AgentAccountId, AgentAccountScope, AgentContextAccountBinding,
-    AgentDataFlowRule, AgentEffectScope, AgentManifestContractError, AgentNavigationRoute,
-    AgentPlanLeaseId, AgentPlanNodeAuthority, AgentPlanNodeId, AgentPlanNodeScope,
-    AgentPolicyInstant, AgentRunBudget, AgentRunManifest, AgentRunManifestId, AgentRunScope,
-    MAX_AGENT_DATA_FLOW_RULES, MAX_AGENT_NAVIGATION_ROUTE_HOPS, MAX_AGENT_PLAN_NODES,
-    MAX_AGENT_RUN_ACCOUNTS, MAX_AGENT_RUN_CONTEXTS, MAX_AGENT_RUN_COST_MICRO_USD,
-    MAX_AGENT_RUN_LIFETIME_MILLIS, MAX_AGENT_RUN_MODEL_TOKENS, MAX_AGENT_RUN_OPERATIONS,
-    MAX_AGENT_RUN_ORIGINS, MAX_AGENT_RUN_PROFILES,
+    AgentDataFlowRule, AgentEffectScope, AgentManifestContractError, AgentNavigationDiscovery,
+    AgentNavigationRoute, AgentPlanLeaseId, AgentPlanNodeAuthority, AgentPlanNodeId,
+    AgentPlanNodeScope, AgentPolicyInstant, AgentRunBudget, AgentRunManifest, AgentRunManifestId,
+    AgentRunScope, MAX_AGENT_DATA_FLOW_RULES, MAX_AGENT_NAVIGATION_ROUTE_HOPS,
+    MAX_AGENT_PLAN_NODES, MAX_AGENT_RUN_ACCOUNTS, MAX_AGENT_RUN_CONTEXTS,
+    MAX_AGENT_RUN_COST_MICRO_USD, MAX_AGENT_RUN_LIFETIME_MILLIS, MAX_AGENT_RUN_MODEL_TOKENS,
+    MAX_AGENT_RUN_OPERATIONS, MAX_AGENT_RUN_ORIGINS, MAX_AGENT_RUN_PROFILES,
 };
 pub use agent_metric_closure::{
     AgentRunMetricClosure, AgentRunMetricClosureError, MAX_AGENT_RUN_METRIC_CLOSURE_BYTES,

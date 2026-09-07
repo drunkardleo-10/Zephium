@@ -466,6 +466,14 @@ fn input_with_route(
     allowed: &[SemanticEffectClass],
     route: Option<AgentNavigationRoute>,
 ) -> AgentWorkRunInput {
+    input_with_navigation(allowed, route, None)
+}
+
+fn input_with_navigation(
+    allowed: &[SemanticEffectClass],
+    route: Option<AgentNavigationRoute>,
+    discovery: Option<AgentNavigationDiscovery>,
+) -> AgentWorkRunInput {
     let profile = 1_u128.into();
     let context = ContextIdentity::new(
         ContextId::generate(),
@@ -489,6 +497,11 @@ fn input_with_route(
     .expect("authority");
     let authority = if let Some(route) = route {
         authority.with_navigation_route(route).unwrap()
+    } else {
+        authority
+    };
+    let authority = if let Some(discovery) = discovery {
+        authority.with_navigation_discovery(discovery).unwrap()
     } else {
         authority
     };
@@ -1512,7 +1525,18 @@ fn provider_fixture_with_account(
         "fixture-not-a-secret".to_owned(),
     )
     .expect("credential");
-    let mut approved = if let ProviderFault::Navigation(NavigationFault::Route(_)) = fault {
+    let mut approved = if matches!(
+        fault,
+        ProviderFault::Navigation(
+            NavigationFault::Discovery | NavigationFault::DiscoveryMissingLink
+        )
+    ) {
+        input_with_navigation(
+            &[SemanticEffectClass::Read],
+            None,
+            Some(navigation_tests::discovery_scope()),
+        )
+    } else if let ProviderFault::Navigation(NavigationFault::Route(_)) = fault {
         input_with_route(
             &[SemanticEffectClass::Read],
             Some(navigation_tests::route_tests::route()),
@@ -1551,7 +1575,21 @@ fn provider_fixture_with_account(
             .unwrap(),
         )
     } else if let ProviderFault::Navigation(fault) = fault {
-        if let NavigationFault::Route(fault) = fault {
+        if matches!(
+            fault,
+            NavigationFault::Discovery | NavigationFault::DiscoveryMissingLink
+        ) {
+            Box::new(
+                crate::AgentWorkDiscoveryTask::try_new(
+                    approved.context.identity,
+                    navigation_tests::discovery_scope(),
+                    vec![
+                        SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap(),
+                    ],
+                )
+                .unwrap(),
+            )
+        } else if let NavigationFault::Route(fault) = fault {
             Box::new(navigation_tests::route_tests::RouteTask::new(
                 fault,
                 navigation_schedule.as_ref().unwrap().clone(),

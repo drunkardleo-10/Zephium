@@ -144,6 +144,14 @@ class HTMLInputElement extends Element {
   get labels() { return this._labels; }
 }
 
+class HTMLAnchorElement extends Element {
+  constructor(attributes = {}) { super("a", attributes); }
+  get href() {
+    if (!(this instanceof HTMLAnchorElement)) throw new TypeError("Anchor receiver required");
+    return this.attributes.href || "";
+  }
+}
+
 class HTMLTextAreaElement extends Element {
   constructor(attributes = {}, value = "") {
     super("textarea", attributes);
@@ -217,6 +225,7 @@ Object.assign(globalThis, {
   HTMLElement: Element,
   ShadowRoot,
   HTMLInputElement,
+  HTMLAnchorElement,
   HTMLTextAreaElement,
   HTMLSelectElement,
   HTMLOptionElement,
@@ -1048,7 +1057,7 @@ async function finish() {
   // actionable link. Preserve both children and the composed link name without
   // another DOM walk or exposing hidden/credential content through ancestors.
   const catalog = new Element("main");
-  const productLink = catalog.append(new Element("a", { href: "https://example.test/product" }));
+  const productLink = catalog.append(new HTMLAnchorElement({ href: "https://example.test/product" }));
   productLink.append(new Element("h3")).append(new CharacterData("Fixture Cup"));
   productLink.append(new Element("p")).append(new CharacterData("$15.00 USD"));
   productLink.append(new Element("span", { hidden: "" })).append(new CharacterData("hidden-catalog-secret"));
@@ -1061,10 +1070,15 @@ async function finish() {
   secretLink.append(new Element("h3")).append(new CharacterData("sk-name-secret-fixture-value"));
   document._root = catalog;
   setOwner(catalog, document);
+  const anchorGetter = Object.getOwnPropertyDescriptor(HTMLAnchorElement.prototype, "href");
+  Object.defineProperty(productLink, "href", { get() { throw new Error("page-owned href getter"); } });
+  Object.defineProperty(HTMLAnchorElement.prototype, "href", { configurable: true, get() { throw new Error("replaced prototype getter"); } });
   const catalogWire = invoke(103, 103, { k: "initial" });
+  Object.defineProperty(HTMLAnchorElement.prototype, "href", anchorGetter);
   const catalogSnapshot = JSON.parse(catalogWire);
   const catalogLink = catalogSnapshot.n.find((node) => node.r === "link" && node.n === "Fixture Cup $15.00 USD");
   assert(catalogLink && (catalogLink.o & 1) === 1, "nested product text lost actionable link identity");
+  assert(catalogLink.u === "https://example.test/product", "link destination did not use the captured exact native getter");
   assert(catalogSnapshot.n.some((node) => node.r === "heading" && node.n === "Fixture Cup"), "nested heading was discarded");
   assert(catalogSnapshot.n.some((node) => node.r === "paragraph" && node.t === "$15.00 USD"), "nested price was discarded");
   assert(catalogSnapshot.n.some((node) => node.r === "link" && node.n === "Explicit product"), "explicit accessible name was overwritten");
@@ -1109,6 +1123,7 @@ async function finish() {
     malformed_request_rejected: true,
     oversized_action_subtree_rejected: true,
     nested_control_names_bounded: true,
+    captured_link_destination_getter: true,
     immutable: true
   })}\n`);
 }

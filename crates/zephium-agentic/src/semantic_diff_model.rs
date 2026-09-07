@@ -574,6 +574,10 @@ fn write_full_node(
     if let Some(level) = node.heading_level() {
         checked_write(output, format_args!(" level={}", level.get()))?;
     }
+    if let Some(target) = node.link_destination() {
+        output.push(" destination=")?;
+        write_quoted(output, target.as_url().as_str())?;
+    }
     write_states(output, node.states())?;
     write_operations(output, node.operations())?;
     if let Some(name) = node.name() {
@@ -618,6 +622,14 @@ fn write_changed_fields(
     if changes.contains(SemanticNodeChange::Name) {
         output.push(" name=")?;
         write_optional_text(output, node.name().map(|value| value.as_str()))?;
+    }
+    if changes.contains(SemanticNodeChange::LinkDestination) {
+        output.push(" destination=")?;
+        write_optional_text(
+            output,
+            node.link_destination()
+                .map(|target| target.as_url().as_str()),
+        )?;
     }
     if changes.contains(SemanticNodeChange::Text) {
         output.push(" text=")?;
@@ -723,7 +735,7 @@ fn write_operation_inventory(
     Ok(())
 }
 
-fn change_labels() -> [(SemanticNodeChange, &'static str); 9] {
+fn change_labels() -> [(SemanticNodeChange, &'static str); 10] {
     [
         (SemanticNodeChange::Name, "name"),
         (SemanticNodeChange::Text, "text"),
@@ -734,6 +746,7 @@ fn change_labels() -> [(SemanticNodeChange, &'static str); 9] {
         (SemanticNodeChange::Trust, "trust"),
         (SemanticNodeChange::Geometry, "geometry"),
         (SemanticNodeChange::HeadingLevel, "heading_level"),
+        (SemanticNodeChange::LinkDestination, "link_destination"),
     ]
 }
 

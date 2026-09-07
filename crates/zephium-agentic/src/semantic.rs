@@ -20,6 +20,8 @@ pub const MAX_SEMANTIC_NODES: usize = 512;
 pub const MAX_SEMANTIC_DEPTH: usize = 32;
 /// Maximum UTF-8 bytes in one accessible name.
 pub const MAX_SEMANTIC_NAME_BYTES: usize = 512;
+/// Maximum exact UTF-8 bytes in one disclosed public link destination.
+pub const MAX_SEMANTIC_LINK_DESTINATION_BYTES: usize = 2048;
 /// Maximum UTF-8 bytes in one visible-text segment.
 pub const MAX_SEMANTIC_TEXT_BYTES: usize = 4 * 1024;
 /// Maximum UTF-8 bytes in one safe value summary.
@@ -889,6 +891,7 @@ pub struct SemanticNode {
     depth: u8,
     role: SemanticRole,
     heading_level: Option<SemanticHeadingLevel>,
+    link_destination: Option<crate::ContextNavigationTarget>,
     name: Option<SemanticText>,
     text: Option<SemanticText>,
     value: Option<SemanticValueSummary>,
@@ -919,6 +922,12 @@ impl SemanticNode {
     /// Heading level, present exactly for heading nodes.
     pub const fn heading_level(&self) -> Option<SemanticHeadingLevel> {
         self.heading_level
+    }
+
+    /// Bounded public HTTP(S) destination observed on this exact link.
+    /// Page data, never a navigation permit.
+    pub const fn link_destination(&self) -> Option<&crate::ContextNavigationTarget> {
+        self.link_destination.as_ref()
     }
 
     /// Bounded accessible name.
@@ -980,6 +989,7 @@ impl fmt::Debug for SemanticNode {
             .field("depth", &self.depth)
             .field("role", &self.role)
             .field("heading_level", &self.heading_level)
+            .field("has_link_destination", &self.link_destination.is_some())
             .field("name_bytes", &self.name.as_ref().map(SemanticText::len))
             .field("text_bytes", &self.text.as_ref().map(SemanticText::len))
             .field("has_value", &self.value.is_some())
@@ -999,6 +1009,7 @@ pub(crate) struct SemanticNodeInput {
     pub(crate) depth: u8,
     pub(crate) role: SemanticRole,
     pub(crate) heading_level: Option<SemanticHeadingLevel>,
+    pub(crate) link_destination: Option<crate::ContextNavigationTarget>,
     pub(crate) name: Option<SemanticText>,
     pub(crate) text: Option<SemanticText>,
     pub(crate) value: Option<SemanticValueSummary>,
@@ -1176,6 +1187,7 @@ impl SemanticSnapshot {
                 depth: input.depth,
                 role: input.role,
                 heading_level: input.heading_level,
+                link_destination: input.link_destination,
                 name: input.name,
                 text: input.text,
                 value: input.value,
@@ -1320,6 +1332,7 @@ mod tests {
             depth: 0,
             role: SemanticRole::Button,
             heading_level: None,
+            link_destination: None,
             name: Some(SemanticText::try_new("Save".to_owned(), 10).expect("name")),
             text: None,
             value: None,

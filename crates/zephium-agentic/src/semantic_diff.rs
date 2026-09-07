@@ -181,6 +181,8 @@ pub enum SemanticNodeChange {
     Geometry,
     /// Heading level changed.
     HeadingLevel,
+    /// Observed public link destination changed.
+    LinkDestination,
 }
 
 impl SemanticNodeChange {
@@ -946,6 +948,10 @@ fn shared_node_positions(
 fn changed_fields(previous: &SemanticNode, current: &SemanticNode) -> SemanticNodeChanges {
     let mut changes = SemanticNodeChanges::NONE;
     for (changed, field) in [
+        (
+            previous.link_destination() != current.link_destination(),
+            SemanticNodeChange::LinkDestination,
+        ),
         (previous.name() != current.name(), SemanticNodeChange::Name),
         (previous.text() != current.text(), SemanticNodeChange::Text),
         (
@@ -1036,7 +1042,7 @@ struct FingerprintHasher(Sha256);
 impl FingerprintHasher {
     fn new() -> Self {
         let mut hasher = Sha256::new();
-        hasher.update(b"zephium-semantic-observation-ack-v1\0");
+        hasher.update(b"zephium-semantic-observation-ack-v2\0");
         Self(hasher)
     }
 
@@ -1192,6 +1198,11 @@ fn hash_node(hasher: &mut FingerprintHasher, node: &SemanticNode) {
         None => hasher.byte(0),
     }
     hash_text(hasher, node.name().map(|value| value.as_str()));
+    hash_text(
+        hasher,
+        node.link_destination()
+            .map(|target| target.as_url().as_str()),
+    );
     hash_text(hasher, node.text().map(|value| value.as_str()));
     match node.value() {
         None => hasher.byte(0),
@@ -1671,6 +1682,44 @@ mod tests {
                 SemanticDiffBudget::ACTION,
             )),
             SemanticFreshSnapshotReason::NotAcknowledged
+        );
+    }
+
+    #[test]
+    fn link_destination_changes_revoke_acknowledgement_and_are_projected_as_changes() {
+        let context = context(2);
+        let nodes = |destination: &str| {
+            json!([
+                {"k":1,"r":"document"}, {"k":2,"p":0,"r":"link","n":"Source","u":destination}
+            ])
+        };
+        let first = observation(
+            context,
+            20,
+            200,
+            21,
+            "complete",
+            nodes("https://example.test/first"),
+        );
+        let swapped = observation(
+            context,
+            20,
+            200,
+            21,
+            "complete",
+            nodes("https://example.test/second"),
+        );
+        let acknowledgement = acknowledge(&first);
+        assert!(!acknowledgement.matches(&swapped));
+        let changes = changed_fields(
+            &first.frames()[0].nodes()[1],
+            &swapped.frames()[0].nodes()[1],
+        );
+        assert!(changes.contains(SemanticNodeChange::LinkDestination));
+        assert_eq!(changes.len(), 1);
+        assert!(
+            SemanticObservationFingerprint::from_observation(&first)
+                != SemanticObservationFingerprint::from_observation(&swapped)
         );
     }
 

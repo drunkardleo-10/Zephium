@@ -66,6 +66,11 @@ pub trait AgentWorkTask: Send {
     fn navigation_route(&self) -> Option<&AgentNavigationRoute> {
         None
     }
+    /// Frozen public observed-link discovery authority, mutually exclusive with
+    /// fixed routes. The model chooses a route and answer inside this scope.
+    fn navigation_discovery(&self) -> Option<&AgentNavigationDiscovery> {
+        None
+    }
     /// Opts into nonterminal public reads of the exact initial baseline. Reads
     /// grant no task progress, new observation/ref or native effect authority.
     /// This setting is frozen at admission with the other task capabilities.
@@ -693,13 +698,15 @@ impl AgentWorkController {
         let baseline_read = task.allows_baseline_read();
         let navigation_target = task.navigation_target().cloned();
         let navigation_route = task.navigation_route().cloned();
+        let navigation_discovery = task.navigation_discovery().cloned();
         if retained.is_some()
             && (input.durable_result
                 || extraction_schema.is_none()
                 || actions_before_extraction
                 || subtree_extraction
                 || navigation_target.is_some()
-                || navigation_route.is_some())
+                || navigation_route.is_some()
+                || navigation_discovery.is_some())
         {
             return Err(AgentWorkFailure::Contract);
         }
@@ -713,6 +720,24 @@ impl AgentWorkController {
             || navigation_route.as_ref().is_some_and(|route| {
                 route.departure() != &input.context.target
                     || route.origin() != &input.context.origin
+            })
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
+        let approved_discovery = input
+            .manifest
+            .plan_node(input.lease.node())
+            .ok_or(AgentWorkFailure::Contract)?
+            .navigation_discovery();
+        if navigation_discovery.as_ref() != approved_discovery
+            || navigation_discovery.as_ref().is_some_and(|scope| {
+                navigation_target.is_some()
+                    || navigation_route.is_some()
+                    || scope.departure() != &input.context.target
+                    || scope.origin() != &input.context.origin
+                    || extraction_schema.is_none()
+                    || actions_before_extraction
+                    || subtree_extraction
             })
         {
             return Err(AgentWorkFailure::Contract);
@@ -772,6 +797,7 @@ impl AgentWorkController {
                     baseline_read,
                     navigation_target,
                     navigation_route,
+                    navigation_discovery,
                     navigation_hops: 0,
                     extraction: None,
                     failure: None,
@@ -789,6 +815,7 @@ impl AgentWorkController {
 struct WorkState {
     navigation_target: Option<ContextNavigationTarget>,
     navigation_route: Option<AgentNavigationRoute>,
+    navigation_discovery: Option<AgentNavigationDiscovery>,
     navigation_hops: usize,
     baseline_read: bool,
     extraction_schema: Option<SemanticExtractionSchema>,
@@ -812,6 +839,9 @@ struct WorkState {
 
 impl WorkState {
     fn navigation_length(&self) -> usize {
+        if let Some(scope) = &self.navigation_discovery {
+            return scope.max_hops();
+        }
         self.navigation_route
             .as_ref()
             .map_or(usize::from(self.navigation_target.is_some()), |route| {
@@ -820,7 +850,9 @@ impl WorkState {
     }
 
     fn has_navigation(&self) -> bool {
-        self.navigation_target.is_some() || self.navigation_route.is_some()
+        self.navigation_target.is_some()
+            || self.navigation_route.is_some()
+            || self.navigation_discovery.is_some()
     }
 
     fn navigation_complete(&self) -> bool {
@@ -865,7 +897,11 @@ impl WorkState {
         self.check_task_contract()?;
         let progress = self.task.evaluate(observation)?;
         self.check_task_contract()?;
-        if self.has_navigation() {
+        if self.navigation_discovery.is_some() {
+            if progress != AgentWorkTaskProgress::Continue {
+                return Err(AgentWorkFailure::Contract);
+            }
+        } else if self.has_navigation() {
             let expected = if self.navigation_complete() {
                 AgentWorkTaskProgress::ReadyForExtraction
             } else {
@@ -890,6 +926,7 @@ impl WorkState {
         if self.task.extraction_schema() != self.extraction_schema.as_ref()
             || self.task.navigation_target() != self.navigation_target.as_ref()
             || self.task.navigation_route() != self.navigation_route.as_ref()
+            || self.task.navigation_discovery() != self.navigation_discovery.as_ref()
             || self.task.allows_actions_before_extraction() != self.actions_before_extraction
             || self.task.allows_subtree_extraction() != self.subtree_extraction
             || self.task.allows_baseline_read() != self.baseline_read
@@ -1753,6 +1790,7 @@ impl AgentWorkController {
             let proposal = match step.turn.proposal().kind() {
                 AgentBrowserToolKind::Extract => {
                     if state.has_navigation()
+                        && state.navigation_discovery.is_none()
                         && (navigation_incomplete
                             || progress != AgentWorkTaskProgress::ReadyForExtraction)
                     {

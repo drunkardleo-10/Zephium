@@ -235,7 +235,7 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
     (
         "crates/zephium-agent-controller/src/work.rs",
         &[
-            "ifretained.is_some()&&(input.durable_result||extraction_schema.is_none()||actions_before_extraction||subtree_extraction||navigation_target.is_some()||navigation_route.is_some())",
+            "ifretained.is_some()&&(input.durable_result||extraction_schema.is_none()||actions_before_extraction||subtree_extraction||navigation_target.is_some()||navigation_route.is_some()||navigation_discovery.is_some())",
             "resources:retained.is_none().then(||WorkContextResources{",
             "ifstate.native.retained.is_some(){journal.emit(AgentWorkEventKind::ContextActive)?;self.start_session()?;self.browser_loop(worker,browser).await?;returnself.close_retained(worker,None).await;}",
             "state.transport.take().ok_or(AgentWorkFailure::Contract)?",

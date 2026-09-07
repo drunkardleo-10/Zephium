@@ -206,6 +206,14 @@ pub fn decode_semantic_snapshot(
             validate_optional_text(raw_node.name, MAX_SEMANTIC_NAME_BYTES, &mut wire_text_bytes)?;
         let mut raw_text =
             validate_optional_text(raw_node.text, MAX_SEMANTIC_TEXT_BYTES, &mut wire_text_bytes)?;
+        let raw_destination = validate_optional_text(
+            raw_node.link_destination,
+            crate::semantic::MAX_SEMANTIC_LINK_DESTINATION_BYTES,
+            &mut wire_text_bytes,
+        )?;
+        if raw_destination.is_some() && role != SemanticRole::Link {
+            return Err(SemanticDecodeError::NodeContract);
+        }
         let (mut value, value_was_secret) =
             decode_value(role, raw_node.value, &mut wire_text_bytes)?;
 
@@ -246,6 +254,28 @@ pub fn decode_semantic_snapshot(
             }
         }
 
+        // Only public, credential-free, canonical document links enter model
+        // context. Rejected destinations are omitted, not repaired or truncated.
+        let link_destination = raw_destination
+            .filter(|value| {
+                sensitivity == SemanticSensitivity::Public
+                    && !looks_like_secret_value(value.as_str())
+            })
+            .and_then(|value| {
+                let target = crate::ContextNavigationTarget::parse(value.as_str()).ok()?;
+                (matches!(target.as_url().scheme(), "http" | "https")
+                    && target.as_url().as_str() == value.as_str()
+                    && target.as_url().query().is_none()
+                    && target.as_url().fragment().is_none())
+                .then_some(target)
+            });
+        retained_text_bytes = retained_text_bytes
+            .checked_add(
+                link_destination
+                    .as_ref()
+                    .map_or(0, |target| target.as_url().as_str().len()),
+            )
+            .ok_or(SemanticDecodeError::TextLimit)?;
         retained_text_bytes = retained_text_bytes
             .checked_add(if retain_name_bytes {
                 raw_name.as_ref().map_or(0, SemanticText::len)
@@ -279,6 +309,7 @@ pub fn decode_semantic_snapshot(
             depth,
             role,
             heading_level,
+            link_destination,
             name: raw_name,
             text: raw_text,
             value,
@@ -569,6 +600,8 @@ struct RawNode {
     role: RawRole,
     #[serde(rename = "l", default)]
     heading_level: Option<u8>,
+    #[serde(rename = "u", default)]
+    link_destination: Option<String>,
     #[serde(rename = "n", default)]
     name: Option<String>,
     #[serde(rename = "t", default)]
@@ -785,6 +818,60 @@ mod tests {
             2
         );
         assert_eq!(snapshot.total_text_bytes(), 12);
+    }
+
+    #[test]
+    fn link_destinations_are_exact_public_bounded_data_not_arbitrary_urls() {
+        let good = "https://example.test/docs/next";
+        for (destination, sensitivity, retained) in [
+            (good, "public", true),
+            (good, "sensitive", false),
+            (good, "secret", false),
+            ("https://example.test/docs?token=secret", "public", false),
+            ("https://example.test/docs#section", "public", false),
+            ("https://user:secret@example.test/docs", "public", false),
+            ("javascript:alert(1)", "public", false),
+            ("about:blank", "public", false),
+            ("/docs/next", "public", false),
+            ("https://EXAMPLE.test/docs/next", "public", false),
+            ("https://example.test/sk-secret-key-value", "public", false),
+        ] {
+            let snapshot = decode_semantic_snapshot(
+                decode_context(),
+                &payload(json!([
+                    {"k":1,"r":"link","u":destination,"q":sensitivity}
+                ])),
+            )
+            .unwrap();
+            assert_eq!(
+                snapshot.nodes()[0].link_destination().is_some(),
+                retained,
+                "{destination}"
+            );
+            assert_eq!(
+                snapshot.total_text_bytes(),
+                if retained { good.len() as u32 } else { 0 }
+            );
+            assert!(!format!("{snapshot:?}").contains("example.test"));
+        }
+        assert_eq!(
+            decode_semantic_snapshot(
+                decode_context(),
+                &payload(json!([
+                    {"k":1,"r":"paragraph","u":good}
+                ]))
+            ),
+            Err(SemanticDecodeError::NodeContract)
+        );
+        assert_eq!(
+            decode_semantic_snapshot(
+                decode_context(),
+                &payload(json!([
+                    {"k":1,"r":"link","u":"x".repeat(crate::semantic::MAX_SEMANTIC_LINK_DESTINATION_BYTES + 1)}
+                ]))
+            ),
+            Err(SemanticDecodeError::TextLimit)
+        );
     }
 
     #[test]

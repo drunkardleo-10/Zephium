@@ -6,6 +6,26 @@ use std::sync::atomic::AtomicBool;
 #[path = "work_route_tests.rs"]
 pub(super) mod route_tests;
 
+pub(super) fn discovery_scope() -> AgentNavigationDiscovery {
+    AgentNavigationDiscovery::try_new(
+        ContextNavigationTarget::parse("https://work-fixture.invalid/").unwrap(),
+        "/".into(),
+        2,
+    )
+    .unwrap()
+}
+
+#[test]
+fn discovered_link_workflow_uses_original_controller_and_refuses_unobserved_urls() {
+    let _serial = lock(&SERIAL);
+    for fault in [
+        NavigationFault::Discovery,
+        NavigationFault::DiscoveryMissingLink,
+    ] {
+        provider_fixture(ProviderFault::Navigation(fault));
+    }
+}
+
 pub(super) struct NavigationSchedule {
     pub(super) events: Mutex<Option<Arc<Mutex<WorkEvents>>>>,
     native_started: AtomicBool,
@@ -79,6 +99,8 @@ impl TerraControllerClock for NavigationClock {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum NavigationFault {
+    Discovery,
+    DiscoveryMissingLink,
     Route(route_tests::RouteFault),
     None,
     PriorLocate,
@@ -125,6 +147,7 @@ impl NavigationFault {
             Self::Ceiling => 14,
             Self::DepartureMissing | Self::TargetMutation | Self::AccountMutation => 0,
             Self::None
+            | Self::Discovery
             | Self::ForeignSource
             | Self::OldCitation
             | Self::ResultMutation
@@ -198,6 +221,11 @@ impl NavigationFault {
             return fault.check_request(bytes, turns);
         }
         let text = std::str::from_utf8(bytes).unwrap();
+        if matches!(self, Self::Discovery | Self::DiscoveryMissingLink) {
+            assert!(text.contains("ZEPHIUM_HOST_LINK_DISCOVERY_V1"));
+            assert!(!text.contains("ZEPHIUM_HOST_NAVIGATION_CHECKPOINT_V1"));
+            assert!(text.contains(r#"\"next_navigation_target\":null"#));
+        }
         assert!(
             text.contains("Verify a deterministic fixture."),
             "admitted objective survives"
@@ -455,6 +483,11 @@ pub(super) fn capture(
         correlation.invocation().get(),
         correlation.snapshot_generation().get()
     );
+    let wire = if !arrived && fault == NavigationFault::Discovery {
+        wire.replace("]}", r#",{"k":3,"p":0,"r":"link","n":"A relevant source","u":"https://work-fixture.invalid/arrival"}]}"#)
+    } else {
+        wire
+    };
     let snapshot = decode_semantic_snapshot(
         SemanticDecodeContext::new(
             correlation.invocation(),
@@ -536,7 +569,10 @@ pub(super) fn assert_outcome(
     assert!(!events
         .iter()
         .any(|event| event.kind() == AgentWorkEventKind::Verified));
-    if matches!(fault, NavigationFault::None | NavigationFault::PriorLocate) {
+    if matches!(
+        fault,
+        NavigationFault::None | NavigationFault::PriorLocate | NavigationFault::Discovery
+    ) {
         let AgentWorkOutcome::Succeeded(mut success) = outcome else {
             panic!("navigation success: {outcome:?}");
         };

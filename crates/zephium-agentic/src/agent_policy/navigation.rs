@@ -295,12 +295,18 @@ impl AgentRunPolicy {
             .manifest
             .plan_node(node_id)
             .ok_or(AgentPolicyError::Invariant)?;
-        let Some(route) = node.navigation_route() else {
+        let route = node.navigation_route();
+        let discovery = node.navigation_discovery();
+        if route.is_none() && discovery.is_none() {
             return Ok(None);
-        };
+        }
+        let total_hops = discovery.map_or_else(
+            || route.map_or(0, |route| route.destinations().len()),
+            |scope| scope.max_hops(),
+        );
         let completed = self.navigation_attempts;
         if self.navigation.is_some()
-            || completed > route.destinations().len()
+            || completed > total_hops
             || self.navigation_receipts.iter().flatten().count() != completed
             || request.account().context() != context
         {
@@ -324,7 +330,9 @@ impl AgentRunPolicy {
                 || !receipt.matches_manifest_revision(self.manifest.id(), self.manifest.guard())
                 || receipt.lease != request.lease()
                 || receipt.node != node_id
-                || receipt.target_guard != target_guard(&route.destinations()[hop])
+                || route.is_some_and(|route| {
+                    receipt.target_guard != target_guard(&route.destinations()[hop])
+                })
                 || receipt.settlement != AgentNavigationSettlement::Committed
                 || receipt.account != request.account().account()
                 || receipt.settled_at > request.account().observed_at()
@@ -357,8 +365,9 @@ impl AgentRunPolicy {
                     .map(|receipt| receipt.map(AgentNavigationReceipt::progress_id)),
             },
             completed_hops: completed,
-            total_hops: route.destinations().len(),
-            next_target: route.destinations().get(completed),
+            total_hops,
+            next_target: route.and_then(|route| route.destinations().get(completed)),
+            discovery: discovery.is_some(),
         }))
     }
 
@@ -394,12 +403,36 @@ impl AgentRunPolicy {
             .ok_or(AgentPolicyError::Invariant)?;
         let hop = self.navigation_attempts;
         let route = node.navigation_route();
-        let limit = route.map_or(1, |route| route.destinations().len());
+        let discovery = node.navigation_discovery();
+        let limit = discovery.map_or_else(
+            || route.map_or(1, |route| route.destinations().len()),
+            |scope| scope.max_hops(),
+        );
         if hop >= limit
             || hop != self.navigation_receipts.iter().flatten().count()
             || route.is_some_and(|route| route.destinations().get(hop) != Some(target))
         {
             return Err(AgentPolicyError::Navigation);
+        }
+        if let Some(scope) = discovery {
+            if !scope.admits(target)
+                || self
+                    .navigation_receipts
+                    .iter()
+                    .flatten()
+                    .any(|receipt| receipt.target_guard == target_guard(target))
+                || !observation
+                    .frames()
+                    .iter()
+                    .flat_map(|frame| frame.nodes())
+                    .any(|node| {
+                        node.role() == crate::SemanticRole::Link
+                            && node.sensitivity() == SemanticSensitivity::Public
+                            && node.link_destination() == Some(target)
+                    })
+            {
+                return Err(AgentPolicyError::Navigation);
+            }
         }
         if hop > 0
             && !self
@@ -636,6 +669,7 @@ pub(crate) struct AgentNavigationCheckpoint<'a> {
     completed_hops: usize,
     total_hops: usize,
     next_target: Option<&'a ContextNavigationTarget>,
+    discovery: bool,
 }
 
 impl AgentNavigationCheckpoint<'_> {
@@ -650,6 +684,9 @@ impl AgentNavigationCheckpoint<'_> {
     }
     pub(crate) const fn next_target(&self) -> Option<&ContextNavigationTarget> {
         self.next_target
+    }
+    pub(crate) const fn is_discovery(&self) -> bool {
+        self.discovery
     }
 }
 

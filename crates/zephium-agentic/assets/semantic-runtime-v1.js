@@ -55,6 +55,8 @@
   const stringSlice = String.prototype.slice;
   const stringSplit = String.prototype.split;
   const stringTrim = String.prototype.trim;
+  const stringStartsWith = String.prototype.startsWith;
+  const stringIncludes = String.prototype.includes;
 
   if (objectHasOwn(globalThis, GLOBAL_NAME)) {
     return;
@@ -111,6 +113,8 @@
 
   const inputValueGetter =
     typeof HTMLInputElement === "function" ? getter(HTMLInputElement.prototype, "value") : null;
+  const anchorHrefGetter =
+    typeof HTMLAnchorElement === "function" ? getter(HTMLAnchorElement.prototype, "href") : null;
   const inputCheckedGetter =
     typeof HTMLInputElement === "function" ? getter(HTMLInputElement.prototype, "checked") : null;
   const inputLabelsGetter =
@@ -1318,6 +1322,7 @@
     if (sensitivity === "secret" || (sensitivity === "sensitive" && record.sensitivity === "public")) {
       record.sensitivity = sensitivity;
       record.wire.q = sensitivity;
+      delete record.wire.u;
     }
   }
 
@@ -1461,6 +1466,20 @@
       const name = labelledText(element, descriptor, state);
       if (name !== null && name !== "") addName(record, name, state);
       record.sink = recordSink(descriptor, wire.n !== undefined);
+      if (descriptor.role === "link" && descriptor.tag === "a" && record.sensitivity === "public") {
+        // Use the captured native getter, never an element-owned accessor or
+        // a click. Exact URL bytes share the original text/wire ceilings.
+        let destination;
+        try { destination = read(anchorHrefGetter, element); } catch (_) { destination = undefined; }
+        if (typeof destination === "string" && destination !== "" &&
+            utf8Length(destination, 2049) <= 2048 &&
+            (apply(stringStartsWith, destination, ["https://"]) || apply(stringStartsWith, destination, ["http://"])) &&
+            !apply(stringIncludes, destination, ["?"]) && !apply(stringIncludes, destination, ["#"]) &&
+            !apply(stringIncludes, destination, ["@"])) {
+          const field = consumeField(destination, 2048, state);
+          if (!field.secret && field.value === destination) wire.u = destination;
+        }
+      }
 
       if (descriptor.role === "password") {
         wire.v = { k: "redacted" };

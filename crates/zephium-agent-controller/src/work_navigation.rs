@@ -41,16 +41,32 @@ impl AgentWorkController {
         AgentWorkFailure,
     > {
         state.check_task_contract()?;
-        if state.navigation_complete() || progress != AgentWorkTaskProgress::ReadyForNavigation {
+        let discovery = state.navigation_discovery.as_ref();
+        let expected = if discovery.is_some() {
+            AgentWorkTaskProgress::Continue
+        } else {
+            AgentWorkTaskProgress::ReadyForNavigation
+        };
+        if state.navigation_complete() || progress != expected {
             return Err(AgentWorkFailure::TaskPhase {
                 expected: progress,
                 proposed: AgentBrowserToolKind::Navigate,
             });
         }
-        let target = state
-            .current_navigation_target()
-            .cloned()
-            .ok_or(AgentWorkFailure::Contract)?;
+        let target = if let Some(scope) = discovery {
+            let AgentBrowserToolProposal::Navigate(target) = turn.turn.proposal() else {
+                return Err(AgentWorkFailure::Contract);
+            };
+            if !scope.admits(target) {
+                return Err(AgentWorkFailure::Contract);
+            }
+            target.clone()
+        } else {
+            state
+                .current_navigation_target()
+                .cloned()
+                .ok_or(AgentWorkFailure::Contract)?
+        };
         if !matches!(turn.turn.proposal(), AgentBrowserToolProposal::Navigate(proposed) if proposed == &target)
         {
             return Err(AgentWorkFailure::Contract);
@@ -58,10 +74,14 @@ impl AgentWorkController {
         let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
         // Keep the original total ceiling and reserve the remaining exact route
         // proposals plus final extraction/mapping; no hop receives a new budget.
-        let remaining_hops = state
-            .navigation_length()
-            .checked_sub(state.navigation_hops)
-            .ok_or(AgentWorkFailure::Contract)?;
+        let remaining_hops = if discovery.is_some() {
+            1
+        } else {
+            state
+                .navigation_length()
+                .checked_sub(state.navigation_hops)
+                .ok_or(AgentWorkFailure::Contract)?
+        };
         if usize::from(session.turns) + remaining_hops + 1
             > usize::from(super::super::MAX_BROWSER_MODEL_TURNS)
         {
