@@ -44,8 +44,9 @@ global native seal/audit proof. Unresolved construction, Store, worker or native
 owners cannot become a clean local-zero substitute. Factory/admission ambiguity
 remains fail-closed and retains any original owner available to the application.
 
-The production provider path remains `store:false`; inspectable qualification
-retention is explicitly refused by this entry. One-page read-only objectives
+The production provider path remains `store:false`. An explicit public-only,
+release-excluded diagnostic can select inspectable retention through this same
+entry; its separately compiled adapters do not exist in production. One-page read-only objectives
 are supported by the existing trusted task/controller contract. Retained
 navigation, human takeover/input, rendering authority, fresh successor admission
 and general multi-page open objectives are **not** exposed. Shared application

@@ -7,6 +7,10 @@ use std::time::Instant;
 use zephium_agent_controller::*;
 use zephium_agent_provider_transport::AgentProviderCredential;
 
+#[cfg(feature = "work-execution-probe")]
+#[path = "work_resources_public_product.rs"]
+mod public_qualification;
+
 /// Move-only original Engine port factory. The stable sink belongs to the
 /// application resource owner, not to an actor runtime's private mailbox.
 pub type RetainedWorkNativeFactory = Box<
@@ -390,6 +394,12 @@ impl ProductWork {
                 break;
             };
             projection.events.push_back(event);
+        }
+        #[cfg(feature = "work-execution-probe")]
+        if work.phase() == AdmissionPhase::Terminal
+            && projection.snapshot.phase != RetainedWorkPhase::Terminal
+        {
+            work.public_retention_diagnostic();
         }
         projection.snapshot.phase = match work.phase() {
             AdmissionPhase::Constructing => RetainedWorkPhase::Constructing,

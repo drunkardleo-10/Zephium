@@ -9,7 +9,6 @@ use zephium_agent_provider_transport::{
 use zephium_agent_runtime::AgentRuntimeConfig;
 
 const TOTAL: Duration = Duration::from_secs(150);
-const INITIAL: &str = "https://react.dev/learn";
 
 struct Clock(Instant);
 impl TerraControllerClock for Clock {
@@ -86,7 +85,7 @@ fn input(
     deadline: Instant,
     definition: &QualificationDefinition,
 ) -> Result<AgentWorkRunInput, &'static str> {
-    let origin = SemanticOrigin::parse(ORIGIN).map_err(|_| "origin")?;
+    let origin = SemanticOrigin::parse(definition.origin).map_err(|_| "origin")?;
     let effects = AgentEffectScope::try_new(&[SemanticEffectClass::Read]).map_err(|_| "effects")?;
     // Reservation ceiling, not expected charge. Luna's catalog-bounded initial
     // reservation is 77,830 micro-USD; all exact usage shares this original cap.
@@ -135,7 +134,7 @@ fn input(
         AgentWorkContextSpec::try_new(
             identity,
             storage,
-            ContextNavigationTarget::parse(INITIAL).map_err(|_| "target")?,
+            ContextNavigationTarget::parse(definition.initial).map_err(|_| "target")?,
         )
         .map_err(|_| "context")?,
         definition.objective.into(),
@@ -173,6 +172,7 @@ mod tests {
             ContextProfileStorageClass::Durable,
             ContextProfileStorageClass::Ephemeral,
         ] {
+            #[allow(clippy::single_element_loop)] // Optional static witness matrix.
             for definition in [
                 &DEFINITION,
                 #[cfg(feature = "discovery-qualification")]
@@ -184,6 +184,21 @@ mod tests {
             }
         }
         let task = task(identity).unwrap();
+        #[cfg(feature = "retained-product-qualification")]
+        {
+            let definition = &crate::retained_product_qualification::DEFINITION;
+            assert!(input(
+                identity,
+                ContextProfileStorageClass::Durable,
+                started,
+                started + TOTAL,
+                definition
+            )
+            .is_ok());
+            let task = (definition.task)(identity).unwrap();
+            assert!(task.navigation_target().is_none());
+            assert!(task.navigation_discovery().is_none());
+        }
         assert_eq!(task.navigation_target().is_some(), !DISCOVERY);
         assert_eq!(task.navigation_discovery().is_some(), DISCOVERY);
         assert!(task.navigation_route().is_none());

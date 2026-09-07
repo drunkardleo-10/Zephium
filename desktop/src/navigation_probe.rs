@@ -7,13 +7,23 @@ use std::sync::{
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tauri::Manager;
+#[cfg(not(feature = "macos-work-retained-product-probe"))]
 use zephium_app::AgentWorkApplicationHandle;
+#[cfg(feature = "macos-work-retained-product-probe")]
+use zephium_app::RetainedWorkHandle as AgentWorkApplicationHandle;
 #[cfg(feature = "macos-work-discovery-probe")]
 use zephium_work_composition::discovery_qualification::{
     self as qualifier, ApplicationObserver, ApplicationReport,
 };
-#[cfg(not(feature = "macos-work-discovery-probe"))]
+#[cfg(not(any(
+    feature = "macos-work-discovery-probe",
+    feature = "macos-work-retained-product-probe"
+)))]
 use zephium_work_composition::navigation_qualification::{
+    self as qualifier, ApplicationObserver, ApplicationReport,
+};
+#[cfg(feature = "macos-work-retained-product-probe")]
+use zephium_work_composition::retained_product_qualification::{
     self as qualifier, ApplicationObserver, ApplicationReport,
 };
 
@@ -181,7 +191,11 @@ fn run(app: &tauri::AppHandle, control: &Control) -> Result<ApplicationReport, &
     let view = control
         .admission
         .admit(|| {
-            let view = super::admit_trusted_work(app, request).map_err(|error| {
+            #[cfg(feature = "macos-work-retained-product-probe")]
+            let admit = super::admit_retained_trusted_work;
+            #[cfg(not(feature = "macos-work-retained-product-probe"))]
+            let admit = super::admit_trusted_work;
+            let view = admit(app, request).map_err(|error| {
                 super::write_diagnostic(format_args!(
                     "work-application-navigation-refusal: {error:?}"
                 ));

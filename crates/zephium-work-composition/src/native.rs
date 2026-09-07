@@ -87,18 +87,20 @@ impl MacosWorkComposition {
         request: TrustedWorkRequest,
     ) -> Result<Option<zephium_app::RetainedWorkHandle>, AgentWorkFailure> {
         let binding = request.browser_profile.ok_or(AgentWorkFailure::Contract)?;
-        #[cfg(feature = "public-qualification")]
-        if request.public_qualification {
-            // This production join has no inspectable-retention bypass.
-            return Err(AgentWorkFailure::Contract);
-        }
         let ports = zephium_app::RetainedWorkPorts::new(
             self.engine.clone(),
             self.store.clone(),
             self.store.clone(),
             self.native_factory(),
         );
-        let prepared = zephium_app::PreparedRetainedWork::try_new(
+        let prepare = zephium_app::PreparedRetainedWork::try_new;
+        #[cfg(feature = "public-qualification")]
+        let prepare = if request.public_qualification {
+            zephium_app::PreparedRetainedWork::try_new_for_public_qualification
+        } else {
+            prepare
+        };
+        let prepared = prepare(
             request.input,
             binding,
             request.config,

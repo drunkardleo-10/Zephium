@@ -7,7 +7,10 @@ use zephium_agentic::*;
 
 #[path = "navigation_qualification_input.rs"]
 mod input;
-#[cfg(feature = "discovery-qualification")]
+#[cfg(any(
+    feature = "discovery-qualification",
+    feature = "retained-product-qualification"
+))]
 pub(crate) use input::load_configured_request;
 pub use input::load_request;
 #[path = "navigation_qualification_observer.rs"]
@@ -19,6 +22,8 @@ const MAX_HOPS: u64 = 1;
 const DISCOVERY: bool = false;
 
 pub(crate) struct QualificationDefinition {
+    pub initial: &'static str,
+    pub origin: &'static str,
     pub task_name: &'static str,
     pub retention_name: &'static str,
     pub objective: &'static str,
@@ -30,6 +35,8 @@ pub(crate) struct QualificationDefinition {
     pub verify_owned: fn(&SemanticOwnedExtractionResult) -> bool,
 }
 const DEFINITION: QualificationDefinition = QualificationDefinition {
+    initial: "https://react.dev/learn",
+    origin: ORIGIN,
     task_name: "react-one-hop-v1",
     retention_name: "stateless",
     objective: OBJECTIVE,

@@ -10,6 +10,7 @@ macos-work = ["dep:zephium-app", "dep:zephium-engine", "dep:zephium-store", "dep
 public-qualification = ["macos-work", "zephium-app/work-execution-probe"]
 navigation-qualification = ["macos-work", "dep:zephium-agentic", "dep:zephium-core", "dep:zephium-agent-runtime"]
 discovery-qualification = ["navigation-qualification", "public-qualification"]
+retained-product-qualification = ["navigation-qualification", "public-qualification"]
 retained-qualification = ["public-qualification", "zephium-engine/native-agentic-work-resource-probe", "dep:zephium-agentic", "dep:zephium-core", "dep:zephium-agent-runtime"]
 retained-public-qualification = ["retained-qualification", "zephium-engine/native-agentic-public-resource-probe"]
 

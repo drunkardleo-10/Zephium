@@ -60,6 +60,14 @@ pub(crate) fn fixture_provider_responses(
                     "{\"object\":\"response.input_tokens\",\"input_tokens\":17}".to_owned(),
                 )
             } else {
+                // Every ordinary application/retained loopback path is stateless,
+                // even when the release-excluded public adapter is compiled.
+                assert!(std::str::from_utf8(&request)
+                    .unwrap()
+                    .contains("\"store\":false"));
+                assert!(!std::str::from_utf8(&request)
+                    .unwrap()
+                    .contains("\"store\":true"));
                 turns += 1;
                 ("text/event-stream", responses[turns - 1].clone())
             };

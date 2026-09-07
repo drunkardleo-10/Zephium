@@ -15,6 +15,9 @@ pub use native::{MacosWorkComposition, TrustedWorkRequest};
 pub use zephium_agent_controller::AgentWorkFailure;
 #[cfg(feature = "public-qualification")]
 mod qualification;
+#[cfg(feature = "retained-product-qualification")]
+#[doc(hidden)]
+pub mod retained_product_qualification;
 #[cfg(all(feature = "navigation-qualification", not(debug_assertions)))]
 compile_error!("navigation Work qualification is forbidden in optimized builds");
 #[cfg(feature = "discovery-qualification")]

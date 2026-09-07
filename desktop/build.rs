@@ -64,6 +64,13 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
     let extension_lab = env::var_os("CARGO_FEATURE_LOCAL_EXTENSION_LAB").is_some();
     let rendering_probe = env::var_os("CARGO_FEATURE_MACOS_WORK_RENDERING_PROBE").is_some();
     let navigation_probe = env::var_os("CARGO_FEATURE_MACOS_WORK_NAVIGATION_PROBE").is_some();
+    if env::var_os("CARGO_FEATURE_MACOS_WORK_RETAINED_PRODUCT_PROBE").is_some()
+        && env::var_os("CARGO_FEATURE_MACOS_WORK_DISCOVERY_PROBE").is_some()
+    {
+        return Err(
+            "retained product and navigation discovery witnesses are mutually exclusive".into(),
+        );
+    }
     if navigation_probe {
         if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
             || env::var("PROFILE").as_deref() != Ok("debug")

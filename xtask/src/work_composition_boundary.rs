@@ -67,7 +67,10 @@ fn ordinary_navigation_observer(source: &str) -> Result<(), String> {
             "let profile = wait_for_profile(app, control, started, None)?;",
             "wait_for_profile(app, control, started, Some(profile))?;",
             "control::profile_wait_failure(started, Instant::now(), control.admission.cancelled())",
-            ".admission.admit(|| { let view = super::admit_trusted_work(app, request)",
+            ".admission.admit(|| {",
+            "#[cfg(not(feature = \"macos-work-retained-product-probe\"))] let admit = super::admit_trusted_work;",
+            "#[cfg(feature = \"macos-work-retained-product-probe\")] let admit = super::admit_retained_trusted_work;",
+            "let view = admit(app, request)",
             "Some((view.clone(), false))",
             "let settled = control.admission.settle(result);",
             "if state.control.admission.cancel() { request_stop(&state.control); api.prevent_exit();",
@@ -303,7 +306,8 @@ mod tests {
         let source = include_str!("../../desktop/src/navigation_probe.rs");
         ordinary_navigation_observer(source).unwrap();
         for boundary in [
-            "super::admit_trusted_work(app, request)",
+            "let admit = super::admit_trusted_work;",
+            "let admit = super::admit_retained_trusted_work;",
             "worker.join().is_ok()",
             "accepted && joined && normal_shutdown_clean",
             "api.prevent_exit()",
@@ -320,6 +324,30 @@ mod tests {
             "shell.shutdown_with_deadline()",
         ] {
             assert!(ordinary_navigation_observer(&format!("{source}\n{mutation}")).is_err());
+        }
+    }
+    #[test]
+    fn retained_public_retention_is_excluded_and_shipping_selection_is_stateless() {
+        let controller = include_str!("../../crates/zephium-agent-controller/src/work_retained.rs");
+        require(
+            controller,
+            &[
+                "task, AgentBrowserRetention::Stateless,",
+                "#[cfg(feature = \"probe-harness\")] pub fn try_new_for_public_probe(",
+                "task, AgentBrowserRetention::InspectablePublicData,",
+            ],
+        )
+        .unwrap();
+        let product = include_str!("../../crates/zephium-app/src/work_resources_product.rs");
+        require(product, &["#[cfg(feature = \"work-execution-probe\")] #[path = \"work_resources_public_product.rs\"] mod public_qualification;"]).unwrap();
+        let actor = include_str!("../../crates/zephium-app/src/work_resources_application.rs");
+        require(actor, &["#[cfg(feature = \"work-execution-probe\")] #[path = \"work_resources_public_actor.rs\"] mod public_qualification;"]).unwrap();
+        for (source, token) in [
+            (controller, "AgentBrowserRetention::Stateless"),
+            (product, "#[cfg(feature = \"work-execution-probe\")]"),
+            (actor, "#[cfg(feature = \"work-execution-probe\")]"),
+        ] {
+            assert!(require(&source.replace(token, "removed"), &[token]).is_err());
         }
     }
     #[test]

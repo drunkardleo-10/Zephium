@@ -173,7 +173,15 @@ impl AgentWorkRetainedController {
     > {
         let transport = AgentProviderTransport::try_new(transport)
             .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Transport))?;
-        Self::with_transport(input, browser, transport, credential, audit, task)
+        Self::with_transport(
+            input,
+            browser,
+            transport,
+            credential,
+            audit,
+            task,
+            AgentBrowserRetention::Stateless,
+        )
     }
 
     /// Release-excluded loopback adapter, with the same exact original transport.
@@ -193,9 +201,48 @@ impl AgentWorkRetainedController {
         ),
         AgentWorkFailure,
     > {
-        Self::with_transport(input, browser, transport, credential, audit, task)
+        Self::with_transport(
+            input,
+            browser,
+            transport,
+            credential,
+            audit,
+            task,
+            AgentBrowserRetention::Stateless,
+        )
     }
 
+    /// Explicit public-data diagnostic retention; absent from production builds.
+    #[cfg(feature = "probe-harness")]
+    pub fn try_new_for_public_probe(
+        input: AgentWorkRunInput,
+        browser: Box<dyn AgentWorkRetainedBrowser>,
+        transport: AgentProviderTransportConfig,
+        credential: AgentProviderCredential,
+        audit: Arc<dyn AgentAuditPort>,
+        task: Box<dyn AgentWorkTask>,
+    ) -> Result<
+        (
+            Self,
+            AgentWorkRetainedHandle,
+            zephium_agent_runtime::AgentRuntimeScopedBinding,
+        ),
+        AgentWorkFailure,
+    > {
+        let transport = AgentProviderTransport::try_new(transport)
+            .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Transport))?;
+        Self::with_transport(
+            input,
+            browser,
+            transport,
+            credential,
+            audit,
+            task,
+            AgentBrowserRetention::InspectablePublicData,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn with_transport(
         mut input: AgentWorkRunInput,
         browser: Box<dyn AgentWorkRetainedBrowser>,
@@ -203,6 +250,7 @@ impl AgentWorkRetainedController {
         credential: AgentProviderCredential,
         audit: Arc<dyn AgentAuditPort>,
         task: Box<dyn AgentWorkTask>,
+        retention: AgentBrowserRetention,
     ) -> Result<
         (
             Self,
@@ -253,7 +301,7 @@ impl AgentWorkRetainedController {
             credential,
             audit,
             task,
-            AgentBrowserRetention::Stateless,
+            retention,
             Some(browser),
         )?;
         let terminal = Arc::new(Mutex::new(None));

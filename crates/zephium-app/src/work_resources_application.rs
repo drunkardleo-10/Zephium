@@ -13,6 +13,10 @@ use zephium_agent_controller::*;
 use zephium_agent_provider_transport::{AgentProviderCredential, AgentProviderTransportConfig};
 use zephium_agent_runtime::*;
 
+#[cfg(feature = "work-execution-probe")]
+#[path = "work_resources_public_actor.rs"]
+mod public_qualification;
+
 /// Trusted, dormant preparation. The callback receives only a newly acquired
 /// read binding through the narrow facade, never the native resource owner.
 pub(super) type PrepareActor = Box<
