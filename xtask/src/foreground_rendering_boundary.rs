@@ -143,6 +143,8 @@ fn validate_driver(driver: &str, desktop: &str) -> Result<(), String> {
         "api.prevent_exit()",
         "cancel_foreground_rendering_witness()",
         "normal_shutdown_clean",
+        "retained_controller_shutdown_complete()",
+        "&&original_owner_closed",
         "native_drain==Some(true)",
         "report.cleanup_failure.is_none()",
         "configuration::require_fresh_data_root(root)",

@@ -75,9 +75,10 @@ pub struct WorkBrowserResourceHealth {
 }
 
 impl WorkBrowserResourceHealth {
-    /// The original native reporting owner has entered retirement. This remains
-    /// observable after sticky uncertainty; it is not callback-return or native
-    /// absence proof. Its counted native delivery lane must still be audited.
+    /// The original native reporting owner's final health publication and wake
+    /// have returned. Cleanup polls this separately from health: the final wake
+    /// can run before this completion becomes observable. Sticky uncertainty is
+    /// preserved, and the native owner's counted lane must still be audited.
     pub fn reporter_retired(&self) -> bool {
         self.state.reporter_retired.load(Ordering::Acquire)
     }
@@ -170,15 +171,16 @@ impl WorkBrowserResourceHealthReporter {
 }
 impl Drop for WorkBrowserResourceHealthReporter {
     fn drop(&mut self) {
-        // Publish ownership retirement before waking the original application.
-        // Health uncertainty remains sticky and cannot be healed by this fact.
-        self.state.reporter_retired.store(true, Ordering::Release);
+        // Final publication (including arbitrary wake code) must return before
+        // cleanup may reap the receiver. In particular a concurrent cleanup
+        // poll cannot treat entry into this destructor as completed retirement.
         self.state
             .publish(if self.installed.load(Ordering::Acquire) {
                 RETIRED
             } else {
                 UNCERTAIN
             });
+        self.state.reporter_retired.store(true, Ordering::Release);
     }
 }
 impl fmt::Debug for WorkBrowserResourceHealthReporter {

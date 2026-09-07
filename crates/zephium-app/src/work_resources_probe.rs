@@ -23,6 +23,8 @@ pub struct RetainedWorkProbeOwner {
     constructed: bool,
     acquired: bool,
     started: bool,
+    audit_attempted: bool,
+    audit_pending: Option<ContextResourceAuditId>,
 }
 impl RetainedWorkProbeOwner {
     /// Creates no resource or worker; retains the platform's original event sink.
@@ -40,6 +42,8 @@ impl RetainedWorkProbeOwner {
             constructed: false,
             acquired: false,
             started: false,
+            audit_attempted: false,
+            audit_pending: None,
         })
     }
     /// One frozen anonymous document, never an actor-selected URL.
@@ -200,7 +204,7 @@ impl RetainedWorkProbeOwner {
     /// schedules one original native seal. The unchanged audit still accounts
     /// callback-return and queued-task debt; retirement alone mints no proof.
     pub fn poll_seal(&mut self, audit: ContextResourceAuditId) -> Result<bool, &'static str> {
-        if self.pending.is_some() {
+        if self.pending.is_some() || self.audit_attempted {
             return Err("seal_phase");
         }
         if let Some(resource) = &self.resource {
@@ -215,23 +219,69 @@ impl RetainedWorkProbeOwner {
             {
                 return Err("seal_phase");
             }
-            match self.owner.reap_absent(resource) {
-                Ok(_) => {}
-                Err(Refusal::Busy) => return Ok(false),
-                Err(_) => return Err("resource_reap"),
+            let resource = self
+                .owner
+                .shared
+                .resource(resource)
+                .map_err(|_| "resource_owner")?;
+            if resource.flights.load(Ordering::Acquire) != 0
+                || !resource
+                    .lock_local(&resource.health)
+                    .map_err(|_| "resource_health")?
+                    .reporter_retired()
+            {
+                return Ok(false);
             }
         }
-        (self
+        // Keep the original row/receiver through both audit dispatch and its
+        // terminal. A scheduling refusal must not consume the cleanup owner.
+        self.audit_attempted = true;
+        let scheduled = self
             .owner
             .shutdown_audit(audit)
             .map_err(|_| "native_seal")?
-            == ContextShutdownDispatch::AuditScheduled)
-            .then_some(true)
-            .ok_or("native_audit_dispatch")
+            == ContextShutdownDispatch::AuditScheduled;
+        if !scheduled {
+            return Err("native_audit_dispatch");
+        }
+        self.audit_pending = Some(audit);
+        Ok(true)
     }
     /// Bounded original global event lane; never rebound to the worker.
-    pub fn poll_native_event(&self) -> Result<Option<ContextNativeEvent>, &'static str> {
-        self.owner.poll_native_event().map_err(|_| "native_event")
+    pub fn poll_native_event(&mut self) -> Result<Option<ContextNativeEvent>, &'static str> {
+        let event = self.owner.poll_native_event().map_err(|_| "native_event")?;
+        if let Some(ContextNativeEvent::ShutdownAuditSettled(settlement)) = &event {
+            if self.audit_pending == Some(settlement.audit()) {
+                self.audit_pending = None;
+            }
+        }
+        Ok(event)
+    }
+    /// Final nonblocking accounting after ordinary engine teardown. This checks
+    /// callback-owner retirement, not task acceptance or native absence. Failed
+    /// rows are kept until every original receiver is safe to drop.
+    pub fn drain_after_engine_shutdown(&mut self, now: AgentPolicyInstant) -> bool {
+        self.pending.take();
+        let _ = self.owner.seal_resources();
+        let accounted = self.owner.drain_abandoned(now).is_ok();
+        loop {
+            match self.poll_native_event() {
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(_) => return false,
+            }
+        }
+        accounted
+            && self.audit_pending.is_none()
+            && self.owner.shared.lock_resources().is_ok_and(|resources| {
+                resources.values().all(|resource| {
+                    resource.flights.load(Ordering::Acquire) == 0
+                        && resource.reads.load(Ordering::Acquire) == 0
+                        && resource
+                            .lock_local(&resource.health)
+                            .is_ok_and(|health| health.reporter_retired())
+                })
+            })
     }
     /// Local descriptive closure only; final application/global proof is separate.
     pub fn locally_retired(&self) -> bool {

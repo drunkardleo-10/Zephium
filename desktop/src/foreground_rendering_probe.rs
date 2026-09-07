@@ -142,6 +142,10 @@ pub(super) fn on_run_event(app: &tauri::AppHandle, event: &tauri::RunEvent) -> b
             }
         }
         tauri::RunEvent::Exit => {
+            #[cfg(feature = "macos-work-retained-controller-probe")]
+            let original_owner_closed = zephium_work_composition::retained_qualification::retained_controller_shutdown_complete();
+            #[cfg(not(feature = "macos-work-retained-controller-probe"))]
+            let original_owner_closed = true;
             let shutdown_clean = app
                 .try_state::<super::ShutdownCoordinator>()
                 .is_some_and(|shutdown| shutdown.authorized_exit_code.load(Ordering::Acquire) == 0);
@@ -158,8 +162,13 @@ pub(super) fn on_run_event(app: &tauri::AppHandle, event: &tauri::RunEvent) -> b
                     && report.fixture_clean
                     && report.cleanup_failure.is_none()
             }) && shutdown_clean
+                && original_owner_closed
                 && native_drain == Some(true);
             super::write_diagnostic(format_args!("work-rendering-closure: qualified={qualified} normal_shutdown_clean={shutdown_clean} exact_native_weak_drain={native_drain:?}"));
+            #[cfg(feature = "macos-work-retained-controller-probe")]
+            super::write_diagnostic(format_args!(
+                "work-retained-shutdown-owner: closed={original_owner_closed}"
+            ));
         }
         _ => {}
     }

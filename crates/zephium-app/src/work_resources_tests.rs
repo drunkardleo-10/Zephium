@@ -319,6 +319,53 @@ fn original_work_owner_and_sink_survive_two_exact_lease_facades_without_global_r
 }
 
 #[test]
+fn reaping_waits_for_the_final_reporter_wake_to_return() {
+    for uncertain in [false, true] {
+        let armed = Arc::new(AtomicBool::new(false));
+        let (entered, arrived) = mpsc::sync_channel(1);
+        let (release, resume) = mpsc::sync_channel(1);
+        let resume = Mutex::new(resume);
+        let wake_armed = armed.clone();
+        let (owner, native) = setup(Arc::new(move || {
+            if wake_armed.swap(false, Ordering::AcqRel) {
+                entered.send(()).unwrap();
+                resume.lock().unwrap().recv().unwrap();
+            }
+            true
+        }));
+        let resource = construct(&owner);
+        let reporter = native
+            .reporters
+            .lock()
+            .unwrap()
+            .remove(&resource.identity().context())
+            .unwrap();
+        if uncertain {
+            reporter.invalidate();
+        }
+        let mut destroy = owner.destroy(&resource).unwrap();
+        assert!(destroy.poll(tick(6)).unwrap().is_some());
+        owner.seal_resources().unwrap();
+        while owner.poll_native_event().unwrap().is_some() {}
+        armed.store(true, Ordering::Release);
+        let retiring = std::thread::spawn(move || drop(reporter));
+        arrived.recv().unwrap();
+        let original = owner.shared.resource(&resource).unwrap();
+        assert!(!original
+            .lock_local(&original.health)
+            .unwrap()
+            .reporter_retired());
+        assert!(!owner.locally_retired());
+        assert_eq!(owner.reap_absent(&resource), Err(Refusal::Busy));
+        release.send(()).unwrap();
+        retiring.join().unwrap();
+        assert!(owner.locally_retired());
+        assert_eq!(owner.reap_absent(&resource).unwrap(), resource.identity());
+        assert!(owner.shared.global_current());
+    }
+}
+
+#[test]
 fn destroyed_terminal_cannot_reap_a_living_native_reporter_even_after_uncertainty() {
     for uncertain in [false, true] {
         let (owner, native) = setup(Arc::new(|| true));

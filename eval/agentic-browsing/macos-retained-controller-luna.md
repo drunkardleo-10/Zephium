@@ -38,7 +38,7 @@ The original session transport, provider/account/policy/metric/audit ownership
 and actual scoped worker must close. Audit uses the same original SqliteStore
 as the shell; it is not a fabricated immediate-ACK sink. Scoped drain happens
 off the main loop and cannot substitute for native notification completion,
-resource destruction or global Clean. Original resource destruction/reaping,
+resource destruction or global Clean. Original resource destruction/row retirement,
 the exact original native audit with all nine counters zero, fixture closure,
 unchanged human ownership, ordinary application shutdown and exact native weak
 drain remain independently required.
@@ -48,8 +48,10 @@ drain remain independently required.
 One resource, one actor, one initial native observation; eight approved
 operations, 100,000 model tokens and 100,000 micro-USD maximum policy budget;
 150-second absolute run bound; four diagnostic mailbox slots; one coalesced
-50-ms main-loop check; one five-second cleanup bound, never renewed by a late
-actor terminal. Existing provider/controller/native limits are unchanged.
+50-ms main-loop check; a five-second cleanup target plus one fixed five-second
+hard grace for already-admitted cleanup. Both bounds derive from the original
+cleanup start and cannot be renewed by late actors or repeated failures.
+Existing provider/controller/native limits are unchanged.
 The corrected development-only cost ceiling admits Luna's existing 77,830
 micro-USD conservative call reservation before exact counting. It is not an
 expected charge; original exact provider accounting remains required. The first
@@ -143,10 +145,12 @@ still lived beyond the Destroyed terminal.
 Source correction preserves the policy refusal and exact native audit. The
 development manifest/node cost ceiling now covers the existing conservative
 reservation. Local reaping and local retirement require retirement of the exact
-native reporter, including after sticky uncertainty. The qualification driver
-keeps its original owner/sink through a bounded post-Destroy drain before its
-single shutdown audit; it does not reinterpret a nonzero audit as clean, renew
-cleanup time, or suppress notification failure. Focused deterministic regression
+native reporter, including after sticky uncertainty, after its final health
+publication and wake have returned. The qualification keeps its original local
+row/receiver through audit scheduling and settlement; refusal to schedule cannot
+consume it. The driver keeps its original owner/sink through a bounded
+post-Destroy drain before its single shutdown audit; it does not reinterpret a
+nonzero audit as clean or renew cleanup deadlines. Focused deterministic regression
 tests cover insufficient/exact reservation boundaries, pre-provider failure
 through the actual common scoped worker, and delayed native reporter retirement.
 No corrected GUI launch, Keychain access or provider call has been performed.
@@ -160,3 +164,42 @@ boundary mutation tests, hostile JavaScript smoke, formatting and whitespace
 checks passed. Application loopback fixtures required sandbox escalation for
 localhost binding; they used no real provider endpoint or credential. These are
 deterministic source checks, not a new live qualification or a rebuilt executable.
+
+## Independent review corrections, 2026-09-07
+
+The unlaunched compile-only build of `4e988fdadfdd83fc9ab708333c593c69e0ac1ec9`
+had executable SHA-256
+`315de5a66458f060629b7ef58f39da40cfe424871af38d87726b54f0cba282bc`.
+Review superseded it before any GUI, Keychain or provider use: its retirement
+flag could become visible before the final wake returned, and cleanup failure
+could still end the driver while exact source obligations lived.
+
+The corrected final retirement publication is ordered after wake return, with a
+controlled concurrent test holding that wake while reaping remains Busy. Soft
+cleanup timeout and diagnostic mailbox failure now retain active cleanup through
+the fixed hard bound: a late reporter can drain and the original native audit
+can settle before ordinary exit. The failure remains recorded even if cleanup
+then succeeds. Diagnostic mailbox failure is distinct from loss of the retained
+resource-health receiver.
+
+Only hard cleanup expiry or loss of the main scheduler uses terminal handoff.
+It retains narrow resource/callback/worker obligations while dropping direct
+engine, Store and rendering holders. The existing failed-report path requests
+ordinary ShutdownCoordinator shutdown. At desktop Exit, an explicit nonblocking
+drain accounts late original lifecycle/audit terminals and releases retained
+receivers only after their reporters, flights, callbacks and workers have drained.
+Unresolved obligations remain visibly unproven and retained through process
+teardown; `work-retained-shutdown-owner: closed=false` cannot qualify the run.
+Weak native drainage alone cannot substitute for either qualification or this
+owner check. No new native/provider success is claimed.
+
+Review-correction verification: all 46 application Work-resource tests, 38
+native Work-resource tests and nine retained-composition tests passed. These
+include a held final wake, late reporter delivery inside the fixed hard grace,
+hard-expiry narrow-owner transfer, original flight/audit-terminal debt during
+engine teardown, and audit dispatch refusal without consuming the source row.
+Strict all-targets Clippy passed for the four relevant crates. The isolated
+desktop retained-probe feature check, agentic-probe/controller/runtime gates,
+resource and foreground-boundary mutation tests, hostile JavaScript smoke,
+formatting and whitespace checks passed. This supersedes the earlier correction
+counts; it is deterministic source/compilation evidence only.
