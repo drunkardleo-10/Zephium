@@ -101,10 +101,15 @@ private func readExactRegularArtifact(at path: String) throws -> Data {
 private func isolatedCacheDirectory() throws -> URL {
     let parent = FileManager.default.temporaryDirectory.path
     var template = Array("\(parent)/zephium-wk-rule-probe.XXXXXX".utf8CString)
-    guard let created = mkdtemp(&template) else {
+    let path = template.withUnsafeMutableBufferPointer { buffer -> String? in
+        guard let baseAddress = buffer.baseAddress, mkdtemp(baseAddress) != nil else {
+            return nil
+        }
+        return String(cString: baseAddress)
+    }
+    guard let path else {
         throw posixFailure("cannot create isolated WebKit cache")
     }
-    let path = String(cString: created)
     guard chmod(path, S_IRWXU) == 0 else {
         let error = posixFailure("cannot restrict isolated WebKit cache")
         _ = rmdir(path)

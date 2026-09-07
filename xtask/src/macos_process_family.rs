@@ -11,7 +11,9 @@ use serde::Serialize;
 
 const MAX_BUNDLE_ID_BYTES: usize = 255;
 const MAX_LABEL_BYTES: usize = 64;
+#[cfg(target_os = "macos")]
 const MAX_APPLICATION_NAME_BYTES: usize = 512;
+#[cfg(any(target_os = "macos", test))]
 const MAX_COALITION_PROCESSES: usize = 128;
 const MIN_DURATION_SECONDS: u64 = 1;
 const MAX_DURATION_SECONDS: u64 = 24 * 60 * 60;
@@ -122,6 +124,7 @@ impl UsageCounters {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[cfg(target_os = "macos")]
 struct ProcessIdentity {
     pid: i32,
     uuid: [u8; 16],
@@ -129,6 +132,7 @@ struct ProcessIdentity {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(target_os = "macos")]
 struct ProcessSample {
     identity: ProcessIdentity,
     resident_bytes: u64,
@@ -138,6 +142,7 @@ struct ProcessSample {
 }
 
 #[derive(Clone, Debug)]
+#[cfg(target_os = "macos")]
 struct TrackedProcess {
     role: ProcessRole,
     first: ProcessSample,
@@ -145,12 +150,14 @@ struct TrackedProcess {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+#[cfg(target_os = "macos")]
 struct MemorySample {
     process_count: usize,
     resident_bytes: u64,
     physical_footprint_bytes: u64,
 }
 
+#[cfg(target_os = "macos")]
 impl MemorySample {
     fn checked_add(&mut self, process: ProcessSample) -> Result<(), String> {
         self.process_count = self
@@ -170,6 +177,7 @@ impl MemorySample {
 }
 
 #[derive(Clone, Debug, Default)]
+#[cfg(target_os = "macos")]
 struct RoleAccumulator {
     observed_processes: usize,
     peak_process_count: usize,
@@ -180,6 +188,7 @@ struct RoleAccumulator {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[cfg(target_os = "macos")]
 struct RoleReport {
     role: ProcessRole,
     observed_processes: usize,
@@ -191,6 +200,7 @@ struct RoleReport {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[cfg(target_os = "macos")]
 struct MeasurementReport {
     schema_version: u8,
     label: String,
@@ -344,6 +354,7 @@ fn validate_label(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_single_asn(output: &str) -> Result<&str, String> {
     let mut asns = output.split_ascii_whitespace().filter(|word| {
         word.starts_with("ASN:")
@@ -361,6 +372,7 @@ fn parse_single_asn(output: &str) -> Result<&str, String> {
     Ok(asn)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_integer_value(output: &str, key: &str) -> Result<i32, String> {
     let prefix = format!("\"{key}\"=");
     let value = output
@@ -375,6 +387,7 @@ fn parse_integer_value(output: &str, key: &str) -> Result<i32, String> {
         .map_err(|_| format!("LaunchServices {key} is out of range"))
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_string_value(output: &str, key: &str, maximum: usize) -> Result<String, String> {
     let prefix = format!("\"{key}\"=\"");
     let value = output
@@ -388,6 +401,7 @@ fn parse_string_value(output: &str, key: &str, maximum: usize) -> Result<String,
     Ok(value.to_owned())
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_coalition_pids(output: &str) -> Result<Vec<i32>, String> {
     let prefix = "\"LSApplicationCoalitionPIDsKey\"=(";
     let cohort = output
@@ -418,6 +432,7 @@ fn parse_coalition_pids(output: &str) -> Result<Vec<i32>, String> {
     Ok(pids)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn role_for_process(root: i32, pid: i32, name: &str) -> ProcessRole {
     if pid == root {
         return ProcessRole::Application;

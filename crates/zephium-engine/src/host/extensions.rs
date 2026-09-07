@@ -12,10 +12,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[cfg(any(target_os = "macos", test))]
+use zephium_core::extensions::ExtensionActiveTabGrantWitness;
 use zephium_core::extensions::{
-    ExtensionActiveTabGrantWitness, ExtensionDocumentAuthorityWitness, ExtensionDocumentPurpose,
-    ExtensionGrantDenial, ExtensionRuntimeFingerprint, ExtensionRuntimeInstance,
-    ExtensionUrlScopeDecision, MAX_EXTENSION_INSTALLS_PER_PROFILE,
+    ExtensionDocumentAuthorityWitness, ExtensionDocumentPurpose, ExtensionGrantDenial,
+    ExtensionRuntimeFingerprint, ExtensionRuntimeInstance, ExtensionUrlScopeDecision,
+    MAX_EXTENSION_INSTALLS_PER_PROFILE,
 };
 use zephium_core::ids::{ItemId, ProfileId};
 
@@ -317,15 +319,19 @@ enum ExtensionAuthorityDenial {
     RuntimeFingerprintMismatch,
     #[cfg(test)]
     RuntimeOwnerAlreadyRetained,
+    #[cfg(any(target_os = "macos", test))]
     ActiveTabCapacity,
     PendingPermitCapacity,
     PendingPermitPerAuthorityCapacity,
     PermitIdentityExhausted,
     WrongProfile,
+    #[cfg(any(target_os = "macos", test))]
     UnsupportedInvocation,
+    #[cfg(any(target_os = "macos", test))]
     InvocationWitnessMismatch,
     PurposeWitnessMismatch,
     DocumentUrlOutOfScope,
+    #[cfg(any(target_os = "macos", test))]
     UnsupportedDocumentOrigin,
     DocumentNotPresented,
     NativeDocumentMismatch,
@@ -337,6 +343,7 @@ enum ExtensionAuthorityDenial {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(target_os = "macos")]
 pub(super) enum ToolbarActiveTabGrant {
     Granted,
     NotApplicable,
@@ -444,6 +451,7 @@ impl ExtensionDocumentAuthority {
     /// still cannot mint authority unless the exact runtime's native owner is
     /// retained and the exact physical tab generation has a committed web
     /// origin.
+    #[cfg(any(target_os = "macos", test))]
     fn grant_active_tab_from_witness_document(
         &mut self,
         witness: ExtensionActiveTabGrantWitness,
@@ -804,6 +812,7 @@ impl ExtensionDocumentAuthority {
         self.refresh_pending_presence();
     }
 
+    #[cfg(any(target_os = "macos", test))]
     fn revoke_pending_for_key(&mut self, key: (ExtensionRuntimeInstance, ItemId)) {
         self.pending_permits
             .retain(|_, pending| (pending.runtime.instance(), pending.item) != key);
@@ -869,6 +878,7 @@ impl EngineHost {
     /// The only future production ingress for minting activeTab scope. All
     /// document fields are derived from EngineHost-owned maps; the service can
     /// supply only an opaque witness bound to the same runtime/invocation.
+    #[cfg(target_os = "macos")]
     fn grant_active_tab_from_user_invocation(
         &mut self,
         item: ItemId,
@@ -884,6 +894,7 @@ impl EngineHost {
     /// presented host document. A restricted or not-yet-presented page simply
     /// receives no transient scope; it does not suppress the independent
     /// action click event.
+    #[cfg(target_os = "macos")]
     pub(super) fn grant_toolbar_active_tab(
         &mut self,
         item: ItemId,

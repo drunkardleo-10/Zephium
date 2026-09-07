@@ -438,6 +438,7 @@ impl NavigationEpochTracker {
     /// Verifies the exact current provisional or committed top-level target.
     /// Terminal/restored generations and stale redirect callbacks cannot
     /// authorize work for another URL.
+    #[cfg(any(target_os = "macos", test))]
     pub(crate) fn matches_current_target(&self, epoch: NavigationEpoch, target: &str) -> bool {
         let Some(target) = canonical_navigation_target(target) else {
             return false;

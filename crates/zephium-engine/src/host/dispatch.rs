@@ -119,6 +119,7 @@ impl<const CAPACITY: usize> ExactTerminalSlots<CAPACITY> {
         overflow_predecessors: 0,
     };
 
+    #[cfg(any(target_os = "macos", test))]
     fn push_back(&mut self, task: HostTask) -> Result<(), HostTask> {
         if self.len >= CAPACITY {
             return Err(task);
@@ -159,6 +160,7 @@ impl<const CAPACITY: usize> ExactTerminalSlots<CAPACITY> {
         self.len == 0 && self.overflow_quarantine.is_none()
     }
 
+    #[cfg(any(target_os = "macos", test))]
     fn quarantine_overflow(&mut self, task: HostTask) -> Result<(), HostTask> {
         if self.overflow_quarantine.is_some() {
             return Err(task);
@@ -799,6 +801,7 @@ pub(crate) const fn agent_context_terminal_depth_for_audit() -> Option<usize> {
 
 /// Admits one exact native extension terminal independently of ordinary
 /// ingress. Shutdown sealing and host reentrancy cannot discard it.
+#[cfg(any(target_os = "macos", test))]
 pub(super) fn with_extension_runtime_terminal<F>(f: F) -> bool
 where
     F: FnOnce(&mut EngineHost) + 'static,
@@ -806,6 +809,7 @@ where
     admit_extension_runtime_terminal(Box::new(f))
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn admit_extension_runtime_terminal(task: HostTask) -> bool {
     enum Admission {
         Accepted,

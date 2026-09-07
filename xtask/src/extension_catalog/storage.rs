@@ -143,10 +143,16 @@ fn path_entry_exists(path: &Path) -> Result<bool, String> {
 }
 
 fn create_restricted_directory(path: &Path) -> std::io::Result<()> {
-    let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
-    builder.mode(0o700);
-    builder.create(path)
+    {
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(0o700);
+        builder.create(path)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::DirBuilder::new().create(path)
+    }
 }
 
 #[cfg(unix)]

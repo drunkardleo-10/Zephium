@@ -143,6 +143,16 @@ candidate commit. Passing macOS tests does not substitute for Windows or Linux,
 and unit tests do not substitute for packaged hostile-page, teardown, erasure,
 and endurance tests.
 
+GitHub-hosted macOS images may temporarily lag the embedded hard floor or ship
+a Safari application whose build does not match the loaded WebKit framework.
+Ordinary push and pull-request CI may still use such an image for source,
+Clippy, unit, and API-availability coverage, but it must label that boundary and
+mint no native runtime evidence. The reusable production-release CI call still
+executes exact runtime admission, principal isolation, and WKWebExtension probes
+and fails closed until an admitted runner is available. Never lower a floor,
+ignore a build mismatch, or relabel hosted source coverage as release evidence
+to make branch CI green.
+
 The Linux Wayland device pass must also force GlobalShortcuts portal denial
 (and separately restart the portal process) and verify that the configured
 launcher chord still opens from the focused main window and closes from the

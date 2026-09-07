@@ -28,7 +28,8 @@ for invariant in \
   'coldCompileSeconds <= productionColdCompileBudgetSeconds' \
   'native WKContentRuleListStore timings: cold_compile_seconds=' \
   'WebKit delivered a duplicate or out-of-order blocker callback' \
-  'let created = mkdtemp(&template)' \
+  'template.withUnsafeMutableBufferPointer' \
+  'mkdtemp(baseAddress)' \
   'chmod(path, S_IRWXU)'
 do
   grep -Fq "${invariant}" "${probe}"

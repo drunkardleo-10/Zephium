@@ -1100,6 +1100,8 @@ impl EngineHost {
                     }
                 }
                 NavigationTransition::Redirected(epoch) => {
+                    #[cfg(not(target_os = "macos"))]
+                    let _ = epoch;
                     #[cfg(target_os = "macos")]
                     queue_extension_background_wake(
                         id,

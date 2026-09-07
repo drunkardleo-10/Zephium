@@ -4,15 +4,20 @@
 //! only the privileged-chrome visibility boundary for browser-level passkey
 //! authorization and never enumerates credentials or relying parties.
 
+#[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use tauri::{Manager as _, WebviewWindow};
 use tauri_specta::Event;
 
-use crate::{authorize, emit_to_privileged, shutdown_started, CallerPolicy, MAIN_LABEL};
+use crate::{authorize, shutdown_started, CallerPolicy};
+#[cfg(target_os = "macos")]
+use crate::{emit_to_privileged, MAIN_LABEL};
 
+#[cfg(target_os = "macos")]
 const EVENT_BROWSER_CREDENTIAL_CAPABILITY: &str = "zephium:browser-credential-capability";
+#[cfg(target_os = "macos")]
 static PASSKEY_AUTHORIZATION_REQUEST_PENDING: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]

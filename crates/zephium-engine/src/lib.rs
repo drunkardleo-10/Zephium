@@ -4,6 +4,7 @@ mod agent_context_port;
 pub use agent_context_port::work_browser_monotonic_now;
 #[cfg(feature = "agentic-browser")]
 pub use agent_context_port::{AgentBrowserLifetimeFactory, MAX_AGENT_BROWSER_LIFETIMES};
+#[cfg(target_os = "macos")]
 mod diagnostics;
 mod erasure;
 mod host;
@@ -48,12 +49,14 @@ pub use platform::macos::{
     MacosPasskeyAuthorizationRequestFailure, MacosPasskeyAuthorizationState,
 };
 
+#[cfg(target_os = "macos")]
 macro_rules! diagnostic {
     ($($argument:tt)*) => {{
         crate::diagnostics::write(format_args!($($argument)*));
     }};
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) use diagnostic;
 
 /// Runs one bounded macOS native-input matrix on the process main thread.
@@ -539,10 +542,13 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use raw_window_handle::RawWindowHandle;
 use zephium_core::blocker::{ContentPolicyGeneration, ContentRules};
+#[cfg(target_os = "macos")]
 use zephium_core::extensions::{
-    ExtensionActionRejection, ExtensionActionRequest, ExtensionActionSettlement,
-    ExtensionActionSnapshotSettlement, ExtensionBrowserRequestId,
-    ExtensionBrowserRequestSettlement, ExtensionBrowserSurface, ExtensionBrowserSurfaceGeneration,
+    ExtensionActionRejection, ExtensionActionSettlement, ExtensionActionSnapshotSettlement,
+};
+use zephium_core::extensions::{
+    ExtensionActionRequest, ExtensionBrowserRequestId, ExtensionBrowserRequestSettlement,
+    ExtensionBrowserSurface, ExtensionBrowserSurfaceGeneration,
     ExtensionCompatibilityBrokerRequestId, ExtensionCompatibilityBrokerSettlement,
     ExtensionNativeNamespaceScope, ExtensionRuntimeInstance,
 };
