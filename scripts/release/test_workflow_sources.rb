@@ -298,6 +298,9 @@ def linux_native_environment_errors(ci, dockerfile, launcher, preflight, profile
     "--user 10001:10001 --cap-drop ALL --security-opt no-new-privileges",
     "--security-opt seccomp=unconfined --security-opt apparmor=zephium-native-ci",
     "--security-opt systempaths=unconfined",
+    '/sys/firmware:ro,nosuid,nodev,noexec,size=1m,mode=000',
+    '/sys/devices/virtual/powercap:ro,nosuid,nodev,noexec,size=1m,mode=000',
+    '"${native_system_masks[@]}"',
     "--read-only --pids-limit 2048", "target=/workspace,readonly",
     "docker exec --interactive --user 10001:10001",
     "target=/opt/rustup,readonly", "target=/opt/rust-bin,readonly",
@@ -322,7 +325,7 @@ def linux_native_environment_errors(ci, dockerfile, launcher, preflight, profile
   ["CapInh CapPrm CapEff CapBnd CapAmb", "NoNewPrivs:", "Seccomp_filters:",
    "--unshare-user --unshare-pid --unshare-net", '"${native_interface##*/}" = lo',
    '"${native_label}" = \'zephium-native-ci (unconfined)\'',
-   'awk -f scripts/ci/verify_linux_native_mounts.awk',
+   'awk -v powercap_present="${native_powercap}" -f scripts/ci/verify_linux_native_mounts.awk',
    '--ro-bind / / --proc /proc --dev /dev',
    '"$(id -u)" = 10001'].each do |required|
     errors << "native preflight lost #{required}" unless preflight.include?(required)
@@ -339,7 +342,8 @@ def assert_linux_native_evidence(root)
   valid = "1 0 0:1 / / ro - overlay overlay ro\n" \
           "2 1 0:2 / /workspace ro - ext4 /dev/test ro\n" \
           "3 1 0:3 / /sys ro,nosuid,nodev,noexec - sysfs sysfs ro\n" \
-          "4 1 0:4 / /proc rw,nosuid,nodev,noexec - proc proc rw\n"
+          "4 1 0:4 / /proc rw,nosuid,nodev,noexec - proc proc rw\n" \
+          "5 3 0:5 / /sys/firmware ro,nosuid,nodev,noexec - tmpfs tmpfs ro\n"
   [[valid, true],
    [valid + "5 4 0:5 / /proc/keys ro - tmpfs secret-source ro\n", false],
    [valid + "5 4 0:4 /sys /proc/sys ro - proc proc rw\n", false],
@@ -349,13 +353,28 @@ def assert_linux_native_evidence(root)
    [valid.sub("/workspace ro", "/workspace rw"), false],
    [valid.sub("/sys ro", "/sys rw"), false],
    [valid.sub("/ / ro", "/ / rw"), false],
+   [valid + "6 1 0:6 / / rw - tmpfs tmpfs rw\n", false],
+   [valid + "6 1 0:6 / /workspace rw - tmpfs tmpfs rw\n", false],
+   [valid + "6 1 0:6 / /sys rw - tmpfs tmpfs rw\n", false],
+   [valid.sub(valid.lines.last, ""), false],
+   [valid.sub("/sys/firmware ro", "/sys/firmware rw"), false],
+   [valid.sub("- tmpfs tmpfs ro", "- sysfs sysfs ro"), false],
+   [valid + "6 5 0:6 / /sys/firmware/exposed ro - sysfs sysfs ro\n", false],
    [valid.sub("rw,nosuid,nodev,noexec", "rw,nosuid,nodev"), false],
    [valid + valid.lines.last, false],
    [valid + "x" * 4097, false],
    [valid + "\n" * 253, false]].each do |input, accepted|
-    out, _, status = Open3.capture3("awk", "-f", mounts, stdin_data: input)
+    out, _, status = Open3.capture3("awk", "-v", "powercap_present=false", "-f", mounts, stdin_data: input)
     raise "native proc topology guard changed" unless status.success? == accepted
     raise "native mount evidence leaked a source" if out.include?("secret-source") || out.include?("/dev/test")
+  end
+  powercap = "6 3 0:6 / /sys/devices/virtual/powercap ro,nosuid,nodev,noexec - tmpfs tmpfs ro\n"
+  [[valid + powercap, "true", true], [valid, "true", false],
+   [valid + powercap, "false", false], [valid, "unknown", false],
+   [valid + powercap + powercap.sub("powercap ro", "powercap rw"), "true", false],
+   [valid + powercap.sub("powercap ro", "powercap rw"), "true", false]].each do |input, present, accepted|
+    _, _, status = Open3.capture3("awk", "-v", "powercap_present=#{present}", "-f", mounts, stdin_data: input)
+    raise "native optional powercap mask guard changed" unless status.success? == accepted
   end
   denials = File.join(root, "scripts/ci/summarize_linux_native_denials.awk")
   records = [
@@ -511,6 +530,8 @@ def assert_linux_native_environment(root)
     [1, "docker network disconnect bridge", "echo skipped"],
     [1, "--security-opt no-new-privileges", "--privileged"],
     [1, "--security-opt systempaths=unconfined", ""],
+    [1, '/sys/firmware:ro,nosuid,nodev,noexec,size=1m,mode=000', '/sys/firmware:rw'],
+    [1, '"${native_system_masks[@]}"', ''],
     [2, "--unshare-user", "--unshare-user-try"],
     [2, "Seccomp_filters:", "Unrelated:"],
     [3, "zephium-native-ci", "unconfined"]

@@ -197,11 +197,20 @@ rejects a newly exposed procfs when inherited locked child mounts obscure the
 existing one. [BuildKit documents this exact nested rootless failure](https://github.com/moby/buildkit/blob/master/docs/rootless.md).
 The test launch therefore explicitly uses
 [`systempaths=unconfined`](https://docs.docker.com/reference/cli/docker/container/run/#security-opt),
-removing Docker's masked and read-only **system-path lists**, not granting an
-outer capability. Those masks are not part of the claimed test boundary.
-This can expose dangerous kernel files; the unchanged nonroot identity, zero
-outer capabilities and no-new-privileges are mandatory. Root, worktree and
-sysfs must still be read-only. Preflight requires one full procfs root with
+removing Docker's masked and read-only **system-path lists**. This is an explicit
+**containment tradeoff**, not preservation of every previous boundary, even
+though it grants no outer capability. Removing proc masks can expose dangerous
+kernel files; nonroot identity, zero outer capabilities and no-new-privileges
+remain mandatory. Reinstalling those proc submounts would recreate the kernel
+condition that prevents the fresh nested procfs, so they remain absent in this
+trusted, disposable-VM job. Non-proc masks are feasible and restored separately:
+`/sys/firmware` and, where present, `/sys/devices/virtual/powercap` receive empty
+read-only, nosuid/nodev/noexec tmpfs mounts with mode 000. A missing firmware
+directory or any failed mount refuses launch; no fallback exists. Preflight
+requires the exact masks and rejects child mounts that could expose their data.
+Root, worktree and sysfs must each have exactly one read-only mount entry;
+duplicate entries are rejected, including a writable overmount. Preflight
+also requires one full procfs root with
 no proc submounts and checks the actual named AppArmor label before and inside
 the original one-shot bubblewrap invocation. No host procfs bind or alternate
 PID-namespace proof substitutes for mounting the new procfs.

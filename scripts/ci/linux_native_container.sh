@@ -50,12 +50,21 @@ case "${1:-}" in
     docker build --file scripts/ci/linux-native.Dockerfile --tag "${native_name}" scripts/ci
     sudo apparmor_parser --replace scripts/ci/linux-native.apparmor
     docker volume create "${native_volume}" >/dev/null
+    # systempaths=unconfined is a containment tradeoff needed only for procfs.
+    # Restore the non-proc masks with empty read-only tmpfs mounts. Powercap
+    # is kernel-dependent; never try creating a missing directory in sysfs.
+    test -d /sys/firmware
+    native_system_masks=(--tmpfs /sys/firmware:ro,nosuid,nodev,noexec,size=1m,mode=000)
+    if test -d /sys/devices/virtual/powercap; then
+      native_system_masks+=(--tmpfs /sys/devices/virtual/powercap:ro,nosuid,nodev,noexec,size=1m,mode=000)
+    fi
     docker run --detach --init --name "${native_name}" \
       --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges \
       --security-opt seccomp=unconfined --security-opt apparmor=zephium-native-ci \
       --security-opt systempaths=unconfined \
       --read-only --pids-limit 2048 --shm-size 256m \
       --tmpfs /tmp:rw,nosuid,nodev,size=1g \
+      "${native_system_masks[@]}" \
       --mount "type=bind,source=${GITHUB_WORKSPACE},target=/workspace,readonly" \
       --mount "type=bind,source=${native_rustup},target=/opt/rustup,readonly" \
       --mount "type=bind,source=${native_rust_bin},target=/opt/rust-bin,readonly" \

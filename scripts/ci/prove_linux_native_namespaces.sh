@@ -28,7 +28,9 @@ esac
 echo "native AppArmor label classification: ${native_label_class}"
 test "${native_label}" = 'zephium-native-ci (unconfined)'
 echo 'native AppArmor: actual=zephium-native-ci; mode=unconfined'
-awk -f scripts/ci/verify_linux_native_mounts.awk /proc/$$/mountinfo
+native_powercap=false
+if test -d /sys/devices/virtual/powercap; then native_powercap=true; fi
+awk -v powercap_present="${native_powercap}" -f scripts/ci/verify_linux_native_mounts.awk /proc/$$/mountinfo
 for field in user mnt pid; do
   export "ZEPHIUM_PARENT_NS_${field}=$(readlink "/proc/$$/ns/${field}")"
 done
