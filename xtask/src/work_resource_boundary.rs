@@ -48,6 +48,8 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "owner:RetainedWorkProbeOwner", "admission:ForegroundRenderingAdmission",
             "load_macos_probe_openai_credential()", "native.take_agent_browser_port(move|event|sink(event))",
             "self.store.clone()", "self.owner.start(", "lifecycle.drain_until(deadline)",
+            "let(fixture,target)=task::document()?", "input::input(", "task::OBJECTIVE", "sample.trace()",
+            "#[cfg(feature=\"retained-public-qualification\")]#[path=\"retained_qualification_public.rs\"]modtask;",
             "mpsc::sync_channel(4)", "TOTAL:Duration=Duration::from_secs(150)", "CLEANUP:Duration=Duration::from_secs(5)",
             "ifstate==ForegroundRenderingState::Retiring{return;}",
             "deliver_snapshot_retirement(&release,state,&signal)", "self.owner.presentation_returned()",
@@ -76,9 +78,76 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "node.role()==SemanticRole::Paragraph", "fragment.provenance().reference()!=expected.reference",
             "fragment.provenance().frame()!=&expected.frame", "source.reference==expected.reference",
             "source.frame==expected.frame", "source.role==SemanticRole::Paragraph",
-            "AgentRunBudget::try_new(8,100_000,100_000,1)", "AgentBrowserModel::Luna", "AgentAccountScope::Anonymous",
+            "AgentAccountScope::Anonymous", "FixtureServer::start()", "Some(fixture)",
         ],
         &["allows_actions_before_extraction", "navigation_target", "with_source_roles", "with_subtree_extraction", "AgentBrowserPort", "Serialize", "Deserialize"],
+    ),
+    (
+        "crates/zephium-work-composition/src/retained_qualification_input.rs",
+        &[
+            "AgentRunBudget::try_new(8,100_000,100_000,1)",
+            "AgentBrowserModel::Luna",
+            "AgentEffectScope::try_new(&[SemanticEffectClass::Read])",
+            "SemanticSensitivity::Public",
+            "AgentAccountScope::Anonymous",
+            "ContextProfileStorageClass::Ephemeral",
+            "AgentWorkRunInput::try_new(",
+            "objective.into()",
+        ],
+        &[
+            "AgentBrowserPort",
+            "Serialize",
+            "Deserialize",
+            "std::env",
+            "Command::new",
+            "try_new_for_probe",
+        ],
+    ),
+    (
+        "crates/zephium-work-composition/src/retained_qualification_public.rs",
+        &[
+            "TARGET:&str=\"https://shop.pimoroni.com/products/raspberry-pi-pico-2\"",
+            "ContextNavigationTarget::parse(TARGET)",
+            "RetainedProbeTrace::ConfiguredPublic",
+            "RetainedProbeTrace::PublicObservation",
+            "context.kind()!=ContextKind::Owned",
+            "value.starts_with(\"Alowcost,\")&&value.contains(\"RP2350\")",
+            "value==PRODUCT",
+            "SemanticReadField::AccessibleName",
+            "SemanticReadField::VisibleText",
+            "snapshot.completeness()==SemanticCompleteness::Complete",
+            "observation.request().context().identity()==self.context",
+            "!sample.current||!sample.complete||sample.boundaries!=0||matched!=[true;2]",
+            "ifexpected.is_some()",
+            "self.extraction.attest_account(context,now)",
+            "self.accepted||result.observation()!=expected.observation",
+            "fragment.field()!=source_field",
+            "fragment.provenance().reference()!=expected.sources[index].reference",
+            "fragment.provenance().frame()!=&expected.frame",
+            "source.field==source_field",
+            "fragment.provenance().invocation()!=expected.invocation",
+            "fragment.provenance().snapshot()!=expected.snapshot",
+            "source.invocation==expected.invocation",
+            "source.snapshot==expected.snapshot",
+            "source.reference==expected.sources[index].reference",
+            "source.frame==expected.frame",
+            "value.as_str()==expected.sources[index].value",
+            "sources.next().is_none()",
+            "self.accepted=true",
+            "AgentAccountScope::Anonymous",
+        ],
+        &[
+            "allows_actions_before_extraction",
+            "navigation_target",
+            "with_subtree_extraction",
+            "AgentBrowserPort",
+            "Serialize",
+            "Deserialize",
+            "FixtureServer::start",
+            "std::env",
+            "Command::new",
+            "Duration::from",
+        ],
     ),
     (
         "crates/zephium-app/src/work_resources_snapshot_probe.rs",
@@ -538,6 +607,35 @@ mod tests {
     use super::*;
     const SOURCE: &str = include_str!("../../crates/zephium-agentic/src/work_browser_resource.rs");
     const PORT: &str = include_str!("../../crates/zephium-agentic/src/context_port.rs");
+    #[test]
+    fn real_public_brief_cannot_widen_target_or_drop_exact_source_guards() {
+        let source = include_str!(
+            "../../crates/zephium-work-composition/src/retained_qualification_public.rs"
+        );
+        let (_, required, forbidden) = ADAPTER_RULES
+            .iter()
+            .find(|(path, _, _)| path.ends_with("retained_qualification_public.rs"))
+            .unwrap();
+        validate_adapter(source, required, forbidden).unwrap();
+        let source = compact(production(source));
+        for changed in [
+            source.replace(
+                "https://shop.pimoroni.com/products/raspberry-pi-pico-2",
+                "https://example.test/other",
+            ),
+            source.replace(
+                "fragment.provenance().invocation()!=expected.invocation",
+                "false",
+            ),
+            source.replace("source.snapshot==expected.snapshot", "true"),
+            source.replace("fragment.field()!=source_field", "false"),
+            source.replace("matched!=[true;2]", "false"),
+            source.replace("sources.next().is_none()", "true"),
+            format!("{source}fn allows_actions_before_extraction()->bool{{true}}"),
+        ] {
+            assert!(validate_adapter(&changed, required, forbidden).is_err());
+        }
+    }
     #[test]
     fn resource_boundary_rejects_run_ownership_false_drain_and_probe_authority() {
         validate(SOURCE, PORT).unwrap();

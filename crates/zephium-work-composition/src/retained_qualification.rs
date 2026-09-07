@@ -24,7 +24,13 @@ use zephium_engine::{
 };
 use zephium_store::SqliteStore;
 
+#[path = "retained_qualification_input.rs"]
+mod input;
+#[cfg(not(feature = "retained-public-qualification"))]
 #[path = "retained_qualification_task.rs"]
+mod task;
+#[cfg(feature = "retained-public-qualification")]
+#[path = "retained_qualification_public.rs"]
 mod task;
 const TOTAL: Duration = Duration::from_secs(150);
 const CLEANUP: Duration = Duration::from_secs(5);
@@ -72,6 +78,7 @@ fn begin_cleanup_deadline(
 /// Only reviewed content-free controller metadata and bounded witness counters.
 pub enum RetainedProbeTrace {
     Configured,
+    ConfiguredPublic,
     Event(AgentWorkEvent),
     Outcome {
         state: &'static str,
@@ -84,9 +91,17 @@ pub enum RetainedProbeTrace {
         frame_boundaries: usize,
         markers: [bool; 5],
     },
+    PublicObservation {
+        nodes: u16,
+        complete: bool,
+        current_document: bool,
+        frame_boundaries: usize,
+        product_title: bool,
+        product_summary: bool,
+    },
     Closure {
         accepted: bool,
-        fixture_mapping_verified: bool,
+        mapping_verified: bool,
         presentation_retired: bool,
         scoped_worker_drained: bool,
         original_resource_retired: bool,
@@ -445,9 +460,7 @@ pub fn start_retained_controller_witness(
         Box::new(move |sink| native.take_agent_browser_port(move |event| sink(event))),
     )
     .ok_or("native_owner")?;
-    let fixture = FixtureServer::start().map_err(|_| "fixture")?;
-    let target = ContextNavigationTarget::parse(&fixture.url(FixtureRoute::SemanticRendering))
-        .map_err(|_| "fixture_target")?;
+    let (fixture, target) = task::document()?;
     let credential_job = std::thread::Builder::new()
         .name("work-probe-credential".into())
         .spawn(|| load_macos_probe_openai_credential().map_err(|_| "credential_unavailable"))
@@ -459,7 +472,7 @@ pub fn start_retained_controller_witness(
             store,
             owner,
             admission,
-            fixture: Some(fixture),
+            fixture,
             target,
             signal,
             rx,
@@ -785,7 +798,7 @@ impl Driver {
         Ok(())
     }
     fn start_actor(&mut self, lease: WorkBrowserExecutionLease) -> Result<(), &'static str> {
-        if !(self.trace)(RetainedProbeTrace::Configured) {
+        if !(self.trace)(task::configured()) {
             return Err("trace_output");
         }
         let resource = lease.resource().identity();
@@ -795,12 +808,13 @@ impl Driver {
             resource.profile(),
             ContextKind::Owned,
         );
-        let input = task::input(
+        let input = input::input(
             identity,
             self.target.clone(),
             self.issued,
             self.expires,
             self.deadline,
+            task::OBJECTIVE,
         )?;
         let task = task::Task::new(identity, self.expected.clone(), self.sample.clone())?;
         let signal = self.signal.clone();
@@ -843,13 +857,7 @@ impl Driver {
             let sample = *self.sample.lock().map_err(|_| "task_sample")?;
             if let Some(sample) = sample {
                 self.observed = true;
-                if !(self.trace)(RetainedProbeTrace::Observation {
-                    nodes: sample.nodes,
-                    complete: sample.complete,
-                    current_document: sample.current,
-                    frame_boundaries: sample.boundaries,
-                    markers: sample.markers,
-                }) {
+                if !(self.trace)(sample.trace()) {
                     return Err("trace_output");
                 }
             }
@@ -990,7 +998,7 @@ impl Driver {
         let fixture_clean = self
             .fixture
             .take()
-            .is_some_and(|fixture| fixture.shutdown().is_ok());
+            .is_none_or(|fixture| fixture.shutdown().is_ok());
         let scoped = self.scoped.is_some();
         if !(self.trace)(RetainedProbeTrace::Totals {
             model_calls: self.totals.calls,
@@ -1002,7 +1010,7 @@ impl Driver {
         }
         if !(self.trace)(RetainedProbeTrace::Closure {
             accepted: self.accepted,
-            fixture_mapping_verified: self.verified,
+            mapping_verified: self.verified,
             presentation_retired: self.owner.presentation_returned(),
             scoped_worker_drained: scoped,
             original_resource_retired: self.owner.locally_retired(),

@@ -23,6 +23,26 @@ pub(super) struct Sample {
     pub boundaries: usize,
     pub markers: [bool; 5],
 }
+impl Sample {
+    pub(super) fn trace(self) -> RetainedProbeTrace {
+        RetainedProbeTrace::Observation {
+            nodes: self.nodes,
+            complete: self.complete,
+            current_document: self.current,
+            frame_boundaries: self.boundaries,
+            markers: self.markers,
+        }
+    }
+}
+pub(super) fn configured() -> RetainedProbeTrace {
+    RetainedProbeTrace::Configured
+}
+pub(super) fn document() -> Result<(Option<FixtureServer>, ContextNavigationTarget), &'static str> {
+    let fixture = FixtureServer::start().map_err(|_| "fixture")?;
+    let target = ContextNavigationTarget::parse(&fixture.url(FixtureRoute::SemanticRendering))
+        .map_err(|_| "fixture_target")?;
+    Ok((Some(fixture), target))
+}
 pub(super) struct Task {
     extraction: AgentWorkExtractionTask,
     context: ContextIdentity,
@@ -196,66 +216,7 @@ pub(super) fn verify_owned(result: &SemanticOwnedExtractionResult, expected: &Ex
         && matches!(&source.content, SemanticOwnedReadContent::Text(text) if text == MARKERS[4])
 }
 
-struct Clock;
-impl TerraControllerClock for Clock {
-    fn now(&self) -> Result<AgentPolicyInstant, TerraControllerClockError> {
-        zephium_engine::work_browser_monotonic_now().ok_or(TerraControllerClockError::Invalid)
-    }
-}
-pub(super) fn input(
-    identity: ContextIdentity,
-    target: ContextNavigationTarget,
-    issued: AgentPolicyInstant,
-    expires: AgentPolicyInstant,
-    deadline: Instant,
-) -> Result<AgentWorkRunInput, &'static str> {
-    let origin = SemanticOrigin::parse(target.as_url().as_str()).map_err(|_| "origin")?;
-    let effects = AgentEffectScope::try_new(&[SemanticEffectClass::Read]).map_err(|_| "effects")?;
-    // Luna reserves 77,830 micro-USD before exact whole-request counting. The
-    // development witness must admit that reservation; actual provider usage
-    // still settles against this same run/node ceiling and original ledger.
-    let budget = AgentRunBudget::try_new(8, 100_000, 100_000, 1).map_err(|_| "budget")?;
-    let node = AgentPlanNodeId::generate();
-    let authority = AgentPlanNodeAuthority::try_new(
-        vec![identity.profile()],
-        vec![AgentAccountScope::Anonymous],
-        vec![origin.clone()],
-        SemanticSensitivity::Public,
-        effects,
-    )
-    .map_err(|_| "authority")?;
-    let manifest = AgentRunManifest::try_new(
-        AgentRunManifestId::generate(),
-        identity.owner(),
-        AgentRunScope::try_new(
-            vec![identity.profile()],
-            vec![AgentAccountScope::Anonymous],
-            vec![origin],
-            SemanticSensitivity::Public,
-            effects,
-            Vec::new(),
-        )
-        .map_err(|_| "scope")?,
-        budget,
-        issued,
-        expires,
-        vec![AgentPlanNodeScope::new(node, authority, budget, expires)],
-    )
-    .map_err(|_| "manifest")?;
-    let ids = TerraControllerIds::try_new(
-        AgentSupervisorId::new(1).ok_or("id")?,
-        AgentSupervisorAttemptId::new(1).ok_or("id")?,
-        AgentSupervisorCancellationId::new(1).ok_or("id")?,
-        AgentModelCallId::new(1).ok_or("id")?,
-        [1, 2, 3, 4].map(|id| AgentAuditEventId::new(id).expect("fixed nonzero ID")),
-        AgentAuditDeliveryId::new(1).ok_or("id")?,
-    )
-    .map_err(|_| "ids")?;
-    AgentWorkRunInput::try_new(manifest, AgentPlanLeaseBinding::new(AgentPlanLeaseId::generate(), node), AgentWorkContextSpec::try_new(identity, ContextProfileStorageClass::Ephemeral, target).map_err(|_| "context")?,
-        "Read the current rendering-readiness fixture. Extract the exact current animation-frame status into animation_status, using trusted schema 1 and initial scope. You may inspect the acknowledged baseline with read if useful. Copy the complete paragraph and cite that exact source. Do not navigate, modify the page, or infer the answer from these instructions.".into(),
-        AgentWorkRunSettings::new(AgentBrowserModel::Luna, ids, Arc::new(Clock), deadline),
-    ).map_err(|_| "input")
-}
+pub(super) const OBJECTIVE: &str = "Read the current rendering-readiness fixture. Extract the exact current animation-frame status into animation_status, using trusted schema 1 and initial scope. You may inspect the acknowledged baseline with read if useful. Copy the complete paragraph and cite that exact source. Do not navigate, modify the page, or infer the answer from these instructions.";
 
 #[cfg(test)]
 mod tests {

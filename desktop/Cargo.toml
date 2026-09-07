@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+# Same release-excluded retained path, one closed real-public product-brief task.
+macos-work-retained-public-probe = [
+    "macos-work-retained-controller-probe",
+    "zephium-work-composition/retained-public-qualification",
+]
 # One explicit paid public-fixture controller witness in the isolated debug app.
 macos-work-retained-controller-probe = [
     "macos-work-rendering-probe",

@@ -433,10 +433,15 @@ fn trace_retained(
     // request bodies, source quotes, URLs, account data or credentials.
     let result = match trace {
         Trace::Configured => writeln!(std::io::stderr().lock(), "work-retained-config: provider=OpenAIResponses model=gpt-5.6-luna retention=stateless fixture=semantic-rendering-v1"),
+        Trace::ConfiguredPublic => writeln!(std::io::stderr().lock(), "work-retained-config: provider=OpenAIResponses model=gpt-5.6-luna retention=stateless workflow=pimoroni-pico2-brief-v1"),
+        Trace::PublicObservation { nodes, complete, current_document, frame_boundaries, product_title, product_summary } => writeln!(std::io::stderr().lock(), "work-retained-public-observation: nodes={nodes} complete={complete} current_document={current_document} frame_boundaries={frame_boundaries} product_title={product_title} product_summary={product_summary}"),
         Trace::Event(event) => writeln!(std::io::stderr().lock(), "work-retained-event: sequence={} phase={:?} wall_ms={} content=redacted", event.sequence(), event.kind(), event.elapsed_millis()),
         Trace::Outcome { state, failure } => writeln!(std::io::stderr().lock(), "work-retained-outcome: state={state} failure={failure:?} mapping_contract=ModelMapped durable_publication=false"),
         Trace::Observation { nodes, complete, current_document, frame_boundaries, markers } => writeln!(std::io::stderr().lock(), "work-retained-observation: nodes={nodes} complete={complete} current_document={current_document} frame_boundaries={frame_boundaries} readiness_markers={markers:?}"),
-        Trace::Closure { accepted, fixture_mapping_verified, presentation_retired, scoped_worker_drained, original_resource_retired } => writeln!(std::io::stderr().lock(), "work-retained-closure: accepted={accepted} fixture_mapping_verified={fixture_mapping_verified} presentation_retired={presentation_retired} scoped_worker_drained={scoped_worker_drained} original_resource_retired={original_resource_retired} durable_publication=false successor_admission=false"),
+        Trace::Closure { accepted, mapping_verified, presentation_retired, scoped_worker_drained, original_resource_retired } => {
+            let mapping_label = if cfg!(feature = "macos-work-retained-public-probe") { "source_mapping_verified" } else { "fixture_mapping_verified" };
+            writeln!(std::io::stderr().lock(), "work-retained-closure: accepted={accepted} {mapping_label}={mapping_verified} presentation_retired={presentation_retired} scoped_worker_drained={scoped_worker_drained} original_resource_retired={original_resource_retired} durable_publication=false successor_admission=false")
+        },
         Trace::Totals { model_calls, input_tokens, output_tokens, cost_micro_usd } => writeln!(std::io::stderr().lock(), "work-retained-totals: model_calls={model_calls} input_tokens={input_tokens} output_tokens={output_tokens} cost_micro_usd={cost_micro_usd}"),
     };
     result.is_ok()

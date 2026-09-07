@@ -119,6 +119,7 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
         &[
             "default = []",
             "public-qualification = [\"macos-work\", \"zephium-app/work-execution-probe\"]",
+            "retained-public-qualification = [\"retained-qualification\"]",
         ],
     )?;
     let parsed: toml::Value =

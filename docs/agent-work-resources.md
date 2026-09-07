@@ -509,7 +509,7 @@ resource destruction and final original native/application audit. A retirement
 result is not any of those proofs. Deterministic evidence includes a real scoped
 worker/common controller with no model-active event before the held retirement
 is released, then the existing loopback provider path and original resource
-cleanup. This prerequisite is not yet native/provider qualification.
+cleanup. Those focused tests alone are not native/provider qualification.
 
 The next compile-time-only composition now joins that adapter to the original
 application owner, original WKWebView resource port, real retained common
@@ -517,6 +517,9 @@ controller/scoped runtime and original SqliteStore audit in the actual Tauri
 debug bundle. It uses one fixed synthetic-public fixture and the existing
 Keychain loader, with no durable result or successor admission. The render
 holder must completely retire before the first provider turn. The candidate
-and its explicit unqualified evidence boundary are recorded in
-`eval/agentic-browsing/macos-retained-controller-luna.md`; compilation and
-deterministic tests alone are not a native/Luna workflow result.
+and its exact successful synthetic-public fixture witness are recorded in
+`eval/agentic-browsing/macos-retained-controller-luna.md`; that result does not
+qualify real public sites. The separately selected
+[real-storefront product brief](../eval/agentic-browsing/macos-retained-public-product-brief.md)
+reuses the same driver and fixed read-only budgets, with no native navigation,
+action or second observation. Its public-site qualification remains pending.
