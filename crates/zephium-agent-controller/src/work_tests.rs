@@ -9,6 +9,108 @@ use zephium_agent_runtime::{
 static SERIAL: Mutex<()> = Mutex::new(());
 
 #[test]
+fn temporal_admission_millisecond_crossing_keeps_the_original_deadline() {
+    struct CrossingClock(AtomicU64);
+    impl TerraControllerClock for CrossingClock {
+        fn now(&self) -> Result<AgentPolicyInstant, super::super::TerraControllerClockError> {
+            // A deterministic elapsed-time sample crosses 999us -> 1000us.
+            self.0.store(1_000, Ordering::SeqCst);
+            Ok(AgentPolicyInstant::from_millis(
+                FIXTURE_POLICY_NOW_MILLIS + 1,
+            ))
+        }
+    }
+    let original = input();
+    let expires = original
+        .manifest
+        .plan_node(original.lease.node())
+        .unwrap()
+        .expires_at();
+    let base = Instant::now();
+    let deadline = base + Duration::from_millis(expires.millis() - FIXTURE_POLICY_NOW_MILLIS);
+    let clock = Arc::new(CrossingClock(AtomicU64::new(999)));
+
+    // Negative control: the previous ordering spuriously refuses this exact
+    // deadline, without relying on scheduler timing or sleeping at a boundary.
+    let early_wall = base + Duration::from_micros(clock.0.load(Ordering::SeqCst));
+    let late_policy = clock.now().unwrap();
+    let old_horizon = deadline.duration_since(early_wall);
+    let policy_remaining = Duration::from_millis(expires.millis() - late_policy.millis());
+    assert_eq!(old_horizon - policy_remaining, Duration::from_micros(1));
+
+    clock.0.store(999, Ordering::SeqCst);
+    let mut settings = original.settings;
+    settings.clock = clock.clone();
+    settings.deadline = deadline;
+    let admitted = AgentWorkRunInput::try_new_with_monotonic_now(
+        original.manifest,
+        original.lease,
+        original.context,
+        "Verify a deterministic fixture.".into(),
+        settings,
+        || base + Duration::from_micros(clock.0.load(Ordering::SeqCst)),
+    )
+    .expect("policy-before-wall sampling admits the same original expiry");
+    assert_eq!(admitted.settings.deadline, deadline);
+    assert_eq!(
+        admitted
+            .manifest
+            .plan_node(admitted.lease.node())
+            .unwrap()
+            .expires_at(),
+        expires
+    );
+}
+
+#[test]
+fn temporal_admission_preserves_expiry_and_hard_horizon_refusals() {
+    for case in 0..8 {
+        let original = input();
+        let expires = original
+            .manifest
+            .plan_node(original.lease.node())
+            .unwrap()
+            .expires_at();
+        let base = Instant::now();
+        let (policy_now, deadline) = match case {
+            0 => (FIXTURE_POLICY_NOW_MILLIS, base),
+            1 => (FIXTURE_POLICY_NOW_MILLIS, base - Duration::from_nanos(1)),
+            2 => (
+                FIXTURE_POLICY_NOW_MILLIS,
+                base + super::super::MAX_TERRA_CONTROLLER_HARD_DEADLINE + Duration::from_nanos(1),
+            ),
+            3 => (0, base + Duration::from_millis(1)), // Before manifest issuance.
+            4 => (expires.millis() + 1, base + Duration::from_millis(1)),
+            5 => (expires.millis(), base + Duration::from_millis(1)),
+            6 => (
+                expires.millis() - 100,
+                base + Duration::from_millis(100) + Duration::from_nanos(1),
+            ),
+            _ => (expires.millis() - 100, base + Duration::from_millis(100)),
+        };
+        let mut settings = original.settings;
+        settings.clock = Arc::new(Clock(AtomicU64::new(policy_now)));
+        settings.deadline = deadline;
+        let result = AgentWorkRunInput::try_new_with_monotonic_now(
+            original.manifest,
+            original.lease,
+            original.context,
+            "Verify a deterministic fixture.".into(),
+            settings,
+            || base,
+        );
+        if case == 7 {
+            assert_eq!(result.unwrap().settings.deadline, deadline);
+        } else {
+            assert!(
+                matches!(result, Err(AgentWorkFailure::Deadline)),
+                "case {case}"
+            );
+        }
+    }
+}
+
+#[test]
 fn deferred_audit_recovery_consumes_only_original_inflight_terminal_once() {
     let _serial = lock(&SERIAL);
     fn fixture() -> (AgentWorkController, AgentAuditDeliverySettlement) {

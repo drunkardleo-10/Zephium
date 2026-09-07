@@ -229,13 +229,24 @@ impl AgentWorkRunInput {
         objective: String,
         settings: AgentWorkRunSettings,
     ) -> Result<Self, AgentWorkFailure> {
-        let horizon = settings
-            .deadline
-            .checked_duration_since(Instant::now())
-            .ok_or(AgentWorkFailure::Deadline)?;
-        if horizon.is_zero() || horizon > super::MAX_TERRA_CONTROLLER_HARD_DEADLINE {
-            return Err(AgentWorkFailure::Deadline);
-        }
+        Self::try_new_with_monotonic_now(
+            manifest,
+            lease,
+            context,
+            objective,
+            settings,
+            Instant::now,
+        )
+    }
+
+    fn try_new_with_monotonic_now(
+        manifest: AgentRunManifest,
+        lease: AgentPlanLeaseBinding,
+        context: AgentWorkContextSpec,
+        objective: String,
+        settings: AgentWorkRunSettings,
+        monotonic_now: impl FnOnce() -> Instant,
+    ) -> Result<Self, AgentWorkFailure> {
         let root = manifest
             .plan_node(lease.node())
             .ok_or(AgentWorkFailure::Contract)?;
@@ -243,6 +254,18 @@ impl AgentWorkRunInput {
             .clock
             .now()
             .map_err(|_| AgentWorkFailure::Contract)?;
+        // Policy time floors elapsed milliseconds. Sample it first: comparing
+        // an earlier, larger wall horizon with a later, smaller policy remainder
+        // can falsely reject the same absolute deadline at a millisecond edge.
+        // Neither approved expiry nor the caller's absolute deadline is changed;
+        // later execution still independently enforces both original bounds.
+        let horizon = settings
+            .deadline
+            .checked_duration_since(monotonic_now())
+            .ok_or(AgentWorkFailure::Deadline)?;
+        if horizon.is_zero() || horizon > super::MAX_TERRA_CONTROLLER_HARD_DEADLINE {
+            return Err(AgentWorkFailure::Deadline);
+        }
         let remaining = root
             .expires_at()
             .millis()
