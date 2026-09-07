@@ -45,6 +45,35 @@ fn validate_preflight_order(source: &str) -> Result<(), String> {
 
 const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
     (
+        "crates/zephium-app/src/work_resources_product.rs",
+        &[
+            "letspec=input.retained_resource_spec()?", "StagedActor::try_new(input,browser,runtime,provider,credential,audit,task)",
+            "spec.identity.profile()!=profile.profile()", "spec.storage!=profile.storage_class()",
+            "!std::ptr::addr_eq(Arc::as_ptr(&journal),Arc::as_ptr(&audit))",
+            "Arc::ptr_eq(engine,&prepared.engine)",
+            "std::ptr::addr_eq(Arc::as_ptr(store),Arc::as_ptr(&prepared.journal))",
+            "std::ptr::addr_eq(Arc::as_ptr(store),Arc::as_ptr(&prepared.audit))",
+            "readiness==AgentWorkProfileReadiness::Ready(prepared.profile)",
+            "!self.signal.stop.load(Ordering::Acquire)", "callback.wake_retained_work()",
+            "RetainedWork::constructing(owner,pending,prepared.journal,prepared.audit,)",
+            "self.failed_owner=Some(owner)", "self.native_uncertain=true",
+            "projection.events.len()<MAX_AGENT_WORK_EVENTS", "projection.extraction=work.take_extraction()",
+            "work.shutdown_until(self.clock.as_ref(),deadline)",
+            "clean&&!self.native_uncertain&&self.failed_owner.is_none()",
+            "implDropforProductWork", "self.prepared.is_some(){self.refuse();}",
+        ],
+        &["InspectablePublic", "try_new_for_probe", "AgentWorkController::", "PendingAgentRuntime", "ContextRegistry", "std::thread", "tokio::spawn", "Serialize", "Deserialize", "execute_semantic_action", "invoke_semantic", "AgentNativeShutdownProof"],
+    ),
+    (
+        "crates/zephium-app/src/shell/mod.rs",
+        &[
+            "self.work.is_some()||self.retained_work.is_some()",
+            "!work.admits(&self.engine,&self.store,self.work_profile_binding())",
+            "self.retained_work=Some(Box::new(work));self.retained_work.as_mut().unwrap().initialize()",
+            "ifletSome(work)=&mutself.retained_work{returnwork.shutdown_until(deadline);}",
+        ], &[],
+    ),
+    (
         "crates/zephium-agentic/src/work_browser_document.rs",
         &[
             "#[default]Exact", "url.scheme()==\"https\"", "url.query().is_none()",

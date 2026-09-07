@@ -11,6 +11,33 @@ use zephium_core::ports::extensions::{
 
 use crate::shell::tests::{FakeChrome, FakeEngine, FakeStore, ImmediateAllowAllCompiler};
 
+#[cfg(feature = "work-execution")]
+#[test]
+fn retained_work_wake_uses_owned_full_or_shutdown_drain_but_rejects_closed_queue() {
+    let queue = CommandQueue::new();
+    let owner = Handle::new(queue.clone());
+    let callback = owner.callback_handle();
+    assert!(callback.wake_retained_work());
+    assert!(matches!(queue.try_recv(), Some(Command::WorkWake)));
+    while queue.try_push(Command::Open).is_ok() {}
+    // WorkWake owns an existing critical-lifecycle slot beyond normal FIFO
+    // saturation and coalesces; it cannot consume unbounded extra capacity.
+    assert!(queue.try_push(Command::WorkWake).is_ok());
+    assert!(callback.wake_retained_work());
+    let _shutdown =
+        owner.shutdown_with_deadline(std::time::Instant::now() + std::time::Duration::from_secs(1));
+    assert!(matches!(
+        queue.try_push(Command::WorkWake),
+        Err(TryPushError::Sealed(_))
+    ));
+    assert!(callback.wake_retained_work());
+    drop(queue.close_and_drain());
+    assert!(!callback.wake_retained_work());
+    drop(owner);
+    drop(queue);
+    assert!(!callback.wake_retained_work());
+}
+
 #[derive(Default)]
 struct LifecycleProbe {
     startup_calls: std::sync::atomic::AtomicUsize,

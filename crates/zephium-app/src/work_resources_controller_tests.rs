@@ -14,6 +14,10 @@ mod durable_tests;
 #[path = "work_resources_application_tests.rs"]
 mod application_tests;
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[path = "work_resources_product_tests.rs"]
+mod product_tests;
+
 struct Clock(AtomicU64);
 impl TerraControllerClock for Clock {
     fn now(&self) -> Result<AgentPolicyInstant, TerraControllerClockError> {
@@ -38,6 +42,13 @@ impl AgentAuditPort for Audit {
 }
 #[derive(Default)]
 struct Native {
+    hold_construct: AtomicBool,
+    construction: Mutex<
+        Option<(
+            WorkBrowserResourceRequest,
+            WorkBrowserResourceCompletionCallback,
+        )>,
+    >,
     resource_sink: Mutex<Option<NativeSink>>,
     allow_global_shutdown: AtomicBool,
     global_sealed: AtomicBool,
@@ -68,6 +79,14 @@ struct Native {
     final_document: Mutex<Option<ContextNavigationTarget>>,
 }
 impl Native {
+    fn release_construction(&self) {
+        self.hold_construct.store(false, Ordering::Release);
+        let (request, callback) = self.construction.lock().unwrap().take().unwrap();
+        assert!(matches!(
+            self.work_resource_lifecycle(request, callback),
+            WorkBrowserResourceDispatch::Scheduled
+        ));
+    }
     fn global_audit(&self, audit: ContextResourceAuditId, shutdown: bool) {
         let audit = if self.wrong_global_audit_identity.load(Ordering::Acquire) {
             ContextResourceAuditId::new(audit.get() + 1).unwrap()
@@ -140,6 +159,17 @@ impl AgentBrowserPort for Native {
         mut request: WorkBrowserResourceRequest,
         callback: WorkBrowserResourceCompletionCallback,
     ) -> WorkBrowserResourceDispatch {
+        if request.operation() == WorkBrowserResourceOperation::Construct
+            && self.hold_construct.load(Ordering::Acquire)
+        {
+            assert!(self
+                .construction
+                .lock()
+                .unwrap()
+                .replace((request, callback))
+                .is_none());
+            return WorkBrowserResourceDispatch::Scheduled;
+        }
         if self.gate.load(Ordering::Acquire)
             && matches!(
                 request.operation(),
@@ -412,6 +442,35 @@ fn input_with_budget(
 ) -> AgentWorkRunInput {
     let identity = binding.frame().context().identity();
     let origin = binding.frame().origin().clone();
+    input_for_context(identity, origin, clock, storage, target, budget)
+}
+fn input_for_context(
+    identity: ContextIdentity,
+    origin: SemanticOrigin,
+    clock: Arc<Clock>,
+    storage: ContextProfileStorageClass,
+    target: ContextNavigationTarget,
+    budget: AgentRunBudget,
+) -> AgentWorkRunInput {
+    input_for_context_until(
+        identity,
+        origin,
+        clock,
+        storage,
+        target,
+        budget,
+        Instant::now() + Duration::from_secs(600),
+    )
+}
+fn input_for_context_until(
+    identity: ContextIdentity,
+    origin: SemanticOrigin,
+    clock: Arc<Clock>,
+    storage: ContextProfileStorageClass,
+    target: ContextNavigationTarget,
+    budget: AgentRunBudget,
+    deadline: Instant,
+) -> AgentWorkRunInput {
     let effects = AgentEffectScope::try_new(&[SemanticEffectClass::Read]).unwrap();
     let node = AgentPlanNodeId::generate();
     let expires = AgentPolicyInstant::from_millis(600_002);
@@ -459,12 +518,7 @@ fn input_with_budget(
         AgentPlanLeaseBinding::new(AgentPlanLeaseId::generate(), node),
         AgentWorkContextSpec::try_new(identity, storage, target).unwrap(),
         "Read the current page and extract its label with source evidence.".into(),
-        AgentWorkRunSettings::new(
-            AgentBrowserModel::Luna,
-            ids,
-            clock,
-            Instant::now() + Duration::from_secs(600),
-        ),
+        AgentWorkRunSettings::new(AgentBrowserModel::Luna, ids, clock, deadline),
     )
     .unwrap()
 }

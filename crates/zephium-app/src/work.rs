@@ -67,6 +67,9 @@ pub struct AgentWorkApplicationConfig {
 }
 
 impl AgentWorkApplicationConfig {
+    pub(crate) fn into_parts(self) -> (AgentRuntimeConfig, AgentProviderTransportConfig) {
+        (self.runtime, self.provider)
+    }
     /// Uses the same bounded runtime and transport configuration as the actor.
     pub fn new(runtime: AgentRuntimeConfig, provider: AgentProviderTransportConfig) -> Self {
         Self { runtime, provider }

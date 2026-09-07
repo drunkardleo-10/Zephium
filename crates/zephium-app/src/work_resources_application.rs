@@ -1,4 +1,4 @@
-//! Application-owned single-resource admission. No Shell/UI entry point yet.
+//! Application-owned single-resource admission behind the bounded Shell adapter.
 //!
 //! A retained native row is not successor permission. This owner alone sequences
 //! original Store acknowledgements, the common controller and scoped worker,
@@ -114,6 +114,7 @@ struct ActiveActor {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum AdmissionPhase {
+    Constructing,
     Loading,
     Ready,
     Acquiring,
@@ -149,6 +150,7 @@ pub(super) struct RetainedWork {
     persistence_failure: Option<AgentWorkJournalError>,
     request: Option<ActorRequest>,
     acquisition: Option<PendingLifecycle>,
+    construction: Option<PendingLifecycle>,
     staged: Option<StagedActor>,
     unstarted: Option<AgentWorkRetainedOutcome>,
     active: Option<ActiveActor>,
@@ -192,7 +194,23 @@ impl RetainedWork {
         // Journal/progress use the same original application wake as native
         // resource notifications; no second callback route is substituted.
         let waker = owner.shared.notifications.clone().into();
-        let mut work = Self {
+        let mut work = Self::dormant(owner, resource, journal, audit, waker);
+        work.rearm();
+        if work.failure.is_some() {
+            return Err((work.owner, Refusal::Uncertain));
+        }
+        work.dispatch(AgentWorkJournalRequest::Claim);
+        Ok(work)
+    }
+
+    fn dormant(
+        owner: WorkResourceOwner,
+        resource: WorkBrowserResourceJoin,
+        journal: Arc<dyn AgentWorkJournalPort>,
+        audit: Arc<dyn AgentAuditPort>,
+        waker: Waker,
+    ) -> Self {
+        Self {
             owner,
             resource,
             journal,
@@ -205,6 +223,7 @@ impl RetainedWork {
             persistence_failure: None,
             request: None,
             acquisition: None,
+            construction: None,
             staged: None,
             unstarted: None,
             active: None,
@@ -217,13 +236,36 @@ impl RetainedWork {
             destroyed: false,
             unexpected_native: None,
             native_shutdown: None,
-        };
-        work.rearm();
-        if work.failure.is_some() {
-            return Err((work.owner, Refusal::Uncertain));
         }
-        work.dispatch(AgentWorkJournalRequest::Claim);
-        Ok(work)
+    }
+
+    /// Shell has already checked original Store/Engine/profile before native
+    /// construction. Retain its original operation through stop and timeout.
+    pub(super) fn constructing(
+        owner: WorkResourceOwner,
+        pending: PendingLifecycle,
+        journal: Arc<dyn AgentWorkJournalPort>,
+        audit: Arc<dyn AgentAuditPort>,
+    ) -> Self {
+        let resource = pending.resource.join.clone();
+        let exact = Arc::ptr_eq(&owner.shared, &pending.shared)
+            && std::ptr::addr_eq(Arc::as_ptr(&journal), Arc::as_ptr(&audit))
+            && owner
+                .shared
+                .lock_resources()
+                .is_ok_and(|rows| rows.len() == 1)
+            && owner
+                .shared
+                .resource(&resource)
+                .is_ok_and(|row| Arc::ptr_eq(&row, &pending.resource));
+        let waker = owner.shared.notifications.clone().into();
+        let mut work = Self::dormant(owner, resource, journal, audit, waker);
+        work.phase = AdmissionPhase::Constructing;
+        work.construction = Some(pending);
+        if !exact {
+            work.fail(AgentWorkFailure::Contract);
+        }
+        work
     }
 
     pub(super) fn ready(&self) -> bool {
@@ -498,6 +540,20 @@ impl RetainedWork {
 
     fn poll_before(&mut self, now: AgentPolicyInstant, deadline: Option<Instant>) {
         self.rearm();
+        if let Some(mut construction) = self.construction.take() {
+            match construction.poll(now) {
+                Ok(None) => self.construction = Some(construction),
+                Ok(Some(LifecycleResult::Event(WorkBrowserResourceEvent::Retained(resource))))
+                    if resource == self.resource =>
+                {
+                    if !self.stopping {
+                        self.phase = AdmissionPhase::Loading;
+                        self.dispatch(AgentWorkJournalRequest::Claim);
+                    }
+                }
+                _ => self.fail(AgentWorkFailure::ContextLost),
+            }
+        }
         // Check both original horizons before consuming a raced Running ACK.
         if self.staged.as_ref().is_some_and(|staged| {
             staged.deadline <= Instant::now() || staged.lease.deadline() <= now
@@ -716,6 +772,10 @@ impl RetainedWork {
         self.phase
     }
 
+    pub(super) fn failures(&self) -> (Option<AgentWorkFailure>, Option<AgentWorkJournalError>) {
+        (self.failure, self.persistence_failure)
+    }
+
     pub(super) fn record(&self) -> Option<AgentWorkRecord> {
         self.record
     }
@@ -733,7 +793,11 @@ impl RetainedWork {
 
     /// Revokes actor execution only. It grants no rendering or human-input right.
     pub(super) fn cancel(&mut self) {
-        if self.request.is_some() || self.acquisition.is_some() || self.staged.is_some() {
+        if self.active.is_none()
+            || self.request.is_some()
+            || self.acquisition.is_some()
+            || self.staged.is_some()
+        {
             self.fail(AgentWorkFailure::Cancelled);
         }
         if let Some(active) = &self.active {
@@ -788,7 +852,8 @@ impl RetainedWork {
         if self.destroyed {
             return self.poll_native_shutdown(deadline);
         }
-        if self.acquisition.is_some()
+        if self.construction.is_some()
+            || self.acquisition.is_some()
             || self.staged.is_some()
             || self
                 .active

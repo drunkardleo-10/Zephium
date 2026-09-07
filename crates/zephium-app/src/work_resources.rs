@@ -3,8 +3,8 @@
 //! The original owner has no actor-runtime, journal or Store admission authority.
 //! Its opt-in child supplies only the common controller's narrow lease facade;
 //! Its private application child joins scoped/durable actor admission; selected
-//! profile construction and Shell attachment remain necessary before exposure.
-#![allow(dead_code)] // Private until the independently reviewed product admission cut.
+//! profile construction and Shell attachment live in the bounded product child.
+#![allow(dead_code)] // Other private resource primitives await explicit product joins.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
@@ -20,6 +20,10 @@ mod controller;
 #[cfg(feature = "work-execution")]
 #[path = "work_resources_application.rs"]
 mod application;
+
+#[cfg(feature = "work-execution")]
+#[path = "work_resources_product.rs"]
+pub(super) mod product;
 
 #[cfg(feature = "work-execution")]
 #[path = "work_resources_shutdown.rs"]

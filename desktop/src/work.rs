@@ -71,6 +71,38 @@ pub fn admit_trusted_work(
     admit_after(app, request, None)
 }
 
+/// Launches one approved read-only objective on an application-retained page.
+/// This is trusted Rust composition only, never Tauri IPC. The original Shell
+/// rechecks profile and owners; the returned handle reports actual admission.
+pub fn admit_retained_trusted_work(
+    app: &tauri::AppHandle,
+    request: TrustedWorkRequest,
+) -> Result<zephium_app::RetainedWorkHandle, WorkAdmissionFailure> {
+    let shell = app
+        .try_state::<zephium_app::Handle>()
+        .ok_or(WorkAdmissionFailure::Unavailable)?;
+    let state = app
+        .try_state::<WorkCompositionState>()
+        .ok_or(WorkAdmissionFailure::Unavailable)?;
+    let mut owner = state
+        .0
+        .lock()
+        .map_err(|_| WorkAdmissionFailure::Unavailable)?;
+    if owner.initial_attached {
+        return Err(WorkAdmissionFailure::Unavailable);
+    }
+    let composition = owner
+        .composition
+        .as_ref()
+        .ok_or(WorkAdmissionFailure::Unavailable)?;
+    let handle = composition
+        .launch_retained(&shell.callback_handle(), request)
+        .map_err(WorkAdmissionFailure::Contract)?
+        .ok_or(WorkAdmissionFailure::Unavailable)?;
+    owner.initial_attached = true;
+    Ok(handle)
+}
+
 /// Explicit fresh trusted work after an exact completed predecessor. This is
 /// not resume/retry permission; the Shell and native factory independently
 /// retain all original closure, output-drain and lifetime checks.

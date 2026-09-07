@@ -194,6 +194,27 @@ pub struct AgentWorkRunInput {
 }
 
 impl AgentWorkRunInput {
+    /// Descriptive original resource construction operands for the trusted
+    /// application. These do not mint a browser, account or execution lease.
+    pub fn retained_resource_spec(
+        &self,
+    ) -> Result<AgentWorkRetainedResourceSpec, AgentWorkFailure> {
+        if self.durable_result {
+            return Err(AgentWorkFailure::Contract);
+        }
+        Ok(AgentWorkRetainedResourceSpec {
+            identity: self.context.identity,
+            storage: self.context.storage,
+            target: self.context.target.clone(),
+            clock: self.settings.clock.clone(),
+            deadline: self.settings.deadline,
+            expires_at: self
+                .manifest
+                .plan_node(self.lease.node())
+                .ok_or(AgentWorkFailure::Contract)?
+                .expires_at(),
+        })
+    }
     /// Joins approved scope, explicit profile, bounded objective and model.
     pub fn try_new(
         manifest: AgentRunManifest,
@@ -277,6 +298,22 @@ impl AgentWorkRunInput {
             Ok(AgentWorkJournalMutation::admit(&self.manifest, owner))
         }
     }
+}
+
+/// Original approved input facts, not resource or execution authority.
+pub struct AgentWorkRetainedResourceSpec {
+    /// Exact context/run/profile identity in the approved input.
+    pub identity: ContextIdentity,
+    /// Original selected session persistence class.
+    pub storage: ContextProfileStorageClass,
+    /// Exact approved initial document, not navigation authority.
+    pub target: ContextNavigationTarget,
+    /// Original policy clock, shared with controller admission.
+    pub clock: Arc<dyn TerraControllerClock>,
+    /// Original absolute execution deadline.
+    pub deadline: Instant,
+    /// Original plan-node policy expiry ceiling for resource acquisition.
+    pub expires_at: AgentPolicyInstant,
 }
 
 /// Content-free shell/application observation port. It exposes no browser,

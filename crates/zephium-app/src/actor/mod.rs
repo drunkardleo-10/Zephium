@@ -663,6 +663,20 @@ pub struct CallbackHandle {
 }
 
 impl CallbackHandle {
+    /// Sticky retained state is polled after every Shell command. A full queue
+    /// already owns that progress; a sealed queue owns the shutdown barrier,
+    /// which waits on the original resource notification epoch instead. Only
+    /// a permanently closed actor has lost the application wake route.
+    #[cfg(feature = "work-execution")]
+    pub(crate) fn wake_retained_work(&self) -> bool {
+        let Some(inner) = self.queue.upgrade() else {
+            return false;
+        };
+        !matches!(
+            (CommandQueue { inner }).try_push(Command::WorkWake),
+            Err(TryPushError::Closed(_))
+        )
+    }
     pub fn dispatch(&self, command: Command) -> bool {
         let Some(inner) = self.queue.upgrade() else {
             return false;

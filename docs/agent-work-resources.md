@@ -13,6 +13,54 @@ one [frozen public product brief](../eval/agentic-browsing/macos-retained-public
 on 2026-09-07, with two stateless Luna calls and clean independent closure.
 That one-page read-only result is not general task or shipping-product readiness.
 
+## Production selected-profile attachment
+
+The shipping `macos-work` Rust entry is now
+`zephium_desktop::admit_retained_trusted_work(app, request)`, delegating through
+the installed `MacosWorkComposition::launch_retained` and the original Shell.
+The trusted request must include the existing actor-selected Ready profile
+binding, approved manifest/context/objective/model/deadline, credential and
+task/account contract. There is no UI/IPC authority parser or default task.
+Preparation opens no resource or provider request. Shell rechecks its original
+Engine and Store/audit allocations, selected profile/storage/readiness, deadline
+and exclusive lifecycle slot before invoking the original deferred native factory.
+Legacy and retained compositions share its single acquisition site; no port
+reopens or is manufactured from an ordinary Browse tab.
+
+The installed application owner retains construction through callback loss,
+stop and expiry; successful construction enters the existing original Store
+Claim, native acquisition, exact Admitted/Running ACK and scoped controller
+sequence. Original notifications drive the existing Shell queue/timer. A sealed
+queue has an already-owned shutdown barrier, not a lost resource wake: that
+barrier waits on the original notification epoch under one caller deadline.
+No new executor, timer thread or model/controller implementation is added.
+
+`RetainedWorkHandle` exposes bounded content-free snapshots/events, explicit
+stop and exact uncertain-CAS reconciliation, and one source-bound ModelMapped
+extraction only after original scoped drain and durable Succeeded ACK. Result
+artifacts are not persisted by this slice. The resource remains retained after
+result retrieval; normal Shell shutdown alone destroys it and joins the same
+global native seal/audit proof. Unresolved construction, Store, worker or native
+owners cannot become a clean local-zero substitute. Factory/admission ambiguity
+remains fail-closed and retains any original owner available to the application.
+
+The production provider path remains `store:false`; inspectable qualification
+retention is explicitly refused by this entry. One-page read-only objectives
+are supported by the existing trusted task/controller contract. Retained
+navigation, human takeover/input, rendering authority, fresh successor admission
+and general multi-page open objectives are **not** exposed. Shared application
+contracts are macOS/Windows-neutral; existing unsupported native platforms remain
+unsupported. Default Browse does not enable this optional graph.
+
+Deterministic actual-Shell/SQLite/loopback tests cover durable result before
+destruction, original global shutdown, foreign Engine/Store and changed profile,
+duplicate/legacy attachment, pre-attachment stop, and stop/expiry during original
+construction with no acquisition/provider work. These tests and build gates do
+not qualify a new live native/provider run. The next live witness must invoke
+this production entry in the actual `macos-work` application, manually judge a
+bounded one-page objective, retain its page after terminal result, and verify
+normal original Shell/native shutdown. No live invocation was performed here.
+
 ## Why this boundary exists
 
 The actual-application foreground witness establishes a bounded supported

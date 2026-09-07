@@ -46,8 +46,8 @@ pub use terra::{
     AgentWorkExtractionTask, AgentWorkFailure, AgentWorkHandle, AgentWorkOutcome,
     AgentWorkRecovery, AgentWorkRetainedBrowser, AgentWorkRetainedController,
     AgentWorkRetainedHandle, AgentWorkRetainedOutcome, AgentWorkRetainedRecovery,
-    AgentWorkRunInput, AgentWorkRunSettings, AgentWorkSuccess, AgentWorkTask,
-    AgentWorkTaskProgress, MAX_AGENT_WORK_EVENTS,
+    AgentWorkRetainedResourceSpec, AgentWorkRunInput, AgentWorkRunSettings, AgentWorkSuccess,
+    AgentWorkTask, AgentWorkTaskProgress, MAX_AGENT_WORK_EVENTS,
 };
 
 #[cfg(feature = "probe-harness")]

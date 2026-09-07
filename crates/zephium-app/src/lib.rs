@@ -36,6 +36,12 @@ pub use work_profile::{
 #[cfg(feature = "agentic-browser")]
 mod work_resources;
 
+#[cfg(feature = "work-execution")]
+pub use work_resources::product::{
+    PreparedRetainedWork, RetainedWorkHandle, RetainedWorkNativeFactory, RetainedWorkPhase,
+    RetainedWorkPorts, RetainedWorkSnapshot,
+};
+
 #[cfg(feature = "work-execution-probe")]
 #[doc(hidden)]
 pub use work_resources::probe as retained_work_probe;

@@ -184,6 +184,8 @@ impl AgentLifecycleOwner {
 pub struct Shell {
     #[cfg(feature = "work-execution")]
     work: Option<Box<crate::work::ApplicationWork>>,
+    #[cfg(feature = "work-execution")]
+    retained_work: Option<Box<crate::work_resources::product::ProductWork>>,
     profiles: Profiles,
     spaces: Spaces,
     items: Items,
@@ -466,6 +468,8 @@ impl Shell {
             agent_lifecycle: AgentLifecycleOwner::new(agent_lifecycle),
             #[cfg(feature = "work-execution")]
             work: None,
+            #[cfg(feature = "work-execution")]
+            retained_work: None,
             extension_service: Some(extension_service),
             extension_startup_ready: false,
             extension_browser_surfaces: ExtensionBrowserSurfaceState::default(),
@@ -525,9 +529,28 @@ impl Shell {
         }
         match cmd {
             #[cfg(feature = "work-execution")]
+            Command::AttachRetainedWork(attachment) => {
+                if let Some(mut work) =
+                    crate::work_resources::product::ProductWork::take(&attachment)
+                {
+                    if self.work.is_some()
+                        || self.retained_work.is_some()
+                        || !matches!(self.agent_lifecycle, AgentLifecycleOwner::Absent)
+                        || !work.admits(&self.engine, &self.store, self.work_profile_binding())
+                    {
+                        work.refuse();
+                    } else {
+                        // Install original ownership before native construction.
+                        self.retained_work = Some(Box::new(work));
+                        self.retained_work.as_mut().unwrap().initialize();
+                    }
+                }
+            }
+            #[cfg(feature = "work-execution")]
             Command::AttachWork(attachment) => {
                 if let Some(mut work) = crate::work::ApplicationWork::take_attachment(&attachment) {
                     if !work.belongs_to_store(&self.store)
+                        || self.retained_work.is_some()
                         || !work.belongs_to_engine(&self.engine)
                         || !work.accepts_predecessor(self.work.as_deref())
                         || !matches!(self.agent_lifecycle, AgentLifecycleOwner::Absent)
@@ -919,6 +942,12 @@ impl Shell {
 
     #[cfg(feature = "work-execution")]
     fn poll_work(&mut self) {
+        if let Some(work) = &mut self.retained_work {
+            work.poll();
+            if let Some(queue) = &self.self_queue {
+                queue.schedule_work(work.next_deadline());
+            }
+        }
         if let Some(work) = &mut self.work {
             work.poll();
             if let Some(queue) = &self.self_queue {
@@ -928,6 +957,10 @@ impl Shell {
     }
 
     fn shutdown_until(&mut self, deadline: std::time::Instant, ack: SyncSender<ShutdownOutcome>) {
+        #[cfg(feature = "work-execution")]
+        if let Some(work) = &mut self.retained_work {
+            work.begin_shutdown();
+        }
         #[cfg(feature = "work-execution")]
         if let Some(work) = &mut self.work {
             work.begin_shutdown();
@@ -1163,6 +1196,10 @@ impl Shell {
     /// proof; the proof is deliberately consumed inside the actor barrier.
     #[cfg(feature = "agentic-browser")]
     fn shutdown_agent_lifecycle_until(&mut self, deadline: std::time::Instant) -> bool {
+        #[cfg(feature = "work-execution")]
+        if let Some(work) = &mut self.retained_work {
+            return work.shutdown_until(deadline);
+        }
         #[cfg(feature = "work-execution")]
         if let Some(work) = &mut self.work {
             return work.shutdown_until(deadline);

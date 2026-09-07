@@ -77,6 +77,37 @@ enum NativeLifetimeOwner {
 }
 
 impl MacosWorkComposition {
+    /// Launches a stateless, single-page retained Work request through the
+    /// original Shell. No qualification owner, rendering or navigation lease
+    /// is substituted. Queue acceptance is not profile/durable admission;
+    /// observe the returned bounded handle for the actual outcome.
+    pub fn launch_retained(
+        &self,
+        shell: &CallbackHandle,
+        request: TrustedWorkRequest,
+    ) -> Result<Option<zephium_app::RetainedWorkHandle>, AgentWorkFailure> {
+        let binding = request.browser_profile.ok_or(AgentWorkFailure::Contract)?;
+        #[cfg(feature = "public-qualification")]
+        if request.public_qualification {
+            // This production join has no inspectable-retention bypass.
+            return Err(AgentWorkFailure::Contract);
+        }
+        let ports = zephium_app::RetainedWorkPorts::new(
+            self.engine.clone(),
+            self.store.clone(),
+            self.store.clone(),
+            self.native_factory(),
+        );
+        let prepared = zephium_app::PreparedRetainedWork::try_new(
+            request.input,
+            binding,
+            request.config,
+            request.credential,
+            request.task,
+            ports,
+        )?;
+        Ok(shell.attach_retained_work(prepared))
+    }
     /// Uses the same owners passed to the normal application shell.
     pub fn new(engine: Arc<WebviewEngine>, store: Arc<SqliteStore>) -> Self {
         Self {
@@ -133,27 +164,35 @@ impl MacosWorkComposition {
 
     pub(crate) fn ports(&self) -> AgentWorkApplicationPorts {
         let engine = self.engine.clone();
-        let native = self.native.clone();
+        let factory = self.native_factory();
         AgentWorkApplicationPorts::new(
             engine.clone(),
             self.store.clone(),
             Box::new(move |sink| {
-                let mut native = native.lock().ok()?;
-                if matches!(*native, NativeLifetimeOwner::Dormant) {
-                    *native = engine.take_agent_browser_lifetime_factory().map_or(
-                        NativeLifetimeOwner::Unavailable,
-                        NativeLifetimeOwner::Factory,
-                    );
-                }
-                let NativeLifetimeOwner::Factory(factory) = &mut *native else {
-                    return None;
-                };
-                factory
-                    .begin(move |event| {
-                        let _ = sink.publish(event);
-                    })
-                    .ok()
+                factory(Arc::new(move |event| {
+                    let _ = sink.publish(event);
+                }))
             }),
         )
+    }
+
+    // Both product lifetimes share the original one-shot factory acquisition;
+    // neither composition can reopen a port or fork native lifetime ownership.
+    fn native_factory(&self) -> zephium_app::RetainedWorkNativeFactory {
+        let engine = self.engine.clone();
+        let native = self.native.clone();
+        Box::new(move |sink| {
+            let mut native = native.lock().ok()?;
+            if matches!(*native, NativeLifetimeOwner::Dormant) {
+                *native = engine.take_agent_browser_lifetime_factory().map_or(
+                    NativeLifetimeOwner::Unavailable,
+                    NativeLifetimeOwner::Factory,
+                );
+            }
+            let NativeLifetimeOwner::Factory(factory) = &mut *native else {
+                return None;
+            };
+            factory.begin(move |event| sink(event)).ok()
+        })
     }
 }
