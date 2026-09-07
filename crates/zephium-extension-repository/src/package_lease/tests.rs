@@ -1,17 +1,22 @@
-use zephium_core::ids::{ExtensionInstallId, ProfileId};
-
 use super::api::{
-    ActiveBundledPackageLease, ActiveBundledPackageReleaseRequest, BundledPackageLeaseError,
-    BundledPackageLeaseReleaseError, RollbackBundledPackageLease,
+    ActiveBundledPackageLease, ActiveBundledPackageReleaseRequest, RollbackBundledPackageLease,
     RollbackBundledPackageReleaseRequest,
 };
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use super::api::{BundledPackageLeaseError, BundledPackageLeaseReleaseError};
 use super::policy::{map_snapshot_object_error, snapshot_object_error_requires_poison};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use super::runtime::{LocalLeaseError, PackageLeaseRuntime};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use crate::materialization::{
-    MaterializationTransitionError, PackageLeaseRepositoryIdentity, PackageObjectError,
-    SnapshotObjectPhase, MAX_DURABLE_PACKAGE_PINS,
+    MaterializationTransitionError, PackageLeaseRepositoryIdentity, MAX_DURABLE_PACKAGE_PINS,
 };
-use crate::{ExtensionRepository, ExtensionRepositoryError};
+use crate::materialization::{PackageObjectError, SnapshotObjectPhase};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use crate::ExtensionRepository;
+use crate::ExtensionRepositoryError;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use zephium_core::ids::{ExtensionInstallId, ProfileId};
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn empty_repository() -> (tempfile::TempDir, ExtensionRepository) {

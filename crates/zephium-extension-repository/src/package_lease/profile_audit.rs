@@ -328,8 +328,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    use zephium_core::ids::ExtensionInstallId;
-    use zephium_core::ids::ProfileId;
+    use zephium_core::ids::{ExtensionInstallId, ProfileId};
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     use zephium_private_fs::LockedPrivateNamespace;
 

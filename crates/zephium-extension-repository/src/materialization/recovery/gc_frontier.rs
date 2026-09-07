@@ -648,7 +648,7 @@ fn validate_gc_intact_semantics(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 pub(super) fn validate_gc_intact_predelete_frontier(
     state: &MaterializationState,
     records: &RecordInventory,

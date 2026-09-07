@@ -4180,6 +4180,7 @@ mod runtime_tests;
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     use std::sync::atomic::AtomicUsize;
 
     use super::*;

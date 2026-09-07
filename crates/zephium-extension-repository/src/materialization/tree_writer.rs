@@ -12,7 +12,7 @@ use zephium_extension_acquisition::{
     AcquiredExtensionArchive, AcquiredExtensionArchiveReadError, AcquiredExtensionTreeReceipt,
     AcquiredExtensionTreeReceiptError,
 };
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 use zephium_extension_package::MAX_EXTENSION_RELATIVE_PATH_DEPTH;
 use zephium_extension_package::{
     CanonicalExtensionTreeIndex, ExtensionTreeFile, PortableRelativePath,

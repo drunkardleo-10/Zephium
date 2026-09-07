@@ -466,7 +466,7 @@ impl ProductCatalogAdmissionCache {
         self.entries.iter().flatten().count()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
     fn entries_are_empty(&self) -> bool {
         self.entries.iter().all(Option::is_none)
     }

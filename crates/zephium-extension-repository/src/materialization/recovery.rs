@@ -47,7 +47,7 @@ use crate::ExtensionRepositoryError;
 
 mod gc_frontier;
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 use gc_frontier::validate_gc_intact_predelete_frontier;
 use gc_frontier::{validate_gc_partial_frontier, validate_prepared_gc_transition_shape};
 
