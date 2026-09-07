@@ -11365,7 +11365,7 @@ mod tests {
                 self.topology.manifest_guard()
             );
         "#;
-        let progress = join.repeat(7);
+        let progress = join.repeat(9);
         let audit = r#"
             if !supervisor
                 .topology()
@@ -11393,7 +11393,7 @@ mod tests {
             policy,
             effect_policy,
             supervisor,
-            &join.repeat(5),
+            &join.repeat(8),
             audit,
         )
         .is_err());

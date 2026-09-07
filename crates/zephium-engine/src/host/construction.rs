@@ -44,6 +44,7 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2, ICoreWebView2
 #[derive(Clone, Copy)]
 enum NativeViewPurpose {
     Tab,
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
     WarmSpare,
 }
 
@@ -51,6 +52,7 @@ impl NativeViewPurpose {
     const fn resource_class(self) -> NativeResourceClass {
         match self {
             Self::Tab => NativeResourceClass::Tab,
+            #[cfg(not(all(unix, not(target_os = "macos"))))]
             Self::WarmSpare => NativeResourceClass::WarmSpare,
         }
     }

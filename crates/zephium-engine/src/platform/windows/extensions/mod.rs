@@ -8,8 +8,8 @@ mod native;
 
 pub(crate) use native::{
     begin_native_extension_activation, native_extension_cleanup_invariant_failed,
-    prepare_native_extension_activation, profile_inventory_is_empty,
-    WindowsNativeExtensionActivation, WindowsNativeExtensionFailure, WindowsNativeExtensionOwner,
+    prepare_native_extension_activation, WindowsNativeExtensionActivation,
+    WindowsNativeExtensionFailure, WindowsNativeExtensionOwner,
     WindowsNativeExtensionOwnerReconciliation, WindowsNativeExtensionProfile,
     WindowsNativeExtensionProfileReconciliation, WindowsNativeExtensionRetirement,
 };

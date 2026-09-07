@@ -346,12 +346,10 @@ fn sync(state: &Rc<RefCell<State>>, sync_scheduled: &Rc<Cell<bool>>) {
                     }
                 }
             }
-            if !mapped {
-                if view.view.is_visible() {
-                    view.view.hide();
-                    if !revision_is_current(state, revision) {
-                        continue 'attempt;
-                    }
+            if !mapped && view.view.is_visible() {
+                view.view.hide();
+                if !revision_is_current(state, revision) {
+                    continue 'attempt;
                 }
             }
         }

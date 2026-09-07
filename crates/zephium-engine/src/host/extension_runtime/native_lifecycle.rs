@@ -4,6 +4,10 @@
 //! carries copied terminal observations only: timing out a waiter never
 //! cancels native work, changes lifecycle state, or releases native resources.
 
+// Shared logical tests remain available where native extension adapters are
+// unsupported; warning enforcement stays complete on the two native backends.
+#![cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+
 use std::num::NonZeroU64;
 use std::sync::{Condvar, Mutex};
 use std::time::Instant;
@@ -495,6 +499,7 @@ impl PlatformOwnerBundle {
             (Self::Windows(left), Self::Windows(right)) => left.owner_id() == right.owner_id(),
             #[cfg(test)]
             (Self::Logical(left), Self::Logical(right)) => left.token == right.token,
+            #[cfg(any(target_os = "macos", target_os = "windows", test))]
             _ => false,
         }
     }

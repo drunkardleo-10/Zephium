@@ -7,6 +7,11 @@
 //! to [`ExtensionRuntimeRegistry`] on the UI thread; passive destruction can
 //! release only a reservation that never attached.
 
+// The logical ownership/denial ingress is cross-platform; native success and
+// cleanup states have adapters only on macOS/Windows. Keep those shared states
+// available to the Linux adversarial harness without claiming a Linux adapter.
+#![cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+
 #[cfg(test)]
 #[path = "extension_runtime/activation_issuer_test_support.rs"]
 mod activation_issuer_test_support;
@@ -3253,7 +3258,10 @@ impl AdapterAvailability {
     fn accepts_activation(self, expectation: ExtensionRuntimeNativeIdentityExpectation) -> bool {
         match self {
             #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-            Self::Unsupported => false,
+            Self::Unsupported => {
+                let _ = expectation;
+                false
+            }
             #[cfg(target_os = "macos")]
             Self::MacosNative => matches!(
                 expectation,
@@ -3272,7 +3280,10 @@ impl AdapterAvailability {
     fn accepts_recovery(self, expectation: ExtensionRuntimeRecoveryExpectation) -> bool {
         match self {
             #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-            Self::Unsupported => false,
+            Self::Unsupported => {
+                let _ = expectation;
+                false
+            }
             #[cfg(target_os = "macos")]
             Self::MacosNative => matches!(
                 expectation,
@@ -3694,6 +3705,7 @@ fn begin_activation_adapter(
     match reservation.adapter {
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         AdapterAvailability::Unsupported => {
+            let _ = ticket;
             host.extension_runtime_registry.fail_invariant();
             Err(ExtensionRuntimeHostBindError::InternalInvariant)
         }
@@ -3828,6 +3840,7 @@ fn begin_retirement_adapter(
     match reservation.adapter {
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         AdapterAvailability::Unsupported => {
+            let _ = ticket;
             platform_owner.quarantine_unattributed();
             host.extension_runtime_registry.fail_invariant();
             Err(ExtensionRuntimeHostBindError::InternalInvariant)
@@ -3934,6 +3947,7 @@ fn begin_reconciliation_adapter(
     match reservation.adapter {
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         AdapterAvailability::Unsupported => {
+            let _ = ticket;
             host.extension_runtime_registry.fail_invariant();
             Err(ExtensionRuntimeHostBindError::InternalInvariant)
         }
