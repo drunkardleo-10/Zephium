@@ -1,5 +1,5 @@
-//! Frozen development admission. Uses shipping stateless preparation, not the
-//! public-retention constructor or a replacement runtime/native lifecycle.
+//! Shared frozen development admission; a static definition selects the task
+//! and explicit retention without changing any runtime/native lifecycle.
 use super::*;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -30,14 +30,23 @@ pub fn load_request(
     started: Instant,
     profile: zephium_app::AgentWorkProfileBinding,
 ) -> Result<crate::TrustedWorkRequest, &'static str> {
+    load_configured_request(started, profile, &DEFINITION)
+}
+
+pub(crate) fn load_configured_request(
+    started: Instant,
+    profile: zephium_app::AgentWorkProfileBinding,
+    definition: &'static QualificationDefinition,
+) -> Result<crate::TrustedWorkRequest, &'static str> {
     let credential = load_macos_development_openai_credential().map_err(|_| "credential")?;
-    request(credential, started, profile)
+    request(credential, started, profile, definition)
 }
 
 fn request(
     credential: AgentProviderCredential,
     started: Instant,
     profile: zephium_app::AgentWorkProfileBinding,
+    definition: &QualificationDefinition,
 ) -> Result<crate::TrustedWorkRequest, &'static str> {
     let identity = ContextIdentity::new(
         ContextId::generate(),
@@ -49,17 +58,25 @@ fn request(
     if Instant::now() >= deadline {
         return Err("deadline");
     }
-    let input = input(identity, profile.storage_class(), started, deadline)?;
-    Ok(crate::TrustedWorkRequest::new(
-        input,
-        zephium_app::AgentWorkApplicationConfig::new(
-            AgentRuntimeConfig::STANDARD,
-            AgentProviderTransportConfig::STANDARD,
-        ),
-        credential,
-        task(identity).map_err(|_| "task")?,
-    )
-    .with_browser_profile(profile))
+    let input = input(
+        identity,
+        profile.storage_class(),
+        started,
+        deadline,
+        definition,
+    )?;
+    Ok((definition.configure_request)(
+        crate::TrustedWorkRequest::new(
+            input,
+            zephium_app::AgentWorkApplicationConfig::new(
+                AgentRuntimeConfig::STANDARD,
+                AgentProviderTransportConfig::STANDARD,
+            ),
+            credential,
+            (definition.task)(identity).map_err(|_| "task")?,
+        )
+        .with_browser_profile(profile),
+    ))
 }
 
 fn input(
@@ -67,6 +84,7 @@ fn input(
     storage: ContextProfileStorageClass,
     started: Instant,
     deadline: Instant,
+    definition: &QualificationDefinition,
 ) -> Result<AgentWorkRunInput, &'static str> {
     let origin = SemanticOrigin::parse(ORIGIN).map_err(|_| "origin")?;
     let effects = AgentEffectScope::try_new(&[SemanticEffectClass::Read]).map_err(|_| "effects")?;
@@ -82,6 +100,7 @@ fn input(
         effects,
     )
     .map_err(|_| "authority")?;
+    let authority = (definition.authority)(authority)?;
     let expires = AgentPolicyInstant::from_millis(151_000);
     let manifest = AgentRunManifest::try_new(
         AgentRunManifestId::generate(),
@@ -119,7 +138,7 @@ fn input(
             ContextNavigationTarget::parse(INITIAL).map_err(|_| "target")?,
         )
         .map_err(|_| "context")?,
-        OBJECTIVE.into(),
+        definition.objective.into(),
         AgentWorkRunSettings::new(
             AgentBrowserModel::Luna,
             ids,
@@ -147,13 +166,19 @@ mod tests {
             ContextProfileStorageClass::Durable,
             ContextProfileStorageClass::Ephemeral,
         ] {
-            assert!(input(identity, storage, started, started + TOTAL).is_ok());
+            for definition in [
+                &DEFINITION,
+                #[cfg(feature = "discovery-qualification")]
+                &crate::discovery_qualification::DEFINITION,
+            ] {
+                assert!(input(identity, storage, started, started + TOTAL, definition).is_ok());
+                let task = (definition.task)(identity).unwrap();
+                assert_eq!(task.navigation_discovery().is_some(), definition.inspection);
+            }
         }
         let task = task(identity).unwrap();
-        assert_eq!(
-            task.navigation_target().unwrap().as_url().as_str(),
-            DESTINATION
-        );
+        assert_eq!(task.navigation_target().is_some(), !DISCOVERY);
+        assert_eq!(task.navigation_discovery().is_some(), DISCOVERY);
         assert!(task.navigation_route().is_none());
     }
 }

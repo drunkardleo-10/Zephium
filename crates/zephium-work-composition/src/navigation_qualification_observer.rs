@@ -15,12 +15,18 @@ pub struct ApplicationReport {
     pub durable_terminal_verified: bool,
 }
 
-#[derive(Default)]
 pub struct ApplicationObserver {
     report: ApplicationReport,
     sequence: u64,
     run: Option<ContextRunId>,
     failed: bool,
+    definition: &'static QualificationDefinition,
+}
+
+impl Default for ApplicationObserver {
+    fn default() -> Self {
+        Self::with_definition(&DEFINITION)
+    }
 }
 
 pub fn cancel(view: &AgentWorkApplicationHandle) -> bool {
@@ -33,6 +39,15 @@ pub fn cancel(view: &AgentWorkApplicationHandle) -> bool {
 }
 
 impl ApplicationObserver {
+    pub(crate) fn with_definition(definition: &'static QualificationDefinition) -> Self {
+        Self {
+            report: ApplicationReport::default(),
+            sequence: 0,
+            run: None,
+            failed: false,
+            definition,
+        }
+    }
     pub fn report(&self) -> ApplicationReport {
         self.report
     }
@@ -78,9 +93,9 @@ impl ApplicationObserver {
             if record.disposition() == AgentWorkDisposition::Succeeded
                 && record.debt() == AgentWorkDebt::NONE
                 && snapshot.run.is_some_and(|run| record.key()[16..] == run.bytes()));
-        self.report.source_mapping_verified = view
-            .take_extraction()
-            .is_some_and(|result| verify_owned(&result) && view.take_extraction().is_none());
+        self.report.source_mapping_verified = view.take_extraction().is_some_and(|result| {
+            (self.definition.verify_owned)(&result) && view.take_extraction().is_none()
+        });
         self.report.accepted = self.healthy()
             && snapshot.phase == AgentWorkApplicationPhase::Succeeded
             && snapshot.failure.is_none()
@@ -89,7 +104,7 @@ impl ApplicationObserver {
             && snapshot.run == self.run
             && self.report.durable_terminal_verified
             && self.report.source_mapping_verified
-            && self.report.navigation_proposals == 1
+            && (1..=self.definition.max_hops).contains(&self.report.navigation_proposals)
             && self.report.model_calls > 0;
         self.failed |= writeln!(std::io::stdout().lock(),
             "work-application-navigation-terminal: phase={:?} failure={:?} persistence_failure={:?} content=redacted",
@@ -129,9 +144,12 @@ impl ApplicationObserver {
             AgentWorkEventKind::ToolProposed(AgentBrowserToolKind::Navigate) => {
                 self.report.navigation_proposals =
                     self.report.navigation_proposals.saturating_add(1);
-                self.failed |= self.report.navigation_proposals > 1;
+                self.failed |= self.report.navigation_proposals > self.definition.max_hops;
             }
             AgentWorkEventKind::ToolProposed(AgentBrowserToolKind::Extract) => {}
+            AgentWorkEventKind::ToolProposed(
+                AgentBrowserToolKind::Read | AgentBrowserToolKind::Locate,
+            ) if self.definition.inspection => {}
             AgentWorkEventKind::ToolProposed(_)
             | AgentWorkEventKind::ActionActive
             | AgentWorkEventKind::Verified
@@ -145,6 +163,29 @@ impl ApplicationObserver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn discovery_observer_shares_accounting_but_accepts_two_hops_and_inspection() {
+        const OPEN: QualificationDefinition = QualificationDefinition {
+            max_hops: 2,
+            inspection: true,
+            ..DEFINITION
+        };
+        let mut observer = ApplicationObserver::with_definition(&OPEN);
+        for kind in [
+            AgentBrowserToolKind::Read,
+            AgentBrowserToolKind::Locate,
+            AgentBrowserToolKind::Navigate,
+            AgentBrowserToolKind::Navigate,
+        ] {
+            observer.observe_kind(AgentWorkEventKind::ToolProposed(kind));
+            assert!(observer.healthy());
+        }
+        observer.observe_kind(AgentWorkEventKind::ToolProposed(
+            AgentBrowserToolKind::Navigate,
+        ));
+        assert!(!observer.healthy());
+        assert!(!observer.report().accepted);
+    }
     fn settled(input_tokens: u64, output_tokens: u64, cost_micro_usd: u64) -> AgentWorkEventKind {
         AgentWorkEventKind::ModelSettled {
             call: AgentModelCallId::new(1).unwrap(),
@@ -199,9 +240,11 @@ mod tests {
             AgentBrowserToolKind::Navigate,
         ));
         assert!(observer.healthy());
-        observer.observe_kind(AgentWorkEventKind::ToolProposed(
-            AgentBrowserToolKind::Navigate,
-        ));
+        for _ in 1..=MAX_HOPS {
+            observer.observe_kind(AgentWorkEventKind::ToolProposed(
+                AgentBrowserToolKind::Navigate,
+            ));
+        }
         assert!(!observer.healthy());
         assert!(!observer.report().accepted);
         for kind in [
@@ -212,7 +255,10 @@ mod tests {
         ] {
             let mut observer = ApplicationObserver::default();
             observer.observe_kind(kind);
-            assert!(!observer.healthy());
+            assert_eq!(
+                observer.healthy(),
+                DISCOVERY && kind == AgentWorkEventKind::ToolProposed(AgentBrowserToolKind::Read)
+            );
             assert!(!observer.report().accepted);
         }
     }

@@ -7,6 +7,8 @@ license.workspace = true
 [features]
 # Frozen one-hop witness through ordinary trusted Work admission, never retained.
 macos-work-navigation-probe = ["macos-work", "zephium-work-composition/navigation-qualification", "tauri/custom-protocol"]
+# Same actual-application owners, public inspectable unknown-route objective.
+macos-work-discovery-probe = ["macos-work-navigation-probe", "zephium-work-composition/discovery-qualification"]
 # Same release-excluded retained path, one closed real-public product-brief task.
 macos-work-retained-public-probe = [
     "macos-work-retained-controller-probe",

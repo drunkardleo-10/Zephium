@@ -8,6 +8,11 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tauri::Manager;
 use zephium_app::AgentWorkApplicationHandle;
+#[cfg(feature = "macos-work-discovery-probe")]
+use zephium_work_composition::discovery_qualification::{
+    self as qualifier, ApplicationObserver, ApplicationReport,
+};
+#[cfg(not(feature = "macos-work-discovery-probe"))]
 use zephium_work_composition::navigation_qualification::{
     self as qualifier, ApplicationObserver, ApplicationReport,
 };

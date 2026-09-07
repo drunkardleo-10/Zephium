@@ -7,12 +7,42 @@ use zephium_agentic::*;
 
 #[path = "navigation_qualification_input.rs"]
 mod input;
+#[cfg(feature = "discovery-qualification")]
+pub(crate) use input::load_configured_request;
 pub use input::load_request;
 #[path = "navigation_qualification_observer.rs"]
 mod observer;
 pub use observer::{cancel, ApplicationObserver, ApplicationReport};
 
 const ORIGIN: &str = "https://react.dev";
+const MAX_HOPS: u64 = 1;
+const DISCOVERY: bool = false;
+
+pub(crate) struct QualificationDefinition {
+    pub objective: &'static str,
+    pub task: fn(ContextIdentity) -> Result<Box<dyn AgentWorkTask>, AgentWorkFailure>,
+    pub authority: fn(AgentPlanNodeAuthority) -> Result<AgentPlanNodeAuthority, &'static str>,
+    pub configure_request: fn(crate::TrustedWorkRequest) -> crate::TrustedWorkRequest,
+    pub max_hops: u64,
+    pub inspection: bool,
+    pub verify_owned: fn(&SemanticOwnedExtractionResult) -> bool,
+}
+const DEFINITION: QualificationDefinition = QualificationDefinition {
+    objective: OBJECTIVE,
+    task,
+    authority,
+    configure_request,
+    max_hops: MAX_HOPS,
+    inspection: DISCOVERY,
+    verify_owned,
+};
+
+fn authority(authority: AgentPlanNodeAuthority) -> Result<AgentPlanNodeAuthority, &'static str> {
+    Ok(authority)
+}
+fn configure_request(request: crate::TrustedWorkRequest) -> crate::TrustedWorkRequest {
+    request
+}
 const DESTINATION: &str = "https://react.dev/learn/your-first-component";
 const DEPARTURE: &str = "Quick Start";
 const ARRIVAL: &str = "Your First Component";

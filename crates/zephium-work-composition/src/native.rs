@@ -19,6 +19,8 @@ pub struct TrustedWorkRequest {
     pub(crate) credential: AgentProviderCredential,
     pub(crate) task: Box<dyn AgentWorkTask>,
     browser_profile: Option<zephium_app::AgentWorkProfileBinding>,
+    #[cfg(feature = "public-qualification")]
+    public_qualification: bool,
 }
 
 impl TrustedWorkRequest {
@@ -35,11 +37,21 @@ impl TrustedWorkRequest {
             credential,
             task,
             browser_profile: None,
+            #[cfg(feature = "public-qualification")]
+            public_qualification: false,
         }
     }
     /// Requests the exact actor-selected browser session, revalidated by Shell.
     pub fn with_browser_profile(mut self, binding: zephium_app::AgentWorkProfileBinding) -> Self {
         self.browser_profile = Some(binding);
+        self
+    }
+
+    /// Explicit public-only diagnostic retention. Absent from release graphs;
+    /// it does not change the ordinary profile-bound application admission.
+    #[cfg(feature = "public-qualification")]
+    pub fn with_public_qualification_retention(mut self) -> Self {
+        self.public_qualification = true;
         self
     }
 }
@@ -98,6 +110,17 @@ impl MacosWorkComposition {
         request: TrustedWorkRequest,
     ) -> Result<PreparedAgentWork, AgentWorkFailure> {
         let binding = request.browser_profile.ok_or(AgentWorkFailure::Contract)?;
+        #[cfg(feature = "public-qualification")]
+        if request.public_qualification {
+            return PreparedAgentWork::try_new_for_public_probe(
+                request.input,
+                request.config,
+                request.credential,
+                request.task,
+                self.ports(),
+            )?
+            .with_browser_profile(binding);
+        }
         let prepared = PreparedAgentWork::try_new(
             request.input,
             request.config,

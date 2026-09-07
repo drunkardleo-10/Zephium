@@ -17,6 +17,9 @@ pub use zephium_agent_controller::AgentWorkFailure;
 mod qualification;
 #[cfg(all(feature = "navigation-qualification", not(debug_assertions)))]
 compile_error!("navigation Work qualification is forbidden in optimized builds");
+#[cfg(feature = "discovery-qualification")]
+#[doc(hidden)]
+pub mod discovery_qualification;
 #[cfg(feature = "navigation-qualification")]
 #[doc(hidden)]
 pub mod navigation_qualification;
