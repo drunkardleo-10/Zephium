@@ -59,12 +59,66 @@ fn preparation_precedes_attachment(source: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn ordinary_navigation_observer(source: &str) -> Result<(), String> {
+    require(
+        source,
+        &[
+            "let request = qualifier::load_request(started)?;",
+            ".admission.admit(|| { let view = super::admit_trusted_work(app, request)",
+            "Some((view.clone(), false))",
+            "control.ready_for_shutdown.store(true, Ordering::Release); worker_app.exit(0);",
+            "state.control.admission.cancel(); request_stop(&state.control); api.prevent_exit();",
+            "worker.join().is_ok()",
+            "let qualified = accepted && joined && normal_shutdown_clean;",
+            "!owner.terminal_failure.load(Ordering::Acquire)",
+            "qualifier::cancel(view)",
+            "let mut observer = ApplicationObserver::default();",
+        ],
+    )?;
+    for forbidden in [
+        "AgentWorkController::",
+        "MacosWorkComposition::",
+        "WebviewEngine::",
+        "SqliteStore::",
+        "spawn_suspended",
+        "prepare_public_qualification",
+        "shutdown_with_deadline",
+        "set_focus(",
+        "activate(",
+        "process::exit(",
+        "#[tauri::command]",
+        "impl AgentBrowserPort",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "navigation observer acquired another owner/authority: {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn check(root: &Path) -> Result<(), String> {
     let read = |path: &str| {
         fs::read_to_string(root.join(path))
             .map_err(|_| format!("missing Work composition source {path}"))
     };
     let native = read("crates/zephium-work-composition/src/native.rs")?;
+    ordinary_navigation_observer(&read("desktop/src/navigation_probe.rs")?)?;
+    require(&read("desktop/Cargo.toml")?, &[
+        "macos-work-navigation-probe = [\"macos-work\", \"zephium-work-composition/navigation-qualification\", \"tauri/custom-protocol\"]",
+    ])?;
+    require(
+        &read("desktop/build.rs")?,
+        &[
+            "env::var_os(\"CARGO_FEATURE_MACOS_WORK_NAVIGATION_PROBE\").is_some()",
+            "navigation_probe_config::validate(",
+        ],
+    )?;
+    require(&read("desktop/src/lib.rs")?, &[
+        "#[cfg(all(feature = \"macos-work-navigation-probe\", any(not(debug_assertions), not(target_os = \"macos\"))))] compile_error!",
+        "#[cfg(all(feature = \"macos-work-navigation-probe\", target_os = \"macos\"))] navigation_probe::install(app.handle())?;",
+    ])?;
     production(&native)?;
     require(
         &native,
@@ -224,6 +278,27 @@ fn combined_result_qualification(source: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn navigation_observer_cannot_bypass_admission_or_ordinary_shutdown() {
+        let source = include_str!("../../desktop/src/navigation_probe.rs");
+        ordinary_navigation_observer(source).unwrap();
+        for boundary in [
+            "super::admit_trusted_work(app, request)",
+            "worker.join().is_ok()",
+            "accepted && joined && normal_shutdown_clean",
+            "api.prevent_exit()",
+            ".admit(||",
+        ] {
+            assert!(ordinary_navigation_observer(&source.replace(boundary, "removed")).is_err());
+        }
+        for mutation in [
+            "WebviewEngine::new()",
+            "window.set_focus()",
+            "shell.shutdown_with_deadline()",
+        ] {
+            assert!(ordinary_navigation_observer(&format!("{source}\n{mutation}")).is_err());
+        }
+    }
     #[test]
     fn combined_qualification_requires_verified_effects_and_exact_post_action_source() {
         let source = include_str!("../../crates/zephium-terra-macos-probe/src/work_application.rs");

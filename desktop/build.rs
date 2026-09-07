@@ -5,6 +5,7 @@ use tauri_utils::platform::Target;
 
 #[allow(dead_code)]
 mod foreground_probe_config;
+mod navigation_probe_config;
 
 const MAIN_LABEL: &str = "main";
 const LINUX_APP_ID: &str = "app.zephium";
@@ -62,6 +63,24 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
     let extensions_staging = env::var_os("CARGO_FEATURE_STAGING_EXTENSION_CATALOG").is_some();
     let extension_lab = env::var_os("CARGO_FEATURE_LOCAL_EXTENSION_LAB").is_some();
     let rendering_probe = env::var_os("CARGO_FEATURE_MACOS_WORK_RENDERING_PROBE").is_some();
+    let navigation_probe = env::var_os("CARGO_FEATURE_MACOS_WORK_NAVIGATION_PROBE").is_some();
+    if navigation_probe {
+        if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
+            || env::var("PROFILE").as_deref() != Ok("debug")
+            || rendering_probe
+            || extensions_staging
+            || extension_lab
+        {
+            return Err(
+                "navigation qualification is an isolated macOS debug-only application".into(),
+            );
+        }
+        navigation_probe_config::validate(
+            config_override
+                .as_ref()
+                .ok_or("navigation qualification requires its isolated configuration override")?,
+        )?;
+    }
     if rendering_probe {
         if env::var_os("CARGO_FEATURE_MACOS_WORK_RESOURCE_PROBE").is_some()
             && env::var_os("CARGO_FEATURE_MACOS_WORK_RETAINED_CONTROLLER_PROBE").is_some()
@@ -123,6 +142,7 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
                 && !extensions_staging
                 && !extension_lab
                 && !rendering_probe
+                && !navigation_probe
             {
                 validate_linux_identity("effective", &config, &root)?;
             }

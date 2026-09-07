@@ -8,6 +8,9 @@ use zephium_agentic::*;
 #[path = "navigation_qualification_input.rs"]
 mod input;
 pub use input::load_request;
+#[path = "navigation_qualification_observer.rs"]
+mod observer;
+pub use observer::{cancel, ApplicationObserver, ApplicationReport};
 
 const ORIGIN: &str = "https://react.dev";
 const DESTINATION: &str = "https://react.dev/learn/your-first-component";
