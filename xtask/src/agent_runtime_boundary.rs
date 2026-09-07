@@ -246,7 +246,8 @@ const SCOPED_RULES: &[(&str, &[&str], &[&str])] = &[
         "letretained_worker=recover_lock(&EMERGENCY_WORKER_REAP).take()",
         "schedule_reap(worker);returnErr(RuntimeSpawnError::AlreadyRunning)",
         "recover_lock(&inner.scoped_closure).take()",
-    ], &["worker.take().is_some_and(RuntimeWorkerOwnership::join)", "worker.is_finished()"]),
+        "self.inner.control_wake.notify_waiters();Ok(ticket)",
+    ], &["worker.take().is_some_and(RuntimeWorkerOwnership::join)", "worker.is_finished()", "control_wake.notify_one()"]),
     ("crates/zephium-agentic/src/agent_policy.rs", &[
         "pubstructAgentRunPolicySettlementBinding", "manifest:AgentRunManifestId,guard:[u8;32]",
         "settlement.closure.manifest()==self.manifest&&settlement.closure.manifest_guard()==self.guard",

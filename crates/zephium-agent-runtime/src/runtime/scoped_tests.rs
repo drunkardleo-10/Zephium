@@ -6,7 +6,7 @@ use std::task::Poll;
 
 use zephium_agentic::*;
 
-use super::tests::{runtime_test_guard, wait_stopped};
+use super::tests::{runtime_test_guard, wait_stopped, LateStartController};
 use super::*;
 
 fn tick(value: u64) -> AgentPolicyInstant {
@@ -91,6 +91,30 @@ struct IngressController {
     polled_pending: mpsc::Sender<()>,
     claimed: mpsc::Sender<Result<(), AgentRuntimeControllerTerminalRefusal>>,
     resume: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[test]
+fn bound_scoped_controller_observes_late_start_without_an_unrelated_wake() {
+    let _serial = runtime_test_guard();
+    let (_rows, _lease, binding) = acquired_scope();
+    let (waiting, pending_event) = mpsc::channel();
+    let (started, observed_start) = mpsc::channel();
+    let pending = PendingScopedAgentRuntime::spawn_suspended(
+        AgentRuntimeConfig::STANDARD,
+        binding,
+        Box::new(LateStartController { waiting, started }),
+    )
+    .unwrap();
+    let (handle, _completion, lifecycle) = pending.bind().into_parts();
+    pending_event.recv_timeout(Duration::from_secs(2)).unwrap();
+    let ticket = handle.start_run().unwrap();
+    let observed = observed_start.recv_timeout(Duration::from_millis(200));
+    // Closure proof cannot be inferred from delivering a start or stopping.
+    assert!(matches!(
+        lifecycle.drain_until(Instant::now() + Duration::from_secs(1)),
+        AgentRuntimeScopedDrain::Unproven
+    ));
+    assert_eq!(observed, Ok(Some(ticket)));
 }
 
 impl AgentRuntimeScopedController for IngressController {

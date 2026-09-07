@@ -1357,7 +1357,12 @@ impl AgentRuntimeHandle {
             self.inner.current_ticket.store(0, Ordering::Release);
             return Err(AgentRunAdmissionRefusal::Capacity);
         }
-        self.inner.control_wake.notify_one();
+        // Shared control has nested lifecycle/watchdog and controller event
+        // waiters. An older lifecycle waiter can remain enabled while the
+        // controller runs, so waking only one can strand this queued Start.
+        // Every consumer registers before inspecting durable control state;
+        // broadcast makes that state visible without relying on a wake permit.
+        self.inner.control_wake.notify_waiters();
         Ok(ticket)
     }
 
@@ -2266,6 +2271,77 @@ mod tests {
     }
 
     struct EarlyExitController;
+
+    pub(super) struct LateStartController {
+        pub(super) waiting: mpsc::Sender<()>,
+        pub(super) started: mpsc::Sender<Option<AgentRunTicket>>,
+    }
+
+    impl LateStartController {
+        fn wait_for_start(
+            self: Box<Self>,
+            mut worker: AgentRuntimeWorker,
+        ) -> AgentRuntimeControllerFuture {
+            Box::pin(async move {
+                let mut event = Box::pin(worker.next_event());
+                std::future::poll_fn(|cx| {
+                    // Signal only after the real inner waiter has registered
+                    // and returned Pending under the older lifecycle waiters.
+                    assert!(event.as_mut().poll(cx).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                self.waiting.send(()).unwrap();
+                let ticket = match event.await {
+                    Ok(AgentRuntimeEvent::RunStarted(ticket)) => Some(ticket),
+                    _ => None,
+                };
+                let _ = self.started.send(ticket);
+            })
+        }
+    }
+
+    impl AgentRuntimeController for LateStartController {
+        fn run(
+            self: Box<Self>,
+            worker: AgentRuntimeWorker,
+            _browser: AgentRuntimeBrowser,
+        ) -> AgentRuntimeControllerFuture {
+            self.wait_for_start(worker)
+        }
+    }
+
+    impl AgentRuntimeScopedController for LateStartController {
+        fn run(self: Box<Self>, worker: AgentRuntimeWorker) -> AgentRuntimeControllerFuture {
+            self.wait_for_start(worker)
+        }
+    }
+
+    #[test]
+    fn bound_controller_observes_late_start_without_an_unrelated_wake() {
+        let _guard = runtime_test_guard();
+        let (waiting, pending_event) = mpsc::channel();
+        let (started, observed_start) = mpsc::channel();
+        let pending = PendingAgentRuntime::spawn_suspended_with_controller(
+            AgentRuntimeConfig::STANDARD,
+            Box::new(LateStartController { waiting, started }),
+        )
+        .unwrap();
+        let (handle, _completion, lifecycle) = pending
+            .bind_browser_port(Arc::new(RecordingPort {
+                calls: AtomicUsize::new(0),
+            }))
+            .into_parts();
+        pending_event.recv_timeout(Duration::from_secs(2)).unwrap();
+        let ticket = handle.start_run().unwrap();
+        let observed = observed_start.recv_timeout(Duration::from_millis(200));
+        // Always clean up before asserting, including the negative control.
+        assert!(matches!(
+            lifecycle.shutdown_until(Instant::now() + Duration::from_secs(1)),
+            AgentBrowserShutdownOutcome::Unclean
+        ));
+        assert_eq!(observed, Ok(Some(ticket)));
+    }
 
     impl AgentRuntimeController for EarlyExitController {
         fn run(

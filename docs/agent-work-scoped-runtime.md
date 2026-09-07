@@ -427,3 +427,16 @@ formatting and default Browse provider/runtime dependency isolation pass. These
 are deterministic/build results; no GUI, credential or public provider service
 was used. All actual-runtime application fixtures share the existing process-wide
 worker test lock; the production one-worker admission limit is unchanged.
+
+Runtime control notifications broadcast to the registered lifecycle, watchdog
+and controller event waiters. Each registers before checking durable control
+state; the bounded Start queue remains the admission source of truth. In the
+real bind-before-start ordering, an older outer lifecycle waiter remains enabled
+while the controller awaits its first event. A single-consumer notification can
+wake that dormant waiter and strand the queued Start. Deterministic legacy and
+scoped regressions first poll the actual controller event future to Pending,
+then admit the run and require its exact ticket without any unrelated wake or
+polling loop. Both time out with the single-consumer publisher and pass with
+broadcast. Cancellation, watchdog and absolute shutdown deadline ownership are
+unchanged; delivering Start does not grant a closure proof or qualify a live
+retained product workflow.
