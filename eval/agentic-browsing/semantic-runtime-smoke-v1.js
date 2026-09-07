@@ -1090,6 +1090,62 @@ async function finish() {
   const catalogInspected = JSON.parse(invoke(105, 105, { k: "initial" }, { n: 4, x: 4 }));
   assert(catalogInspected.c === "inspection_limit", "nested names escaped the DOM inspection ceiling");
 
+  // A source-backed prose unit must not lose the labels of its inline links.
+  // Keep the child refs, but also preserve their visible words in DOM order in
+  // the nearest prose record; do not flatten unrelated nested block prose.
+  const prose = new Element("main");
+  const observable = prose.append(new Element("li"));
+  observable.append(new CharacterData("Observable :"));
+  const features = ["recording", "streaming", "debugging", "profiling", "diffing"];
+  for (let index = 0; index < features.length; index += 1) {
+    if (index !== 0) observable.append(new CharacterData(index === 4 ? ", and" : ","));
+    const attributes = { href: `https://example.test/${features[index]}` };
+    if (index === 3) attributes["aria-label"] = "Profile tooling";
+    observable.append(new HTMLAnchorElement(attributes))
+      .append(new CharacterData(features[index]));
+  }
+  observable.append(new CharacterData("tools are built in."));
+  observable.append(new Element("span", { hidden: "" })).append(new CharacterData("hidden-prose-label"));
+  observable.append(new Element("div", { contenteditable: "true" }))
+    .append(new Element("p")).append(new CharacterData("editable-prose-label"));
+  observable.append(new HTMLAnchorElement({ href: "https://example.test/secret" }))
+    .append(new CharacterData("sk-prose-secret-fixture-value"));
+  observable.append(new HTMLAnchorElement({ href: "https://example.test/private-label", "aria-label": "sk-private-label-fixture-value" }))
+    .append(new CharacterData("private-link-body"));
+  const outer = prose.append(new Element("li"));
+  outer.append(new CharacterData("Outer only"));
+  const inner = outer.append(new Element("p"));
+  inner.append(new CharacterData("Separate paragraph"));
+  inner.append(new HTMLAnchorElement({ href: "https://example.test/detail" }))
+    .append(new CharacterData("detail"));
+  document._root = prose;
+  setOwner(prose, document);
+  const proseWire = invoke(106, 106, { k: "initial" });
+  const proseSnapshot = JSON.parse(proseWire);
+  const observableNode = proseSnapshot.n.find((node) => node.r === "list_item");
+  assert(observableNode.t === "Observable : recording , streaming , debugging , profiling , and diffing tools are built in.", "inline link labels were lost from their prose source");
+  for (const feature of features) {
+    const link = proseSnapshot.n.find((node) => node.u === `https://example.test/${feature}`);
+    assert(link && link.r === "link" && link.p === proseSnapshot.n.indexOf(observableNode), "prose composition lost exact child link ancestry");
+    assert(link.n === (feature === "profiling" ? "Profile tooling" : feature), "prose composition changed a child accessible name");
+  }
+  assert(proseSnapshot.n.some((node) => node.r === "list_item" && node.t === "Outer only"), "nested block prose was flattened into its ancestor");
+  assert(proseSnapshot.n.some((node) => node.r === "paragraph" && node.t === "Separate paragraph detail"), "nearest paragraph lost its inline label");
+  assert(!proseWire.includes("hidden-prose-label") && !proseWire.includes("sk-prose-secret-fixture-value"), "hidden or secret inline text escaped");
+  assert(!observableNode.t.includes("editable-prose-label"), "editable text entered an ancestor prose source");
+  assert(!observableNode.t.includes("private-link-body"), "a secret-classified explicit link entered an ancestor prose source");
+  assert(JSON.parse(invoke(107, 107, { k: "initial" }, { t: 16 })).c === "text_limit", "prose copies escaped aggregate text accounting");
+  assert(JSON.parse(invoke(108, 108, { k: "initial" }, { n: 4, x: 4 })).c === "inspection_limit", "prose composition escaped the DOM inspection ceiling");
+  const largeProse = new Element("p");
+  for (let index = 0; index < 11; index += 1) {
+    largeProse.append(new HTMLAnchorElement({ href: `https://example.test/bounded/${index}` }))
+      .append(new CharacterData("x".repeat(400)));
+  }
+  document._root = largeProse;
+  setOwner(largeProse, document);
+  const largeProseSnapshot = JSON.parse(invoke(109, 109, { k: "initial" }));
+  assert(largeProseSnapshot.c === "text_limit" && largeProseSnapshot.n.some((node) => node.r === "paragraph" && Buffer.byteLength(node.t) <= 4096), "inline copies escaped the original per-prose-field ceiling");
+
   process.stdout.write(`${JSON.stringify({
     schema: "zephium.agentic.semantic-runtime-smoke.v1",
     initial_nodes: initial.n.length,
@@ -1123,6 +1179,7 @@ async function finish() {
     malformed_request_rejected: true,
     oversized_action_subtree_rejected: true,
     nested_control_names_bounded: true,
+    inline_prose_sources_bounded: true,
     captured_link_destination_getter: true,
     immutable: true
   })}\n`);

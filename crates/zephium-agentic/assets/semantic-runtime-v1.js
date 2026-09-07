@@ -1386,11 +1386,14 @@
   function appendVisibleText(records, item, raw, state) {
     if (item.sink !== null) appendSink(records[item.sink], raw, state);
     if (item.nameAncestors === false) return;
+    let proseSeen = item.sink !== null && records[item.sink].sink === "text";
     // A link/button/heading may contain semantic children (for example a
     // product heading and price paragraph). Their own text must not erase the
     // enclosing control's content-derived name. Walk only the already bounded
     // retained ancestry: no second DOM traversal, selector, or unbounded text
-    // getter. Every copy remains charged to the same field/global text budget.
+    // getter. The nearest prose sink also retains inline link labels in DOM
+    // order, without flattening nested paragraphs/list items into outer prose.
+    // Every copy remains charged to the same field/global text budget.
     for (let index = item.parent, depth = 0;
       index !== null && depth <= MAX_TREE_DEPTH && !state.stopped;
       index = records[index].wire.p === undefined ? null : records[index].wire.p, depth += 1) {
@@ -1402,6 +1405,10 @@
         role === "textbox" || role === "password" || role === "searchbox" ||
         role === "spinbutton" || role === "combobox" || role === "listbox" || role === "option") break;
       if (index !== item.sink && record.sink === "name") appendSink(record, raw, state);
+      if (!proseSeen && record.sink === "text") {
+        proseSeen = true;
+        if (index !== item.sink) appendSink(record, raw, state);
+      }
     }
   }
 
@@ -1638,7 +1645,12 @@
             const index = addRecord(records, record, state);
             if (index === null) break;
             parent = index;
-            sink = record.sink === null ? null : index;
+            // An explicitly named inline link still has visible descendant
+            // words belonging to its prose parent. Keep that existing sink;
+            // never substitute its aria-label or overwrite its explicit name.
+            sink = record.sink !== null ? index :
+              descriptor.role === "link" && record.sensitivity === "public" &&
+                sink !== null && records[sink].sink === "text" ? sink : null;
           } else {
             sink = null;
           }

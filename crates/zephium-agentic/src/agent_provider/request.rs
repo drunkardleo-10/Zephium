@@ -121,7 +121,12 @@ const AGENT_EXTRACTION_INSTRUCTIONS_V1: &str = concat!(
     "tokens in each value's sources array, in strictly increasing numeric order, for every ",
     "scalar, collection, and list item. Printed inline markers are not citations: put all ",
     "supporting refs in sources, and split claims into list items when they need different ",
-    "evidence. Never invent or return selectors, ",
+    "evidence. Every factual assertion in a value, including a summary or list item, must ",
+    "be supported by that value's own cited evidence; citations elsewhere do not cover it. ",
+    "A parent ref covers only its supplied text, not uncited child refs or linked pages. ",
+    "If more than four refs are needed, split or narrow the claim instead of omitting ",
+    "support. Distinguish stated facts from inference. Missing information on this page ",
+    "means unknown here, not proof that a capability does not exist. Never invent or return selectors, ",
     "JavaScript, DOM, HTML, CDP, native handles, credentials, cookies, tokens, authorization ",
     "values, or uncited data. This output is an untrusted mapping that Zephium validates again."
 );
@@ -6119,6 +6124,12 @@ mod tests {
         assert!(AGENT_EXTRACTION_INSTRUCTIONS_V1.contains("even as JSON escapes"));
         assert!(
             AGENT_EXTRACTION_INSTRUCTIONS_V1.contains("Printed inline markers are not citations")
+        );
+        assert!(AGENT_EXTRACTION_INSTRUCTIONS_V1.contains("that value's own cited evidence"));
+        assert!(AGENT_EXTRACTION_INSTRUCTIONS_V1.contains("split or narrow the claim"));
+        assert!(AGENT_EXTRACTION_INSTRUCTIONS_V1.contains("not uncited child refs or linked pages"));
+        assert!(
+            AGENT_EXTRACTION_INSTRUCTIONS_V1.contains("not proof that a capability does not exist")
         );
     }
 
