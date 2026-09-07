@@ -188,10 +188,11 @@ An original move-only completion carries requested→effective lineage into the
 core row; the controller/account input uses the independently checked effective
 document exactly. The requested target stays available separately and remains
 the native holder's fixed admission join. No actor reference exists before this
-barrier. Later location callbacks synchronously close the ready gate and cancel
-semantic work; native health invalidation follows through the queued invariant
-callback. Dispatch and completion require the same permanently frozen
-document gate. Returning to an earlier URL cannot revive references. See
+barrier. Later location callbacks synchronously change Ready to Refused, invoke
+the invariant callback to invalidate native health, and cancel semantic work.
+Only the coalesced owner reconciliation notification is queued. Dispatch and
+completion require the same permanently frozen document gate. Returning to an
+earlier URL cannot revive references. See
 [the resource contract](../../docs/agent-work-resources.md) for the invariant.
 
 Correction checks: 47 core Work-resource tests, 10 native document-gate tests,

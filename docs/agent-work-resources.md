@@ -140,14 +140,14 @@ resource identity or the original navigation identity.
 No lease, invocation, snapshot or actor reference exists before this barrier.
 The actual initial commit already retired the bootstrap world and installed the
 new document's isolated runtime; finalization must not fabricate another native
-commit. After finalization, a location callback synchronously closes the gate
-and cancels semantic work. The invariant callback is queued; it later invalidates
-the exact native health owner and schedules owner reconciliation. That health
-publication is not synchronous with the location callback. Dispatch and
-completion both require that same immutable
-ready gate and current lease/health; even a change back to the frozen URL cannot
-revive old references. Continuing a later SPA/history transition is unsupported
-and requires a future explicit generation/account/ref-invalidation protocol.
+commit. After finalization, a location callback synchronously changes the gate
+from Ready to Refused, invokes the invariant callback to invalidate the exact
+native health owner, and cancels semantic work. Only the coalesced owner
+reconciliation notification is queued. Dispatch and completion both require the
+same immutable ready gate and current lease/health; even a change back to the
+frozen URL cannot revive old references. Continuing a later SPA/history
+transition is unsupported and requires a future explicit generation/account/
+ref-invalidation protocol.
 
 The page lives in a separate resource map; native callbacks capture only its
 stable private incarnation guard. They never capture the first actor's run and
