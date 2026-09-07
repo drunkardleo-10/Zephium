@@ -256,6 +256,8 @@ const fn map_semantic_runtime_failure(
 
 /// Typed callback cohort retained by one native view delegate graph.
 pub(crate) struct AgentOwnedViewCallbacks<Navigation, Location, RendererLost, Invariant, Panic> {
+    #[cfg(feature = "native-agentic-work-construction-probe")]
+    construction_diagnostic: Option<Rc<dyn Fn(crate::WorkConstructionFailure)>>,
     navigation: Navigation,
     location: Location,
     renderer_lost: RendererLost,
@@ -274,12 +276,22 @@ impl<Navigation, Location, RendererLost, Invariant, Panic>
         panic: Panic,
     ) -> Self {
         Self {
+            #[cfg(feature = "native-agentic-work-construction-probe")]
+            construction_diagnostic: None,
             navigation,
             location,
             renderer_lost,
             invariant,
             panic,
         }
+    }
+    #[cfg(feature = "native-agentic-work-construction-probe")]
+    pub(crate) fn with_construction_diagnostic(
+        mut self,
+        diagnostic: impl Fn(crate::WorkConstructionFailure) + 'static,
+    ) -> Self {
+        self.construction_diagnostic = Some(Rc::new(diagnostic));
+        self
     }
 }
 
@@ -359,12 +371,16 @@ where
     Panic: Fn() + 'static,
 {
     let AgentOwnedViewCallbacks {
+        #[cfg(feature = "native-agentic-work-construction-probe")]
+        construction_diagnostic,
         navigation: on_navigation,
         location: on_location,
         renderer_lost: on_renderer_lost,
         invariant: on_invariant_failure,
         panic: on_callback_panic,
     } = callbacks;
+    #[cfg(feature = "native-agentic-work-construction-probe")]
+    let navigation_diagnostic = construction_diagnostic.clone();
     let navigation = AgentNavigationController::default();
     let navigation_policy = navigation.clone();
     let navigation_events = navigation.clone();
@@ -423,6 +439,10 @@ where
                 match gate.observe(event) {
                     Ok((committed, notify)) => {
                         if gate.failed() {
+                            #[cfg(feature = "native-agentic-work-construction-probe")]
+                            if let Some(report) = &navigation_diagnostic {
+                                report(crate::WorkConstructionFailure::StrictNavigation);
+                            }
                             invoke_owned_unit_callback(
                                 navigation_invariant_failure.as_ref(),
                                 navigation_callback_panicked.as_ref(),
@@ -536,6 +556,10 @@ where
             ) {
                 Ok(true) => {
                     if work_location.as_ref().is_some_and(|gate| gate.failed()) {
+                        #[cfg(feature = "native-agentic-work-construction-probe")]
+                        if let Some(report) = &construction_diagnostic {
+                            report(crate::WorkConstructionFailure::StrictNavigation);
+                        }
                         invoke_owned_unit_callback(
                             location_invariant.as_ref(),
                             location_panic.as_ref(),

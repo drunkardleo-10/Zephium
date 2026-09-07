@@ -52,6 +52,9 @@ struct State {
 }
 
 pub(crate) struct WorkResourceGuard {
+    #[cfg(feature = "native-agentic-work-construction-probe")]
+    pub(super) construction_failure:
+        Mutex<Option<super::work_construction_diagnostic::WorkConstructionFailure>>,
     #[cfg(feature = "native-agentic-work-resource-probe")]
     pub(super) construction_evidence_claimed: AtomicBool,
     #[cfg(feature = "native-agentic-work-resource-probe")]
@@ -73,8 +76,28 @@ pub(crate) struct WorkNotificationPermit {
     _permit: AgentTaskPermit,
 }
 impl WorkResourceGuard {
+    #[cfg(feature = "native-agentic-work-construction-probe")]
+    pub(crate) fn record_construction_failure(
+        &self,
+        failure: super::work_construction_diagnostic::WorkConstructionFailure,
+    ) {
+        // Diagnostics neither fail nor wake the guard. Ignore later execution,
+        // cleanup and poisoned diagnostic storage rather than replacing cause.
+        if !self
+            .state
+            .lock()
+            .is_ok_and(|state| state.construction_pending)
+        {
+            return;
+        }
+        if let Ok(mut first) = self.construction_failure.lock() {
+            first.get_or_insert(failure);
+        }
+    }
     fn new(request: &WorkBrowserResourceRequest, admission: &Arc<AgentPortAdmission>) -> Self {
         Self {
+            #[cfg(feature = "native-agentic-work-construction-probe")]
+            construction_failure: Mutex::new(None),
             #[cfg(feature = "native-agentic-work-resource-probe")]
             construction_evidence_claimed: AtomicBool::new(false),
             #[cfg(feature = "native-agentic-work-resource-probe")]
@@ -568,6 +591,22 @@ pub(super) struct WorkIngress {
     rows: BTreeMap<ContextId, Arc<WorkResourceGuard>>,
 }
 impl AgentPortAdmission {
+    #[cfg(feature = "native-agentic-work-construction-probe")]
+    pub(super) fn construction_failure(
+        &self,
+        resource: &WorkBrowserResourceJoin,
+    ) -> Option<super::work_construction_diagnostic::WorkConstructionFailure> {
+        let guard = self
+            .work
+            .lock()
+            .ok()?
+            .rows
+            .get(&resource.identity().context())
+            .filter(|guard| guard.resource() == resource)?
+            .clone();
+        let result = *guard.construction_failure.lock().ok()?;
+        result
+    }
     #[cfg(feature = "native-agentic-work-resource-probe")]
     pub(super) fn witness_resource(
         &self,

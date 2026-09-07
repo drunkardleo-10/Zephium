@@ -103,6 +103,19 @@ pub fn admit_retained_trusted_work(
     Ok(handle)
 }
 
+#[cfg(feature = "macos-work-retained-product-probe")]
+pub(crate) fn retained_construction_failure(
+    app: &tauri::AppHandle,
+    view: &zephium_app::RetainedWorkHandle,
+) -> Option<zephium_engine::WorkConstructionFailure> {
+    let state = app.try_state::<WorkCompositionState>()?;
+    let owner = state.0.lock().ok()?;
+    owner
+        .composition
+        .as_ref()?
+        .retained_construction_failure(view)
+}
+
 /// Explicit fresh trusted work after an exact completed predecessor. This is
 /// not resume/retry permission; the Shell and native factory independently
 /// retain all original closure, output-drain and lifetime checks.

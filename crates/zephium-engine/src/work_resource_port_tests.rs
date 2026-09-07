@@ -23,6 +23,61 @@ fn source() -> (WorkBrowserResources, WorkBrowserResourceRequest) {
         .unwrap();
     (rows, request)
 }
+
+#[cfg(feature = "native-agentic-work-construction-probe")]
+#[test]
+fn construction_failure_is_exact_first_wins_and_survives_original_factory_seal() {
+    use crate::WorkConstructionFailure as Failure;
+    for cause in [
+        Failure::StrictNavigation,
+        Failure::RendererLost,
+        Failure::SemanticNativeInvariant,
+        Failure::Deadline,
+        Failure::NativeAdmission(ContextPortFailure::NativeRefused),
+        Failure::UnattributedResourceFailure,
+    ] {
+        let (_, request) = source();
+        let resource = request.resource().clone();
+        let slot = AgentContextPortSlot::new(Arc::new(|_| true), Arc::new(|_| {}));
+        let mut factory = slot.take_factory().unwrap();
+        let _port = factory.begin(|_| {}).unwrap();
+        let admission = factory.inner.state.lock().unwrap().active.clone().unwrap();
+        let guard = Arc::new(WorkResourceGuard::new(&request, &admission));
+        admission
+            .work
+            .lock()
+            .unwrap()
+            .rows
+            .insert(resource.identity().context(), guard.clone());
+        assert!(guard.construction_current());
+        assert_eq!(slot.work_construction_failure(&resource), None);
+        guard.record_construction_failure(cause);
+        // Observation is not a failure/reporting owner and cannot poison state.
+        assert!(guard.construction_current());
+        guard.fail();
+        guard.record_construction_failure(Failure::Deadline);
+        guard.outcome(&request, Outcome::Refused);
+        guard.record_construction_failure(Failure::SemanticNativeInvariant);
+        assert_eq!(slot.work_construction_failure(&resource), Some(cause));
+        assert_eq!(slot.work_construction_failure(source().1.resource()), None);
+        let mut foreign_rows =
+            WorkBrowserResources::new(WorkId::generate(), resource.identity().profile());
+        let foreign = foreign_rows
+            .construct(
+                WorkBrowserResourceId::generate(),
+                resource.identity().context(),
+                ContextProfileStorageClass::Ephemeral,
+                tick(0),
+            )
+            .unwrap();
+        assert_eq!(slot.work_construction_failure(foreign.resource()), None);
+        slot.seal();
+        assert_eq!(slot.work_construction_failure(&resource), Some(cause));
+    }
+    let (_, admission, retained) = setup();
+    retained.record_construction_failure(Failure::RendererLost);
+    assert_eq!(admission.construction_failure(retained.resource()), None);
+}
 pub(super) fn setup() -> (
     WorkBrowserResources,
     Arc<AgentPortAdmission>,

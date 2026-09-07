@@ -152,6 +152,8 @@ pub struct RetainedWorkSnapshot {
     pub persistence_failure: Option<AgentWorkJournalError>,
 }
 struct Projection {
+    #[cfg(feature = "work-execution-probe")]
+    construction_resource: Option<WorkBrowserResourceJoin>,
     snapshot: RetainedWorkSnapshot,
     events: VecDeque<AgentWorkEvent>,
     extraction: Option<Box<SemanticOwnedExtractionResult>>,
@@ -221,6 +223,8 @@ impl CallbackHandle {
     ) -> Option<RetainedWorkHandle> {
         let signal = Arc::new(ProductSignal {
             projection: Mutex::new(Projection {
+                #[cfg(feature = "work-execution-probe")]
+                construction_resource: None,
                 snapshot: RetainedWorkSnapshot {
                     phase: RetainedWorkPhase::Attaching,
                     run: prepared.spec.identity.owner(),
@@ -328,6 +332,10 @@ impl ProductWork {
             now,
         ) {
             Ok(pending) => {
+                #[cfg(feature = "work-execution-probe")]
+                if let Ok(mut projection) = self.signal.projection.lock() {
+                    projection.construction_resource = Some(pending.resource.join.clone());
+                }
                 self.coordinator = Some(RetainedWork::constructing(
                     owner,
                     pending,

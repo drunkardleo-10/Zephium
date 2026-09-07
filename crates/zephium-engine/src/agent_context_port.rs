@@ -39,6 +39,12 @@ pub(crate) use foreground_probe::AgentForegroundProbeTask;
 #[cfg(all(target_os = "macos", feature = "native-agentic-work-resource-probe"))]
 #[path = "agent_work_resource_probe_port.rs"]
 pub(crate) mod resource_witness;
+#[cfg(all(
+    target_os = "macos",
+    feature = "native-agentic-work-construction-probe"
+))]
+#[path = "work_construction_diagnostic.rs"]
+pub(crate) mod work_construction_diagnostic;
 #[cfg(target_os = "macos")]
 #[path = "work_resource_port.rs"]
 mod work_resource;

@@ -13,6 +13,35 @@ mod navigation_epoch;
 mod pane_geometry;
 mod platform;
 
+#[cfg(all(
+    feature = "native-agentic-work-construction-probe",
+    not(debug_assertions)
+))]
+compile_error!("native Work construction diagnostics are forbidden in optimized builds");
+
+#[cfg(all(
+    target_os = "macos",
+    feature = "native-agentic-work-construction-probe"
+))]
+#[doc(hidden)]
+pub use agent_context_port::work_construction_diagnostic::WorkConstructionFailure;
+
+#[cfg(all(
+    target_os = "macos",
+    feature = "native-agentic-work-construction-probe"
+))]
+impl WebviewEngine {
+    /// Descriptive only, for the exact retained qualifier resource. No native
+    /// getters, replacement authority, page data, or lifetime acquisition.
+    #[doc(hidden)]
+    pub fn work_construction_failure(
+        &self,
+        resource: &zephium_agentic::WorkBrowserResourceJoin,
+    ) -> Option<WorkConstructionFailure> {
+        self.agent_context_port.work_construction_failure(resource)
+    }
+}
+
 #[cfg(all(target_os = "macos", feature = "native-agentic-work-resource-probe"))]
 #[doc(hidden)]
 pub use agent_context_port::resource_witness::ConstructionEvidence as WorkResourceConstructionEvidence;

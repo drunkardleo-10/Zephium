@@ -77,6 +77,14 @@ enum NativeLifetimeOwner {
 }
 
 impl MacosWorkComposition {
+    #[cfg(feature = "retained-product-qualification")]
+    pub fn retained_construction_failure(
+        &self,
+        view: &zephium_app::RetainedWorkHandle,
+    ) -> Option<zephium_engine::WorkConstructionFailure> {
+        self.engine
+            .work_construction_failure(&view.construction_resource_for_qualification()?)
+    }
     /// Launches a stateless, single-page retained Work request through the
     /// original Shell. No qualification owner, rendering or navigation lease
     /// is substituted. Queue acceptance is not profile/durable admission;

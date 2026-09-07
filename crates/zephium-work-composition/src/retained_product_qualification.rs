@@ -177,15 +177,36 @@ pub struct ApplicationObserver {
     report: ApplicationReport,
     sequence: u64,
     failed: bool,
+    construction_failure: Option<zephium_engine::WorkConstructionFailure>,
 }
 impl ApplicationObserver {
+    /// Descriptive first cause only, read from the original resource before
+    /// shutdown removes it. Does not affect native or controller decisions.
+    fn observe_construction_failure(
+        &mut self,
+        failure: Option<zephium_engine::WorkConstructionFailure>,
+    ) {
+        if self.construction_failure.is_none() {
+            self.construction_failure = failure;
+        }
+    }
+    fn construction_diagnostic(&self) -> String {
+        format!(
+            "work-retained-product-construction: cause={:?} content=redacted",
+            self.construction_failure
+        )
+    }
     pub fn report(&self) -> ApplicationReport {
         self.report
     }
     pub fn healthy(&self) -> bool {
         !self.failed
     }
-    pub fn poll(&mut self, view: &RetainedWorkHandle) -> Option<ApplicationReport> {
+    pub fn poll(
+        &mut self,
+        view: &RetainedWorkHandle,
+        construction_failure: impl FnOnce() -> Option<zephium_engine::WorkConstructionFailure>,
+    ) -> Option<ApplicationReport> {
         let snapshot = view.snapshot();
         for _ in 0..256 {
             let Some(event) = view.take_event() else {
@@ -210,6 +231,10 @@ impl ApplicationObserver {
         ) {
             return None;
         }
+        // Sample after the terminal projection, not before it: a native failure
+        // racing this poll must publish its cause before its resource terminal.
+        // The ordinary shutdown owner has not yet removed the original guard.
+        self.observe_construction_failure(construction_failure());
         self.report.durable_terminal_verified = snapshot.record.is_some_and(|record| {
             record.disposition() == AgentWorkDisposition::Succeeded
                 && record.debt() == AgentWorkDebt::NONE
@@ -233,6 +258,12 @@ impl ApplicationObserver {
                 <= 100_000
             && self.report.cost_micro_usd <= 100_000;
         self.report.accepted &= writeln!(std::io::stdout().lock(), "work-retained-product-terminal: phase={:?} failure={:?} persistence_failure={:?} answer=dashboard_inspectable_public factual_validation=false content=redacted", snapshot.phase, snapshot.failure, snapshot.persistence_failure).is_ok();
+        self.report.accepted &= writeln!(
+            std::io::stdout().lock(),
+            "{}",
+            self.construction_diagnostic()
+        )
+        .is_ok();
         Some(self.report)
     }
 
@@ -287,6 +318,37 @@ mod objective_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn construction_failure_survives_observer_to_closed_content_free_log() {
+        use zephium_engine::WorkConstructionFailure as Failure;
+        for (cause, label) in [
+            (Failure::StrictNavigation, "StrictNavigation"),
+            (Failure::RendererLost, "RendererLost"),
+            (Failure::SemanticNativeInvariant, "SemanticNativeInvariant"),
+            (Failure::Deadline, "Deadline"),
+            (
+                Failure::UnattributedResourceFailure,
+                "UnattributedResourceFailure",
+            ),
+            (
+                Failure::NativeAdmission(ContextPortFailure::NativeRefused),
+                "NativeAdmission(NativeRefused)",
+            ),
+        ] {
+            let mut observer = ApplicationObserver::default();
+            observer.observe_construction_failure(None);
+            observer.observe_construction_failure(Some(cause));
+            observer.observe_construction_failure(None);
+            observer.observe_construction_failure(Some(Failure::Deadline));
+            assert_eq!(
+                observer.construction_diagnostic(),
+                format!("work-retained-product-construction: cause=Some({label}) content=redacted")
+            );
+            assert!(observer.healthy());
+            assert_eq!(observer.report().model_calls, 0);
+            assert!(!observer.report().accepted);
+        }
+    }
     #[test]
     fn discovery_task_has_frozen_public_scope_but_no_route_or_answer_validator() {
         let identity = ContextIdentity::new(

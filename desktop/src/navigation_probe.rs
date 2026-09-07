@@ -211,7 +211,13 @@ fn run(app: &tauri::AppHandle, control: &Control) -> Result<ApplicationReport, &
         if control.admission.cancelled() || !observer.healthy() {
             request_stop(control);
         }
-        if let Some(report) = observer.poll(&view) {
+        #[cfg(feature = "macos-work-retained-product-probe")]
+        let report = observer.poll(&view, || {
+            super::work::retained_construction_failure(app, &view)
+        });
+        #[cfg(not(feature = "macos-work-retained-product-probe"))]
+        let report = observer.poll(&view);
+        if let Some(report) = report {
             return Ok(report);
         }
         if started.elapsed() >= OBSERVER_HANDOFF {

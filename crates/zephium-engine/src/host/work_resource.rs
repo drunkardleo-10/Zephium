@@ -12,6 +12,8 @@ use super::{
 use crate::agent_context_port::{
     work_browser_monotonic_now, WorkLifecycleTask, WorkObservationTask, WorkResourceGuard,
 };
+#[cfg(feature = "native-agentic-work-construction-probe")]
+use crate::WorkConstructionFailure as ConstructionFailure;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use zephium_agentic::{
@@ -415,6 +417,10 @@ impl EngineHost {
         let original_deadline = Instant::now().checked_add(CONSTRUCTION_BUDGET);
         let result = self.build_work_resource(guard.clone());
         let Ok(mut resource) = result else {
+            #[cfg(feature = "native-agentic-work-construction-probe")]
+            if let Err(failure) = &result {
+                guard.record_construction_failure(ConstructionFailure::NativeAdmission(*failure));
+            }
             #[cfg(feature = "native-agentic-work-resource-probe")]
             guard.record_construction_evidence(|| {
                 crate::agent_context_port::resource_witness::ConstructionEvidence {
@@ -439,6 +445,10 @@ impl EngineHost {
             deadline.and_then(|deadline| timeout(guard.clone(), deadline, CONSTRUCTION_BUDGET));
         if resource.watchdog.is_none() || resource.lifecycle_deadline.is_none() {
             resource.deadline_expired = true;
+            #[cfg(feature = "native-agentic-work-construction-probe")]
+            guard.record_construction_failure(ConstructionFailure::NativeAdmission(
+                ContextPortFailure::ResourceExhausted,
+            ));
             #[cfg(feature = "native-agentic-work-resource-probe")]
             resource.record_construction_failure("construction_watchdog");
             guard.fail();
@@ -547,33 +557,51 @@ impl EngineHost {
             #[cfg(feature = "native-agentic-work-resource-probe")]
             presentation_observations: 0,
         };
+        let callbacks = crate::platform::imp::AgentOwnedViewCallbacks::new(
+            move |_| {
+                legacy.fail();
+                resource_callback(legacy.clone());
+            },
+            move || resource_callback(location.clone()),
+            move || {
+                #[cfg(feature = "native-agentic-work-construction-probe")]
+                renderer.record_construction_failure(ConstructionFailure::RendererLost);
+                renderer.fail();
+                resource_callback(renderer.clone());
+            },
+            move || {
+                #[cfg(feature = "native-agentic-work-construction-probe")]
+                invariant.record_construction_failure(ConstructionFailure::SemanticNativeInvariant);
+                invariant.fail();
+                resource_callback(invariant.clone());
+            },
+            move || {
+                #[cfg(feature = "native-agentic-work-construction-probe")]
+                panic.record_construction_failure(ConstructionFailure::SemanticNativeInvariant);
+                panic.fail();
+                resource_callback(panic.clone());
+            },
+        );
+        #[cfg(feature = "native-agentic-work-construction-probe")]
+        let callbacks = {
+            let diagnostic = guard.clone();
+            callbacks.with_construction_diagnostic(move |failure| {
+                diagnostic.record_construction_failure(failure)
+            })
+        };
         let view = crate::platform::imp::build_owned_work_view(
             &self.parent,
             ContextOwnedViewport::STANDARD,
             profile,
             guard.storage(),
             store.as_ref(),
-            crate::platform::imp::AgentOwnedViewCallbacks::new(
-                move |_| {
-                    legacy.fail();
-                    resource_callback(legacy.clone());
-                },
-                move || resource_callback(location.clone()),
-                move || {
-                    renderer.fail();
-                    resource_callback(renderer.clone());
-                },
-                move || {
-                    invariant.fail();
-                    resource_callback(invariant.clone());
-                },
-                move || {
-                    panic.fail();
-                    resource_callback(panic.clone());
-                },
-            ),
+            callbacks,
         );
         let Ok(view) = view else {
+            #[cfg(feature = "native-agentic-work-construction-probe")]
+            guard.record_construction_failure(ConstructionFailure::NativeAdmission(
+                ContextPortFailure::NativeRefused,
+            ));
             #[cfg(feature = "native-agentic-work-resource-probe")]
             resource.record_construction_failure("view_build");
             guard.fail();
@@ -583,6 +611,10 @@ impl EngineHost {
             crate::platform::imp::install_content_policy_on_view(view.view(), &policy);
         resource.view = Some(view);
         let Ok(registration) = registration else {
+            #[cfg(feature = "native-agentic-work-construction-probe")]
+            guard.record_construction_failure(ConstructionFailure::NativeAdmission(
+                ContextPortFailure::NativeRefused,
+            ));
             #[cfg(feature = "native-agentic-work-resource-probe")]
             resource.record_construction_failure("content_policy_install");
             guard.fail();
@@ -608,6 +640,8 @@ impl EngineHost {
             .is_some_and(|deadline| Instant::now() >= deadline)
         {
             resource.deadline_expired = true;
+            #[cfg(feature = "native-agentic-work-construction-probe")]
+            guard.record_construction_failure(ConstructionFailure::Deadline);
             #[cfg(feature = "native-agentic-work-resource-probe")]
             if resource.construction.is_some() {
                 resource.record_construction_failure("construction_deadline");
@@ -641,6 +675,8 @@ impl EngineHost {
             .and_then(|view| view.work_navigation())
             .is_none_or(|gate| gate.failed())
         {
+            #[cfg(feature = "native-agentic-work-construction-probe")]
+            guard.record_construction_failure(ConstructionFailure::UnattributedResourceFailure);
             #[cfg(feature = "native-agentic-work-resource-probe")]
             if resource.construction.is_some() {
                 resource.record_construction_failure("navigation_gate");
@@ -648,6 +684,8 @@ impl EngineHost {
             guard.fail();
         }
         if !guard.is_healthy() {
+            #[cfg(feature = "native-agentic-work-construction-probe")]
+            guard.record_construction_failure(ConstructionFailure::UnattributedResourceFailure);
             #[cfg(feature = "native-agentic-work-resource-probe")]
             if resource.construction.is_some() {
                 resource.record_construction_failure("native_health");
@@ -664,6 +702,8 @@ impl EngineHost {
         }
         if resource.construction.is_some() {
             if !guard.construction_current() {
+                #[cfg(feature = "native-agentic-work-construction-probe")]
+                guard.record_construction_failure(ConstructionFailure::UnattributedResourceFailure);
                 #[cfg(feature = "native-agentic-work-resource-probe")]
                 resource.record_construction_failure("construction_authority");
                 guard.fail();
@@ -694,6 +734,10 @@ impl EngineHost {
                             .is_err()
                         || view.view().load_url(document.as_url().as_str()).is_err()
                     {
+                        #[cfg(feature = "native-agentic-work-construction-probe")]
+                        guard.record_construction_failure(ConstructionFailure::NativeAdmission(
+                            ContextPortFailure::NativeRefused,
+                        ));
                         #[cfg(feature = "native-agentic-work-resource-probe")]
                         resource.record_construction_failure("document_dispatch");
                         guard.fail();
@@ -722,6 +766,10 @@ impl EngineHost {
                                 }
                             }
                             _ => {
+                                #[cfg(feature = "native-agentic-work-construction-probe")]
+                                guard.record_construction_failure(
+                                    ConstructionFailure::StrictNavigation,
+                                );
                                 #[cfg(feature = "native-agentic-work-resource-probe")]
                                 guard.record_construction_evidence(|| {
                                     // Finalization already consumed its sole
@@ -816,6 +864,8 @@ impl EngineHost {
                 .is_some_and(|task| deadline.matches(task))
         {
             resource.deadline_expired = true;
+            #[cfg(feature = "native-agentic-work-construction-probe")]
+            guard.record_construction_failure(ConstructionFailure::Deadline);
             #[cfg(feature = "native-agentic-work-resource-probe")]
             if resource.construction.is_some() {
                 resource.record_construction_failure("construction_deadline");
