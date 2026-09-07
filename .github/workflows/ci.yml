@@ -534,6 +534,15 @@ jobs:
             --features native-agentic-semantic-probe \
             --bin windows-agentic-semantic-probe
 
+      # Run before workspace fail-fast can cancel this primitive diagnostic.
+      # Exact selection must execute a test; no retry or filesystem fallback.
+      - name: Diagnose macOS sealed native publication before workspace tests
+        if: runner.os == 'macOS'
+        run: >-
+          cargo nextest run --locked -p zephium-private-fs --lib
+          --retries 0 --no-tests fail --failure-output immediate-final
+          -E 'test(=platform::unix::tests::nested_sealed_same_parent_publication_reports_native_operation_and_errno)'
+
       - name: cargo nextest (macOS)
         if: runner.os == 'macOS'
         run: cargo nextest run --locked --retries 2 --workspace

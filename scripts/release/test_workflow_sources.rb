@@ -200,6 +200,27 @@ def assert_macos_runtime_evidence_boundary(root)
   source_if = "runner.os == 'macOS'"
   release_if = "runner.os == 'macOS' && inputs.checkout_ref != ''"
   ordinary_if = "runner.os == 'macOS' && inputs.checkout_ref == ''"
+  assert_macos_publication_diagnostic(ci)
+  ["order", "selection", "retry", "empty", "bypass"].each do |change|
+    mutated = Marshal.load(Marshal.dump(ci))
+    index, diagnostic = named_step(mutated, "rust-platforms", "Diagnose macOS sealed native publication before workspace tests")
+    case change
+    when "order"
+      steps = mutated.fetch("jobs").fetch("rust-platforms").fetch("steps")
+      steps[index], steps[index + 1] = steps[index + 1], steps[index]
+    when "selection" then diagnostic["run"] = diagnostic.fetch("run").sub("test(=", "test(")
+    when "retry" then diagnostic["run"] = diagnostic.fetch("run").sub("--retries 0", "--retries 2")
+    when "empty" then diagnostic["run"] = diagnostic.fetch("run").sub("--no-tests fail", "--no-tests pass")
+    when "bypass" then diagnostic["continue-on-error"] = true
+    end
+    begin
+      assert_macos_publication_diagnostic(mutated)
+    rescue RuntimeError => error
+      raise unless error.message == "macOS publication diagnostic must run exactly once before the unchanged workspace suite"
+    else
+      raise "macOS publication diagnostic mutation escaped: #{change}"
+    end
+  end
 
   _, source = named_step(
     ci,
@@ -234,6 +255,20 @@ def assert_macos_runtime_evidence_boundary(root)
   ignore = "requires a release-qualified system Safari/WebKit pair; the explicit native security probe owns this environment-dependent gate"
   unless desktop.include?(%[#[ignore = "#{ignore}"]\n    fn system_safari_matches_the_framework_owning_wkwebview()])
     raise "the environment-dependent Safari/WebKit test must stay captive to the explicit native release probe"
+  end
+end
+
+def assert_macos_publication_diagnostic(ci)
+  diagnostic_index, diagnostic = named_step(ci, "rust-platforms", "Diagnose macOS sealed native publication before workspace tests")
+  workspace_index, workspace = named_step(ci, "rust-platforms", "cargo nextest (macOS)")
+  command = "cargo nextest run --locked -p zephium-private-fs --lib " \
+            "--retries 0 --no-tests fail --failure-output immediate-final " \
+            "-E 'test(=platform::unix::tests::nested_sealed_same_parent_publication_reports_native_operation_and_errno)'"
+  unless diagnostic_index + 1 == workspace_index && diagnostic["if"] == "runner.os == 'macOS'" &&
+    diagnostic["run"] == command && !diagnostic.key?("continue-on-error") &&
+    workspace["if"] == "runner.os == 'macOS'" && !workspace.key?("continue-on-error") &&
+    workspace["run"] == "cargo nextest run --locked --retries 2 --workspace"
+    raise "macOS publication diagnostic must run exactly once before the unchanged workspace suite"
   end
 end
 

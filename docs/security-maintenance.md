@@ -153,6 +153,19 @@ and fails closed until an admitted runner is available. Never lower a floor,
 ignore a build mismatch, or relabel hosted source coverage as release evidence
 to make branch CI green.
 
+### macOS native publication pre-gate
+
+The hosted repository test refused sealed-tree publication with the deliberately
+opaque public `Filesystem(Io)` classification. Full-suite fail-fast cancelled
+the lower-level native diagnostic before it ran. CI now runs the exact
+`zephium-private-fs` nested sealed-tree NOREPLACE diagnostic immediately before
+the macOS workspace suite, with zero retries and failure on an empty selection.
+A failed primitive reports its operation and numeric errno without a path;
+success separately proves rejection of an occupied destination. The unchanged
+repository test remains in the full suite. This is filesystem evidence for the
+hosted runner, not browser/application qualification, and changes no production
+publication semantics or recovery policy.
+
 ### Fedora native CI sandbox environment
 
 The 2026-09-07 hosted run at `fd9010f` compiled the Linux native test binary but
