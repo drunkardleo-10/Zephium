@@ -39,16 +39,38 @@ fn foreground_wait_never_extends_its_deadline_or_accepts_late_focus() {
     let now = Instant::now();
     let mut gate = AdmissionGate::default();
     assert!(gate.begin(now));
-    assert!(!gate.begin(now + Duration::from_secs(4)));
+    assert!(!gate.begin(now + Duration::from_secs(14)));
     assert_eq!(
-        sample(&mut gate, now + Duration::from_secs(4), false),
+        sample(&mut gate, now + Duration::from_secs(14), false),
         Some(AdmissionDecision::Wait)
     );
     assert_eq!(
-        sample(&mut gate, now + Duration::from_secs(5), true),
+        sample(&mut gate, now + Duration::from_secs(15), true),
         Some(AdmissionDecision::DeferredForeground)
     );
-    assert_eq!(sample(&mut gate, now + Duration::from_secs(6), true), None);
+    assert_eq!(sample(&mut gate, now + Duration::from_secs(16), true), None);
+}
+
+#[test]
+fn foreground_wait_allows_user_selection_after_accessibility_acquisition() {
+    let now = Instant::now();
+    for elapsed_ms in [5_140, 14_999] {
+        let mut gate = AdmissionGate::default();
+        assert!(gate.begin(now));
+        // Every nominal timer opportunity remains bounded and refuses Work
+        // until the user actually selects the exact foreground window.
+        for check_ms in (0..elapsed_ms).step_by(50) {
+            assert_eq!(
+                sample(&mut gate, now + Duration::from_millis(check_ms), false),
+                Some(AdmissionDecision::Wait)
+            );
+        }
+        assert_eq!(
+            sample(&mut gate, now + Duration::from_millis(elapsed_ms), true),
+            Some(AdmissionDecision::Admit)
+        );
+        assert!(!gate.begin(now + Duration::from_secs(15)));
+    }
 }
 
 #[test]
@@ -72,14 +94,14 @@ fn foreground_wait_has_a_check_ceiling_even_without_clock_progress() {
     let now = Instant::now();
     let mut gate = AdmissionGate::default();
     assert!(gate.begin(now));
-    for _ in 0..101 {
+    for _ in 0..301 {
         assert_eq!(sample(&mut gate, now, false), Some(AdmissionDecision::Wait));
     }
     assert_eq!(
         sample(&mut gate, now, true),
         Some(AdmissionDecision::DeferredForeground)
     );
-    assert_eq!(gate.counts(now).1, 101);
+    assert_eq!(gate.counts(now).1, 301);
 }
 
 #[test]
@@ -90,20 +112,20 @@ fn foreground_check_must_be_reserved_and_cannot_cross_deadline_or_cancellation()
         assert!(gate.begin(now));
         assert_eq!(gate.poll(now, true), None);
         assert_eq!(
-            gate.begin_check(now + Duration::from_secs(4)),
+            gate.begin_check(now + Duration::from_secs(14)),
             Some(ForegroundCheck::Capture)
         );
-        assert_eq!(gate.begin_check(now + Duration::from_secs(4)), None);
+        assert_eq!(gate.begin_check(now + Duration::from_secs(14)), None);
         if cancelled {
             gate.close();
-            assert_eq!(gate.poll(now + Duration::from_secs(4), true), None);
+            assert_eq!(gate.poll(now + Duration::from_secs(14), true), None);
         } else {
             assert_eq!(
-                gate.poll(now + Duration::from_secs(5), true),
+                gate.poll(now + Duration::from_secs(15), true),
                 Some(AdmissionDecision::DeferredForeground)
             );
         }
-        assert_eq!(gate.counts(now + Duration::from_secs(5)).1, 1);
+        assert_eq!(gate.counts(now + Duration::from_secs(15)).1, 1);
     }
 }
 

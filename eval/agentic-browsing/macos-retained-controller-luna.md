@@ -9,6 +9,8 @@ not a public-site matrix or product admission.
 
 The normal Tauri startup loop consumes the existing exact foreground
 main/key/responder admission before any fixture, Work or credential preparation.
+The release-excluded pre-Work admission waits at most 15 seconds/301 checks for
+explicit user selection, independently of the native rendering lease.
 It never activates Zephium or takes human input authority. The private original
 application WorkResourceOwner constructs one ephemeral frozen loopback document
 through the production retained WKWebView resource port. Its original native
@@ -203,3 +205,21 @@ desktop retained-probe feature check, agentic-probe/controller/runtime gates,
 resource and foreground-boundary mutation tests, hostile JavaScript smoke,
 formatting and whitespace checks passed. This supersedes the earlier correction
 counts; it is deterministic source/compilation evidence only.
+
+## Foreground admission timing, 2026-09-07
+
+Two executions of clean source `1538a92022697b5a69b153148cfe9347096efdbc`
+safely returned `DeferredForeground` after approximately 5.12 seconds, with no
+Work resource or provider activity. Accessibility acquisition of the actual app
+took approximately 5.14 seconds, leaving no opportunity to select its window.
+The diagnostic-only admission budget is now 15 seconds with 301 checks at the
+unchanged 50-ms timer cadence. Exact foreground ownership, the original
+nonrenewable deadline, cancellation, release exclusion and no activation remain
+required. The native rendering holder still has exactly its original five-second
+opportunity; this change supplies no new native/provider qualification evidence.
+
+All eight isolated desktop admission/configuration tests and six foreground
+boundary mutation tests passed. The retained-feature desktop test target passed
+strict Clippy; the agentic-probe architecture gate, hostile JavaScript smoke,
+formatting and whitespace checks also passed. No corrected application launch,
+credential access or provider call accompanied this timing adjustment.

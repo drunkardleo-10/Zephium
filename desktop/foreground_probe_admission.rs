@@ -2,8 +2,10 @@
 
 use std::time::{Duration, Instant};
 
-const FOREGROUND_WAIT_BUDGET: Duration = Duration::from_secs(5);
-const MAX_FOREGROUND_CHECKS: u16 = 101;
+// Pre-Work user-selection time only; the separate native rendering holder
+// keeps its original five-second lease. This diagnostic never takes focus.
+const FOREGROUND_WAIT_BUDGET: Duration = Duration::from_secs(15);
+const MAX_FOREGROUND_CHECKS: u16 = 301;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum Phase {

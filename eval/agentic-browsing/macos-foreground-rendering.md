@@ -220,23 +220,28 @@ waiting phase is required; programmatic activation or a blind delay is not.
 
 ## Bounded AwaitingForeground correction
 
-The release-excluded desktop now starts one original five-second admission clock
+The release-excluded desktop now starts one original 15-second admission clock
 after trusted chrome first becomes eligible. A failed first exact-foreground
 predicate does not immediately terminate the application. One retained,
 cancellable public main-queue dispatch timer provides coalesced 50 ms predicate
 opportunities on the normal Tauri/AppKit lifecycle. The existing dispatch timer's
 100 ms leeway and normal event servicing still apply; this is not a hard
-realtime five-second shutdown promise. There is no worker, alternate event loop,
+realtime 15-second shutdown promise. There is no worker, alternate event loop,
 programmatic activation, focus command, or blind sleep.
 
 Before each native focus inspection, a pure admission state machine reserves and
-counts one of at most 101 checks under that unchanged deadline. Capturing an
+counts one of at most 301 checks under that unchanged deadline. Capturing an
 exact token across the deadline cannot authorize Work: the deadline is checked
 again when the reserved check settles. Unreserved/repeated settlement,
 cancellation, late foreground and a non-progressing clock cannot reopen or
 extend admission. The token still retains the exact Tauri `main` window and
 responder across the engine boundary and is revalidated on consume. Only this
 admitted branch may take the Work engine owner or construct the fixture/context.
+
+The pre-Work admission window was extended from five to 15 seconds on 2026-09-07
+after actual-window accessibility acquisition itself took about 5.14 seconds.
+This allows explicit user selection without adding activation or extending the
+independent five-second native rendering lease.
 
 The admission timer is a separate bounded pre-Work owner, not a hidden renderer
 or native Work cohort. Timeout closes the waiter and reports normal

@@ -40,8 +40,8 @@ fn validate_admission(admission: &str, desktop: &str, driver: &str) -> Result<()
     let desktop = compact(desktop);
     let driver = compact(driver);
     for required in [
-        "FOREGROUND_WAIT_BUDGET:Duration=Duration::from_secs(5)",
-        "MAX_FOREGROUND_CHECKS:u16=101",
+        "FOREGROUND_WAIT_BUDGET:Duration=Duration::from_secs(15)",
+        "MAX_FOREGROUND_CHECKS:u16=301",
         "now.checked_add(FOREGROUND_WAIT_BUDGET)",
         "now>=deadline",
         "self.checks>=MAX_FOREGROUND_CHECKS",
@@ -362,10 +362,10 @@ mod tests {
     fn foreground_wait_rejects_extended_deadlines_ungated_start_and_uncancelled_wakes() {
         validate_admission(ADMISSION, DESKTOP, DRIVER).unwrap();
         for changed in [
-            ADMISSION.replace("Duration::from_secs(5)", "Duration::from_secs(6)"),
+            ADMISSION.replace("Duration::from_secs(15)", "Duration::from_secs(16)"),
             ADMISSION.replace(
-                "MAX_FOREGROUND_CHECKS: u16 = 101",
-                "MAX_FOREGROUND_CHECKS: u16 = 102",
+                "MAX_FOREGROUND_CHECKS: u16 = 301",
+                "MAX_FOREGROUND_CHECKS: u16 = 302",
             ),
             ADMISSION.replace("now >= deadline", "false"),
         ] {
