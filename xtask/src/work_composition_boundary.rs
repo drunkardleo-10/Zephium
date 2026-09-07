@@ -129,6 +129,24 @@ fn inspection_composition(retained: &str, discovery: &str, observer: &str) -> Re
     Ok(())
 }
 
+fn commerce_selection(desktop: &str, composition: &str, retained: &str) -> Result<(), String> {
+    // Specialization must inherit the exact debug/isolated/retained entry and
+    // public-retention gates, not introduce an independent launcher or runtime.
+    require(desktop, &["macos-work-retained-commerce-probe = [\"macos-work-retained-product-probe\", \"zephium-work-composition/retained-commerce-qualification\"]"])?;
+    require(
+        composition,
+        &["retained-commerce-qualification = [\"retained-product-qualification\"]"],
+    )?;
+    require(retained, &[
+        "#[cfg(feature = \"retained-commerce-qualification\")] #[path = \"retained_commerce_objective.rs\"] mod objective;",
+        "#[cfg(not(feature = \"retained-commerce-qualification\"))] #[path = \"retained_svelte_objective.rs\"] mod objective;",
+        "use objective::{INITIAL, ORIGIN, PATH_PREFIX, TASK_NAME};",
+        "initial: INITIAL, origin: ORIGIN, task_name: TASK_NAME,",
+        "ContextNavigationTarget::parse(INITIAL)",
+        "PATH_PREFIX.into()",
+    ])
+}
+
 pub(crate) fn check(root: &Path) -> Result<(), String> {
     let read = |path: &str| {
         fs::read_to_string(root.join(path))
@@ -151,6 +169,11 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
         "let profile = self.work_profile_binding(); if let Some(work) = &mut self.work { work.admit(submission, Some(profile)); }",
     ])?;
     ordinary_navigation_observer(&read("desktop/src/navigation_probe.rs")?)?;
+    commerce_selection(
+        &read("desktop/Cargo.toml")?,
+        &read("crates/zephium-work-composition/Cargo.toml")?,
+        &read("crates/zephium-work-composition/src/retained_product_qualification.rs")?,
+    )?;
     inspection_composition(
         &read("crates/zephium-work-composition/src/retained_product_qualification.rs")?,
         &read("crates/zephium-work-composition/src/discovery_qualification.rs")?,
@@ -329,6 +352,48 @@ fn combined_result_qualification(source: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn commerce_selection_cannot_bypass_original_qualification_or_retained_entry() {
+        let desktop = include_str!("../../desktop/Cargo.toml");
+        let composition = include_str!("../../crates/zephium-work-composition/Cargo.toml");
+        let retained = include_str!(
+            "../../crates/zephium-work-composition/src/retained_product_qualification.rs"
+        );
+        commerce_selection(desktop, composition, retained).unwrap();
+        assert!(commerce_selection(
+            &desktop.replace(
+                "macos-work-retained-commerce-probe = [\"macos-work-retained-product-probe\",",
+                "macos-work-retained-commerce-probe = [\"macos-work-navigation-probe\","
+            ),
+            composition,
+            retained
+        )
+        .is_err());
+        assert!(commerce_selection(
+            desktop,
+            &composition.replace(
+                "retained-commerce-qualification = [\"retained-product-qualification\"]",
+                "retained-commerce-qualification = [\"macos-work\"]"
+            ),
+            retained
+        )
+        .is_err());
+        assert!(commerce_selection(
+            desktop,
+            composition,
+            &retained.replace(
+                "retained_commerce_objective.rs",
+                "retained_svelte_objective.rs"
+            )
+        )
+        .is_err());
+        assert!(commerce_selection(
+            desktop,
+            composition,
+            &retained.replace("PATH_PREFIX.into()", "\"/\".into()")
+        )
+        .is_err());
+    }
     #[test]
     fn exact_discovery_wrappers_and_observers_cannot_drop_inspection() {
         let retained = include_str!(

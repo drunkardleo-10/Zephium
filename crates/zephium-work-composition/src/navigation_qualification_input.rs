@@ -187,14 +187,17 @@ mod tests {
         #[cfg(feature = "retained-product-qualification")]
         {
             let definition = &crate::retained_product_qualification::DEFINITION;
-            assert!(input(
-                identity,
+            for storage in [
                 ContextProfileStorageClass::Durable,
-                started,
-                started + TOTAL,
-                definition
-            )
-            .is_ok());
+                ContextProfileStorageClass::Ephemeral,
+            ] {
+                let prepared =
+                    input(identity, storage, started, started + TOTAL, definition).unwrap();
+                assert!(
+                    prepared.retained_resource_spec().is_ok(),
+                    "the selected witness must remain valid for the retained product entry"
+                );
+            }
             let task = (definition.task)(identity).unwrap();
             assert!(task.navigation_target().is_none());
             assert_eq!(task.navigation_discovery().unwrap().max_hops(), 2);

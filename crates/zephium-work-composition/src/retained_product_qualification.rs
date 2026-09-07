@@ -6,13 +6,20 @@ use zephium_agent_controller::*;
 use zephium_agentic::*;
 use zephium_app::{RetainedWorkHandle, RetainedWorkPhase};
 
-const ORIGIN: &str = "https://svelte.dev";
-const INITIAL: &str = "https://svelte.dev/docs/svelte/overview";
-pub const OBJECTIVE: &str = "Starting at https://svelte.dev/docs/svelte/overview, research this practical Svelte 5 problem: I keep a reactive state object, destructure a property into another variable, and later mutate the original object; the UI using that separate variable does not update as I expected. Find the relevant current official guidance, explain what is happening, and recommend a practical correction with important caveats. Choose your own route from links actually observed in the current page under https://svelte.dev/docs/svelte/; at most two navigation hops are authorized. Do not guess destination URLs. Use read with initial scope when useful. Once the current page supports a useful answer, call extract with initial scope and trusted schema 1: summary, important_claims, and caveats. Keep each text value a short single-line statement; separate ideas into list items, each supported by its own declared current-page sources rather than inline citation markers. Mark unsupported details as uncertain instead of filling gaps from memory. Do not click controls, edit values, sign in, submit, install, run code or visit external sites. The route and answer are yours to discover. The host checks execution and current-source binding, not factual correctness or usefulness; a human will judge those.";
+// Static qualification selection only. No URL, prompt, expected answer or
+// authority is accepted from an environment variable, page or IPC request.
+#[cfg(feature = "retained-commerce-qualification")]
+#[path = "retained_commerce_objective.rs"]
+mod objective;
+#[cfg(not(feature = "retained-commerce-qualification"))]
+#[path = "retained_svelte_objective.rs"]
+mod objective;
+pub use objective::OBJECTIVE;
+use objective::{INITIAL, ORIGIN, PATH_PREFIX, TASK_NAME};
 pub(crate) const DEFINITION: QualificationDefinition = QualificationDefinition {
     initial: INITIAL,
     origin: ORIGIN,
-    task_name: "retained-svelte-reactivity-v1",
+    task_name: TASK_NAME,
     retention_name: "inspectable-public",
     objective: OBJECTIVE,
     task,
@@ -37,7 +44,7 @@ pub fn load_request(
 fn discovery() -> Result<AgentNavigationDiscovery, AgentWorkFailure> {
     AgentNavigationDiscovery::try_new(
         ContextNavigationTarget::parse(INITIAL).map_err(|_| AgentWorkFailure::Contract)?,
-        "/docs/svelte/".into(),
+        PATH_PREFIX.into(),
         2,
     )
     .map_err(|_| AgentWorkFailure::Contract)
@@ -272,6 +279,10 @@ impl ApplicationObserver {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "retained_objective_tests.rs"]
+mod objective_tests;
 
 #[cfg(test)]
 mod tests {

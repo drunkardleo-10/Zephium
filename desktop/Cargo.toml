@@ -11,6 +11,8 @@ macos-work-navigation-probe = ["macos-work", "zephium-work-composition/navigatio
 macos-work-discovery-probe = ["macos-work-navigation-probe", "zephium-work-composition/discovery-qualification"]
 # Same isolated launcher, but only the shipping retained product entry/handle.
 macos-work-retained-product-probe = ["macos-work-navigation-probe", "zephium-work-composition/retained-product-qualification"]
+# Same retained owners, rendering and limits; selects the open commerce objective.
+macos-work-retained-commerce-probe = ["macos-work-retained-product-probe", "zephium-work-composition/retained-commerce-qualification"]
 # Same release-excluded retained path, one closed real-public product-brief task.
 macos-work-retained-public-probe = [
     "macos-work-retained-controller-probe",
