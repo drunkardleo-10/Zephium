@@ -115,11 +115,18 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
     require(&read("desktop/Cargo.toml")?, &["macos-work = [\"dep:zephium-work-composition\", \"zephium-work-composition/macos-work\"]", "zephium-work-composition = { workspace = true, optional = true }"])?;
     let manifest = read("crates/zephium-work-composition/Cargo.toml")?;
     require(
+        &read("crates/zephium-engine/Cargo.toml")?,
+        &[
+            "native-agentic-public-resource-probe = [\"native-agentic-work-resource-probe\"]",
+            "native-agentic-work-resource-probe = [\"native-agentic-foreground-probe\"]",
+        ],
+    )?;
+    require(
         &manifest,
         &[
             "default = []",
             "public-qualification = [\"macos-work\", \"zephium-app/work-execution-probe\"]",
-            "retained-public-qualification = [\"retained-qualification\"]",
+            "retained-public-qualification = [\"retained-qualification\", \"zephium-engine/native-agentic-public-resource-probe\"]",
         ],
     )?;
     let parsed: toml::Value =

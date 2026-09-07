@@ -331,6 +331,7 @@ impl Driver {
         let request = RenderRequest {
             resource: self.join()?.clone(),
             operation,
+            document: crate::agent_context_port::resource_witness::Document::RenderingFixture,
         };
         self.phase = if operation == RenderOp::Retire {
             Phase::Retire(request.clone())
@@ -794,6 +795,7 @@ mod tests {
         let request = RenderRequest {
             resource: resource(),
             operation: RenderOp::Inspect,
+            document: crate::agent_context_port::resource_witness::Document::RenderingFixture,
         };
         assert!(rendering_reply_matches(
             &Phase::Stamp(0, request.clone()),
@@ -818,15 +820,28 @@ mod tests {
         let foreign = RenderRequest {
             resource: resource(),
             operation: RenderOp::Inspect,
+            document: crate::agent_context_port::resource_witness::Document::RenderingFixture,
         };
         assert!(!rendering_reply_matches(
             &Phase::Stamp(0, request.clone()),
             &foreign
         ));
+        #[cfg(feature = "native-agentic-public-resource-probe")]
+        {
+            let changed = RenderRequest {
+                document: crate::agent_context_port::resource_witness::Document::PublicProductBrief,
+                ..request.clone()
+            };
+            assert!(!rendering_reply_matches(
+                &Phase::Stamp(0, request.clone()),
+                &changed
+            ));
+        }
         for operation in [RenderOp::Acquire, RenderOp::Poll, RenderOp::Retire] {
             let changed = RenderRequest {
                 resource: request.resource.clone(),
                 operation,
+                document: request.document,
             };
             assert!(!rendering_reply_matches(
                 &Phase::Stamp(0, request.clone()),

@@ -40,6 +40,7 @@ struct Native {
         )>,
     >,
     hold_read: AtomicBool,
+    not_ready: AtomicBool,
     reads: AtomicUsize,
     acquisitions: AtomicUsize,
     destructions: AtomicUsize,
@@ -148,6 +149,11 @@ impl AgentBrowserPort for Native {
         callback: WorkBrowserObservationCompletionCallback,
     ) -> WorkBrowserObservationDispatch {
         self.reads.fetch_add(1, Ordering::AcqRel);
+        if self.not_ready.load(Ordering::Acquire) {
+            let (_, completion) = request.into_parts();
+            callback(completion.settle(Err(SemanticRuntimePortFailure::NotReady)));
+            return WorkBrowserObservationDispatch::Scheduled;
+        }
         if self.hold_read.load(Ordering::Acquire) {
             *self.read.lock().unwrap() = Some((request, callback));
         } else {
@@ -739,6 +745,69 @@ fn snapshot_probe_common_worker_cannot_start_model_until_native_release() {
     owner.seal_resources().unwrap();
     assert!(owner.locally_retired());
     assert_eq!(server.join().unwrap(), 2);
+}
+
+#[test]
+fn snapshot_probe_not_ready_consumes_one_dispatch_and_drains_without_provider() {
+    use super::snapshot_probe::{SnapshotRelease, SnapshotReleaseBrowser};
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (owner, native, resource, browser) = setup();
+    native.not_ready.store(true, Ordering::Release);
+    let release = SnapshotRelease::new(
+        resource.clone(),
+        Box::new(|_| panic!("no successful snapshot to retire")),
+    );
+    let browser = SnapshotReleaseBrowser::new(browser, release.clone()).unwrap();
+    let (controller, mut result, scope, server) = prepared(Box::new(browser), Vec::new(), false);
+    let (_handle, lifecycle) = start(controller, scope);
+    let mut outcome = None;
+    wait_until(|| {
+        while let Some(event) = result.take_event() {
+            assert!(!matches!(
+                event.kind(),
+                AgentWorkEventKind::ModelActive | AgentWorkEventKind::ModelSettled { .. }
+            ));
+        }
+        outcome = result.take_outcome();
+        outcome.is_some()
+    });
+    let Some(AgentWorkRetainedOutcome::ClosedUnsuccessfully(closed)) = outcome else {
+        panic!("NotReady must close before provider");
+    };
+    assert_eq!(
+        closed.failure(),
+        AgentWorkFailure::Observation(SemanticRuntimePortFailure::NotReady)
+    );
+    assert_eq!(closed.policy_settlement().closure().model_calls(), 0);
+    assert_eq!(native.reads.load(Ordering::Acquire), 1);
+    assert!(!release.returned().unwrap());
+    assert!(matches!(
+        lifecycle.drain_until(Instant::now() + Duration::from_secs(2)),
+        AgentRuntimeScopedDrain::Drained(_)
+    ));
+    native.join();
+    let reporter = native
+        .reporters
+        .lock()
+        .unwrap()
+        .remove(&resource.identity().context())
+        .unwrap();
+    let mut destroy = owner.destroy(&resource).unwrap();
+    assert!(matches!(
+        destroy.poll(now()).unwrap(),
+        Some(LifecycleResult::Event(WorkBrowserResourceEvent::Destroyed(
+            _
+        )))
+    ));
+    assert_eq!(owner.reap_absent(&resource), Err(Refusal::Busy));
+    drop(reporter);
+    owner.reap_absent(&resource).unwrap();
+    owner.seal_resources().unwrap();
+    assert!(owner.locally_retired());
+    assert!(owner.shared.global_current());
+    assert_eq!(server.join().unwrap(), 0);
 }
 
 #[test]

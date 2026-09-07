@@ -1,15 +1,30 @@
 //! Fixed, release-excluded holder/evidence only. The product resource owns
 //! its page independently; this child adds no production rendering authority.
 use super::*;
-use crate::agent_context_port::resource_witness::{Operation as Op, RetentionStamp, Task};
+use crate::agent_context_port::resource_witness::{
+    Document, Operation as Op, RetentionStamp, Task,
+};
 use crate::platform::imp::ForegroundRenderingLease;
 use std::{cell::RefCell, rc::Rc, sync::Mutex};
-use zephium_agentic::{ContextNavigationTarget, ForegroundRenderingState as State};
+use zephium_agentic::ForegroundRenderingState as State;
 
 pub(super) struct RenderingHolder {
     lease: Rc<RefCell<ForegroundRenderingLease>>,
     watchdog: Option<RenderingWatchdog>,
+}
+/// Original resource-owned read budget survives presentation retirement.
+pub(super) struct Admission {
+    document: Document,
     samples: u8,
+}
+impl Admission {
+    fn read(&mut self) -> bool {
+        if self.samples >= self.document.read_limit() {
+            return false;
+        }
+        self.samples += 1;
+        true
+    }
 }
 type WatchdogAction = Box<dyn FnOnce() + Send>;
 struct RenderingWatchdog {
@@ -68,13 +83,7 @@ impl WorkNativeResource {
         if !self.witness_ready() {
             return false;
         }
-        self.witness.as_mut().is_none_or(|holder| {
-            if holder.samples >= 8 {
-                return false;
-            }
-            holder.samples += 1;
-            true
-        })
+        self.witness_admission.as_mut().is_none_or(Admission::read)
     }
     fn stamp(&self) -> Option<RetentionStamp> {
         if !self.ready() || self.pending() || !self.witness_ready() {
@@ -88,18 +97,6 @@ impl WorkNativeResource {
             self.last_invocation,
         ))
     }
-}
-
-fn fixed_fixture(target: &ContextNavigationTarget) -> bool {
-    let url = target.as_url();
-    url.scheme() == "http"
-        && url.host_str() == Some("127.0.0.1")
-        && url.port().is_some()
-        && url.path() == "/semantic-rendering-v1.html"
-        && url.query().is_none()
-        && url.fragment().is_none()
-        && url.username().is_empty()
-        && url.password().is_none()
 }
 
 impl EngineHost {
@@ -124,7 +121,13 @@ impl EngineHost {
             || !resource.ready()
             || resource.pending()
             || guard.storage() != ContextProfileStorageClass::Ephemeral
-            || !guard.document().is_some_and(fixed_fixture)
+            || !guard
+                .document()
+                .is_some_and(|target| request.document.admits(target))
+            || resource
+                .witness_admission
+                .as_ref()
+                .is_some_and(|admission| admission.document != request.document)
         {
             task.complete(State::Failed, None);
             return;
@@ -139,6 +142,10 @@ impl EngineHost {
                     return;
                 }
                 resource.witness_attempted = true;
+                resource.witness_admission = Some(Admission {
+                    document: request.document,
+                    samples: 0,
+                });
                 let Some(deadline) = ForegroundRenderingLease::admission_deadline(Instant::now())
                 else {
                     task.complete(State::Failed, None);
@@ -162,7 +169,6 @@ impl EngineHost {
                 resource.witness = Some(RenderingHolder {
                     lease: native.clone(),
                     watchdog: None,
-                    samples: 0,
                 });
                 native
                     .try_borrow_mut()
@@ -269,6 +275,37 @@ impl EngineHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_context_port::resource_witness::fixed_fixture;
+    use zephium_agentic::ContextNavigationTarget;
+
+    #[test]
+    fn rendering_fixture_keeps_its_original_eight_read_bound() {
+        let mut admission = Admission {
+            document: Document::RenderingFixture,
+            samples: 0,
+        };
+        for _ in 0..8 {
+            assert!(admission.read());
+        }
+        assert!(!admission.read());
+        assert_eq!(admission.samples, 8);
+    }
+
+    #[cfg(feature = "native-agentic-public-resource-probe")]
+    #[test]
+    fn public_resource_admission_is_one_shot_without_a_presentation_holder() {
+        // This resource-owned budget is not stored in (or renewed by dropping)
+        // RenderingHolder. A failed first read consumes the same sole attempt.
+        let mut admission = Admission {
+            document: Document::PublicProductBrief,
+            samples: 0,
+        };
+        assert!(admission.read());
+        for _ in 0..64 {
+            assert!(!admission.read());
+        }
+        assert_eq!(admission.samples, 1);
+    }
     #[test]
     fn cancelled_watchdog_consumes_original_authority_before_a_late_dispatch_block() {
         use std::sync::atomic::{AtomicUsize, Ordering};

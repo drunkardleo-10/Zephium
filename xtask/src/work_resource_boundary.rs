@@ -13,6 +13,33 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
         let source = std::fs::read_to_string(root.join(path)).map_err(|e| e.to_string())?;
         validate_adapter(&source, required, forbidden).map_err(|e| format!("{path}: {e}"))?;
     }
+    validate_preflight_order(
+        &std::fs::read_to_string(
+            root.join("crates/zephium-work-composition/src/retained_qualification.rs"),
+        )
+        .map_err(|e| e.to_string())?,
+    )?;
+    Ok(())
+}
+
+fn validate_preflight_order(source: &str) -> Result<(), String> {
+    let source = compact(production(source));
+    let preflight = source
+        .find("let(fixture,target)=task::document()?")
+        .ok_or("missing document preflight")?;
+    for effect in [
+        "RetainedWorkProbeOwner::new(",
+        "letcredential_job=std::thread::Builder::new()",
+    ] {
+        if source
+            .find(effect)
+            .is_none_or(|position| position <= preflight)
+        {
+            return Err(
+                "document preflight must precede native owner and credential worker".into(),
+            );
+        }
+    }
     Ok(())
 }
 
@@ -37,7 +64,10 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
         &[
             "port:ResourceWitnessPort,resource:WorkBrowserResourceJoin", "MainThreadMarker::new()?",
             "if!admission.remains_current()", "engine.agent_context_port.resource_witness_port()?",
-            "Request{resource:self.resource.clone(),operation,}", "ifactual==expected",
+            "Request{resource:self.resource.clone(),operation,document:self.document,}", "ifactual==expected",
+            "Self::with_document(engine,admission,resource,Document::RenderingFixture)",
+            "Document::PublicProductBrief.admits(target)",
+            "Self::with_document(engine,admission,resource,Document::PublicProductBrief)",
             "self.schedule(Operation::Acquire,completion)", "self.schedule(Operation::Retire,completion)",
         ],
         &["AgentProvider", "AgentBrowserPort", "WorkBrowserResources", "evaluateJavaScript", "setActivationPolicy", "makeKey", "makeMain", "NSRunLoop", "requestAnimationFrame", "unsafe", "Serialize", "Deserialize"],
@@ -108,6 +138,8 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
         &[
             "TARGET:&str=\"https://shop.pimoroni.com/products/raspberry-pi-pico-2\"",
             "ContextNavigationTarget::parse(TARGET)",
+            "WorkResourceRenderingProbe::admits_public_product(&target)",
+            "WorkResourceRenderingProbe::for_public_product(engine,admission,resource)",
             "RetainedProbeTrace::ConfiguredPublic",
             "RetainedProbeTrace::PublicObservation",
             "context.kind()!=ContextKind::Owned",
@@ -158,6 +190,7 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "self.observation=Some(observation);self.release.start()?",
             "ifself.release.returned()?{Ok(self.observation.take())}",
             "ifself.observed{returnErr(AgentWorkFailure::Contract);}",
+            "fnallows_readiness_retry(&self)->bool{false}",
             "letreturned=ReleaseCompletion(Some(self.clone()))",
             "implDropforReleaseCompletion",
             "let_=slot.complete(false)",
@@ -178,6 +211,8 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "state.native.retained.take()",
             "Self::reconcile_deferred_audit(state)",
             "delivery.proof()==settlement.proof()",
+            "ifstate.native.retained.as_ref().is_some_and(|browser|!browser.allows_readiness_retry()){returnSelf::observe_once(state,worker,browser).await;}",
+            "for_in0..64", "tokio::time::sleep(Duration::from_millis(50))",
         ],
         &["WorkBrowserResources::new", "implAgentWorkRetainedBrowser", "attach_successor_work"],
     ),
@@ -186,6 +221,7 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
         &[
             "pubtraitAgentWorkRetainedBrowser:Send", "fnregister_listener(&mutself,waker:Waker)",
             "fncheck_health(&self,now:AgentPolicyInstant)",
+            "fnallows_readiness_retry(&self)->bool{true}",
             "fnbinding(&self)->&WorkBrowserReadBinding",
             "implzephium_agent_runtime::AgentRuntimeScopedControllerforAgentWorkRetainedController",
             "controller.execute(&mutworker,&WorkBrowser::Retained).await",
@@ -336,6 +372,11 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
     (
         "crates/zephium-engine/src/agent_work_resource_probe_port.rs",
         &[
+            "#[cfg(feature=\"native-agentic-public-resource-probe\")]PublicProductBrief",
+            "Self::RenderingFixture=>fixed_fixture(target)", "Self::RenderingFixture=>8", "Self::PublicProductBrief=>1",
+            "target.as_url().as_str()==\"https://shop.pimoroni.com/products/raspberry-pi-pico-2\"",
+            "url.host_str()==Some(\"127.0.0.1\")", "url.path()==\"/semantic-rendering-v1.html\"",
+            "url.query().is_none()", "url.fragment().is_none()", "url.username().is_empty()", "url.password().is_none()",
             "self.resource==next.resource", "self.view==next.view", "self.world==next.world", "self.document==next.document",
             "self.completed.checked_add(1)==Some(next.completed)", "next.invocation>self.invocation",
             "self.admission.witness_resource(&request.resource)", "self.admission.reserve()",
@@ -347,10 +388,13 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
     (
         "crates/zephium-engine/src/host/work_resource_witness.rs",
         &[
-            "url.host_str()==Some(\"127.0.0.1\")", "url.path()==\"/semantic-rendering-v1.html\"",
-            "url.query().is_none()", "url.fragment().is_none()", "url.username().is_empty()", "url.password().is_none()",
+            "request.document.admits(target)", "admission.document!=request.document",
+            "self.witness_admission.as_mut().is_none_or(Admission::read)",
+            "self.samples>=self.document.read_limit()", "self.samples+=1",
+            "resource.witness_admission=Some(Admission{document:request.document,samples:0,})",
+            "ifrequest.operation==Op::Retire{letstate=resource.retire_witness_state();task.complete(state,None);return;}",
             "Arc::ptr_eq(&resource.guard,&guard)", "self.witness_attempted=true",
-            "self.retire_witness_state()==State::Retired", "ifstate==State::Retired", "holder.samples>=8", "holder.samples+=1",
+            "self.retire_witness_state()==State::Retired", "ifstate==State::Retired",
             "view.semantic()?.witness_identity()?", "view.work_navigation()?.witness_document()?",
             "resource.last_invocation!=0||guard.execution_reserved()",
             "resource.witness=Some(RenderingHolder", "lease.present_resource(guard.resource())",
@@ -442,6 +486,7 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
     (
         "crates/zephium-engine/src/host/work_resource.rs",
         &[
+            "witness_admission:Option<witness::Admission>",
             "self.agent_contexts.len()+self.work_resources.len()>=MAX_LIVE_CONTEXTS",
             "execution_count<=MAX_EXECUTING_CONTEXTS",
             "guard.acquisition_current(lease,now)",
@@ -607,6 +652,18 @@ mod tests {
     use super::*;
     const SOURCE: &str = include_str!("../../crates/zephium-agentic/src/work_browser_resource.rs");
     const PORT: &str = include_str!("../../crates/zephium-agentic/src/context_port.rs");
+    #[test]
+    fn fixed_document_preflight_precedes_native_or_credential_activity() {
+        let source =
+            include_str!("../../crates/zephium-work-composition/src/retained_qualification.rs");
+        validate_preflight_order(source).unwrap();
+        let source = compact(production(source));
+        let without = source.replace("let(fixture,target)=task::document()?;", "");
+        assert!(validate_preflight_order(&format!(
+            "{without}let(fixture,target)=task::document()?;"
+        ))
+        .is_err());
+    }
     #[test]
     fn real_public_brief_cannot_widen_target_or_drop_exact_source_guards() {
         let source = include_str!(

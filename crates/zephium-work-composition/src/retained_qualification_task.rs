@@ -37,6 +37,13 @@ impl Sample {
 pub(super) fn configured() -> RetainedProbeTrace {
     RetainedProbeTrace::Configured
 }
+pub(super) fn rendering(
+    engine: &WebviewEngine,
+    admission: &ForegroundRenderingAdmission,
+    resource: WorkBrowserResourceJoin,
+) -> Option<WorkResourceRenderingProbe> {
+    WorkResourceRenderingProbe::new(engine, admission, resource)
+}
 pub(super) fn document() -> Result<(Option<FixtureServer>, ContextNavigationTarget), &'static str> {
     let fixture = FixtureServer::start().map_err(|_| "fixture")?;
     let target = ContextNavigationTarget::parse(&fixture.url(FixtureRoute::SemanticRendering))

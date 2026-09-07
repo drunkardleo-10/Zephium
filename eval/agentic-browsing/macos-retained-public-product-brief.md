@@ -35,6 +35,15 @@ Browse tab, account or profile. The one owned, ephemeral, extension-free Work
 resource and original anonymous account sample keep their existing limits;
 task code never renews an account timestamp.
 
+The public rendering capability is a separate release-excluded engine feature,
+not an extension of the loopback fixture's admission. Its closed native purpose
+admits only the exact parsed HTTPS document above (including no query/fragment
+or credentials). The public task checks that native predicate before creating
+the resource owner or credential worker; the host rechecks the original guarded
+document, exact resource, ephemeral storage and sticky health at admission.
+Native callbacks also bind the diagnostic purpose. The original fixture
+constructor remains loopback-only even when the public feature is enabled.
+
 The schema requires `product_name` (at most 64 bytes) and `technical_summary`
 (at most 512 bytes). The native predicate requires one unique matching
 Heading/accessible-name product identity and one unique Paragraph/visible-text
@@ -44,6 +53,14 @@ source, not supplied in the objective or copied from web research. Missing,
 duplicate, wrong-role, foreign or incomplete evidence fails before a model call.
 A changed introduction can correctly fail this frozen contract; no automatic
 wait, recapture, predicate relaxation or budget increase follows a refusal.
+The one-shot capture adapter explicitly disables readiness retry in the common
+controller: a first `NotReady` closes with that original typed cause, no second
+semantic dispatch and zero provider calls. Other retained adapters keep the
+existing bounded readiness retry by default. The public native resource owns a
+one-read admission budget that survives presentation retirement; the synthetic
+rendering probe retains its original eight-read budget. An admitted dispatch
+may fail before JavaScript executes, so one attempted read is not a claim of a
+completed native observation.
 
 Mapping selects only Heading/Paragraph evidence through the existing trusted
 source-role mechanism. The model may inspect the acknowledged initial baseline.
@@ -58,7 +75,7 @@ stock/pricing truth or artifact publication. All page/model data stays untrusted
 
 ## Original owners, limits and evidence
 
-Only the compile-time document/task choice changes. The same original Work
+The compile-time document/task and closed rendering purpose change. The same original Work
 owner, resource port, content policy, scoped runtime, common controller/session,
 stateless Luna transport, shared SQLite audit and ordinary application shutdown
 remain. Both tasks use the shared fixed manifest: Read/Public/Anonymous,
@@ -92,7 +109,8 @@ node node_modules/@tauri-apps/cli/tauri.js build --debug --bundles app \
 ```
 
 This feature forwards through the original retained qualifier and its optimized
-build exclusion. `macos-work-retained-controller-probe` without the public choice
+build exclusion, selecting `native-agentic-public-resource-probe` only for the
+public mode. `macos-work-retained-controller-probe` without the public choice
 still selects the synthetic task. Default Browse/product `macos-work` behavior
 and admission remain unchanged; no UI/IPC endpoint is added.
 
@@ -107,6 +125,33 @@ qualification with its original cause.
 No GUI, Keychain access or provider request was used for this implementation.
 No native/public result or executable identity is inferred from deterministic
 checks or read-only web inspection.
+
+Pre-launch audit correction (2026-09-07): the initial prepared candidate still
+used the fixture-only native host admission and could not reach public execution.
+No live run was attempted. The correction above binds a separate fixed public
+purpose and moves its pure preflight ahead of credential/resource creation.
+Audit also identified ambiguous readiness wording: the existing one-shot
+wrapper already blocked a second native dispatch, but a common-controller
+retry would have replaced `NotReady` with `Contract`. The explicit adapter
+contract preserves the original cause and removes that retry attempt.
+
+Correction checks: 47 application Work-resource tests passed, including the
+scoped common-controller first-`NotReady` test (one original native dispatch,
+zero provider calls, original failure, drained worker/revocation, late reporter
+blocking reaping until retirement). The existing generic common-controller
+readiness/first-stop-reason regression also passed, retaining three read attempts
+before success in its non-one-shot case. The public and original fixture engine
+resource suites passed 40 and 39 tests; three witness-port tests and the exact
+rendering-receipt test reject document, resource and purpose substitution.
+The native resource budget tests keep public admission at one read and fixture
+admission at eight. Both composition suites remain green (12 public/nine
+fixture), including existing timeout, notification, audit and shutdown tests.
+Strict all-targets Clippy passed for the changed application, public engine and
+public composition; the isolated public desktop library passed strict Clippy.
+Four Work-resource, four composition and six foreground mutation tests passed,
+including preflight-before-effects, fixed feature forwarding, exact admission,
+one-shot retry policy and unchanged foreground/cleanup guards. Agentic-probe,
+controller and runtime architecture checks passed. None is live site evidence.
 
 Preparation checks: 12 public-feature and nine original synthetic-feature
 composition tests passed, including the original late-reporter/audit/shutdown

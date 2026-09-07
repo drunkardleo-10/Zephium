@@ -450,6 +450,9 @@ pub fn start_retained_controller_witness(
         alive: AtomicBool::new(true),
         shutdown: AtomicBool::new(false),
     });
+    // Pure public target/native-capability preflight precedes the original
+    // native port factory and any credential preparation.
+    let (fixture, target) = task::document()?;
     let native = engine.clone();
     let wake = signal.clone();
     let owner = RetainedWorkProbeOwner::new(
@@ -460,7 +463,6 @@ pub fn start_retained_controller_witness(
         Box::new(move |sink| native.take_agent_browser_port(move |event| sink(event))),
     )
     .ok_or("native_owner")?;
-    let (fixture, target) = task::document()?;
     let credential_job = std::thread::Builder::new()
         .name("work-probe-credential".into())
         .spawn(|| load_macos_probe_openai_credential().map_err(|_| "credential_unavailable"))
@@ -723,12 +725,8 @@ impl Driver {
                     (Phase::Construct, WorkBrowserResourceEvent::Retained(resource)) => {
                         EXPECTED_RESOURCE.with(|r| *r.borrow_mut() = Some(resource.clone()));
                         self.render = Some(Arc::new(
-                            WorkResourceRenderingProbe::new(
-                                &self.engine,
-                                &self.admission,
-                                resource,
-                            )
-                            .ok_or("render_admission")?,
+                            task::rendering(&self.engine, &self.admission, resource)
+                                .ok_or("render_admission")?,
                         ));
                         self.phase = Phase::Rendering;
                         self.render_next = Some(Render::Acquire);

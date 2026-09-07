@@ -1470,6 +1470,14 @@ impl AgentWorkController {
         browser: &WorkBrowser<'_>,
     ) -> Result<SemanticObservation, AgentWorkFailure> {
         state.journal_mut()?.emit(AgentWorkEventKind::Observing)?;
+        if state
+            .native
+            .retained
+            .as_ref()
+            .is_some_and(|browser| !browser.allows_readiness_retry())
+        {
+            return Self::observe_once(state, worker, browser).await;
+        }
         // Only an explicit pre-dispatch NotReady receipt can start another
         // read-only readiness check. Never retry a mutation, stale reference,
         // replaced document, malformed callback or provider turn.

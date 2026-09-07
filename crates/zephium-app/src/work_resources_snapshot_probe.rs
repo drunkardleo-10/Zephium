@@ -166,6 +166,9 @@ impl SnapshotReleaseBrowser {
     }
 }
 impl AgentWorkRetainedBrowser for SnapshotReleaseBrowser {
+    fn allows_readiness_retry(&self) -> bool {
+        false
+    }
     fn binding(&self) -> &WorkBrowserReadBinding {
         self.browser.binding()
     }

@@ -4,6 +4,44 @@
 use super::*;
 use zephium_agentic::{ForegroundRenderingState, WorkBrowserResourceJoin};
 
+/// Closed diagnostic purpose, bound to the exact original resource request.
+/// Public rendering is absent unless its separate excluded feature is selected.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum Document {
+    RenderingFixture,
+    #[cfg(feature = "native-agentic-public-resource-probe")]
+    PublicProductBrief,
+}
+impl Document {
+    pub(crate) fn admits(self, target: &ContextNavigationTarget) -> bool {
+        match self {
+            Self::RenderingFixture => fixed_fixture(target),
+            #[cfg(feature = "native-agentic-public-resource-probe")]
+            Self::PublicProductBrief => {
+                target.as_url().as_str() == "https://shop.pimoroni.com/products/raspberry-pi-pico-2"
+            }
+        }
+    }
+    pub(crate) const fn read_limit(self) -> u8 {
+        match self {
+            Self::RenderingFixture => 8,
+            #[cfg(feature = "native-agentic-public-resource-probe")]
+            Self::PublicProductBrief => 1,
+        }
+    }
+}
+pub(crate) fn fixed_fixture(target: &ContextNavigationTarget) -> bool {
+    let url = target.as_url();
+    url.scheme() == "http"
+        && url.host_str() == Some("127.0.0.1")
+        && url.port().is_some()
+        && url.path() == "/semantic-rendering-v1.html"
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum Operation {
     Acquire,
@@ -15,6 +53,7 @@ pub(crate) enum Operation {
 pub(crate) struct Request {
     pub(crate) resource: WorkBrowserResourceJoin,
     pub(crate) operation: Operation,
+    pub(crate) document: Document,
 }
 
 /// In-memory comparison only: deliberately no Debug/Serialize or raw getters.
@@ -186,6 +225,41 @@ impl ResourceWitnessPort {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "native-agentic-public-resource-probe")]
+    #[test]
+    fn public_document_admission_is_exact_and_disjoint_from_the_fixture() {
+        use super::*;
+        let public = ContextNavigationTarget::parse(
+            "https://shop.pimoroni.com/products/raspberry-pi-pico-2",
+        )
+        .unwrap();
+        assert!(Document::PublicProductBrief.admits(&public));
+        assert!(!Document::RenderingFixture.admits(&public));
+        for url in [
+            "http://127.0.0.1:12345/semantic-rendering-v1.html",
+            "http://shop.pimoroni.com/products/raspberry-pi-pico-2",
+            "https://pimoroni.com/products/raspberry-pi-pico-2",
+            "https://shop.pimoroni.com.evil.test/products/raspberry-pi-pico-2",
+            "https://shop.pimoroni.com:8443/products/raspberry-pi-pico-2",
+            "https://shop.pimoroni.com/products/raspberry-pi-pico-2/",
+            "https://shop.pimoroni.com/products/raspberry-pi-pico-2-w",
+            "https://shop.pimoroni.com/products/raspberry-pi-pico-2?q=1",
+            "https://shop.pimoroni.com/products/raspberry-pi-pico-2#fragment",
+        ] {
+            assert!(
+                !Document::PublicProductBrief.admits(&ContextNavigationTarget::parse(url).unwrap()),
+                "{url}"
+            );
+        }
+        // Parsing may itself reject credentials; neither path can admit them.
+        for url in [
+            "https://user@shop.pimoroni.com/products/raspberry-pi-pico-2",
+            "https://user:pass@shop.pimoroni.com/products/raspberry-pi-pico-2",
+        ] {
+            assert!(ContextNavigationTarget::parse(url)
+                .map_or(true, |target| !Document::PublicProductBrief.admits(&target)));
+        }
+    }
     use super::*;
     use zephium_agentic::*;
     fn source() -> (WorkBrowserResources, WorkBrowserResourceRequest) {
@@ -261,6 +335,7 @@ mod tests {
             request: Request {
                 resource,
                 operation: Operation::Inspect,
+                document: Document::RenderingFixture,
             },
             guard,
             permit: admission.reserve().unwrap(),

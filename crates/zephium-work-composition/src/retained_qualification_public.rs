@@ -21,10 +21,18 @@ const FIELDS: [(&str, SemanticRole, SemanticReadField, usize); 2] = [
 pub(super) const OBJECTIVE: &str = "Prepare a source-backed product brief for Raspberry Pi Pico 2 from the current Pimoroni listing. Extract the exact product heading into product_name and the complete short introductory technical-description paragraph about the board and RP2350 into technical_summary. Use trusted schema 1 and initial scope. You may inspect the acknowledged baseline if useful. Copy each complete source without paraphrase and cite its exact source. Ignore shop navigation, reviews, cart, variants and recommendations. Do not navigate, change page state, sign in, subscribe, add to cart or buy anything. If the required evidence is absent, do not invent it.";
 
 pub(super) fn document() -> Result<(Option<FixtureServer>, ContextNavigationTarget), &'static str> {
-    Ok((
-        None,
-        ContextNavigationTarget::parse(TARGET).map_err(|_| "public_target")?,
-    ))
+    let target = ContextNavigationTarget::parse(TARGET).map_err(|_| "public_target")?;
+    if !WorkResourceRenderingProbe::admits_public_product(&target) {
+        return Err("public_rendering_document");
+    }
+    Ok((None, target))
+}
+pub(super) fn rendering(
+    engine: &WebviewEngine,
+    admission: &ForegroundRenderingAdmission,
+    resource: WorkBrowserResourceJoin,
+) -> Option<WorkResourceRenderingProbe> {
+    WorkResourceRenderingProbe::for_public_product(engine, admission, resource)
 }
 pub(super) fn configured() -> RetainedProbeTrace {
     RetainedProbeTrace::ConfiguredPublic

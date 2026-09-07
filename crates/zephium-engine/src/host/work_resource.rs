@@ -52,6 +52,8 @@ pub(super) struct WorkNativeResource {
     witness: Option<witness::RenderingHolder>,
     #[cfg(feature = "native-agentic-work-resource-probe")]
     witness_attempted: bool,
+    #[cfg(feature = "native-agentic-work-resource-probe")]
+    witness_admission: Option<witness::Admission>,
 }
 impl WorkNativeResource {
     fn unconstructed(guard: Arc<WorkResourceGuard>, native_resource: NativeResourceLease) -> Self {
@@ -74,6 +76,8 @@ impl WorkNativeResource {
             witness: None,
             #[cfg(feature = "native-agentic-work-resource-probe")]
             witness_attempted: false,
+            #[cfg(feature = "native-agentic-work-resource-probe")]
+            witness_admission: None,
         }
     }
     pub(super) fn guard(&self) -> Arc<WorkResourceGuard> {
@@ -464,6 +468,8 @@ impl EngineHost {
             witness: None,
             #[cfg(feature = "native-agentic-work-resource-probe")]
             witness_attempted: false,
+            #[cfg(feature = "native-agentic-work-resource-probe")]
+            witness_admission: None,
         };
         let view = crate::platform::imp::build_owned_work_view(
             &self.parent,

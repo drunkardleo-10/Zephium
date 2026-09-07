@@ -13,6 +13,11 @@ pub trait AgentWorkRetainedBrowser: Send {
     fn register_listener(&mut self, waker: Waker) -> Result<(), AgentWorkFailure>;
     /// Rearms notifications and checks exact lease, deadline and sticky health.
     fn check_health(&self, now: AgentPolicyInstant) -> Result<(), AgentWorkFailure>;
+    /// Whether a pre-dispatch NotReady may consume another initial read.
+    /// One-shot capture adapters refuse retries without replacing that receipt.
+    fn allows_readiness_retry(&self) -> bool {
+        true
+    }
     /// Reserves and dispatches one exact bounded initial read.
     fn begin_observation(&mut self, now: AgentPolicyInstant) -> Result<(), AgentWorkFailure>;
     /// Accounts the original terminal and returns its original observation.
