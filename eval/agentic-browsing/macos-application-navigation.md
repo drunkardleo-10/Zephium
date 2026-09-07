@@ -1,9 +1,8 @@
 # Actual-application one-hop qualification
 
-Status: one actual-app attempt failed before provider at native profile
-construction. A corrected trusted-profile candidate is prepared offline; no
-successful actual-app navigation/provider result is claimed.
-The retained Pimoroni result does not qualify this ordinary-controller path.
+Status: qualified on arm64 macOS through the actual application, ordinary
+controller and actor-selected browser profile at source `bb090751`. The retained
+Pimoroni result remains separate and does not qualify this path.
 
 The prepared boundary is Tauri trusted Rust admission into the existing
 `MacosWorkComposition::prepare` / `PreparedAgentWork::try_new` /
@@ -40,6 +39,46 @@ authority before navigation. Only fresh destination evidence may be cited.
 Cross-document evidence retention/synthesis, route discovery, authentication,
 actions, Work UI and general multi-page browsing remain separate capability
 gaps, not claims made by this witness.
+
+## Successful actual-app qualification, 2026-09-07
+
+Source `bb090751c5bdd290a669dd54c266e285b131a585`, arm64 executable SHA-256
+`1a15e0d3f68309a9120141d9e1e0b9e2dd5d6a425b9d802e075ae677fd97dacc`,
+whole-bundle manifest SHA-256
+`1db9e356c07dc9b10787be6fff6e80abe8c71604bd16a42cfca017cf39fec87c`.
+The pre-run and post-run manifests are identical. Complete content-free evidence
+and the preserved isolated application root are at
+`/private/tmp/zephium-navigation-identity.zHy3c4`.
+
+External test control made the actual Probe window key by clicking its inert
+new-tab search field; no URL, text or product setting was changed. The unchanged
+application foreground gate admitted after 8,902 ms and 166 checks. The Shell
+returned the same ready actor-selected profile binding before and after Keychain
+lookup. The ordinary composition then used that binding's durable profile store.
+
+The native page produced one complete 59-node departure observation with the
+exact Quick Start heading. Luna's first call settled in 3,278 ms with 2,359 input
+and 48 output tokens and proposed the one authorized Navigate operation. The
+native successor produced one complete 64-node arrival observation with the
+exact Your First Component heading under fresh navigation/frame identity. The
+second Luna call settled in 2,893 ms with 2,497 input and 73 output tokens and
+proposed Extract; the final mapping call settled in 3,605 ms with 2,409 input and
+64 output tokens.
+
+The run reached ordinary `Succeeded` after 10,872 ms with exactly three model
+calls, 7,265 input tokens, 185 output tokens, 2,039 micro-USD exact catalog cost,
+one navigation proposal, verified fresh-source mapping and verified durable
+terminal publication. The original observer worker joined and normal application
+shutdown proved clean. No retry, retained provider response, durable artifact or
+second execution owner participated.
+
+The preserved Store has one profile, one Work record, exactly one terminal Work
+record, no artifact, one audit delivery and thirteen audit events. SQLite
+integrity is `ok` and its foreign-key check is empty. Three immediately preceding
+launches were rejected before credential/provider/native admission as
+`DeferredForeground`; their isolated roots and unchanged bundle manifests remain
+preserved separately. They are operational evidence, not additional attempts at
+the qualified workflow.
 
 Offline gates run the same task and adversarial tests through the shared module:
 
