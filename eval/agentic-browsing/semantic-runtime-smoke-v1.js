@@ -473,7 +473,16 @@ button.getBoundingClientRect = () => ({ x: 0, y: 0, width: 0, height: 0 });
 const sourcePath = path.resolve(
   process.argv[2] || "crates/zephium-agentic/assets/semantic-runtime-v1.js"
 );
-const source = fs.readFileSync(sourcePath, "utf8");
+const negativeControl = process.argv[3] === "--without-document-parent-brand";
+assert(process.argv.length <= 4 && (process.argv[3] === undefined || negativeControl), "unknown smoke mode");
+let source = fs.readFileSync(sourcePath, "utf8");
+if (negativeControl) {
+  // Mutate only this process's program string. Exactly one known guard must
+  // match; refactors fail visibly rather than silently skipping the control.
+  const guard = /nodeType\(\s*records\[parent\]\.element\s*\)\s*===\s*1\s*&&/g;
+  assert((source.match(guard) || []).length === 1, "negative-control guard is not unique");
+  source = source.replace(guard, "true &&");
+}
 vm.runInThisContext(source, { filename: sourcePath });
 Object.defineProperty(document, "nodeType", { value: 1 });
 Object.defineProperty(document, "tagName", { value: "SELECT" });
@@ -513,6 +522,11 @@ const invoke = (invocation, generation, scope, budget = {}) => runtime.invoke(JS
 }));
 
 const initialWire = invoke(7, 1, { k: "initial" });
+if (negativeControl) {
+  assert(initialWire === "E1:internal", "missing parent guard did not reproduce the closed fault");
+  process.stdout.write("semantic-runtime negative control: missing parent brand guard reproduces E1:internal\n");
+  process.exit(0);
+}
 assert(!initialWire.startsWith("E1:"), initialWire);
 const initial = JSON.parse(initialWire);
 assert(initial.v === 1 && initial.i === 7 && initial.g === 1, "authority mismatch");

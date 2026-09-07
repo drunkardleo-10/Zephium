@@ -8,6 +8,11 @@ not product rendering authority or general task execution. The existing
 run-owned qualification path remains available, and its all-zero proof now also
 excludes retained Work resources and their outstanding delivery owners.
 
+The actual-app retained WKWebView/common-controller join additionally qualified
+one [frozen public product brief](../eval/agentic-browsing/macos-retained-public-product-brief.md)
+on 2026-09-07, with two stateless Luna calls and clean independent closure.
+That one-page read-only result is not general task or shipping-product readiness.
+
 ## Why this boundary exists
 
 The actual-application foreground witness establishes a bounded supported
@@ -135,9 +140,11 @@ resource identity or the original navigation identity.
 No lease, invocation, snapshot or actor reference exists before this barrier.
 The actual initial commit already retired the bootstrap world and installed the
 new document's isolated runtime; finalization must not fabricate another native
-commit. After finalization, a location callback permanently closes the gate and
-synchronously invalidates the exact native health owner and semantic work before
-queued reconciliation. Dispatch and completion both require that same immutable
+commit. After finalization, a location callback synchronously closes the gate
+and cancels semantic work. The invariant callback is queued; it later invalidates
+the exact native health owner and schedules owner reconciliation. That health
+publication is not synchronous with the location callback. Dispatch and
+completion both require that same immutable
 ready gate and current lease/health; even a change back to the frozen URL cannot
 revive old references. Continuing a later SPA/history transition is unsupported
 and requires a future explicit generation/account/ref-invalidation protocol.
@@ -554,4 +561,11 @@ and its exact successful synthetic-public fixture witness are recorded in
 qualify real public sites. The separately selected
 [real-storefront product brief](../eval/agentic-browsing/macos-retained-public-product-brief.md)
 reuses the same driver and fixed read-only budgets, with no native navigation,
-action or second observation. Its public-site qualification remains pending.
+action or second observation. On 2026-09-07, the exact `0962db9` source and pinned
+executable completed that actual-app public workflow with one 82-node native
+snapshot, two stateless Luna calls, verified source mapping and clean independent
+presentation, worker, resource and native shutdown closure. This qualifies the
+frozen one-page read-only brief, not general public-site reliability, later
+navigation/actions, durable publication, successor admission or product rendering
+authority. The exact trace and earlier unsuccessful attempts remain in the
+linked evaluation record.

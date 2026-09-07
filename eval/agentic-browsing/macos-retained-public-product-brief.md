@@ -1,10 +1,50 @@
 # Actual-app retained public product brief
 
-Status: **Four unsuccessful actual-app public attempts; not qualified.** The
+Status: **Qualified once for the frozen actual-app public product brief on
+2026-09-07, after four separately authorized unsuccessful attempts.** The
 [qualified Luna fixture](macos-retained-controller-luna.md) proves the retained
 native/controller/closure composition only on its frozen loopback page. This
-candidate is a separately selected real-storefront task, not a promotion of
+workflow is a separately selected real-storefront task, not a promotion of
 that fixture result or the older hidden-AppKit qualifiers.
+
+## Successful actual-app public qualification — 2026-09-07
+
+Exact source `0962db94a8b7c3c4e16763d1486e0a7432bd3fd3`; arm64 executable
+SHA-256 `218e6bba9a73dec6a6bf853f0160efac0797bfb9033889992904e1a07a953db6`.
+Foreground admission succeeded after 5,668 ms/43 checks. Construction returned
+`Retained`; acquisition returned `Acquired`. Configuration was stateless
+`gpt-5.6-luna`, workflow `pimoroni-pico2-brief-v1`.
+
+The one native snapshot had 82 nodes, complete and current document true,
+zero frame boundaries, and product-title/product-summary predicates true.
+
+| Call | Input tokens | Output tokens | Cost (micro-USD) | Request bytes | Semantic bytes | Elapsed ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 2,838 | 37 | 754 | 9,678 | 6,223 | 2,551 |
+| 2 | 3,116 | 120 | 923 | 12,481 | 1,339 | 2,585 |
+
+The first call proposed Extract; the common controller accepted the result at
+wall time 5,444 ms. Totals: **two calls, 5,954 input tokens, 157 output tokens,
+1,677 micro-USD**. Source mapping was independently verified. Presentation
+retired, scoped worker drained and original resource retired were all true.
+There was no durable publication or successor admission.
+
+Native primary/cleanup failures were absent. Native cohort clean, human
+ownership preserved and fixture clean were true. Total elapsed time was
+7,920 ms; `qualified=true`, normal shutdown clean, exact native weak drain true
+and shutdown-owner closure true. The preserved evidence root is
+`/private/tmp/zephium-public-pimoroni-qualified-0962db9-20260907.7Dlt3x/data-root`.
+Its database had seven audit events and one delivery, with zero Work runs,
+artifacts and owners, consistent with this stateless/no-durable-publication
+contract. No page, model-response, query or credential content is reproduced here.
+
+This is the first actual-app retained WKWebView/common-controller qualification
+of this fixed real public-site read-only brief. It does not qualify arbitrary
+sites or open objectives, repeat reliability, navigation/actions, account use,
+durable result publication, successor/multi-agent admission, or shipping product
+rendering authority. The successful corrected source is evidence for this run;
+it does not retroactively prove the precise throw location in the previous
+`Internal` attempt. The failed attempts below remain part of the record.
 
 ## First actual-app attempt — 2026-09-07
 
@@ -21,7 +61,7 @@ retired true. Native failure evidence was unavailable (primary/cleanup `None`).
 Native cohort clean, human ownership preserved, no fixture owed and shutdown
 owner closed were all true. Final qualification and normal-shutdown-clean were
 false; exact native weak drain was `None`. No audit/run rows were persisted.
-The failed data root was preserved outside the repository. No retry followed.
+The failed data root was preserved outside the repository. No automatic retry followed.
 
 Source diagnosis: the native rendering holder and controller were not reached.
 The construction phase only advances on the original `Retained` terminal; its
@@ -148,8 +188,9 @@ An original move-only completion carries requested→effective lineage into the
 core row; the controller/account input uses the independently checked effective
 document exactly. The requested target stays available separately and remains
 the native holder's fixed admission join. No actor reference exists before this
-barrier. Later location callbacks synchronously fail native health and cancel
-semantic work; dispatch and completion require the same permanently frozen
+barrier. Later location callbacks synchronously close the ready gate and cancel
+semantic work; native health invalidation follows through the queued invariant
+callback. Dispatch and completion require the same permanently frozen
 document gate. Returning to an earlier URL cannot revive references. See
 [the resource contract](../../docs/agent-work-resources.md) for the invariant.
 
@@ -228,6 +269,17 @@ gates; formatting and whitespace checks. An in-memory negative control removing
 only the new receiver guard reproduced `E1:internal` in the strengthened smoke.
 These checks did not launch a GUI, read credentials or contact a provider.
 
+The guard-removal negative control is now checked in as the smoke's
+`--without-document-parent-brand` mode and runs in `check-agentic-probe-boundary`
+after the complete positive smoke. It changes only the loaded in-memory program
+string, requires exactly one matching receiver guard, and accepts only the
+expected `E1:internal` on the first read. Unknown modes or a missing/ambiguous
+guard fail the check; source files are never modified. This replaces the prior
+ad-hoc control command without changing the production runtime or its digest.
+The evidence/test-only update passed both smoke modes, agentic-probe/controller/
+runtime architecture gates, strict all-targets xtask Clippy, formatting and
+whitespace checks. No additional GUI/provider run or remote change accompanied it.
+
 ## Workflow and decision
 
 Prepare a source-backed product brief from the public
@@ -238,9 +290,10 @@ alongside variant, stock, account, recommendation and cart controls. That
 inspection is not WKWebView visibility, readiness or native projection evidence.
 The witness must independently establish its actual bounded current sources.
 
-The immediate question is whether the qualified retained presentation → original
+The selected question was whether the qualified retained presentation → original
 observation → presentation retirement → common Luna controller path returns
-useful source-bound information on a live storefront. The older commercial
+useful source-bound information on a live storefront. The exact successful run
+above now proves that limited boundary. The older commercial
 route failed at successor evidence before extraction without establishing its
 readiness/presentation/projection cause. The retained adapter currently exposes
 one initial read, not navigation or subtree capture. Starting at the real product
@@ -347,9 +400,9 @@ call/tool sequence, request/semantic/token/cost metrics, task/owned-mapping
 results and all independent closure facts. An early refusal remains unsuccessful
 qualification with its original cause.
 
-No GUI, Keychain access or provider request was used for this implementation.
-No native/public result or executable identity is inferred from deterministic
-checks or read-only web inspection.
+Source preparation used no GUI, Keychain access or provider request. Native/public
+results and executable identities come only from the separately authorized runs
+recorded above, never from deterministic checks or read-only web inspection.
 
 Pre-launch audit correction (2026-09-07): the initial prepared candidate still
 used the fixture-only native host admission and could not reach public execution.

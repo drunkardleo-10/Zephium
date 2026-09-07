@@ -1102,6 +1102,7 @@ fn check_agentic_probe_boundary() {
         exit(1);
     });
     run("node", &[smoke, runtime]);
+    run("node", &[smoke, runtime, "--without-document-parent-brand"]);
 }
 
 fn check_agent_model_catalog_boundary() {
