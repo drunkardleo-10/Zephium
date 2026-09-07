@@ -1132,6 +1132,10 @@ fn command_is_critical(command: &Command) -> bool {
 }
 
 fn command_is_observational_query(command: &Command) -> bool {
+    #[cfg(feature = "work-execution")]
+    if matches!(command, Command::WorkProfileBinding { .. }) {
+        return true;
+    }
     matches!(
         command,
         Command::ContentPolicyStatus { .. } | Command::FocusedContentPolicyStatus { .. }

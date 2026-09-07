@@ -582,6 +582,11 @@ pub enum Command {
     FocusedContentPolicyStatus {
         reply: SyncSender<BlockerStatusView>,
     },
+    /// Trusted Rust-only Work binding query. No caller-selected profile/session.
+    #[cfg(feature = "work-execution")]
+    WorkProfileBinding {
+        reply: SyncSender<crate::AgentWorkProfileReadiness>,
+    },
     /// Bounded retry for the renderer-owned asynchronous favicon decode.
     FaviconPoll {
         id: ItemId,

@@ -192,8 +192,9 @@ impl AgentWorkTask for ReactNavigationTask {
         } else {
             0
         };
-        // Only this closed qualifier's newly constructed ephemeral profile is
-        // in scope: no imported session, credential input, action or auth step.
+        // Only this closed qualifier's fresh isolated application profile (or
+        // the standalone host's new ephemeral profile) is in scope: no imported
+        // session, credential input, action or auth step.
         // Its isolated anonymous basis is sampled once per verified document;
         // cached samples never renew. This is not login/account detection.
         let sample = AgentContextAccountBinding::new(

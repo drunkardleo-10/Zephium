@@ -27,6 +27,12 @@ mod shell;
 mod store_reads;
 #[cfg(feature = "work-execution")]
 mod work;
+#[cfg(feature = "work-execution")]
+mod work_profile;
+#[cfg(feature = "work-execution")]
+pub use work_profile::{
+    AgentWorkProfileBinding, AgentWorkProfileReadiness, AgentWorkProfileRequest,
+};
 #[cfg(feature = "agentic-browser")]
 mod work_resources;
 

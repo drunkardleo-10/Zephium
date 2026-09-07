@@ -18,6 +18,7 @@ pub struct TrustedWorkRequest {
     pub(crate) config: AgentWorkApplicationConfig,
     pub(crate) credential: AgentProviderCredential,
     pub(crate) task: Box<dyn AgentWorkTask>,
+    browser_profile: Option<zephium_app::AgentWorkProfileBinding>,
 }
 
 impl TrustedWorkRequest {
@@ -33,7 +34,13 @@ impl TrustedWorkRequest {
             config,
             credential,
             task,
+            browser_profile: None,
         }
+    }
+    /// Requests the exact actor-selected browser session, revalidated by Shell.
+    pub fn with_browser_profile(mut self, binding: zephium_app::AgentWorkProfileBinding) -> Self {
+        self.browser_profile = Some(binding);
+        self
     }
 }
 
@@ -90,13 +97,15 @@ impl MacosWorkComposition {
         &self,
         request: TrustedWorkRequest,
     ) -> Result<PreparedAgentWork, AgentWorkFailure> {
-        PreparedAgentWork::try_new(
+        let binding = request.browser_profile.ok_or(AgentWorkFailure::Contract)?;
+        let prepared = PreparedAgentWork::try_new(
             request.input,
             request.config,
             request.credential,
             request.task,
             self.ports(),
-        )
+        )?;
+        prepared.with_browser_profile(binding)
     }
 
     pub(crate) fn ports(&self) -> AgentWorkApplicationPorts {

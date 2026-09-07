@@ -37,9 +37,13 @@ or provider work. `AgentWorkHandle` exposes bounded content-free events and the
 single move-only terminal/recovery outcome; it exposes no page/native internals.
 
 The caller must keep pumping the engine's native dispatcher during execution
-and shutdown. It must install the selected profile's authoritative content
-policy before constructing a Work page. An uninstalled policy is a refusal,
-not permission to bypass profile security.
+and shutdown. The selected browser profile must already have its authoritative
+content policy applied by the ordinary profile/policy owner before constructing
+a Work page. Application admission waits for that existing readiness under the
+original deadline; inventing a profile or installing a task-specific fallback
+policy is not a repair. An uninstalled policy is a refusal, not permission to
+bypass profile security. The [composition binding](agent-work-composition.md)
+preserves the actor-selected session's profile and persistence class.
 
 ## Ownership and bounds
 

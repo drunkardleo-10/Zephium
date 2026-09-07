@@ -63,7 +63,10 @@ fn ordinary_navigation_observer(source: &str) -> Result<(), String> {
     require(
         source,
         &[
-            "let request = qualifier::load_request(started)?;",
+            "let request = qualifier::load_request(started, profile)?;",
+            "let profile = wait_for_profile(app, control, started, None)?;",
+            "wait_for_profile(app, control, started, Some(profile))?;",
+            "control::profile_wait_failure(started, Instant::now(), control.admission.cancelled())",
             ".admission.admit(|| { let view = super::admit_trusted_work(app, request)",
             "Some((view.clone(), false))",
             "let settled = control.admission.settle(result);",
@@ -106,6 +109,21 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
             .map_err(|_| format!("missing Work composition source {path}"))
     };
     let native = read("crates/zephium-work-composition/src/native.rs")?;
+    require(
+        &native,
+        &[
+            "let binding = request.browser_profile.ok_or(AgentWorkFailure::Contract)?;",
+            "prepared.with_browser_profile(binding)",
+        ],
+    )?;
+    require(&read("crates/zephium-app/src/work.rs")?, &[
+        "self.controller.profile_storage_binding()? != (binding.profile(), binding.storage_class())",
+        "profile == Some(crate::AgentWorkProfileReadiness::Ready(binding))",
+        "if !profile_valid { self.stopping = true; self.fail(AgentWorkFailure::Contract); self.abort_staged(); }",
+    ])?;
+    require(&read("crates/zephium-app/src/shell/mod.rs")?, &[
+        "let profile = self.work_profile_binding(); if let Some(work) = &mut self.work { work.admit(submission, Some(profile)); }",
+    ])?;
     ordinary_navigation_observer(&read("desktop/src/navigation_probe.rs")?)?;
     require(&read("desktop/Cargo.toml")?, &[
         "macos-work-navigation-probe = [\"macos-work\", \"zephium-work-composition/navigation-qualification\", \"tauri/custom-protocol\"]",

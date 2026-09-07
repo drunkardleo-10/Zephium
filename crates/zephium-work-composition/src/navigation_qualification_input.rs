@@ -26,26 +26,30 @@ impl TerraControllerClock for Clock {
 
 /// Called only by the explicitly admitted development worker. The one absolute
 /// deadline includes credential loading and is never restarted after a hop.
-pub fn load_request(started: Instant) -> Result<crate::TrustedWorkRequest, &'static str> {
+pub fn load_request(
+    started: Instant,
+    profile: zephium_app::AgentWorkProfileBinding,
+) -> Result<crate::TrustedWorkRequest, &'static str> {
     let credential = load_macos_development_openai_credential().map_err(|_| "credential")?;
-    request(credential, started)
+    request(credential, started, profile)
 }
 
 fn request(
     credential: AgentProviderCredential,
     started: Instant,
+    profile: zephium_app::AgentWorkProfileBinding,
 ) -> Result<crate::TrustedWorkRequest, &'static str> {
     let identity = ContextIdentity::new(
         ContextId::generate(),
         ContextRunId::generate(),
-        zephium_core::ids::ProfileId::generate(),
+        profile.profile(),
         ContextKind::Owned,
     );
     let deadline = started.checked_add(TOTAL).ok_or("deadline")?;
     if Instant::now() >= deadline {
         return Err("deadline");
     }
-    let input = input(identity, started, deadline)?;
+    let input = input(identity, profile.storage_class(), started, deadline)?;
     Ok(crate::TrustedWorkRequest::new(
         input,
         zephium_app::AgentWorkApplicationConfig::new(
@@ -54,11 +58,13 @@ fn request(
         ),
         credential,
         task(identity).map_err(|_| "task")?,
-    ))
+    )
+    .with_browser_profile(profile))
 }
 
 fn input(
     identity: ContextIdentity,
+    storage: ContextProfileStorageClass,
     started: Instant,
     deadline: Instant,
 ) -> Result<AgentWorkRunInput, &'static str> {
@@ -109,7 +115,7 @@ fn input(
         AgentPlanLeaseBinding::new(AgentPlanLeaseId::generate(), node),
         AgentWorkContextSpec::try_new(
             identity,
-            ContextProfileStorageClass::Ephemeral,
+            storage,
             ContextNavigationTarget::parse(INITIAL).map_err(|_| "target")?,
         )
         .map_err(|_| "context")?,
@@ -137,7 +143,12 @@ mod tests {
             zephium_core::ids::ProfileId::generate(),
             ContextKind::Owned,
         );
-        assert!(input(identity, started, started + TOTAL).is_ok());
+        for storage in [
+            ContextProfileStorageClass::Durable,
+            ContextProfileStorageClass::Ephemeral,
+        ] {
+            assert!(input(identity, storage, started, started + TOTAL).is_ok());
+        }
         let task = task(identity).unwrap();
         assert_eq!(
             task.navigation_target().unwrap().as_url().as_str(),

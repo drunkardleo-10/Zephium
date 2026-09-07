@@ -993,6 +993,36 @@ impl Shell {
         )
     }
 
+    #[cfg(feature = "work-execution")]
+    pub(super) fn work_profile_binding(&self) -> crate::AgentWorkProfileReadiness {
+        use crate::{AgentWorkProfileBinding as Binding, AgentWorkProfileReadiness as Readiness};
+        let Some(profile) = self
+            .windows
+            .focused()
+            .and_then(|window| self.profiles.get(window.profile))
+        else {
+            return Readiness::ProfileMissing;
+        };
+        if self.profile_deletion_quarantines(profile.id) {
+            return Readiness::ProfileMissing;
+        }
+        let binding = Binding::from_profile(profile);
+        let Some(status) = self.blocker.status(profile.id) else {
+            return Readiness::PolicyMissing;
+        };
+        match status.state {
+            ProfileContentPolicyState::Ready { .. }
+                if self.blocker.native_policy_available(profile.id) =>
+            {
+                Readiness::Ready(binding)
+            }
+            ProfileContentPolicyState::Uninitialized
+            | ProfileContentPolicyState::Compiling { .. }
+            | ProfileContentPolicyState::Installing { .. } => Readiness::PolicyPending(binding),
+            _ => Readiness::PolicyFailed,
+        }
+    }
+
     pub(super) fn project_blocker_status(&self) {
         let status = self.focused_blocker_status();
         if self.blocker.should_project(status) {

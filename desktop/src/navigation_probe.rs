@@ -166,9 +166,13 @@ fn run(app: &tauri::AppHandle, control: &Control) -> Result<ApplicationReport, &
         return Err("cancelled_before_credential");
     }
     let started = Instant::now();
+    let profile = wait_for_profile(app, control, started, None)?;
     // Security.framework lookup is noncancellable. A quit keeps this original
     // worker retained; its late result is dropped, never admitted or detached.
-    let request = qualifier::load_request(started)?;
+    let request = qualifier::load_request(started, profile)?;
+    // Lookup can outlive a browser selection/policy transition. Reconcile only
+    // this same binding before admission; never follow a new profile silently.
+    wait_for_profile(app, control, started, Some(profile))?;
     let view = control
         .admission
         .admit(|| {
@@ -195,6 +199,53 @@ fn run(app: &tauri::AppHandle, control: &Control) -> Result<ApplicationReport, &
             request_stop(control);
             super::write_diagnostic(format_args!("work-application-navigation-handoff: report={:?} phase={:?} cleanup_owner=ordinary_shutdown", observer.report(), view.snapshot().phase));
             return Err("observer_deadline_handoff");
+        }
+        std::thread::sleep(TICK);
+    }
+}
+
+fn wait_for_profile(
+    app: &tauri::AppHandle,
+    control: &Control,
+    started: Instant,
+    mut pinned: Option<zephium_app::AgentWorkProfileBinding>,
+) -> Result<zephium_app::AgentWorkProfileBinding, &'static str> {
+    use zephium_app::AgentWorkProfileReadiness as Readiness;
+    let shell = app
+        .try_state::<zephium_app::Handle>()
+        .ok_or("profile_owner")?;
+    let mut pending = None;
+    let mut prior = None;
+    loop {
+        if let Some(failure) =
+            control::profile_wait_failure(started, Instant::now(), control.admission.cancelled())
+        {
+            return Err(failure);
+        }
+        let request = pending.get_or_insert_with(|| shell.work_profile_binding());
+        if let Some(readiness) = request.try_recv() {
+            pending = None;
+            if prior != Some(readiness) {
+                super::write_diagnostic(format_args!(
+                    "work-application-navigation-profile: state={readiness:?} content=redacted"
+                ));
+                prior = Some(readiness);
+            }
+            match readiness {
+                Readiness::Ready(binding) | Readiness::PolicyPending(binding) => {
+                    if pinned.is_some_and(|prior| prior != binding) {
+                        return Err("profile_selection_changed");
+                    }
+                    pinned = Some(binding);
+                    if matches!(readiness, Readiness::Ready(_)) {
+                        return Ok(binding);
+                    }
+                }
+                Readiness::ProfileMissing => return Err("profile_missing"),
+                Readiness::PolicyMissing => return Err("profile_policy_missing"),
+                Readiness::PolicyFailed => return Err("profile_policy_failed"),
+                Readiness::Unavailable => return Err("profile_query_unavailable"),
+            }
         }
         std::thread::sleep(TICK);
     }

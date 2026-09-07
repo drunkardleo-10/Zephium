@@ -85,9 +85,24 @@ pub struct PreparedAgentWork {
     deadline: Instant,
     run: ContextRunId,
     result_profile: Option<zephium_core::ids::ProfileId>,
+    browser_profile: Option<crate::AgentWorkProfileBinding>,
 }
 
 impl PreparedAgentWork {
+    /// Pins an actor-selected session and verifies that trusted input did not
+    /// substitute its profile or storage class. Shell rechecks admission later.
+    pub fn with_browser_profile(
+        mut self,
+        binding: crate::AgentWorkProfileBinding,
+    ) -> Result<Self, AgentWorkFailure> {
+        if self.controller.profile_storage_binding()?
+            != (binding.profile(), binding.storage_class())
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
+        self.browser_profile = Some(binding);
+        Ok(self)
+    }
     /// Builds the shipping stateless actor from trusted product inputs.
     pub fn try_new(
         input: AgentWorkRunInput,
@@ -128,6 +143,7 @@ impl PreparedAgentWork {
             deadline,
             run,
             result_profile,
+            browser_profile: None,
         })
     }
 }
@@ -655,7 +671,11 @@ impl ApplicationWork {
         self.fail(AgentWorkFailure::Contract);
     }
 
-    pub(crate) fn admit(&mut self, submission: WorkSubmission) {
+    pub(crate) fn admit(
+        &mut self,
+        submission: WorkSubmission,
+        profile: Option<crate::AgentWorkProfileReadiness>,
+    ) {
         if !Arc::ptr_eq(&self.projection, &submission.1) {
             return;
         }
@@ -673,8 +693,16 @@ impl ApplicationWork {
         }
         self.used = true;
         self.audit = Some(run.audit.clone());
+        let profile_valid = run.browser_profile.is_none_or(|binding| {
+            profile == Some(crate::AgentWorkProfileReadiness::Ready(binding))
+        });
         lock(&self.projection).snapshot.run = Some(run.run);
         self.staged = Some(run);
+        if !profile_valid {
+            self.stopping = true;
+            self.fail(AgentWorkFailure::Contract);
+            self.abort_staged();
+        }
         self.poll();
     }
 

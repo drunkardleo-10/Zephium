@@ -1,6 +1,20 @@
 //! Linearization fence only, not a Work or native lifecycle.
 use std::sync::Mutex;
 
+pub fn profile_wait_failure(
+    started: std::time::Instant,
+    now: std::time::Instant,
+    cancelled: bool,
+) -> Option<&'static str> {
+    if cancelled {
+        Some("profile_cancelled")
+    } else if now.saturating_duration_since(started) >= std::time::Duration::from_secs(150) {
+        Some("profile_deadline")
+    } else {
+        None
+    }
+}
+
 pub struct AdmissionFence<T>(Mutex<FenceState<T>>);
 struct FenceState<T> {
     cancelled: bool,
@@ -76,6 +90,34 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         Arc, Barrier,
     };
+    #[test]
+    fn profile_wait_cannot_refresh_deadline_or_accept_after_cancellation() {
+        let started = std::time::Instant::now();
+        for seconds in [0, 1, 149] {
+            assert_eq!(
+                profile_wait_failure(
+                    started,
+                    started + std::time::Duration::from_secs(seconds),
+                    false
+                ),
+                None
+            );
+        }
+        for seconds in [150, 151, 300] {
+            assert_eq!(
+                profile_wait_failure(
+                    started,
+                    started + std::time::Duration::from_secs(seconds),
+                    false
+                ),
+                Some("profile_deadline")
+            );
+        }
+        assert_eq!(
+            profile_wait_failure(started, started, true),
+            Some("profile_cancelled")
+        );
+    }
     #[test]
     fn cancelled_lookup_completion_cannot_call_admission() {
         let fence = Arc::new(AdmissionFence::<()>::default());

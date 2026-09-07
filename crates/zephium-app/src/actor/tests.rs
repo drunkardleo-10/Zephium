@@ -760,6 +760,30 @@ fn content_policy_status_query_is_ordered_and_fails_boundedly_when_sealed() {
     );
 }
 
+#[cfg(feature = "work-execution")]
+#[test]
+fn work_profile_query_is_selector_free_bounded_and_closed_on_shutdown() {
+    let queue = CommandQueue::new();
+    let handle = Handle::new(queue.clone());
+    let request = handle.work_profile_binding();
+    assert_eq!(request.try_recv(), None);
+    let Command::WorkProfileBinding { reply } = queue.try_recv().unwrap() else {
+        panic!("wrong query");
+    };
+    reply
+        .send(crate::AgentWorkProfileReadiness::ProfileMissing)
+        .unwrap();
+    assert_eq!(
+        request.try_recv(),
+        Some(crate::AgentWorkProfileReadiness::ProfileMissing)
+    );
+    let _shutdown = handle.shutdown();
+    assert_eq!(
+        handle.work_profile_binding().try_recv(),
+        Some(crate::AgentWorkProfileReadiness::Unavailable)
+    );
+}
+
 #[test]
 fn focused_content_policy_query_has_no_profile_selector_and_fails_with_revision_zero() {
     let queue = CommandQueue::new();

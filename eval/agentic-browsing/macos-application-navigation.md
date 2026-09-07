@@ -1,7 +1,8 @@
 # Actual-application one-hop qualification
 
-Status: actual-app adapter prepared and offline-tested; no actual-app execution
-or provider evidence yet.
+Status: one actual-app attempt failed before provider at native profile
+construction. A corrected trusted-profile candidate is prepared offline; no
+successful actual-app navigation/provider result is claimed.
 The retained Pimoroni result does not qualify this ordinary-controller path.
 
 The prepared boundary is Tauri trusted Rust admission into the existing
@@ -17,8 +18,9 @@ fresh Your First Component heading under the exact successor navigation epoch
 and frame generation, and extract only that destination heading with one fresh
 heading-text citation. No objective parser or model output chooses authority.
 
-The development-only request has one ephemeral Owned context, Public / Read /
-Anonymous authority restricted to `https://react.dev`, eight model turns,
+The development-only request has one Owned context sharing the actor-selected
+browser profile's session, Public / Read / Anonymous authority restricted to
+`https://react.dev`, eight model turns,
 100,000 tokens and a 100,000 micro-USD reservation ceiling (not expected cost).
 Luna's catalog-bounded first reservation requires 77,830 micro-USD. Exact runtime
 accounting, the original lease and the single 150-second absolute deadline
@@ -49,6 +51,60 @@ cargo clippy --locked -p zephium-work-composition --features navigation-qualific
 The qualifier feature is absent by default and compile-rejected in optimized
 or non-macOS builds. Source tests do not constitute native/site qualification.
 
+## Failed actual-app boundary, 2026-09-07
+
+Source `14a1c6341f762b8979f1b78c42db2a363abcd7c0`, arm64 executable SHA-256
+`e78957f5e7a9f0a2ebb9368c0997384628f6b2ac737a988a898f2ad50bf794d6`,
+bundle-manifest SHA-256
+`6b561dae4b8d16340dd82f93cafb21a6424fc8209dd3e9146fd0d79f86890a77`.
+Foreground admission was immediate. `Started`, `ContextActive`, then `Recovery`
+at 19 ms ended with `Native(ProfileUnavailable)`. All model calls, tokens, cost
+and navigation proposals were zero. The observer joined; ordinary shutdown
+correctly refused clean success. The bundle was unchanged. Evidence is retained
+at `/private/tmp/zephium-navigation-identity.WafrUu`; original app data remains at
+`~/Library/Application Support/app.zephium.work-navigation-probe`.
+
+The Store contains one profile, one acknowledged `RecoveryRequired` Work record
+with `UNKNOWN` debt (`04/3F`, nonterminal), no artifact and no audit event/delivery.
+This is retained uncertainty, not delayed success. The observer's
+`durable_terminal_verified=false` is a success-only check, not proof that the
+recovery write was lost. Its existing fail-closed handoff remains unchanged.
+
+Source diagnosis: the request invented a ProfileId, but native construction
+requires the profile's existing applied content policy. Substituting the current
+ID while still forcing ephemeral storage would also violate the independent
+native persistence-class check. No provider or page semantics were reached.
+
+## Trusted profile/session binding
+
+The ordinary application actor now answers a selector-free Rust query with an
+opaque binding from its focused browser window and live profile aggregate. It
+does not expose an IPC profile selector, create a profile, or install policy.
+Default/named profiles retain durable storage; incognito retains its existing
+ephemeral store. Both ordinary browser views and owned Work views use the same
+profile-scoped macOS website-data-store identity. A fresh isolated application
+root is still mandatory for this anonymous qualifier; this is not generalized
+account detection or permission to share an arbitrary authenticated session.
+
+Missing/deleting profiles and missing/failed/unapplied policy fail closed.
+Compiling/installing policy is observed as pending without provider/native work.
+The worker pins the first binding, never follows a switched profile, and polls
+only the existing actor status under the original 150-second deadline and
+cancellation fence. It rechecks the same binding after noncancellable credential
+lookup. Prepared input must match the binding's profile and storage class;
+Shell revalidates a live, non-deleting, ready binding when consuming `AdmitWork`,
+closing the query-to-admission race before activation. Both original durable
+admission acknowledgements remain required before the native factory is called.
+
+The binding is a session selection, not a capability to an old blocker policy
+generation. Native construction independently checks tombstones and persistence
+class and acquires the current applied policy on its serialized host turn.
+Subsequent ordinary policy replacement/retirement remains authoritative. Pinning
+a historical generation would incorrectly turn the readiness snapshot into a
+policy override; no generation override or bypass is introduced. Deletion after
+admission follows the engine's existing monotonic tombstone/resource-retirement
+path. The actor query is not claimed to keep a profile alive independently.
+
 ## Actual application admission and closure
 
 `macos-work-navigation-probe` adds only a development observer and a fixed Rust
@@ -65,13 +121,14 @@ main window's visible/focused state and never activates, focuses or presents a
 window. Failure to select the window defers before credential lookup or Work
 admission. The initial human chrome window remains outside the owned task.
 
-After foreground admission, the single worker loads the existing development
-Keychain credential. Security.framework lookup is synchronous and
+After foreground admission and trusted profile readiness, the single worker
+loads the existing development Keychain credential. Security.framework lookup is synchronous and
 noncancellable: a quit retains this worker and the app event loop until lookup
 returns. Cancellation and actual trusted admission share a mutex fence, so a
 late credential result is dropped without admitting work. There is no detached
 credential worker or claim of a bounded Keychain cancellation time. The original
-150-second deadline starts before lookup; an expired lookup cannot admit.
+150-second deadline starts before profile readiness and lookup; neither can
+renew it, and an expired lookup cannot admit.
 
 Cancellation and terminal settlement also share this same mutex. The stored
 terminal is the sole readiness fact, not a result followed by an independent
@@ -101,6 +158,23 @@ ordinary controller/runtime/native closure evidence, not the retained witness's
 separate weak-resource census. No second native cleanup path is installed.
 
 ## Build and explicitly authorized one-shot run
+
+Before any corrected-candidate launch, archive the previous failed app root by
+moving it intact to a new, nonexisting evidence path while the app is stopped.
+The existing `app-data-failed-run` evidence copy must not be overwritten. Never
+delete the original or reuse its database as a fresh run. For the preserved run:
+
+```sh
+navigation_failed_root="$HOME/Library/Application Support/app.zephium.work-navigation-probe"
+navigation_archive="/private/tmp/zephium-navigation-identity.WafrUu/app-data-original-before-corrected-candidate"
+test -d "$navigation_failed_root" && test ! -e "$navigation_archive" && mv -n "$navigation_failed_root" "$navigation_archive"
+test ! -e "$navigation_failed_root" && test -d "$navigation_archive"
+```
+
+Record that move in the evidence log; it is recoverable by moving the archive
+back only while the app is stopped and the original path is absent. A failed
+precondition is a stop, not permission to overwrite another root. This procedure
+does not authorize launching, credentials or retry by itself.
 
 Build only the `.app`, from the repository root on the arm64 macOS host with the
 default repository target directory (does not launch). The installed Tauri CLI
@@ -162,5 +236,8 @@ TAURI_CONFIG="$(<desktop/tauri.work-navigation-probe.conf.json)" cargo test --lo
 TAURI_CONFIG="$(<desktop/tauri.work-navigation-probe.conf.json)" cargo test --locked -p zephium-desktop --features macos-work-navigation-probe --lib navigation_probe
 cargo test --locked -p xtask work_composition_boundary
 cargo xtask check-agentic-probe-boundary
+cargo test --locked -p zephium-app --features work-execution --lib
+cargo test --locked -p zephium-app --features work-execution --doc
+cargo test --locked -p zephium-engine --features agentic-browser --lib host::profiles::tests
 node --test eval/agentic-browsing/bundle-manifest-v1.test.mjs
 ```

@@ -866,6 +866,24 @@ impl Handle {
         FocusedContentPolicyStatusRequest { receiver }
     }
 
+    /// Selects the current browser profile on the actor, never from UI/model IDs.
+    #[cfg(feature = "work-execution")]
+    pub fn work_profile_binding(&self) -> crate::AgentWorkProfileRequest {
+        let (reply, receiver) = sync_channel(1);
+        let command = Command::WorkProfileBinding { reply };
+        match self.queue.try_push(command) {
+            Ok(()) => {}
+            Err(
+                TryPushError::Full(command)
+                | TryPushError::Sealed(command)
+                | TryPushError::Closed(command),
+            ) => {
+                finish_unprocessed_command(command, ShutdownOutcome::Unclean);
+            }
+        }
+        crate::AgentWorkProfileRequest(receiver)
+    }
+
     /// Requests an ordered shutdown without waiting for queue capacity on the
     /// caller (normally the UI thread). Only `RetryableFailure` leaves the
     /// actor and native engine available for another attempt.
@@ -930,6 +948,10 @@ fn finish_unprocessed_command(command: Command, outcome: ShutdownOutcome) {
         }
         Command::FocusedContentPolicyStatus { reply } => {
             let _ = reply.send(BlockerStatusView::unavailable());
+        }
+        #[cfg(feature = "work-execution")]
+        Command::WorkProfileBinding { reply } => {
+            let _ = reply.send(crate::AgentWorkProfileReadiness::Unavailable);
         }
         Command::ProvisionAcquiredExtensionPackage(submission) => {
             submission.settle_unavailable();

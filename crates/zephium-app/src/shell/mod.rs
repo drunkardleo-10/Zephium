@@ -544,8 +544,9 @@ impl Shell {
             }
             #[cfg(feature = "work-execution")]
             Command::AdmitWork(submission) => {
+                let profile = self.work_profile_binding();
                 if let Some(work) = &mut self.work {
-                    work.admit(submission);
+                    work.admit(submission, Some(profile));
                 }
             }
             #[cfg(feature = "work-execution")]
@@ -829,6 +830,10 @@ impl Shell {
             Command::FocusedContentPolicyStatus { reply } => {
                 self.maintain_blocker_catalog();
                 let _ = reply.send(self.focused_blocker_status_view());
+            }
+            #[cfg(feature = "work-execution")]
+            Command::WorkProfileBinding { reply } => {
+                let _ = reply.send(self.work_profile_binding());
             }
             Command::FaviconPoll { id, attempt } => self.poll_favicon(id, attempt),
             Command::PresentationFallback {

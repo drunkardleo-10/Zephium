@@ -13,6 +13,57 @@ use zephium_core::ports::engine::ContentRuleSettlement;
 
 type CompileCallback = Box<dyn FnOnce(BlockerCompileOutcome) + Send>;
 
+#[cfg(feature = "work-execution")]
+#[test]
+fn work_profile_binding_waits_for_native_policy_and_refuses_deletion_or_missing_profile() {
+    use crate::AgentWorkProfileReadiness as Readiness;
+    let (mut shell, _engine, compiler, _store, _screen) = controlled_shell();
+    assert_eq!(shell.work_profile_binding(), Readiness::ProfileMissing);
+    shell.handle(Command::Bootstrap);
+    let profile = shell.windows.focused().unwrap().profile;
+    let Readiness::PolicyPending(binding) = shell.work_profile_binding() else {
+        panic!("compile must remain pending");
+    };
+    assert_eq!(binding.profile(), profile);
+    assert_eq!(
+        binding.storage_class(),
+        zephium_agentic::ContextProfileStorageClass::Durable
+    );
+    let generation = compiler.complete_next(allow_all());
+    shell.handle(Command::BlockerReady(profile));
+    assert_eq!(
+        shell.work_profile_binding(),
+        Readiness::PolicyPending(binding)
+    );
+    shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
+        profile,
+        requested: generation,
+        settlement: ContentRuleSettlement::Applied { generation },
+    }));
+    assert_eq!(shell.work_profile_binding(), Readiness::Ready(binding));
+    shell.blocker.retire_profile(profile);
+    // Even a Ready classification cannot substitute an absent native policy.
+    shell.blocker.profiles.get_mut(&profile).unwrap().state = BlockerProfileState::Ready {
+        applied: generation,
+    };
+    assert_eq!(shell.work_profile_binding(), Readiness::PolicyFailed);
+    shell.profile_deletion.states.insert(
+        profile,
+        crate::shell::profile_deletion::ProfileDeletionState::new(
+            crate::shell::profile_deletion::ProfileDeletionPhase::FailedClosed,
+            None,
+            0,
+            None,
+        ),
+    );
+    assert_eq!(shell.work_profile_binding(), Readiness::ProfileMissing);
+    shell.profile_deletion.states.clear();
+    shell.blocker.profiles.remove(&profile);
+    assert_eq!(shell.work_profile_binding(), Readiness::PolicyMissing);
+    shell.profiles.remove(profile);
+    assert_eq!(shell.work_profile_binding(), Readiness::ProfileMissing);
+}
+
 #[test]
 fn runtime_diagnostics_projection_is_exact_and_javascript_safe() {
     let view = blocker_runtime_diagnostics_view(NetworkPolicyDiagnostics {

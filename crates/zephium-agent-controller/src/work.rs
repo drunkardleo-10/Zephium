@@ -577,6 +577,18 @@ pub struct AgentWorkController {
 }
 
 impl AgentWorkController {
+    /// Immutable session storage selected in the trusted input, while dormant.
+    pub fn profile_storage_binding(
+        &self,
+    ) -> Result<(AgentWorkProfileId, ContextProfileStorageClass), AgentWorkFailure> {
+        let context = &self
+            .state
+            .as_ref()
+            .and_then(|state| state.input.as_ref())
+            .ok_or(AgentWorkFailure::Contract)?
+            .context;
+        Ok((context.identity.profile(), context.storage))
+    }
     /// Trusted durable destination, fixed before native/provider admission.
     pub fn durable_result_profile(&self) -> Result<Option<AgentWorkProfileId>, AgentWorkFailure> {
         let input = self
