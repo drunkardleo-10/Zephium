@@ -350,8 +350,15 @@ impl AgentRunProgressMetrics {
         nodes.extend(topology_nodes.iter().map(|node| NodeProgressMetricRow {
             node: node.node(),
             navigation_limit: manifest.plan_node(node.node()).map_or(0, |node| {
-                node.navigation_route()
-                    .map_or(1, |route| route.destinations().len())
+                // Discovery has the same immutable per-node hop allowance as
+                // policy admission; absence of a fixed route is not one hop.
+                node.navigation_discovery().map_or_else(
+                    || {
+                        node.navigation_route()
+                            .map_or(1, |route| route.destinations().len())
+                    },
+                    crate::AgentNavigationDiscovery::max_hops,
+                )
             }),
             activated: false,
             terminal: false,

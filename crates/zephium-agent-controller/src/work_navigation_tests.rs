@@ -26,6 +26,12 @@ fn discovered_link_workflow_uses_original_controller_and_refuses_unobserved_urls
     }
 }
 
+#[test]
+fn two_discovered_hops_settle_original_progress_accounting_and_extract() {
+    let _serial = lock(&SERIAL);
+    provider_fixture(ProviderFault::Navigation(NavigationFault::DiscoveryTwoHops));
+}
+
 pub(super) struct NavigationSchedule {
     pub(super) events: Mutex<Option<Arc<Mutex<WorkEvents>>>>,
     native_started: AtomicBool,
@@ -100,6 +106,7 @@ impl TerraControllerClock for NavigationClock {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum NavigationFault {
     Discovery,
+    DiscoveryTwoHops,
     DiscoveryMissingLink,
     Route(route_tests::RouteFault),
     None,
@@ -142,6 +149,7 @@ pub(super) enum NavigationFault {
 impl NavigationFault {
     pub(super) fn requests(self) -> u8 {
         match self {
+            Self::DiscoveryTwoHops => route_tests::RouteFault::None.requests(),
             Self::Route(fault) => fault.requests(),
             Self::PriorLocate => 8,
             Self::Ceiling => 14,
@@ -164,6 +172,9 @@ impl NavigationFault {
         self == Self::CancelMapCount && turns == 2 && count
     }
     pub(super) fn stream(self, turn: u8) -> String {
+        if self == Self::DiscoveryTwoHops {
+            return route_tests::RouteFault::None.stream(turn);
+        }
         if let Self::Route(fault) = self {
             return fault.stream(turn);
         }
@@ -217,6 +228,20 @@ impl NavigationFault {
         }
     }
     pub(super) fn check_request(self, bytes: &[u8], turns: u8) {
+        if self == Self::DiscoveryTwoHops {
+            let text = std::str::from_utf8(bytes).unwrap();
+            assert!(text.contains("ZEPHIUM_HOST_LINK_DISCOVERY_V1"));
+            assert!(!text.contains("ZEPHIUM_HOST_NAVIGATION_CHECKPOINT_V1"));
+            assert!(text.contains(&format!(
+                r#"\"completed_hops\":{},\"total_hops\":2,\"next_navigation_target\":null"#,
+                turns.min(2)
+            )));
+            for prior in 1..=turns.min(2) {
+                assert!(!text.contains(&format!("call_{prior}")));
+                assert!(!text.contains(&format!("resp_{prior}")));
+            }
+            return;
+        }
         if let Self::Route(fault) = self {
             return fault.check_request(bytes, turns);
         }
@@ -392,6 +417,9 @@ pub(super) fn navigate(
     request: ContextNavigationRequest,
     fault: NavigationFault,
 ) -> ContextDispatch {
+    if fault == NavigationFault::DiscoveryTwoHops {
+        return route_tests::navigate(port, request, route_tests::RouteFault::None);
+    }
     if let NavigationFault::Route(fault) = fault {
         return route_tests::navigate(port, request, fault);
     }
@@ -449,6 +477,9 @@ pub(super) fn capture(
     invocation: SemanticRuntimeInvocation,
     fault: NavigationFault,
 ) -> ContextDispatch {
+    if fault == NavigationFault::DiscoveryTwoHops {
+        return route_tests::capture(port, invocation, route_tests::RouteFault::None);
+    }
     if let NavigationFault::Route(fault) = fault {
         return route_tests::capture(port, invocation, fault);
     }
@@ -562,6 +593,15 @@ pub(super) fn assert_outcome(
     calls: &[u8],
     events: &[AgentWorkEvent],
 ) {
+    if fault == NavigationFault::DiscoveryTwoHops {
+        return route_tests::assert_outcome(
+            route_tests::RouteFault::None,
+            outcome,
+            shutdown,
+            calls,
+            events,
+        );
+    }
     if let NavigationFault::Route(fault) = fault {
         return route_tests::assert_outcome(fault, outcome, shutdown, calls, events);
     }

@@ -1528,7 +1528,9 @@ fn provider_fixture_with_account(
     let mut approved = if matches!(
         fault,
         ProviderFault::Navigation(
-            NavigationFault::Discovery | NavigationFault::DiscoveryMissingLink
+            NavigationFault::Discovery
+                | NavigationFault::DiscoveryTwoHops
+                | NavigationFault::DiscoveryMissingLink
         )
     ) {
         input_with_navigation(
@@ -1577,7 +1579,9 @@ fn provider_fixture_with_account(
     } else if let ProviderFault::Navigation(fault) = fault {
         if matches!(
             fault,
-            NavigationFault::Discovery | NavigationFault::DiscoveryMissingLink
+            NavigationFault::Discovery
+                | NavigationFault::DiscoveryTwoHops
+                | NavigationFault::DiscoveryMissingLink
         ) {
             Box::new(
                 crate::AgentWorkDiscoveryTask::try_new(
@@ -1697,11 +1701,13 @@ fn provider_fixture_with_account(
         navigation_schedule,
     );
     if let ProviderFault::Navigation(fault) = fault {
+        // Report the original controller failure before a missing follow-up
+        // request can obscure it as a fixture-server timeout.
+        navigation_tests::assert_outcome(fault, outcome, shutdown, &calls, &events);
         assert_eq!(
             server.join().expect("navigation fixture server"),
             requests / 2
         );
-        navigation_tests::assert_outcome(fault, outcome, shutdown, &calls, &events);
         return;
     }
     if let Some(account) = account.filter(|fault| *fault != AccountFault::Slow) {
