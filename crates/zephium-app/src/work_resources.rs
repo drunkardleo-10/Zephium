@@ -18,6 +18,12 @@ use zephium_core::ids::ProfileId;
 mod controller;
 
 #[cfg(feature = "work-execution")]
+#[path = "work_resources_navigation.rs"]
+mod navigation;
+#[cfg(feature = "work-execution")]
+use navigation::PendingNavigation;
+
+#[cfg(feature = "work-execution")]
 #[path = "work_resources_application.rs"]
 mod application;
 
@@ -101,6 +107,7 @@ struct Resource {
     failed: AtomicBool,
     flights: AtomicUsize,
     reads: AtomicUsize,
+    navigations: AtomicUsize,
     reusable: AtomicBool,
     slots: Mutex<Vec<OwnedSlot>>,
     facade: Mutex<Option<WorkBrowserExecutionLease>>,
@@ -142,7 +149,8 @@ impl Resource {
                 index += 1;
             }
         }
-        // One lifecycle, one read and one overtaking destruction maximum.
+        // One lifecycle, one document operation (read OR navigation), and one
+        // overtaking destruction maximum; the core enforces the exclusion.
         let result = if slots.len() >= 3 {
             self.fail();
             Err(Refusal::Busy)
@@ -354,6 +362,7 @@ impl WorkResourceOwner {
             failed: AtomicBool::new(false),
             flights: AtomicUsize::new(0),
             reads: AtomicUsize::new(0),
+            navigations: AtomicUsize::new(0),
             reusable: AtomicBool::new(false),
             slots: Mutex::new(Vec::with_capacity(3)),
             facade: Mutex::new(None),
@@ -659,6 +668,7 @@ struct Flight<T> {
     abandoned: bool,
     contradictory: bool,
     read: bool,
+    navigation: bool,
 }
 impl<T: Send + 'static> Flight<T> {
     fn new(
@@ -691,6 +701,7 @@ impl<T: Send + 'static> Flight<T> {
                 abandoned: false,
                 contradictory: false,
                 read,
+                navigation: false,
             },
             callback,
         )
@@ -727,6 +738,9 @@ impl<T: Send + 'static> Flight<T> {
             resource.flights.fetch_sub(1, Ordering::AcqRel);
             if self.read {
                 resource.reads.fetch_sub(1, Ordering::AcqRel);
+            }
+            if self.navigation {
+                resource.navigations.fetch_sub(1, Ordering::AcqRel);
             }
         }
     }
@@ -837,7 +851,10 @@ impl LifecycleOperation {
         // Native read callbacks can be physically returned but still queued in
         // their original application slot. Settle those exact reads before the
         // core's zero-read revocation terminal; never infer drain from order.
-        if self.delivery.is_some() && resource.reads.load(Ordering::Acquire) != 0 {
+        if self.delivery.is_some()
+            && (resource.reads.load(Ordering::Acquire) != 0
+                || resource.navigations.load(Ordering::Acquire) != 0)
+        {
             return Ok(None);
         }
         if self.ended.is_none() {
@@ -1037,12 +1054,16 @@ impl ReadOperation {
 enum OwnedSlot {
     Lifecycle(Arc<Mutex<LifecycleOperation>>),
     Read(Arc<Mutex<ReadOperation>>),
+    #[cfg(feature = "work-execution")]
+    Navigation(Arc<Mutex<navigation::NavigationOperation>>),
 }
 impl OwnedSlot {
     fn is_poisoned(&self) -> bool {
         match self {
             Self::Lifecycle(slot) => slot.is_poisoned(),
             Self::Read(slot) => slot.is_poisoned(),
+            #[cfg(feature = "work-execution")]
+            Self::Navigation(slot) => slot.is_poisoned(),
         }
     }
     fn finished(&self, resource: &Resource) -> bool {
@@ -1058,6 +1079,15 @@ impl OwnedSlot {
                 Err(TryLockError::WouldBlock) => false,
             },
             Self::Read(slot) => match slot.try_lock() {
+                Ok(slot) => slot.flight.finished,
+                Err(TryLockError::Poisoned(_)) => {
+                    resource.fail();
+                    false
+                }
+                Err(TryLockError::WouldBlock) => false,
+            },
+            #[cfg(feature = "work-execution")]
+            Self::Navigation(slot) => match slot.try_lock() {
                 Ok(slot) => slot.flight.finished,
                 Err(TryLockError::Poisoned(_)) => {
                     resource.fail();
@@ -1083,6 +1113,15 @@ impl OwnedSlot {
             Self::Read(slot) => {
                 let mut slot = resource.lock_local(slot)?;
                 if slot.flight.abandoned && !slot.flight.finished {
+                    let _ = slot.poll(shared, resource, now);
+                }
+            }
+            #[cfg(feature = "work-execution")]
+            Self::Navigation(slot) => {
+                let mut slot = resource.lock_local(slot)?;
+                if slot.flight.abandoned && !slot.flight.finished {
+                    // This only drains resource ownership after abandonment.
+                    // The lost controller policy receipt remains recovery debt.
                     let _ = slot.poll(shared, resource, now);
                 }
             }

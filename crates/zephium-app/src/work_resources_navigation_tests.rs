@@ -1,0 +1,484 @@
+//! Existing controller/provider/policy loop on the retained application owner.
+use super::*;
+
+const FIRST: &str = "https://retained-fixture.invalid/one";
+const SECOND: &str = "https://retained-fixture.invalid/two";
+pub(super) fn read_result(
+    native: &Native,
+    request: WorkBrowserObservationRequest,
+    callback: WorkBrowserObservationCompletionCallback,
+) {
+    let stage = native.navigation_count.load(Ordering::Acquire);
+    let (invocation, completion) = request.into_parts();
+    let wire = format!(
+        r#"{{"v":1,"i":{},"g":{},"c":"complete","n":[{{"k":1,"r":"paragraph","t":"Fixture result document_marker_{stage}"}},{{"k":2,"r":"link","n":"First source","u":"{FIRST}"}},{{"k":3,"r":"link","n":"Second source","u":"{SECOND}"}},{{"k":4,"r":"link","n":"Out of scope source","u":"https://other.invalid/source"}},{{"k":5,"r":"link","n":"Original source","u":"https://retained-fixture.invalid/frozen"}}]}}"#,
+        invocation.invocation().get(),
+        invocation.snapshot_generation().get()
+    );
+    callback(completion.settle(Ok(invocation.decode_result(wire.as_bytes()).unwrap())));
+}
+fn navigation_stream(turn: usize, url: &str) -> String {
+    let arguments = format!(r#"{{\"url\":\"{url}\"}}"#);
+    response_stream(1)
+        .replace("\"extract\"", "\"navigate\"")
+        .replace(
+            r#"{\"scope\":{\"kind\":\"initial\"},\"schema_id\":1}"#,
+            &arguments,
+        )
+        .replace("resp_1", &format!("resp_{turn}"))
+        .replace("fc_1", &format!("fc_{turn}"))
+        .replace("call_1", &format!("call_{turn}"))
+}
+fn final_streams() -> Vec<String> {
+    vec![
+        response_stream(1)
+            .replace("resp_1", "resp_3")
+            .replace("fc_1", "fc_3")
+            .replace("call_1", "call_3"),
+        response_stream(2)
+            .replace("resp_2", "resp_4")
+            .replace("msg_2", "msg_4"),
+    ]
+}
+type PreparedDiscovery = (
+    AgentWorkRetainedController,
+    AgentWorkRetainedHandle,
+    AgentRuntimeScopedBinding,
+    std::thread::JoinHandle<usize>,
+    Arc<Mutex<Vec<String>>>,
+);
+fn prepare(browser: RetainedBrowser, responses: Vec<String>) -> PreparedDiscovery {
+    prepare_with_clock(browser, responses, Arc::new(Clock(AtomicU64::new(2))))
+}
+fn prepare_with_clock(
+    browser: RetainedBrowser,
+    responses: Vec<String>,
+    clock: Arc<dyn TerraControllerClock>,
+) -> PreparedDiscovery {
+    let binding = browser.binding();
+    let scope =
+        AgentNavigationDiscovery::try_new(binding.document().clone(), "/".into(), 2).unwrap();
+    let input = input_for_context_authority(
+        binding.frame().context().identity(),
+        binding.frame().origin().clone(),
+        clock,
+        binding.storage(),
+        binding.document().clone(),
+        AgentRunBudget::try_new(24, 1_000_000, 1_000_000, 1).unwrap(),
+        (
+            Instant::now() + Duration::from_secs(30),
+            Some(scope.clone()),
+        ),
+    );
+    let task = AgentWorkDiscoveryTask::try_new(
+        binding.frame().context().identity(),
+        scope,
+        vec![SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap()],
+    )
+    .unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured = requests.clone();
+    let (transport, server) =
+        crate::work_provider_fixture::fixture_provider_inspect(responses, move |_, request| {
+            captured.lock().unwrap().push(request.to_owned())
+        });
+    let (controller, handle, scope) = AgentWorkRetainedController::try_new_for_probe(
+        input,
+        Box::new(browser),
+        transport,
+        AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "fixture-not-a-secret".into(),
+        )
+        .unwrap(),
+        Arc::new(Audit(false)),
+        Box::new(task),
+    )
+    .unwrap();
+    (controller, handle, scope, server, requests)
+}
+fn finish(result: &mut AgentWorkRetainedHandle) -> AgentWorkRetainedOutcome {
+    let mut outcome = None;
+    wait_until(|| {
+        while result.take_event().is_some() {}
+        outcome = result.take_outcome();
+        outcome.is_some()
+    });
+    outcome.unwrap()
+}
+#[test]
+fn retained_two_selected_hops_use_original_policy_and_retire_previous_transcripts() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (owner, native, resource, browser) = setup();
+    native.discovery.store(true, Ordering::Release);
+    let lease = browser.binding().lease().clone();
+    let mut responses = vec![navigation_stream(1, FIRST), navigation_stream(2, SECOND)];
+    responses.extend(final_streams());
+    let (controller, mut result, scope, server, requests) = prepare(browser, responses);
+    let (_, lifecycle) = start(controller, scope);
+    let outcome = finish(&mut result);
+    let AgentWorkRetainedOutcome::Accepted {
+        settlement,
+        extraction,
+    } = outcome
+    else {
+        panic!("two-hop retained controller did not accept");
+    };
+    assert_eq!(settlement.closure().navigations(), 2);
+    assert_eq!(settlement.closure().model_calls(), 4);
+    assert_eq!(extraction.stats().source_edges(), 1);
+    assert_eq!(native.navigation_count.load(Ordering::Acquire), 2);
+    assert_eq!(native.reads.load(Ordering::Acquire), 3);
+    assert_eq!(native.acquisitions.load(Ordering::Acquire), 1);
+    assert_eq!(native.destructions.load(Ordering::Acquire), 0);
+    assert!(
+        matches!(lifecycle.drain_until(Instant::now() + Duration::from_secs(2)), AgentRuntimeScopedDrain::Drained(ref proof) if proof.lease() == &lease)
+    );
+    native.join();
+    assert_eq!(server.join().unwrap(), 4);
+    let requests = requests.lock().unwrap();
+    assert!(requests[0].contains("document_marker_0"));
+    assert!(requests[1].contains("document_marker_1"));
+    assert!(!requests[1].contains("document_marker_0"));
+    assert!(requests[2].contains("document_marker_2"));
+    assert!(!requests[2].contains("document_marker_1"));
+    assert!(!requests[2].contains("document_marker_0"));
+    let mut destroy = owner.destroy(&resource).unwrap();
+    assert!(matches!(
+        destroy.poll(now()).unwrap(),
+        Some(LifecycleResult::Event(WorkBrowserResourceEvent::Destroyed(
+            _
+        )))
+    ));
+    owner.reap_absent(&resource).unwrap();
+    owner.seal_resources().unwrap();
+    assert!(owner.locally_retired());
+}
+
+#[test]
+fn invalid_selected_destinations_and_hop_exhaustion_never_dispatch_extra_navigation() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for (targets, dispatched) in [
+        (vec!["https://other.invalid/source"], 0),
+        (vec!["https://retained-fixture.invalid/unobserved"], 0),
+        (vec!["https://retained-fixture.invalid/frozen"], 0),
+        (vec![FIRST, FIRST], 1),
+        (vec![FIRST, SECOND, FIRST], 2),
+    ] {
+        let (owner, native, resource, browser) = setup();
+        native.discovery.store(true, Ordering::Release);
+        let responses = targets
+            .iter()
+            .enumerate()
+            .map(|(index, target)| navigation_stream(index + 1, target))
+            .collect();
+        let (controller, mut result, scope, server, _) = prepare(browser, responses);
+        let (_, lifecycle) = start(controller, scope);
+        let AgentWorkRetainedOutcome::ClosedUnsuccessfully(closed) = finish(&mut result) else {
+            panic!("invalid navigation must close unsuccessfully");
+        };
+        assert_eq!(
+            closed.policy_settlement().closure().navigations(),
+            dispatched as u32
+        );
+        assert_eq!(native.navigation_count.load(Ordering::Acquire), dispatched);
+        assert!(matches!(
+            lifecycle.drain_until(Instant::now() + Duration::from_secs(2)),
+            AgentRuntimeScopedDrain::Drained(_)
+        ));
+        native.join();
+        let mut destroy = owner.destroy(&resource).unwrap();
+        assert!(matches!(
+            destroy.poll(now()).unwrap(),
+            Some(LifecycleResult::Event(WorkBrowserResourceEvent::Destroyed(
+                _
+            )))
+        ));
+        owner.seal_resources().unwrap();
+        assert!(owner.locally_retired());
+        assert_eq!(server.join().unwrap(), targets.len());
+    }
+}
+
+#[test]
+fn stop_during_either_hop_accounts_native_terminal_and_original_policy_before_lease_delivery() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for (hop, reason) in [
+        (1, AgentRuntimeStopReason::Cancelled),
+        (2, AgentRuntimeStopReason::Cancelled),
+        (1, AgentRuntimeStopReason::HumanTakeover),
+        (1, AgentRuntimeStopReason::Suspend),
+        (1, AgentRuntimeStopReason::PolicyRevoked),
+    ] {
+        let (owner, native, resource, browser) = setup();
+        native.discovery.store(true, Ordering::Release);
+        native.hold_navigation.store(true, Ordering::Release);
+        let lease = browser.binding().lease().clone();
+        let responses = [FIRST, SECOND]
+            .into_iter()
+            .take(hop)
+            .enumerate()
+            .map(|(index, target)| navigation_stream(index + 1, target))
+            .collect();
+        let (controller, mut result, scope, server, _) = prepare(browser, responses);
+        let (handle, lifecycle) = start(controller, scope);
+        for prior in 1..hop {
+            wait_until(|| native.navigation.lock().unwrap().is_some());
+            let (request, callback) = native.navigation.lock().unwrap().take().unwrap();
+            assert_eq!(
+                request
+                    .navigation()
+                    .operation()
+                    .context()
+                    .navigation_epoch()
+                    .get(),
+                prior as u64 + 1
+            );
+            let target = request.navigation().target().clone();
+            callback(request.into_completion().settle(Ok(target)));
+        }
+        wait_until(|| native.navigation.lock().unwrap().is_some());
+        handle.stop_and_seal(reason);
+        wait_until(|| {
+            owner.shared.lock_rows().unwrap().phase(&resource).unwrap()
+                == WorkBrowserResourcePhase::Revoking
+        });
+        assert!(result.take_outcome().is_none());
+        assert!(owner
+            .shared
+            .lock_rows()
+            .unwrap()
+            .read_binding(&lease, now())
+            .is_err());
+        assert_eq!(
+            owner
+                .shared
+                .resource(&resource)
+                .unwrap()
+                .navigations
+                .load(Ordering::Acquire),
+            1
+        );
+        let (request, callback) = native.navigation.lock().unwrap().take().unwrap();
+        let target = request.navigation().target().clone();
+        callback(request.into_completion().settle(Ok(target)));
+        let AgentWorkRetainedOutcome::ClosedUnsuccessfully(closed) = finish(&mut result) else {
+            panic!("accounted stopped navigation must close without success");
+        };
+        assert_eq!(
+            closed.policy_settlement().closure().navigations(),
+            hop as u32
+        );
+        assert_eq!(
+            closed.policy_settlement().closure().model_calls(),
+            hop as u32
+        );
+        assert_eq!(native.reads.load(Ordering::Acquire), hop);
+        assert!(matches!(
+            lifecycle.drain_until(Instant::now() + Duration::from_secs(2)),
+            AgentRuntimeScopedDrain::Drained(_)
+        ));
+        native.join();
+        let mut destroy = owner.destroy(&resource).unwrap();
+        assert!(matches!(
+            destroy.poll(now()).unwrap(),
+            Some(LifecycleResult::Event(WorkBrowserResourceEvent::Destroyed(
+                _
+            )))
+        ));
+        owner.seal_resources().unwrap();
+        assert!(owner.locally_retired());
+        assert_eq!(server.join().unwrap(), hop);
+    }
+}
+
+#[test]
+fn synchronous_native_refusal_reconciles_both_owners_without_restoring_old_reads() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (owner, native, resource, browser) = setup();
+    native.discovery.store(true, Ordering::Release);
+    native.reject_navigation.store(true, Ordering::Release);
+    let lease = browser.binding().lease().clone();
+    let (controller, mut result, scope, server, _) =
+        prepare(browser, vec![navigation_stream(1, FIRST)]);
+    let (_, lifecycle) = start(controller, scope);
+    let outcome = finish(&mut result);
+    assert!(!matches!(
+        outcome,
+        AgentWorkRetainedOutcome::Accepted { .. }
+    ));
+    assert!(owner
+        .shared
+        .lock_rows()
+        .unwrap()
+        .read_binding(&lease, now())
+        .is_err());
+    assert_eq!(
+        owner
+            .shared
+            .resource(&resource)
+            .unwrap()
+            .navigations
+            .load(Ordering::Acquire),
+        0
+    );
+    assert_eq!(native.reads.load(Ordering::Acquire), 1);
+    let _ = lifecycle.drain_until(Instant::now() + Duration::from_secs(2));
+    native.join();
+    let mut destroy = owner.destroy(&resource).unwrap();
+    assert!(matches!(
+        destroy.poll(now()).unwrap(),
+        Some(LifecycleResult::Event(WorkBrowserResourceEvent::Destroyed(
+            _
+        )))
+    ));
+    owner.seal_resources().unwrap();
+    assert!(owner.locally_retired());
+    assert_eq!(server.join().unwrap(), 1);
+}
+
+#[test]
+fn lost_navigation_callback_preserves_recovery_and_original_resource_debt() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (owner, native, resource, browser) = setup();
+    native.discovery.store(true, Ordering::Release);
+    native.hold_navigation.store(true, Ordering::Release);
+    let (controller, mut result, scope, server, _) =
+        prepare(browser, vec![navigation_stream(1, FIRST)]);
+    let (handle, lifecycle) = start(controller, scope);
+    wait_until(|| native.navigation.lock().unwrap().is_some());
+    handle.stop_and_seal(AgentRuntimeStopReason::Cancelled);
+    drop(native.navigation.lock().unwrap().take());
+    assert!(matches!(
+        finish(&mut result),
+        AgentWorkRetainedOutcome::Recovery(_)
+    ));
+    assert!(matches!(
+        lifecycle.drain_until(Instant::now() + Duration::from_secs(2)),
+        AgentRuntimeScopedDrain::Unproven
+    ));
+    native.join();
+    let mut destroy = owner.destroy(&resource).unwrap();
+    let _ = destroy.poll(now());
+    owner.seal_resources().unwrap();
+    assert!(!owner.locally_retired());
+    assert_eq!(
+        owner
+            .shared
+            .resource(&resource)
+            .unwrap()
+            .navigations
+            .load(Ordering::Acquire),
+        1
+    );
+    assert_eq!(server.join().unwrap(), 1);
+}
+
+#[test]
+fn undispatched_preparation_retires_old_reads_and_cancels_without_native_debt() {
+    let (owner, native, resource, mut browser) = setup();
+    browser
+        .register_listener(Arc::new(CountWake(AtomicUsize::new(0))).into())
+        .unwrap();
+    let old = browser.binding().frame().context();
+    let lease = browser.binding().lease().clone();
+    assert!(browser.prepare_navigation(old, now()).is_err());
+    browser.begin_observation(now()).unwrap();
+    assert!(browser.poll_observation(now()).unwrap().is_some());
+    let operation = browser.prepare_navigation(old, now()).unwrap();
+    assert_ne!(operation.context(), old);
+    assert!(browser.begin_observation(now()).is_err());
+    assert!(owner
+        .shared
+        .lock_rows()
+        .unwrap()
+        .read_binding(&lease, now())
+        .is_err());
+    assert!(browser.prepare_navigation(old, now()).is_err());
+    browser.cancel_navigation_preparation().unwrap();
+    assert!(browser.begin_observation(now()).is_err());
+    assert_eq!(native.navigation_count.load(Ordering::Acquire), 0);
+    assert_eq!(
+        owner
+            .shared
+            .resource(&resource)
+            .unwrap()
+            .navigations
+            .load(Ordering::Acquire),
+        0
+    );
+    // Preparation refusal leaves the document quarantined, not restored. The
+    // resource owner must explicitly destroy it rather than grant a new lease.
+    let mut destroy = owner.destroy(&resource).unwrap();
+    assert!(destroy.poll(now()).unwrap().is_some());
+    owner.seal_resources().unwrap();
+    assert!(owner.locally_retired());
+}
+
+struct FailNextClock(AtomicBool);
+impl TerraControllerClock for FailNextClock {
+    fn now(&self) -> Result<AgentPolicyInstant, TerraControllerClockError> {
+        if self.0.swap(false, Ordering::AcqRel) {
+            Err(TerraControllerClockError::Unavailable)
+        } else {
+            Ok(now())
+        }
+    }
+}
+
+#[test]
+fn journal_clock_failure_after_native_decision_accounts_native_debt_but_refuses_closure() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for refused in [false, true] {
+        let (owner, native, resource, browser) = setup();
+        native.discovery.store(true, Ordering::Release);
+        native.reject_navigation.store(refused, Ordering::Release);
+        let clock = Arc::new(FailNextClock(AtomicBool::new(false)));
+        let trigger = clock.clone();
+        *native.after_navigation.lock().unwrap() = Some(Box::new(move || {
+            trigger.0.store(true, Ordering::Release);
+        }));
+        let (controller, mut result, scope, server, _) =
+            prepare_with_clock(browser, vec![navigation_stream(1, FIRST)], clock);
+        let (_, lifecycle) = start(controller, scope);
+        let AgentWorkRetainedOutcome::Recovery(mut recovery) = finish(&mut result) else {
+            panic!("failed journal authority cannot become successful or clean closure");
+        };
+        assert_eq!(recovery.failure(), AgentWorkFailure::Contract);
+        // Original journal/session owners survive in Recovery; physical native
+        // terminal debt is not fabricated to hide a missing journal record.
+        assert!(recovery.audit_status().is_ok());
+        assert_eq!(native.reads.load(Ordering::Acquire), 1);
+        assert_eq!(
+            owner
+                .shared
+                .resource(&resource)
+                .unwrap()
+                .navigations
+                .load(Ordering::Acquire),
+            0
+        );
+        assert!(matches!(
+            lifecycle.drain_until(Instant::now() + Duration::from_secs(2)),
+            AgentRuntimeScopedDrain::Unproven
+        ));
+        native.join();
+        let mut destroy = owner.destroy(&resource).unwrap();
+        assert!(destroy.poll(now()).unwrap().is_some());
+        owner.seal_resources().unwrap();
+        assert!(owner.locally_retired());
+        assert_eq!(server.join().unwrap(), 1);
+    }
+}

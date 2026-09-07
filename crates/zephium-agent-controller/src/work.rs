@@ -743,7 +743,10 @@ impl AgentWorkController {
                 || subtree_extraction
                 || navigation_target.is_some()
                 || navigation_route.is_some()
-                || navigation_discovery.is_some())
+                || (navigation_discovery.is_some()
+                    && !retained
+                        .as_ref()
+                        .is_some_and(|browser| browser.supports_navigation())))
         {
             return Err(AgentWorkFailure::Contract);
         }
@@ -2730,6 +2733,7 @@ impl AgentWorkController {
             // bounded deferred lane before cleanup starts. Consume it there,
             // preserving foreign or otherwise unaccounted terminals in order.
             Self::reconcile_deferred_audit(state);
+            Self::drain_retained_navigation(state, deadline).await;
         }
         // Drain already-dispatched callbacks only; no action or provider retry.
         while state.native.operation.is_some()

@@ -1,4 +1,4 @@
-//! Frozen task-authored document checkpoints through the original Work owners.
+//! Task-scoped document checkpoints through the original Work owners.
 
 use super::*;
 
@@ -96,12 +96,26 @@ impl AgentWorkController {
         state.native.check_control(worker, browser)?;
         state.check_task_contract()?;
         let id = state.native.identity.id();
-        let automation = state
-            .native
-            .contexts()?
-            .automation_state(id)
-            .map_err(|_| AgentWorkFailure::Context)?;
-        let op = ContextOperationId::new(state.native.id()?).ok_or(AgentWorkFailure::Contract)?;
+        let automation = if let Some(retained) = &state.native.retained {
+            let now = state
+                .session
+                .as_mut()
+                .ok_or(AgentWorkFailure::Contract)?
+                .policy_now()
+                .map_err(AgentWorkFailure::Browser)?;
+            retained.automation_state(now)?
+        } else {
+            state
+                .native
+                .contexts()?
+                .automation_state(id)
+                .map_err(|_| AgentWorkFailure::Context)?
+        };
+        let legacy_operation = if state.native.retained.is_none() {
+            Some(ContextOperationId::new(state.native.id()?).ok_or(AgentWorkFailure::Contract)?)
+        } else {
+            None
+        };
         let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
         let checkpoint = turn
             .into_tool_turn()
@@ -126,7 +140,17 @@ impl AgentWorkController {
             .map_err(|error| {
                 AgentWorkFailure::Browser(AgentBrowserProviderError::Navigation(error))
             })?;
-        let operation = match state.native.contexts()?.begin_navigation(id, op) {
+        let prepared = if let Some(retained) = &mut state.native.retained {
+            retained.prepare_navigation(automation.context(), now)
+        } else {
+            let op = legacy_operation.ok_or(AgentWorkFailure::Contract)?;
+            state
+                .native
+                .contexts()?
+                .begin_navigation(id, op)
+                .map_err(|_| AgentWorkFailure::Context)
+        };
+        let operation = match prepared {
             Ok(operation) => operation,
             Err(_) => {
                 state
@@ -149,17 +173,30 @@ impl AgentWorkController {
             .dispatch_navigation(permit, operation, now)
             .map_err(|error| {
                 AgentWorkFailure::Browser(AgentBrowserProviderError::Navigation(error))
-            })?;
+            });
+        let active = match active {
+            Ok(active) => active,
+            Err(error) => {
+                if let Some(retained) = &mut state.native.retained {
+                    let _ = retained.cancel_navigation_preparation();
+                }
+                return Err(error);
+            }
+        };
         session.navigation = Some(active);
         let active = session
             .navigation
             .as_ref()
             .ok_or(AgentWorkFailure::Contract)?;
-        let request = active
-            .native_request()
-            .map_err(|_| AgentWorkFailure::Contract)?;
         state.native.operation = Some(operation);
-        let dispatch = browser.dispatch(ContextNativeRequest::Navigate(request));
+        let dispatch = if let Some(retained) = &mut state.native.retained {
+            retained.dispatch_navigation(active)
+        } else {
+            let request = active
+                .native_request()
+                .map_err(|_| AgentWorkFailure::Contract)?;
+            browser.dispatch(ContextNativeRequest::Navigate(request))
+        };
         let refusal = match dispatch {
             ContextDispatch::Rejected(failure) => Some(failure),
             ContextDispatch::Unsupported => Some(ContextPortFailure::Unsupported),
@@ -183,11 +220,13 @@ impl AgentWorkController {
             .err();
         if let Some(failure) = refusal {
             state.native.operation = None;
-            state
-                .native
-                .contexts()?
-                .settle_navigation(id, operation, ContextSettlement::Refused)
-                .map_err(|_| AgentWorkFailure::Context)?;
+            if state.native.retained.is_none() {
+                state
+                    .native
+                    .contexts()?
+                    .settle_navigation(id, operation, ContextSettlement::Refused)
+                    .map_err(|_| AgentWorkFailure::Context)?;
+            }
             let terminal = state
                 .session
                 .as_mut()
@@ -204,7 +243,7 @@ impl AgentWorkController {
         if let Some(failure) = journal_failure {
             return Err(failure);
         }
-        let receipt = match state.native.next_event(worker, browser).await? {
+        let receipt = match state.native.next_navigation_event(worker, browser).await? {
             AgentRuntimeEvent::NativeTerminal(ContextNativeEvent::NavigationSettled(terminal))
                 if terminal.operation() == operation =>
             {
@@ -223,19 +262,21 @@ impl AgentWorkController {
                     }
                 };
                 state.native.operation = None;
-                state
-                    .native
-                    .contexts()?
-                    .settle_navigation(
-                        id,
-                        operation,
-                        if terminal.outcome().is_ok() {
-                            ContextSettlement::Applied
-                        } else {
-                            ContextSettlement::Refused
-                        },
-                    )
-                    .map_err(|_| AgentWorkFailure::Context)?;
+                if state.native.retained.is_none() {
+                    state
+                        .native
+                        .contexts()?
+                        .settle_navigation(
+                            id,
+                            operation,
+                            if terminal.outcome().is_ok() {
+                                ContextSettlement::Applied
+                            } else {
+                                ContextSettlement::Refused
+                            },
+                        )
+                        .map_err(|_| AgentWorkFailure::Context)?;
+                }
                 if let Some(failure) = terminal_record.journal_failure {
                     return Err(failure);
                 }

@@ -1,4 +1,4 @@
-//! Read-only retained backing for the common Work controller.
+//! Retained read/discovery backing for the common Work controller.
 
 use super::*;
 use std::task::Waker;
@@ -13,6 +13,41 @@ pub trait AgentWorkRetainedBrowser: Send {
     fn register_listener(&mut self, waker: Waker) -> Result<(), AgentWorkFailure>;
     /// Rearms notifications and checks exact lease, deadline and sticky health.
     fn check_health(&self, now: AgentPolicyInstant) -> Result<(), AgentWorkFailure>;
+    /// Whether this exact backing supports policy-bound document transitions.
+    fn supports_navigation(&self) -> bool {
+        false
+    }
+    /// Current acknowledged observation authority, not a navigation permit.
+    fn automation_state(
+        &self,
+        _now: AgentPolicyInstant,
+    ) -> Result<ContextAutomationState, AgentWorkFailure> {
+        Err(AgentWorkFailure::Contract)
+    }
+    /// Retires old read authority and reserves one original successor owner.
+    fn prepare_navigation(
+        &mut self,
+        _source: ContextJoin,
+        _now: AgentPolicyInstant,
+    ) -> Result<ContextOperationJoin, AgentWorkFailure> {
+        Err(AgentWorkFailure::Contract)
+    }
+    /// Explicitly accounts an original preparation that never reached dispatch.
+    fn cancel_navigation_preparation(&mut self) -> Result<(), AgentWorkFailure> {
+        Err(AgentWorkFailure::Contract)
+    }
+    /// Binds only the original policy's active operation; no arbitrary URL port.
+    fn dispatch_navigation(&mut self, _active: &AgentActiveNavigation) -> ContextDispatch {
+        ContextDispatch::Unsupported
+    }
+    /// Returns the original core-accounted terminal, including after revocation.
+    /// The caller must settle its independent policy/audit owner before closure.
+    fn poll_navigation(
+        &mut self,
+        _now: AgentPolicyInstant,
+    ) -> Result<Option<ContextNavigationSettlement>, AgentWorkFailure> {
+        Err(AgentWorkFailure::Contract)
+    }
     /// Whether a pre-dispatch NotReady may consume another initial read.
     /// One-shot capture adapters refuse retries without replacing that receipt.
     fn allows_readiness_retry(&self) -> bool {
@@ -27,7 +62,8 @@ pub trait AgentWorkRetainedBrowser: Send {
     ) -> Result<Option<SemanticObservation>, AgentWorkFailure>;
     /// Seals this lease before dispatch; never stops loading or destroys the page.
     fn begin_revocation(&mut self) -> Result<(), AgentWorkFailure>;
-    /// Drains original read/revocation/delivery owners. Wake is not a receipt.
+    /// Drains original read/revocation/delivery owners after the caller consumed
+    /// any original navigation terminal. Wake is not a receipt.
     fn poll_revocation(
         &mut self,
         now: AgentPolicyInstant,
@@ -386,6 +422,67 @@ impl zephium_agent_runtime::AgentRuntimeScopedController for AgentWorkRetainedCo
 }
 
 impl WorkNative {
+    pub(super) async fn next_navigation_event(
+        &mut self,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+    ) -> Result<AgentRuntimeEvent, AgentWorkFailure> {
+        if self.retained.is_none() {
+            return self.next_event(worker, browser).await;
+        }
+        self.check_control(worker, browser)?;
+        let clock = self
+            .clock
+            .as_ref()
+            .ok_or(AgentWorkFailure::Contract)?
+            .clone();
+        let retained = self.retained.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let result =
+            tokio::time::timeout_at(tokio::time::Instant::from_std(self.deadline), async {
+                let event = worker.next_event();
+                tokio::pin!(event);
+                std::future::poll_fn(|cx| {
+                    // Control always wins continuation. Cleanup separately polls
+                    // the retained terminal even when the lease is already revoked.
+                    if let std::task::Poll::Ready(event) =
+                        std::future::Future::poll(event.as_mut(), cx)
+                    {
+                        return std::task::Poll::Ready(Err(event));
+                    }
+                    match clock
+                        .now()
+                        .map_err(|_| AgentWorkFailure::Contract)
+                        .and_then(|now| {
+                            retained.check_health(now)?;
+                            retained.poll_navigation(now)
+                        }) {
+                        Ok(None) => std::task::Poll::Pending,
+                        Ok(Some(terminal)) => std::task::Poll::Ready(Ok(Ok(terminal))),
+                        Err(error) => std::task::Poll::Ready(Ok(Err(error))),
+                    }
+                })
+                .await
+            })
+            .await;
+        match result {
+            Ok(Ok(Ok(terminal))) => Ok(AgentRuntimeEvent::NativeTerminal(
+                ContextNativeEvent::NavigationSettled(terminal),
+            )),
+            Ok(Ok(Err(error))) => Err(error),
+            Ok(Err(Ok(
+                AgentRuntimeEvent::CancellationRequested | AgentRuntimeEvent::ShutdownRequested,
+            ))) => {
+                self.check_control(worker, browser)?;
+                Err(AgentWorkFailure::Mailbox)
+            }
+            Ok(Err(Ok(event))) => {
+                self.retain(event)?;
+                Err(AgentWorkFailure::Mailbox)
+            }
+            Ok(Err(Err(_))) => Err(AgentWorkFailure::Mailbox),
+            Err(_) => Err(AgentWorkFailure::Deadline),
+        }
+    }
     pub(super) fn check_retained_health(&self) -> Result<(), AgentWorkFailure> {
         if let Some(browser) = &self.retained {
             let now = self
@@ -456,6 +553,66 @@ impl WorkNative {
 }
 
 impl AgentWorkController {
+    /// Resource receipt and policy/audit receipt are two independent owners.
+    /// Stop cannot discard the former while leaving the latter unaccounted.
+    pub(super) async fn drain_retained_navigation(state: &mut WorkState, deadline: Instant) {
+        if state.native.retained.is_none() || state.native.operation.is_none() {
+            return;
+        }
+        let operation = state.native.operation;
+        let deferred = state.native.deferred.iter().position(|event| {
+            matches!(event,
+            AgentRuntimeEvent::NativeTerminal(ContextNativeEvent::NavigationSettled(terminal))
+            if Some(terminal.operation()) == operation)
+        });
+        let terminal = if let Some(index) = deferred {
+            match state.native.deferred.remove(index) {
+                AgentRuntimeEvent::NativeTerminal(ContextNativeEvent::NavigationSettled(
+                    terminal,
+                )) => Some(terminal),
+                _ => None,
+            }
+        } else {
+            let Some(clock) = state.native.clock.clone() else {
+                return;
+            };
+            let Some(browser) = state.native.retained.as_mut() else {
+                return;
+            };
+            tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                std::future::poll_fn(|_| {
+                    match clock
+                        .now()
+                        .map_err(|_| AgentWorkFailure::Contract)
+                        .and_then(|now| browser.poll_navigation(now))
+                    {
+                        Ok(None) => std::task::Poll::Pending,
+                        Ok(Some(terminal)) => std::task::Poll::Ready(Some(terminal)),
+                        Err(_) => std::task::Poll::Ready(None),
+                    }
+                }),
+            )
+            .await
+            .ok()
+            .flatten()
+        };
+        let Some(terminal) = terminal else {
+            return;
+        };
+        if Some(terminal.operation()) == operation
+            && state
+                .session
+                .as_mut()
+                .is_some_and(|session| session.settle_navigation_terminal(&terminal).is_ok())
+        {
+            state.native.operation = None;
+        } else {
+            let _ = state.native.retain(AgentRuntimeEvent::NativeTerminal(
+                ContextNativeEvent::NavigationSettled(terminal),
+            ));
+        }
+    }
     pub(super) async fn close_retained(
         &mut self,
         worker: &mut AgentRuntimeWorker,

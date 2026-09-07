@@ -41,6 +41,14 @@ discovery, cross-origin browsing and cross-document evidence synthesis are not.
 The shared Rust contracts are platform-neutral. Actual desktop composition
 and live evidence remain macOS-only until the Windows composition is qualified.
 
+The same controller now supports this discovery contract on application-retained
+Work resources. A retained hop consumes both the original resource terminal and
+the existing policy/audit receipt, including after cancellation; it does not
+allocate a legacy context or restart the session. The successor's observation
+owns its bounded native rendering episode and retires presentation before the
+next provider call. See [retained resource ownership](agent-work-resources.md).
+Deterministic two-hop and interruption regressions are not live qualification.
+
 Production/BYOK construction remains `store:false`. The development-only
 `discovery-qualification` feature explicitly opts into retained public Responses
 through the same profile-bound application preparation and is compile-refused

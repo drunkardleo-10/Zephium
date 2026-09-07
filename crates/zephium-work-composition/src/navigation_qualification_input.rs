@@ -197,7 +197,7 @@ mod tests {
             .is_ok());
             let task = (definition.task)(identity).unwrap();
             assert!(task.navigation_target().is_none());
-            assert!(task.navigation_discovery().is_none());
+            assert_eq!(task.navigation_discovery().unwrap().max_hops(), 2);
         }
         assert_eq!(task.navigation_target().is_some(), !DISCOVERY);
         assert_eq!(task.navigation_discovery().is_some(), DISCOVERY);

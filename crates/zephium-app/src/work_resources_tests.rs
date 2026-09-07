@@ -985,6 +985,8 @@ fn refused_construction_retires_waking_reporter_before_any_owner_slot_or_rows_lo
                                 slots.iter().all(|slot| match slot {
                                     OwnedSlot::Lifecycle(slot) => slot.try_lock().is_ok(),
                                     OwnedSlot::Read(slot) => slot.try_lock().is_ok(),
+                                    #[cfg(feature = "work-execution")]
+                                    OwnedSlot::Navigation(slot) => slot.try_lock().is_ok(),
                                 })
                             })
                     })

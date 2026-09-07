@@ -13,10 +13,12 @@ one [frozen public product brief](../eval/agentic-browsing/macos-retained-public
 on 2026-09-07, with two stateless Luna calls and clean independent closure.
 That one-page read-only result is not general task or shipping-product readiness.
 
-The next deterministic slice adds an execution-lease-bound native document
-transition on that same retained resource. The shared controller/application
-still exposes the one-page contract: successor navigation has **not** been
-qualified with a live page/model, and no general Work navigation is enabled.
+The shared controller/application now joins observed-link public discovery to
+execution-lease-bound document transitions on that same retained resource. Its
+deterministic provider/controller regressions cover two selected hops, transcript
+retirement and exact cancellation accounting. Successor navigation has **not**
+yet been qualified with a live retained page/model. Observation-owned native
+rendering is separately [RAF-qualified](../eval/agentic-browsing/macos-retained-observation-rendering.md).
 
 ## Production selected-profile attachment
 
@@ -51,10 +53,11 @@ remains fail-closed and retains any original owner available to the application.
 
 The production provider path remains `store:false`. An explicit public-only,
 release-excluded diagnostic can select inspectable retention through this same
-entry; its separately compiled adapters do not exist in production. One-page read-only objectives
-are supported by the existing trusted task/controller contract. Retained
-navigation, human takeover/input, rendering authority, fresh successor admission
-and general multi-page open objectives are **not** exposed. Shared application
+entry; its separately compiled adapters do not exist in production. One-page
+read-only objectives and bounded Public/Anonymous/Read observed-link discovery
+are supported by the existing trusted task/controller contract. Arbitrary URL
+navigation, actions, human takeover/input, fresh successor-run admission and
+general cross-origin multi-page objectives are **not** exposed. Shared application
 contracts are macOS/Windows-neutral; existing unsupported native platforms remain
 unsupported. Default Browse does not enable this optional graph.
 
@@ -91,9 +94,37 @@ monotonic generation and original absolute deadline without relabeling the
 resource or page. It is neither an account/effect/navigation capability nor a
 model-facing tool. Future page operations must also join the approved policy,
 account, current document, observation and operation-specific native permit.
-The application currently enables only an explicit trusted construction source
-and bounded all-role observation. The native successor primitive below adds no
-application navigation or effect authority by itself.
+The application enables an explicit trusted construction source, bounded
+all-role observation and the existing approved observed-link discovery contract.
+The native successor primitive below adds no navigation or effect authority by
+itself; the original controller policy remains the only navigation authorizer.
+
+## Retained discovery controller join
+
+The existing `navigate_current` algorithm is shared by legacy and retained
+backings. Only current automation state, preparation, dispatch and terminal
+polling differ. Retained execution never opens a shadow `ContextRegistry`, tab,
+run-owned native page, provider loop or deadline. A private application slot owns
+the move-only preparation, original callback and terminal independently of the
+worker. One original policy `AgentActiveNavigation` binds that preparation.
+
+The checkpoint retires the previous page transcript; preparation invalidates old
+observations before dispatch. Exact successful native settlement commits the
+successor document, refreshes the retained binding, then requires a new bounded
+observation/rendering episode and account attestation before any next model call.
+Resource/profile/incarnation/lease stay unchanged. Existing observed-link,
+same-origin subtree, hop, repeat, redirect, cumulative budget and deadline rules
+apply without exceptions. Final extraction cites only its current document;
+cross-page evidence synthesis is not claimed.
+
+Cancellation drains two independent original owners: the application settles
+the retained resource terminal, and the controller settles its original policy
+navigation receipt/audit obligation. Lease delivery waits on outstanding
+navigation slots and cannot silently consume and discard that policy terminal.
+Abandoned slots remain application-owned for physical cleanup; lost or uncertain
+callback admission cannot become a false zero. A journal failure retains explicit
+Recovery even when native terminal debt is known drained. An undispatched or
+synchronously refused successor never restores the old document's authority.
 
 ## Retained document transitions: deterministic native primitive
 
@@ -580,7 +611,7 @@ with the Work owner. Dropping that owner immediately closes new actor authority
 without pretending to perform cleanup.
 
 Each resource retains at most three exact operation slots: lifecycle, bounded
-read, and an overtaking destruction. Every slot owns its one terminal receiver,
+read or navigation (mutually exclusive), and an overtaking destruction. Every slot owns its one terminal receiver,
 original refusal request, and any revocation ticket/terminal; actor handles only
 poll that original slot. Native callbacks publish into their immutable one-slot
 destination before waking. Dropping an actor handle cannot discard a late A
@@ -598,7 +629,7 @@ Finished-slot inspection does not wait for an operation mutex while holding the
 slots collection. An operation poll may independently inspect that collection's
 poison state without creating the inverse lock-order dependency.
 
-Read terminals are accounted before the core's zero-read revocation settlement.
+Read and navigation terminals are accounted before the core's revocation settlement.
 After an exact terminal and delivery receipt are consumed, failed health/delivery
 proof marks uncertainty but does not retain fictitious callback debt. Actual
 missing terminals stay owed. The private primitive acquisition gate requires

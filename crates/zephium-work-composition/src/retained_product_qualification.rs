@@ -1,4 +1,4 @@
-//! One public, model-decided page brief through the shipping retained entry.
+//! Public observed-link discovery through the shipping retained product entry.
 use crate::navigation_qualification::{self as navigation, QualificationDefinition};
 pub use navigation::ApplicationReport;
 use std::io::Write as _;
@@ -6,24 +6,25 @@ use zephium_agent_controller::*;
 use zephium_agentic::*;
 use zephium_app::{RetainedWorkHandle, RetainedWorkPhase};
 
-const ORIGIN: &str = "https://agent-browser.dev";
-pub const OBJECTIVE: &str = "Read only the current https://agent-browser.dev/ homepage and prepare a concise source-backed technical brief useful to the team building Zephium, a Rust-owned agentic layer over native WebViews. Decide which architecture, capabilities, tradeoffs and product claims matter most. Distinguish what this page claims from what it actually establishes; explain relevant uncertainties and missing details rather than guessing. Use read with initial scope if useful. Finish by calling extract with initial scope and trusted schema 1: a concise summary, an important_claims list, and a caveats list. Keep each text value a short single-line statement; separate ideas into list items, with each item supported by its own declared current-page sources rather than inline citation markers. Do not navigate, follow links, click, change values, sign in, submit, install or run anything. The host checks execution and source binding, not the factual correctness or usefulness of your answer; a human will judge those.";
+const ORIGIN: &str = "https://svelte.dev";
+const INITIAL: &str = "https://svelte.dev/docs/svelte/overview";
+pub const OBJECTIVE: &str = "Starting at https://svelte.dev/docs/svelte/overview, research this practical Svelte 5 problem: I keep a reactive state object, destructure a property into another variable, and later mutate the original object; the UI using that separate variable does not update as I expected. Find the relevant current official guidance, explain what is happening, and recommend a practical correction with important caveats. Choose your own route from links actually observed in the current page under https://svelte.dev/docs/svelte/; at most two navigation hops are authorized. Do not guess destination URLs. Use read with initial scope when useful. Once the current page supports a useful answer, call extract with initial scope and trusted schema 1: summary, important_claims, and caveats. Keep each text value a short single-line statement; separate ideas into list items, each supported by its own declared current-page sources rather than inline citation markers. Mark unsupported details as uncertain instead of filling gaps from memory. Do not click controls, edit values, sign in, submit, install, run code or visit external sites. The route and answer are yours to discover. The host checks execution and current-source binding, not factual correctness or usefulness; a human will judge those.";
 pub(crate) const DEFINITION: QualificationDefinition = QualificationDefinition {
-    initial: "https://agent-browser.dev/",
+    initial: INITIAL,
     origin: ORIGIN,
-    task_name: "retained-agent-browser-brief-v2",
+    task_name: "retained-svelte-reactivity-v1",
     retention_name: "inspectable-public",
     objective: OBJECTIVE,
     task,
-    authority: Ok,
+    authority,
     configure_request: crate::TrustedWorkRequest::with_public_qualification_retention,
-    max_hops: 0,
+    max_hops: 2,
     inspection: true,
     verify_owned,
 };
 pub fn configuration_diagnostic() -> String {
     format!(
-        "work-retained-product-config: entry=admit_retained_trusted_work provider=OpenAIResponses model=gpt-5.6-luna retention={} task={} navigation=false rendering_lease=false",
+        "work-retained-product-config: entry=admit_retained_trusted_work provider=OpenAIResponses model=gpt-5.6-luna retention={} task={} navigation=observed_link_discovery rendering=observation_owned",
         DEFINITION.retention_name, DEFINITION.task_name
     )
 }
@@ -33,30 +34,39 @@ pub fn load_request(
 ) -> Result<crate::TrustedWorkRequest, &'static str> {
     navigation::load_configured_request(started, profile, &DEFINITION)
 }
-fn task(_: ContextIdentity) -> Result<Box<dyn AgentWorkTask>, AgentWorkFailure> {
-    Ok(Box::new(PublicTask(
-        AgentWorkExtractionTask::try_new(
-            vec![
-                // Total value ceiling remains 4,096 bytes: 640 + 8*320 + 4*224.
-                SemanticExtractionFieldSchema::try_text("summary".into(), true, 640)
-                    .map_err(|_| AgentWorkFailure::Contract)?,
-                SemanticExtractionFieldSchema::try_text_list(
-                    "important_claims".into(),
-                    true,
-                    8,
-                    320,
-                )
-                .map_err(|_| AgentWorkFailure::Contract)?,
-                SemanticExtractionFieldSchema::try_text_list("caveats".into(), true, 4, 224)
-                    .map_err(|_| AgentWorkFailure::Contract)?,
-            ],
-            AgentAccountScope::Anonymous,
-        )?
-        .with_baseline_read(),
-    )))
+fn discovery() -> Result<AgentNavigationDiscovery, AgentWorkFailure> {
+    AgentNavigationDiscovery::try_new(
+        ContextNavigationTarget::parse(INITIAL).map_err(|_| AgentWorkFailure::Contract)?,
+        "/docs/svelte/".into(),
+        2,
+    )
+    .map_err(|_| AgentWorkFailure::Contract)
 }
-struct PublicTask(AgentWorkExtractionTask);
+fn authority(authority: AgentPlanNodeAuthority) -> Result<AgentPlanNodeAuthority, &'static str> {
+    authority
+        .with_navigation_discovery(discovery().map_err(|_| "discovery")?)
+        .map_err(|_| "authority")
+}
+fn task(identity: ContextIdentity) -> Result<Box<dyn AgentWorkTask>, AgentWorkFailure> {
+    Ok(Box::new(PublicTask(AgentWorkDiscoveryTask::try_new(
+        identity,
+        discovery()?,
+        vec![
+            // Total value ceiling remains 4,096 bytes: 640 + 8*320 + 4*224.
+            SemanticExtractionFieldSchema::try_text("summary".into(), true, 640)
+                .map_err(|_| AgentWorkFailure::Contract)?,
+            SemanticExtractionFieldSchema::try_text_list("important_claims".into(), true, 8, 320)
+                .map_err(|_| AgentWorkFailure::Contract)?,
+            SemanticExtractionFieldSchema::try_text_list("caveats".into(), true, 4, 224)
+                .map_err(|_| AgentWorkFailure::Contract)?,
+        ],
+    )?)))
+}
+struct PublicTask(AgentWorkDiscoveryTask);
 impl AgentWorkTask for PublicTask {
+    fn navigation_discovery(&self) -> Option<&AgentNavigationDiscovery> {
+        self.0.navigation_discovery()
+    }
     fn allows_baseline_read(&self) -> bool {
         self.0.allows_baseline_read()
     }
@@ -197,6 +207,11 @@ impl ApplicationObserver {
                 AgentWorkEventKind::ToolProposed(
                     AgentBrowserToolKind::Read | AgentBrowserToolKind::Extract,
                 ) => {}
+                AgentWorkEventKind::ToolProposed(AgentBrowserToolKind::Navigate) => {
+                    self.report.navigation_proposals =
+                        self.report.navigation_proposals.saturating_add(1);
+                    self.failed |= self.report.navigation_proposals > DEFINITION.max_hops;
+                }
                 AgentWorkEventKind::ToolProposed(_)
                 | AgentWorkEventKind::ActionActive
                 | AgentWorkEventKind::NeedsHuman(_)
@@ -232,6 +247,7 @@ impl ApplicationObserver {
             && snapshot.persistence_failure.is_none()
             && self.report.durable_terminal_verified
             && self.report.source_mapping_verified
+            && (1..=DEFINITION.max_hops).contains(&self.report.navigation_proposals)
             && (1..=8).contains(&self.report.model_calls)
             && self
                 .report
@@ -248,7 +264,7 @@ impl ApplicationObserver {
 mod tests {
     use super::*;
     #[test]
-    fn static_task_is_read_only_and_not_an_answer_validator() {
+    fn discovery_task_has_frozen_public_scope_but_no_route_or_answer_validator() {
         let identity = ContextIdentity::new(
             ContextId::generate(),
             ContextRunId::generate(),
@@ -257,12 +273,14 @@ mod tests {
         );
         let task = task(identity).unwrap();
         assert!(task.navigation_target().is_none());
-        assert!(task.navigation_discovery().is_none());
+        assert_eq!(task.navigation_discovery(), Some(&discovery().unwrap()));
+        assert!(task.navigation_route().is_none());
         assert!(task.allows_baseline_read());
         assert!(!task.allows_subtree_extraction());
         assert!(configuration_diagnostic().contains("retention=inspectable-public"));
         assert!(configuration_diagnostic().contains(DEFINITION.task_name));
-        assert_eq!(DEFINITION.initial, "https://agent-browser.dev/");
+        assert_eq!(DEFINITION.initial, INITIAL);
+        assert_eq!(DEFINITION.max_hops, 2);
         let fields = task.extraction_schema().unwrap().fields();
         assert_eq!(
             fields.iter().map(|field| field.name()).collect::<Vec<_>>(),

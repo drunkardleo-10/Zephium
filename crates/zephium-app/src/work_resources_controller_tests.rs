@@ -18,6 +18,9 @@ mod application_tests;
 #[path = "work_resources_product_tests.rs"]
 mod product_tests;
 
+#[path = "work_resources_navigation_tests.rs"]
+mod navigation_tests;
+
 struct Clock(AtomicU64);
 impl TerraControllerClock for Clock {
     fn now(&self) -> Result<AgentPolicyInstant, TerraControllerClockError> {
@@ -77,6 +80,17 @@ struct Native {
     arm_notification: Mutex<Option<Arc<AtomicBool>>>,
     before_publication: Mutex<Option<mpsc::Receiver<()>>>,
     final_document: Mutex<Option<ContextNavigationTarget>>,
+    discovery: AtomicBool,
+    navigation_count: AtomicUsize,
+    hold_navigation: AtomicBool,
+    reject_navigation: AtomicBool,
+    after_navigation: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    navigation: Mutex<
+        Option<(
+            WorkBrowserNavigationRequest,
+            WorkBrowserNavigationCompletionCallback,
+        )>,
+    >,
 }
 impl Native {
     fn release_construction(&self) {
@@ -263,9 +277,49 @@ impl AgentBrowserPort for Native {
         if self.hold_read.load(Ordering::Acquire) {
             *self.read.lock().unwrap() = Some((request, callback));
         } else {
-            Self::read_result(request, callback);
+            if self.discovery.load(Ordering::Acquire) {
+                navigation_tests::read_result(self, request, callback);
+            } else {
+                Self::read_result(request, callback);
+            }
         }
         WorkBrowserObservationDispatch::Scheduled
+    }
+    fn work_resource_navigate(
+        &self,
+        request: WorkBrowserNavigationRequest,
+        callback: WorkBrowserNavigationCompletionCallback,
+    ) -> WorkBrowserNavigationDispatch {
+        assert!(
+            self.discovery.load(Ordering::Acquire),
+            "only explicit discovery fixtures navigate"
+        );
+        self.navigation_count.fetch_add(1, Ordering::AcqRel);
+        if self.reject_navigation.load(Ordering::Acquire) {
+            drop(callback);
+            if let Some(action) = self.after_navigation.lock().unwrap().take() {
+                action();
+            }
+            return WorkBrowserNavigationDispatch::Rejected {
+                request: Box::new(request),
+                failure: ContextPortFailure::NativeRefused,
+            };
+        }
+        if self.hold_navigation.load(Ordering::Acquire) {
+            assert!(self
+                .navigation
+                .lock()
+                .unwrap()
+                .replace((request, callback))
+                .is_none());
+        } else {
+            let target = request.navigation().target().clone();
+            callback(request.into_completion().settle(Ok(target)));
+        }
+        if let Some(action) = self.after_navigation.lock().unwrap().take() {
+            action();
+        }
+        WorkBrowserNavigationDispatch::Scheduled
     }
     fn dispatch(&self, _: ContextNativeRequest) -> ContextDispatch {
         panic!("retained path has no legacy context capability")
@@ -471,9 +525,40 @@ fn input_for_context_until(
     budget: AgentRunBudget,
     deadline: Instant,
 ) -> AgentWorkRunInput {
+    input_for_context_authority(
+        identity,
+        origin,
+        clock,
+        storage,
+        target,
+        budget,
+        (deadline, None),
+    )
+}
+fn input_for_context_authority(
+    identity: ContextIdentity,
+    origin: SemanticOrigin,
+    clock: Arc<dyn TerraControllerClock>,
+    storage: ContextProfileStorageClass,
+    target: ContextNavigationTarget,
+    budget: AgentRunBudget,
+    (deadline, discovery): (Instant, Option<AgentNavigationDiscovery>),
+) -> AgentWorkRunInput {
     let effects = AgentEffectScope::try_new(&[SemanticEffectClass::Read]).unwrap();
     let node = AgentPlanNodeId::generate();
     let expires = AgentPolicyInstant::from_millis(600_002);
+    let authority = AgentPlanNodeAuthority::try_new(
+        vec![identity.profile()],
+        vec![AgentAccountScope::Anonymous],
+        vec![origin.clone()],
+        SemanticSensitivity::Public,
+        effects,
+    )
+    .unwrap();
+    let authority = match discovery {
+        Some(scope) => authority.with_navigation_discovery(scope).unwrap(),
+        None => authority,
+    };
     let manifest = AgentRunManifest::try_new(
         AgentRunManifestId::generate(),
         identity.owner(),
@@ -489,19 +574,7 @@ fn input_for_context_until(
         budget,
         AgentPolicyInstant::from_millis(1),
         expires,
-        vec![AgentPlanNodeScope::new(
-            node,
-            AgentPlanNodeAuthority::try_new(
-                vec![identity.profile()],
-                vec![AgentAccountScope::Anonymous],
-                vec![origin],
-                SemanticSensitivity::Public,
-                effects,
-            )
-            .unwrap(),
-            budget,
-            expires,
-        )],
+        vec![AgentPlanNodeScope::new(node, authority, budget, expires)],
     )
     .unwrap();
     let ids = TerraControllerIds::try_new(
