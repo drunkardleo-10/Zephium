@@ -1076,6 +1076,9 @@ pub struct AgentRunPolicy {
     effects: Vec<AgentEffectRow>,
     navigation: Option<AgentNavigationRow>,
     navigation_receipts: [Option<AgentNavigationReceipt>; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS],
+    // Bounded public discovery progress only. Receipt/audit types stay content-free.
+    navigation_destinations:
+        [Option<crate::ContextNavigationTarget>; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS],
     navigation_attempts: usize,
     last_call: Option<AgentModelCallId>,
     last_effect: Option<AgentEffectId>,
@@ -1127,6 +1130,7 @@ impl AgentRunPolicy {
             effects: Vec::with_capacity(MAX_AGENT_PENDING_EFFECTS),
             navigation: None,
             navigation_receipts: [None; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS],
+            navigation_destinations: std::array::from_fn(|_| None),
             navigation_attempts: 0,
             last_call: None,
             last_effect: None,

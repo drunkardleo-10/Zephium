@@ -320,12 +320,24 @@ impl AgentRunPolicy {
         )?;
         for (hop, receipt) in self.navigation_receipts.iter().enumerate() {
             if hop >= completed {
-                if receipt.is_some() {
+                if receipt.is_some()
+                    || (discovery.is_some() && self.navigation_destinations[hop].is_some())
+                {
                     return Err(AgentPolicyError::Navigation);
                 }
                 continue;
             }
             let receipt = receipt.ok_or(AgentPolicyError::Navigation)?;
+            if discovery.is_some_and(|scope| {
+                !self.navigation_destinations[hop]
+                    .as_ref()
+                    .is_some_and(|destination| {
+                        scope.admits(destination)
+                            && target_guard(destination) == receipt.target_guard
+                    })
+            }) {
+                return Err(AgentPolicyError::Navigation);
+            }
             if receipt.hop != hop
                 || !receipt.matches_manifest_revision(self.manifest.id(), self.manifest.guard())
                 || receipt.lease != request.lease()
@@ -368,6 +380,8 @@ impl AgentRunPolicy {
             total_hops,
             next_target: route.and_then(|route| route.destinations().get(completed)),
             discovery: discovery.is_some(),
+            departure: discovery.map(|scope| scope.departure()),
+            destinations: &self.navigation_destinations[..completed],
         }))
     }
 
@@ -621,11 +635,17 @@ impl AgentRunPolicy {
         let index = self
             .lease_index(active.row.lease)
             .ok_or(AgentPolicyError::Invariant)?;
+        let discovery = self
+            .manifest
+            .plan_node(active.row.node)
+            .ok_or(AgentPolicyError::Invariant)?
+            .navigation_discovery()
+            .is_some();
         let slot = self
             .navigation_receipts
             .get_mut(active.row.hop)
             .ok_or(AgentPolicyError::Invariant)?;
-        if slot.is_some() {
+        if slot.is_some() || self.navigation_destinations[active.row.hop].is_some() {
             return Err(AgentPolicyError::Invariant);
         }
         let added = ConsumedUsage {
@@ -653,6 +673,9 @@ impl AgentRunPolicy {
             hop: active.row.hop,
         };
         *slot = Some(receipt);
+        if discovery && settlement == AgentNavigationSettlement::Committed {
+            self.navigation_destinations[active.row.hop] = Some(active.row.target.clone());
+        }
         Ok(receipt)
     }
 
@@ -670,6 +693,8 @@ pub(crate) struct AgentNavigationCheckpoint<'a> {
     total_hops: usize,
     next_target: Option<&'a ContextNavigationTarget>,
     discovery: bool,
+    departure: Option<&'a ContextNavigationTarget>,
+    destinations: &'a [Option<ContextNavigationTarget>],
 }
 
 impl AgentNavigationCheckpoint<'_> {
@@ -687,6 +712,24 @@ impl AgentNavigationCheckpoint<'_> {
     }
     pub(crate) const fn is_discovery(&self) -> bool {
         self.discovery
+    }
+    /// Exact current document under the validated committed receipt prefix.
+    pub(crate) fn current_document(&self) -> Option<&ContextNavigationTarget> {
+        self.destinations
+            .last()
+            .and_then(Option::as_ref)
+            .or(self.departure)
+    }
+    /// Completed documents no longer current. Descriptive facts, not sources.
+    pub(crate) fn prior_documents(&self) -> impl Iterator<Item = &ContextNavigationTarget> {
+        self.departure
+            .filter(|_| self.completed_hops > 0)
+            .into_iter()
+            .chain(
+                self.destinations[..self.completed_hops.saturating_sub(1)]
+                    .iter()
+                    .filter_map(Option::as_ref),
+            )
     }
 }
 

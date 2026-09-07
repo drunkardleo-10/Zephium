@@ -3,6 +3,18 @@ use super::*;
 
 const FIRST: &str = "https://retained-fixture.invalid/one";
 const SECOND: &str = "https://retained-fixture.invalid/two";
+fn assert_host_checkpoint(request: &str, current: &str, prior: &[&str]) {
+    assert!(request.contains("ZEPHIUM_HOST_LINK_DISCOVERY_V1"));
+    let prior = prior
+        .iter()
+        .map(|url| format!(r#"\"{url}\""#))
+        .collect::<Vec<_>>()
+        .join(",");
+    assert!(request.contains(&format!(
+        r#"\"current_document_url\":\"{current}\",\"prior_document_urls\":[{prior}]"#
+    )));
+    assert!(request.contains(r#"\"next_navigation_target\":null"#));
+}
 pub(super) fn read_result(
     native: &Native,
     request: WorkBrowserObservationRequest,
@@ -145,6 +157,17 @@ fn retained_two_selected_hops_use_original_policy_and_retire_previous_transcript
     assert!(requests[2].contains("document_marker_2"));
     assert!(!requests[2].contains("document_marker_1"));
     assert!(!requests[2].contains("document_marker_0"));
+    for (index, current, prior) in [
+        (0, "https://retained-fixture.invalid/frozen", vec![]),
+        (1, FIRST, vec!["https://retained-fixture.invalid/frozen"]),
+        (
+            2,
+            SECOND,
+            vec!["https://retained-fixture.invalid/frozen", FIRST],
+        ),
+    ] {
+        assert_host_checkpoint(&requests[index], current, &prior);
+    }
     let mut destroy = owner.destroy(&resource).unwrap();
     assert!(matches!(
         destroy.poll(now()).unwrap(),
@@ -153,6 +176,67 @@ fn retained_two_selected_hops_use_original_policy_and_retire_previous_transcript
         )))
     ));
     owner.reap_absent(&resource).unwrap();
+    owner.seal_resources().unwrap();
+    assert!(owner.locally_retired());
+}
+
+#[test]
+fn retained_read_between_selected_hops_preserves_current_navigation_authority() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (owner, native, resource, browser) = setup();
+    native.discovery.store(true, Ordering::Release);
+    let read = response_stream(1)
+        .replace("\"extract\"", "\"read\"")
+        .replace(
+            r#"{\"scope\":{\"kind\":\"initial\"},\"schema_id\":1}"#,
+            r#"{\"scope\":{\"kind\":\"initial\"}}"#,
+        )
+        .replace("resp_1", "resp_2")
+        .replace("fc_1", "fc_2")
+        .replace("call_1", "call_2");
+    let mut responses = vec![
+        navigation_stream(1, FIRST),
+        read,
+        navigation_stream(3, SECOND),
+    ];
+    responses.extend(
+        final_streams()
+            .into_iter()
+            .enumerate()
+            .map(|(index, response)| {
+                let (from, to) = (index + 3, index + 4);
+                response
+                    .replace(&format!("resp_{from}"), &format!("resp_{to}"))
+                    .replace(&format!("fc_{from}"), &format!("fc_{to}"))
+                    .replace(&format!("call_{from}"), &format!("call_{to}"))
+                    .replace(&format!("msg_{from}"), &format!("msg_{to}"))
+            }),
+    );
+    let (controller, mut result, scope, server, requests) = prepare(browser, responses);
+    let (_, lifecycle) = start(controller, scope);
+    let AgentWorkRetainedOutcome::Accepted { settlement, .. } = finish(&mut result) else {
+        panic!("baseline read must not invalidate the current observed-link authority");
+    };
+    assert_eq!(settlement.closure().navigations(), 2);
+    assert_eq!(settlement.closure().model_calls(), 5);
+    assert_eq!(native.reads.load(Ordering::Acquire), 3);
+    assert!(matches!(
+        lifecycle.drain_until(Instant::now() + Duration::from_secs(2)),
+        AgentRuntimeScopedDrain::Drained(_)
+    ));
+    native.join();
+    assert_eq!(server.join().unwrap(), 5);
+    assert!(requests.lock().unwrap()[2].contains("document_marker_1"));
+    assert_host_checkpoint(
+        &requests.lock().unwrap()[2],
+        FIRST,
+        &["https://retained-fixture.invalid/frozen"],
+    );
+    assert!(!requests.lock().unwrap()[3].contains("document_marker_1"));
+    let mut destroy = owner.destroy(&resource).unwrap();
+    assert!(destroy.poll(now()).unwrap().is_some());
     owner.seal_resources().unwrap();
     assert!(owner.locally_retired());
 }

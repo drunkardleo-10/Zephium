@@ -10,12 +10,40 @@ fn route_fixture_with_targets(
     tokens: u64,
     destinations: Vec<ContextNavigationTarget>,
 ) -> (PolicyFixture, ContextRegistry, SemanticObservation) {
+    navigation_fixture(operations, tokens, destinations, false)
+}
+fn discovery_observation(context: ContextJoin, id: u64) -> SemanticObservation {
+    observation(
+        context,
+        origin("source"),
+        id,
+        vec![
+            json!({"k":1,"r":"link","n":"Next","u":target().as_url().as_str()}),
+            json!({"k":2,"r":"link","n":"Final","u":final_target().as_url().as_str()}),
+        ],
+    )
+}
+fn navigation_fixture(
+    operations: u32,
+    tokens: u64,
+    destinations: Vec<ContextNavigationTarget>,
+    discovery: bool,
+) -> (PolicyFixture, ContextRegistry, SemanticObservation) {
     let (mut registry, context) = make_context_registry(901, 902, 903);
     registry
         .acknowledge_observation(context.identity().id(), context)
         .unwrap();
     let source = origin("source");
-    let observation = actionable_observation(context, source.clone(), 1);
+    let observation = if discovery {
+        discovery_observation(context, 1)
+    } else {
+        actionable_observation(context, source.clone(), 1)
+    };
+    let sensitivity = if discovery {
+        SemanticSensitivity::Public
+    } else {
+        SemanticSensitivity::Sensitive
+    };
     let budget = run_budget(operations, tokens, 10_000);
     let effects = effects(&[SemanticEffectClass::Read]);
     let route = crate::AgentNavigationRoute::try_new(
@@ -27,12 +55,20 @@ fn route_fixture_with_targets(
         vec![profile(902)],
         vec![AgentAccountScope::Anonymous],
         vec![source.clone()],
-        SemanticSensitivity::Sensitive,
+        sensitivity,
         effects,
     )
-    .unwrap()
-    .with_navigation_route(route)
     .unwrap();
+    let authority = if discovery {
+        authority
+            .with_navigation_discovery(
+                crate::AgentNavigationDiscovery::try_new(route.departure().clone(), "/".into(), 2)
+                    .unwrap(),
+            )
+            .unwrap()
+    } else {
+        authority.with_navigation_route(route).unwrap()
+    };
     let manifest = AgentRunManifest::try_new(
         AgentRunManifestId::from_raw(1),
         ContextRunId::from_raw(901),
@@ -40,7 +76,7 @@ fn route_fixture_with_targets(
             vec![profile(902)],
             vec![AgentAccountScope::Anonymous],
             vec![source],
-            SemanticSensitivity::Sensitive,
+            sensitivity,
             effects,
             vec![],
         )
@@ -83,7 +119,16 @@ fn committed_route() -> (
     PolicyFixture,
     Vec<(AgentActiveNavigation, AgentNavigationReceipt)>,
 ) {
-    let (mut f, mut registry, mut current) = route_fixture(5);
+    committed_navigation(false)
+}
+fn committed_navigation(
+    discovery: bool,
+) -> (
+    PolicyFixture,
+    Vec<(AgentActiveNavigation, AgentNavigationReceipt)>,
+) {
+    let (mut f, mut registry, mut current) =
+        navigation_fixture(5, 10_000, vec![target(), final_target()], discovery);
     let mut terminals = vec![];
     for (hop, destination) in [target(), final_target()].into_iter().enumerate() {
         let binding = account(
@@ -126,10 +171,89 @@ fn committed_route() -> (
         registry
             .acknowledge_observation(operation.context().identity().id(), operation.context())
             .unwrap();
-        current = actionable_observation(operation.context(), origin("source"), hop as u64 + 2);
+        current = if discovery {
+            discovery_observation(operation.context(), hop as u64 + 2)
+        } else {
+            actionable_observation(operation.context(), origin("source"), hop as u64 + 2)
+        };
         terminals.push((active, receipt));
     }
     (f, terminals)
+}
+
+#[test]
+fn discovery_progress_urls_join_exact_committed_receipts_and_current_document() {
+    for fault in 0..7 {
+        let (mut f, terminals) = committed_navigation(true);
+        let context = terminals[1].1.operation().context();
+        let observed = discovery_observation(context, 3);
+        match fault {
+            1 => f.policy.navigation_destinations[0] = None,
+            2 => f.policy.navigation_destinations.swap(0, 1),
+            3 => f.policy.navigation_destinations[1] = Some(target()),
+            4 => f.policy.navigation_receipts[1] = None,
+            5 => {
+                f.policy.navigation_destinations[0] =
+                    Some(ContextNavigationTarget::parse("https://other.invalid/foreign").unwrap())
+            }
+            _ => {}
+        }
+        let request = call_request(
+            3,
+            f.lease,
+            account(
+                if fault == 6 {
+                    terminals[0].1.operation().context()
+                } else {
+                    context
+                },
+                NOW,
+            ),
+            0,
+            0,
+            0,
+            NOW,
+        );
+        let checkpoint = f.policy.provider_navigation_checkpoint(request, &observed);
+        if fault != 0 {
+            assert!(checkpoint.is_err(), "substituted URL/context {fault}");
+            continue;
+        }
+        let checkpoint = checkpoint.unwrap().unwrap();
+        assert_eq!(checkpoint.current_document(), Some(&final_target()));
+        assert_eq!(
+            checkpoint.prior_documents().collect::<Vec<_>>(),
+            vec![
+                &ContextNavigationTarget::parse("https://source.example.test/start").unwrap(),
+                &target()
+            ]
+        );
+        assert_eq!(checkpoint.completed_hops(), 2);
+        assert!(checkpoint.next_target().is_none());
+        assert!(!format!("{:?}", terminals[0].1).contains("https://"));
+    }
+    let (f, _, observed) = navigation_fixture(5, 10_000, vec![target(), final_target()], true);
+    let checkpoint = f
+        .policy
+        .provider_navigation_checkpoint(
+            call_request(
+                2,
+                f.lease,
+                account(observed.request().context(), NOW),
+                0,
+                0,
+                0,
+                NOW,
+            ),
+            &observed,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        checkpoint.current_document().unwrap().as_url().as_str(),
+        "https://source.example.test/start"
+    );
+    assert_eq!(checkpoint.prior_documents().count(), 0);
 }
 
 #[test]

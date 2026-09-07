@@ -33,7 +33,12 @@ old references before dispatch. Its exact native receipt precedes a fresh
 successor observation and account sample. Earlier page transcripts are retired;
 only the current document may supply extraction citations. A bounded host
 checkpoint describes completed hops and the maximum allowance without supplying
-a next destination. It is not citable page evidence or additional authority.
+a next destination. For discovery it also preserves the exact current and prior
+document URLs: a bounded private policy prefix is recorded only at successful
+native settlement and rejoined to original receipt target guards/current context
+before projection. Retiring old page transcripts must not erase the information
+needed to avoid revisits. These URLs are not citable page evidence, restored old
+references, audit content, a suggested route or additional authority.
 
 The first task can complete before spending its entire navigation allowance.
 Nonterminal initial-baseline reads are supported; actions, native subtree
