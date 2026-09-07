@@ -462,6 +462,33 @@ impl AgentWorkJournalMutation {
             result_profile: None,
         })
     }
+    /// Closes only the run's retained-resource execution lease, not the resource
+    /// or browser lifetime. The application must independently join the exact
+    /// scoped worker drain before persisting this mutation. Decoded records,
+    /// lease coordinates and a wake cannot substitute for native delivery.
+    pub fn closed_retained(
+        previous: AgentWorkRecord,
+        policy: AgentRunPolicySettlement,
+        delivery: &crate::WorkBrowserLeaseDeliveryProof,
+    ) -> Result<Self, AgentWorkJournalError> {
+        if previous.disposition() != AgentWorkDisposition::Running
+            || previous.0[32..48] != policy.closure().manifest().bytes()
+            || previous.0[48..64] != delivery.lease().run().bytes()
+            || previous.0[64..96] != policy.closure().manifest_guard()
+        {
+            return Err(AgentWorkJournalError::Transition);
+        }
+        let disposition = match policy.closure().outcome() {
+            AgentRunProgressOutcome::Succeeded => AgentWorkDisposition::Succeeded,
+            AgentRunProgressOutcome::Failed(_) => AgentWorkDisposition::Failed,
+            AgentRunProgressOutcome::Cancelled(_) => AgentWorkDisposition::Cancelled,
+        };
+        Ok(Self {
+            expected: Some(previous),
+            next: previous.next(disposition, previous.incarnation(), AgentWorkDebt::NONE)?,
+            result_profile: None,
+        })
+    }
     /// Preserves an exact policy-derived review request with original clean
     /// closure proofs. A generic transition or decoded fact cannot clear debt.
     pub fn needs_approval_closed(

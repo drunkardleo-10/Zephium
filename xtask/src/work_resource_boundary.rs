@@ -269,8 +269,9 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "controller.publish_terminal(&mutworker,false).await",
             "journal.audit.is_quiescent()",
             "Self::Retained=>ContextDispatch::Unsupported",
+            "self.0.journal_admission(owner)",
         ],
-        &["AgentBrowserPort", "ContextRegistry::new", "AgentNativeShutdownProof", "AgentNativeShutdownCoordinator", "AgentWorkJournal", "Serialize", "Deserialize", "std::thread", "tokio::spawn", "try_prove_shutdown"],
+        &["AgentBrowserPort", "ContextRegistry::new", "AgentNativeShutdownProof", "AgentNativeShutdownCoordinator", "AgentWorkJournalPort", "AgentWorkJournalRequest", "Serialize", "Deserialize", "std::thread", "tokio::spawn", "try_prove_shutdown"],
     ),
     (
         "crates/zephium-app/src/work_resources_controller.rs",

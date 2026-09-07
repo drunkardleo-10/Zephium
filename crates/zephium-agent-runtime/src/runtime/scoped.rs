@@ -334,6 +334,25 @@ impl AgentRuntimeScopedDrained {
     pub fn policy(&self) -> AgentRunPolicySettlement {
         self.closure.policy
     }
+    /// Prepares a run-only durable terminal from this original worker's consumed
+    /// lease delivery, policy/audit/provider closure and actual thread drain.
+    /// A mutation is not a durable acknowledgement, current resource health,
+    /// human input permission, successor admission or global browser shutdown.
+    pub fn work_terminal(
+        &self,
+        runtime: &AgentRuntimeHandle,
+        previous: zephium_agentic::AgentWorkRecord,
+    ) -> Result<zephium_agentic::AgentWorkJournalMutation, zephium_agentic::AgentWorkJournalError>
+    {
+        if !self.matches_runtime(runtime) {
+            return Err(zephium_agentic::AgentWorkJournalError::Transition);
+        }
+        zephium_agentic::AgentWorkJournalMutation::closed_retained(
+            previous,
+            self.closure.policy,
+            &self.closure.delivery,
+        )
+    }
 }
 
 impl fmt::Debug for AgentRuntimeScopedDrained {

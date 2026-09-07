@@ -220,12 +220,20 @@ const SCOPED_RULES: &[(&str, &[&str], &[&str])] = &[
         "join_worker_until(&self.inner,&mutself.worker,deadline)",
         "recover_lock(&self.inner.scoped_closure).take()",
         "Arc::ptr_eq(&self.inner,&handle.inner)",
+        "if!self.matches_runtime(runtime)",
+        "AgentWorkJournalMutation::closed_retained(previous,self.closure.policy,&self.closure.delivery,)",
         "self.inner.request_cooperative_shutdown_until(Instant::now())", "schedule_reap(worker)",
     ], &[
         "AgentNativeShutdownProof", "AgentBrowserShutdownOutcome", "AgentBrowserLifecycle",
         "AgentBrowserPort", "AgentRuntimeBrowser", "ContextRegistry", "Serialize", "Deserialize",
         "std::thread", "tokio::spawn", "is_clean(", "native_event_sink(", "shutdown_audit(",
     ]),
+    ("crates/zephium-agentic/src/agent_work_journal.rs", &[
+        "previous.disposition()!=AgentWorkDisposition::Running",
+        "previous.0[32..48]!=policy.closure().manifest().bytes()",
+        "previous.0[48..64]!=delivery.lease().run().bytes()",
+        "previous.0[64..96]!=policy.closure().manifest_guard()",
+    ], &[]),
     ("crates/zephium-agent-runtime/src/runtime.rs", &[
         "enumRuntimeController", "Scoped(Box<dynAgentRuntimeScopedController>)",
         "Some(controller.run(worker))", "asyncfnclaim_terminal(",

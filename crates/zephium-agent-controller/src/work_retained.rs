@@ -129,6 +129,15 @@ pub(super) enum TerminalClaim {
 }
 
 impl AgentWorkRetainedController {
+    /// Dormant admission intent from the original approved manifest. A trusted
+    /// application must receive exact Admitted and Running acknowledgements
+    /// before releasing this controller's scoped runtime startup gate.
+    pub fn journal_admission(
+        &self,
+        owner: AgentWorkIncarnation,
+    ) -> Result<AgentWorkJournalMutation, AgentWorkFailure> {
+        self.0.journal_admission(owner)
+    }
     /// Uses a dedicated original provider transport and the same session loop.
     /// This is primitive composition, not product or durable admission.
     pub fn try_new(

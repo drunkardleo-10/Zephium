@@ -2,9 +2,50 @@
 
 Status: production runtime foundation and read-only retained backing in the
 existing Work controller, with deterministic actual-worker/loopback-provider
-tests through the private application resource owner. Durable coordination and
-product admission remain separate. No native, public-site or UI qualification
+tests through the private application resource owner. A scoped durable-terminal
+proof join now exists; Shell coordination and product admission remain separate.
+No native, public-site or UI qualification
 is added by this integration.
+
+## Durable terminal without destroying the Work page
+
+`AgentWorkRetainedController::journal_admission` supplies the dormant original
+manifest's admission intent. The application must acknowledge exact Admitted
+and Running writes before releasing the scoped startup gate. The controller
+does not own a Store port or dispatch persistence itself.
+
+After actual scoped drain, `AgentRuntimeScopedDrained::work_terminal` requires
+the exact original runtime allocation and a Running record matching the
+consumed manifest identity, complete authority guard and lease run. It uses the
+original native lease-delivery proof and settled policy/audit/provider owners
+to prepare Succeeded, Failed or Cancelled with no run-owned debt. It cannot
+produce `AgentNativeShutdownProof`, destroy the retained resource, acknowledge
+its own write or reopen an old actor. Existing global-zero terminal/successor
+and Store record-format/immutability contracts are unchanged.
+
+The lower functional constructor `AgentWorkJournalMutation::closed_retained`
+checks the record against actual delivery and policy operands, just as the
+legacy terminal constructor checks original native/policy operands; callers
+must additionally own the matching runtime drain. The runtime wrapper joins
+those operands by construction and never exports or reconstructs their native
+delivery authority from serialized coordinates.
+
+Deterministic integration uses the real fenced SQLite Store and original
+retained controller, provider transport, worker and application resource owner.
+One accepted read/mapping run durably closes while the page stays alive. After
+that exact acknowledgement and native notification drain, an explicitly
+acquired second lease starts a fresh observed run, is cancelled and durably
+closes without destroying the page. Wrong runtime/manifest/run/guard records,
+non-Running state and reopening a terminal refuse; exact Store-write
+reconciliation remains idempotent. Global-zero still refuses until independent
+resource destruction. No process fence is reset for the test.
+
+This is the durable proof bridge, not automatic product successor admission.
+The existing Shell coordinator still owns only legacy complete-browser runs;
+it must integrate scoped lifecycle/admission and retain the Work resource owner
+before these primitives become a user-facing persistent workflow. Durable
+result publication, Work/resource restart inventory, rendering/input takeover,
+fresh post-human document authority and retained navigation remain separate.
 
 ## The ownership distinction
 

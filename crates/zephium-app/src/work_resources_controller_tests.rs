@@ -6,6 +6,10 @@ use std::time::{Duration, Instant};
 use zephium_agent_controller::*;
 use zephium_agent_runtime::*;
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[path = "work_resources_durable_tests.rs"]
+mod durable_tests;
+
 struct Clock(AtomicU64);
 impl TerraControllerClock for Clock {
     fn now(&self) -> Result<AgentPolicyInstant, TerraControllerClockError> {
