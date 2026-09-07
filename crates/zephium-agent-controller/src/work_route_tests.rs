@@ -521,12 +521,20 @@ pub(super) fn capture(
         && port
             .navigation_schedule
             .as_ref()
-            .is_some_and(|schedule| schedule.fault == NavigationFault::DiscoveryTwoHops)
+            .is_some_and(|schedule| schedule.fault.two_discovery_hops())
     {
         let target = if hop == 0 { FIRST } else { FINAL };
         nodes.push(format!(
             r#"{{"k":5,"p":0,"r":"link","n":"A relevant source","u":"{target}"}}"#
         ));
+    }
+    if hop == 2
+        && port
+            .navigation_schedule
+            .as_ref()
+            .is_some_and(|schedule| schedule.fault == NavigationFault::DiscoveryTwoHopsBlockedFrame)
+    {
+        nodes.push(r#"{"k":5,"p":0,"r":"frame_boundary"}"#.into());
     }
     let wire = format!(
         r#"{{"v":1,"i":{},"g":1,"c":"complete","n":[{}]}}"#,

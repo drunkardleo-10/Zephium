@@ -120,7 +120,7 @@ impl AgentWorkTask for PublicTask {
         &mut self,
         observation: &SemanticObservation,
     ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
-        let progress = self.0.evaluate(observation)?;
+        let progress = self.0.evaluate(observation);
         let mut links = 0_usize;
         let mut destination_bytes = 0_usize;
         for target in observation
@@ -132,8 +132,21 @@ impl AgentWorkTask for PublicTask {
             links += 1;
             destination_bytes += target.as_url().as_str().len();
         }
-        writeln!(std::io::stdout().lock(), "work-discovery-observation: model=gpt-5.6-luna retention=inspectable-public nodes={} links={links} destination_bytes={destination_bytes} content=redacted", observation.node_count()).map_err(|_| AgentWorkFailure::Contract)?;
-        Ok(progress)
+        // Record closed boundary reasons even when task evaluation refuses,
+        // without disclosing child origins, content or identifiers.
+        let boundaries = observation.frame_boundaries().len();
+        let policy_blocked_frames = observation
+            .frame_boundaries()
+            .iter()
+            .filter(|boundary| {
+                boundary.status()
+                    == SemanticFrameBoundaryStatus::Unsupported(
+                        SemanticFrameUnsupported::PolicyBlocked,
+                    )
+            })
+            .count();
+        writeln!(std::io::stdout().lock(), "work-discovery-observation: model=gpt-5.6-luna retention=inspectable-public nodes={} links={links} destination_bytes={destination_bytes} captured_frames={} boundaries={boundaries} policy_blocked_frames={policy_blocked_frames} task_accepted={} content=redacted", observation.node_count(), observation.frames().len(), progress.is_ok()).map_err(|_| AgentWorkFailure::Contract)?;
+        progress
     }
 }
 pub fn verify_owned(result: &SemanticOwnedExtractionResult) -> bool {

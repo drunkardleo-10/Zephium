@@ -32,6 +32,14 @@ fn two_discovered_hops_settle_original_progress_accounting_and_extract() {
     provider_fixture(ProviderFault::Navigation(NavigationFault::DiscoveryTwoHops));
 }
 
+#[test]
+fn two_discovered_hops_preserve_policy_blocked_final_page_frames() {
+    let _serial = lock(&SERIAL);
+    provider_fixture(ProviderFault::Navigation(
+        NavigationFault::DiscoveryTwoHopsBlockedFrame,
+    ));
+}
+
 pub(super) struct NavigationSchedule {
     pub(super) events: Mutex<Option<Arc<Mutex<WorkEvents>>>>,
     native_started: AtomicBool,
@@ -107,6 +115,7 @@ impl TerraControllerClock for NavigationClock {
 pub(super) enum NavigationFault {
     Discovery,
     DiscoveryTwoHops,
+    DiscoveryTwoHopsBlockedFrame,
     DiscoveryMissingLink,
     Route(route_tests::RouteFault),
     None,
@@ -147,9 +156,17 @@ pub(super) enum NavigationFault {
 }
 
 impl NavigationFault {
+    pub(super) fn two_discovery_hops(self) -> bool {
+        matches!(
+            self,
+            Self::DiscoveryTwoHops | Self::DiscoveryTwoHopsBlockedFrame
+        )
+    }
     pub(super) fn requests(self) -> u8 {
         match self {
-            Self::DiscoveryTwoHops => route_tests::RouteFault::None.requests(),
+            Self::DiscoveryTwoHops | Self::DiscoveryTwoHopsBlockedFrame => {
+                route_tests::RouteFault::None.requests()
+            }
             Self::Route(fault) => fault.requests(),
             Self::PriorLocate => 8,
             Self::Ceiling => 14,
@@ -172,7 +189,7 @@ impl NavigationFault {
         self == Self::CancelMapCount && turns == 2 && count
     }
     pub(super) fn stream(self, turn: u8) -> String {
-        if self == Self::DiscoveryTwoHops {
+        if self.two_discovery_hops() {
             return route_tests::RouteFault::None.stream(turn);
         }
         if let Self::Route(fault) = self {
@@ -228,8 +245,16 @@ impl NavigationFault {
         }
     }
     pub(super) fn check_request(self, bytes: &[u8], turns: u8) {
-        if self == Self::DiscoveryTwoHops {
+        if self.two_discovery_hops() {
             let text = std::str::from_utf8(bytes).unwrap();
+            assert!(
+                text.contains("frames=1"),
+                "only the main frame is disclosed"
+            );
+            if self == Self::DiscoveryTwoHopsBlockedFrame && turns >= 2 {
+                assert!(text.contains("unsupported:policy_blocked"));
+                assert!(text.contains("frame_boundary"));
+            }
             assert!(text.contains("ZEPHIUM_HOST_LINK_DISCOVERY_V1"));
             assert!(!text.contains("ZEPHIUM_HOST_NAVIGATION_CHECKPOINT_V1"));
             assert!(text.contains(&format!(
@@ -417,7 +442,7 @@ pub(super) fn navigate(
     request: ContextNavigationRequest,
     fault: NavigationFault,
 ) -> ContextDispatch {
-    if fault == NavigationFault::DiscoveryTwoHops {
+    if fault.two_discovery_hops() {
         return route_tests::navigate(port, request, route_tests::RouteFault::None);
     }
     if let NavigationFault::Route(fault) = fault {
@@ -477,7 +502,7 @@ pub(super) fn capture(
     invocation: SemanticRuntimeInvocation,
     fault: NavigationFault,
 ) -> ContextDispatch {
-    if fault == NavigationFault::DiscoveryTwoHops {
+    if fault.two_discovery_hops() {
         return route_tests::capture(port, invocation, route_tests::RouteFault::None);
     }
     if let NavigationFault::Route(fault) = fault {
@@ -593,7 +618,7 @@ pub(super) fn assert_outcome(
     calls: &[u8],
     events: &[AgentWorkEvent],
 ) {
-    if fault == NavigationFault::DiscoveryTwoHops {
+    if fault.two_discovery_hops() {
         return route_tests::assert_outcome(
             route_tests::RouteFault::None,
             outcome,

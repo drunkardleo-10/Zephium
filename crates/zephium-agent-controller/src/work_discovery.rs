@@ -55,7 +55,15 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
             || context.identity() != self.identity
             || context.frame() != FrameId::MAIN
             || observation.frames().len() != 1
-            || !observation.frame_boundaries().is_empty()
+            // The controller retains blocked embedded-frame boundaries as
+            // evidence; they do not grant child-frame capture/model authority.
+            || observation.frame_boundaries().iter().any(|boundary| {
+                boundary.parent_frame() != FrameId::MAIN
+                    || boundary.status()
+                        != SemanticFrameBoundaryStatus::Unsupported(
+                            SemanticFrameUnsupported::PolicyBlocked,
+                        )
+            })
             || observation.frames()[0].frame().origin() != self.discovery.origin()
         {
             return Err(AgentWorkFailure::Contract);

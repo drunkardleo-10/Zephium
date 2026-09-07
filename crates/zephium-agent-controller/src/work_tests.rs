@@ -110,6 +110,55 @@ fn main_document_keeps_unadmitted_frames_explicit_without_child_native_calls() {
                 .omissions()
                 .contains(SemanticReadOmission::SourceIncomplete));
             assert_eq!(read.stats().incomplete_frames(), 1);
+            // Discovery may use the same main document, but only the explicit
+            // policy refusal is admitted; other missing-frame reasons stay closed.
+            for reason in [
+                Some(SemanticFrameUnsupported::PolicyBlocked),
+                Some(SemanticFrameUnsupported::RuntimeUnavailable),
+                Some(SemanticFrameUnsupported::PlatformIsolationUnavailable),
+                None,
+            ] {
+                let mut assembler = SemanticObservationAssembler::new(
+                    observation.request().clone(),
+                    observation.frames()[0].clone(),
+                )
+                .unwrap();
+                if let Some(reason) = reason {
+                    assembler
+                        .mark_frame_unsupported(FrameId::MAIN, boundary.reference(), reason)
+                        .unwrap();
+                } else {
+                    assembler
+                        .defer_frame(
+                            FrameId::MAIN,
+                            boundary.reference(),
+                            SemanticFrameDeferral::OutsideScope,
+                        )
+                        .unwrap();
+                }
+                let candidate = assembler.finish().unwrap();
+                let mut discovery = crate::AgentWorkDiscoveryTask::try_new(
+                    observation.request().context().identity(),
+                    AgentNavigationDiscovery::try_new(
+                        ContextNavigationTarget::parse("https://work-fixture.invalid/").unwrap(),
+                        "/".into(),
+                        2,
+                    )
+                    .unwrap(),
+                    vec![
+                        SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap(),
+                    ],
+                )
+                .unwrap();
+                assert_eq!(
+                    discovery.evaluate(&candidate),
+                    if reason == Some(SemanticFrameUnsupported::PolicyBlocked) {
+                        Ok(AgentWorkTaskProgress::Continue)
+                    } else {
+                        Err(AgentWorkFailure::Contract)
+                    },
+                );
+            }
             Ok(AgentWorkTaskProgress::Complete)
         }
         fn assess(
@@ -1530,6 +1579,7 @@ fn provider_fixture_with_account(
         ProviderFault::Navigation(
             NavigationFault::Discovery
                 | NavigationFault::DiscoveryTwoHops
+                | NavigationFault::DiscoveryTwoHopsBlockedFrame
                 | NavigationFault::DiscoveryMissingLink
         )
     ) {
@@ -1581,6 +1631,7 @@ fn provider_fixture_with_account(
             fault,
             NavigationFault::Discovery
                 | NavigationFault::DiscoveryTwoHops
+                | NavigationFault::DiscoveryTwoHopsBlockedFrame
                 | NavigationFault::DiscoveryMissingLink
         ) {
             Box::new(
