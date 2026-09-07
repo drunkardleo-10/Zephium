@@ -53,6 +53,7 @@ case "${1:-}" in
     docker run --detach --init --name "${native_name}" \
       --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges \
       --security-opt seccomp=unconfined --security-opt apparmor=zephium-native-ci \
+      --security-opt systempaths=unconfined \
       --read-only --pids-limit 2048 --shm-size 256m \
       --tmpfs /tmp:rw,nosuid,nodev,size=1g \
       --mount "type=bind,source=${GITHUB_WORKSPACE},target=/workspace,readonly" \
@@ -61,6 +62,20 @@ case "${1:-}" in
       --mount "type=volume,source=${native_volume},target=/home/native" \
       --env "ZEPHIUM_MIN_WEBKITGTK_VERSION=${ZEPHIUM_MIN_WEBKITGTK_VERSION:?}" \
       "${native_name}" >/dev/null
+    ;;
+  diagnose)
+    [[ "$#" == 1 ]]
+    # Only this trusted event's container metadata and a bounded kernel-log
+    # tail are read. Never print raw audit records, arbitrary profiles or paths.
+    test "$(docker inspect --format '{{.AppArmorProfile}}' "${native_name}")" = zephium-native-ci
+    test "$(docker inspect --format '{{len .HostConfig.MaskedPaths}} {{len .HostConfig.ReadonlyPaths}}' "${native_name}")" = '0 0'
+    sudo grep -Fx 'zephium-native-ci (unconfined)' /sys/kernel/security/apparmor/profiles
+    native_started="$(docker inspect --format '{{.State.StartedAt}}' "${native_name}")"
+    native_since="$(date --date="${native_started}" +%s)"
+    [[ "${native_since}" =~ ^[0-9]+$ ]]
+    timeout --signal=TERM --kill-after=2s 10s \
+      sudo journalctl --kernel --since="@${native_since}" --lines=256 --no-pager --output=cat \
+      | awk -f scripts/ci/summarize_linux_native_denials.awk
     ;;
   seal)
     [[ "$#" == 1 ]]
@@ -95,5 +110,5 @@ case "${1:-}" in
       sudo apparmor_parser --remove scripts/ci/linux-native.apparmor
     fi
     ;;
-  *) echo 'expected start, seal, exec SCRIPT, or stop' >&2; exit 2 ;;
+  *) echo 'expected start, seal, exec SCRIPT, diagnose, or stop' >&2; exit 2 ;;
 esac

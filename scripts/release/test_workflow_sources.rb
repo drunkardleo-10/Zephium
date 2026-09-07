@@ -269,6 +269,7 @@ def linux_native_environment_errors(ci, dockerfile, launcher, preflight, profile
   host_steps = {
     ordered[0] => "start",
     ordered[2] => "seal",
+    "Record bounded native preflight refusal provenance" => "diagnose",
     "Retire exact Fedora native test environment" => "stop"
   }
   job.fetch("steps").each do |step|
@@ -285,12 +286,18 @@ def linux_native_environment_errors(ci, dockerfile, launcher, preflight, profile
   end
   _, cleanup = named_step(ci, "linux-native-security", host_steps.keys.last)
   errors << "native environment cleanup must be unconditional" unless cleanup["if"] == "always()"
+  preflight_index, preflight_step = named_step(ci, "linux-native-security", ordered[3])
+  evidence_index, evidence_step = named_step(ci, "linux-native-security", "Record bounded native preflight refusal provenance")
+  errors << "host evidence must follow only the exact failed native preflight" unless
+    preflight_step["id"] == "native-preflight" && evidence_index == preflight_index + 1 &&
+    evidence_step["if"] == "failure() && steps.native-preflight.outcome == 'failure'"
   validate_image(dockerfile[/^FROM (.+)$/, 1], "Fedora native Dockerfile", errors)
   errors << "native image must stay unprivileged and exact-toolchain-bound" unless
     dockerfile.include?("USER 10001:10001") && dockerfile.include?("RUSTUP_TOOLCHAIN=1.95.0")
   [
     "--user 10001:10001 --cap-drop ALL --security-opt no-new-privileges",
     "--security-opt seccomp=unconfined --security-opt apparmor=zephium-native-ci",
+    "--security-opt systempaths=unconfined",
     "--read-only --pids-limit 2048", "target=/workspace,readonly",
     "docker exec --interactive --user 10001:10001",
     "target=/opt/rustup,readonly", "target=/opt/rust-bin,readonly",
@@ -301,7 +308,9 @@ def linux_native_environment_errors(ci, dockerfile, launcher, preflight, profile
     '"${NATIVE_CHECKOUT_REF}" = "${GITHUB_SHA}"',
     '"${GITHUB_REF:?}" != refs/heads/main',
     '"$(git rev-parse HEAD)" != "${GITHUB_SHA}"',
-    'sudo apparmor_parser --remove scripts/ci/linux-native.apparmor'
+    'sudo apparmor_parser --remove scripts/ci/linux-native.apparmor',
+    '--lines=256 --no-pager --output=cat',
+    'awk -f scripts/ci/summarize_linux_native_denials.awk'
   ].each do |required|
     errors << "native launcher lost #{required}" unless launcher.include?(required)
   end
@@ -312,6 +321,9 @@ def linux_native_environment_errors(ci, dockerfile, launcher, preflight, profile
   end
   ["CapInh CapPrm CapEff CapBnd CapAmb", "NoNewPrivs:", "Seccomp_filters:",
    "--unshare-user --unshare-pid --unshare-net", '"${native_interface##*/}" = lo',
+   '"${native_label}" = \'zephium-native-ci (unconfined)\'',
+   'awk -f scripts/ci/verify_linux_native_mounts.awk',
+   '--ro-bind / / --proc /proc --dev /dev',
    '"$(id -u)" = 10001'].each do |required|
     errors << "native preflight lost #{required}" unless preflight.include?(required)
   end
@@ -320,6 +332,47 @@ def linux_native_environment_errors(ci, dockerfile, launcher, preflight, profile
     errors << "scoped native userns profile changed"
   end
   errors
+end
+
+def assert_linux_native_evidence(root)
+  mounts = File.join(root, "scripts/ci/verify_linux_native_mounts.awk")
+  valid = "1 0 0:1 / / ro - overlay overlay ro\n" \
+          "2 1 0:2 / /workspace ro - ext4 /dev/test ro\n" \
+          "3 1 0:3 / /sys ro,nosuid,nodev,noexec - sysfs sysfs ro\n" \
+          "4 1 0:4 / /proc rw,nosuid,nodev,noexec - proc proc rw\n"
+  [[valid, true],
+   [valid + "5 4 0:5 / /proc/keys ro - tmpfs secret-source ro\n", false],
+   [valid + "5 4 0:4 /sys /proc/sys ro - proc proc rw\n", false],
+   [valid.sub("/ /proc rw", "/ /proc ro"), false],
+   [valid.sub("/ /proc", "/subtree /proc"), false],
+   [valid.sub("- proc proc", "- tmpfs proc"), false],
+   [valid.sub("/workspace ro", "/workspace rw"), false],
+   [valid.sub("/sys ro", "/sys rw"), false],
+   [valid.sub("/ / ro", "/ / rw"), false],
+   [valid.sub("rw,nosuid,nodev,noexec", "rw,nosuid,nodev"), false],
+   [valid + valid.lines.last, false],
+   [valid + "x" * 4097, false],
+   [valid + "\n" * 253, false]].each do |input, accepted|
+    out, _, status = Open3.capture3("awk", "-f", mounts, stdin_data: input)
+    raise "native proc topology guard changed" unless status.success? == accepted
+    raise "native mount evidence leaked a source" if out.include?("secret-source") || out.include?("/dev/test")
+  end
+  denials = File.join(root, "scripts/ci/summarize_linux_native_denials.awk")
+  records = [
+    'apparmor="DENIED" operation="mount" profile="zephium-native-ci" comm="bwrap" name="secret-source"',
+    'apparmor="DENIED" operation="userns_create" profile="zephium-native-ci" comm="bwrap"',
+    'apparmor="DENIED" operation="capable" profile="unexpected-secret-profile" comm="bwrap"',
+    'apparmor="DENIED" operation="other" profile="zephium-native-ci" comm="other"',
+    'apparmor="DENIED" operation="mount" profile="unrelated" comm="unrelated"',
+    'apparmor="ALLOWED" operation="mount" profile="zephium-native-ci" comm="bwrap"'
+  ].join("\n") + "\n"
+  out, _, status = Open3.capture3("awk", "-f", denials, stdin_data: records)
+  expected = "native host denials: sampled=6 matching=4 exact_profile=3 other_bwrap_profile=1 mount=1 userns=1 capability=1 other_operation=1 bounded=1 absence_not_proof=true\n"
+  raise "native denial provenance/redaction changed" unless status.success? && out == expected
+  ["x" * 16385, "\n" * 257].each do |overflow|
+    _, _, status = Open3.capture3("awk", "-f", denials, stdin_data: overflow)
+    raise "native denial evidence lost its bound" if status.success?
+  end
 end
 
 def native_job_admitted?(expression, event, ref)
@@ -457,6 +510,7 @@ def assert_linux_native_environment(root)
     [1, "target=/workspace,readonly", "target=/workspace"],
     [1, "docker network disconnect bridge", "echo skipped"],
     [1, "--security-opt no-new-privileges", "--privileged"],
+    [1, "--security-opt systempaths=unconfined", ""],
     [2, "--unshare-user", "--unshare-user-try"],
     [2, "Seccomp_filters:", "Unrelated:"],
     [3, "zephium-native-ci", "unconfined"]
@@ -484,7 +538,7 @@ def assert_linux_native_environment(root)
 
   # Invoke every helper mode in refused contexts. Exact diagnostics prove the
   # trust guard ran before any Docker, AppArmor or other host-policy operation.
-  %w[start seal exec stop].each do |mode|
+  %w[start seal exec diagnose stop].each do |mode|
     [
       ["pull_request", "refs/heads/main", "a trusted main event"],
       ["push", "refs/heads/unreviewed", "a trusted main event"],
@@ -523,6 +577,7 @@ root = File.expand_path("../..", __dir__)
 assert_ci_dependency_staging(root)
 assert_macos_runtime_evidence_boundary(root)
 assert_linux_native_environment(root)
+assert_linux_native_evidence(root)
 workflows = Dir[File.join(root, ".github/workflows/*.{yml,yaml}")].sort
 raise "repository contains no GitHub Actions workflows" if workflows.empty?
 

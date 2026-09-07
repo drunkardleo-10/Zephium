@@ -189,6 +189,23 @@ The unchanged Fedora package/vendor/signature/integrity and engine-floor checks
 still precede WebKit execution. The job logs the installed package NEVRAs and
 actual shared host-kernel release for traceability, not as a repository pin.
 
+The subsequent hosted preflight passed the capability/NNP/seccomp checks but
+bubblewrap refused its fresh procfs mount with `Operation not permitted`.
+Docker's default proc masks/read-only submounts are a distinct restriction:
+Linux's [`mount_too_revealing` check](https://github.com/torvalds/linux/blob/v6.8/fs/namespace.c)
+rejects a newly exposed procfs when inherited locked child mounts obscure the
+existing one. [BuildKit documents this exact nested rootless failure](https://github.com/moby/buildkit/blob/master/docs/rootless.md).
+The test launch therefore explicitly uses
+[`systempaths=unconfined`](https://docs.docker.com/reference/cli/docker/container/run/#security-opt),
+removing Docker's masked and read-only **system-path lists**, not granting an
+outer capability. Those masks are not part of the claimed test boundary.
+This can expose dangerous kernel files; the unchanged nonroot identity, zero
+outer capabilities and no-new-privileges are mandatory. Root, worktree and
+sysfs must still be read-only. Preflight requires one full procfs root with
+no proc submounts and checks the actual named AppArmor label before and inside
+the original one-shot bubblewrap invocation. No host procfs bind or alternate
+PID-namespace proof substitutes for mounting the new procfs.
+
 That test container intentionally has no outer seccomp filter and uses a named
 `flags=(unconfined)` AppArmor user-namespace grant. It has **no outer container
 seccomp or LSM confinement**. Loading that profile modifies host policy only in
@@ -218,6 +235,12 @@ retry or replacement context-property proof exists.
 Workflow-policy mutations pin these restrictions. Local macOS source checks do
 not qualify this Linux environment: the next hosted execution must supply the
 actual namespace and native-test evidence before it is called green.
+If that exact preflight fails, a trusted host-only diagnostic checks the
+container's requested/loaded profile and empty system-path lists, then summarizes
+at most 256 kernel records since that container's start. Only counts and closed
+profile/operation classes are printed; unrelated records, paths and arbitrary
+profile strings are not emitted. Missing or rate-limited audit records cannot
+prove absence of AppArmor denial, and this diagnostic never turns refusal green.
 
 The Linux Wayland device pass must also force GlobalShortcuts portal denial
 (and separately restart the portal process) and verify that the configured

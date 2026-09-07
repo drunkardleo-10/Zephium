@@ -1333,7 +1333,8 @@ These inherited properties must not be overstated:
   Observer access to `/proc/<renderer>/root` is not renderer-credential evidence.
   The [native CI environment](security-maintenance.md#fedora-native-ci-sandbox-environment)
   requires an unprivileged, capability-free, network-sealed launcher and does not
-  supply outer container seccomp/LSM confinement; its disposable VM is the outer
+  supply outer container seccomp/LSM confinement or Docker system-path masking;
+  its disposable VM is the outer
   boundary. A successful execution is evidence for that exact observed state,
   not attestation of an arbitrary installed machine or packaged application.
 - **Release gates:** rerun the confinement probe through the packaged application on

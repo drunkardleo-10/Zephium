@@ -682,7 +682,13 @@ jobs:
         run: bash scripts/ci/linux_native_container.sh seal
 
       - name: Prove unprivileged native sandbox prerequisites
+        id: native-preflight
         run: bash scripts/ci/prove_linux_native_namespaces.sh
+
+      - name: Record bounded native preflight refusal provenance
+        if: failure() && steps.native-preflight.outcome == 'failure'
+        shell: bash
+        run: bash scripts/ci/linux_native_container.sh diagnose
 
       - name: Prove native WebKitGTK sandbox package prerequisites
         run: |
