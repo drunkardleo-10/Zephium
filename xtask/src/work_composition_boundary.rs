@@ -66,8 +66,9 @@ fn ordinary_navigation_observer(source: &str) -> Result<(), String> {
             "let request = qualifier::load_request(started)?;",
             ".admission.admit(|| { let view = super::admit_trusted_work(app, request)",
             "Some((view.clone(), false))",
-            "control.ready_for_shutdown.store(true, Ordering::Release); worker_app.exit(0);",
-            "state.control.admission.cancel(); request_stop(&state.control); api.prevent_exit();",
+            "let settled = control.admission.settle(result);",
+            "if state.control.admission.cancel() { request_stop(&state.control); api.prevent_exit();",
+            "let accepted = matches!(state.control.admission.terminal(), Some(Ok(report)) if report.accepted);",
             "worker.join().is_ok()",
             "let qualified = accepted && joined && normal_shutdown_clean;",
             "!owner.terminal_failure.load(Ordering::Acquire)",
@@ -88,6 +89,7 @@ fn ordinary_navigation_observer(source: &str) -> Result<(), String> {
         "process::exit(",
         "#[tauri::command]",
         "impl AgentBrowserPort",
+        "ready_for_shutdown",
     ] {
         if source.contains(forbidden) {
             return Err(format!(
@@ -288,6 +290,9 @@ mod tests {
             "accepted && joined && normal_shutdown_clean",
             "api.prevent_exit()",
             ".admit(||",
+            "control.admission.settle(result)",
+            "state.control.admission.cancel()",
+            "state.control.admission.terminal()",
         ] {
             assert!(ordinary_navigation_observer(&source.replace(boundary, "removed")).is_err());
         }

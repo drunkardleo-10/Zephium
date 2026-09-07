@@ -27,10 +27,8 @@ const OBSERVER_HANDOFF: Duration = Duration::from_secs(160);
 
 #[derive(Default)]
 struct Control {
-    admission: control::AdmissionFence,
+    admission: control::AdmissionFence<ApplicationReport>,
     view: Mutex<Option<(AgentWorkApplicationHandle, bool)>>,
-    result: Mutex<Option<Result<ApplicationReport, &'static str>>>,
-    ready_for_shutdown: AtomicBool,
     worker_joined: AtomicBool,
 }
 struct State {
@@ -82,26 +80,19 @@ pub(super) fn install(app: &tauri::AppHandle) -> std::io::Result<()> {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take();
-            super::write_diagnostic(format_args!(
-                "work-application-navigation-report: {result:?} content=redacted"
-            ));
-            *control
-                .result
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
             // No credential, request or application projection remains on this
             // worker when it authorizes the normal application shutdown handoff.
-            control.ready_for_shutdown.store(true, Ordering::Release);
+            let settled = control.admission.settle(result);
+            super::write_diagnostic(format_args!(
+                "work-application-navigation-report: terminal={settled:?} content=redacted"
+            ));
             worker_app.exit(0);
         });
     let worker = match worker {
         Ok(worker) => worker,
         Err(error) => {
             let state = app.state::<State>();
-            state
-                .control
-                .ready_for_shutdown
-                .store(true, Ordering::Release);
+            state.control.admission.settle(Err("observer_worker_spawn"));
             state.control.worker_joined.store(true, Ordering::Release);
             return Err(error);
         }
@@ -197,8 +188,7 @@ fn run(app: &tauri::AppHandle, control: &Control) -> Result<ApplicationReport, &
         if control.admission.cancelled() || !observer.healthy() {
             request_stop(control);
         }
-        if let Some(mut report) = observer.poll(&view) {
-            report.accepted &= !control.admission.cancelled();
+        if let Some(report) = observer.poll(&view) {
             return Ok(report);
         }
         if started.elapsed() >= OBSERVER_HANDOFF {
@@ -218,8 +208,7 @@ pub(super) fn on_run_event(app: &tauri::AppHandle, event: &tauri::RunEvent) -> b
     };
     match event {
         tauri::RunEvent::ExitRequested { api, .. } => {
-            if !state.control.ready_for_shutdown.load(Ordering::Acquire) {
-                state.control.admission.cancel();
+            if state.control.admission.cancel() {
                 request_stop(&state.control);
                 api.prevent_exit();
                 return true;
@@ -244,12 +233,8 @@ pub(super) fn on_run_event(app: &tauri::AppHandle, event: &tauri::RunEvent) -> b
                         owner.authorized_exit_code.load(Ordering::Acquire) == 0
                             && !owner.terminal_failure.load(Ordering::Acquire)
                     });
-            let accepted = state
-                .control
-                .result
-                .lock()
-                .ok()
-                .is_some_and(|result| matches!(*result, Some(Ok(report)) if report.accepted));
+            let accepted =
+                matches!(state.control.admission.terminal(), Some(Ok(report)) if report.accepted);
             let qualified = accepted && joined && normal_shutdown_clean;
             super::write_diagnostic(format_args!("work-application-navigation-closure: qualified={qualified} accepted={accepted} observer_worker_joined={joined} normal_shutdown_clean={normal_shutdown_clean}"));
         }
