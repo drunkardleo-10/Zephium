@@ -33,6 +33,12 @@ mod agent_progress_metrics;
 mod agent_provider;
 mod agent_supervisor;
 mod agent_work_artifact;
+mod agent_work_evidence;
+pub use agent_work_evidence::{
+    WorkEvidenceBudget, WorkEvidenceBuilder, WorkEvidenceDescriptor, WorkEvidenceEntry,
+    WorkEvidenceEntryId, WorkEvidenceError, WorkEvidenceReview, WorkEvidenceSet,
+    MAX_WORK_EVIDENCE_CONTENT_BYTES, MAX_WORK_EVIDENCE_ENTRIES,
+};
 /// Existing product profile identity used by durable Work result contracts.
 pub use zephium_core::ids::ProfileId as AgentWorkProfileId;
 mod agent_work_journal;

@@ -652,9 +652,19 @@ pub struct SemanticExtractionResult<'a> {
     sources: Vec<SemanticExtractionSource<'a>>,
     stats: SemanticExtractionStats,
     guard: [u8; 32],
+    read_omissions: crate::SemanticReadOmissions,
+    read_stats: crate::SemanticReadStats,
 }
 
 impl<'a> SemanticExtractionResult<'a> {
+    /// Exact source-read omissions, never a whole-document completeness claim.
+    pub const fn read_omissions(&self) -> crate::SemanticReadOmissions {
+        self.read_omissions
+    }
+    /// Original delivered-read counts, including uncited admitted fragments.
+    pub const fn read_stats(&self) -> crate::SemanticReadStats {
+        self.read_stats
+    }
     /// Moves validated fields into one bounded owned result, retaining each
     /// cited source fragment once. This is model-mapped data, never authority.
     pub fn into_owned(self) -> Result<SemanticOwnedExtractionResult, SemanticExtractionError> {
@@ -717,6 +727,8 @@ impl<'a> SemanticExtractionResult<'a> {
             edges,
             stats: self.stats,
             guard: self.guard,
+            read_omissions: self.read_omissions,
+            read_stats: self.read_stats,
         })
     }
     /// Exact trusted schema used to validate this result.
@@ -824,9 +836,26 @@ pub struct SemanticOwnedExtractionResult {
     edges: Vec<u16>,
     stats: SemanticExtractionStats,
     guard: [u8; 32],
+    read_omissions: crate::SemanticReadOmissions,
+    read_stats: crate::SemanticReadStats,
 }
 
 impl SemanticOwnedExtractionResult {
+    /// Exact source-read omissions. Empty does not certify whole-document coverage
+    /// or factual correctness: only the admitted bounded projection was read.
+    pub const fn read_omissions(&self) -> crate::SemanticReadOmissions {
+        self.read_omissions
+    }
+    /// Counts for the original delivered read, not only the cited subset.
+    pub const fn read_stats(&self) -> crate::SemanticReadStats {
+        self.read_stats
+    }
+    pub(crate) fn evidence_sources(&self) -> &[SemanticOwnedExtractionSource] {
+        &self.sources
+    }
+    pub(crate) const fn evidence_guard(&self) -> [u8; 32] {
+        self.guard
+    }
     /// Trusted schema identity.
     pub const fn schema(&self) -> SemanticExtractionSchemaId {
         self.schema
@@ -1098,6 +1127,8 @@ fn extract_semantic_read_inner<'a>(
         sources,
         stats,
         guard: result_guard,
+        read_omissions: read.omissions(),
+        read_stats: read.stats(),
     })
 }
 
