@@ -4568,11 +4568,13 @@ mod tests {
         ExtensionRuntimeHostFactory::from_trusted_port(Box::new(UnsupportedHostFactoryPort))
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     struct ProfileAbsenceHostFactoryPort {
         calls: Arc<AtomicUsize>,
         disposition: Option<ExtensionRuntimeHostProfileAbsenceDisposition>,
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     impl ExtensionRuntimeHostFactoryPort for ProfileAbsenceHostFactoryPort {
         fn bind_activation(
             &mut self,
@@ -4599,6 +4601,7 @@ mod tests {
         }
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn profile_absence_host_factory(
         calls: Arc<AtomicUsize>,
         disposition: Option<ExtensionRuntimeHostProfileAbsenceDisposition>,

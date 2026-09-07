@@ -972,7 +972,6 @@ mod tests {
     use gtk::prelude::{ContainerExt, WidgetExt};
     use std::cell::{Cell, RefCell};
     use std::collections::{HashMap, HashSet};
-    use std::path::PathBuf;
     use std::rc::Rc;
     use std::sync::atomic::AtomicBool;
     use std::sync::{mpsc, Arc};
