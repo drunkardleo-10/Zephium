@@ -968,6 +968,7 @@ fn remove_linux_profile_directories_async(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use gtk::prelude::{ContainerExt, WidgetExt};
     use std::cell::{Cell, RefCell};
     use std::collections::{HashMap, HashSet};

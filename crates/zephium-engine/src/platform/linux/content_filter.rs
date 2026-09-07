@@ -1081,9 +1081,10 @@ mod tests {
             panic!("native WebKitGTK content-filter compilation exceeded 120 seconds");
         }
         timeout.cancel();
-        result
+        let outcome = result
             .borrow_mut()
             .take()
-            .expect("native content-filter compiler must settle exactly once")
+            .expect("native content-filter compiler must settle exactly once");
+        outcome
     }
 }

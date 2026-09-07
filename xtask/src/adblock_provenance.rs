@@ -2385,7 +2385,8 @@ fn parse_feature_tree(source: &str) -> Result<Vec<FeatureTreeRow>, String> {
     source
         .lines()
         .map(|line| {
-            let line = line.strip_suffix(" (*)").unwrap_or(line);
+            let line = strip_ansi_sgr(line)?;
+            let line = line.strip_suffix(" (*)").unwrap_or(&line);
             let digits = line.bytes().take_while(u8::is_ascii_digit).count();
             if digits == 0 || digits == line.len() {
                 return Err(format!("invalid cargo feature-tree depth row `{line}`"));
@@ -2413,8 +2414,54 @@ fn parse_feature_tree(source: &str) -> Result<Vec<FeatureTreeRow>, String> {
         .collect()
 }
 
+/// Cargo uses ANSI SGR sequences for duplicated feature rows when its colour
+/// mode is inherited from the surrounding CI environment. The tree is parsed
+/// as a machine-readable security boundary, so normalise that presentation
+/// layer before interpreting a feature name. Reject every non-SGR escape
+/// sequence rather than silently accepting an unknown terminal control code.
+fn strip_ansi_sgr(line: &str) -> Result<String, String> {
+    let bytes = line.as_bytes();
+    let mut normalized = String::with_capacity(line.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != 0x1b {
+            let character = line[index..]
+                .chars()
+                .next()
+                .expect("index must remain on a UTF-8 boundary");
+            normalized.push(character);
+            index += character.len_utf8();
+            continue;
+        }
+
+        let escape = index;
+        index += 1;
+        if bytes.get(index) != Some(&b'[') {
+            return Err(format!(
+                "cargo feature-tree row has an unsupported ANSI escape at byte {escape}"
+            ));
+        }
+        index += 1;
+        while matches!(bytes.get(index), Some(b'0'..=b'9' | b';')) {
+            index += 1;
+        }
+        if bytes.get(index) != Some(&b'm') {
+            return Err(format!(
+                "cargo feature-tree row has a non-SGR ANSI escape at byte {escape}"
+            ));
+        }
+        index += 1;
+    }
+    Ok(normalized)
+}
+
 fn cargo_tree(repository: &Path, args: &[&str]) -> Result<String, String> {
     let output = Command::new("cargo")
+        // Do not permit CARGO_TERM_COLOR from a CI action to change the
+        // grammar consumed by parse_feature_tree. strip_ansi_sgr above is
+        // retained as a defensive parser boundary for Cargo presentation
+        // changes or a future caller that supplies recorded output.
+        .args(["--color", "never"])
         .args(args)
         .current_dir(repository)
         .output()
@@ -2747,9 +2794,9 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        git_blob, sha256_file, validate_blocker_fuzz_deny_source, validate_fork_root_layout,
-        validate_relative_path, verify_imported_files, UpstreamEntry, FORK_ROOT_DIRECTORIES,
-        FORK_ROOT_FILES,
+        git_blob, parse_feature_tree, sha256_file, validate_blocker_fuzz_deny_source,
+        validate_fork_root_layout, validate_relative_path, verify_imported_files, UpstreamEntry,
+        FORK_ROOT_DIRECTORIES, FORK_ROOT_FILES,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -2767,6 +2814,19 @@ mod tests {
         validate_blocker_fuzz_deny_source(strict).unwrap();
         let weakened = strict.replace("unknown-git = \"deny\"", "unknown-git = \"allow\"");
         assert!(validate_blocker_fuzz_deny_source(&weakened).is_err());
+    }
+
+    #[test]
+    fn feature_tree_normalizes_colored_duplicate_feature_rows() {
+        let tree = parse_feature_tree(
+            "0zephium-desktop v0.1.0 (/workspace/desktop)|\n\
+             1zephium-blocker v0.1.0 (/workspace/crates/zephium-blocker)|runtime\n\
+             2zephium-blocker v0.1.0 (/workspace/crates/zephium-blocker)|runtime \x1b[33m\x1b[2m(*)\x1b[39m\x1b[22m\n",
+        )
+        .expect("Cargo colour must not become a feature name");
+
+        assert_eq!(tree.len(), 3);
+        assert_eq!(tree[2].features, BTreeSet::from(["runtime".to_owned()]));
     }
 
     #[test]
