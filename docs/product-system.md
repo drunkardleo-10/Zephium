@@ -375,10 +375,11 @@ Initially the gateway authenticates, validates entitlements and budgets,
 selects an eligible provider/model, relays bounded requests, streams outputs,
 and accounts for provider-reported usage.
 
-The planned hosted stack is a separate private service using TypeScript,
-Bun/Hono, Better Auth with email one-time-password authentication, Polar,
-PostgreSQL/Drizzle, Redis where it earns its operational cost, and OCI
-deployment. The public browser does not require an account when hosted
+The hosted gateway is a separate private Python service using FastAPI. Its
+authentication, entitlement, billing, persistence, cache and deployment
+adapters remain behind explicit service boundaries; their concrete products
+must be selected from operational evidence rather than becoming browser-domain
+dependencies. The public browser does not require an account when hosted
 features are unused, and it must not initialize hosted connections in that
 state.
 

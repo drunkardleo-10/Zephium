@@ -31,10 +31,15 @@ tool: `extract` with the initial scope and exact schema identity. Native actions
 and navigation are never admitted by this task; subtree capture requires the
 separate trusted opt-in described below. After a fresh actual
 native observation, the session validates the current frame cohort and consumes
-the exact provider tool continuation. The read uses `PublicOnly` sensitivity,
-at most 128 readable fragments and 32 KiB of read content, further restricted by
-the 16 KiB combined encoded schema/read preflight. Insufficient evidence or a
-budget refusal fails closed; it does not trigger a larger disclosure or retry.
+the exact provider tool continuation. The read uses `PublicOnly` sensitivity and
+admits at most 128 readable fragments and 32 KiB of source values. Compact
+`ZREAD3` preserves every admitted fragment and its provenance inside a separate
+112-KiB terminal-extraction encoding envelope derived from worst-case escaping,
+bounded rows, frame provenance and the closed schema. This does not increase
+native capture, read, request, turn or run budgets; only the actual encoded
+request enters the existing exact provider count and policy reservation.
+Insufficient evidence or an encoding refusal fails closed; it does not trigger
+a larger disclosure, evidence subset or retry.
 
 Trusted tasks may narrow evidence with `with_source_roles`, a nonempty closed
 set of semantic roles in the extraction schema. The default remains all roles.
