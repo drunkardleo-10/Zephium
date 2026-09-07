@@ -3,11 +3,78 @@
 Status: production runtime foundation and read-only retained backing in the
 existing Work controller, with deterministic actual-worker/loopback-provider
 tests through the private application resource owner. A scoped durable-terminal
-proof join now exists; Shell coordination and product admission remain separate.
+proof join and private application-owned admission coordinator now exist;
+Shell attachment, selected-profile admission and product UI remain separate.
 No native, public-site or UI qualification
 is added by this integration.
 
 ## Durable terminal without destroying the Work page
+
+### Application-owned retained admission
+
+`work_resources_application::RetainedWork` now owns one original retained
+resource owner and one bounded actor at a time. This is shared production Rust,
+not another controller/provider algorithm or a diagnostic executor. It remains
+private: no Shell command, native composition-root entry, or product UI is
+exposed before the selected-profile/resource-construction join is integrated.
+
+The coordinator claims the original fenced Store and requires the audit and
+journal ports to identify that same allocation. An explicit fresh request
+acquires a lease, prepares the existing read-only retained controller against
+its exact new binding, then receives the original Admitted and Running CAS
+acknowledgements before starting the original scoped worker. No read/provider
+operation precedes Running ACK. Descriptive IDs and an independently read
+durable record cannot release a startup gate.
+
+Native-resource, journal and progress callbacks share the original coalesced
+application wake. Each application poll drains/rearms that original stable
+resource lane; wake-only assertions guard against fixtures hiding a lost wake
+by repeatedly polling. Unexpected global audit terminals remain retained and
+fail closed rather than being discarded or converted to resource proof.
+
+After accepted/failed/cancelled actor closure, it joins the original outcome,
+matching scoped worker drain and resource lease, prepares the existing terminal
+mutation, and waits for the exact original CAS acknowledgement. A second lease
+cannot be acquired until that join, progress drain and result handoff complete;
+the primitive's native-reusable bit is not enough. The new explicit request
+must use a run ID absent from the bounded durable inventory. Its controller
+receives a fresh read binding and captures again; no old observation, task,
+model proposal or input authority is resumed.
+
+Malformed replies/timeouts retain the exact request for explicit bounded
+idempotent reconciliation (at most four attempts). Reconciliation uses the
+same original CAS, never read-back or decoded facts as acknowledgement. Old
+callbacks retain their disconnected bounded slots. A stop caused by uncertainty
+stays sticky even after the original durable fact is reconciled: no automatic
+successor or result publication is enabled.
+
+Whole-owner shutdown can independently destroy the retained resource after the
+worker stops. Resource destruction is not coordinator completion: outstanding
+Claim/Admit/Start/Terminal acknowledgement, retained pre-start recovery, or
+unproven scoped drain keeps shutdown unsettled. Destruction receipt and final
+callback reaping remain separately polled. Cancellation/expiry after acquisition
+but before startup never treats a dropped facade as a revocation receipt;
+the resource remains non-reusable recovery until explicit whole-owner shutdown.
+Late admission acknowledgements are reconciled to immutable FailedClosed with
+their debt intact. The original pre-start recovery owner remains retained;
+this slice does **not** claim a clean recover-and-reuse path for that case.
+
+Deterministic real-SQLite/loopback tests hold Admitted, Running and successful
+terminal ACKs independently of actual commits. They exercise an accepted A,
+fresh observed/cancelled B, unread-result and progress ownership, wrong-guard
+ACK refusal, timeout plus exact reconciliation/late callback isolation, and
+stop/expiry before startup, and real process-worker permit refusal after Running
+ACK. The page survives both clean actors and is destroyed
+once only on whole-owner shutdown. These are application-coordination tests,
+not native/GUI/provider qualification.
+
+Remaining product joins are explicit Shell ownership and selected-profile
+admission, pre-start/run recovery reconciliation, durable result publication,
+rendering/input handoff, post-human document authority and retained navigation.
+The production constructor still uses the common stateless provider transport;
+only unit-test construction can inject the existing loopback transport.
+
+### Original durable proof bridge
 
 `AgentWorkRetainedController::journal_admission` supplies the dormant original
 manifest's admission intent. The application must acknowledge exact Admitted
@@ -40,10 +107,10 @@ non-Running state and reopening a terminal refuse; exact Store-write
 reconciliation remains idempotent. Global-zero still refuses until independent
 resource destruction. No process fence is reset for the test.
 
-This is the durable proof bridge, not automatic product successor admission.
-The existing Shell coordinator still owns only legacy complete-browser runs;
-it must integrate scoped lifecycle/admission and retain the Work resource owner
-before these primitives become a user-facing persistent workflow. Durable
+The proof bridge itself is not successor permission; the private application
+coordinator above now performs that join. The existing Shell coordinator still
+owns only legacy complete-browser runs; it must attach the retained owner and
+selected-profile admission before this becomes a user-facing workflow. Durable
 result publication, Work/resource restart inventory, rendering/input takeover,
 fresh post-human document authority and retained navigation remain separate.
 

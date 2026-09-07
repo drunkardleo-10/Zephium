@@ -74,6 +74,18 @@ pub struct AgentWorkRetainedHandle {
     pub(super) terminal: Arc<Mutex<Option<AgentWorkRetainedOutcome>>>,
 }
 impl AgentWorkRetainedHandle {
+    /// Registers the application's bounded progress wake, without native authority.
+    pub fn set_waker(&self, waker: Waker) {
+        let mut events = lock(&self.events);
+        events.waker = Some(waker);
+        if !events.queue.is_empty() {
+            events.wake();
+        }
+    }
+    /// Queue drain status only; not scoped closure or successor permission.
+    pub fn has_pending_events(&self) -> bool {
+        !lock(&self.events).queue.is_empty()
+    }
     /// Removes one bounded content-free event.
     pub fn take_event(&self) -> Option<AgentWorkEvent> {
         lock(&self.events).queue.pop_front()
@@ -129,6 +141,10 @@ pub(super) enum TerminalClaim {
 }
 
 impl AgentWorkRetainedController {
+    /// Original dormant hard deadline, including the retained lease intersection.
+    pub fn deadline(&self) -> Result<Instant, AgentWorkFailure> {
+        self.0.deadline()
+    }
     /// Dormant admission intent from the original approved manifest. A trusted
     /// application must receive exact Admitted and Running acknowledgements
     /// before releasing this controller's scoped runtime startup gate.

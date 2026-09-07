@@ -2,7 +2,8 @@
 //!
 //! The original owner has no actor-runtime, journal or Store admission authority.
 //! Its opt-in child supplies only the common controller's narrow lease facade;
-//! durable/scoped product admission must precede exposure from the shell.
+//! Its private application child joins scoped/durable actor admission; selected
+//! profile construction and Shell attachment remain necessary before exposure.
 #![allow(dead_code)] // Private until the independently reviewed product admission cut.
 
 use std::collections::BTreeMap;
@@ -15,6 +16,10 @@ use zephium_core::ids::ProfileId;
 #[cfg(feature = "work-execution")]
 #[path = "work_resources_controller.rs"]
 mod controller;
+
+#[cfg(feature = "work-execution")]
+#[path = "work_resources_application.rs"]
+mod application;
 
 #[cfg(feature = "work-execution-probe")]
 #[path = "work_resources_probe.rs"]

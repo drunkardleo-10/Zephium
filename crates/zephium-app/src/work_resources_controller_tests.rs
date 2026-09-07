@@ -10,6 +10,10 @@ use zephium_agent_runtime::*;
 #[path = "work_resources_durable_tests.rs"]
 mod durable_tests;
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[path = "work_resources_application_tests.rs"]
+mod application_tests;
+
 struct Clock(AtomicU64);
 impl TerraControllerClock for Clock {
     fn now(&self) -> Result<AgentPolicyInstant, TerraControllerClockError> {
@@ -34,6 +38,7 @@ impl AgentAuditPort for Audit {
 }
 #[derive(Default)]
 struct Native {
+    resource_sink: Mutex<Option<NativeSink>>,
     reporters: Arc<Mutex<BTreeMap<ContextId, WorkBrowserResourceHealthReporter>>>,
     gate: Arc<AtomicBool>,
     tasks: Mutex<Vec<std::thread::JoinHandle<()>>>,
@@ -241,14 +246,47 @@ fn setup_with_document_policy(
     WorkBrowserResourceJoin,
     RetainedBrowser,
 ) {
+    let (owner, native, resource) = construct_fixture(storage, policy, effective);
+    let mut acquire = owner
+        .acquire(
+            &resource,
+            ContextRunId::generate(),
+            now(),
+            AgentPolicyInstant::from_millis(600_002),
+        )
+        .unwrap();
+    let Some(LifecycleResult::Event(WorkBrowserResourceEvent::Acquired(lease))) =
+        acquire.poll(now()).unwrap()
+    else {
+        panic!("original acquisition")
+    };
+    let browser = owner.retained_browser(lease, now()).unwrap();
+    (owner, native, resource, browser)
+}
+fn construct_fixture(
+    storage: ContextProfileStorageClass,
+    policy: zephium_agentic::WorkBrowserDocumentPolicy,
+    effective: Option<ContextNavigationTarget>,
+) -> (WorkResourceOwner, Arc<Native>, WorkBrowserResourceJoin) {
+    construct_fixture_with_wake(storage, policy, effective, Arc::new(|| true))
+}
+fn construct_fixture_with_wake(
+    storage: ContextProfileStorageClass,
+    policy: zephium_agentic::WorkBrowserDocumentPolicy,
+    effective: Option<ContextNavigationTarget>,
+    wake: WakeApplication,
+) -> (WorkResourceOwner, Arc<Native>, WorkBrowserResourceJoin) {
     let native = Arc::new(Native::default());
     *native.final_document.lock().unwrap() = effective;
     let port = native.clone();
     let owner = WorkResourceOwner::new(
         WorkId::generate(),
         ProfileId::generate(),
-        Arc::new(|| true),
-        Box::new(move |_| Some(port)),
+        wake,
+        Box::new(move |sink| {
+            *port.resource_sink.lock().unwrap() = Some(sink);
+            Some(port)
+        }),
     )
     .unwrap();
     let mut construct = owner
@@ -266,21 +304,7 @@ fn setup_with_document_policy(
     else {
         panic!("original construction")
     };
-    let mut acquire = owner
-        .acquire(
-            &resource,
-            ContextRunId::generate(),
-            now(),
-            AgentPolicyInstant::from_millis(600_002),
-        )
-        .unwrap();
-    let Some(LifecycleResult::Event(WorkBrowserResourceEvent::Acquired(lease))) =
-        acquire.poll(now()).unwrap()
-    else {
-        panic!("original acquisition")
-    };
-    let browser = owner.retained_browser(lease, now()).unwrap();
-    (owner, native, resource, browser)
+    (owner, native, resource)
 }
 fn input(binding: &WorkBrowserReadBinding, clock: Arc<Clock>) -> AgentWorkRunInput {
     input_with_source(
