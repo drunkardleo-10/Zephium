@@ -45,7 +45,9 @@ mod work_resource;
 #[cfg(target_os = "macos")]
 pub use work_resource::work_browser_monotonic_now;
 #[cfg(target_os = "macos")]
-pub(crate) use work_resource::{WorkLifecycleTask, WorkObservationTask, WorkResourceGuard};
+pub(crate) use work_resource::{
+    WorkLifecycleTask, WorkNavigationTask, WorkObservationTask, WorkResourceGuard,
+};
 
 pub(crate) type AgentContextEventSink = Arc<dyn Fn(ContextNativeEvent) + Send + Sync>;
 
@@ -1448,6 +1450,14 @@ impl EngineAgentBrowserPort {
 }
 
 impl AgentBrowserPort for EngineAgentBrowserPort {
+    #[cfg(target_os = "macos")]
+    fn work_resource_navigate(
+        &self,
+        request: zephium_agentic::WorkBrowserNavigationRequest,
+        completion: zephium_agentic::WorkBrowserNavigationCompletionCallback,
+    ) -> zephium_agentic::WorkBrowserNavigationDispatch {
+        self.schedule_work_navigation(request, completion)
+    }
     #[cfg(target_os = "macos")]
     fn work_resource_lifecycle(
         &self,

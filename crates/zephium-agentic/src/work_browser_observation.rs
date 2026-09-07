@@ -126,6 +126,9 @@ impl WorkBrowserResources {
     ) -> Result<WorkBrowserReadBinding, WorkBrowserResourceError> {
         self.admits_lease(lease, now)?;
         let row = self.row_mut(lease.resource())?;
+        if !row.document_available || row.navigation.is_some() {
+            return Err(WorkBrowserResourceError::Pending);
+        }
         let document = row
             .effective_document
             .as_ref()
@@ -138,6 +141,8 @@ impl WorkBrowserResources {
                 ContextKind::Owned,
             ),
             ContextGeneration::new(lease.generation).ok_or(WorkBrowserResourceError::Exhausted)?,
+            row.navigation_epoch,
+            row.frame_generation,
         );
         let frame = SemanticFrameJoin::try_new(
             context,
@@ -235,7 +240,10 @@ impl WorkBrowserResources {
             return Ok(WorkBrowserObservationEvent::DebtSettled);
         }
         Ok(match completion.outcome {
-            Ok(snapshot) => WorkBrowserObservationEvent::Snapshot(Box::new(snapshot)),
+            Ok(snapshot) => {
+                row.observed = true;
+                WorkBrowserObservationEvent::Snapshot(Box::new(snapshot))
+            }
             Err(failure) => WorkBrowserObservationEvent::Refused(failure),
         })
     }

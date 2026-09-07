@@ -30,6 +30,9 @@ const DRAIN_BUDGET: Duration = Duration::from_secs(5);
 #[path = "work_resource_witness.rs"]
 mod witness;
 
+#[path = "work_resource_navigation.rs"]
+mod navigation;
+
 pub(super) struct WorkNativeResource {
     guard: Arc<WorkResourceGuard>,
     construction: Option<WorkLifecycleTask>,
@@ -40,6 +43,7 @@ pub(super) struct WorkNativeResource {
         SemanticRuntimeCorrelation,
         crate::platform::imp::ContentPolicyTimeout,
     )>,
+    navigation: Option<navigation::WorkNavigation>,
     last_invocation: u64,
     document_started: bool,
     retirement_clean: bool,
@@ -104,6 +108,7 @@ impl WorkNativeResource {
             destruction: None,
             watchdog: None,
             observation: None,
+            navigation: None,
             last_invocation: 0,
             document_started: false,
             retirement_clean: true,
@@ -140,6 +145,7 @@ impl WorkNativeResource {
             || self.revocation.is_some()
             || self.destruction.is_some()
             || self.observation.is_some()
+            || self.navigation.is_some()
     }
     pub(super) fn resident(&self) -> bool {
         self.view.is_some()
@@ -149,6 +155,7 @@ impl WorkNativeResource {
             && self.view.is_none()
             && self.guard.callbacks_drained()
             && self.observation.is_none()
+            && self.navigation.is_none()
     }
     fn retire_construction(&mut self) {
         if let Some(task) = self.construction.take() {
@@ -160,6 +167,9 @@ impl WorkNativeResource {
         // physical delivery barriers. Ingress-owned queued tasks and accepted
         // reads remain independently owed; refusal is not a drain shortcut.
         self.retire_construction();
+        if let Some(navigation) = self.navigation.take() {
+            navigation.refuse(ContextPortFailure::Shutdown);
+        }
         if let Some(task) = self.revocation.take() {
             task.complete(Outcome::Refused);
         }
@@ -512,6 +522,7 @@ impl EngineHost {
             destruction: None,
             watchdog: None,
             observation: None,
+            navigation: None,
             last_invocation: 0,
             document_started: false,
             retirement_clean: false,
@@ -613,6 +624,7 @@ impl EngineHost {
             }
             return;
         }
+        resource.progress_navigation(self.erasure_tombstones.contains(&resource.profile()));
         if resource
             .view
             .as_ref()
@@ -749,6 +761,7 @@ impl EngineHost {
                 .and_then(|request| request.lease())
                 .is_some_and(|lease| guard.lease_drained(lease))
                 && resource.observation.is_none()
+                && resource.navigation.is_none()
                 && resource.ready()
                 && resource
                     .view

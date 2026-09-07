@@ -13,6 +13,11 @@ one [frozen public product brief](../eval/agentic-browsing/macos-retained-public
 on 2026-09-07, with two stateless Luna calls and clean independent closure.
 That one-page read-only result is not general task or shipping-product readiness.
 
+The next deterministic slice adds an execution-lease-bound native document
+transition on that same retained resource. The shared controller/application
+still exposes the one-page contract: successor navigation has **not** been
+qualified with a live page/model, and no general Work navigation is enabled.
+
 ## Production selected-profile attachment
 
 The shipping `macos-work` Rust entry is now
@@ -86,8 +91,55 @@ monotonic generation and original absolute deadline without relabeling the
 resource or page. It is neither an account/effect/navigation capability nor a
 model-facing tool. Future page operations must also join the approved policy,
 account, current document, observation and operation-specific native permit.
-This checkpoint enables only an explicit trusted construction source and the
-existing bounded initial all-role observation, not general navigation or effects.
+The application currently enables only an explicit trusted construction source
+and bounded all-role observation. The native successor primitive below adds no
+application navigation or effect authority by itself.
+
+## Retained document transitions: deterministic native primitive
+
+An execution lease may prepare one successor only after a successful observation
+of its exact current document. Preparation reserves a successor operation and
+navigation/frame epochs privately, immediately makes old read bindings and
+automation state unusable, and holds registry navigation debt. It does **not**
+advance the row's committed URL/epochs or dispatch anything. The preparation
+becomes a move-only native request only when bound to the existing policy's exact
+`AgentActiveNavigation`. Scope, account, budget and audit authorization therefore
+remain in that policy; the lease is not a new source of navigation authority.
+This first primitive accepts exact-target navigation with no redirects.
+
+The native ingress independently joins the original private resource guard,
+lease/deadline, successfully core-accounted source observation and document epoch.
+It reserves the actual task/navigation slot before dispatch. The host rechecks
+the selected profile erasure state, current native URL/gate, semantic callback
+drain and original lease immediately before loading. A 30-second navigation
+ceiling is intersected with the original lease deadline. No temporary tab, legacy
+context registry, replacement view, profile or run-owned page is constructed.
+
+The original resource-owned document gate admits an explicit successor from its
+Ready state. It never reopens bootstrap, constructor authority or unsolicited
+location handling. The load must independently pass the exact native
+Started/Committed/Finished sequence, native navigation identity and target;
+redirects, old-document callbacks, target substitution and post-ready location
+drift still refuse. Only the exact successful terminal publishes the successor
+URL and epochs. The resource identity, native view, profile and execution lease
+stay unchanged; the next document requires a fresh observation before automation.
+
+Core navigation debt and the native request/task/callback-return debt remain
+separate and both join lease revocation, destruction and global shutdown. A
+successful terminal arriving after revocation records physical document facts
+but cannot resume the old actor. Synchronous non-admission returns the original
+request for explicit accounting. Failure or uncertain admission never restores
+old authority and requires cleanup in this slice. Destruction settles the
+host-owned navigation task before waiting for its original native drains.
+
+Deterministic tests cover the actual policy-to-request/budget-receipt join,
+pre-dispatch invalidation versus committed epoch publication, fresh successor
+observation, foreign/stale terminals, refusal, expiry, revocation/destruction,
+physical callback-return barriers and exact native gate event ordering. The
+shared port defaults to lossless Unsupported outside the concrete macOS adapter.
+Controller transcript retirement, fresh account evidence, production rendering
+opportunities and a genuine unfamiliar multi-page live witness remain the next
+integration work; these tests do not qualify those capabilities.
 
 ## Exact lifetime protocol
 

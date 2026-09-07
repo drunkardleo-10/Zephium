@@ -43,6 +43,9 @@ struct State {
     // Keep that exact delivery reservation separate from the active lease.
     retirement_delivery: Option<WorkBrowserExecutionLease>,
     reads: usize,
+    navigation: Option<zephium_agentic::ContextOperationJoin>,
+    observed: Option<zephium_agentic::ContextJoin>,
+    document_epoch: u64,
     callbacks: usize,
     uncertain: bool,
     notification_pending: bool,
@@ -91,6 +94,9 @@ impl WorkResourceGuard {
                 lease: None,
                 retirement_delivery: None,
                 reads: 0,
+                navigation: None,
+                observed: None,
+                document_epoch: 1,
                 callbacks: 0,
                 uncertain: false,
                 notification_pending: false,
@@ -214,6 +220,7 @@ impl WorkResourceGuard {
                     && state.lease.is_none()
                     && state.retirement_delivery.is_none()
                     && state.reads == 0
+                    && state.navigation.is_none()
                     && state.callbacks == 0 =>
             {
                 let lease = request
@@ -252,6 +259,7 @@ impl WorkResourceGuard {
                     && state.retirement_delivery.is_none()
                     && state.callbacks == 0
                     && state.lease.as_ref() == Some(lease)
+                    && state.navigation.is_none()
                     && now < lease.deadline()
             })
     }
@@ -284,6 +292,7 @@ impl WorkResourceGuard {
                     && state.lease.as_ref() == Some(lease)
                     && state.retirement_delivery.as_ref() == Some(lease)
                     && state.reads == 0
+                    && state.navigation.is_none()
                     && state.callbacks == 0
             })
     }
@@ -292,6 +301,7 @@ impl WorkResourceGuard {
             !state.construction_pending
                 && state.retirement_delivery.is_none()
                 && state.reads == 0
+                && state.navigation.is_none()
                 && state.callbacks == 0
                 && !state.notification_pending
         })
@@ -355,10 +365,17 @@ impl WorkResourceGuard {
         if now >= request.lease().deadline() {
             return Err(ContextPortFailure::TimedOut);
         }
-        if state.reads != 0 {
+        if state.reads != 0 || state.navigation.is_some() || state.callbacks != 0 {
             return Err(ContextPortFailure::ResourceExhausted);
         }
+        let context = request.invocation().frame().context();
+        if context.navigation_epoch().get() != state.document_epoch
+            || context.frame_generation().get() != state.document_epoch
+        {
+            return Err(ContextPortFailure::Stale);
+        }
         state.reads = 1;
+        state.observed = Some(context);
         Ok(())
     }
     fn read_terminal_begin(&self) {
@@ -425,6 +442,7 @@ impl WorkResourceGuard {
                 && debt == zephium_agentic::WorkBrowserLeaseNativeDebt::default()
                 && resource_retained
                 && state.reads == 0
+                && state.navigation.is_none()
                 && state.callbacks == 0 =>
             {
                 state.phase = Phase::Retained;
@@ -436,6 +454,7 @@ impl WorkResourceGuard {
                 if !state.construction_pending
                     && state.retirement_delivery.is_none()
                     && state.reads == 0
+                    && state.navigation.is_none()
                     && state.callbacks == 0 =>
             {
                 state.phase = Phase::Destroyed;
@@ -476,6 +495,7 @@ impl WorkResourceGuard {
             && state.phase == Phase::Retained
             && state.lease.is_none()
             && state.reads == 0
+            && state.navigation.is_none()
             && state.callbacks == 0;
         // Publication joins the fixed slot with its short registration lock.
         // Registration never invokes code, so it cannot call back into this
@@ -1034,3 +1054,7 @@ impl EngineAgentBrowserPort {
 #[cfg(test)]
 #[path = "work_resource_port_tests.rs"]
 mod tests;
+
+#[path = "work_resource_navigation_port.rs"]
+mod navigation;
+pub(crate) use navigation::WorkNavigationTask;

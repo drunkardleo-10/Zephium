@@ -975,6 +975,18 @@ pub type SemanticActionNativeCompletion =
 /// never project owned contexts into tab/session/extension inventories and
 /// must retain no queue, worker, timer, or page when no contexts exist.
 pub trait AgentBrowserPort: Send + Sync {
+    /// Policy-bound exact document transition on an existing execution lease.
+    /// Unsupported adapters return the original request without a callback.
+    fn work_resource_navigate(
+        &self,
+        request: crate::WorkBrowserNavigationRequest,
+        _completion: crate::WorkBrowserNavigationCompletionCallback,
+    ) -> crate::WorkBrowserNavigationDispatch {
+        crate::WorkBrowserNavigationDispatch::Rejected {
+            request: Box::new(request),
+            failure: ContextPortFailure::Unsupported,
+        }
+    }
     /// Product resource-lifetime seam, unsupported until an adapter proves
     /// persistent resource ownership and exact scoped lease drain. This does
     /// not reuse legacy cancellation, unseal a port or grant a model tool.

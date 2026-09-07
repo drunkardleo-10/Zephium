@@ -1,8 +1,12 @@
-//! Resource-owned one-document navigation gate. No run/legacy operation join,
-//! redirect allowance, reload, same-document continuation or model target.
+//! Resource-owned document gate. Construction and explicit policy-bound
+//! successor loads share one gate; unsolicited transitions, redirects and
+//! same-document continuation never acquire authority from native callbacks.
 
 use std::sync::{Arc, Mutex};
-use zephium_agentic::ContextNavigationTarget;
+use zephium_agentic::{
+    ContextJoin, ContextNavigationRequest, ContextNavigationTarget, ContextOperationJoin,
+    ContextPortFailure,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Phase {
@@ -28,6 +32,8 @@ struct State {
     location_revision: u64,
     native_id: Option<wry::NavigationId>,
     requested: bool,
+    navigation_epoch: u64,
+    operation: Option<ContextOperationJoin>,
     #[cfg(feature = "native-agentic-work-resource-probe")]
     evidence: NavigationEvidence,
 }
@@ -100,7 +106,8 @@ impl CurrentDocumentEvidence {
     }
 }
 
-/// Immutable source comes only from an admitted Work construction request.
+/// One resource's document authority. Construction fixes the initial source;
+/// only an admitted execution-lease operation can retire it for a successor.
 #[derive(Clone)]
 pub(crate) struct WorkDocumentNavigation(Arc<Mutex<State>>);
 impl Default for WorkDocumentNavigation {
@@ -117,6 +124,8 @@ impl Default for WorkDocumentNavigation {
             location_revision: 0,
             native_id: None,
             requested: false,
+            navigation_epoch: 1,
+            operation: None,
             #[cfg(feature = "native-agentic-work-resource-probe")]
             evidence: NavigationEvidence::default(),
         })))
@@ -124,6 +133,59 @@ impl Default for WorkDocumentNavigation {
 }
 
 impl WorkDocumentNavigation {
+    /// Reuse the exact resource gate only under an admitted successor operation.
+    /// The source was freshly observed under the same execution lease; the host
+    /// additionally checks the current native URL and exact ingress reservation.
+    pub(crate) fn arm_successor(
+        &self,
+        source: ContextJoin,
+        request: &ContextNavigationRequest,
+    ) -> Result<(), ()> {
+        let mut state = self.0.lock().map_err(|_| ())?;
+        let next = request.operation().context();
+        if state.phase != Phase::Ready
+            || state.operation.is_some()
+            || state.native_id.is_none()
+            || state.navigation_epoch != source.navigation_epoch().get()
+            || source.identity() != next.identity()
+            || source.context_generation() != next.context_generation()
+            || source.cancellation_generation() != next.cancellation_generation()
+            || source.frame() != zephium_agentic::FrameId::MAIN
+            || next.frame() != zephium_agentic::FrameId::MAIN
+            || source.navigation_epoch().get().checked_add(1) != Some(next.navigation_epoch().get())
+            || source.frame_generation().get().checked_add(1) != Some(next.frame_generation().get())
+            || request.redirect_policy().is_some()
+        {
+            return Err(());
+        }
+        state.operation = Some(request.operation());
+        state.target = Some(request.target().clone());
+        state.effective = None;
+        state.policy = zephium_agentic::WorkBrowserDocumentPolicy::Exact;
+        state.native_id = None;
+        state.requested = false;
+        state.phase = Phase::Armed;
+        Ok(())
+    }
+    /// One exact terminal after original native event callbacks have returned.
+    pub(crate) fn take_successor_terminal(
+        &self,
+    ) -> Option<(
+        ContextOperationJoin,
+        Result<ContextNavigationTarget, ContextPortFailure>,
+    )> {
+        let mut state = self.0.lock().ok()?;
+        let outcome = match state.phase {
+            Phase::Ready => Ok(state.effective.clone()?),
+            Phase::Refused | Phase::Retired => Err(ContextPortFailure::NativeRefused),
+            _ => return None,
+        };
+        let operation = state.operation.take()?;
+        if outcome.is_ok() {
+            state.navigation_epoch = operation.context().navigation_epoch().get();
+        }
+        Some((operation, outcome))
+    }
     #[cfg(feature = "native-agentic-work-resource-probe")]
     pub(crate) fn construction_evidence(&self) -> Option<NavigationEvidence> {
         let state = self.0.lock().ok()?;
@@ -371,6 +433,115 @@ mod tests {
     use super::*;
     use wry::NavigationEventPhase as E;
     const URL: &str = "https://example.test/frozen";
+    fn next_request() -> (ContextJoin, ContextNavigationRequest) {
+        use zephium_agentic::*;
+        let identity = ContextIdentity::new(
+            ContextId::generate(),
+            ContextRunId::generate(),
+            zephium_core::ids::ProfileId::generate(),
+            ContextKind::Owned,
+        );
+        let mut registry = ContextRegistry::new();
+        registry
+            .reserve(
+                identity,
+                ContextCapabilities::try_new(
+                    ContextKind::Owned,
+                    &[ContextCapability::Navigate, ContextCapability::Observe],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let construction = registry
+            .begin_context(identity.id(), ContextOperationId::new(1).unwrap())
+            .unwrap();
+        registry
+            .settle_construction(identity.id(), construction, ContextSettlement::Applied)
+            .unwrap();
+        let source = registry.join(identity.id()).unwrap();
+        registry
+            .acknowledge_observation(identity.id(), source)
+            .unwrap();
+        let operation = registry
+            .begin_navigation(identity.id(), ContextOperationId::new(2).unwrap())
+            .unwrap();
+        (
+            source,
+            ContextNavigationRequest::try_new(
+                operation,
+                ContextNavigationTarget::parse("https://example.test/next").unwrap(),
+            )
+            .unwrap(),
+        )
+    }
+    fn ready_gate() -> WorkDocumentNavigation {
+        let gate = armed();
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, URL)).unwrap();
+        }
+        gate
+    }
+    #[test]
+    fn successor_uses_same_gate_exact_lineage_and_one_terminal_without_bootstrap() {
+        let gate = ready_gate();
+        let (source, request) = next_request();
+        let next = request.target().as_url().as_str();
+        gate.arm_successor(source, &request).unwrap();
+        assert!(!gate.ready(Some(URL)));
+        assert!(!gate.allows("about:blank"));
+        assert!(!gate.allows(URL));
+        assert!(gate.allows(next));
+        assert!(!gate.allows(next));
+        assert!(gate.take_successor_terminal().is_none());
+        gate.observe(event(2, E::Started, next)).unwrap();
+        gate.location_changed().unwrap();
+        assert_eq!(
+            gate.observe(event(2, E::Committed, next)),
+            Ok((true, false))
+        );
+        assert!(gate.take_successor_terminal().is_none());
+        gate.observe(event(2, E::Finished, next)).unwrap();
+        assert!(gate.ready(Some(next)));
+        assert!(gate.arm_successor(source, &request).is_err());
+        let (operation, outcome) = gate.take_successor_terminal().unwrap();
+        assert_eq!(operation, request.operation());
+        assert_eq!(outcome.as_ref(), Ok(request.target()));
+        assert_eq!(gate.0.lock().unwrap().navigation_epoch, 2);
+        assert!(gate.take_successor_terminal().is_none());
+        assert!(gate.arm_successor(source, &request).is_err());
+        assert_eq!(gate.location_changed(), Ok(true));
+        assert!(!gate.ready(Some(next)));
+    }
+    #[test]
+    fn successor_rejects_old_document_events_redirects_wrong_ids_and_post_ready_drift() {
+        for fault in 0..6 {
+            let gate = ready_gate();
+            let (source, request) = next_request();
+            let next = request.target().as_url().as_str();
+            gate.arm_successor(source, &request).unwrap();
+            assert!(gate.allows(next));
+            gate.observe(event(2, E::Started, next)).unwrap();
+            let hostile = match fault {
+                0 => event(1, E::Finished, URL),
+                1 => event(2, E::Redirected, next),
+                2 => event(3, E::Committed, next),
+                3 => event(2, E::Committed, URL),
+                4 => event(2, E::Finished, next),
+                _ => event(2, E::Failed, next),
+            };
+            gate.observe(hostile).unwrap();
+            assert!(gate.failed());
+            let (operation, outcome) = gate.take_successor_terminal().unwrap();
+            assert_eq!(operation, request.operation());
+            assert!(outcome.is_err());
+            gate.observe(event(2, E::Committed, next)).unwrap();
+            gate.observe(event(2, E::Finished, next)).unwrap();
+            assert!(!gate.ready(Some(next)));
+            assert!(!gate.ready(Some(URL)));
+            assert!(gate.arm_successor(source, &request).is_err());
+            assert_eq!(gate.0.lock().unwrap().navigation_epoch, 1);
+        }
+    }
     #[cfg(feature = "native-agentic-work-resource-probe")]
     #[test]
     fn current_components_distinguish_normalization_and_drift_without_granting_authority() {

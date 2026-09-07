@@ -422,6 +422,11 @@ struct Resource {
     document: Option<Arc<ContextNavigationTarget>>,
     document_policy: crate::WorkBrowserDocumentPolicy,
     effective_document: Option<Arc<ContextNavigationTarget>>,
+    navigation_epoch: crate::NavigationEpoch,
+    frame_generation: crate::FrameGeneration,
+    document_available: bool,
+    observed: bool,
+    navigation: Option<navigation::NavigationJoin>,
     observation_sequence: u16,
     observation: Option<observation::ObservationJoin>,
 }
@@ -608,6 +613,11 @@ impl WorkBrowserResources {
                 document: document.clone(),
                 document_policy,
                 effective_document: None,
+                navigation_epoch: crate::NavigationEpoch::INITIAL,
+                frame_generation: crate::FrameGeneration::INITIAL,
+                document_available: false,
+                observed: false,
+                navigation: None,
                 observation_sequence: 0,
                 observation: None,
             },
@@ -648,6 +658,7 @@ impl WorkBrowserResources {
             || row.pending.is_some()
             || row.lease.is_some()
             || row.observation.is_some()
+            || row.navigation.is_some()
         {
             return Err(WorkBrowserResourceError::Phase);
         }
@@ -665,6 +676,7 @@ impl WorkBrowserResources {
             lease: Some(lease.clone()),
         };
         row.lease = Some(lease);
+        row.observed = false;
         row.phase = WorkBrowserResourcePhase::Acquiring;
         row.pending = Some(operation.clone());
         Ok(WorkBrowserResourceRequest {
@@ -881,6 +893,7 @@ impl WorkBrowserResources {
                     ));
                 }
                 row.effective_document = effective;
+                row.document_available = row.effective_document.is_some();
                 row.phase = WorkBrowserResourcePhase::Retained;
                 return Ok(WorkBrowserResourceEvent::Retained(row.join.clone()));
             }
@@ -906,6 +919,7 @@ impl WorkBrowserResources {
                     && debt.is_empty()
                     && resource_retained
                     && row.observation.is_none()
+                    && row.navigation.is_none()
                 {
                     if let Some(lease) = row.lease.take() {
                         row.phase = WorkBrowserResourcePhase::Retained;
@@ -1009,6 +1023,7 @@ impl WorkBrowserResources {
                     && row.destruction.is_none()
                     && row.lease.is_none()
                     && row.observation.is_none()
+                    && row.navigation.is_none()
             })
     }
     /// Admits the existing global native seal/audit protocol once, only after
@@ -1041,7 +1056,11 @@ impl WorkBrowserResources {
         resource: &WorkBrowserResourceJoin,
     ) -> Result<WorkBrowserResourceIdentity, WorkBrowserResourceError> {
         let row = self.row_mut(resource)?;
-        if row.pending.is_some() || row.destruction.is_some() || row.observation.is_some() {
+        if row.pending.is_some()
+            || row.destruction.is_some()
+            || row.observation.is_some()
+            || row.navigation.is_some()
+        {
             return Err(WorkBrowserResourceError::Pending);
         }
         if row.phase != WorkBrowserResourcePhase::Destroyed || row.lease.is_some() {
@@ -1060,6 +1079,14 @@ pub use observation::{
     WorkBrowserObservationCompletion, WorkBrowserObservationCompletionCallback,
     WorkBrowserObservationDispatch, WorkBrowserObservationEvent, WorkBrowserObservationRequest,
     WorkBrowserReadBinding,
+};
+
+#[path = "work_browser_navigation.rs"]
+mod navigation;
+pub use navigation::{
+    WorkBrowserNavigationCompletion, WorkBrowserNavigationCompletionCallback,
+    WorkBrowserNavigationDispatch, WorkBrowserNavigationEvent, WorkBrowserNavigationPreparation,
+    WorkBrowserNavigationRequest,
 };
 
 #[path = "work_browser_delivery.rs"]

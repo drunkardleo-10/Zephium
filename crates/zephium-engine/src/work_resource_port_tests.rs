@@ -3,7 +3,7 @@ use zephium_agentic::{
     ContextRunId, WorkBrowserResourceEvent, WorkBrowserResourceId, WorkBrowserResources, WorkId,
 };
 
-fn tick(value: u64) -> AgentPolicyInstant {
+pub(super) fn tick(value: u64) -> AgentPolicyInstant {
     AgentPolicyInstant::from_millis(value)
 }
 fn admission() -> Arc<AgentPortAdmission> {
@@ -23,7 +23,7 @@ fn source() -> (WorkBrowserResources, WorkBrowserResourceRequest) {
         .unwrap();
     (rows, request)
 }
-fn setup() -> (
+pub(super) fn setup() -> (
     WorkBrowserResources,
     Arc<AgentPortAdmission>,
     Arc<WorkResourceGuard>,
@@ -43,7 +43,7 @@ fn setup() -> (
         .unwrap();
     (rows, admission, guard)
 }
-fn leased(
+pub(super) fn leased(
     rows: &mut WorkBrowserResources,
     guard: &Arc<WorkResourceGuard>,
 ) -> WorkBrowserExecutionLease {
@@ -69,7 +69,7 @@ fn drained() -> Outcome {
         resource_retained: true,
     }
 }
-fn port(
+pub(super) fn port(
     admission: Arc<AgentPortAdmission>,
     dispatch: MainThreadDispatch,
 ) -> EngineAgentBrowserPort {
