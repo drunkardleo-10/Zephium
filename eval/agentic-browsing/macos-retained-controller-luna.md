@@ -1,9 +1,11 @@
 # macOS retained common-controller / Luna composition
 
-Status: **Failed first actual-app run, 2026-09-07; corrective source pending live
-qualification**. Deterministic/build checks do not qualify native or provider
-behavior. This is one synthetic-public fixture in the isolated actual application,
-not a public-site matrix or product admission.
+Status: **One actual-app synthetic-public fixture qualified, 2026-09-07**.
+The corrected retained WKWebView/common-controller/Luna run passed the complete
+recorded acceptance and shutdown checks. This does not qualify a real public-site
+workflow, public-site matrix or product admission. Earlier failure and deferral
+evidence remains below; deterministic/build checks alone do not qualify native
+or provider behavior.
 
 ## Exact boundary
 
@@ -155,7 +157,8 @@ post-Destroy drain before its single shutdown audit; it does not reinterpret a
 nonzero audit as clean or renew cleanup deadlines. Focused deterministic regression
 tests cover insufficient/exact reservation boundaries, pre-provider failure
 through the actual common scoped worker, and delayed native reporter retirement.
-No corrected GUI launch, Keychain access or provider call has been performed.
+At this correction stage, no corrected GUI launch, Keychain access or provider
+call had been performed.
 
 Corrective candidate verification: the Luna reservation boundary test passed;
 all 45 application Work-resource tests and 38 native Work-resource tests passed;
@@ -223,3 +226,45 @@ boundary mutation tests passed. The retained-feature desktop test target passed
 strict Clippy; the agentic-probe architecture gate, hostile JavaScript smoke,
 formatting and whitespace checks also passed. No corrected application launch,
 credential access or provider call accompanied this timing adjustment.
+
+## Qualified actual-app fixture, 2026-09-07
+
+The explicitly authorized live candidate used source
+`37dc42ee0afc607bd54a6831df2018173ff74e24`, arm64 executable SHA-256
+`e3b71358f9c43ff304cfd8eb97ad26b2abdc64476c0677a0bac886ee446988bb`,
+and bundle identifier `app.zephium.work-rendering-probe`.
+
+Admission was `Admitted`, with `waited_ms=9931` and `checks=73`. Configuration
+was `OpenAIResponses`, `gpt-5.6-luna`, stateless retention and
+`semantic-rendering-v1`. The one native observation contained seven nodes,
+complete/current-document true, zero frame boundaries and all five readiness
+markers true.
+
+The recorded content-free provider sequence was:
+
+| Call | Input tokens | Output tokens | Cost (micro-USD) | Request bytes | Semantic bytes | Elapsed (ms) |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 720 | 58 | 214 | 3586 | 603 | 3319 |
+| 2 | 888 | 88 | 284 | 5723 | 952 | 1987 |
+
+The first call proposed `Extract`. Terminal `wall_ms=5540` reported accepted,
+`ModelMapped`, non-durable output. Totals were exactly two model calls, 1608
+input tokens, 146 output tokens and 498 micro-USD.
+
+Mapping verified, presentation retired, scoped worker drained and original
+resource retired were all true. Native primary and cleanup failures were both
+`None`. The result was `RetainedControllerAccepted`; native cohort, human
+ownership and fixture cleanup were clean, with total `elapsed_ms=6915`.
+Final application evidence recorded `qualified=true`,
+`normal_shutdown_clean=true`, `exact_native_weak_drain=Some(true)` and
+`work-retained-shutdown-owner: closed=true`.
+
+This is actual native/provider evidence for the single frozen synthetic-public
+loopback fixture through the retained WKWebView, original common controller,
+real Luna transport, scoped worker and ordinary application shutdown. It proves
+the recorded non-durable fixture mapping and exact closure, not general factual
+accuracy or a user workflow on a real public website. No navigation, action,
+authenticated/account workflow, durable publication, successor admission or
+parallel production execution is qualified by this run. Those remain separate
+workflow qualification work; no page/model text or credential material is
+included in this record.
