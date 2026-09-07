@@ -250,6 +250,49 @@ Focused deterministic measurements (not live-model token predictions):
 - Six extraction-encoder and five read-encoder tests pass, including hostile
   delimiter quoting, cross-frame/sensitive provenance and exact binding.
 
-The corrected encoder has not yet been live-qualified. A real mapper response,
-source validation, durable success and human-reviewed usefulness still need
-the unchanged open-objective Luna run after integration review.
+At this implementation checkpoint the corrected encoder had not yet been
+live-qualified; the following run records the required real mapper response,
+source validation, durable success and human-reviewed usefulness.
+
+## Corrected live route: accepted source-backed result
+
+Commit `6f8507e` was built as the unsigned debug
+`app.zephium.work-navigation-probe` bundle. Its executable SHA-256 was
+`ae88ced5a857e0e477f4edc43a877061baf5e016cc361e110d6ddb2159b46735`.
+The unchanged open-objective Luna run completed in approximately 22.8 seconds:
+
+1. Navigate from the observed overview link to the official `$state` page.
+2. Inspect the bounded main region.
+3. Inspect 700 bytes before / 1,800 bytes after the relevant current heading.
+4. Extract the trusted three-field result from that exact current observation.
+
+The five stored calls consumed 21,000 input / 1,045 output tokens and 5,696
+microUSD under priced-ceiling accounting. The final mapper call received one
+2,503-byte current-page source fragment encoded as compact `ZREAD3`; it returned
+a source-backed explanation of destructuring, direct proxy-property access,
+deep proxying, original-object identity, class / `Object.create` boundaries and
+`$state.raw`. Human inspection found the answer useful and faithful to the
+provided official passage. This is an evaluation judgment, not a mechanical
+factual-validation claim.
+
+The controller reported five model calls, one navigation, verified source
+mapping, verified durable terminal state and clean retained/native shutdown.
+The preserved Store passed SQLite integrity and foreign-key checks and contains
+one terminal Work run, fifteen audit events, one audit delivery and zero local
+artifacts; result content intentionally remains in the inspectable-public
+stored provider response for this qualification profile. Exact Store and five
+response/input-item pairs are preserved at
+`/private/tmp/zephium-retained-svelte-extraction-live.wpoNiZ`.
+
+Stored response IDs in call order:
+
+- `resp_0fd304d06dbafbba006a9f2ddb50e887d2a391404888ff3775`
+- `resp_0d26ed7ad603d296006a9f2dde976487d29ceb11faa3188fb0`
+- `resp_0c672230f46c82a2006a9f2de315f087d28841e8fa89b88f33`
+- `resp_0f84cd458505903b006a9f2de868dc87d2b56e657d8f9000a1`
+- `resp_0f84cd458505903b006a9f2debddc087d28cdc929c595164df`
+
+This closes the reproduced extraction-encoding blocker and proves one
+single-agent, open-route, current-source-bound multi-page research workflow on
+macOS. It does not yet qualify arbitrary sites, signed-in mutation, concurrent
+user browsing, Windows behavior or multi-agent orchestration.
