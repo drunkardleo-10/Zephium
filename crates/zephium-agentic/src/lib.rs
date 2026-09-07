@@ -263,8 +263,12 @@ pub use agent_supervisor::{
     AgentSupervisorExecutionOutcome, AgentSupervisorExecutionReceipt, AgentSupervisorFailure,
     AgentSupervisorId, AgentSupervisorNodeCancellation, AgentSupervisorNodeSnapshot,
     AgentSupervisorNodeStatus, AgentSupervisorRuntimeError, AgentSupervisorRuntimeStatus,
-    AgentSupervisorWait, MAX_AGENT_DELEGATION_DEPTH, MAX_AGENT_EXECUTING_SUPERVISOR_NODES,
-    MAX_AGENT_LIVE_SUPERVISOR_NODES,
+    AgentSupervisorWait, AgentWorkChildOutput, AgentWorkExecution, AgentWorkExecutionRefusal,
+    AgentWorkNodeCheckpoint, AgentWorkOrchestration, AgentWorkOrchestrationCheckpoint,
+    AgentWorkOrchestrationError, AgentWorkOutputReference, MAX_AGENT_DELEGATION_DEPTH,
+    MAX_AGENT_EXECUTING_SUPERVISOR_NODES, MAX_AGENT_LIVE_SUPERVISOR_NODES,
+    MAX_AGENT_WORK_NODE_OUTPUTS, MAX_AGENT_WORK_ORCHESTRATION_OUTPUTS,
+    MAX_AGENT_WORK_ORCHESTRATION_TURNS,
 };
 pub use agent_work_journal::{
     AgentWorkDebt, AgentWorkDisposition, AgentWorkIncarnation, AgentWorkJournalCompletion,

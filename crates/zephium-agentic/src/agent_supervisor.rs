@@ -27,6 +27,10 @@ pub use runtime::{
     AgentSupervisorExecutionReceipt, AgentSupervisorFailure, AgentSupervisorId,
     AgentSupervisorNodeCancellation, AgentSupervisorNodeSnapshot, AgentSupervisorNodeStatus,
     AgentSupervisorRuntimeError, AgentSupervisorRuntimeStatus, AgentSupervisorWait,
+    AgentWorkChildOutput, AgentWorkExecution, AgentWorkExecutionRefusal, AgentWorkNodeCheckpoint,
+    AgentWorkOrchestration, AgentWorkOrchestrationCheckpoint, AgentWorkOrchestrationError,
+    AgentWorkOutputReference, MAX_AGENT_WORK_NODE_OUTPUTS, MAX_AGENT_WORK_ORCHESTRATION_OUTPUTS,
+    MAX_AGENT_WORK_ORCHESTRATION_TURNS,
 };
 
 /// Initial maximum simultaneously live nodes in one supervisor tree.

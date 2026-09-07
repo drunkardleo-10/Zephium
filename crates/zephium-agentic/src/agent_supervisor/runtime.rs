@@ -17,7 +17,14 @@ pub use context_schedule::{
     AgentSupervisorContextAssignment, AgentSupervisorContextCancellationTarget,
     AgentSupervisorContextRelease, AgentSupervisorContextReleaseOutcome,
 };
+mod orchestration;
 mod progress;
+pub use orchestration::{
+    AgentWorkChildOutput, AgentWorkExecution, AgentWorkExecutionRefusal, AgentWorkNodeCheckpoint,
+    AgentWorkOrchestration, AgentWorkOrchestrationCheckpoint, AgentWorkOrchestrationError,
+    AgentWorkOutputReference, MAX_AGENT_WORK_NODE_OUTPUTS, MAX_AGENT_WORK_ORCHESTRATION_OUTPUTS,
+    MAX_AGENT_WORK_ORCHESTRATION_TURNS,
+};
 pub use progress::{
     AgentProgressActivity, AgentProgressBlocker, AgentProgressOperation, AgentProgressResource,
     AgentProgressResult, AgentProgressState, AgentSemanticProgress,
