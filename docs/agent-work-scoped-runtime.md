@@ -28,7 +28,12 @@ durable record cannot release a startup gate.
 
 Native-resource, journal and progress callbacks share the original coalesced
 application wake. Each application poll drains/rearms that original stable
-resource lane; wake-only assertions guard against fixtures hiding a lost wake
+resource lane; the original runtime completion registers that wake independently
+of progress, before start, so consuming Terminal progress before worker exit
+cannot strand the coordinator. A task-destructor barrier regression consumes
+every last progress/native wake before permitting actual worker completion, then
+drives terminal persistence using only callbacks, without periodic polling.
+Wake-only assertions guard against fixtures hiding a lost wake
 by repeatedly polling. Unexpected global audit terminals remain retained and
 fail closed rather than being discarded or converted to resource proof.
 

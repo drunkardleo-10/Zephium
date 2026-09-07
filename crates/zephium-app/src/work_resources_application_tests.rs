@@ -79,6 +79,13 @@ fn child(test: &str) -> bool {
 }
 
 fn coordinator(directory: &std::path::Path) -> (RetainedWork, Arc<Native>, Arc<GatedStore>) {
+    coordinator_with_wake(directory, Arc::new(|| true))
+}
+
+fn coordinator_with_wake(
+    directory: &std::path::Path,
+    wake: WakeApplication,
+) -> (RetainedWork, Arc<Native>, Arc<GatedStore>) {
     let store = Arc::new(GatedStore {
         store: Arc::new(zephium_store::SqliteStore::open(directory).unwrap()),
         hold: Arc::new(AtomicU8::new(0)),
@@ -92,12 +99,157 @@ fn coordinator(directory: &std::path::Path) -> (RetainedWork, Arc<Native>, Arc<G
         None,
         Arc::new(move || {
             wakes.fetch_add(1, Ordering::AcqRel);
-            true
+            wake()
         }),
     );
     let work = RetainedWork::new(owner, resource, store.clone(), store.clone())
         .unwrap_or_else(|_| panic!("original owner and Store join"));
     (work, native, store)
+}
+
+struct TaskExitGate {
+    task: AgentWorkExtractionTask,
+    entered: mpsc::SyncSender<()>,
+    release: mpsc::Receiver<()>,
+}
+impl AgentWorkTask for TaskExitGate {
+    fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
+        self.task.extraction_schema()
+    }
+    fn accept_extraction(
+        &mut self,
+        result: &SemanticExtractionResult<'_>,
+    ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+        self.task.accept_extraction(result)
+    }
+    fn evaluate(
+        &mut self,
+        observation: &SemanticObservation,
+    ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+        self.task.evaluate(observation)
+    }
+    fn assess(
+        &self,
+        action: &SemanticPreparedAction,
+    ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+        self.task.assess(action)
+    }
+    fn attest_account(
+        &self,
+        context: ContextJoin,
+        now: AgentPolicyInstant,
+    ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
+        self.task.attest_account(context, now)
+    }
+}
+impl Drop for TaskExitGate {
+    fn drop(&mut self) {
+        // The common controller publishes Terminal, then drops its task, and
+        // only afterwards can the original worker publish completion.
+        self.entered.send(()).unwrap();
+        self.release.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+}
+
+#[test]
+fn worker_exit_wakes_application_after_last_progress_wake_was_consumed() {
+    if child("worker_exit_wakes_application_after_last_progress_wake_was_consumed") {
+        return;
+    }
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let directory = tempfile::tempdir().unwrap();
+    let (wake, wakes) = mpsc::sync_channel(1);
+    let (mut work, native, _) = coordinator_with_wake(
+        directory.path(),
+        Arc::new(move || match wake.try_send(()) {
+            Ok(()) | Err(mpsc::TrySendError::Full(())) => true,
+            Err(mpsc::TrySendError::Disconnected(())) => false,
+        }),
+    );
+    // No periodic/blind polling. Every poll below is driven by the exact
+    // original application wake, with timeout used only as test failure.
+    while !work.ready() {
+        wakes
+            .recv_timeout(Duration::from_secs(2))
+            .expect("Store claim wake");
+        work.poll(now());
+    }
+    let (entered, entering) = mpsc::sync_channel(1);
+    let (release, releasing) = mpsc::sync_channel(1);
+    let (server_tx, server_rx) = mpsc::sync_channel(1);
+    let request = ActorRequest {
+        run: ContextRunId::generate(),
+        deadline: AgentPolicyInstant::from_millis(600_002),
+        prepare: Box::new(move |browser, audit| {
+            let input = input(browser.binding(), Arc::new(Clock(AtomicU64::new(2))));
+            let (transport, server) =
+                fixture_provider_responses(vec![response_stream(1), response_stream(2)]);
+            server_tx.send(server).unwrap();
+            StagedActor::for_probe(
+                input,
+                browser,
+                transport,
+                AgentProviderCredential::try_new(
+                    AgentProviderKind::OpenAiResponses,
+                    "fixture-not-a-secret".into(),
+                )
+                .unwrap(),
+                audit,
+                Box::new(TaskExitGate {
+                    task: task(),
+                    entered,
+                    release: releasing,
+                }),
+            )
+        }),
+    };
+    assert!(work.submit(request, now()).is_ok());
+    let mut terminal = false;
+    while !terminal {
+        wakes
+            .recv_timeout(Duration::from_secs(2))
+            .expect("original progress wake");
+        work.poll(now());
+        while let Some(event) = work.take_event() {
+            terminal |= matches!(event.kind(), AgentWorkEventKind::Terminal);
+        }
+    }
+    entering.recv_timeout(Duration::from_secs(2)).unwrap();
+    native.join();
+    assert_eq!(
+        server_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .join()
+            .unwrap(),
+        2
+    );
+    while wakes.try_recv().is_ok() {
+        work.poll(now());
+        drain_events(&mut work);
+    }
+    assert_eq!(work.phase(), AdmissionPhase::Running);
+    assert_eq!(
+        work.record().unwrap().disposition(),
+        AgentWorkDisposition::Running
+    );
+    assert!(
+        work.next_deadline().is_none(),
+        "no timer may hide the missing completion wake"
+    );
+    release.send(()).unwrap();
+    while work.phase() != AdmissionPhase::Terminal {
+        wakes
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker completion or terminal Store ACK wake");
+        work.poll(now());
+        drain_events(&mut work);
+    }
+    assert!(work.take_extraction().is_some());
+    work.begin_shutdown();
+    assert!(work.poll_shutdown(now()).unwrap());
 }
 
 type Servers = Arc<Mutex<Vec<std::thread::JoinHandle<usize>>>>;

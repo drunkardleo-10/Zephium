@@ -283,6 +283,7 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "matchself.owner.poll_native_event()", "self.unexpected_native=Some(event)",
             "record==mutation.next()", "AdmissionPhase::Starting,AgentWorkDisposition::Running",
             "PendingScopedAgentRuntime::spawn_suspended(config,scope,controller)",
+            "completion.set_waker(self.waker.clone())",
             "drained.work_terminal(&active.runtime,record)",
             "drained.lease().resource()==&self.resource",
             "policy==Some(drained.policy())",

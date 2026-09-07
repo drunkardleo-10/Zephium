@@ -470,6 +470,7 @@ impl RetainedWork {
             }
         };
         let (runtime, completion, lifecycle) = pending.bind().into_parts();
+        completion.set_waker(self.waker.clone());
         let started = runtime.start_run().is_ok();
         self.active = Some(ActiveActor {
             handle,
