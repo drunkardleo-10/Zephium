@@ -4824,10 +4824,10 @@ pub fn run() {
             panel_window.on_window_event(move |event| match event {
                 tauri::WindowEvent::Focused(false) => blur_overlay.hide(),
                 #[cfg(target_os = "windows")]
-                tauri::WindowEvent::Destroyed => {
-                    if !platform::imp::remove_privileged_version_observer(overlay::PANEL_LABEL) {
-                        diagnostic!("runtime: panel WebView2 update observer removal was reentrant");
-                    }
+                tauri::WindowEvent::Destroyed
+                    if !platform::imp::remove_privileged_version_observer(overlay::PANEL_LABEL) =>
+                {
+                    diagnostic!("runtime: panel WebView2 update observer removal was reentrant");
                 }
                 _ => {}
             });

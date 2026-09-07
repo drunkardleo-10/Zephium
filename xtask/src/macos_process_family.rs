@@ -7,6 +7,7 @@
 //! and reads monotonic per-process kernel counters. It is an xtask-only
 //! measurement tool and grants no authority to product code.
 
+#[cfg(any(target_os = "macos", test))]
 use serde::Serialize;
 
 const MAX_BUNDLE_ID_BYTES: usize = 255;
@@ -29,6 +30,7 @@ struct MeasurementArguments {
     label: String,
 }
 
+#[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum ProcessRole {
@@ -39,6 +41,7 @@ enum ProcessRole {
     Auxiliary,
 }
 
+#[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct KernelCounters {
     user_cpu_abstime: u64,
@@ -55,6 +58,7 @@ struct KernelCounters {
     serviced_energy_raw: u64,
 }
 
+#[cfg(any(target_os = "macos", test))]
 impl KernelCounters {
     fn checked_delta(self, earlier: Self) -> Result<Self, String> {
         macro_rules! delta {
@@ -81,6 +85,7 @@ impl KernelCounters {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 struct UsageCounters {
     user_cpu_ns: u64,
@@ -97,6 +102,7 @@ struct UsageCounters {
     serviced_energy_raw: u64,
 }
 
+#[cfg(any(target_os = "macos", test))]
 impl UsageCounters {
     fn checked_add_assign(&mut self, other: Self) -> Result<(), String> {
         macro_rules! add {
