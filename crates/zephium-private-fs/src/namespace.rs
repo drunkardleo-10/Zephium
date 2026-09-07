@@ -433,10 +433,13 @@ impl SealedPrivateDirectory {
     /// freshly opened destination capability. The source and destination
     /// parents must share the exact same namespace lease. Same-parent
     /// publication is the universal layout and flushes that parent exactly
-    /// once. Linux additionally supports distinct parents and flushes both;
-    /// macOS returns a clean [`PrivateFsError::PrimitiveUnavailable`] because
-    /// that kernel requires write permission on a moved directory to update
-    /// `..`, which conflicts with the exact `0500` seal.
+    /// once. On macOS the consumed root alone transitions through owner-only
+    /// `0700`: older kernels require source-directory write permission even for
+    /// a same-parent rename. The root is immediately resealed and synced before
+    /// any capability can be returned; descendants are never unsealed. The
+    /// namespace operation lock and no-path-pins gate span that entire window.
+    /// Linux additionally supports distinct parents and flushes both; macOS
+    /// deliberately retains the narrower same-parent publication contract.
     pub fn publish_noreplace(
         self,
         destination_parent: &PrivateDirectory,
@@ -524,14 +527,57 @@ impl SealedPrivateDirectory {
             };
         }
 
-        let rename = platform::atomic_publish_noreplace_between(
-            &source_parent.handle,
-            &source_parent.path,
-            source_parent.child_name.as_str(),
-            &destination_parent.core.handle,
-            &destination_parent.core.path,
-            destination.as_str(),
-        );
+        #[cfg(target_os = "macos")]
+        if self.prepare_publication_root_unlocked().is_err() {
+            // A committed/ambiguous mode transition never returns the old
+            // capability. Best-effort sealing is cleanup, not a rename retry.
+            let _ = self.reseal_publication_root_unlocked();
+            let error = terminal_settlement_error(&self.lease);
+            drop(operation);
+            return Err(PrivateFsTransitionError::terminal(error));
+        }
+
+        let rename = || {
+            platform::atomic_publish_noreplace_between(
+                &source_parent.handle,
+                &source_parent.path,
+                source_parent.child_name.as_str(),
+                &destination_parent.core.handle,
+                &destination_parent.core.path,
+                destination.as_str(),
+            )
+        };
+        #[cfg(all(test, target_os = "macos"))]
+        let rename = if self
+            .lease
+            .take_lifecycle_fault(crate::lease::LifecycleFault::PublishRenameRefused)
+        {
+            Err(PrivateFsError::Io)
+        } else {
+            rename()
+        };
+        #[cfg(not(all(test, target_os = "macos")))]
+        let rename = rename();
+        #[cfg(all(test, target_os = "macos"))]
+        let rename = rename.and_then(|()| {
+            if self
+                .lease
+                .take_lifecycle_fault(crate::lease::LifecycleFault::PublishRenameCommitted)
+            {
+                Err(PrivateFsError::Io)
+            } else {
+                Ok(())
+            }
+        });
+
+        // Use the original descriptor, never either mutable name, for reseal.
+        // This runs after both success and refusal, before classifying either.
+        #[cfg(target_os = "macos")]
+        if self.reseal_publication_root_unlocked().is_err() {
+            let error = terminal_settlement_error(&self.lease);
+            drop(operation);
+            return Err(PrivateFsTransitionError::terminal(error));
+        }
         if let Err(error) = rename {
             let (clean_error, clean) = if error == PrivateFsError::AlreadyExists {
                 let classification =
@@ -555,13 +601,14 @@ impl SealedPrivateDirectory {
                         .and_then(|()| destination_parent.verify_boundary_unlocked()),
                 )
             };
+            let terminal = clean
+                .is_err()
+                .then(|| terminal_settlement_error(&self.lease));
             drop(operation);
-            return if clean.is_ok() {
-                Err(PrivateFsTransitionError::recoverable(clean_error, self))
+            return if let Some(error) = terminal {
+                Err(PrivateFsTransitionError::terminal(error))
             } else {
-                Err(PrivateFsTransitionError::terminal(
-                    terminal_settlement_error(&self.lease),
-                ))
+                Err(PrivateFsTransitionError::recoverable(clean_error, self))
             };
         }
 
@@ -572,10 +619,9 @@ impl SealedPrivateDirectory {
             && replace_published_directory_identity_for_test(destination_parent, destination)
                 .is_err()
         {
+            let error = terminal_settlement_error(&self.lease);
             drop(operation);
-            return Err(PrivateFsTransitionError::terminal(
-                terminal_settlement_error(&self.lease),
-            ));
+            return Err(PrivateFsTransitionError::terminal(error));
         }
 
         let settlement = (|| {
@@ -616,13 +662,59 @@ impl SealedPrivateDirectory {
             self.lease.verify_authority()?;
             Ok(installed)
         })();
+        // Publish quarantine while the operation mutex is still held. A
+        // competing capability admission must never enter between uncertain
+        // settlement and revocation of the shared namespace authority.
+        let settlement = settlement.map_err(|_| terminal_settlement_error(&self.lease));
         drop(operation);
         match settlement {
             Ok(installed) => Ok(installed),
-            Err(_) => Err(PrivateFsTransitionError::terminal(
-                terminal_settlement_error(&self.lease),
-            )),
+            Err(error) => Err(PrivateFsTransitionError::terminal(error)),
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn prepare_publication_root_unlocked(&self) -> Result<(), PrivateFsError> {
+        platform::set_directory_mode(&self.core.handle, DirectoryMode::Writable)?;
+        #[cfg(test)]
+        if self
+            .lease
+            .take_lifecycle_fault(crate::lease::LifecycleFault::PublishRootWritableCommitted)
+        {
+            return Err(PrivateFsError::Io);
+        }
+        verify_core_boundary(&self.core, DirectoryMode::Writable)?;
+        self.lease.verify_authority()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn reseal_publication_root_unlocked(&self) -> Result<(), PrivateFsError> {
+        #[cfg(test)]
+        if self
+            .lease
+            .take_lifecycle_fault(crate::lease::LifecycleFault::PublishRootResealRefused)
+        {
+            return Err(PrivateFsError::Io);
+        }
+        platform::set_directory_mode(&self.core.handle, DirectoryMode::Sealed)?;
+        #[cfg(test)]
+        if self
+            .lease
+            .take_lifecycle_fault(crate::lease::LifecycleFault::PublishRootResealCommitted)
+        {
+            return Err(PrivateFsError::Io);
+        }
+        platform::sync_directory(&self.core.handle)?;
+        #[cfg(test)]
+        if self
+            .lease
+            .take_lifecycle_fault(crate::lease::LifecycleFault::PublishRootResealSync)
+        {
+            return Err(PrivateFsError::Io);
+        }
+        // Source/destination name and parent joins are checked by settlement;
+        // successful fchmod/fsync alone never constitutes a returned authority.
+        Ok(())
     }
 
     /// Removes this directory only when its exact descriptor is empty.
@@ -3706,6 +3798,162 @@ mod tests {
             namespace.directory.list_components(4),
             Err(PrivateFsError::Quarantined)
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn publication_root_committed_frontiers_quarantine_without_capability() {
+        use std::os::unix::fs::PermissionsExt;
+        for (label, fault, committed_name) in [
+            (
+                "writable",
+                LifecycleFault::PublishRootWritableCommitted,
+                "source",
+            ),
+            (
+                "reseal",
+                LifecycleFault::PublishRootResealCommitted,
+                "installed",
+            ),
+            ("sync", LifecycleFault::PublishRootResealSync, "installed"),
+            (
+                "rename",
+                LifecycleFault::PublishRenameCommitted,
+                "installed",
+            ),
+        ] {
+            let namespace_name = format!("publish-root-{label}-fault-test");
+            let (parent, namespace) = test_namespace(&namespace_name);
+            let container = namespace
+                .directory
+                .create_new_private_child(&PrivateComponent::new("objects").unwrap())
+                .unwrap();
+            let source = container
+                .create_new_private_child(&PrivateComponent::new("source").unwrap())
+                .unwrap()
+                .seal()
+                .unwrap();
+            source.lease.inject_lifecycle_fault(fault);
+            let error = source
+                .publish_noreplace(&container, &PrivateComponent::new("installed").unwrap())
+                .err()
+                .unwrap();
+            assert_eq!(error.error(), PrivateFsError::SettlementUnknown);
+            assert!(!error.is_recoverable());
+            assert_eq!(
+                namespace.directory.list_components(4),
+                Err(PrivateFsError::Quarantined)
+            );
+            let path = parent
+                .path()
+                .join(namespace_name)
+                .join("objects")
+                .join(committed_name);
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o500
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn publication_native_refusal_returns_only_freshly_resealed_source() {
+        let (_parent, namespace) = test_namespace("publish-root-refusal-test");
+        let container = namespace
+            .directory
+            .create_new_private_child(&PrivateComponent::new("objects").unwrap())
+            .unwrap();
+        let source = container
+            .create_new_private_child(&PrivateComponent::new("source").unwrap())
+            .unwrap()
+            .seal()
+            .unwrap();
+        let identity = source.identity();
+        source
+            .lease
+            .inject_lifecycle_fault(LifecycleFault::PublishRenameRefused);
+        let error = source
+            .publish_noreplace(&container, &PrivateComponent::new("installed").unwrap())
+            .err()
+            .unwrap();
+        let (kind, source) = error.into_parts();
+        assert_eq!(kind, PrivateFsError::Io);
+        let source = source.expect("confirmed refusal returns resealed original authority");
+        assert_eq!(source.identity(), identity);
+        source.with_verified_path(|_| ()).unwrap();
+        assert_eq!(
+            container
+                .open_sealed_private_child(&PrivateComponent::new("installed").unwrap(),)
+                .err(),
+            Some(PrivateFsError::NotFound)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn publication_reseal_refusal_never_recovers_or_admits_crash_residue_as_sealed() {
+        use std::os::unix::fs::PermissionsExt;
+        for rename_refused in [false, true] {
+            let (parent, namespace) = test_namespace("publish-root-reseal-refusal-test");
+            let container = namespace
+                .directory
+                .create_new_private_child(&PrivateComponent::new("objects").unwrap())
+                .unwrap();
+            let source = container
+                .create_new_private_child(&PrivateComponent::new("source").unwrap())
+                .unwrap()
+                .seal()
+                .unwrap();
+            source
+                .lease
+                .inject_lifecycle_fault(LifecycleFault::PublishRootResealRefused);
+            if rename_refused {
+                source
+                    .lease
+                    .inject_lifecycle_fault(LifecycleFault::PublishRenameRefused);
+            }
+            let error = source
+                .publish_noreplace(&container, &PrivateComponent::new("installed").unwrap())
+                .err()
+                .unwrap();
+            assert_eq!(error.error(), PrivateFsError::SettlementUnknown);
+            assert!(!error.is_recoverable());
+            assert_eq!(
+                namespace.directory.list_components(4),
+                Err(PrivateFsError::Quarantined)
+            );
+            let name = PrivateComponent::new(if rename_refused {
+                "source"
+            } else {
+                "installed"
+            })
+            .unwrap();
+            let root = parent.path().join("publish-root-reseal-refusal-test");
+            assert_eq!(
+                std::fs::metadata(root.join("objects").join(name.as_str()))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+            drop(container);
+            drop(namespace);
+            // A reopened process gets no sealed capability for incomplete
+            // publication. The existing explicit mixed-mode recovery surface
+            // remains the only way to handle the privately owned residue.
+            let reopened = LockedPrivateNamespace::open_or_create(root).unwrap();
+            let objects = reopened
+                .directory
+                .open_private_child(&PrivateComponent::new("objects").unwrap())
+                .unwrap();
+            assert!(objects.open_sealed_private_child(&name).is_err());
+            assert!(matches!(
+                objects.open_private_child_any_mode(&name),
+                Ok(OpenedPrivateDirectory::Writable(_))
+            ));
+        }
     }
 
     #[test]

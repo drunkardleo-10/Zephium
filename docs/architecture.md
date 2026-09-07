@@ -1535,6 +1535,20 @@ digest alias fail closed without deleting ambiguous evidence.
 Acquired publication consumes the stage with the same-parent no-replace
 primitive, persists the canonical index and authenticated legal artifact, and
 publishes the package record last. Only then may the completed ledger advance.
+On macOS, publication consumes the sealed root under the existing namespace
+operation lock/no-path-pins gate, changes only that root from `0500` to `0700`,
+performs one native `RENAME_EXCL`, immediately restores `0500` and syncs, and
+freshly validates the destination identity, mode and parent before returning a
+capability. Descendants remain sealed. This is an explicit private transition,
+not a claim that the root stays read-only during rename: macOS 15 requires
+source-directory write permission even for a same-parent rename. A refused
+rename returns the source only after reseal, sync and fresh unchanged-boundary
+proof; ambiguous mode/rename/reseal/sync settlement quarantines the namespace.
+No check-then-rename, overwrite, retry or fallback is used. A crash can leave an
+owner-only `0700` stage or destination; dedicated sealed admission rejects it.
+The existing package-record-last protocol and fresh final-tree verification
+remain authoritative, while mixed-mode stage cleanup remains explicit recovery,
+never an implicit seal or a successful publication receipt.
 The public materializer accepts borrowed CRX bytes and the existing
 capability-limited legal-resource adapter; it performs no network request,
 accepts no host path, and grants no install, profile, activation, or native

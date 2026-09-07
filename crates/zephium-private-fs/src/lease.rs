@@ -1,8 +1,8 @@
 use std::fs::File;
 use std::path::PathBuf;
-#[cfg(test)]
-use std::sync::atomic::AtomicU16;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(test)]
+use std::sync::atomic::{AtomicU16, AtomicU32};
 use std::sync::{Mutex, MutexGuard};
 
 use crate::platform;
@@ -26,7 +26,7 @@ pub(crate) struct NamespaceLease {
     #[cfg(test)]
     streaming_faults: AtomicU16,
     #[cfg(test)]
-    lifecycle_faults: AtomicU16,
+    lifecycle_faults: AtomicU32,
     #[cfg(test)]
     remove_empty_race: AtomicBool,
     #[cfg(test)]
@@ -80,6 +80,18 @@ pub(crate) enum LifecycleFault {
     RemoveDirectoryParentSync = 1 << 13,
     PublishSameParentSync = 1 << 14,
     RemoveChildOpenIdentity = 1 << 15,
+    #[cfg(target_os = "macos")]
+    PublishRootWritableCommitted = 1 << 16,
+    #[cfg(target_os = "macos")]
+    PublishRootResealCommitted = 1 << 17,
+    #[cfg(target_os = "macos")]
+    PublishRootResealSync = 1 << 18,
+    #[cfg(target_os = "macos")]
+    PublishRenameRefused = 1 << 19,
+    #[cfg(target_os = "macos")]
+    PublishRenameCommitted = 1 << 20,
+    #[cfg(target_os = "macos")]
+    PublishRootResealRefused = 1 << 21,
 }
 
 pub(crate) struct PathPinGuard<'a> {
@@ -138,7 +150,7 @@ impl NamespaceLease {
             #[cfg(test)]
             streaming_faults: AtomicU16::new(0),
             #[cfg(test)]
-            lifecycle_faults: AtomicU16::new(0),
+            lifecycle_faults: AtomicU32::new(0),
             #[cfg(test)]
             remove_empty_race: AtomicBool::new(false),
             #[cfg(test)]
@@ -289,12 +301,12 @@ impl NamespaceLease {
     #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
     pub(crate) fn inject_lifecycle_fault(&self, fault: LifecycleFault) {
         self.lifecycle_faults
-            .fetch_or(fault as u16, Ordering::AcqRel);
+            .fetch_or(fault as u32, Ordering::AcqRel);
     }
 
     #[cfg(test)]
     pub(crate) fn take_lifecycle_fault(&self, fault: LifecycleFault) -> bool {
-        let mask = fault as u16;
+        let mask = fault as u32;
         self.lifecycle_faults.fetch_and(!mask, Ordering::AcqRel) & mask != 0
     }
 

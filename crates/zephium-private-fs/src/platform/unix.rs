@@ -849,8 +849,9 @@ mod tests {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
         // Match the repository's nested tree, seal modes and independently
-        // held same-parent descriptors. No writable-tree retry or rename
-        // fallback is permitted: this is evidence for the existing primitive.
+        // held same-parent descriptors. The root-only writable publication
+        // transition is required by macOS 15; descendants stay sealed. There
+        // is exactly one native NOREPLACE call per positive/negative case.
         let parent = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
         let mode = |path: &Path, mode| {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
@@ -884,32 +885,52 @@ mod tests {
         std::fs::write(occupied.join("sentinel"), b"must remain").unwrap();
         let sealed = File::open(&stage).unwrap();
         let identity = sealed.metadata().unwrap().ino();
+        let publish = |root: &File, source: &str, destination: &str| {
+            let fail =
+                |operation, error: rustix::io::Errno| (operation, Some(error.raw_os_error()));
+            assert_eq!(root.metadata().unwrap().mode() & 0o777, 0o500);
+            rustix::fs::fchmod(root, Mode::from_raw_mode(0o700))
+                .map_err(|error| fail("root_writable", error))?;
+            let renamed =
+                rename_noreplace_between(&source_parent, source, &destination_parent, destination);
+            rustix::fs::fchmod(root, Mode::from_raw_mode(0o500))
+                .map_err(|error| fail("root_reseal", error))?;
+            root.sync_all()
+                .map_err(|error| ("root_reseal_sync", error.raw_os_error()))?;
+            assert_eq!(root.metadata().unwrap().mode() & 0o777, 0o500);
+            renamed.map_err(|error| fail("rename_noreplace", error))
+        };
         let mut destination_refusal = None;
         let outcome = (|| -> Result<(), (&str, Option<i32>)> {
             sealed
                 .sync_all()
                 .map_err(|error| ("pre_publish_sync", error.raw_os_error()))?;
-            rename_noreplace_between(
-                &source_parent,
-                "tree.stage",
-                &destination_parent,
-                "tree.object",
-            )
-            .map_err(|error| ("rename_noreplace", Some(error.raw_os_error())))?;
+            publish(&sealed, "tree.stage", "tree.object")?;
             source_parent
                 .sync_all()
                 .map_err(|error| ("post_publish_parent_sync", error.raw_os_error()))?;
-            destination_refusal = Some(
-                rename_noreplace_between(
-                    &source_parent,
-                    "tree.object",
-                    &destination_parent,
-                    "occupied.object",
-                )
-                .map_err(|error| error.raw_os_error()),
-            );
+            destination_refusal = Some(publish(&sealed, "tree.object", "occupied.object"));
             Ok(())
         })();
+        if outcome.is_ok() {
+            let installed = parent.path().join("tree.object");
+            for relative in ["", "assets", "assets/icons", "scripts"] {
+                assert_eq!(
+                    std::fs::metadata(installed.join(relative)).unwrap().mode() & 0o777,
+                    0o500
+                );
+            }
+            for relative in [
+                "assets/icons/icon.txt",
+                "manifest.json",
+                "scripts/content.js",
+            ] {
+                assert_eq!(
+                    std::fs::metadata(installed.join(relative)).unwrap().mode() & 0o777,
+                    0o400
+                );
+            }
+        }
         // Restore only this fixture's exact directories for TempDir cleanup,
         // after the terminal outcome. This never authorizes a second attempt.
         for name in ["tree.stage", "tree.object"] {
@@ -923,7 +944,10 @@ mod tests {
         assert!(outcome.is_ok(), "native publication failed: {outcome:?}");
         assert_eq!(
             destination_refusal,
-            Some(Err(rustix::io::Errno::EXIST.raw_os_error())),
+            Some(Err((
+                "rename_noreplace",
+                Some(rustix::io::Errno::EXIST.raw_os_error())
+            ))),
             "native existing-destination refusal changed"
         );
         assert_eq!(
