@@ -51,6 +51,57 @@ guards, agentic-probe/controller/runtime architecture gates, formatting and
 whitespace checks. No live run or credential/provider access was used to prepare
 or test this diagnostic correction.
 
+## Diagnostic actual-app attempt — 2026-09-07
+
+The separately authorized diagnostic run used source
+`2c80a069c0012e39820fc2e2eb20b7101d5a28bf` and arm64 executable SHA-256
+`9b82511028dca3e2eb1109ba8d449c5773d0f0a5060c5a6ee8c3d39aae4f4e13`.
+Admission was `Admitted`, 3,708 ms/33 checks. The exact lifecycle terminal was
+`phase=construct terminal=quarantined failure=NativeRefused`.
+
+First native failure: `cause=construction_deadline`; bootstrap started,
+committed and finished all true; requested, started, committed and finished all
+true; refused false; last event `Finished`; document started and deadline
+expired true; guard healthy true; current document false; semantic pending
+`Some(false)`. Model calls remained zero. The original resource retired and the
+shutdown owner closed. The separate failed data root was preserved. This run
+did not qualify the public workflow.
+
+This establishes failure of the current-document check after exact initial
+navigation and semantic drainage, not a bootstrap stall or rendering admission
+failure. Vendored WKWebView navigation handling samples `URL.absoluteString` at
+commit; the gate accepted that sample exactly. Its finish event reuses the
+retained committed URL rather than resampling the current URL. Meanwhile, the
+Work gate does not treat a pre-ready location callback as a refused continuation.
+A commit-to-finish History API change can therefore produce these facts. The
+trace does not establish that such a change actually occurred: a missing or
+oversized later native URL also produces `current_document=false`. Initial URL
+normalization or an observed HTTP redirect is not supported by the accepted
+exact-commit/no-refusal evidence.
+
+The next diagnostic candidate retains the same exact comparison and authority.
+One bounded native URL sample supplies both readiness and presence/component
+relations: raw/canonical equality, scheme/host/effective-port/path/query/fragment/
+credential equality, and query/fragment/credential presence. Missing native URL,
+missing absolute string, existing UTF-16/UTF-8 limits and parse failure have
+separate classes. No URL, query key/value or digest is retained or logged.
+One additional boolean records a post-commit/pre-ready location callback, explicitly not
+proof of a URL change because the observer also covers back/forward availability.
+Canonical equality is diagnostic only and cannot admit a changed raw document.
+No production behavior, normalization allowance, redirect rule, timeout or
+workflow retry is changed. The exact current-URL difference remains unproven
+until independently observed; these new component facts are not backfilled
+into the prior run.
+
+Component correction checks passed: six navigation/component tests, including
+normalization-without-authority, indistinguishable query contents and the
+commit/finish/current mismatch; one Foundation-only UTF-16/UTF-8 boundary test;
+the exact first-failure slot test; public13/fixture10 composition tests; strict
+engine all-targets and public desktop library Clippy; non-probe engine compile;
+Work-resource/foreground mutation and agentic-probe/controller/runtime gates,
+formatting and whitespace checks. No live retry, credential access or provider
+request was used for this correction.
+
 ## Workflow and decision
 
 Prepare a source-backed product brief from the public

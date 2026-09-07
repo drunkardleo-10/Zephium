@@ -545,6 +545,9 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
     (
         "crates/zephium-engine/src/platform/work_document_navigation.rs",
         &[
+            "canonical_equal:expected==&actual", "raw_equal:expected.as_str()==current",
+            "query_equal:expected.query()==actual.query()", "fragment_equal:expected.fragment()==actual.fragment()",
+            "state.evidence.location_callback_after_commit_before_ready=true",
             "state.phase!=Phase::Bootstrap||!state.bootstrap_finished||state.target.is_some()",
             "expected.as_url().as_str()==target",
             "state.native_id==Some(event.id)",
@@ -586,6 +589,20 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
         &[
             "self.work_resources",
             "resource.replace_content_policy_registration(registration)",
+        ],
+        &[],
+    ),
+    (
+        "crates/zephium-engine/src/platform/macos/mod.rs",
+        &[
+            "pubfncurrent_url(view:&wry::WebView)->Option<String>{bounded_current_url(view).ok()}",
+            "PAGE_URL_UTF16_LIMIT:usize=8*1_024", "PAGE_URL_UTF8_LIMIT:usize=8*1_024",
+            "value.length()>PAGE_URL_UTF16_LIMIT", "value.len()<=PAGE_URL_UTF8_LIMIT",
+            "Ok(current)=>(gate.ready(Some(&current)),E::compare(expected,&current))",
+            "Err(CurrentUrlUnavailable::MissingNativeUrl)=>(false,E::MissingNativeUrl)",
+            "Err(CurrentUrlUnavailable::MissingAbsoluteString)=>(false,E::MissingAbsoluteString)",
+            "Err(CurrentUrlUnavailable::Utf16Limit)=>(false,E::Utf16Limit)",
+            "Err(CurrentUrlUnavailable::Utf8Limit)=>(false,E::Utf8Limit)",
         ],
         &[],
     ),

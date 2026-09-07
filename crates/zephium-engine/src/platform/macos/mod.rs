@@ -218,13 +218,55 @@ pub fn install_navigation_observer(
 }
 
 pub fn current_url(view: &wry::WebView) -> Option<String> {
-    let url = unsafe { native::webkit(view).URL() }?;
-    let value = url.absoluteString()?;
+    bounded_current_url(view).ok()
+}
+
+#[derive(Clone, Copy)]
+enum CurrentUrlUnavailable {
+    MissingNativeUrl,
+    MissingAbsoluteString,
+    Utf16Limit,
+    Utf8Limit,
+}
+
+fn bounded_current_url(view: &wry::WebView) -> Result<String, CurrentUrlUnavailable> {
+    let url =
+        unsafe { native::webkit(view).URL() }.ok_or(CurrentUrlUnavailable::MissingNativeUrl)?;
+    let value = url
+        .absoluteString()
+        .ok_or(CurrentUrlUnavailable::MissingAbsoluteString)?;
+    bounded_absolute_url(&value)
+}
+
+fn bounded_absolute_url(
+    value: &objc2_foundation::NSString,
+) -> Result<String, CurrentUrlUnavailable> {
     if value.length() > PAGE_URL_UTF16_LIMIT {
-        return None;
+        return Err(CurrentUrlUnavailable::Utf16Limit);
     }
     let value = value.to_string();
-    (value.len() <= PAGE_URL_UTF8_LIMIT).then_some(value)
+    (value.len() <= PAGE_URL_UTF8_LIMIT)
+        .then_some(value)
+        .ok_or(CurrentUrlUnavailable::Utf8Limit)
+}
+
+#[cfg(feature = "native-agentic-work-resource-probe")]
+pub(crate) fn current_document_evidence(
+    view: &wry::WebView,
+    gate: &super::work_document_navigation::WorkDocumentNavigation,
+    expected: &zephium_agentic::ContextNavigationTarget,
+) -> (
+    bool,
+    super::work_document_navigation::CurrentDocumentEvidence,
+) {
+    use super::work_document_navigation::CurrentDocumentEvidence as E;
+    match bounded_current_url(view) {
+        Ok(current) => (gate.ready(Some(&current)), E::compare(expected, &current)),
+        Err(CurrentUrlUnavailable::MissingNativeUrl) => (false, E::MissingNativeUrl),
+        Err(CurrentUrlUnavailable::MissingAbsoluteString) => (false, E::MissingAbsoluteString),
+        Err(CurrentUrlUnavailable::Utf16Limit) => (false, E::Utf16Limit),
+        Err(CurrentUrlUnavailable::Utf8Limit) => (false, E::Utf8Limit),
+    }
 }
 
 pub fn enforce_navigation_pending(view: &wry::WebView) -> bool {
@@ -580,6 +622,26 @@ fn initialize_data_store_enumeration() -> Result<(), &'static str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn current_url_reader_preserves_exact_utf16_and_utf8_bounds() {
+        use super::*;
+        use objc2_foundation::NSString;
+        assert_eq!(
+            bounded_absolute_url(&NSString::from_str(&"a".repeat(PAGE_URL_UTF8_LIMIT)))
+                .ok()
+                .unwrap()
+                .len(),
+            PAGE_URL_UTF8_LIMIT
+        );
+        assert!(matches!(
+            bounded_absolute_url(&NSString::from_str(&"a".repeat(PAGE_URL_UTF16_LIMIT + 1))),
+            Err(CurrentUrlUnavailable::Utf16Limit)
+        ));
+        assert!(matches!(
+            bounded_absolute_url(&NSString::from_str(&"\u{0800}".repeat(2731))),
+            Err(CurrentUrlUnavailable::Utf8Limit)
+        ));
+    }
     use super::*;
     use std::sync::mpsc;
     use std::time::Duration;

@@ -15,6 +15,8 @@ pub struct ConstructionEvidence {
     pub deadline_expired: bool,
     pub guard_healthy: bool,
     pub current_document: bool,
+    pub current_components:
+        Option<crate::platform::work_document_navigation::CurrentDocumentEvidence>,
     pub semantic_pending: Option<bool>,
 }
 
@@ -336,6 +338,7 @@ mod tests {
             deadline_expired: true,
             guard_healthy: false,
             current_document: false,
+            current_components: None,
             semantic_pending: None,
         };
         guard.record_construction_evidence(first);

@@ -40,6 +40,59 @@ pub struct NavigationEvidence {
     pub finished: bool,
     pub refused: bool,
     pub last_event: Option<wry::NavigationEventPhase>,
+    pub location_callback_after_commit_before_ready: bool,
+}
+
+/// Component relations only: no URL, digest, query key/value, or native handle.
+/// Equality here is diagnostic; only the original exact gate admits a document.
+#[cfg(feature = "native-agentic-work-resource-probe")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CurrentDocumentEvidence {
+    MissingNativeUrl,
+    MissingAbsoluteString,
+    Utf16Limit,
+    Utf8Limit,
+    InvalidUrl,
+    Compared {
+        raw_equal: bool,
+        canonical_equal: bool,
+        scheme_equal: bool,
+        host_equal: bool,
+        port_equal: bool,
+        path_equal: bool,
+        query_equal: bool,
+        fragment_equal: bool,
+        credentials_equal: bool,
+        query_present: bool,
+        query_empty: bool,
+        fragment_present: bool,
+        credentials_present: bool,
+    },
+}
+#[cfg(feature = "native-agentic-work-resource-probe")]
+impl CurrentDocumentEvidence {
+    pub(crate) fn compare(expected: &ContextNavigationTarget, current: &str) -> Self {
+        let Ok(actual) = url::Url::parse(current) else {
+            return Self::InvalidUrl;
+        };
+        let expected = expected.as_url();
+        Self::Compared {
+            raw_equal: expected.as_str() == current,
+            canonical_equal: expected == &actual,
+            scheme_equal: expected.scheme() == actual.scheme(),
+            host_equal: expected.host() == actual.host(),
+            port_equal: expected.port_or_known_default() == actual.port_or_known_default(),
+            path_equal: expected.path() == actual.path(),
+            query_equal: expected.query() == actual.query(),
+            fragment_equal: expected.fragment() == actual.fragment(),
+            credentials_equal: expected.username() == actual.username()
+                && expected.password() == actual.password(),
+            query_present: actual.query().is_some(),
+            query_empty: actual.query() == Some(""),
+            fragment_present: actual.fragment().is_some(),
+            credentials_present: !actual.username().is_empty() || actual.password().is_some(),
+        }
+    }
 }
 
 /// Immutable source comes only from an admitted Work construction request.
@@ -193,6 +246,12 @@ impl WorkDocumentNavigation {
     /// invalidates this fixed-document slice, even if its URL is unchanged.
     pub(crate) fn location_changed(&self) -> Result<bool, ()> {
         let mut state = self.0.lock().map_err(|_| ())?;
+        #[cfg(feature = "native-agentic-work-resource-probe")]
+        if state.phase == Phase::Committed {
+            // This observer also includes back/forward availability. It is
+            // evidence of a callback, not proof of a URL or History API change.
+            state.evidence.location_callback_after_commit_before_ready = true;
+        }
         if state.phase == Phase::Ready {
             state.phase = Phase::Refused;
             return Ok(true);
@@ -239,6 +298,132 @@ mod tests {
     use super::*;
     use wry::NavigationEventPhase as E;
     const URL: &str = "https://example.test/frozen";
+    #[cfg(feature = "native-agentic-work-resource-probe")]
+    #[test]
+    fn current_components_distinguish_normalization_and_drift_without_granting_authority() {
+        use CurrentDocumentEvidence as C;
+        let expected = ContextNavigationTarget::parse(URL).unwrap();
+        let gate = armed();
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, URL)).unwrap();
+        }
+        let normalized = "https://EXAMPLE.TEST:443/frozen";
+        assert!(matches!(
+            C::compare(&expected, normalized),
+            C::Compared {
+                raw_equal: false,
+                canonical_equal: true,
+                ..
+            }
+        ));
+        assert!(!gate.ready(Some(normalized)));
+        assert!(gate.ready(Some(URL)));
+        let query = C::compare(&expected, "https://example.test/frozen?opaque=one");
+        assert!(matches!(
+            query,
+            C::Compared {
+                raw_equal: false,
+                canonical_equal: false,
+                scheme_equal: true,
+                host_equal: true,
+                port_equal: true,
+                path_equal: true,
+                query_equal: false,
+                fragment_equal: true,
+                query_present: true,
+                query_empty: false,
+                credentials_present: false,
+                ..
+            }
+        ));
+        assert_eq!(
+            query,
+            C::compare(&expected, "https://example.test/frozen?different=two")
+        );
+        let safe = format!("{query:?}");
+        for secret in [
+            "example.test",
+            "opaque",
+            "one",
+            "different",
+            "two",
+            "/frozen",
+        ] {
+            assert!(!safe.contains(secret));
+        }
+        assert!(matches!(
+            C::compare(&expected, "https://example.test/frozen?"),
+            C::Compared {
+                query_present: true,
+                query_empty: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            C::compare(&expected, "https://example.test/frozen#private"),
+            C::Compared {
+                query_equal: true,
+                fragment_equal: false,
+                fragment_present: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            C::compare(&expected, "https://example.test/changed"),
+            C::Compared {
+                path_equal: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            C::compare(&expected, "https://other.test/frozen"),
+            C::Compared {
+                host_equal: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            C::compare(&expected, "https://user:secret@example.test/frozen"),
+            C::Compared {
+                credentials_equal: false,
+                credentials_present: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            C::compare(&expected, "http://example.test/frozen"),
+            C::Compared {
+                scheme_equal: false,
+                port_equal: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            C::compare(&expected, "https://example.test:8443/frozen"),
+            C::Compared {
+                port_equal: false,
+                ..
+            }
+        ));
+        assert_eq!(C::compare(&expected, "not a URL"), C::InvalidUrl);
+    }
+    #[cfg(feature = "native-agentic-work-resource-probe")]
+    #[test]
+    fn finished_commit_identity_does_not_authorize_a_pre_finish_location_change() {
+        let gate = armed();
+        gate.observe(event(1, E::Started, URL)).unwrap();
+        gate.observe(event(1, E::Committed, URL)).unwrap();
+        assert_eq!(gate.location_changed(), Ok(false));
+        gate.observe(event(1, E::Finished, URL)).unwrap();
+        let evidence = gate.construction_evidence().unwrap();
+        assert!(
+            evidence.finished
+                && evidence.location_callback_after_commit_before_ready
+                && !evidence.refused
+        );
+        assert!(!gate.ready(Some("https://example.test/frozen?changed=1")));
+        assert!(!gate.ready(None));
+    }
     #[cfg(feature = "native-agentic-work-resource-probe")]
     #[test]
     fn construction_milestones_distinguish_waits_and_freeze_first_navigation_refusal() {

@@ -58,6 +58,17 @@ pub(super) struct WorkNativeResource {
 impl WorkNativeResource {
     #[cfg(feature = "native-agentic-work-resource-probe")]
     fn record_construction_failure(&self, cause: &'static str) {
+        // One bounded native URL sample supplies both exact readiness and
+        // component relations. Raw values never enter the retained evidence.
+        let current = self
+            .view
+            .as_ref()
+            .zip(self.guard.document())
+            .and_then(|(view, expected)| {
+                view.work_navigation().map(|gate| {
+                    crate::platform::imp::current_document_evidence(view.view(), gate, expected)
+                })
+            });
         self.guard.record_construction_evidence(
             crate::agent_context_port::resource_witness::ConstructionEvidence {
                 cause,
@@ -70,7 +81,10 @@ impl WorkNativeResource {
                 document_started: self.document_started,
                 deadline_expired: self.deadline_expired,
                 guard_healthy: self.guard.is_healthy(),
-                current_document: self.ready(),
+                current_document: current
+                    .as_ref()
+                    .map_or_else(|| self.ready(), |(ready, _)| *ready),
+                current_components: current.map(|(_, evidence)| evidence),
                 semantic_pending: self
                     .view
                     .as_ref()
@@ -390,6 +404,7 @@ impl EngineHost {
                     deadline_expired: false,
                     guard_healthy: guard.is_healthy(),
                     current_document: false,
+                    current_components: None,
                     semantic_pending: None,
                 },
             );
