@@ -418,7 +418,7 @@ pub fn encode_semantic_extraction_request(
     checked_write(
         &mut output,
         format_args!(
-            "ZEXTRACT{} schema_content=trusted evidence_content=untrusted schema={} fields={}\n",
+            "ZEXTRACT{} schema_content=trusted evidence_content=untrusted schema={} fields={} text=single_line_printable sources=ordered_arrays_only\n",
             SEMANTIC_EXTRACTION_MODEL_SCHEMA_VERSION,
             schema.id().get(),
             schema.fields().len(),
@@ -754,6 +754,9 @@ mod tests {
         .expect("budget");
         let encoded =
             encode_semantic_extraction_request(&schema, &read, budget).expect("encode extraction");
+        assert!(encoded
+            .content
+            .contains("text=single_line_printable sources=ordered_arrays_only"));
         assert_eq!(encoded.stats().fields(), 2);
         assert_eq!(encoded.stats().read().items(), read.stats().items());
         let debug = format!("{encoded:?}");

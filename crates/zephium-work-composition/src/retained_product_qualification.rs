@@ -7,11 +7,11 @@ use zephium_agentic::*;
 use zephium_app::{RetainedWorkHandle, RetainedWorkPhase};
 
 const ORIGIN: &str = "https://agent-browser.dev";
-pub const OBJECTIVE: &str = "Read only the current https://agent-browser.dev/ homepage and prepare a concise source-backed technical brief useful to the team building Zephium, a Rust-owned agentic layer over native WebViews. Decide which architecture, capabilities, tradeoffs and product claims matter most. Distinguish what this page claims from what it actually establishes; explain relevant uncertainties and missing details rather than guessing. Use read with initial scope if useful. Finish by calling extract with initial scope and trusted schema 1, putting your brief, important claims and caveats in the answer field with current-page citations. Do not navigate, follow links, click, change values, sign in, submit, install or run anything. The host checks execution and source binding, not the factual correctness or usefulness of your answer; a human will judge those.";
+pub const OBJECTIVE: &str = "Read only the current https://agent-browser.dev/ homepage and prepare a concise source-backed technical brief useful to the team building Zephium, a Rust-owned agentic layer over native WebViews. Decide which architecture, capabilities, tradeoffs and product claims matter most. Distinguish what this page claims from what it actually establishes; explain relevant uncertainties and missing details rather than guessing. Use read with initial scope if useful. Finish by calling extract with initial scope and trusted schema 1: a concise summary, an important_claims list, and a caveats list. Keep each text value a short single-line statement; separate ideas into list items, with each item supported by its own declared current-page sources rather than inline citation markers. Do not navigate, follow links, click, change values, sign in, submit, install or run anything. The host checks execution and source binding, not the factual correctness or usefulness of your answer; a human will judge those.";
 pub(crate) const DEFINITION: QualificationDefinition = QualificationDefinition {
     initial: "https://agent-browser.dev/",
     origin: ORIGIN,
-    task_name: "retained-agent-browser-brief-v1",
+    task_name: "retained-agent-browser-brief-v2",
     retention_name: "inspectable-public",
     objective: OBJECTIVE,
     task,
@@ -22,7 +22,10 @@ pub(crate) const DEFINITION: QualificationDefinition = QualificationDefinition {
     verify_owned,
 };
 pub fn configuration_diagnostic() -> String {
-    "work-retained-product-config: entry=admit_retained_trusted_work provider=OpenAIResponses model=gpt-5.6-luna retention=inspectable-public task=retained-agent-browser-brief-v1 navigation=false rendering_lease=false".into()
+    format!(
+        "work-retained-product-config: entry=admit_retained_trusted_work provider=OpenAIResponses model=gpt-5.6-luna retention={} task={} navigation=false rendering_lease=false",
+        DEFINITION.retention_name, DEFINITION.task_name
+    )
 }
 pub fn load_request(
     started: std::time::Instant,
@@ -34,7 +37,17 @@ fn task(_: ContextIdentity) -> Result<Box<dyn AgentWorkTask>, AgentWorkFailure> 
     Ok(Box::new(PublicTask(
         AgentWorkExtractionTask::try_new(
             vec![
-                SemanticExtractionFieldSchema::try_text("answer".into(), true, 4096)
+                // Total value ceiling remains 4,096 bytes: 640 + 8*320 + 4*224.
+                SemanticExtractionFieldSchema::try_text("summary".into(), true, 640)
+                    .map_err(|_| AgentWorkFailure::Contract)?,
+                SemanticExtractionFieldSchema::try_text_list(
+                    "important_claims".into(),
+                    true,
+                    8,
+                    320,
+                )
+                .map_err(|_| AgentWorkFailure::Contract)?,
+                SemanticExtractionFieldSchema::try_text_list("caveats".into(), true, 4, 224)
                     .map_err(|_| AgentWorkFailure::Contract)?,
             ],
             AgentAccountScope::Anonymous,
@@ -88,26 +101,53 @@ impl AgentWorkTask for PublicTask {
     }
 }
 fn verify_owned(result: &SemanticOwnedExtractionResult) -> bool {
-    let [field] = result.fields() else {
+    let [summary, claims, caveats] = result.fields() else {
         return false;
     };
-    let SemanticExtractedValue::Text(value) = field.value() else {
+    let (
+        SemanticExtractedValue::Text(summary_value),
+        SemanticExtractedValue::TextList(claim_values),
+        SemanticExtractedValue::TextList(caveat_values),
+    ) = (summary.value(), claims.value(), caveats.value())
+    else {
         return false;
     };
-    let Some(sources) = result.sources(value.source_span()) else {
-        return false;
-    };
-    let sources: Vec<_> = sources.collect();
     result.trust() == SemanticExtractionTrust::ModelMapped
         && result.schema().get() == 1
-        && field.name() == "answer"
-        && !value.as_str().is_empty()
-        && !sources.is_empty()
-        && sources.iter().all(|source| {
-            source.sensitivity == SemanticSensitivity::Public
-                && source.frame.frame() == FrameId::MAIN
-                && SemanticOrigin::parse(ORIGIN).as_ref() == Ok(source.frame.origin())
-        })
+        && summary.name() == "summary"
+        && claims.name() == "important_claims"
+        && caveats.name() == "caveats"
+        && !summary_value.as_str().is_empty()
+        && [
+            summary_value.source_span(),
+            claim_values.source_span(),
+            caveat_values.source_span(),
+        ]
+        .into_iter()
+        .chain(
+            claim_values
+                .items()
+                .iter()
+                .chain(caveat_values.items())
+                .map(|item| item.source_span()),
+        )
+        .all(|span| verify_sources(result, span))
+}
+fn verify_sources(
+    result: &SemanticOwnedExtractionResult,
+    span: SemanticExtractionSourceSpan,
+) -> bool {
+    let Some(sources) = result.sources(span) else {
+        return false;
+    };
+    let mut count = 0;
+    let valid = sources.into_iter().all(|source| {
+        count += 1;
+        source.sensitivity == SemanticSensitivity::Public
+            && source.frame.frame() == FrameId::MAIN
+            && SemanticOrigin::parse(ORIGIN).as_ref() == Ok(source.frame.origin())
+    });
+    valid && count > 0
 }
 pub fn cancel(view: &RetainedWorkHandle) -> bool {
     view.stop()
@@ -221,6 +261,17 @@ mod tests {
         assert!(task.allows_baseline_read());
         assert!(!task.allows_subtree_extraction());
         assert!(configuration_diagnostic().contains("retention=inspectable-public"));
+        assert!(configuration_diagnostic().contains(DEFINITION.task_name));
         assert_eq!(DEFINITION.initial, "https://agent-browser.dev/");
+        let fields = task.extraction_schema().unwrap().fields();
+        assert_eq!(
+            fields.iter().map(|field| field.name()).collect::<Vec<_>>(),
+            ["summary", "important_claims", "caveats"]
+        );
+        assert_eq!(fields[0].max_text_bytes(), Some(640));
+        assert_eq!(fields[1].max_list_items(), Some(8));
+        assert_eq!(fields[1].max_list_item_bytes(), Some(320));
+        assert_eq!(fields[2].max_list_items(), Some(4));
+        assert_eq!(fields[2].max_list_item_bytes(), Some(224));
     }
 }

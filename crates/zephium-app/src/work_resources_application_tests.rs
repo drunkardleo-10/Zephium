@@ -401,6 +401,84 @@ fn drain_events(work: &mut RetainedWork) {
 }
 
 #[test]
+fn drained_failed_mapping_projects_original_typed_failure_through_terminal_ack() {
+    if child("drained_failed_mapping_projects_original_typed_failure_through_terminal_ack") {
+        return;
+    }
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    failed_mapping_projection(
+        "sk-fixture-not-a-secret",
+        SemanticExtractionError::SecretValue,
+    );
+}
+
+#[test]
+fn multiline_mapping_projects_invalid_text_through_terminal_ack() {
+    if child("multiline_mapping_projects_invalid_text_through_terminal_ack") {
+        return;
+    }
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // Two levels of JSON string encoding: SSE delta, then mapped value.
+    failed_mapping_projection(
+        "First.\\\\n\\\\nSecond.",
+        SemanticExtractionError::InvalidText,
+    );
+}
+
+fn failed_mapping_projection(value: &str, error: SemanticExtractionError) {
+    use zephium_agent_controller::AgentBrowserProviderError;
+    let directory = tempfile::tempdir().unwrap();
+    let (mut work, native, store) = coordinator(directory.path());
+    let servers = Servers::default();
+    poll_until(&mut work, RetainedWork::ready);
+    store
+        .hold
+        .store(AgentWorkDisposition::Failed as u8, Ordering::Release);
+    let mapping = response_stream(2).replace("Fixture result", value);
+    assert!(work
+        .submit(
+            request(
+                ContextRunId::generate(),
+                vec![response_stream(1), mapping],
+                servers.clone()
+            ),
+            now()
+        )
+        .is_ok());
+    poll_until(&mut work, |work| {
+        work.phase() == AdmissionPhase::Closing && store.pending.lock().unwrap().is_some()
+    });
+    let expected = AgentWorkFailure::Browser(AgentBrowserProviderError::Extraction(
+        AgentProviderExtractionOutputError::Extraction(error),
+    ));
+    assert_eq!(work.phase(), AdmissionPhase::Closing);
+    assert_eq!(work.failures(), (Some(expected), None));
+    assert!(work.take_extraction().is_none());
+    store.release(0);
+    poll_until(&mut work, |work| work.phase() == AdmissionPhase::Terminal);
+    assert_eq!(
+        work.record().unwrap().disposition(),
+        AgentWorkDisposition::Failed
+    );
+    assert_eq!(work.record().unwrap().debt(), AgentWorkDebt::NONE);
+    assert_eq!(work.failures(), (Some(expected), None));
+    assert!(work.take_extraction().is_none());
+    assert!(!native.global_sealed.load(Ordering::Acquire));
+    assert_eq!(native.destructions.load(Ordering::Acquire), 0);
+    for server in servers.lock().unwrap().drain(..) {
+        assert_eq!(server.join().unwrap(), 2);
+    }
+    assert!(work.shutdown_until(
+        &Clock(AtomicU64::new(2)),
+        Instant::now() + Duration::from_secs(2)
+    ));
+}
+
+#[test]
 fn original_acknowledgements_gate_retained_workers_results_and_successors() {
     if child("original_acknowledgements_gate_retained_workers_results_and_successors") {
         return;

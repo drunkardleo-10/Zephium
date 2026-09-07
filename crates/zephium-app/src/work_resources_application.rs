@@ -777,7 +777,16 @@ impl RetainedWork {
     }
 
     pub(super) fn failures(&self) -> (Option<AgentWorkFailure>, Option<AgentWorkJournalError>) {
-        (self.failure, self.persistence_failure)
+        // A proved unsuccessful actor outcome is not coordinator uncertainty.
+        // Project its original cause without calling fail(), changing phase,
+        // cancelling a drained actor, or interfering with the terminal CAS.
+        let failure = self
+            .failure
+            .or_else(|| match self.active.as_ref()?.outcome.as_ref()? {
+                AgentWorkRetainedOutcome::ClosedUnsuccessfully(closed) => Some(closed.failure()),
+                _ => None,
+            });
+        (failure, self.persistence_failure)
     }
 
     pub(super) fn record(&self) -> Option<AgentWorkRecord> {

@@ -2139,6 +2139,118 @@ mod tests {
     }
 
     #[test]
+    fn public_brief_multiline_refuses_before_sources_and_structured_lines_keep_provenance() {
+        // Equivalent to the retained public failure, not retained provider content.
+        // The original decoded scalar had 2,495 bytes, paragraph breaks, and four
+        // valid ordered sources. Inline @r strings are not source-array authority.
+        let observation = observation();
+        let read = read(&observation, 31);
+        let delivery = delivered(&read);
+        let legacy = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![SemanticExtractionFieldSchema::try_text("answer".into(), true, 4096).unwrap()],
+        )
+        .unwrap();
+        let prefix = "Summary @r30.\n\nImportant claim @r38.\n\nCaveat @r52. ";
+        let multiline = format!("{prefix}{}", "x".repeat(2495 - prefix.len()));
+        assert_eq!(multiline.len(), 2495);
+        let mut output = json!({"v":1,"schema":1,"fields":[{"name":"answer","value":{
+            "k":"text","value":multiline,"sources":["@r30","@r35","@r36","@r37"]
+        }}]});
+        assert_eq!(
+            extract_semantic_read(
+                &legacy,
+                &read,
+                &delivery,
+                SemanticReadSensitivityLimit::PublicOnly,
+                &serde_json::to_vec(&output).unwrap()
+            )
+            .unwrap_err(),
+            SemanticExtractionError::InvalidText
+        );
+        // A distinct well-formed model output, not automatic normalization/retry.
+        output["fields"][0]["value"]["value"] = json!("A concise single-line summary.");
+        output["fields"][0]["value"]["sources"] = json!(["@r1", "@r2", "@r3", "@r4"]);
+        assert!(extract_semantic_read(
+            &legacy,
+            &read,
+            &delivery,
+            SemanticReadSensitivityLimit::PublicOnly,
+            &serde_json::to_vec(&output).unwrap()
+        )
+        .is_ok());
+
+        let schema = SemanticExtractionSchema::try_new(
+            legacy.id(),
+            vec![
+                SemanticExtractionFieldSchema::try_text("summary".into(), true, 640).unwrap(),
+                SemanticExtractionFieldSchema::try_text_list(
+                    "important_claims".into(),
+                    true,
+                    8,
+                    320,
+                )
+                .unwrap(),
+                SemanticExtractionFieldSchema::try_text_list("caveats".into(), true, 4, 224)
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+        let mut structured = json!({"v":1,"schema":1,"fields":[
+            {"name":"summary","value":{"k":"text","value":"A concise brief.","sources":["@r1"]}},
+            {"name":"important_claims","value":{"k":"text_list","sources":["@r1","@r2"],"items":[{"value":"One claim.","sources":["@r1"]},{"value":"Another claim.","sources":["@r2"]}]}},
+            {"name":"caveats","value":{"k":"text_list","sources":["@r3"],"items":[{"value":"A limitation.","sources":["@r3"]}]}}
+        ]});
+        let bytes = serde_json::to_vec(&structured).unwrap();
+        let result = extract_semantic_read(
+            &schema,
+            &read,
+            &delivery,
+            SemanticReadSensitivityLimit::PublicOnly,
+            &bytes,
+        )
+        .unwrap();
+        assert_eq!(result.trust(), SemanticExtractionTrust::ModelMapped);
+        let SemanticExtractedValue::TextList(claims) = result.fields()[1].value() else {
+            panic!("claims");
+        };
+        assert_eq!(claims.items().len(), 2);
+        assert_eq!(
+            result
+                .sources(claims.items()[0].source_span())
+                .unwrap()
+                .len(),
+            1
+        );
+        structured["fields"][1]["value"]["items"][0]["value"] =
+            json!("One claim.\n\nAnother paragraph.");
+        assert_eq!(
+            extract_semantic_read(
+                &schema,
+                &read,
+                &delivery,
+                SemanticReadSensitivityLimit::PublicOnly,
+                &serde_json::to_vec(&structured).unwrap()
+            )
+            .unwrap_err(),
+            SemanticExtractionError::InvalidText
+        );
+        structured["fields"][1]["value"]["items"][0]["value"] = json!("One claim.");
+        structured["fields"][1]["value"]["items"][0]["sources"] = json!(["@r99"]);
+        assert_eq!(
+            extract_semantic_read(
+                &schema,
+                &read,
+                &delivery,
+                SemanticReadSensitivityLimit::PublicOnly,
+                &serde_json::to_vec(&structured).unwrap()
+            )
+            .unwrap_err(),
+            SemanticExtractionError::SourceMissing
+        );
+    }
+
+    #[test]
     fn enforces_canonical_bounded_resolved_ordered_and_sensitive_sources() {
         for (sources, expected) in [
             (json!([]), SemanticExtractionError::SourceLimit),
