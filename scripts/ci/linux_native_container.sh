@@ -9,7 +9,7 @@ native_volume="${native_name}-home"
 
 # Every mode, including cleanup, is host-policy-sensitive. Never run it against
 # a PR or a caller-selected checkout, even if invoked outside the job gate.
-if [[ "${GITHUB_EVENT_NAME:?}" != push && "${GITHUB_EVENT_NAME}" != workflow_dispatch && "${GITHUB_EVENT_NAME}" != workflow_call ]] \
+if [[ "${GITHUB_EVENT_NAME:?}" != push && "${GITHUB_EVENT_NAME}" != workflow_dispatch ]] \
   || [[ "${GITHUB_REF:?}" != refs/heads/main ]] \
   || [[ ! "${GITHUB_SHA:?}" =~ ^[0-9a-f]{40}$ ]]; then
   echo 'native host setup requires a trusted main event' >&2
@@ -20,7 +20,7 @@ case "${GITHUB_EVENT_NAME}" in
     native_input_valid=false
     if [[ -z "${NATIVE_CHECKOUT_REF:-}" ]]; then native_input_valid=true; fi
     ;;
-  workflow_call|workflow_dispatch)
+  workflow_dispatch)
     native_input_valid=false
     if [[ "${NATIVE_CHECKOUT_REF:-}" =~ ^[0-9a-f]{40}$ ]] && [[ "${NATIVE_CHECKOUT_REF}" = "${GITHUB_SHA}" ]]; then
       native_input_valid=true

@@ -240,7 +240,7 @@ end
 def linux_native_environment_errors(ci, dockerfile, launcher, preflight, profile)
   errors = []
   job = ci.fetch("jobs").fetch("linux-native-security")
-  trusted_if = "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call')"
+  trusted_if = "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')"
   errors << "host policy must be captive to an exact trusted-main event after source policy" unless
     job["if"] == trusted_if && job["needs"] == "workflow-policy"
   checkout = job.fetch("steps").find { |step| step["uses"]&.start_with?("actions/checkout@") }
@@ -296,7 +296,7 @@ def linux_native_environment_errors(ci, dockerfile, launcher, preflight, profile
     "target=/opt/rustup,readonly", "target=/opt/rust-bin,readonly",
     'docker network disconnect bridge "${native_name}"',
     'CARGO_NET_OFFLINE=${native_offline}',
-    '"${GITHUB_EVENT_NAME:?}" != push && "${GITHUB_EVENT_NAME}" != workflow_dispatch && "${GITHUB_EVENT_NAME}" != workflow_call',
+    '"${GITHUB_EVENT_NAME:?}" != push && "${GITHUB_EVENT_NAME}" != workflow_dispatch',
     '"${NATIVE_CHECKOUT_REF:-}" =~ ^[0-9a-f]{40}$',
     '"${NATIVE_CHECKOUT_REF}" = "${GITHUB_SHA}"',
     '"${GITHUB_REF:?}" != refs/heads/main',
@@ -335,10 +335,52 @@ def native_job_admitted?(expression, event, ref)
   ref == parts[1] && events.include?(event)
 end
 
+def assert_ci_checkout_admission(ci)
+  jobs = ci.fetch("jobs")
+  policy = jobs.fetch("workflow-policy")
+  admission = policy.fetch("steps").first
+  unless !policy.key?("if") && !policy.key?("continue-on-error") &&
+    admission["name"] == "Admit exact CI event and checkout input before checkout" &&
+    admission["shell"] == "bash" && !admission.key?("if") && !admission.key?("continue-on-error") &&
+    admission["env"] == { "CI_CHECKOUT_REF" => "${{ inputs.checkout_ref }}" }
+    raise "CI input admission must precede all checkout"
+  end
+  checkout = policy.fetch("steps")[1]
+  raise "source policy must check out only the admitted event SHA" unless
+    checkout["uses"]&.start_with?("actions/checkout@") && checkout.fetch("with")["ref"] == "${{ github.sha }}"
+  reaches_admission = lambda do |name, seen|
+    next true if name == "workflow-policy"
+    next false if seen.include?(name)
+    job = jobs.fetch(name)
+    next false if job.fetch("if", "").match?(/always\(|cancelled\(|failure\(/)
+    Array(job["needs"]).any? { |dependency| reaches_admission.call(dependency, seen + [name]) }
+  end
+  jobs.each_key do |name|
+    raise "CI checkout DAG bypasses input admission: #{name}" unless reaches_admission.call(name, [])
+  end
+  # Test real caller semantics, including malformed/unresolvable refs. No
+  # checkout, Git or host-policy operation runs to classify these inputs.
+  %w[push pull_request workflow_dispatch workflow_call pull_request_target].each do |event|
+    ["refs/heads/main", "refs/heads/unreviewed"].each do |ref|
+      ["", "a" * 40, "b" * 40, "not-a-ref", "A" * 40].each do |candidate|
+        expected = if %w[push pull_request].include?(event)
+                     candidate.empty?
+                   else
+                     event == "workflow_dispatch" && ref == "refs/heads/main" && candidate == "a" * 40
+                   end
+        env = { "CI_CHECKOUT_REF" => candidate, "GITHUB_SHA" => "a" * 40,
+                "GITHUB_EVENT_NAME" => event, "GITHUB_REF" => ref }
+        _, _, status = Open3.capture3(env, "bash", "-e", "-c", admission.fetch("run"))
+        raise "CI pre-checkout refusal changed: #{event}/#{ref}/#{candidate.inspect}" unless status.success? == expected
+      end
+    end
+  end
+end
+
 def assert_native_event_admission(job)
   %w[push workflow_dispatch workflow_call pull_request pull_request_target schedule].each do |event|
     ["refs/heads/main", "refs/heads/unreviewed", "refs/pull/1/merge", "refs/tags/v1"].each do |ref|
-      expected = ref == "refs/heads/main" && %w[push workflow_dispatch workflow_call].include?(event)
+      expected = ref == "refs/heads/main" && %w[push workflow_dispatch].include?(event)
       raise "native job event admission changed: #{event}/#{ref}" unless
         native_job_admitted?(job.fetch("if"), event, ref) == expected
     end
@@ -346,7 +388,7 @@ def assert_native_event_admission(job)
   refusal = job.fetch("steps").first.fetch("run")
   %w[push workflow_call workflow_dispatch pull_request].each do |event|
     ["", "a" * 40, "b" * 40, "a" * 39, "A" * 40].each do |candidate|
-      expected = event == "push" ? candidate.empty? : %w[workflow_call workflow_dispatch].include?(event) && candidate == "a" * 40
+      expected = event == "push" ? candidate.empty? : event == "workflow_dispatch" && candidate == "a" * 40
       env = { "NATIVE_CHECKOUT_REF" => candidate, "GITHUB_SHA" => "a" * 40,
               "GITHUB_EVENT_NAME" => event, "GITHUB_REF" => "refs/heads/main" }
       _, _, status = Open3.capture3(env, "bash", "-e", "-c", refusal)
@@ -362,9 +404,30 @@ def assert_linux_native_environment(root)
   errors = linux_native_environment_errors(ci, *sources)
   raise errors.join("\n") unless errors.empty?
   job = ci.fetch("jobs").fetch("linux-native-security")
+  assert_ci_checkout_admission(ci)
+  %w[frontend blocker-security-fork blocker-fuzz-smoke rust rust-platforms linux-native-security coverage].each do |name|
+    mutation = Marshal.load(Marshal.dump(ci))
+    mutation.fetch("jobs").fetch(name).delete("needs")
+    begin
+      assert_ci_checkout_admission(mutation)
+    rescue RuntimeError => error
+      raise unless error.message.start_with?("CI checkout DAG bypasses input admission:")
+    else
+      raise "CI checkout escaped admission: #{name}"
+    end
+  end
+  mutation = Marshal.load(Marshal.dump(ci))
+  mutation.fetch("jobs").fetch("workflow-policy").fetch("steps").rotate!(1)
+  begin
+    assert_ci_checkout_admission(mutation)
+  rescue RuntimeError => error
+    raise unless error.message == "CI input admission must precede all checkout"
+  else
+    raise "source-policy checkout preceded input admission"
+  end
   assert_native_event_admission(job)
   mutation = Marshal.load(Marshal.dump(job))
-  mutation["if"] = mutation.fetch("if").sub(" || github.event_name == 'workflow_call'", "")
+  mutation["if"] = mutation.fetch("if").sub(" || github.event_name == 'workflow_dispatch'", "")
   begin
     assert_native_event_admission(mutation)
   rescue RuntimeError => error
@@ -427,17 +490,17 @@ def assert_linux_native_environment(root)
       ["push", "refs/heads/unreviewed", "a trusted main event"],
       ["push", "refs/heads/main", "the exact event checkout"],
       ["workflow_dispatch", "refs/heads/main", "the exact event checkout"],
-      ["workflow_call", "refs/heads/main", "the exact event checkout"]
+      ["workflow_call", "refs/heads/main", "a trusted main event"]
     ].each do |event, ref, expected|
       env = { "GITHUB_RUN_ID" => "1", "GITHUB_RUN_ATTEMPT" => "1",
               "GITHUB_EVENT_NAME" => event, "GITHUB_REF" => ref, "GITHUB_SHA" => "0" * 40,
-              "NATIVE_CHECKOUT_REF" => %w[workflow_call workflow_dispatch].include?(event) ? "0" * 40 : "" }
+              "NATIVE_CHECKOUT_REF" => event == "workflow_dispatch" ? "0" * 40 : "" }
       out, err, status = Open3.capture3(env, "bash", File.join(root, "scripts/ci/linux_native_container.sh"), mode, chdir: root)
       unless !status.success? && out.empty? && err.strip == "native host setup requires #{expected}"
         raise "native #{mode} failed to refuse #{event}/#{ref} at the trust boundary"
       end
     end
-    [["push", "a" * 40], ["workflow_call", ""], ["workflow_call", "b" * 40],
+    [["push", "a" * 40], ["workflow_dispatch", "b" * 40],
      ["workflow_dispatch", ""], ["workflow_dispatch", "a" * 39]].each do |event, candidate|
       env = { "GITHUB_RUN_ID" => "1", "GITHUB_RUN_ATTEMPT" => "1",
               "GITHUB_EVENT_NAME" => event, "GITHUB_REF" => "refs/heads/main",

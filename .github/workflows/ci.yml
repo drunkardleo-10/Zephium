@@ -29,9 +29,27 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
+      # Reusable workflows keep their caller's event context. The release
+      # caller is workflow_dispatch; there is no workflow_call runtime event.
+      - name: Admit exact CI event and checkout input before checkout
+        shell: bash
+        env:
+          CI_CHECKOUT_REF: ${{ inputs.checkout_ref }}
+        run: |
+          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          case "${GITHUB_EVENT_NAME}" in
+            push|pull_request) test -z "${CI_CHECKOUT_REF}" ;;
+            workflow_dispatch)
+              test "${GITHUB_REF}" = refs/heads/main
+              [[ "${CI_CHECKOUT_REF}" =~ ^[0-9a-f]{40}$ ]]
+              test "${CI_CHECKOUT_REF}" = "${GITHUB_SHA}"
+              ;;
+            *) exit 1 ;;
+          esac
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
-          ref: ${{ inputs.checkout_ref || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Enforce immutable workflow action and container sources
@@ -68,6 +86,7 @@ jobs:
           "${destination}/actionlint" -color
 
   frontend:
+    needs: workflow-policy
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -96,6 +115,7 @@ jobs:
         run: pnpm --dir frame run build
 
   blocker-security-fork:
+    needs: workflow-policy
     name: blocker security fork
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -139,6 +159,7 @@ jobs:
         run: cargo xtask check-blocker-security-fork
 
   blocker-fuzz-smoke:
+    needs: workflow-policy
     name: blocker deterministic sanitizer smoke
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -215,6 +236,7 @@ jobs:
           retention-days: 7
 
   rust:
+    needs: workflow-policy
     runs-on: ubuntu-22.04
     env:
       CARGO_TARGET_DIR: target
@@ -354,6 +376,7 @@ jobs:
         run: git diff --exit-code frame/src/shared/ipc/bindings.ts
 
   rust-platforms:
+    needs: workflow-policy
     name: rust-test (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -602,7 +625,7 @@ jobs:
     # This job installs host policy. Never consume a PR checkout here. The
     # release caller independently proves its reviewed main SHA; this gate also
     # refuses any checkout_ref that differs from the main event commit.
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call')
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     needs: workflow-policy
     # Ubuntu's currently published WebKitGTK is below WSA-2026-0004's fixed
     # boundary. Fedora 44 updates-testing currently carries Fedora's signed
@@ -626,7 +649,7 @@ jobs:
           [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]
           case "${GITHUB_EVENT_NAME}" in
             push) test -z "${NATIVE_CHECKOUT_REF}" ;;
-            workflow_call|workflow_dispatch)
+            workflow_dispatch)
               [[ "${NATIVE_CHECKOUT_REF}" =~ ^[0-9a-f]{40}$ ]]
               test "${NATIVE_CHECKOUT_REF}" = "${GITHUB_SHA}"
               ;;
