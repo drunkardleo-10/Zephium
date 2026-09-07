@@ -22,6 +22,12 @@ mod semantic_action;
 mod semantic_runtime;
 #[cfg(feature = "agentic-browser")]
 mod semantic_screenshot;
+#[cfg(feature = "agentic-browser")]
+mod work_observation_presentation;
+#[cfg(feature = "native-agentic-work-resource-probe")]
+pub(crate) use work_observation_presentation::retained_page_hidden;
+#[cfg(feature = "agentic-browser")]
+pub(crate) use work_observation_presentation::{PresentationState, WorkObservationPresentation};
 // Pure policy translation and the profile-scoped native extension lifecycle.
 mod extensions;
 mod native;

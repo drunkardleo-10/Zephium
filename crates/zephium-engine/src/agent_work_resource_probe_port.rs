@@ -101,6 +101,7 @@ pub(crate) struct RetentionStamp {
     document: wry::NavigationId,
     completed: u16,
     invocation: u64,
+    presented_observations: u16,
 }
 impl RetentionStamp {
     pub(crate) fn new(
@@ -108,6 +109,7 @@ impl RetentionStamp {
         identity: (usize, usize, u16),
         document: wry::NavigationId,
         invocation: u64,
+        presented_observations: u16,
     ) -> Self {
         Self {
             resource,
@@ -116,6 +118,7 @@ impl RetentionStamp {
             completed: identity.2,
             document,
             invocation,
+            presented_observations,
         }
     }
     pub(crate) fn retained_after_one_read(&self, next: &Self) -> bool {
@@ -130,6 +133,9 @@ impl RetentionStamp {
     }
     pub(crate) fn completed(&self) -> u16 {
         self.completed
+    }
+    pub(crate) fn presented_observations(&self) -> u16 {
+        self.presented_observations
     }
 }
 pub(crate) struct Evidence {
@@ -399,10 +405,24 @@ mod tests {
     fn retention_stamp_rejects_resource_view_document_world_counter_and_invocation_substitution() {
         let (_, request) = source();
         let join = request.resource().clone();
-        let stamp =
-            || RetentionStamp::new(join.clone(), (10, 20, 1), wry::NavigationId::from_raw(7), 1);
-        let next =
-            || RetentionStamp::new(join.clone(), (10, 20, 2), wry::NavigationId::from_raw(7), 3);
+        let stamp = || {
+            RetentionStamp::new(
+                join.clone(),
+                (10, 20, 1),
+                wry::NavigationId::from_raw(7),
+                1,
+                0,
+            )
+        };
+        let next = || {
+            RetentionStamp::new(
+                join.clone(),
+                (10, 20, 2),
+                wry::NavigationId::from_raw(7),
+                3,
+                0,
+            )
+        };
         assert!(stamp().retained_after_one_read(&next()));
         for change in 0..8 {
             let mut wrong = next();

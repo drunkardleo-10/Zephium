@@ -95,6 +95,7 @@ impl WorkNativeResource {
             view.semantic()?.witness_identity()?,
             view.work_navigation()?.witness_document()?,
             self.last_invocation,
+            self.presentation_observations,
         ))
     }
 }
@@ -114,6 +115,32 @@ impl EngineHost {
         if request.operation == Op::Retire {
             let state = resource.retire_witness_state();
             task.complete(state, None);
+            return;
+        }
+        if request.operation == Op::Inspect && resource.witness.is_none() {
+            let stamp = (guard.port_open()
+                && guard.is_healthy()
+                && resource.ready()
+                && !resource.pending()
+                && guard.storage() == ContextProfileStorageClass::Ephemeral
+                && guard
+                    .document()
+                    .is_some_and(|target| request.document.admits(target))
+                && resource.presentation_observations > 0
+                && resource
+                    .view
+                    .as_ref()
+                    .is_some_and(|view| crate::platform::imp::retained_page_hidden(view.view())))
+            .then(|| resource.stamp())
+            .flatten();
+            task.complete(
+                if stamp.is_some() {
+                    State::Ready
+                } else {
+                    State::Failed
+                },
+                stamp,
+            );
             return;
         }
         if !guard.port_open()

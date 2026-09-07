@@ -141,6 +141,56 @@ Controller transcript retirement, fresh account evidence, production rendering
 opportunities and a genuine unfamiliar multi-page live witness remain the next
 integration work; these tests do not qualify those capabilities.
 
+## Rendering as part of retained observation
+
+The macOS retained-read adapter now owns one bounded presentation episode inside
+the original observation task. It prepares a hidden auxiliary public AppKit
+window, publishes the owner and watchdog before presentation, briefly reparents
+the same WKWebView, performs one semantic invocation, and restores/hides/releases
+the presentation before delivering a snapshot. It creates no second browser,
+profile, model tool or foreground-control capability. Other native adapters remain
+Unsupported at the existing retained-resource port.
+
+The exact resource guard/incarnation, execution lease, observation correlation,
+committed document epoch/native navigation stamp and current native URL are
+rechecked through completion. Only one such presentation is admitted at a time.
+The fixed 1280×800 viewport must fit on-screen without scaling or clipping. The
+window cannot become key/main and ignores mouse input. The application's current
+key/main window and responder must remain the captured human owners. Zephium
+never activates the application, injects input, selects a responder or restores
+focus after a human changes it. Missing foreground/geometry yields an explicit
+read refusal, not a fabricated observation.
+
+The episode has one five-second absolute deadline intersected with the original
+execution lease. Once visibly presented, a 100 ms normal-event-loop opportunity
+precedes the single invocation; this is a bounded rendering opportunity, not a
+claim that any arbitrary site has settled. A coalesced 50 ms watchdog revalidates
+ownership. Expiry/control/profile/document changes revoke presentation and discard
+the result. Callback servicing is subject to the real application event loop,
+not a realtime scheduling guarantee. Cleanup can outlive revoked authority but
+gets at most 104 total watchdog opportunities, without renewing execution or
+presentation authority. An undrained failure remains owned and blocks Clean.
+
+The snapshot remains with the original task until the semantic callback has
+returned through the next-main-queue barrier, the exact auxiliary window's weak
+reference has cleared, parent/frame restoration is verified, and the cancelled
+or entered watchdog owner has physically drained. Cancellation of an executing
+semantic invocation invalidates that channel and quarantines the resource;
+it is not represented as a healthy reusable page. Destruction retries exact
+presentation retirement before retiring the page. Native audits include the
+production surface and the original pending resource/task owners. No live timer
+authority or presentation remains when the observation finishes; a cancelled
+dispatch block may still run later, but holds no callback, lease or permit.
+
+The historical diagnostic holder stays release-excluded. The provider-free
+two-lease RAF qualifier now instead calls the shipping retained-read operation,
+then waits 400 ms after delivery before independently checking the hidden page
+and completed presentation count. Its native view/document/world stamps and
+normal application/profile/native weak cleanup remain required. See
+[retained observation rendering qualification](../eval/agentic-browsing/macos-retained-observation-rendering.md)
+for the actual measured status; deterministic tests alone do not qualify a live
+RAF workflow, background execution or heterogeneous multi-page tasks.
+
 ## Exact lifetime protocol
 
 Construction, acquisition, revocation and destruction publish their pending

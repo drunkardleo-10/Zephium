@@ -23,7 +23,6 @@ use zephium_agentic::{
 use zephium_core::{ids::ProfileId, ports::engine::Partition};
 
 const CONSTRUCTION_BUDGET: Duration = Duration::from_secs(30);
-const READ_BUDGET: Duration = Duration::from_secs(15);
 const DRAIN_BUDGET: Duration = Duration::from_secs(5);
 
 #[cfg(feature = "native-agentic-work-resource-probe")]
@@ -32,6 +31,8 @@ mod witness;
 
 #[path = "work_resource_navigation.rs"]
 mod navigation;
+#[path = "work_resource_observation.rs"]
+mod observation;
 
 pub(super) struct WorkNativeResource {
     guard: Arc<WorkResourceGuard>,
@@ -39,10 +40,7 @@ pub(super) struct WorkNativeResource {
     revocation: Option<WorkLifecycleTask>,
     destruction: Option<WorkLifecycleTask>,
     watchdog: Option<crate::platform::imp::ContentPolicyTimeout>,
-    observation: Option<(
-        SemanticRuntimeCorrelation,
-        crate::platform::imp::ContentPolicyTimeout,
-    )>,
+    observation: Option<observation::WorkObservation>,
     navigation: Option<navigation::WorkNavigation>,
     last_invocation: u64,
     document_started: bool,
@@ -58,6 +56,8 @@ pub(super) struct WorkNativeResource {
     witness_attempted: bool,
     #[cfg(feature = "native-agentic-work-resource-probe")]
     witness_admission: Option<witness::Admission>,
+    #[cfg(feature = "native-agentic-work-resource-probe")]
+    presentation_observations: u16,
 }
 impl WorkNativeResource {
     #[cfg(feature = "native-agentic-work-resource-probe")]
@@ -123,6 +123,8 @@ impl WorkNativeResource {
             witness_attempted: false,
             #[cfg(feature = "native-agentic-work-resource-probe")]
             witness_admission: None,
+            #[cfg(feature = "native-agentic-work-resource-probe")]
+            presentation_observations: 0,
         }
     }
     pub(super) fn guard(&self) -> Arc<WorkResourceGuard> {
@@ -167,12 +169,14 @@ impl WorkNativeResource {
         // physical delivery barriers. Ingress-owned queued tasks and accepted
         // reads remain independently owed; refusal is not a drain shortcut.
         self.retire_construction();
+        self.cancel_observation(SemanticRuntimePortFailure::Shutdown);
         if let Some(navigation) = self.navigation.take() {
             navigation.refuse(ContextPortFailure::Shutdown);
         }
         if let Some(task) = self.revocation.take() {
             task.complete(Outcome::Refused);
         }
+        self.retire_page();
         self.destruction_drained()
     }
     pub(super) fn consistent(&self, id: ContextId) -> bool {
@@ -199,6 +203,9 @@ impl WorkNativeResource {
     }
     fn retire_page(&mut self) -> bool {
         self.watchdog = None;
+        if !self.retire_observation_presentation() {
+            return false;
+        }
         #[cfg(feature = "native-agentic-work-resource-probe")]
         if !self.retire_witness() {
             self.retirement_clean = false;
@@ -537,6 +544,8 @@ impl EngineHost {
             witness_attempted: false,
             #[cfg(feature = "native-agentic-work-resource-probe")]
             witness_admission: None,
+            #[cfg(feature = "native-agentic-work-resource-probe")]
+            presentation_observations: 0,
         };
         let view = crate::platform::imp::build_owned_work_view(
             &self.parent,
@@ -585,6 +594,7 @@ impl EngineHost {
     }
 
     pub(crate) fn progress_work_resource(&mut self, guard: &Arc<WorkResourceGuard>) {
+        self.progress_work_observation(guard);
         let id = guard.resource().identity().context();
         let Some(resource) = self
             .work_resources
@@ -813,147 +823,6 @@ impl EngineHost {
             guard.fail();
             self.progress_work_resource(guard);
         }
-    }
-
-    pub(crate) fn handle_work_observation_task(&mut self, mut task: WorkObservationTask) {
-        let guard = task.guard();
-        let id = guard.resource().identity().context();
-        let Some(request) = task.request() else {
-            return;
-        };
-        let correlation = request.invocation().correlation();
-        let lease = request.lease().clone();
-        let Some(resource) = self
-            .work_resources
-            .get_mut(&id)
-            .filter(|resource| Arc::ptr_eq(&resource.guard, &guard))
-        else {
-            task.refuse(SemanticRuntimePortFailure::Stale);
-            return;
-        };
-        let admitted = work_browser_monotonic_now().is_some_and(|now| guard.admits(&lease, now))
-            && !self.erasure_tombstones.contains(&resource.profile())
-            && !resource.pending()
-            && resource.ready()
-            && request.invocation().invocation().get() > resource.last_invocation
-            && request.invocation().budget()
-                == zephium_agentic::SemanticRuntimeBudget::INITIAL_FILTERED
-            && request.invocation().scope() == zephium_agentic::SemanticRuntimeScopeClass::Initial;
-        if !admitted {
-            task.refuse(SemanticRuntimePortFailure::Stale);
-            return;
-        }
-        #[cfg(feature = "native-agentic-work-resource-probe")]
-        if !resource.admit_witness_read() {
-            task.refuse(SemanticRuntimePortFailure::Stale);
-            return;
-        }
-        let Some(invocation) = task.take_invocation() else {
-            guard.fail();
-            return;
-        };
-        let Some(now) = work_browser_monotonic_now() else {
-            task.complete(Err(SemanticRuntimePortFailure::TimedOut));
-            return;
-        };
-        let duration =
-            Duration::from_millis(lease.deadline().millis().saturating_sub(now.millis()))
-                .min(READ_BUDGET);
-        let timeout_guard = guard.clone();
-        let timeout_correlation = correlation.clone();
-        let watchdog = crate::platform::imp::schedule_content_policy_timeout(duration, move || {
-            let rejected = timeout_guard.clone();
-            if !crate::host::try_with_agent_context_terminal(move |host| {
-                host.timeout_work_observation(&timeout_guard, &timeout_correlation)
-            }) {
-                rejected.fail();
-            }
-        });
-        let Some(watchdog) = watchdog else {
-            task.complete(Err(SemanticRuntimePortFailure::Shutdown));
-            return;
-        };
-        resource.last_invocation = invocation.invocation().get();
-        resource.observation = Some((correlation.clone(), watchdog));
-        let Some(view) = resource.view.as_ref() else {
-            task.complete(Err(SemanticRuntimePortFailure::Retired));
-            return;
-        };
-        let _ = view.dispatch_semantic(invocation, move |outcome| {
-            // The task/permit remains owned across this mandatory next-main-
-            // queue barrier. Revocation cannot report zero while the WebKit
-            // reply/result handler or this lease-bearing envelope can run.
-            dispatch2::DispatchQueue::main().exec_async(move || {
-                let rejected = guard.clone();
-                if !crate::host::try_with_agent_context_terminal(move |host| {
-                    host.finish_work_observation(task, correlation, lease, outcome)
-                }) {
-                    rejected.fail();
-                }
-            });
-        });
-    }
-
-    fn timeout_work_observation(
-        &mut self,
-        guard: &Arc<WorkResourceGuard>,
-        correlation: &SemanticRuntimeCorrelation,
-    ) {
-        let Some(resource) = self
-            .work_resources
-            .get_mut(&guard.resource().identity().context())
-            .filter(|resource| Arc::ptr_eq(&resource.guard, guard))
-        else {
-            return;
-        };
-        if resource
-            .observation
-            .as_ref()
-            .is_some_and(|(pending, _)| pending == correlation)
-        {
-            guard.fail();
-            if let Some(runtime) = resource.view.as_ref().and_then(|view| view.semantic()) {
-                runtime.timeout(correlation.invocation());
-            }
-        }
-    }
-    fn finish_work_observation(
-        &mut self,
-        task: WorkObservationTask,
-        correlation: SemanticRuntimeCorrelation,
-        lease: zephium_agentic::WorkBrowserExecutionLease,
-        outcome: Result<SemanticSnapshot, SemanticRuntimePortFailure>,
-    ) {
-        let guard = task.guard();
-        let Some(resource) = self
-            .work_resources
-            .get_mut(&guard.resource().identity().context())
-            .filter(|resource| Arc::ptr_eq(&resource.guard, &guard))
-        else {
-            guard.fail();
-            task.complete(Err(SemanticRuntimePortFailure::Stale));
-            return;
-        };
-        if resource
-            .observation
-            .as_ref()
-            .is_none_or(|(pending, _)| pending != &correlation)
-        {
-            guard.fail();
-            task.complete(Err(SemanticRuntimePortFailure::Stale));
-            return;
-        }
-        resource.observation = None;
-        let usable = work_browser_monotonic_now().is_some_and(|now| guard.admits(&lease, now))
-            && resource.ready()
-            && !self.erasure_tombstones.contains(&resource.profile());
-        #[cfg(feature = "native-agentic-work-resource-probe")]
-        let usable = usable && resource.witness_ready();
-        task.complete(if usable {
-            outcome
-        } else {
-            Err(SemanticRuntimePortFailure::Cancelled)
-        });
     }
 
     pub(super) fn force_shutdown_work_resources(&mut self) -> bool {

@@ -703,6 +703,28 @@ pub(crate) fn resource_native_drain(
 ) -> Option<bool> {
     owner_witness_drained(&ForegroundOwner::Resource(resource.clone()))
 }
+/// Weak-only diagnostic sampling of the shipping observation's real owners.
+/// This function grants no presentation, read or resource capability.
+#[cfg(feature = "native-agentic-work-resource-probe")]
+pub(crate) fn record_resource_observation_weak(
+    resource: &zephium_agentic::WorkBrowserResourceJoin,
+    page: &Retained<WKWebView>,
+    surface: &Retained<NSWindow>,
+) {
+    // SAFETY: exact retained main-thread page/configuration, as in the original
+    // diagnostic witness; only weak observations survive this call.
+    let store = unsafe { page.configuration().websiteDataStore() };
+    WEAK_WITNESS.with(|slot| {
+        if let Ok(mut slot) = slot.try_borrow_mut() {
+            *slot = Some(WeakNativeWitness {
+                context: ForegroundOwner::Resource(resource.clone()),
+                page: Weak::from_retained(page),
+                surface: Weak::from_retained(surface),
+                store: Weak::from_retained(&store),
+            });
+        }
+    });
+}
 #[cfg(feature = "native-agentic-work-resource-probe")]
 pub(crate) fn resource_native_failures(
     resource: &zephium_agentic::WorkBrowserResourceJoin,

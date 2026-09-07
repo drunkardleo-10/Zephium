@@ -110,6 +110,21 @@ impl CurrentDocumentEvidence {
 /// only an admitted execution-lease operation can retire it for a successor.
 #[derive(Clone)]
 pub(crate) struct WorkDocumentNavigation(Arc<Mutex<State>>);
+/// Private, descriptive stamp of the exact committed native document.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct WorkDocumentStamp {
+    native_id: wry::NavigationId,
+    epoch: u64,
+}
+#[cfg(test)]
+impl WorkDocumentStamp {
+    pub(crate) fn for_test(epoch: u64) -> Self {
+        Self {
+            native_id: wry::NavigationId::from_raw(1),
+            epoch,
+        }
+    }
+}
 impl Default for WorkDocumentNavigation {
     fn default() -> Self {
         Self(Arc::new(Mutex::new(State {
@@ -133,6 +148,17 @@ impl Default for WorkDocumentNavigation {
 }
 
 impl WorkDocumentNavigation {
+    pub(crate) fn observation_stamp(&self, context: ContextJoin) -> Option<WorkDocumentStamp> {
+        let state = self.0.lock().ok()?;
+        (state.phase == Phase::Ready
+            && state.operation.is_none()
+            && state.navigation_epoch == context.navigation_epoch().get()
+            && state.navigation_epoch == context.frame_generation().get())
+        .then_some(WorkDocumentStamp {
+            native_id: state.native_id?,
+            epoch: state.navigation_epoch,
+        })
+    }
     /// Reuse the exact resource gate only under an admitted successor operation.
     /// The source was freshly observed under the same execution lease; the host
     /// additionally checks the current native URL and exact ingress reservation.
@@ -485,8 +511,10 @@ mod tests {
     fn successor_uses_same_gate_exact_lineage_and_one_terminal_without_bootstrap() {
         let gate = ready_gate();
         let (source, request) = next_request();
+        let prior_stamp = gate.observation_stamp(source).unwrap();
         let next = request.target().as_url().as_str();
         gate.arm_successor(source, &request).unwrap();
+        assert!(gate.observation_stamp(source).is_none());
         assert!(!gate.ready(Some(URL)));
         assert!(!gate.allows("about:blank"));
         assert!(!gate.allows(URL));
@@ -507,10 +535,17 @@ mod tests {
         assert_eq!(operation, request.operation());
         assert_eq!(outcome.as_ref(), Ok(request.target()));
         assert_eq!(gate.0.lock().unwrap().navigation_epoch, 2);
+        assert!(gate.observation_stamp(source).is_none());
+        assert_ne!(
+            gate.observation_stamp(operation.context()),
+            Some(prior_stamp)
+        );
+        assert!(gate.observation_stamp(operation.context()).is_some());
         assert!(gate.take_successor_terminal().is_none());
         assert!(gate.arm_successor(source, &request).is_err());
         assert_eq!(gate.location_changed(), Ok(true));
         assert!(!gate.ready(Some(next)));
+        assert!(gate.observation_stamp(operation.context()).is_none());
     }
     #[test]
     fn successor_rejects_old_document_events_redirects_wrong_ids_and_post_ready_drift() {

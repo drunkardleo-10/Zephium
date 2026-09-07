@@ -46,7 +46,8 @@ mod work_resource;
 pub use work_resource::work_browser_monotonic_now;
 #[cfg(target_os = "macos")]
 pub(crate) use work_resource::{
-    WorkLifecycleTask, WorkNavigationTask, WorkObservationTask, WorkResourceGuard,
+    WorkLifecycleTask, WorkNavigationTask, WorkNotificationPermit, WorkObservationTask,
+    WorkResourceGuard,
 };
 
 pub(crate) type AgentContextEventSink = Arc<dyn Fn(ContextNativeEvent) + Send + Sync>;
