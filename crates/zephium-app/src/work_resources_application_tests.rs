@@ -163,7 +163,7 @@ fn worker_exit_wakes_application_after_last_progress_wake_was_consumed() {
     if child("worker_exit_wakes_application_after_last_progress_wake_was_consumed") {
         return;
     }
-    worker_exit_wake(false);
+    worker_exit_wake(false, false);
 }
 
 #[test]
@@ -173,20 +173,43 @@ fn blocking_shutdown_joins_original_worker_store_and_native_wakes_without_shell_
     ) {
         return;
     }
-    worker_exit_wake(true);
+    worker_exit_wake(true, false);
 }
 
-fn worker_exit_wake(blocking_shutdown: bool) {
+#[test]
+fn shutdown_passes_its_deadline_through_post_completion_scoped_thread_join() {
+    if child("shutdown_passes_its_deadline_through_post_completion_scoped_thread_join") {
+        return;
+    }
+    worker_exit_wake(false, true);
+}
+
+fn worker_exit_wake(blocking_shutdown: bool, post_completion: bool) {
     let _serial = crate::WORK_RUNTIME_TEST_SERIAL
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let directory = tempfile::tempdir().unwrap();
     let (wake, wakes) = mpsc::sync_channel(1);
+    let hold_completion = Arc::new(AtomicBool::new(false));
+    let holding_completion = hold_completion.clone();
+    let (completion_entered, completion_entering) = mpsc::sync_channel(1);
+    let (completion_release, completion_releasing) = mpsc::sync_channel(1);
+    let completion_releasing = Mutex::new(completion_releasing);
     let (mut work, native, store) = coordinator_with_wake(
         directory.path(),
-        Arc::new(move || match wake.try_send(()) {
-            Ok(()) | Err(mpsc::TrySendError::Full(())) => true,
-            Err(mpsc::TrySendError::Disconnected(())) => false,
+        Arc::new(move || {
+            if holding_completion.swap(false, Ordering::AcqRel) {
+                completion_entered.send(()).unwrap();
+                completion_releasing
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap();
+            }
+            match wake.try_send(()) {
+                Ok(()) | Err(mpsc::TrySendError::Full(())) => true,
+                Err(mpsc::TrySendError::Disconnected(())) => false,
+            }
         }),
     );
     // No periodic/blind polling. Every poll below is driven by the exact
@@ -260,6 +283,36 @@ fn worker_exit_wake(blocking_shutdown: bool) {
         work.next_deadline().is_none(),
         "no timer may hide the missing completion wake"
     );
+    if post_completion {
+        // All progress/native wakes have been consumed. The next notification
+        // is completion.mark_stopped's own Waker, invoked after stopped=true
+        // but before worker_main/Tokio/thread-local teardown can return.
+        hold_completion.store(true, Ordering::Release);
+        release.send(()).unwrap();
+        completion_entering
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        let result = std::thread::scope(|scope| {
+            let (finished, finishing) = mpsc::channel();
+            let work = &mut work;
+            scope.spawn(move || {
+                let result = work.shutdown_until(
+                    &Clock(AtomicU64::new(2)),
+                    Instant::now() + Duration::from_millis(10),
+                );
+                let _ = finished.send(result);
+            });
+            let result = finishing.recv_timeout(Duration::from_millis(70));
+            completion_release.send(()).unwrap();
+            result
+        });
+        assert!(
+            matches!(result, Ok(false)),
+            "caller deadline must cap scoped join, not a fresh 100 ms window: {result:?}"
+        );
+        assert_eq!(work.phase(), AdmissionPhase::Uncertain);
+        return;
+    }
     if blocking_shutdown {
         assert!(!work.shutdown_until(
             &Clock(AtomicU64::new(2)),

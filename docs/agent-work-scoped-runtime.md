@@ -115,6 +115,23 @@ one deadline across delayed Store and native phases, and no cleanup dispatch
 after an already-expired deadline or a delayed policy clock. Shell/profile
 attachment remains the next independent product join.
 
+Logical `mark_stopped` is not OS-thread exit: Tokio and thread-local destruction
+can still be running. Deadline-bearing runtime lifecycle joins now run on the existing
+reaper, whose original acknowledgement is published after the OS join and
+permit release. The caller waits for that acknowledgement under its unchanged
+deadline. A reaper-spawn failure retains the original emergency bundle and
+refuses new workers; later admission retries the same reaper handoff, never a
+potentially blocking admission-side join. Deadlineless suspended Drop/startup
+failure preserve their existing synchronous recovery-outcome contract; this
+does not claim those separate paths are deadline-bounded. No native/scoped
+clean proof can precede actual join.
+Retained shutdown passes its caller deadline into scoped drain, rather than
+creating a fresh 100 ms window. Post-`mark_stopped` gates reproduce the old
+unbounded join and guard the runtime and application deadline schedules.
+An expired consumed scoped drain remains Unproven: its worker stays owned by
+the reaper/emergency bundle, while application recovery remains fail-closed;
+this does not add clean recovery/reuse permission.
+
 Deterministic real-SQLite/loopback tests hold Admitted, Running and successful
 terminal ACKs independently of actual commits. They exercise an accepted A,
 fresh observed/cancelled B, unread-result and progress ownership, wrong-guard

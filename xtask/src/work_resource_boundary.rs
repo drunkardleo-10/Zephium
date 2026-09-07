@@ -300,6 +300,8 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "notifications.epoch.wait_until_changed(epoch,wake_at)",
             "Ok(true)=>returnInstant::now()<deadline", "next.min(deadline)",
             "ifInstant::now()>=deadline{returnfalse;}",
+            "self.poll_before(now,deadline)", "lifecycle.drain_until(drain_deadline)",
+            "deadline.unwrap_or_else(||Instant::now()+Duration::from_millis(100))",
             "#[cfg(all(test,feature=\"work-execution-probe\"))]",
         ],
         &[

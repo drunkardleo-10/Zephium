@@ -493,6 +493,10 @@ impl RetainedWork {
     }
 
     pub(super) fn poll(&mut self, now: AgentPolicyInstant) {
+        self.poll_before(now, None);
+    }
+
+    fn poll_before(&mut self, now: AgentPolicyInstant, deadline: Option<Instant>) {
         self.rearm();
         // Check both original horizons before consuming a raced Running ACK.
         if self.staged.as_ref().is_some_and(|staged| {
@@ -594,7 +598,9 @@ impl RetainedWork {
             }
             if active.completion.is_stopped() {
                 if let Some(lifecycle) = active.lifecycle.take() {
-                    match lifecycle.drain_until(Instant::now() + Duration::from_millis(100)) {
+                    let drain_deadline =
+                        deadline.unwrap_or_else(|| Instant::now() + Duration::from_millis(100));
+                    match lifecycle.drain_until(drain_deadline) {
                         AgentRuntimeScopedDrain::Drained(drained) => active.drained = Some(drained),
                         AgentRuntimeScopedDrain::Unproven => {
                             failure = Some(AgentWorkFailure::Contract)
@@ -775,7 +781,7 @@ impl RetainedWork {
         if !self.stopping {
             return Err(Refusal::Busy);
         }
-        self.poll(now);
+        self.poll_before(now, deadline);
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Ok(false);
         }
