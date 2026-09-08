@@ -219,6 +219,71 @@ evidence is preserved under
 required after that generic correction is implemented and reviewed; the failed
 request must not be retried unchanged.
 
+Run twenty-nine was built from clean source `ea1c07b`; its executable SHA-256 is
+`05f1dd76784d9d3d8b15f19d4ca396e13fb8b1c524f3da5957359e796a29dc33`
+and whole-bundle manifest SHA-256 is
+`caf7de25b913c96880e37b2d1ceb09ee704ffc2bcfbd688d9659f916108874b6`.
+The probe configuration remained
+`93ce7e65840926e885c4da9ff0e0cb232a33ce4fef643296d6ddfa5c6bb04331`.
+Executable, configuration and complete bundle inventory were byte-identical
+after execution. The first explicitly coordinated launch deferred at the
+unchanged foreground gate after 15,026 ms / 266 checks, before Keychain,
+provider or Work admission. Its isolated Store and logs were preserved; it was
+not silently retried. The second launch was separately authorized and admitted
+after 978 ms / 19 checks.
+
+Luna selected Tower Bridge from the observed catalog and completed one native
+navigation. Its route was Navigate, initial Snapshot, Locate, surrounding-text
+Snapshot, initial Snapshot, Extract, then the reserved source mapper. Seven
+calls consumed 41,050 input and 983 output tokens in 31.604 seconds, costing
+9,465 micro-USD. The successive native observations contained 128, 128, 128,
+89 and 128 nodes; the broad observations were node-limited and the scoped one
+was scope-limited. No invalid-scope refusal occurred in this route, so run
+twenty-nine does not turn the deterministic recovery proof into a live claim.
+
+The controller reached ordinary accepted success with one navigation proposal,
+verified source mapping and verified durable terminal publication. Before
+shutdown the retained resource was healthy, idle, reusable and not being
+destroyed. The observer joined and normal application shutdown was clean. The
+stopped immutable Store passed integrity and foreign-key checks and contains one
+profile, one terminal Work run, 19 audit events, two audit deliveries and zero
+artifacts. Full evidence, including both launch logs and both intact isolated
+Stores, is preserved under
+`/private/tmp/zephium-retained-commerce-twenty-ninth.hjW83y`.
+
+Mechanical success is not useful-result qualification. Dashboard review of all
+seven stored responses found a rational candidate and source-backed build and
+display details: Tower Bridge, adult/display positioning, bridge features,
+microscale vehicles, building instructions and the observed rating. The mapper
+correctly refused to invent unsupported facts. It explicitly reported that the
+candidate's price and assembled width/depth were not observed, so neither the
+USD 150 budget nor the 30-by-20-cm footprint could be established. An Add to Bag
+control and Specifications section were visible, but their presence did not
+prove stock or dimensions. Therefore the answer is honest and partially useful,
+but it does not satisfy the core purchase-decision objective.
+
+The trace identifies two bounded follow-ups rather than a site workaround. Luna
+spent one decision on an unchanged initial Snapshot immediately after receiving
+the fresh post-navigation initial observation. More importantly, Locate and the
+scoped capture reached marketing/detail prose but not the target price or
+dimension values. The next investigation must distinguish semantic projection
+omission, collapsed/interactive disclosure and retained-evidence limits. It must
+not inject a LEGO answer, increase budgets or weaken source validation. Real
+native action execution is now the relevant product seam: first qualify the
+already-implemented fixed action recipes against a trusted local form with exact
+approval and callback ownership, then use an explicitly authorized real-site
+workflow where interaction is actually required.
+
+Stored response IDs, in execution order, are:
+
+1. `resp_03de4a5be2bdd353006aa0765931fc87d28a9333fa4067bd54`
+2. `resp_0bffe0532b2ba1ef006aa0765daf1887d2b961ccf06c0e2348`
+3. `resp_0e0142cef24a9399006aa076609efc87d282fcc4536ce0aec9`
+4. `resp_0e0142cef24a9399006aa07667cc9087d2a14eee92210d42b0`
+5. `resp_00feeb4bc3f37224006aa0766aa2dc87d2b7774a0a9fb3d88f`
+6. `resp_0540a69c766b53c1006aa0766dd75087d2b5520b29cb5afaa6`
+7. `resp_0540a69c766b53c1006aa07670254087d2b941efb2d71488bc`
+
 ## Deterministic gate
 
 The exact selected wrapper and original observer are tested, not just the bare
