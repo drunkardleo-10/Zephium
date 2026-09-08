@@ -1,6 +1,7 @@
 //! Shared frozen development admission; a static definition selects the task
 //! and explicit retention without changing any runtime/native lifecycle.
 use super::*;
+use crate::native_work_clock::{authority_window, NativeWorkClock};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 #[cfg(not(feature = "public-qualification"))]
@@ -11,19 +12,6 @@ use zephium_agent_provider_transport::{AgentProviderCredential, AgentProviderTra
 use zephium_agent_runtime::AgentRuntimeConfig;
 
 const TOTAL: Duration = Duration::from_secs(150);
-
-struct Clock(Instant);
-impl TerraControllerClock for Clock {
-    fn now(&self) -> Result<AgentPolicyInstant, TerraControllerClockError> {
-        let elapsed = u64::try_from(self.0.elapsed().as_millis())
-            .map_err(|_| TerraControllerClockError::Invalid)?;
-        Ok(AgentPolicyInstant::from_millis(
-            1_000_u64
-                .checked_add(elapsed)
-                .ok_or(TerraControllerClockError::Invalid)?,
-        ))
-    }
-}
 
 /// Called only by the explicitly admitted development worker. The one absolute
 /// deadline includes credential loading and is never restarted after a hop.
@@ -65,13 +53,7 @@ fn request(
     if Instant::now() >= deadline {
         return Err("deadline");
     }
-    let input = input(
-        identity,
-        profile.storage_class(),
-        started,
-        deadline,
-        definition,
-    )?;
+    let input = input(identity, profile.storage_class(), deadline, definition)?;
     Ok((definition.configure_request)(
         crate::TrustedWorkRequest::new(
             input,
@@ -89,7 +71,6 @@ fn request(
 fn input(
     identity: ContextIdentity,
     storage: ContextProfileStorageClass,
-    started: Instant,
     deadline: Instant,
     definition: &QualificationDefinition,
 ) -> Result<AgentWorkRunInput, &'static str> {
@@ -108,7 +89,7 @@ fn input(
     )
     .map_err(|_| "authority")?;
     let authority = (definition.authority)(authority)?;
-    let expires = AgentPolicyInstant::from_millis(151_000);
+    let (issued, expires) = authority_window(deadline)?;
     let manifest = AgentRunManifest::try_new(
         AgentRunManifestId::generate(),
         identity.owner(),
@@ -122,7 +103,7 @@ fn input(
         )
         .map_err(|_| "scope")?,
         budget,
-        AgentPolicyInstant::from_millis(1_000),
+        issued,
         expires,
         vec![AgentPlanNodeScope::new(node, authority, budget, expires)],
     )
@@ -150,7 +131,7 @@ fn input(
         AgentWorkRunSettings::new(
             AgentBrowserModel::Luna,
             ids,
-            Arc::new(Clock(started)),
+            Arc::new(NativeWorkClock),
             deadline,
         ),
     )
@@ -160,6 +141,34 @@ fn input(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn navigation_and_retained_inputs_share_native_epoch_without_renewing_elapsed_time() {
+        let started = Instant::now().checked_sub(Duration::from_secs(37)).unwrap();
+        let deadline = started + TOTAL;
+        let identity = ContextIdentity::new(
+            ContextId::generate(),
+            ContextRunId::generate(),
+            1_u128.into(),
+            ContextKind::Owned,
+        );
+        for definition in [
+            &DEFINITION,
+            #[cfg(feature = "discovery-qualification")]
+            &crate::discovery_qualification::DEFINITION,
+            #[cfg(feature = "retained-product-qualification")]
+            &crate::retained_product_qualification::DEFINITION,
+        ] {
+            let prepared = input(
+                identity,
+                ContextProfileStorageClass::Ephemeral,
+                deadline,
+                definition,
+            )
+            .unwrap();
+            crate::native_work_clock::assert_native_timing(&prepared, deadline);
+        }
+    }
 
     #[test]
     fn configuration_diagnostic_matches_selected_static_witness() {
@@ -194,7 +203,7 @@ mod tests {
                 #[cfg(feature = "discovery-qualification")]
                 &crate::discovery_qualification::DEFINITION,
             ] {
-                assert!(input(identity, storage, started, started + TOTAL, definition).is_ok());
+                assert!(input(identity, storage, started + TOTAL, definition).is_ok());
                 let task = (definition.task)(identity).unwrap();
                 assert_eq!(task.navigation_discovery().is_some(), definition.inspection);
             }
@@ -207,8 +216,7 @@ mod tests {
                 ContextProfileStorageClass::Durable,
                 ContextProfileStorageClass::Ephemeral,
             ] {
-                let prepared =
-                    input(identity, storage, started, started + TOTAL, definition).unwrap();
+                let prepared = input(identity, storage, started + TOTAL, definition).unwrap();
                 assert!(
                     prepared.retained_resource_spec().is_ok(),
                     "the selected witness must remain valid for the retained product entry"

@@ -9,6 +9,17 @@ tasks. A separate trusted task must supply the actual effect contract.
 
 ## Authority and lifecycle
 
+Native retained admission and controller effect timestamps use the engine's one
+process-monotonic Work epoch. The composition supplies `NativeWorkClock`; it must
+not start a run-relative clock or add a fixed epoch offset. Existing absolute
+wall deadlines are projected with `work_browser_monotonic_deadline`, which uses
+that same epoch and rounds fractional milliseconds upward for policy storage.
+The original `Instant` remains independently enforced, including time spent in
+foreground admission and credential lookup; the projection grants no new wall
+time. All relevant navigation and retained qualification builders share this
+path. A correctly authorized action can still be refused before dispatch if
+its requested-at timestamp belongs to another clock domain.
+
 `WorkBrowserResources::prepare_action` accepts an existing
 `SemanticActionNativeRequest`. That request is created by the semantic action
 coordinator only after the independent policy owner approves and dispatches the

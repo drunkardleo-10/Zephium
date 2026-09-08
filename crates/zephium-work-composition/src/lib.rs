@@ -17,6 +17,11 @@ compile_error!("select the retained local action qualification without another o
 
 #[cfg(feature = "macos-work")]
 mod native;
+#[cfg(any(
+    feature = "navigation-qualification",
+    feature = "retained-qualification"
+))]
+mod native_work_clock;
 #[cfg(feature = "macos-work")]
 pub use native::{MacosWorkComposition, TrustedWorkRequest};
 #[cfg(feature = "macos-work")]

@@ -1,23 +1,12 @@
 //! One frozen local-only policy. No page or model input creates authority.
 use super::*;
+use crate::native_work_clock::{authority_window, NativeWorkClock};
 use std::{sync::Arc, time::Duration};
 use zephium_agent_provider_transport::{
     load_macos_probe_openai_credential, AgentProviderTransportConfig,
 };
 use zephium_agent_runtime::AgentRuntimeConfig;
 const TOTAL: Duration = Duration::from_secs(150);
-struct Clock(Instant);
-impl TerraControllerClock for Clock {
-    fn now(&self) -> Result<AgentPolicyInstant, TerraControllerClockError> {
-        let elapsed = u64::try_from(self.0.elapsed().as_millis())
-            .map_err(|_| TerraControllerClockError::Invalid)?;
-        Ok(AgentPolicyInstant::from_millis(
-            1_000_u64
-                .checked_add(elapsed)
-                .ok_or(TerraControllerClockError::Invalid)?,
-        ))
-    }
-}
 
 pub fn load_request(
     started: Instant,
@@ -41,7 +30,6 @@ pub fn load_request(
     let input = input(
         identity,
         profile.storage_class(),
-        started,
         deadline,
         target,
         origin.clone(),
@@ -67,7 +55,6 @@ pub fn load_request(
 fn input(
     identity: ContextIdentity,
     storage: ContextProfileStorageClass,
-    started: Instant,
     deadline: Instant,
     target: ContextNavigationTarget,
     origin: SemanticOrigin,
@@ -87,7 +74,7 @@ fn input(
         effects,
     )
     .map_err(|_| "authority")?;
-    let expires = AgentPolicyInstant::from_millis(151_000);
+    let (issued, expires) = authority_window(deadline)?;
     let manifest = AgentRunManifest::try_new(
         AgentRunManifestId::generate(),
         identity.owner(),
@@ -101,7 +88,7 @@ fn input(
         )
         .map_err(|_| "scope")?,
         budget,
-        AgentPolicyInstant::from_millis(1_000),
+        issued,
         expires,
         vec![AgentPlanNodeScope::new(node, authority, budget, expires)],
     )
@@ -129,9 +116,38 @@ fn input(
         AgentWorkRunSettings::new(
             AgentBrowserModel::Luna,
             ids,
-            Arc::new(Clock(started)),
+            Arc::new(NativeWorkClock),
             deadline,
         ),
     )
     .map_err(|_| "input")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn action_input_uses_native_admission_epoch_and_original_elapsed_deadline() {
+        let started = Instant::now().checked_sub(Duration::from_secs(37)).unwrap();
+        let deadline = started + TOTAL;
+        let target =
+            ContextNavigationTarget::parse("http://127.0.0.1:12345/retained-local-form-v1.html")
+                .unwrap();
+        let origin = SemanticOrigin::parse(target.as_url().as_str()).unwrap();
+        let identity = ContextIdentity::new(
+            ContextId::generate(),
+            ContextRunId::generate(),
+            1_u128.into(),
+            ContextKind::Owned,
+        );
+        let prepared = input(
+            identity,
+            ContextProfileStorageClass::Ephemeral,
+            deadline,
+            target,
+            origin,
+        )
+        .unwrap();
+        crate::native_work_clock::assert_native_timing(&prepared, deadline);
+    }
 }

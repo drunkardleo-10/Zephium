@@ -1,7 +1,7 @@
 #[cfg(feature = "agentic-browser")]
 mod agent_context_port;
 #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
-pub use agent_context_port::work_browser_monotonic_now;
+pub use agent_context_port::{work_browser_monotonic_deadline, work_browser_monotonic_now};
 #[cfg(feature = "agentic-browser")]
 pub use agent_context_port::{AgentBrowserLifetimeFactory, MAX_AGENT_BROWSER_LIFETIMES};
 #[cfg(target_os = "macos")]

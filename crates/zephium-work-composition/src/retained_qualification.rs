@@ -503,10 +503,8 @@ pub fn start_retained_controller_witness(
         return Err("already_used");
     }
     let started = Instant::now();
-    let issued = now()?;
     let deadline = started.checked_add(TOTAL).ok_or("deadline")?;
-    let expires =
-        AgentPolicyInstant::from_millis(issued.millis().checked_add(150_000).ok_or("clock")?);
+    let (issued, expires) = crate::native_work_clock::authority_window(deadline)?;
     let profile = AgentWorkProfileId::generate();
     let generation = ContentPolicyGeneration::new(1).ok_or("generation")?;
     let (tx, rx) = mpsc::sync_channel(4);

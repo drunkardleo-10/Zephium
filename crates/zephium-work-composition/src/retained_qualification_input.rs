@@ -1,12 +1,6 @@
 //! Shared fixed authority and accounting for the release-excluded retained witnesses.
 use super::*;
-
-struct Clock;
-impl TerraControllerClock for Clock {
-    fn now(&self) -> Result<AgentPolicyInstant, TerraControllerClockError> {
-        zephium_engine::work_browser_monotonic_now().ok_or(TerraControllerClockError::Invalid)
-    }
-}
+use crate::native_work_clock::NativeWorkClock;
 pub(super) fn input(
     identity: ContextIdentity,
     target: ContextNavigationTarget,
@@ -63,7 +57,12 @@ pub(super) fn input(
         AgentWorkContextSpec::try_new(identity, ContextProfileStorageClass::Ephemeral, target)
             .map_err(|_| "context")?,
         objective.into(),
-        AgentWorkRunSettings::new(AgentBrowserModel::Luna, ids, Arc::new(Clock), deadline),
+        AgentWorkRunSettings::new(
+            AgentBrowserModel::Luna,
+            ids,
+            Arc::new(NativeWorkClock),
+            deadline,
+        ),
     )
     .map_err(|_| "input")
 }

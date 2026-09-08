@@ -49,7 +49,7 @@ mod work_resource;
 #[path = "work_resource_failure_diagnostic.rs"]
 pub(crate) mod work_resource_failure_diagnostic;
 #[cfg(target_os = "macos")]
-pub use work_resource::work_browser_monotonic_now;
+pub use work_resource::{work_browser_monotonic_deadline, work_browser_monotonic_now};
 #[cfg(target_os = "macos")]
 pub(crate) use work_resource::{
     WorkActionTask, WorkLifecycleTask, WorkNavigationTask, WorkNotificationPermit,

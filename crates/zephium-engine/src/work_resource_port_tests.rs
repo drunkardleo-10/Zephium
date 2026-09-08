@@ -3,6 +3,27 @@ use zephium_agentic::{
     ContextRunId, WorkBrowserResourceEvent, WorkBrowserResourceId, WorkBrowserResources, WorkId,
 };
 
+#[test]
+fn work_deadline_projection_preserves_epoch_and_only_rounds_fractional_milliseconds() {
+    use std::time::Duration;
+    let origin = Instant::now();
+    for (nanos, millis) in [
+        (0, 0),
+        (1, 1),
+        (999_999, 1),
+        (1_000_000, 1),
+        (1_000_001, 2),
+        (400_150_000_001, 400_151),
+    ] {
+        let deadline = origin.checked_add(Duration::from_nanos(nanos)).unwrap();
+        assert_eq!(project_work_deadline(origin, deadline), Some(tick(millis)));
+    }
+    assert!(
+        project_work_deadline(origin, origin.checked_sub(Duration::from_nanos(1)).unwrap())
+            .is_none()
+    );
+}
+
 pub(super) fn tick(value: u64) -> AgentPolicyInstant {
     AgentPolicyInstant::from_millis(value)
 }
