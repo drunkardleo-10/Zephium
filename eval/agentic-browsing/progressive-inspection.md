@@ -32,6 +32,20 @@ silently followed. Hidden and editable/private heading descendants stay excluded
 
 ## Deterministic acceptance
 
+- Surrounding windows coalesce contiguous inline fragments before counting
+  semantic roots. A fixture with 160 fragments on each side retains both full
+  source quotes plus following independent evidence in four roots under a
+  four-node budget. Requested before/after bytes and DOM inspection still bound
+  collection; preceding suffix eviction uses a bounded deque.
+- When source count exceeds the node budget, admission alternates between the
+  nearest preceding and following sources, then emits selected sources in
+  document order. A 280-source fixture retains evidence adjacent to both sides
+  under 128-node and three-node budgets. Repeated captures are deterministic;
+  source quotes never join across another source, the anchor, or a privacy fence.
+  Wire/global-text exhaustion still truncates in document order and reports the
+  existing limit; these regressions establish node-budget fairness, not arbitrary
+  wire-budget fairness. The updated runtime is 99,472 bytes within a 100-KiB fixed
+  installation ceiling; page-disclosure budgets are unchanged.
 - Retained Snapshot → fresh scoped delivery → Read → selected Navigate → Extract
   uses one acquisition and the same resource/lease, with exact cleanup. Old page
   marker, tool replay and refs are absent after scope replacement; navigation

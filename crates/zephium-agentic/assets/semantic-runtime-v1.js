@@ -1727,26 +1727,46 @@
     return false;
   }
 
-  function addRollingChunk(chunks, chunk, byteLimit, state) {
-    if (chunk.text === "" || byteLimit === 0) return;
-    chunks.push(chunk);
-    if (chunks.length > state.request.b.n) {
-      chunks.shift();
-      mark(state, "node_limit", false);
+  function appendWindowChunk(window, chunk, bytes) {
+    if (chunk.text === "") return;
+    const last = window.chunks[window.chunks.length - 1];
+    const separator = window.bytes === 0 ? 0 : 1;
+    if (last !== undefined && last.run === chunk.run) {
+      last.text += ` ${chunk.text}`;
+      last.bytes += 1 + bytes;
+    } else {
+      chunk.bytes = bytes;
+      window.chunks.push(chunk);
     }
-    let bytes = 0;
-    for (let index = chunks.length - 1; index >= 0; index -= 1) {
-      const separator = index === chunks.length - 1 ? 0 : 1;
-      const chunkBytes = utf8Length(chunks[index].text, byteLimit + 1);
-      if (bytes + separator + chunkBytes <= byteLimit) {
-        bytes += separator + chunkBytes;
+    window.bytes += separator + bytes;
+  }
+
+  function addRollingChunk(window, chunk, byteLimit, state) {
+    if (chunk.text === "" || byteLimit === 0) return;
+    appendWindowChunk(window, chunk, utf8Length(chunk.text, byteLimit + 1));
+    // The byte window bounds storage independently of the output-node budget.
+    // A deque avoids rescanning/shifting every retained source per DOM fragment.
+    while (window.bytes > byteLimit) {
+      const first = window.chunks[window.head];
+      const excess = window.bytes - byteLimit;
+      if (first.bytes <= excess) {
+        window.head += 1;
+        window.bytes -= first.bytes + (window.head < window.chunks.length ? 1 : 0);
       } else {
-        const keep = mathMax(0, byteLimit - bytes - separator);
-        const last = { element: chunks[index].element, run: chunks[index].run, text: utf8Suffix(chunks[index].text, keep) };
-        chunks.splice(0, index + 1, last);
-        mark(state, "scope_boundary", false);
-        return;
+        first.text = utf8Suffix(first.text, first.bytes - excess);
+        const kept = utf8Length(first.text, byteLimit + 1);
+        window.bytes -= first.bytes - kept;
+        first.bytes = kept;
+        if (kept === 0) {
+          window.head += 1;
+          if (window.head < window.chunks.length) window.bytes -= 1;
+        }
       }
+      mark(state, "scope_boundary", false);
+    }
+    if (window.head >= 128 && window.head * 2 >= window.chunks.length) {
+      window.chunks = window.chunks.slice(window.head);
+      window.head = 0;
     }
   }
 
@@ -1767,14 +1787,13 @@
   }
 
   function surroundingChunks(anchor, state, beforeLimit, afterLimit) {
-    const before = [];
-    const after = [];
-    let afterBytes = 0;
+    const before = { chunks: [], head: 0, bytes: 0 };
+    const after = { chunks: [], head: 0, bytes: 0 };
     let seenAnchor = false;
     let previousSource = null;
     let run = 0;
     const root = read(documentElementGetter, document);
-    if (root === null || root === undefined) return [];
+    if (root === null || root === undefined) return { before: [], after: [] };
     const stack = [{ node: root, source: document, textual: false }];
     while (stack.length !== 0 && !state.stopped) {
       const item = stack.pop();
@@ -1800,17 +1819,15 @@
           if (normalized.truncated || normalized.bytes > beforeLimit || tail.length < raw.length) {
             mark(state, "scope_boundary", false);
           }
-        } else if (afterBytes < afterLimit) {
-          const separator = after.length === 0 ? 0 : 1;
-          const normalized = normalizeText(raw, mathMax(0, afterLimit - afterBytes - separator));
+        } else if (after.bytes < afterLimit) {
+          const separator = after.bytes === 0 ? 0 : 1;
+          const normalized = normalizeText(raw, mathMax(0, afterLimit - after.bytes - separator));
           if (normalized.value !== "") {
-            if (after.length >= state.request.b.n) { mark(state, "node_limit", false); break; }
-            after.push({ element: item.source, run, text: normalized.value });
-            afterBytes += separator + normalized.bytes;
+            appendWindowChunk(after, { element: item.source, run, text: normalized.value }, normalized.bytes);
           }
           if (normalized.truncated) { mark(state, "scope_boundary", false); break; }
         }
-        if (seenAnchor && afterBytes >= afterLimit) {
+        if (seenAnchor && after.bytes >= afterLimit) {
           if (stack.length !== 0) mark(state, "scope_boundary", false);
           break;
         }
@@ -1848,7 +1865,7 @@
         break;
       }
     }
-    return seenAnchor ? before.concat(after) : [];
+    return seenAnchor ? { before: before.chunks.slice(before.head), after: after.chunks } : { before: [], after: [] };
   }
 
   function surroundingRecords(anchor, descriptor, state) {
@@ -1862,35 +1879,42 @@
     delete record.wire.o;
     delete record.wire.u;
     const records = [record];
-    const chunks = surroundingChunks(anchor, state, state.request.s.p, state.request.s.n);
+    const window = surroundingChunks(anchor, state, state.request.s.p, state.request.s.n);
+    // Admit the nearest source on each side in turn. Preceding page furniture
+    // must not consume every output slot before following evidence is considered.
+    // The selected roots are subsequently emitted in their document order.
+    const chunks = [];
+    const admitted = new Set([anchor]);
+    let beforeIndex = window.before.length - 1;
+    let afterIndex = 0;
+    while (beforeIndex >= 0 || afterIndex < window.after.length) {
+      for (const preceding of [true, false]) {
+        const chunk = preceding ? window.before[beforeIndex--] : window.after[afterIndex++];
+        if (chunk === undefined) continue;
+        if (admitted.has(chunk.element)) { mark(state, "scope_boundary", false); continue; }
+        chunk.descriptor = classify(chunk.element);
+        if (chunk.descriptor === null) continue;
+        if (admitted.size >= state.request.b.n) { mark(state, "node_limit", false); continue; }
+        admitted.add(chunk.element);
+        chunks.push(chunk);
+      }
+    }
+    chunks.sort((left, right) => left.run - right.run);
     // Project the collected prefix without resuming an exhausted DOM walk.
     const inspectionStopped = state.stopped;
     state.stopped = false;
     for (const chunk of chunks) {
       if (state.stopped) break;
-      let source;
-      for (const candidate of records) {
-        if (candidate.element === chunk.element) { source = candidate; break; }
+      const sourceDescriptor = chunk.descriptor;
+      // Admission retained at most one contiguous run per actual source. Never
+      // stitch across another source, the omitted anchor, or a privacy boundary.
+      const wire = { k: keyFor(chunk.element, state.request.g), r: sourceDescriptor.role };
+      if (sourceDescriptor.role === "heading") {
+        const level = sourceDescriptor.level || Number(attribute(chunk.element, "aria-level", 8));
+        wire.l = numberIsSafeInteger(level) && level >= 1 && level <= 6 ? level : 2;
       }
-      if (source === undefined) {
-        if (records.length >= state.request.b.n) { mark(state, "node_limit"); break; }
-        const sourceDescriptor = classify(chunk.element);
-        if (sourceDescriptor === null) continue;
-        // Actual source roots grant neither actions nor navigation.
-        const wire = { k: keyFor(chunk.element, state.request.g), r: sourceDescriptor.role };
-        if (sourceDescriptor.role === "heading") {
-          const level = sourceDescriptor.level || Number(attribute(chunk.element, "aria-level", 8));
-          wire.l = numberIsSafeInteger(level) && level >= 1 && level <= 6 ? level : 2;
-        }
-        source = { wire, element: chunk.element, run: chunk.run, sink: "text", sinkBytes: 0, sensitivity: "public", depth: 0 };
-        records.push(source);
-      }
-      if (source.run !== chunk.run) {
-        // Never stitch text across another source, the omitted anchor, or a
-        // privacy boundary into a fabricated contiguous source quote.
-        mark(state, "scope_boundary", false);
-        continue;
-      }
+      const source = { wire, element: chunk.element, sink: "text", sinkBytes: 0, sensitivity: "public", depth: 0 };
+      records.push(source);
       appendSink(source, chunk.text, state);
     }
     state.stopped = state.stopped || inspectionStopped;

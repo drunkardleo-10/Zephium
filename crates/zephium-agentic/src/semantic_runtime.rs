@@ -55,10 +55,10 @@ pub const MAX_SEMANTIC_RUNTIME_VISITED_NODES: u32 = 32 * 1024;
 pub const MAX_SEMANTIC_RUNTIME_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 /// Maximum immutable production runtime source bytes installed per document.
 ///
-/// The fixed 96 KiB ceiling covers the digest-pinned semantic runtime including
-/// production Fill, native-select, public links and bounded window sources while preserving a small,
-/// explicit installation and validation bound on every platform.
-pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 96 * 1024;
+/// The fixed 100 KiB ceiling covers the digest-pinned semantic runtime including
+/// production Fill, native-select, public links and bounded source-coalesced
+/// windows while preserving an explicit installation bound on every platform.
+pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 100 * 1024;
 /// Sole fixed isolated-world global installed by the production runtime.
 pub const SEMANTIC_RUNTIME_GLOBAL_NAME: &str = "__zephiumSemanticRuntimeV1";
 /// Sole fixed native message handler visible in the production isolated world.
@@ -81,8 +81,8 @@ pub const MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES: usize =
 
 const SEMANTIC_RUNTIME_SOURCE: &str = include_str!("../assets/semantic-runtime-v1.js");
 const SEMANTIC_RUNTIME_SOURCE_SHA256: [u8; 32] = [
-    0xc5, 0x25, 0xd2, 0xbe, 0x28, 0xaf, 0xab, 0x42, 0xa9, 0x8e, 0x27, 0xcd, 0xc8, 0x3d, 0x93, 0x32,
-    0xe6, 0x20, 0xe1, 0x91, 0x0e, 0x22, 0x26, 0xd6, 0x98, 0xe3, 0x40, 0x96, 0x9d, 0xc2, 0x44, 0xa2,
+    0x57, 0x3d, 0x3e, 0xb4, 0x2a, 0x0e, 0x32, 0x4c, 0xa8, 0x8d, 0xd9, 0xa4, 0x1e, 0x72, 0xf2, 0x07,
+    0xff, 0xb5, 0x21, 0xec, 0x26, 0x9e, 0xb5, 0xfa, 0x9a, 0x2c, 0x54, 0x7d, 0x64, 0xd2, 0x69, 0x6c,
 ];
 
 /// Immutable production program passed only to a trusted isolated-world adapter.

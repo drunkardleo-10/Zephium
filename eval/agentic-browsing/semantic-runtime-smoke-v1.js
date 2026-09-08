@@ -1351,6 +1351,70 @@ async function finish() {
     !JSON.stringify(aroundInline).includes("This model is available."),
   "before/after context joined across the omitted anchor into a false quote");
 
+  // DOM fragmentation is not semantic-source cardinality. Both sides retain
+  // all 160 inline fragments and the following independent evidence in four
+  // roots, including when the output budget is much smaller than 160.
+  const fragmentedPage = new Element("main");
+  const fragmentedBefore = fragmentedPage.append(new Element("p"));
+  for (let index = 0; index < 160; index += 1) {
+    fragmentedBefore.append(new Element("span")).append(new CharacterData(`b${index}`));
+  }
+  const fragmentedHeading = fragmentedPage.append(new Element("h2"));
+  fragmentedHeading.append(new CharacterData("Fragmented evidence"));
+  const fragmentedAfter = fragmentedPage.append(new Element("p"));
+  for (let index = 0; index < 160; index += 1) {
+    fragmentedAfter.append(new Element("span")).append(new CharacterData(`a${index}`));
+  }
+  fragmentedPage.append(new Element("p")).append(new CharacterData("Following independent evidence"));
+  document._root = fragmentedPage; setOwner(fragmentedPage, document);
+  const fragmentedInitial = JSON.parse(invoke(139, 139, { k: "initial" }));
+  const fragmentedKey = fragmentedInitial.n.find(node => node.n === "Fragmented evidence").k;
+  const expectedBefore = Array.from({ length: 160 }, (_, index) => `b${index}`).join(" ");
+  const expectedAfter = Array.from({ length: 160 }, (_, index) => `a${index}`).join(" ");
+  const fragmentedWindow = JSON.parse(invoke(140, 140, { k: "surrounding_text", a: fragmentedKey, p: 2048, n: 2048 }, { n: 4 }));
+  assert(fragmentedWindow.c === "complete" && fragmentedWindow.n.length === 4 &&
+    JSON.stringify(fragmentedWindow.n.slice(1).map(node => node.t)) ===
+      JSON.stringify([expectedBefore, expectedAfter, "Following independent evidence"]),
+  "raw inline fragment count exhausted semantic slots or lost contiguous evidence");
+
+  // Output pressure selects nearby sources from both directions. The initial
+  // capture establishes the anchor before preceding page furniture is inserted.
+  const balancedPage = new Element("main");
+  const balancedHeading = balancedPage.append(new Element("h2"));
+  balancedHeading.append(new CharacterData("Balanced evidence"));
+  balancedPage.append(new Element("p")).append(new CharacterData("Immediate following evidence"));
+  for (let index = 1; index < 140; index += 1) {
+    balancedPage.append(new Element("p")).append(new CharacterData(`After ${index}`));
+  }
+  document._root = balancedPage; setOwner(balancedPage, document);
+  const balancedInitial = JSON.parse(invoke(141, 141, { k: "initial" }));
+  const balancedKey = balancedInitial.n.find(node => node.n === "Balanced evidence").k;
+  for (let index = 0; index < 140; index += 1) {
+    const preceding = new Element("p");
+    preceding.append(new CharacterData(`Before ${index}`));
+    preceding._parent = balancedPage;
+    setOwner(preceding, document);
+    balancedPage._children.values.splice(index, 0, preceding);
+  }
+  const balancedWindow = JSON.parse(invoke(142, 142, { k: "surrounding_text", a: balancedKey, p: 4096, n: 4096 }));
+  assert(balancedWindow.c === "node_limit" && balancedWindow.n.length === 128 &&
+    balancedWindow.n.some(node => node.t === "Before 139") &&
+    balancedWindow.n.some(node => node.t === "Immediate following evidence") &&
+    !balancedWindow.n.some(node => node.t === "Before 0"),
+  "distant preceding sources starved immediately adjacent evidence");
+  const tinyBalancedWindow = JSON.parse(invoke(143, 143, { k: "surrounding_text", a: balancedKey, p: 4096, n: 4096 }, { n: 3 }));
+  assert(tinyBalancedWindow.c === "node_limit" && JSON.stringify(tinyBalancedWindow.n.slice(1).map(node => node.t)) ===
+    JSON.stringify(["Before 139", "Immediate following evidence"]),
+  "three-slot window did not retain one immediate source on each side");
+  const repeatedBalancedWindow = JSON.parse(invoke(144, 144, { k: "surrounding_text", a: balancedKey, p: 4096, n: 4096 }, { n: 3 }));
+  assert(JSON.stringify(tinyBalancedWindow.n) === JSON.stringify(repeatedBalancedWindow.n) &&
+    repeatedBalancedWindow.n.every(node => !node.o && !node.u && node.p === undefined),
+  "fair source selection changed across identical captures or widened authority");
+  const rollingWindow = JSON.parse(invoke(145, 145, { k: "surrounding_text", a: balancedKey, p: 32, n: 0 }, { n: 4 }));
+  assert(rollingWindow.c === "scope_boundary" && JSON.stringify(rollingWindow.n.slice(1).map(node => node.t)) ===
+    JSON.stringify(["Before 137", "Before 138", "Before 139"]),
+  "rolling source eviction lost the nearest byte-bounded suffix");
+
   process.stdout.write(`${JSON.stringify({
     offscreen_anchor_wire_bytes: inventoryExtraBytes,
     parent_region_nodes: region.n.length,
@@ -1359,6 +1423,8 @@ async function finish() {
     field_local_discovery: true,
     surrounding_fresh_source_continuation: true,
     surrounding_source_quote_fidelity: true,
+    surrounding_fragment_coalescing: true,
+    surrounding_bidirectional_admission: true,
     schema: "zephium.agentic.semantic-runtime-smoke.v1",
     initial_nodes: initial.n.length,
     expanded_nodes: expansion.n.length,
