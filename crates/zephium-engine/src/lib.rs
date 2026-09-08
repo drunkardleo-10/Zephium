@@ -24,7 +24,9 @@ compile_error!("native Work lifetime diagnostics are forbidden in optimized buil
     feature = "native-agentic-work-lifetime-diagnostic"
 ))]
 #[doc(hidden)]
-pub use agent_context_port::work_resource_failure_diagnostic::WorkResourceFailureCause;
+pub use agent_context_port::work_resource_failure_diagnostic::{
+    WorkResourceDeadlineStage, WorkResourceFailureCause,
+};
 
 #[cfg(all(
     target_os = "macos",

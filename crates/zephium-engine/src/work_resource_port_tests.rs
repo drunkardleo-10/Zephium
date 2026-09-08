@@ -27,14 +27,14 @@ fn source() -> (WorkBrowserResources, WorkBrowserResourceRequest) {
 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
 #[test]
 fn resource_failure_cause_is_exact_first_wins_and_survives_retention_and_factory_seal() {
-    use crate::WorkResourceFailureCause as Failure;
+    use crate::{WorkResourceDeadlineStage as Stage, WorkResourceFailureCause as Failure};
     for cause in [
         Failure::NavigationEventRefused,
         Failure::UrlObservationRefused,
         Failure::DocumentFinalizationRefused,
         Failure::RendererLost,
         Failure::SemanticNativeInvariant,
-        Failure::LifecycleDeadline,
+        Failure::LifecycleDeadline(Stage::ConstructionTargetProvisional),
         Failure::NativeAdmission(ContextPortFailure::NativeRefused),
         Failure::UnattributedResourceFailure,
     ] {
@@ -57,7 +57,7 @@ fn resource_failure_cause_is_exact_first_wins_and_survives_retention_and_factory
         // Observation is not a failure/reporting owner and cannot poison state.
         assert!(guard.construction_current());
         guard.fail();
-        guard.record_failure_cause(Failure::LifecycleDeadline);
+        guard.record_failure_cause(Failure::LifecycleDeadline(Stage::DestructionDrain));
         guard.outcome(&request, Outcome::Refused);
         guard.record_failure_cause(Failure::SemanticNativeInvariant);
         assert_eq!(slot.work_resource_failure_cause(&resource), Some(cause));
@@ -82,7 +82,7 @@ fn resource_failure_cause_is_exact_first_wins_and_survives_retention_and_factory
     let (_, admission, retained) = setup();
     assert!(!retained.construction_current());
     retained.record_failure_cause(Failure::RendererLost);
-    retained.record_failure_cause(Failure::LifecycleDeadline);
+    retained.record_failure_cause(Failure::LifecycleDeadline(Stage::RevocationDrain));
     assert_eq!(
         admission.resource_failure_cause(retained.resource()),
         Some(Failure::RendererLost)

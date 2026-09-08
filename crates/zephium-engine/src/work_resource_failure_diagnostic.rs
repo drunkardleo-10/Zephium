@@ -17,11 +17,31 @@ pub enum WorkResourceFailureCause {
     DocumentFinalizationRefused,
     RendererLost,
     SemanticNativeInvariant,
-    LifecycleDeadline,
+    LifecycleDeadline(WorkResourceDeadlineStage),
     NativeAdmission(ContextPortFailure),
     /// No original native edge supplied a more specific cause (for example,
     /// external resource invalidation). Never guess navigation or focus loss.
     UnattributedResourceFailure,
+}
+
+/// Closed native stage captured when one exact Work resource lifecycle
+/// deadline wins. These values describe only control state: they carry no
+/// page data, URL, native identifier, timing value or model-visible content.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkResourceDeadlineStage {
+    ConstructionNativeSetup,
+    ConstructionBootstrap,
+    ConstructionTargetArmed,
+    ConstructionTargetProvisional,
+    ConstructionTargetCommitted,
+    ConstructionTargetFinalizing,
+    ConstructionTargetSampling,
+    ConstructionTargetReady,
+    ConstructionRefused,
+    ConstructionRetired,
+    RevocationDrain,
+    DestructionDrain,
+    Unattributed,
 }
 
 impl AgentContextPortSlot {

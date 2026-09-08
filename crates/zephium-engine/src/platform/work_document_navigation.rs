@@ -148,6 +148,27 @@ impl Default for WorkDocumentNavigation {
 }
 
 impl WorkDocumentNavigation {
+    /// Content-free control stage for release-excluded lifetime diagnostics.
+    /// This never samples the current URL or exposes native navigation IDs.
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    pub(crate) fn deadline_stage(&self) -> crate::WorkResourceDeadlineStage {
+        use crate::WorkResourceDeadlineStage as Stage;
+
+        self.0
+            .lock()
+            .map_or(Stage::Unattributed, |state| match state.phase {
+                Phase::Bootstrap => Stage::ConstructionBootstrap,
+                Phase::Armed => Stage::ConstructionTargetArmed,
+                Phase::Loading => Stage::ConstructionTargetProvisional,
+                Phase::Committed => Stage::ConstructionTargetCommitted,
+                Phase::Finalizing => Stage::ConstructionTargetFinalizing,
+                Phase::Sampling => Stage::ConstructionTargetSampling,
+                Phase::Ready => Stage::ConstructionTargetReady,
+                Phase::Refused => Stage::ConstructionRefused,
+                Phase::Retired => Stage::ConstructionRetired,
+            })
+    }
+
     pub(crate) fn observation_stamp(&self, context: ContextJoin) -> Option<WorkDocumentStamp> {
         let state = self.0.lock().ok()?;
         (state.phase == Phase::Ready
@@ -773,6 +794,54 @@ mod tests {
         assert!(gate.finalization_pending());
         assert!(!gate.ready(Some(URL)));
         gate
+    }
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    #[test]
+    fn deadline_stage_tracks_only_the_closed_native_control_phase() {
+        use crate::WorkResourceDeadlineStage as Stage;
+
+        let bootstrap = WorkDocumentNavigation::default();
+        assert_eq!(bootstrap.deadline_stage(), Stage::ConstructionBootstrap);
+        assert!(bootstrap.allows("about:blank"));
+        for phase in [E::Started, E::Committed, E::Finished] {
+            bootstrap.observe(event(99, phase, "about:blank")).unwrap();
+            assert_eq!(bootstrap.deadline_stage(), Stage::ConstructionBootstrap);
+        }
+
+        let exact = bootstrap;
+        exact
+            .arm(ContextNavigationTarget::parse(URL).unwrap())
+            .unwrap();
+        assert_eq!(exact.deadline_stage(), Stage::ConstructionTargetArmed);
+        assert!(exact.allows(URL));
+        assert_eq!(exact.deadline_stage(), Stage::ConstructionTargetArmed);
+        exact.observe(event(1, E::Started, URL)).unwrap();
+        assert_eq!(exact.deadline_stage(), Stage::ConstructionTargetProvisional);
+        exact.observe(event(1, E::Committed, URL)).unwrap();
+        assert_eq!(exact.deadline_stage(), Stage::ConstructionTargetCommitted);
+        exact.observe(event(1, E::Finished, URL)).unwrap();
+        assert_eq!(exact.deadline_stage(), Stage::ConstructionTargetReady);
+        assert!(exact.retire());
+        assert_eq!(exact.deadline_stage(), Stage::ConstructionRetired);
+
+        let finalizing = finalizing();
+        assert_eq!(
+            finalizing.deadline_stage(),
+            Stage::ConstructionTargetFinalizing
+        );
+        let effective = finalizing
+            .finalize(|| {
+                assert_eq!(
+                    finalizing.deadline_stage(),
+                    Stage::ConstructionTargetSampling
+                );
+                Some("https://example.test/frozen?opaque=diagnostic".into())
+            })
+            .unwrap();
+        assert!(finalizing.ready(Some(effective.as_url().as_str())));
+        assert_eq!(finalizing.deadline_stage(), Stage::ConstructionTargetReady);
+        finalizing.refuse();
+        assert_eq!(finalizing.deadline_stage(), Stage::ConstructionRefused);
     }
     #[test]
     fn history_availability_is_not_document_authority_when_ready_or_finalizing() {

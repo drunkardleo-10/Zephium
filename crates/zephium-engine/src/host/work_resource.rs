@@ -48,7 +48,10 @@ pub(super) struct WorkNativeResource {
     document_started: bool,
     retirement_clean: bool,
     deadline_expired: bool,
-    lifecycle_deadline: Option<Instant>,
+    // Pair wall-clock expiry with its exact lifecycle class. Destruction can
+    // overtake construction, so diagnostics must not infer this from whichever
+    // task fields happen to remain populated when the deadline wins.
+    lifecycle_deadline: Option<(Instant, Operation)>,
     content_policy: Option<crate::platform::imp::ContentPolicyRegistration>,
     view: Option<crate::platform::imp::AgentOwnedView>,
     native_resource: Option<NativeResourceLease>,
@@ -202,6 +205,30 @@ impl WorkNativeResource {
             return gate.bootstrap_ready();
         }
         gate.ready(crate::platform::imp::current_url(view.view()).as_deref())
+    }
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    fn deadline_failure_cause(&self, operation: Operation) -> ResourceFailureCause {
+        Self::deadline_failure_cause_for_gate(
+            operation,
+            self.view.as_ref().and_then(|view| view.work_navigation()),
+        )
+    }
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    fn deadline_failure_cause_for_gate(
+        operation: Operation,
+        gate: Option<&crate::platform::work_document_navigation::WorkDocumentNavigation>,
+    ) -> ResourceFailureCause {
+        use crate::WorkResourceDeadlineStage as Stage;
+
+        let stage = match operation {
+            Operation::Construct => {
+                gate.map_or(Stage::ConstructionNativeSetup, |gate| gate.deadline_stage())
+            }
+            Operation::Revoke => Stage::RevocationDrain,
+            Operation::Destroy => Stage::DestructionDrain,
+            Operation::Acquire => Stage::Unattributed,
+        };
+        ResourceFailureCause::LifecycleDeadline(stage)
     }
     fn retire_page(&mut self) -> bool {
         self.watchdog = None;
@@ -385,7 +412,9 @@ impl EngineHost {
                 let deadline = LifecycleDeadline::from_task(&task);
                 resource.revocation = Some(task);
                 resource.deadline_expired = false;
-                resource.lifecycle_deadline = Instant::now().checked_add(DRAIN_BUDGET);
+                resource.lifecycle_deadline = Instant::now()
+                    .checked_add(DRAIN_BUDGET)
+                    .map(|deadline| (deadline, Operation::Revoke));
                 resource.watchdog =
                     deadline.and_then(|deadline| timeout(guard.clone(), deadline, DRAIN_BUDGET));
                 if resource.watchdog.is_none() || resource.lifecycle_deadline.is_none() {
@@ -399,7 +428,9 @@ impl EngineHost {
                 resource.destruction = Some(task);
                 resource.retire_page();
                 resource.deadline_expired = false;
-                resource.lifecycle_deadline = Instant::now().checked_add(DRAIN_BUDGET);
+                resource.lifecycle_deadline = Instant::now()
+                    .checked_add(DRAIN_BUDGET)
+                    .map(|deadline| (deadline, Operation::Destroy));
                 resource.watchdog =
                     deadline.and_then(|deadline| timeout(guard.clone(), deadline, DRAIN_BUDGET));
                 if resource.watchdog.is_none() || resource.lifecycle_deadline.is_none() {
@@ -440,7 +471,8 @@ impl EngineHost {
         };
         let deadline = LifecycleDeadline::from_task(&task);
         resource.construction = Some(task);
-        resource.lifecycle_deadline = original_deadline;
+        resource.lifecycle_deadline =
+            original_deadline.map(|deadline| (deadline, Operation::Construct));
         resource.watchdog =
             deadline.and_then(|deadline| timeout(guard.clone(), deadline, CONSTRUCTION_BUDGET));
         if resource.watchdog.is_none() || resource.lifecycle_deadline.is_none() {
@@ -634,13 +666,13 @@ impl EngineHost {
         else {
             return;
         };
-        if resource
+        let expired_lifecycle = resource
             .lifecycle_deadline
-            .is_some_and(|deadline| Instant::now() >= deadline)
-        {
+            .and_then(|(deadline, operation)| (Instant::now() >= deadline).then_some(operation));
+        if let Some(operation) = expired_lifecycle {
             resource.deadline_expired = true;
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
-            guard.record_failure_cause(ResourceFailureCause::LifecycleDeadline);
+            guard.record_failure_cause(resource.deadline_failure_cause(operation));
             #[cfg(feature = "native-agentic-work-resource-probe")]
             if resource.construction.is_some() {
                 resource.record_construction_failure("construction_deadline");
@@ -864,7 +896,7 @@ impl EngineHost {
         {
             resource.deadline_expired = true;
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
-            guard.record_failure_cause(ResourceFailureCause::LifecycleDeadline);
+            guard.record_failure_cause(resource.deadline_failure_cause(deadline.operation));
             #[cfg(feature = "native-agentic-work-resource-probe")]
             if resource.construction.is_some() {
                 resource.record_construction_failure("construction_deadline");
@@ -1277,6 +1309,33 @@ mod tests {
         assert!(deadlines
             .iter()
             .all(|deadline| !deadline.matches_request(&destroy)));
+    }
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    #[test]
+    fn lifecycle_deadline_classification_uses_exact_operation_and_closed_gate_stage() {
+        use crate::{WorkResourceDeadlineStage as Stage, WorkResourceFailureCause as Failure};
+
+        assert_eq!(
+            WorkNativeResource::deadline_failure_cause_for_gate(Operation::Construct, None),
+            Failure::LifecycleDeadline(Stage::ConstructionNativeSetup)
+        );
+        let gate = crate::platform::work_document_navigation::WorkDocumentNavigation::default();
+        assert_eq!(
+            WorkNativeResource::deadline_failure_cause_for_gate(Operation::Construct, Some(&gate)),
+            Failure::LifecycleDeadline(Stage::ConstructionBootstrap)
+        );
+        assert_eq!(
+            WorkNativeResource::deadline_failure_cause_for_gate(Operation::Revoke, Some(&gate)),
+            Failure::LifecycleDeadline(Stage::RevocationDrain)
+        );
+        assert_eq!(
+            WorkNativeResource::deadline_failure_cause_for_gate(Operation::Destroy, Some(&gate)),
+            Failure::LifecycleDeadline(Stage::DestructionDrain)
+        );
+        assert_eq!(
+            WorkNativeResource::deadline_failure_cause_for_gate(Operation::Acquire, Some(&gate)),
+            Failure::LifecycleDeadline(Stage::Unattributed)
+        );
     }
     #[test]
     fn source_owner_retains_partial_construction_capacity_and_lease_retirement_never_cancels_document(

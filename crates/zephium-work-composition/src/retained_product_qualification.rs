@@ -320,7 +320,9 @@ mod tests {
     use super::*;
     #[test]
     fn resource_failure_cause_survives_observer_to_closed_content_free_log() {
-        use zephium_engine::WorkResourceFailureCause as Failure;
+        use zephium_engine::{
+            WorkResourceDeadlineStage as Stage, WorkResourceFailureCause as Failure,
+        };
         for (cause, label) in [
             (Failure::NavigationEventRefused, "NavigationEventRefused"),
             (Failure::UrlObservationRefused, "UrlObservationRefused"),
@@ -330,7 +332,10 @@ mod tests {
             ),
             (Failure::RendererLost, "RendererLost"),
             (Failure::SemanticNativeInvariant, "SemanticNativeInvariant"),
-            (Failure::LifecycleDeadline, "LifecycleDeadline"),
+            (
+                Failure::LifecycleDeadline(Stage::ConstructionTargetProvisional),
+                "LifecycleDeadline(ConstructionTargetProvisional)",
+            ),
             (
                 Failure::UnattributedResourceFailure,
                 "UnattributedResourceFailure",
@@ -344,7 +349,9 @@ mod tests {
             observer.observe_resource_failure_cause(None);
             observer.observe_resource_failure_cause(Some(cause));
             observer.observe_resource_failure_cause(None);
-            observer.observe_resource_failure_cause(Some(Failure::LifecycleDeadline));
+            observer.observe_resource_failure_cause(Some(Failure::LifecycleDeadline(
+                Stage::DestructionDrain,
+            )));
             assert_eq!(
                 observer.resource_failure_diagnostic(),
                 format!(
