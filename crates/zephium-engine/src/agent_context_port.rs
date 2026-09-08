@@ -52,8 +52,8 @@ pub(crate) mod work_resource_failure_diagnostic;
 pub use work_resource::work_browser_monotonic_now;
 #[cfg(target_os = "macos")]
 pub(crate) use work_resource::{
-    WorkLifecycleTask, WorkNavigationTask, WorkNotificationPermit, WorkObservationTask,
-    WorkResourceGuard,
+    WorkActionTask, WorkLifecycleTask, WorkNavigationTask, WorkNotificationPermit,
+    WorkObservationTask, WorkResourceGuard,
 };
 
 pub(crate) type AgentContextEventSink = Arc<dyn Fn(ContextNativeEvent) + Send + Sync>;
@@ -1457,6 +1457,14 @@ impl EngineAgentBrowserPort {
 }
 
 impl AgentBrowserPort for EngineAgentBrowserPort {
+    #[cfg(target_os = "macos")]
+    fn work_resource_act(
+        &self,
+        request: zephium_agentic::WorkBrowserActionRequest,
+        completion: zephium_agentic::WorkBrowserActionCompletionCallback,
+    ) -> zephium_agentic::WorkBrowserActionDispatch {
+        self.schedule_work_action(request, completion)
+    }
     #[cfg(target_os = "macos")]
     fn work_resource_navigate(
         &self,

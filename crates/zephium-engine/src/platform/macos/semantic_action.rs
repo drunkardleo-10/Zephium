@@ -37,6 +37,17 @@ pub(super) fn dispatch(
     admitted_at: Instant,
     completion: impl FnOnce(SemanticActionNativeSettlement) + 'static,
 ) {
+    dispatch_guarded(_view, semantic, request, admitted_at, None, completion);
+}
+
+pub(super) fn dispatch_guarded(
+    _view: &wry::WebView,
+    semantic: &AgentSemanticRuntimeController,
+    request: SemanticActionNativeRequest,
+    admitted_at: Instant,
+    authority: Option<Box<dyn Fn() -> bool>>,
+    completion: impl FnOnce(SemanticActionNativeSettlement) + 'static,
+) {
     if !matches!(
         request.kind(),
         SemanticActionKind::Click | SemanticActionKind::Fill | SemanticActionKind::Select
@@ -64,7 +75,7 @@ pub(super) fn dispatch(
             return;
         }
     };
-    let _ = semantic.dispatch_action(invocation, move |outcome| {
+    let _ = semantic.dispatch_action_guarded(invocation, authority, move |outcome| {
         let settlement = match outcome {
             Ok(evidence) => complete_runtime_recipe(request, evidence, admitted_at),
             Err(failure) => {

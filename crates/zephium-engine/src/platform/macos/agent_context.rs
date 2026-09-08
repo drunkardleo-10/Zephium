@@ -205,6 +205,28 @@ impl AgentOwnedView {
         self.semantic()?.pending_for_audit()
     }
 
+    pub(crate) fn dispatch_retained_semantic_action(
+        &self,
+        request: SemanticActionNativeRequest,
+        admitted_at: Instant,
+        authority: Box<dyn Fn() -> bool>,
+        completion: impl FnOnce(SemanticActionNativeSettlement) + 'static,
+    ) {
+        let Some(semantic) = self.semantic() else {
+            let completed_at = request.requested_at();
+            completion(request.fail(SemanticActionNativeFailure::Shutdown, completed_at));
+            return;
+        };
+        super::semantic_action::dispatch_guarded(
+            &self.view,
+            semantic,
+            request,
+            admitted_at,
+            Some(authority),
+            completion,
+        );
+    }
+
     pub(crate) fn attest(
         &self,
         profile: ProfileId,

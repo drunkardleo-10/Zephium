@@ -10,7 +10,8 @@ use super::{
     EngineHost,
 };
 use crate::agent_context_port::{
-    work_browser_monotonic_now, WorkLifecycleTask, WorkObservationTask, WorkResourceGuard,
+    work_browser_monotonic_now, WorkActionTask, WorkLifecycleTask, WorkObservationTask,
+    WorkResourceGuard,
 };
 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
 use crate::WorkResourceFailureCause as ResourceFailureCause;
@@ -47,6 +48,8 @@ enum DocumentFinalizationProgress {
 #[path = "work_resource_witness.rs"]
 mod witness;
 
+#[path = "work_resource_action.rs"]
+mod action;
 #[path = "work_resource_navigation.rs"]
 mod navigation;
 #[path = "work_resource_observation.rs"]
@@ -59,6 +62,7 @@ pub(super) struct WorkNativeResource {
     destruction: Option<WorkLifecycleTask>,
     watchdog: Option<crate::platform::imp::ContentPolicyTimeout>,
     observation: Option<observation::WorkObservation>,
+    action: Option<action::WorkAction>,
     navigation: Option<navigation::WorkNavigation>,
     document_finalization_wake: Option<DocumentFinalizationWake>,
     document_finalization_ready:
@@ -132,6 +136,7 @@ impl WorkNativeResource {
             destruction: None,
             watchdog: None,
             observation: None,
+            action: None,
             navigation: None,
             document_finalization_wake: None,
             document_finalization_ready: None,
@@ -173,6 +178,7 @@ impl WorkNativeResource {
             || self.revocation.is_some()
             || self.destruction.is_some()
             || self.observation.is_some()
+            || self.action.is_some()
             || self.navigation.is_some()
     }
     fn schedule_document_finalization_wake(
@@ -245,6 +251,7 @@ impl WorkNativeResource {
             && self.view.is_none()
             && self.guard.callbacks_drained()
             && self.observation.is_none()
+            && self.action.is_none()
             && self.navigation.is_none()
     }
     fn retire_construction(&mut self) {
@@ -258,6 +265,7 @@ impl WorkNativeResource {
         // reads remain independently owed; refusal is not a drain shortcut.
         self.retire_construction();
         self.cancel_observation(SemanticRuntimePortFailure::Shutdown);
+        self.cancel_action();
         if let Some(navigation) = self.navigation.take() {
             navigation.refuse(ContextPortFailure::Shutdown);
         }
@@ -315,7 +323,7 @@ impl WorkNativeResource {
     }
     fn retire_page(&mut self) -> bool {
         self.watchdog = None;
-        if !self.retire_observation_presentation() {
+        if !self.retire_observation_presentation() || !self.retire_action_presentation() {
             return false;
         }
         #[cfg(feature = "native-agentic-work-resource-probe")]
@@ -688,6 +696,7 @@ impl EngineHost {
             destruction: None,
             watchdog: None,
             observation: None,
+            action: None,
             navigation: None,
             document_finalization_wake: None,
             document_finalization_ready: None,
@@ -776,6 +785,7 @@ impl EngineHost {
     }
 
     pub(crate) fn progress_work_resource(&mut self, guard: &Arc<WorkResourceGuard>) {
+        self.progress_work_action(guard);
         self.progress_work_observation(guard);
         let id = guard.resource().identity().context();
         let Some(resource) = self
@@ -983,6 +993,7 @@ impl EngineHost {
                 .and_then(|request| request.lease())
                 .is_some_and(|lease| guard.lease_drained(lease))
                 && resource.observation.is_none()
+                && resource.action.is_none()
                 && resource.navigation.is_none()
                 && resource.ready()
                 && resource

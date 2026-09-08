@@ -600,6 +600,7 @@ enum PendingInvocation {
     Action {
         invocation: SemanticActionRuntimeInvocation,
         completion: SemanticActionCompletion,
+        authority: Option<Box<dyn Fn() -> bool>>,
     },
 }
 
@@ -755,6 +756,7 @@ impl SemanticRuntimeChannelState {
         &mut self,
         invocation: SemanticActionRuntimeInvocation,
         completion: SemanticActionCompletion,
+        authority: Option<Box<dyn Fn() -> bool>>,
     ) -> Result<ChannelActions, (AgentSemanticRuntimeDispatchError, SemanticActionCompletion)> {
         if let Some(failure) = self.admission_failure() {
             return Err((failure, completion));
@@ -762,6 +764,7 @@ impl SemanticRuntimeChannelState {
         self.pending = Some(PendingInvocation::Action {
             invocation,
             completion,
+            authority,
         });
         Ok(self.prepare_pump())
     }
@@ -1006,6 +1009,7 @@ impl SemanticRuntimeChannelState {
             PendingInvocation::Action {
                 invocation,
                 completion,
+                ..
             } => {
                 let outcome = invocation
                     .decode_result(bytes)
@@ -1066,6 +1070,15 @@ impl SemanticRuntimeChannelState {
             || self.pull.is_none()
         {
             return actions;
+        }
+        // A retained recipe can wait for the page's next pull. Recheck the
+        // native owner at the actual handoff, before exposing any effect bytes.
+        if self.pending.as_ref().is_some_and(|pending| {
+            matches!(pending,
+                PendingInvocation::Action { authority: Some(authority), .. } if !authority()
+            )
+        }) {
+            return self.cancel();
         }
         let request = self
             .pending
@@ -1148,15 +1161,16 @@ impl AgentSemanticRuntimeController {
         }
     }
 
-    pub(crate) fn dispatch_action(
+    pub(crate) fn dispatch_action_guarded(
         &self,
         invocation: SemanticActionRuntimeInvocation,
+        authority: Option<Box<dyn Fn() -> bool>>,
         completion: impl FnOnce(Result<SemanticActionRuntimeEvidence, AgentSemanticActionRuntimeFailure>)
             + 'static,
     ) -> Result<(), AgentSemanticRuntimeDispatchError> {
         let completion: SemanticActionCompletion = Box::new(completion);
         let dispatched = match self.state.try_borrow_mut() {
-            Ok(mut state) => state.dispatch_action(invocation, completion),
+            Ok(mut state) => state.dispatch_action(invocation, completion, authority),
             Err(_) => Err((AgentSemanticRuntimeDispatchError::Busy, completion)),
         };
         match dispatched {
@@ -1881,6 +1895,53 @@ mod tests {
         SemanticObservationBudget, SemanticObservationId, SemanticObservationRequest,
         SemanticOrigin, SemanticRuntimeBudget, SemanticRuntimeFault, SemanticSnapshotGeneration,
     };
+
+    #[test]
+    fn retained_action_rechecks_authority_at_page_pull_before_releasing_recipe() {
+        for revoked in [false, true] {
+            let native = crate::agent_context_port::WorkActionTask::native_for_test();
+            let invocation =
+                zephium_agentic::encode_semantic_action_runtime_invocation(&native).unwrap();
+            let encoded = invocation.as_str().to_owned();
+            let allowed = Rc::new(std::cell::Cell::new(true));
+            let fence = allowed.clone();
+            let mut state = SemanticRuntimeChannelState {
+                phase: DocumentPhase::Ready,
+                expected_view: Some(7),
+                active_world: Some(8),
+                ..SemanticRuntimeChannelState::default()
+            };
+            let pending = state
+                .dispatch_action(
+                    invocation,
+                    Box::new(|_| {}),
+                    Some(Box::new(move || fence.get())),
+                )
+                .unwrap_or_else(|_| panic!("fixture admission"));
+            assert!(pending.first_reply.is_none());
+            assert!(pending.completion.is_none());
+            allowed.set(!revoked);
+            let mut actions = state.on_message(SEMANTIC_RUNTIME_CHANNEL_PULL, reply());
+            let delivered = success_value(actions.first_reply.take().unwrap());
+            if revoked {
+                assert_eq!(&*delivered, SEMANTIC_RUNTIME_CHANNEL_STOP);
+                assert!(matches!(
+                    actions.completion,
+                    Some(CompletionAction::Action {
+                        outcome: Err(AgentSemanticActionRuntimeFailure::Cancelled),
+                        ..
+                    })
+                ));
+                assert!(state.pending.is_none());
+                assert!(!state.awaiting_result);
+                assert_eq!(state.phase, DocumentPhase::Failed);
+            } else {
+                assert_eq!(&*delivered, encoded);
+                assert!(actions.completion.is_none());
+                assert!(state.awaiting_result);
+            }
+        }
+    }
 
     #[test]
     fn owned_view_fill_shim_is_fixed_bounded_and_has_no_native_authority() {

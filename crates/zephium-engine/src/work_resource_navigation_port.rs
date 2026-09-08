@@ -29,7 +29,11 @@ impl WorkResourceGuard {
         if now >= request.lease().deadline() {
             return Err(ContextPortFailure::TimedOut);
         }
-        if state.reads != 0 || state.callbacks != 0 || state.navigation.is_some() {
+        if state.reads != 0
+            || state.callbacks != 0
+            || state.navigation.is_some()
+            || state.action.is_some()
+        {
             return Err(ContextPortFailure::ResourceExhausted);
         }
         state.navigation = Some(request.navigation().operation());

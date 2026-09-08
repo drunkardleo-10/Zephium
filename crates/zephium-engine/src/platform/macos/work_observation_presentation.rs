@@ -418,6 +418,15 @@ impl WorkObservationPresentation {
     pub(crate) fn human_current(&self) -> bool {
         foreground(&self.app, &self.main, &self.responder)
     }
+
+    /// Fixed native ownership fence retained until the runtime hands the action
+    /// to the page. It confers no activation, focus, or pointer authority.
+    pub(crate) fn human_fence(&self) -> Box<dyn Fn() -> bool> {
+        let app = self.app.clone();
+        let main = self.main.clone();
+        let responder = self.responder.clone();
+        Box::new(move || foreground(&app, &main, &responder))
+    }
 }
 #[cfg(feature = "native-agentic-work-resource-probe")]
 pub(crate) fn retained_page_hidden(view: &wry::WebView) -> bool {

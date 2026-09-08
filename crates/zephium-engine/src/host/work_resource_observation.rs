@@ -52,7 +52,7 @@ pub(super) struct WorkObservation {
 
 /// Cancelling an unentered timer consumes its original callback/permit. Once
 /// entered, debt stays live through a mandatory next-main-queue barrier.
-struct ObservationWake {
+pub(super) struct ObservationWake {
     timer: Option<crate::platform::imp::ContentPolicyTimeout>,
     action: Arc<Mutex<Option<WakeAction>>>,
     active: Arc<AtomicBool>,
@@ -68,7 +68,7 @@ impl Drop for WakeReturn {
     }
 }
 impl ObservationWake {
-    fn schedule(guard: &Arc<WorkResourceGuard>) -> Option<Self> {
+    pub(super) fn schedule(guard: &Arc<WorkResourceGuard>) -> Option<Self> {
         let debt = WakeReturn {
             permit: Some(guard.notification_permit()?),
             active: Arc::new(AtomicBool::new(true)),
@@ -104,14 +104,14 @@ impl ObservationWake {
         };
         wake.timer.is_some().then_some(wake)
     }
-    fn cancel(&mut self) {
+    pub(super) fn cancel(&mut self) {
         self.timer = None;
         self.action
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
     }
-    fn drained(&self) -> bool {
+    pub(super) fn drained(&self) -> bool {
         !self.active.load(Ordering::Acquire)
     }
 }
@@ -154,10 +154,12 @@ impl WorkObservation {
 }
 impl WorkNativeResource {
     pub(in crate::host) fn observation_visible(&self) -> bool {
-        self.observation
-            .as_ref()
-            .and_then(|read| read.presentation.as_ref())
-            .is_some_and(WorkObservationPresentation::visible_for_audit)
+        self.action_visible()
+            || self
+                .observation
+                .as_ref()
+                .and_then(|read| read.presentation.as_ref())
+                .is_some_and(WorkObservationPresentation::visible_for_audit)
     }
     pub(super) fn retire_observation_presentation(&mut self) -> bool {
         self.observation.as_mut().is_none_or(|read| {
@@ -193,10 +195,11 @@ impl EngineHost {
         // One presentation opportunity at a time. A second read never occludes
         // the first page or silently shares its captured foreground owner.
         if self.work_resources.values().any(|resource| {
-            resource
-                .observation
-                .as_ref()
-                .is_some_and(|read| read.presentation.is_some())
+            resource.action.is_some()
+                || resource
+                    .observation
+                    .as_ref()
+                    .is_some_and(|read| read.presentation.is_some())
         }) {
             task.refuse(SemanticRuntimePortFailure::ResourceExhausted);
             return;

@@ -44,6 +44,7 @@ struct State {
     retirement_delivery: Option<WorkBrowserExecutionLease>,
     reads: usize,
     navigation: Option<zephium_agentic::ContextOperationJoin>,
+    action: Option<zephium_agentic::SemanticActionAttemptId>,
     observed: Option<zephium_agentic::ContextJoin>,
     document_epoch: u64,
     callbacks: usize,
@@ -112,6 +113,7 @@ impl WorkResourceGuard {
                 retirement_delivery: None,
                 reads: 0,
                 navigation: None,
+                action: None,
                 observed: None,
                 document_epoch: 1,
                 callbacks: 0,
@@ -238,6 +240,7 @@ impl WorkResourceGuard {
                     && state.retirement_delivery.is_none()
                     && state.reads == 0
                     && state.navigation.is_none()
+                    && state.action.is_none()
                     && state.callbacks == 0 =>
             {
                 let lease = request
@@ -277,6 +280,7 @@ impl WorkResourceGuard {
                     && state.callbacks == 0
                     && state.lease.as_ref() == Some(lease)
                     && state.navigation.is_none()
+                    && state.action.is_none()
                     && now < lease.deadline()
             })
     }
@@ -310,6 +314,7 @@ impl WorkResourceGuard {
                     && state.retirement_delivery.as_ref() == Some(lease)
                     && state.reads == 0
                     && state.navigation.is_none()
+                    && state.action.is_none()
                     && state.callbacks == 0
             })
     }
@@ -319,6 +324,7 @@ impl WorkResourceGuard {
                 && state.retirement_delivery.is_none()
                 && state.reads == 0
                 && state.navigation.is_none()
+                && state.action.is_none()
                 && state.callbacks == 0
                 && !state.notification_pending
         })
@@ -382,7 +388,11 @@ impl WorkResourceGuard {
         if now >= request.lease().deadline() {
             return Err(ContextPortFailure::TimedOut);
         }
-        if state.reads != 0 || state.navigation.is_some() || state.callbacks != 0 {
+        if state.reads != 0
+            || state.navigation.is_some()
+            || state.action.is_some()
+            || state.callbacks != 0
+        {
             return Err(ContextPortFailure::ResourceExhausted);
         }
         let context = request.invocation().frame().context();
@@ -460,6 +470,7 @@ impl WorkResourceGuard {
                 && resource_retained
                 && state.reads == 0
                 && state.navigation.is_none()
+                && state.action.is_none()
                 && state.callbacks == 0 =>
             {
                 state.phase = Phase::Retained;
@@ -472,6 +483,7 @@ impl WorkResourceGuard {
                     && state.retirement_delivery.is_none()
                     && state.reads == 0
                     && state.navigation.is_none()
+                    && state.action.is_none()
                     && state.callbacks == 0 =>
             {
                 state.phase = Phase::Destroyed;
@@ -513,6 +525,7 @@ impl WorkResourceGuard {
             && state.lease.is_none()
             && state.reads == 0
             && state.navigation.is_none()
+            && state.action.is_none()
             && state.callbacks == 0;
         // Publication joins the fixed slot with its short registration lock.
         // Registration never invokes code, so it cannot call back into this
@@ -1091,3 +1104,7 @@ mod tests;
 #[path = "work_resource_navigation_port.rs"]
 mod navigation;
 pub(crate) use navigation::WorkNavigationTask;
+
+#[path = "work_resource_action_port.rs"]
+mod action;
+pub(crate) use action::WorkActionTask;
