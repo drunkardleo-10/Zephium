@@ -237,6 +237,16 @@ and never overwrites a foreign responder selected by the user or a callback.
 Non-child Wry construction retains its upstream content-view focus behavior and
 is not used for this Work resource path.
 
+WKWebView URL observations are bounded evidence rather than document authority.
+Started, committed and finished navigation events plus an independent current-URL
+sample still establish the exact native document. Once that document is sealed,
+a delayed or duplicate URL observation is idempotent only when its newly sampled
+native value is byte-for-byte equal to the sealed effective URL. A missing,
+oversized or unequal value refuses the resource; parsing or canonical equivalence
+cannot weaken that comparison. Equal notifications during query finalization
+still advance its revision fence, and redirects, substitutions, reloads and
+foreign native navigation identities remain fail-closed.
+
 The exact resource guard/incarnation, execution lease, observation correlation,
 committed document epoch/native navigation stamp and current native URL are
 rechecked through completion. Only one such presentation is admitted at a time.

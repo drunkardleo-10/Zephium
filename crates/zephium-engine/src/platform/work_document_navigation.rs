@@ -377,9 +377,13 @@ impl WorkDocumentNavigation {
             }
         }
     }
-    /// Initial load KVO does not establish readiness. Any later location event
-    /// invalidates this fixed-document slice, even if its URL is unchanged.
-    pub(crate) fn location_changed(&self) -> Result<bool, ()> {
+    /// Initial-load KVO does not establish readiness. Once exact native
+    /// navigation and URL sampling have sealed the document, a delayed or
+    /// duplicate URL notification is idempotent only when its bounded native
+    /// value is raw-exactly the sealed effective URL. Missing, oversized or
+    /// unequal values invalidate this fixed-document slice. Canonical
+    /// equivalence is deliberately insufficient.
+    pub(crate) fn location_changed(&self, current: Option<&str>) -> Result<bool, ()> {
         let mut state = self.0.lock().map_err(|_| ())?;
         #[cfg(feature = "native-agentic-work-resource-probe")]
         if state.phase == Phase::Committed {
@@ -389,6 +393,14 @@ impl WorkDocumentNavigation {
             state.evidence.location_callback_after_commit_before_ready = true;
         }
         if state.phase == Phase::Ready {
+            if current.is_some_and(|current| {
+                state
+                    .effective
+                    .as_ref()
+                    .is_some_and(|effective| effective.as_url().as_str() == current)
+            }) {
+                return Ok(false);
+            }
             state.phase = Phase::Refused;
             return Ok(true);
         }
@@ -550,7 +562,7 @@ mod tests {
         assert!(!gate.allows(next));
         assert!(gate.take_successor_terminal().is_none());
         gate.observe(event(2, E::Started, next)).unwrap();
-        gate.location_changed().unwrap();
+        gate.location_changed(Some(next)).unwrap();
         assert_eq!(
             gate.observe(event(2, E::Committed, next)),
             Ok((true, false))
@@ -571,7 +583,17 @@ mod tests {
         assert!(gate.observation_stamp(operation.context()).is_some());
         assert!(gate.take_successor_terminal().is_none());
         assert!(gate.arm_successor(source, &request).is_err());
-        assert_eq!(gate.location_changed(), Ok(true));
+        let successor_stamp = gate.observation_stamp(operation.context()).unwrap();
+        assert_eq!(gate.location_changed(Some(next)), Ok(false));
+        assert_eq!(
+            gate.observation_stamp(operation.context()),
+            Some(successor_stamp)
+        );
+        assert!(gate.ready(Some(next)));
+        assert_eq!(
+            gate.location_changed(Some("https://example.test/next#drift")),
+            Ok(true)
+        );
         assert!(!gate.ready(Some(next)));
         assert!(gate.observation_stamp(operation.context()).is_none());
     }
@@ -720,7 +742,7 @@ mod tests {
         let gate = armed();
         gate.observe(event(1, E::Started, URL)).unwrap();
         gate.observe(event(1, E::Committed, URL)).unwrap();
-        assert_eq!(gate.location_changed(), Ok(false));
+        assert_eq!(gate.location_changed(Some(URL)), Ok(false));
         gate.observe(event(1, E::Finished, URL)).unwrap();
         let evidence = gate.construction_evidence().unwrap();
         assert!(
@@ -789,7 +811,7 @@ mod tests {
         for phase in [E::Started, E::Committed] {
             gate.observe(event(1, phase, URL)).unwrap();
         }
-        assert_eq!(gate.location_changed(), Ok(false));
+        assert_eq!(gate.location_changed(Some(URL)), Ok(false));
         gate.observe(event(1, E::Finished, URL)).unwrap();
         assert!(gate.finalization_pending());
         assert!(!gate.ready(Some(URL)));
@@ -866,19 +888,55 @@ mod tests {
         assert!(!finalizing.failed());
     }
     #[test]
-    fn url_observation_remains_fail_closed_when_ready_or_during_finalization_sample() {
-        let ready = armed();
-        for phase in [E::Started, E::Committed, E::Finished] {
-            ready.observe(event(1, phase, URL)).unwrap();
-        }
-        assert!(ready.ready(Some(URL)));
-        assert_eq!(ready.location_changed(), Ok(true));
-        assert!(ready.failed());
+    fn ready_url_observation_accepts_only_the_raw_exact_sealed_value() {
+        let exact = ready_gate();
+        assert!(exact.ready(Some(URL)));
+        assert_eq!(exact.location_changed(Some(URL)), Ok(false));
+        assert!(exact.ready(Some(URL)));
+        assert!(!exact.failed());
 
+        for current in [
+            None,
+            Some("https://EXAMPLE.TEST/frozen"),
+            Some("https://example.test:443/frozen"),
+            Some("https://example.test/other"),
+            Some("https://example.test/frozen?query=1"),
+            Some("https://example.test/frozen#fragment"),
+            Some("https://other.test/frozen"),
+            Some("https://user@example.test/frozen"),
+            Some("not a URL"),
+            Some(""),
+        ] {
+            let gate = ready_gate();
+            assert!(gate.ready(Some(URL)));
+            assert_eq!(gate.location_changed(current), Ok(true));
+            assert!(gate.failed());
+        }
+    }
+
+    #[test]
+    fn url_observation_is_evidence_only_before_and_after_exact_navigation() {
+        let gate = armed();
+        assert_eq!(gate.location_changed(Some(URL)), Ok(false));
+        assert!(!gate.failed());
+        gate.observe(event(1, E::Started, URL)).unwrap();
+        assert_eq!(gate.location_changed(Some(URL)), Ok(false));
+        assert!(!gate.failed());
+        gate.observe(event(1, E::Committed, URL)).unwrap();
+        assert_eq!(gate.location_changed(Some(URL)), Ok(false));
+        assert!(!gate.failed());
+        gate.observe(event(1, E::Finished, URL)).unwrap();
+        assert!(gate.ready(Some(URL)));
+        assert_eq!(gate.location_changed(Some(URL)), Ok(false));
+        assert!(gate.ready(Some(URL)));
+    }
+
+    #[test]
+    fn finalization_sampling_remains_revision_fenced_by_equal_url_observation() {
         let finalizing = finalizing();
         assert!(finalizing
             .finalize(|| {
-                assert_eq!(finalizing.location_changed(), Ok(false));
+                assert_eq!(finalizing.location_changed(Some(URL)), Ok(false));
                 Some(URL.into())
             })
             .is_err());
@@ -898,9 +956,12 @@ mod tests {
         assert!(gate
             .finalize(|| panic!("never resample a sealed document"))
             .is_err());
-        // This is the same permanent fence used before dispatch and after the
-        // next-main-queue result barrier. Returning to the URL cannot revive refs.
-        assert_eq!(gate.location_changed(), Ok(true));
+        // A duplicate native notification cannot mint new authority or revive
+        // refs, but raw-exact equality also cannot erase the already sealed
+        // document merely because KVO delivery was delayed.
+        assert_eq!(gate.location_changed(Some(current)), Ok(false));
+        assert!(gate.ready(Some(current)));
+        assert_eq!(gate.location_changed(Some(URL)), Ok(true));
         assert!(!gate.ready(Some(current)));
         assert!(gate.failed());
         gate.observe(event(1, E::Finished, URL)).unwrap();
@@ -915,7 +976,7 @@ mod tests {
                 count.set(count.get() + 1);
                 assert!(!gate.ready(Some(URL)));
                 assert!(gate.finalize(|| panic!("reentrant sample")).is_err());
-                gate.location_changed().unwrap();
+                gate.location_changed(Some(URL)).unwrap();
                 Some(URL.into())
             })
             .is_err());
@@ -1001,7 +1062,10 @@ mod tests {
             if reload {
                 gate.observe(event(2, E::Started, URL)).unwrap();
             } else {
-                assert_eq!(gate.location_changed(), Ok(true));
+                assert_eq!(
+                    gate.location_changed(Some("https://example.test/frozen#drift")),
+                    Ok(true)
+                );
             }
             assert!(gate.failed());
         }

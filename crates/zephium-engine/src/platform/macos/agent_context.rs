@@ -552,7 +552,9 @@ where
         match work_location.as_ref().map_or_else(
             || location_events.request_location_check(),
             |gate| match observation {
-                super::navigation::NavigationObservation::Url => gate.location_changed(),
+                super::navigation::NavigationObservation::Url(current) => {
+                    gate.location_changed(current.as_deref())
+                }
                 super::navigation::NavigationObservation::HistoryAvailability => {
                     Ok(gate.history_availability_changed())
                 }

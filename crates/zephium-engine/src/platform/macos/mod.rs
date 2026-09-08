@@ -122,7 +122,7 @@ pub use native::{
 pub(crate) use navigation::signal_same_document_navigation;
 pub use navigation::NavigationObserver;
 use objc2::rc::Retained;
-use objc2_web_kit::{WKWebViewConfiguration, WKWebsiteDataStore};
+use objc2_web_kit::{WKWebView, WKWebViewConfiguration, WKWebsiteDataStore};
 pub use stage::ContentStage;
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use web_extensions::run_bitwarden_core_probe;
@@ -236,8 +236,19 @@ enum CurrentUrlUnavailable {
 }
 
 fn bounded_current_url(view: &wry::WebView) -> Result<String, CurrentUrlUnavailable> {
-    let url =
-        unsafe { native::webkit(view).URL() }.ok_or(CurrentUrlUnavailable::MissingNativeUrl)?;
+    bounded_native_current_url_result(&native::webkit(view))
+}
+
+/// One allocation-bounded native URL sample for KVO evidence. Absence and
+/// oversize intentionally collapse to `None`: Ready Work documents treat
+/// either as refusal, while pre-Ready Work treats it as evidence only and
+/// ordinary Browse uses the notification as a refresh request.
+fn bounded_native_current_url(view: &WKWebView) -> Option<String> {
+    bounded_native_current_url_result(view).ok()
+}
+
+fn bounded_native_current_url_result(view: &WKWebView) -> Result<String, CurrentUrlUnavailable> {
+    let url = unsafe { view.URL() }.ok_or(CurrentUrlUnavailable::MissingNativeUrl)?;
     let value = url
         .absoluteString()
         .ok_or(CurrentUrlUnavailable::MissingAbsoluteString)?;

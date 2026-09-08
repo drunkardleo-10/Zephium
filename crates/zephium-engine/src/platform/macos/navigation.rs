@@ -53,16 +53,23 @@ pub struct NavigationObserverIvars {
 
 /// Closed native signals emitted by the WKWebView chrome observer.
 ///
-/// `URL` is document-authority evidence. Back/forward availability only asks
-/// ordinary browser chrome to refresh; it does not prove that the current
-/// document or its serialized URL changed.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// `URL` carries one bounded native value sample as evidence. It never grants
+/// document authority by itself. `None` means WebKit did not expose a value or
+/// the value crossed the native-to-Rust allocation ceiling. Back/forward
+/// availability only asks ordinary browser chrome to refresh; it does not
+/// prove that the current document or its serialized URL changed.
 pub enum NavigationObservation {
+    Url(Option<String>),
+    HistoryAvailability,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NavigationObservationKind {
     Url,
     HistoryAvailability,
 }
 
-impl NavigationObservation {
+impl NavigationObservationKind {
     fn from_key_path(key_path: &NSString) -> Option<Self> {
         if key_path.isEqualToString(ns_string!("URL")) {
             Some(Self::Url)
@@ -95,7 +102,21 @@ define_class!(
             let Some(key_path) = key_path else {
                 return;
             };
-            if let Some(observation) = NavigationObservation::from_key_path(key_path) {
+            let observation = match NavigationObservationKind::from_key_path(key_path) {
+                Some(NavigationObservationKind::Url) => {
+                    let current = self
+                        .ivars()
+                        .webview
+                        .load()
+                        .and_then(|webview| super::bounded_native_current_url(&webview));
+                    Some(NavigationObservation::Url(current))
+                }
+                Some(NavigationObservationKind::HistoryAvailability) => {
+                    Some(NavigationObservation::HistoryAvailability)
+                }
+                None => None,
+            };
+            if let Some(observation) = observation {
                 (self.ivars().on_change)(observation);
             }
         }
@@ -144,17 +165,17 @@ mod tests {
     #[test]
     fn callback_key_paths_are_closed_and_keep_url_distinct_from_history_availability() {
         assert_eq!(
-            NavigationObservation::from_key_path(ns_string!("URL")),
-            Some(NavigationObservation::Url)
+            NavigationObservationKind::from_key_path(ns_string!("URL")),
+            Some(NavigationObservationKind::Url)
         );
         for key_path in [ns_string!("canGoBack"), ns_string!("canGoForward")] {
             assert_eq!(
-                NavigationObservation::from_key_path(key_path),
-                Some(NavigationObservation::HistoryAvailability)
+                NavigationObservationKind::from_key_path(key_path),
+                Some(NavigationObservationKind::HistoryAvailability)
             );
         }
         assert_eq!(
-            NavigationObservation::from_key_path(ns_string!("title")),
+            NavigationObservationKind::from_key_path(ns_string!("title")),
             None
         );
     }
