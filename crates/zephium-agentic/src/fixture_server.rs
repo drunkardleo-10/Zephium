@@ -13,6 +13,9 @@ use crate::probe_recipes::{backend_name, case_name, MAX_NATIVE_INPUT_RUNTIME_ROW
 use crate::{FixtureCase, InputBackend};
 
 const MAX_REQUEST_BYTES: usize = 4 * 1_024;
+// No form, submission controls, scripts, event handlers, frames, remote assets
+// or persistence. The initial value deliberately differs from the trusted goal.
+const RETAINED_LOCAL_FORM_HTML: &str = r#"<!doctype html><html lang="en"><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; form-action 'none'; frame-src 'none'; base-uri 'none'"><title>Zephium local preparation witness</title><body><main><h1>Local draft</h1><label for="draft">Draft</label><input id="draft" type="text" value="Unprepared" autocomplete="off"><p>This field has no submission or persistence.</p></main></body></html>"#;
 // A maximum 112-row matrix reloads the top document for activation isolation;
 // each load may fetch the fixed child frame and one favicon.
 const MAX_REQUESTS: usize = 512;
@@ -67,6 +70,8 @@ pub enum FixtureRoute {
     SemanticRuntime,
     /// Provider-free hidden-view rendering readiness diagnostic.
     SemanticRendering,
+    /// Script-free, non-submitting local field for retained action qualification.
+    RetainedLocalForm,
     /// Controlled-input document for the release-excluded page-world relay proof.
     SemanticRuntimeRelay,
     /// Real-WebKit adversarial page-world relay qualification document.
@@ -99,6 +104,7 @@ impl FixtureRoute {
             Self::SameOriginFrame => "/frame-v1.html",
             Self::SemanticRuntime => "/semantic-runtime-v1.html",
             Self::SemanticRendering => "/semantic-rendering-v1.html",
+            Self::RetainedLocalForm => "/retained-local-form-v1.html",
             Self::SemanticRuntimeRelay => "/semantic-runtime-relay-v1.html",
             Self::SemanticRuntimeRelayHostile => "/semantic-runtime-relay-hostile-v1.html",
             Self::SemanticRuntimeReplacement => "/semantic-runtime-replacement-v1.html",
@@ -535,6 +541,13 @@ fn handle(
             200,
             "text/html; charset=utf-8",
             SEMANTIC_RENDERING_HTML.as_bytes(),
+            FixtureScriptPolicy::InlineOnly,
+        ),
+        b"GET /retained-local-form-v1.html HTTP/1.1"
+        | b"GET /retained-local-form-v1.html HTTP/1.0" => (
+            200,
+            "text/html; charset=utf-8",
+            RETAINED_LOCAL_FORM_HTML.as_bytes(),
             FixtureScriptPolicy::InlineOnly,
         ),
         b"GET /semantic-runtime-relay-v1.html HTTP/1.1"
@@ -1469,6 +1482,35 @@ mod tests {
         response
     }
 
+    #[test]
+    fn retained_local_form_is_non_submitting_and_has_no_page_code_or_remote_resources() {
+        let server = FixtureServer::start().expect("server");
+        let response = fetch(&server, FixtureRoute::RetainedLocalForm);
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains(RETAINED_LOCAL_FORM_HTML));
+        for required in [
+            "script-src 'none'",
+            "form-action 'none'",
+            "frame-src 'none'",
+            "value=\"Unprepared\"",
+        ] {
+            assert!(RETAINED_LOCAL_FORM_HTML.contains(required));
+        }
+        for forbidden in [
+            "<script",
+            "<form",
+            "<button",
+            "<iframe",
+            "src=",
+            "https://",
+            "oninput=",
+            "onchange=",
+            "Ready for review",
+        ] {
+            assert!(!RETAINED_LOCAL_FORM_HTML.contains(forbidden));
+        }
+        server.shutdown().expect("joined healthy fixture");
+    }
     #[test]
     fn rendering_fixture_is_closed_provider_free_and_keeps_independent_async_controls() {
         let server = FixtureServer::start().expect("server");

@@ -22,7 +22,14 @@ use zephium_work_composition::discovery_qualification::{
 use zephium_work_composition::navigation_qualification::{
     self as qualifier, ApplicationObserver, ApplicationReport,
 };
-#[cfg(feature = "macos-work-retained-product-probe")]
+#[cfg(feature = "macos-work-retained-action-probe")]
+use zephium_work_composition::retained_action_qualification::{
+    self as qualifier, ApplicationObserver, ApplicationReport,
+};
+#[cfg(all(
+    feature = "macos-work-retained-product-probe",
+    not(feature = "macos-work-retained-action-probe")
+))]
 use zephium_work_composition::retained_product_qualification::{
     self as qualifier, ApplicationObserver, ApplicationReport,
 };

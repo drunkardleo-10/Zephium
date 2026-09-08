@@ -6,6 +6,14 @@
 compile_error!("native Work composition is currently supported only on macOS");
 #[cfg(all(feature = "public-qualification", not(debug_assertions)))]
 compile_error!("public Work qualification is forbidden in optimized builds");
+#[cfg(all(
+    feature = "retained-action-qualification",
+    any(
+        feature = "retained-commerce-qualification",
+        feature = "discovery-qualification"
+    )
+))]
+compile_error!("select the retained local action qualification without another objective");
 
 #[cfg(feature = "macos-work")]
 mod native;
@@ -15,6 +23,9 @@ pub use native::{MacosWorkComposition, TrustedWorkRequest};
 pub use zephium_agent_controller::AgentWorkFailure;
 #[cfg(feature = "public-qualification")]
 mod qualification;
+#[cfg(feature = "retained-action-qualification")]
+#[doc(hidden)]
+pub mod retained_action_qualification;
 #[cfg(feature = "retained-product-qualification")]
 #[doc(hidden)]
 pub mod retained_product_qualification;

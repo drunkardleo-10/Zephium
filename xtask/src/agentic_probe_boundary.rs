@@ -6280,7 +6280,11 @@ fn validate_semantic_locate_contract(
     let locate = compact(locate);
     for required in [
         "pubconstMAX_SEMANTIC_LOCATE_QUERY_BYTES:usize=1_024;",
-        "pubconstMAX_SEMANTIC_LOCATE_QUERY_TERMS:usize=16;",
+        // Capacity now derives from the unchanged public byte ceiling, with
+        // fixed bit storage and bounded per-frame ancestry caching. Match the
+        // current implementation rather than reinstating its old hidden limit.
+        "pubconstMAX_SEMANTIC_LOCATE_QUERY_TERMS:usize=MAX_SEMANTIC_LOCATE_QUERY_BYTES.div_ceil(2);",
+        "structQueryTermBits([u64;MAX_SEMANTIC_LOCATE_QUERY_TERMS.div_ceil(64)]);",
         "pubconstMAX_SEMANTIC_LOCATE_MATCHES:u8=32;",
         "||looks_like_secret_value(&source)",
         "ifterms.iter().all(|term|is_query_stopword(term))",
@@ -6292,9 +6296,11 @@ fn validate_semantic_locate_contract(
         "SemanticFrameBoundaryStatus::Observed{frame,..}=>Some(frame)",
         "Vec::<RankedMatch>::with_capacity(usize::from(request.budget.max_matches))",
         "ifnode.sensitivity()==SemanticSensitivity::Secret",
-        "letSome(candidate)=match_node(frame.nodes(),node_index,&request.query,&mutscratch)",
-        "ancestor_term_bits(nodes,node_index,&query.terms,scratch)",
-        "content_bits&required!=0&&(matched_terms>=2||exact_name_term)",
+        "letcandidate=match_node(node,&request.query,&mutscratch,inherited,&mutancestor_contributions[node_index],);",
+        "ancestor_term_bits(frame.nodes(),node_index,&ancestor_contributions)",
+        "letmutancestor_contributions=vec![QueryTermBits::default();frame.nodes().len()];",
+        "elseifcontent_anchor{",
+        "contains_normalized_phrase(&query.normalized,anchor)",
         "for_in0..MAX_SEMANTIC_DEPTH",
         "truncated:usize::from(matched_nodes)>matches.len()",
     ] {
@@ -6308,7 +6314,7 @@ fn validate_semantic_locate_contract(
         .find("ifnode.sensitivity()==SemanticSensitivity::Secret")
         .ok_or_else(|| "semantic locate secret exclusion is missing".to_owned())?;
     let matching = locate
-        .find("letSome(candidate)=match_node(frame.nodes(),node_index,&request.query,&mutscratch)")
+        .find("letcandidate=match_node(")
         .ok_or_else(|| "semantic locate matcher is missing".to_owned())?;
     if secret_check >= matching {
         return Err("semantic locate must exclude secret nodes before matching".to_owned());
@@ -9991,6 +9997,32 @@ mod tests {
             policy,
         )
         .expect("bounded semantic locate");
+        // The advertised byte bound must govern fixed term storage. Restoring
+        // an unrelated term ceiling or an unbounded cache is checker-visible.
+        for changed in [
+            locate.replace("MAX_SEMANTIC_LOCATE_QUERY_BYTES.div_ceil(2)", "usize::MAX"),
+            locate.replace(
+                "[u64; MAX_SEMANTIC_LOCATE_QUERY_TERMS.div_ceil(64)]",
+                "Vec<u64>",
+            ),
+            locate.replace(
+                "vec![QueryTermBits::default(); frame.nodes().len()]",
+                "Vec::new()",
+            ),
+        ] {
+            assert_ne!(changed, locate);
+            assert!(validate_semantic_locate_contract(
+                root,
+                &changed,
+                locate_model,
+                provider_root,
+                provider_tool,
+                continuation,
+                provider_request,
+                policy
+            )
+            .is_err());
+        }
         assert!(validate_semantic_locate_contract(
             root,
             &locate.replace("|| looks_like_secret_value(&source)", ""),
