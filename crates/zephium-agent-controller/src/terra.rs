@@ -2450,6 +2450,12 @@ impl AgentBrowserSession {
             schema.source_roles(),
         )
         .map_err(AgentBrowserProviderError::Read)?;
+        // Every mapped value requires a delivered source fragment. An empty
+        // read cannot satisfy a required field, so do not spend a provider
+        // request asking the model to manufacture an impossible result.
+        if read.fragments().is_empty() && schema.fields().iter().any(|field| field.required()) {
+            return Err(AgentBrowserProviderError::NoExtractionEvidence);
+        }
         let payload = encode_semantic_extraction_request(
             schema,
             &read,
@@ -3470,6 +3476,9 @@ pub enum AgentBrowserProviderError {
     /// Purpose-bound output or its exact delivered sources were refused.
     #[error("browser extraction output was refused")]
     Extraction(zephium_agentic::AgentProviderExtractionOutputError),
+    /// The authorized read has no sources for a required extraction field.
+    #[error("browser extraction has no source evidence for its required fields")]
+    NoExtractionEvidence,
     /// Product projection or exact durable accounting refused a transition.
     #[error("browser session journal refused a transition")]
     Journal,

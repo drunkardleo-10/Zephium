@@ -2592,9 +2592,10 @@ impl AgentWorkController {
                     AgentWorkFailure::Browser(AgentBrowserProviderError::Action(
                         crate::AgentBrowserActionError::NeedsHuman(_),
                     )) => AgentSupervisorFailure::PolicyDenied,
-                    AgentWorkFailure::Browser(AgentBrowserProviderError::Account(_)) => {
-                        AgentSupervisorFailure::PolicyDenied
-                    }
+                    AgentWorkFailure::Browser(
+                        AgentBrowserProviderError::Account(_)
+                        | AgentBrowserProviderError::NoExtractionEvidence,
+                    ) => AgentSupervisorFailure::PolicyDenied,
                     AgentWorkFailure::Browser(_) => AgentSupervisorFailure::ProviderFailed,
                     _ => AgentSupervisorFailure::PolicyDenied,
                 })

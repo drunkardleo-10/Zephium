@@ -83,7 +83,11 @@ Queries are literal Unicode words/numbers, matched case-insensitively by any
 word, with a 256 UTF-8-byte ceiling. Distinct matched words rank candidate
 passages; equal scores preserve traversal order. This is deterministic lexical
 retrieval, not embedding search or a claim of semantic understanding. Concise
-discriminating keywords are appropriate. Query strings never become selectors,
+discriminating page words, numbers and units are appropriate. There is no
+stemming or synonym expansion: `availability` does not match `Available now`,
+and `price` does not match a currency amount by itself. The provider tool
+description states this contract so the model can choose actual page wording
+after a lexical miss. Query strings never become selectors,
 regular expressions, JavaScript, attributes or page instructions.
 
 The fixed runtime retains at most 16 contiguous source passages, each at most
@@ -105,6 +109,14 @@ count and text ceiling before model delivery. Previous refs/evidence retire as
 for every progressive snapshot. Search results can themselves supply current
 source refs for narrower inspection; the original region anchor remains
 available for another explicitly requested search.
+
+Terminal extraction uses only the current acknowledged observation. If its
+authorized read has no source fragments and the trusted schema requires a
+field, the controller closes with `NoExtractionEvidence` before sending or
+counting a mapper request. Zero sources cannot support a required value. This
+is an incomplete workflow outcome, not evidence that the requested facts do
+not exist. Optional-only schemas retain their existing empty-result contract;
+invented source refs remain rejected by normal extraction validation.
 
 Deterministic coverage includes saturated initial inventories, offscreen
 rendered evidence, inline quote fidelity, region/privacy/frame boundaries,

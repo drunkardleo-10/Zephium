@@ -1449,6 +1449,12 @@ async function finish() {
     "text search escaped its exact region or privacy boundaries");
   const searchAbsent = JSON.parse(invoke(148, 148, { k: "text_search", a: searchAnchor, q: "unmentioned" }));
   assert(searchAbsent.n.length === 1 && searchAbsent.c === "complete", "complete search miss invented evidence");
+  const abstractFieldSearch = JSON.parse(invoke(148, 148, { k: "text_search", a: searchAnchor, q: "availability" }));
+  assert(abstractFieldSearch.n.length === 1 && abstractFieldSearch.c === "complete",
+    "literal keyword discovery silently interpreted an abstract field name");
+  const visibleWordingSearch = JSON.parse(invoke(148, 148, { k: "text_search", a: searchAnchor, q: "AVAILABLE" }));
+  assert(visibleWordingSearch.n.some(node => node.t === "Available now. Includes 3745 pieces."),
+    "page wording failed to recover evidence after an abstract-field search miss");
   const searchLimited = JSON.parse(invoke(149, 149, { k: "text_search", a: searchAnchor, q: "dimensions" }, { x: 128 }));
   assert(searchLimited.c === "inspection_limit" && searchLimited.n.length === 1, "search scan ceiling became a false complete miss");
   for (const query of ["", "x".repeat(257), "dimensions\nwidth", "$[]", "width\u202edepth", "width\u200bdepth", "sk-private-search-query-value"]) {

@@ -1373,6 +1373,7 @@ enum ProviderFault {
 enum ExtractionFault {
     None,
     RoleSelection,
+    EmptyEvidence,
     WrongSchema,
     ExpandedScope,
     WrongKind,
@@ -1389,6 +1390,7 @@ fn extraction_uses_the_same_worker_and_never_publishes_failed_or_unsettled_outpu
     for fault in [
         ExtractionFault::None,
         ExtractionFault::RoleSelection,
+        ExtractionFault::EmptyEvidence,
         ExtractionFault::WrongSchema,
         ExtractionFault::ExpandedScope,
         ExtractionFault::WrongKind,
@@ -1542,7 +1544,9 @@ fn provider_fixture_with_account(
             ProviderFault::CountRefused | ProviderFault::CancelCount => 1,
             ProviderFault::Extraction(ExtractionFault::CancelCount) => 3,
             ProviderFault::Extraction(
-                ExtractionFault::WrongSchema | ExtractionFault::ExpandedScope,
+                ExtractionFault::WrongSchema
+                | ExtractionFault::ExpandedScope
+                | ExtractionFault::EmptyEvidence,
             ) => 2,
             ProviderFault::Extraction(_) => 4,
             _ => 2,
@@ -1847,7 +1851,13 @@ fn provider_fixture_with_account(
             AgentAccountScope::Anonymous,
         )
         .unwrap();
-        Box::new(if extraction_fault == ExtractionFault::RoleSelection {
+        Box::new(if extraction_fault == ExtractionFault::EmptyEvidence {
+            // The native snapshot is valid but none of its fields qualify as
+            // evidence under the trusted schema's role selection.
+            extraction.with_source_roles(
+                SemanticReadRoleSelection::try_new(&[SemanticRole::Paragraph]).unwrap(),
+            )
+        } else if extraction_fault == ExtractionFault::RoleSelection {
             extraction.with_source_roles(
                 SemanticReadRoleSelection::try_new(&[SemanticRole::Textbox]).unwrap(),
             )
@@ -2003,7 +2013,9 @@ fn provider_fixture_with_account(
                 .count(),
             if matches!(
                 fault,
-                ExtractionFault::WrongSchema | ExtractionFault::ExpandedScope
+                ExtractionFault::WrongSchema
+                    | ExtractionFault::ExpandedScope
+                    | ExtractionFault::EmptyEvidence
             ) {
                 1
             } else {
@@ -2060,7 +2072,17 @@ fn provider_fixture_with_account(
             assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
             assert_eq!(calls, [1, 2, 3, 4, 5, 6]);
             assert_eq!(closed.policy_settlement().closure().effects(), 0);
-            if matches!(
+            if fault == ExtractionFault::EmptyEvidence {
+                assert_eq!(closed.policy_settlement().closure().model_calls(), 1);
+                assert_eq!(
+                    closed.policy_settlement().closure().outcome(),
+                    AgentRunProgressOutcome::Failed(AgentSupervisorFailure::PolicyDenied)
+                );
+                assert_eq!(
+                    closed.failure(),
+                    AgentWorkFailure::Browser(AgentBrowserProviderError::NoExtractionEvidence)
+                );
+            } else if matches!(
                 fault,
                 ExtractionFault::CancelCount | ExtractionFault::CancelStream
             ) {

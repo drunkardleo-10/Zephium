@@ -4714,7 +4714,7 @@ static ANTHROPIC_BASELINE_READ_TOOL: LazyLock<AnthropicBrowserToolDefinition> =
 static PROGRESSIVE_OBSERVATION_TOOL: LazyLock<BrowserToolDefinition> = LazyLock::new(|| {
     let mut scopes = scope_schema();
     scopes["anyOf"].as_array_mut().expect("fixed scope schema").push(tagged_object(
-        "text_search", vec![("target", reference_schema()), ("query", json!({"type":"string","minLength":1,"maxLength":crate::MAX_SEMANTIC_TEXT_SEARCH_QUERY_BYTES,"description":"Literal keywords, at most 256 UTF-8 bytes. Matches any word; use concise discriminating terms."}))],
+        "text_search", vec![("target", reference_schema()), ("query", json!({"type":"string","minLength":1,"maxLength":crate::MAX_SEMANTIC_TEXT_SEARCH_QUERY_BYTES,"description":"Literal words/numbers, at most 256 UTF-8 bytes. Case-insensitive exact-word OR matching, without stemming or synonyms. Prefer words, numbers or units likely to appear in the page text."}))],
     ));
     scopes["anyOf"]
         .as_array_mut()
@@ -4725,7 +4725,7 @@ static PROGRESSIVE_OBSERVATION_TOOL: LazyLock<BrowserToolDefinition> = LazyLock:
         });
     BrowserToolDefinition {
         kind: AgentBrowserToolKind::Snapshot,
-        description: "Inspect rendered page content without clicking, scrolling or navigating. text_search finds visible passages omitted by compact observations below a current document/landmark/group/dialog ref; query uses literal keywords (any word), up to 256 UTF-8 bytes, returning up to 16 ranked contiguous source passages and 8 KiB under a bounded scan. Use concise discriminating words such as dimensions width depth availability. It cannot reveal hidden/unmounted content. initial restores the viewport plus heading anchors, not a content cursor. region reads own content and leaves nested regions as anchors; subtree recursively reads descendants (heading subtrees exclude following prose). surrounding_text reads around an actual heading/content ref. Prefer a relevant region; repeating a truncated scope does not advance it. New scoped evidence replaces earlier refs/evidence. Use current refs only; missing/truncated content is not absence. Frames are unsupported.",
+        description: "Inspect rendered page content without clicking, scrolling or navigating. text_search finds visible passages omitted by compact observations below a current document/landmark/group/dialog ref; query matches any exact word or number, case-insensitively, without stemming or synonyms. Use page wording or likely units, not abstract field names: availability does not match available. Query limit is 256 UTF-8 bytes; output is up to 16 ranked contiguous passages and 8 KiB under a bounded scan. It cannot reveal hidden/unmounted content. initial restores the viewport plus heading anchors, not a content cursor. region reads own content and leaves nested regions as anchors; subtree recursively reads descendants (heading subtrees exclude following prose). surrounding_text reads around an actual heading/content ref. Prefer a relevant region; repeating a truncated scope does not advance it. New scoped evidence replaces earlier refs/evidence. Use current refs only; missing/truncated content is not absence. Frames are unsupported.",
         parameters: strict_object(vec![("scope", scopes)]),
     }
 });
