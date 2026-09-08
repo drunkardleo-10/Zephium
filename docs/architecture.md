@@ -635,8 +635,59 @@ the current tree. The product target is a curated, package-neutral MV3
 compatibility surface. Pinned **Bitwarden Core** and stock third-party
 artifacts are adversarial acceptance contracts used to expose platform gaps;
 they are not product dependencies and no target-specific branch belongs in
-ordinary browser code. An open store or general-parity promise remains outside
-the initial release.
+ordinary browser code. The agreed public target now combines a small
+recommended cohort with policy-eligible Compatibility/Beta installation from
+the Chrome Web Store or an approved publisher. Original package bytes come
+directly to the user's device; Zephium serves shared signed compatibility and
+revocation metadata, not third-party packages. Recommendations retain exact
+test history while eligible upstream versions update independently. This does
+not relax the existing exact Verified manifest authority or promise general
+API parity. Public provider composition and Beta activation remain unfinished
+and disabled.
+
+The public metadata format and backend handoff are defined in
+`extension-metadata-service.md`. Its bounded parser and read-only xtask
+validator produce structural data, not authenticated policy or installation
+authority. Upstream intake can authenticate and preflight an original CRX
+without inventing a reviewed catalog row; complete tree receipts preserve its
+original CRX digest and can bind its exact original manifest to a numeric
+upstream checkpoint. The checkpoint has a fixed durable codec and rejects
+downgrades, publisher changes, and equal-version byte changes.
+
+PROFILE schema v14 adds an immutable provenance row per installation and a
+bounded publisher high-water history. The source-aware Store authority methods
+commit package selection, source/transform/output/compatibility/policy evidence,
+grants, and upstream history in the same transaction. Updates compare the
+complete expected current provenance and reject source-provider changes,
+policy rollback/equivocation, and upstream rollback/equivocation. Existing
+reviewed installs receive no inferred source data. Snapshot reads require
+matching independently reauthenticated provenance when a row exists; legacy
+bindings cannot silently omit it. Native Begin/MayOwn and grant writes also
+rejoin the stored output descriptor and high-water state through the existing
+grant codec. The native journal retains its existing exact package and
+install/grant revision bindings rather than duplicating mutable grant/native
+identities in provenance. Uninstall removes the installation's provenance but
+retains its upstream maximum; complete profile erasure scrubs both tables.
+
+The empty schema adds 8 KiB (two 4-KiB SQLite pages) per profile in the measured
+migration. Each encoded record is bounded to 1 KiB (the current maximum shape
+is 812 bytes), and history is capped at 128 publishers per profile. The path
+uses the existing Store actor and starts no worker, timer, or native view.
+These are structural persistence guarantees, not Beta authentication. A
+separate typed Beta authority, reauthenticated repository/transform integration,
+fresh signed-policy consumption, and public installation/update orchestration
+remain necessary before upstream intake can be exposed. The exact Verified
+constructors remain unchanged.
+
+The synchronized macOS private-directory publication hardening also requires
+GC to account for one additional root-reseal directory sync and two mode
+changes per freshly retired tree. The pre-existing maximum-cohort filesystem
+tests reproduced five failures on unchanged `1db685c`; correcting the accounting
+makes measured macOS pending cleanup 102 syncs against a 104-sync cap, preserving
+two syncs of headroom. Fresh cleanup is 115/128. Other platforms retain the
+existing 94/96 pending and 107/128 fresh accounting. This changes no native
+filesystem operation and does not remove the required publication hardening;
+the no-garbage path still performs zero durability writes.
 
 Delivery is layered and measured:
 

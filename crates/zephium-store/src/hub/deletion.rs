@@ -639,6 +639,8 @@ fn scrub_profile_database(path: &Path) -> rusqlite::Result<()> {
          DELETE FROM extension_grant_api_permissions;
          DELETE FROM extension_grant_host_permissions;
          DELETE FROM extension_grants;
+         DELETE FROM extension_install_provenance;
+         DELETE FROM extension_upstream_history;
          DELETE FROM extension_installs;
          DELETE FROM extension_install_catalog;
          DELETE FROM page_permission_grants;
@@ -865,6 +867,16 @@ mod tests {
             ],
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO extension_upstream_history(publisher, checkpoint) VALUES (?1, ?2)",
+            params![vec![71_u8; 32], vec![72_u8; 105]],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO extension_install_provenance(install_id, provenance) VALUES (?1, ?2)",
+            params![vec![1_u8; 16], PROFILE_SCRUB_MARKER.as_bytes()],
+        )
+        .unwrap();
         drop(conn);
 
         scrub_profile_database(&path).unwrap();
@@ -887,9 +899,11 @@ mod tests {
             "extension_grant_host_permissions",
             "extension_grants",
             "extension_install_catalog",
+            "extension_install_provenance",
             "extension_installs",
             "extension_profile_policy",
             "extension_profile_site_denials",
+            "extension_upstream_history",
             "favicons",
             "focus",
             "history",
@@ -927,12 +941,14 @@ mod tests {
             "page_permission_catalog",
             "page_permission_grants",
             "extension_install_catalog",
+            "extension_install_provenance",
             "extension_installs",
             "extension_grants",
             "extension_grant_api_permissions",
             "extension_grant_host_permissions",
             "extension_profile_policy",
             "extension_profile_site_denials",
+            "extension_upstream_history",
         ] {
             let count: i64 = conn
                 .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {

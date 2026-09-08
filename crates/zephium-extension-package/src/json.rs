@@ -38,6 +38,17 @@ pub struct BoundedJsonLimits {
 }
 
 impl BoundedJsonLimits {
+    /// Bounds the shared public extension policy before typed parsing.
+    pub const fn public_extension_policy() -> Self {
+        Self {
+            max_bytes: crate::MAX_EXTENSION_PUBLIC_POLICY_BYTES,
+            max_depth: 12,
+            max_nodes: 32_768,
+            max_collection_entries: crate::MAX_EXTENSION_PUBLIC_POLICY_ENTRIES,
+            max_string_bytes: crate::MAX_EXTENSION_PUBLIC_POLICY_BYTES,
+        }
+    }
+
     /// Limits for a canonical extension release catalog.
     pub const fn release_catalog() -> Self {
         Self {

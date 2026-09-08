@@ -20,9 +20,23 @@ mod native_namespace;
 mod native_ownership;
 mod package_pin;
 mod profile_policy;
+mod provenance;
 mod publisher_native_host;
 mod runtime;
 mod transient;
+mod upstream_checkpoint;
+mod upstream_version;
+
+pub use provenance::{
+    ExtensionInstallProvenance, ExtensionProvenancePolicy, ExtensionProvenanceSource,
+    ExtensionProvenanceUpdate, ExtensionSourceTreeIdentity, ExtensionTransformProvenance,
+    MAX_EXTENSION_INSTALL_PROVENANCE_BYTES, MAX_EXTENSION_UPSTREAM_HISTORY_PER_PROFILE,
+};
+pub use upstream_checkpoint::{
+    ExtensionUpstreamCheckpoint, ExtensionUpstreamUpdateDisposition,
+    EXTENSION_UPSTREAM_CHECKPOINT_BYTES,
+};
+pub use upstream_version::ExtensionUpstreamVersion;
 
 pub use action::{
     ExtensionActionError, ExtensionActionIcon, ExtensionActionRejection, ExtensionActionRequest,

@@ -25,11 +25,12 @@ use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision};
 use zephium_core::extensions::{
     ExtensionExpectedNativeOwnershipIdentity, ExtensionGrantAuthority, ExtensionGrantDigest,
     ExtensionGrantManifestBindings, ExtensionGrantPatch, ExtensionGrantRevision,
-    ExtensionInstallCatalogMutation, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
-    ExtensionManifestDescriptor, ExtensionNativeOwnershipEntryCas,
+    ExtensionInstallCatalogMutation, ExtensionInstallCatalogRevision, ExtensionInstallProvenance,
+    ExtensionInstallRevision, ExtensionManifestDescriptor, ExtensionNativeOwnershipEntryCas,
     ExtensionNativeOwnershipJournalMutation, ExtensionNativeOwnershipJournalRevision,
     ExtensionNativeOwnershipKey, ExtensionProfilePolicyMutation, ExtensionProfilePolicyRevision,
-    MAX_EXTENSION_GRANT_MANIFEST_BINDINGS_RETAINED_BYTES, MAX_EXTENSION_MANIFEST_RETAINED_BYTES,
+    ExtensionProvenanceUpdate, MAX_EXTENSION_GRANT_MANIFEST_BINDINGS_RETAINED_BYTES,
+    MAX_EXTENSION_INSTALL_PROVENANCE_BYTES, MAX_EXTENSION_MANIFEST_RETAINED_BYTES,
     MAX_EXTENSION_NATIVE_OWNERSHIP_MUTATION_RETAINED_BYTES,
     MAX_EXTENSION_PROFILE_POLICY_MUTATION_RETAINED_BYTES,
 };
@@ -88,15 +89,21 @@ const MAX_EXTENSION_GRANT_MUTATION_REQUEST_RETAINED_BYTES: usize = checked_const
     MAX_EXTENSION_MANIFEST_RETAINED_BYTES,
     MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES,
 );
-const MAX_EXTENSION_INSTALL_UPDATE_REQUEST_RETAINED_BYTES: usize =
-    checked_const_mul(MAX_EXTENSION_MANIFEST_RETAINED_BYTES, 2);
+const MAX_EXTENSION_PROVISION_REQUEST_RETAINED_BYTES: usize = checked_const_add(
+    MAX_EXTENSION_GRANT_MUTATION_REQUEST_RETAINED_BYTES,
+    MAX_EXTENSION_INSTALL_PROVENANCE_BYTES,
+);
+const MAX_EXTENSION_INSTALL_UPDATE_REQUEST_RETAINED_BYTES: usize = checked_const_add(
+    checked_const_mul(MAX_EXTENSION_MANIFEST_RETAINED_BYTES, 2),
+    2 * MAX_EXTENSION_INSTALL_PROVENANCE_BYTES + std::mem::size_of::<ExtensionProvenanceUpdate>(),
+);
 const MAX_EXTENSION_SERVICE_GRANT_REQUEST_RETAINED_BYTES: usize =
     if MAX_EXTENSION_INSTALL_UPDATE_REQUEST_RETAINED_BYTES
-        > MAX_EXTENSION_GRANT_MUTATION_REQUEST_RETAINED_BYTES
+        > MAX_EXTENSION_PROVISION_REQUEST_RETAINED_BYTES
     {
         MAX_EXTENSION_INSTALL_UPDATE_REQUEST_RETAINED_BYTES
     } else {
-        MAX_EXTENSION_GRANT_MUTATION_REQUEST_RETAINED_BYTES
+        MAX_EXTENSION_PROVISION_REQUEST_RETAINED_BYTES
     };
 // Permit one worst-case cohort load plus one worst-case mutation. A second
 // worst-case cohort waits until the first permit drops instead of allowing a
@@ -689,6 +696,7 @@ enum Cmd {
         ExtensionInstallId,
         Arc<ExtensionManifestDescriptor>,
         Box<ExtensionGrantAuthority>,
+        Option<Box<ExtensionInstallProvenance>>,
         ExtensionInstallMutationPermit,
         ExtensionGrantRequestPermit,
         ExtensionInstallProvisionDone,
@@ -702,6 +710,7 @@ enum Cmd {
         ExtensionInstallUpdateGrantDecision,
         Arc<ExtensionManifestDescriptor>,
         Arc<ExtensionManifestDescriptor>,
+        Option<Box<ExtensionProvenanceUpdate>>,
         ExtensionInstallMutationPermit,
         ExtensionGrantRequestPermit,
         ExtensionInstallUpdateDone,
@@ -1193,6 +1202,30 @@ impl ExtensionServiceStoreAuthority {
         authority: Box<ExtensionGrantAuthority>,
         deadline: Instant,
     ) -> ExtensionServiceStoreCallOutcome<ExtensionInstallProvisionOutcome> {
+        self.provision_install_with_provenance_until(
+            profile,
+            expected_catalog,
+            install,
+            manifest,
+            authority,
+            None,
+            deadline,
+        )
+    }
+
+    /// Persists separately reauthenticated provenance atomically with install
+    /// and grants. It grants no package admission or native activation authority.
+    #[allow(clippy::too_many_arguments)]
+    pub fn provision_install_with_provenance_until(
+        &self,
+        profile: ProfileId,
+        expected_catalog: ExtensionInstallCatalogRevision,
+        install: ExtensionInstallId,
+        manifest: Arc<ExtensionManifestDescriptor>,
+        authority: Box<ExtensionGrantAuthority>,
+        provenance: Option<Box<ExtensionInstallProvenance>>,
+        deadline: Instant,
+    ) -> ExtensionServiceStoreCallOutcome<ExtensionInstallProvisionOutcome> {
         if Instant::now() >= deadline {
             return ExtensionServiceStoreCallOutcome::NotAdmitted;
         }
@@ -1206,6 +1239,7 @@ impl ExtensionServiceStoreAuthority {
             install,
             manifest,
             authority,
+            provenance,
             deadline,
             done,
         ) {
@@ -1229,6 +1263,36 @@ impl ExtensionServiceStoreAuthority {
         replacement_manifest: Arc<ExtensionManifestDescriptor>,
         deadline: Instant,
     ) -> ExtensionServiceStoreCallOutcome<ExtensionInstallUpdateOutcome> {
+        self.update_install_with_provenance_until(
+            profile,
+            expected_catalog,
+            install,
+            expected_install,
+            expected_grant,
+            grant_decision,
+            current_manifest,
+            replacement_manifest,
+            None,
+            deadline,
+        )
+    }
+
+    /// Atomically compares the current source evidence and advances replacement
+    /// provenance and upstream history together with the package and grants.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_install_with_provenance_until(
+        &self,
+        profile: ProfileId,
+        expected_catalog: ExtensionInstallCatalogRevision,
+        install: ExtensionInstallId,
+        expected_install: ExtensionInstallRevision,
+        expected_grant: ExtensionGrantRevision,
+        grant_decision: ExtensionInstallUpdateGrantDecision,
+        current_manifest: Arc<ExtensionManifestDescriptor>,
+        replacement_manifest: Arc<ExtensionManifestDescriptor>,
+        provenance: Option<Box<ExtensionProvenanceUpdate>>,
+        deadline: Instant,
+    ) -> ExtensionServiceStoreCallOutcome<ExtensionInstallUpdateOutcome> {
         if Instant::now() >= deadline {
             return ExtensionServiceStoreCallOutcome::NotAdmitted;
         }
@@ -1245,6 +1309,7 @@ impl ExtensionServiceStoreAuthority {
             grant_decision,
             current_manifest,
             replacement_manifest,
+            provenance,
             deadline,
             done,
         ) {
@@ -1944,6 +2009,7 @@ impl SqliteStore {
         install: ExtensionInstallId,
         manifest: Arc<ExtensionManifestDescriptor>,
         authority: Box<ExtensionGrantAuthority>,
+        provenance: Option<Box<ExtensionInstallProvenance>>,
         deadline: Instant,
         done: ExtensionInstallProvisionDone,
     ) -> bool {
@@ -1961,10 +2027,17 @@ impl SqliteStore {
         let Some(retained_bytes) = manifest
             .retained_bytes()
             .checked_add(authority.retained_bytes())
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    provenance
+                        .as_deref()
+                        .map_or(0, ExtensionInstallProvenance::retained_bytes),
+                )
+            })
         else {
             return false;
         };
-        if retained_bytes > MAX_EXTENSION_GRANT_MUTATION_REQUEST_RETAINED_BYTES {
+        if retained_bytes > MAX_EXTENSION_PROVISION_REQUEST_RETAINED_BYTES {
             return false;
         }
         let Some(install_permit) =
@@ -1988,6 +2061,7 @@ impl SqliteStore {
                 install,
                 manifest,
                 authority,
+                provenance,
                 install_permit,
                 grant_permit,
                 done,
@@ -2006,6 +2080,7 @@ impl SqliteStore {
         grant_decision: ExtensionInstallUpdateGrantDecision,
         current_manifest: Arc<ExtensionManifestDescriptor>,
         replacement_manifest: Arc<ExtensionManifestDescriptor>,
+        provenance: Option<Box<ExtensionProvenanceUpdate>>,
         deadline: Instant,
         done: ExtensionInstallUpdateDone,
     ) -> bool {
@@ -2023,6 +2098,13 @@ impl SqliteStore {
         let Some(retained_bytes) = current_manifest
             .retained_bytes()
             .checked_add(replacement_manifest.retained_bytes())
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    provenance
+                        .as_deref()
+                        .map_or(0, ExtensionProvenanceUpdate::retained_bytes),
+                )
+            })
         else {
             return false;
         };
@@ -2053,6 +2135,7 @@ impl SqliteStore {
                 grant_decision,
                 current_manifest,
                 replacement_manifest,
+                provenance,
                 install_permit,
                 grant_permit,
                 done,
@@ -3339,16 +3422,18 @@ fn actor(
                 install,
                 manifest,
                 authority,
+                provenance,
                 _install_permit,
                 _grant_permit,
                 done,
             )) => {
-                let outcome = match hub.provision_extension_install(
+                let outcome = match hub.provision_extension_install_with_provenance(
                     profile,
                     expected_catalog,
                     install,
                     manifest,
                     authority,
+                    provenance,
                 ) {
                     Ok(outcome) => outcome,
                     Err(error) => {
@@ -3367,11 +3452,12 @@ fn actor(
                 grant_decision,
                 current_manifest,
                 replacement_manifest,
+                provenance,
                 _install_permit,
                 _grant_permit,
                 done,
             )) => {
-                let outcome = match hub.update_extension_install(
+                let outcome = match hub.update_extension_install_with_provenance(
                     profile,
                     expected_catalog,
                     install,
@@ -3380,6 +3466,7 @@ fn actor(
                     grant_decision,
                     current_manifest,
                     replacement_manifest,
+                    provenance,
                 ) {
                     Ok(outcome) => outcome,
                     Err(error) => {

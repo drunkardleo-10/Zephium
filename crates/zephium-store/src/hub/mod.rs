@@ -12,6 +12,7 @@ mod compatibility;
 mod deletion;
 mod extension_grants;
 mod extension_profile_policy;
+mod extension_provenance;
 mod extensions;
 mod favicons;
 mod filesystem;

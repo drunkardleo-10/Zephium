@@ -21,7 +21,11 @@ use crate::operation::RepositoryOperationGuard;
 use crate::{ExtensionRepository, ExtensionRepositoryError};
 
 const MATERIALIZATION_TRANSITION_DURABILITY_SYNCS: usize = 13;
-const TREE_OBJECT_RETIREMENT_DURABILITY_SYNCS: usize = 2;
+// macOS publication temporarily makes the consumed root writable, reseals it,
+// and fsyncs that seal before returning authority. This required root sync is
+// additional to the pre-existing retirement/deletion durability contract.
+const TREE_PUBLICATION_ROOT_RESEAL_SYNCS: usize = cfg!(target_os = "macos") as usize;
+const TREE_OBJECT_RETIREMENT_DURABILITY_SYNCS: usize = 2 + TREE_PUBLICATION_ROOT_RESEAL_SYNCS;
 const MAX_GC_COHORT_REGULAR_TARGETS: usize =
     1 + MAX_GC_CATALOG_SET_TARGETS + MAX_GC_PACKAGE_RECORD_TARGETS + MAX_GC_DATA_OBJECT_TARGETS * 2;
 const MAX_GC_RESIDUE_REGULAR_TARGETS: usize =
@@ -35,7 +39,10 @@ const MAX_GC_REGULAR_TARGETS: usize =
 const MAX_GC_LOGICAL_TARGETS: usize = MAX_GC_REGULAR_TARGETS + MAX_GC_TREE_JOBS;
 const MAX_GC_TREE_DIRECTORY_NODES: usize = MAX_GC_TREE_ENTRIES + MAX_GC_TREE_JOBS;
 const MAX_GC_FRESH_DURABILITY_SYNCS: usize = 128;
-const MAX_GC_PENDING_DURABILITY_SYNCS: usize = 96;
+// Preserve the original two-sync headroom at the maximum native cohort:
+// Linux observes 94/96; macOS observes 102/104 after root-reseal hardening.
+const MAX_GC_PENDING_DURABILITY_SYNCS: usize =
+    96 + MAX_GC_TREE_JOBS * TREE_PUBLICATION_ROOT_RESEAL_SYNCS;
 const MAX_GC_PHYSICAL_DURABILITY_SYNCS: usize =
     MAX_GC_PENDING_DURABILITY_SYNCS - MATERIALIZATION_TRANSITION_DURABILITY_SYNCS;
 const MAX_GC_PENDING_CONTROL_BYTES_WRITTEN: usize =

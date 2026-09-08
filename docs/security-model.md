@@ -1514,6 +1514,22 @@ coverage, and release-build resource/endurance measurements also pass.
 
 ## Features deliberately not claimed
 
+Public extension metadata parsing, store-listing recognition, original CRX
+authentication, and upstream checkpoint comparison are non-authorizing
+boundaries. Neither a parsed policy nor a recognized store URL may mint an
+existing Verified manifest witness. The new conditional metadata transport
+replays only content-derived ETags; an HTTP 304 does not authenticate cached
+bytes, advance trusted time, or extend signed policy expiry. Production Beta
+installation remains disabled until separate admission authority, signed
+policy verification, repository/transform reauthentication, and native
+recovery are composed and tested. Store now commits bounded source provenance
+and monotonic publisher history atomically with installation and grants;
+complete expected provenance is rechecked on cohort reads, and native grant
+reads validate its output-manifest and high-water joins. Neither these rows nor
+their constructors authenticate package bytes or mint native ownership.
+Uninstall retains upstream history; profile erasure scrubs it. See `extension-metadata-service.md` for the
+backend contract and its remaining client integration gates.
+
 The following are roadmap items or disabled backends, not current security guarantees:
 
 - release-enabled page permission prompts or native enforcement of remembered

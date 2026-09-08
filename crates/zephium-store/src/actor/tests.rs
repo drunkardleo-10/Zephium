@@ -3622,7 +3622,9 @@ fn extension_service_store_authority_has_one_closed_public_surface() {
         "pub fn load_install_catalog_until(",
         "pub fn load_native_namespace_until(",
         "pub fn provision_install_until(",
+        "pub fn provision_install_with_provenance_until(",
         "pub fn update_install_until(",
+        "pub fn update_install_with_provenance_until(",
         "pub fn set_install_enabled_until(",
         "pub fn delete_install_until(",
         "pub fn load_grant_cohort_until(",
@@ -3645,7 +3647,7 @@ fn extension_service_store_authority_has_one_closed_public_surface() {
         })
         .count();
     assert_eq!(
-        public_items, 18,
+        public_items, 20,
         "the service Store authority gained an unreviewed public item"
     );
     assert!(!surface.contains("pub fn mutate_extension_install"));
@@ -3920,6 +3922,122 @@ fn extension_service_store_authority_atomically_provisions_disabled_install_and_
             .and_then(|entry| entry.authority_arc())
             .map(Arc::as_ref),
         Some(&grants)
+    );
+}
+
+#[test]
+fn extension_provenance_crosses_only_the_bounded_service_actor_and_is_rechecked_on_read() {
+    use zephium_core::extensions::{
+        ExtensionInstallProvenance, ExtensionProvenancePolicy, ExtensionProvenanceSource,
+        ExtensionProvenanceUpdate, ExtensionSourceTreeIdentity, ExtensionTransformProvenance,
+        ExtensionUpstreamCheckpoint, ExtensionUpstreamVersion,
+    };
+    let make_source = |manifest: &ExtensionManifestDescriptor, version: &str, crx| {
+        Arc::new(
+            ExtensionInstallProvenance::new(
+                ExtensionProvenanceSource::ChromeWebStore,
+                ExtensionUpstreamCheckpoint::from_parts(
+                    ExtensionPackageKey::from_bytes([70; 32]),
+                    ExtensionUpstreamVersion::parse(version).unwrap(),
+                    [crx; 32],
+                    [crx; 32],
+                ),
+                ExtensionSourceTreeIdentity {
+                    manifest: [1; 32],
+                    tree: [2; 32],
+                    index: [3; 32],
+                },
+                ExtensionTransformProvenance::Compiled {
+                    target: ExtensionCompatibilityTargetId::parse_exact("test.transform.v1")
+                        .unwrap(),
+                    revision: std::num::NonZeroU32::new(1).unwrap(),
+                    sha256: [4; 32],
+                },
+                manifest,
+                [5; 32],
+                ExtensionProvenancePolicy {
+                    revision: std::num::NonZeroU64::new(1).unwrap(),
+                    sha256: [6; 32],
+                },
+            )
+            .unwrap(),
+        )
+    };
+    let profile = ProfileId::from(1);
+    let id = ExtensionInstallId::from(0x5017);
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    store.save_session(sample());
+    assert!(store.flush());
+    let service = store.claim_extension_service_store_authority().unwrap();
+    let current = extension_manifest(bundled_extension_package(70, 71, 1));
+    let source = make_source(&current, "1", 1);
+    let grants = ExtensionGrantAuthority::initialize(
+        &ExtensionInstall::new(id, current.package().clone()),
+        vec![ApiPermissionName::parse_exact("storage").unwrap()],
+        vec![MatchPattern::parse("https://example.com/*").unwrap()],
+        false,
+        false,
+        &current,
+    )
+    .unwrap();
+    let ExtensionServiceStoreCallOutcome::Completed(ExtensionInstallProvisionOutcome::Applied(
+        initial,
+    )) = service.provision_install_with_provenance_until(
+        profile,
+        ExtensionInstallCatalogRevision::INITIAL,
+        id,
+        current.clone(),
+        Box::new(grants),
+        Some(Box::new((*source).clone())),
+        Instant::now() + STORE_RPC_TIMEOUT,
+    )
+    else {
+        panic!("provenance did not cross the actor");
+    };
+    let replacement = extension_manifest(bundled_extension_package(70, 71, 2));
+    let replacement_source = make_source(&replacement, "2", 2);
+    assert!(matches!(
+        service.update_install_with_provenance_until(
+            profile,
+            initial.catalog_revision,
+            id,
+            initial.install.revision(),
+            initial.authority.revision(),
+            ExtensionInstallUpdateGrantDecision::PreserveExisting,
+            current,
+            replacement.clone(),
+            Some(Box::new(
+                ExtensionProvenanceUpdate::new(source, replacement_source.clone()).unwrap()
+            )),
+            Instant::now() + STORE_RPC_TIMEOUT
+        ),
+        ExtensionServiceStoreCallOutcome::Completed(ExtensionInstallUpdateOutcome::Applied(_))
+    ));
+    let bindings =
+        ExtensionGrantManifestBindings::new(vec![ExtensionGrantManifestBinding::with_provenance(
+            id,
+            replacement.clone(),
+            replacement_source.clone(),
+        )
+        .unwrap()])
+        .unwrap();
+    let ExtensionServiceStoreCallOutcome::Completed(ExtensionGrantCohortLoadOutcome::Loaded(
+        cohort,
+    )) = service.load_grant_cohort_until(profile, bindings, Instant::now() + STORE_RPC_TIMEOUT)
+    else {
+        panic!("source-aware snapshot failed");
+    };
+    assert_eq!(
+        cohort.grants().next().unwrap().0.provenance(),
+        Some(replacement_source.as_ref())
+    );
+    assert_eq!(
+        service.load_grant_cohort_until(
+            profile,
+            extension_grant_bindings(&[(id, replacement)]),
+            Instant::now() + STORE_RPC_TIMEOUT
+        ),
+        ExtensionServiceStoreCallOutcome::Completed(ExtensionGrantCohortLoadOutcome::Invalid)
     );
 }
 
@@ -5940,7 +6058,7 @@ fn extension_grant_admission_has_exact_byte_bound_and_releases_failed_enqueue() 
     );
     let mutation = ExtensionGrantRequestPermit::acquire(
         &admission,
-        MAX_EXTENSION_GRANT_MUTATION_REQUEST_RETAINED_BYTES,
+        MAX_EXTENSION_SERVICE_GRANT_REQUEST_RETAINED_BYTES,
     )
     .expect("one worst-case mutation must fit beside one cohort");
     assert!(ExtensionGrantRequestPermit::acquire(&admission, 1).is_none());

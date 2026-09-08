@@ -349,6 +349,7 @@ impl Hub {
     /// boundary. This method nevertheless reconstructs the submitted grant
     /// authority against the exact manifest and aggregate-produced install so
     /// stale or internally inconsistent authority cannot become durable.
+    #[cfg(test)]
     pub(crate) fn provision_extension_install(
         &mut self,
         profile: ProfileId,
@@ -356,6 +357,21 @@ impl Hub {
         install_id: ExtensionInstallId,
         manifest: Arc<ExtensionManifestDescriptor>,
         authority: Box<ExtensionGrantAuthority>,
+    ) -> rusqlite::Result<ExtensionInstallProvisionOutcome> {
+        self.provision_extension_install_with_provenance(
+            profile, expected, install_id, manifest, authority, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn provision_extension_install_with_provenance(
+        &mut self,
+        profile: ProfileId,
+        expected: ExtensionInstallCatalogRevision,
+        install_id: ExtensionInstallId,
+        manifest: Arc<ExtensionManifestDescriptor>,
+        authority: Box<ExtensionGrantAuthority>,
+        provenance: Option<Box<zephium_core::extensions::ExtensionInstallProvenance>>,
     ) -> rusqlite::Result<ExtensionInstallProvisionOutcome> {
         if self.recovery_required.is_some() {
             return Err(invalid_data("session recovery mode is read-only"));
@@ -434,7 +450,23 @@ impl Hub {
             return Ok(ExtensionInstallProvisionOutcome::Invalid);
         };
 
+        if provenance
+            .as_ref()
+            .is_some_and(|value| !value.matches_manifest(&manifest))
+        {
+            return Ok(ExtensionInstallProvisionOutcome::Invalid);
+        }
+        if let Some(provenance) = provenance.as_deref() {
+            if !super::extension_provenance::history_has_capacity(&tx, provenance)? {
+                return Ok(ExtensionInstallProvisionOutcome::LimitReached);
+            }
+        }
         insert_install(&tx, install)?;
+        if let Some(provenance) = provenance.as_deref() {
+            if !super::extension_provenance::persist(&tx, install_id, provenance)? {
+                return Ok(ExtensionInstallProvisionOutcome::Invalid);
+            }
+        }
         super::extension_grants::insert_authority(&tx, &verified_authority)?;
         update_catalog_header(
             &tx,
@@ -471,6 +503,7 @@ impl Hub {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(crate) fn update_extension_install(
         &mut self,
         profile: ProfileId,
@@ -481,6 +514,32 @@ impl Hub {
         grant_decision: ExtensionInstallUpdateGrantDecision,
         current_manifest: Arc<ExtensionManifestDescriptor>,
         replacement_manifest: Arc<ExtensionManifestDescriptor>,
+    ) -> rusqlite::Result<ExtensionInstallUpdateOutcome> {
+        self.update_extension_install_with_provenance(
+            profile,
+            expected_catalog,
+            install_id,
+            expected_install,
+            expected_grant,
+            grant_decision,
+            current_manifest,
+            replacement_manifest,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn update_extension_install_with_provenance(
+        &mut self,
+        profile: ProfileId,
+        expected_catalog: ExtensionInstallCatalogRevision,
+        install_id: ExtensionInstallId,
+        expected_install: ExtensionInstallRevision,
+        expected_grant: ExtensionGrantRevision,
+        grant_decision: ExtensionInstallUpdateGrantDecision,
+        current_manifest: Arc<ExtensionManifestDescriptor>,
+        replacement_manifest: Arc<ExtensionManifestDescriptor>,
+        provenance: Option<Box<zephium_core::extensions::ExtensionProvenanceUpdate>>,
     ) -> rusqlite::Result<ExtensionInstallUpdateOutcome> {
         if self.recovery_required.is_some() {
             return Err(invalid_data("session recovery mode is read-only"));
@@ -522,6 +581,16 @@ impl Hub {
             .cloned()
             .ok_or_else(|| invalid_data("extension update install disappeared"))?;
         if install.package() != current_manifest.package() {
+            return Ok(ExtensionInstallUpdateOutcome::Invalid);
+        }
+        if !super::extension_provenance::matches(
+            &tx,
+            install_id,
+            provenance.as_deref().map(|value| value.current()),
+        )? || provenance.as_ref().is_some_and(|value| {
+            !value.current().matches_manifest(&current_manifest)
+                || !value.replacement().matches_manifest(&replacement_manifest)
+        }) {
             return Ok(ExtensionInstallUpdateOutcome::Invalid);
         }
         let Some(authority) =
@@ -608,6 +677,11 @@ impl Hub {
         }
 
         persist_install_package_replacement(&tx, &install, updated)?;
+        if let Some(provenance) = provenance.as_deref() {
+            if !super::extension_provenance::persist(&tx, install_id, provenance.replacement())? {
+                return Ok(ExtensionInstallUpdateOutcome::Invalid);
+            }
+        }
         super::extension_grants::persist_reconciled_authority(
             &tx,
             expected_grant,
@@ -780,6 +854,7 @@ fn update_catalog_header(
 }
 
 pub(super) fn load_catalog(conn: &Connection) -> rusqlite::Result<ExtensionInstallCatalog> {
+    super::extension_provenance::validate_integrity(conn)?;
     let (state_rows, raw_revision, high_water_is_null, raw_high_water): (
         i64,
         Option<i64>,

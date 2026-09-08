@@ -49,9 +49,13 @@ const RAW_ACQUISITION: &str = "acquire_bundled_package_lease(";
 
 pub(crate) fn check(repository: &Path) -> Result<(), String> {
     let mut sources = Vec::new();
+    // Runtime modules can use #[path] to include shared sources next to
+    // desktop/build.rs. Scan those sources too rather than excluding a valid
+    // module edge or weakening the acquisition checks for that edge.
     for root in ["crates", "desktop/src"] {
         collect_rust_sources(&repository.join(root), &mut sources)?;
     }
+    collect_desktop_shared_sources(&repository.join("desktop"), &mut sources)?;
     sources.sort();
     validate_sources(
         sources
@@ -87,7 +91,8 @@ fn validate_sources(sources: Vec<(PathBuf, String)>) -> Result<(), String> {
         if test_only_modules.contains(relative) {
             continue;
         }
-        let shipping = production_prefix(source)?;
+        let shipping = production_prefix(source)
+            .map_err(|error| format!("{}: {error}", relative.display()))?;
         let expected_authority_counts = if relative == Path::new(PLAN_OWNER) {
             saw_plan_owner = true;
             [1, 1, 1]
@@ -194,6 +199,11 @@ fn production_prefix(source: &str) -> Result<&str, String> {
     let mut offset = 0;
     for line in source.split_inclusive('\n') {
         if line.trim_start().starts_with("mod tests {") {
+            if line.starts_with(char::is_whitespace) {
+                // Nested modules need a real Rust parser to strip safely.
+                // Retain every byte instead of excluding an uncertain scope.
+                return Ok(source);
+            }
             if line.trim_end() != "mod tests {" {
                 return Err(
                     "an inline test module must use the rustfmt-compatible `mod tests {` layout"
@@ -232,10 +242,11 @@ fn production_prefix(source: &str) -> Result<&str, String> {
                     .to_owned()
             })?;
             if !module[closing..].trim().is_empty() {
-                return Err(
-                    "shipping content after an inline cfg(test) module is unsupported and must not be hidden from the acquisition gate"
-                        .to_owned(),
-                );
+                // This is not a trailing test module. Conservatively scan the
+                // whole file, including tests, so no shipping suffix can be
+                // hidden. The owner modules still have exact call counts and
+                // may need their tests kept last to avoid false positives.
+                return Ok(source);
             }
             return Ok(&source[..offset]);
         }
@@ -495,7 +506,7 @@ fn default_module_base(parent: &Path) -> Result<PathBuf, String> {
         .file_stem()
         .and_then(|value| value.to_str())
         .ok_or_else(|| format!("module source has a non-UTF-8 stem: {}", parent.display()))?;
-    Ok(if matches!(stem, "lib" | "main" | "mod") {
+    Ok(if matches!(stem, "lib" | "main" | "mod" | "build") {
         directory.to_path_buf()
     } else {
         directory.join(stem)
@@ -551,6 +562,29 @@ fn collect_rust_sources(directory: &Path, output: &mut Vec<PathBuf>) -> Result<(
         } else if file_type.is_file() && path.extension().is_some_and(|value| value == "rs") {
             output.push(path);
         }
+    }
+    Ok(())
+}
+
+fn collect_desktop_shared_sources(
+    directory: &Path,
+    output: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    for entry in std::fs::read_dir(directory).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        // build.rs is a separate build-script crate, not runtime code. Other
+        // root Rust files may be shared with runtime #[path] modules.
+        if path.extension().is_none_or(|extension| extension != "rs")
+            || path.file_name().is_some_and(|name| name == "build.rs")
+        {
+            continue;
+        }
+        let kind = entry.file_type().map_err(|error| error.to_string())?;
+        if is_symlink_or_reparse(&entry, kind.is_symlink())? || !kind.is_file() {
+            return Err("desktop shared Rust sources must be direct regular files".to_owned());
+        }
+        output.push(path);
     }
     Ok(())
 }
@@ -699,10 +733,8 @@ mod tests {{
             "#[cfg(test)]\nconst STALE: () = ();\nmod tests {\n hidden();\n}"
         )
         .is_err());
-        assert!(production_prefix(
-            "fn shipping() {}\n#[cfg(test)]\nmod tests {\n}\nfn shipped_after_tests() {}"
-        )
-        .is_err());
+        let suffix = "fn shipping() {}\n#[cfg(test)]\nmod tests {\n}\nfn shipped_after_tests() {}";
+        assert_eq!(production_prefix(suffix).unwrap(), suffix);
     }
 
     #[test]
@@ -747,6 +779,27 @@ mod tests {{
             PathBuf::from("crates/unowned/src/lib.rs"),
             "#[path = \"../../../outside.rs\"]\nmod outside;".to_owned(),
         ));
+        assert!(validate_sources(sources).is_err());
+    }
+
+    #[test]
+    fn desktop_parent_modules_are_scanned_as_production_sources() {
+        let mut sources = valid_sources();
+        sources.push((
+            PathBuf::from("desktop/src/probe.rs"),
+            "#[path = \"../shared.rs\"]\nmod shared;".to_owned(),
+        ));
+        sources.push((
+            PathBuf::from("desktop/shared.rs"),
+            "fn shared() {}".to_owned(),
+        ));
+        sources.push((PathBuf::from("desktop/build.rs"), "mod shared;".to_owned()));
+        assert!(validate_sources(sources.clone()).is_ok());
+        sources
+            .iter_mut()
+            .find(|(path, _)| path == Path::new("desktop/shared.rs"))
+            .unwrap()
+            .1 = format!("fn bypass() {{ {BEGIN_CONSTRUCTOR}input); }}");
         assert!(validate_sources(sources).is_err());
     }
 

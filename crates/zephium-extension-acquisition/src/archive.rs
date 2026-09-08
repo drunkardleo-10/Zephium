@@ -5,7 +5,10 @@ use std::mem::size_of;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use zephium_core::extensions::ExtensionPackagePayloadIdentity;
+use zephium_core::extensions::{
+    ExtensionArchiveDigest, ExtensionPackageKey, ExtensionPackagePayloadIdentity,
+    ExtensionUpstreamCheckpoint, ExtensionUpstreamVersion,
+};
 use zephium_extension_package::{
     CanonicalExtensionTreeIndex, ChromiumExtensionId, ChromiumManifestKeyDigest, Crx3PackageError,
     ExtensionReleasePackage, ExtensionReleaseTreeBinding, ExtensionTreeIndexError,
@@ -143,6 +146,10 @@ pub enum AcquiredExtensionArchiveReadError {
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 #[non_exhaustive]
 pub enum AcquiredExtensionTreeReceiptError {
+    /// Original manifest bytes, version, or embedded key do not match the
+    /// authenticated upstream tree and publisher.
+    #[error("acquired extension upstream manifest identity is invalid")]
+    InvalidUpstreamManifest,
     /// File receipts are missing, repeated, or belong to another payload.
     #[error("acquired extension file receipts do not form one exact tree")]
     InvalidReceiptCohort,
@@ -190,9 +197,75 @@ pub struct AcquiredExtensionTreeReceipt {
     index_bytes: Box<[u8]>,
     index: CanonicalExtensionTreeIndex,
     retained_bytes: usize,
+    original_crx_sha256: [u8; 32],
 }
 
 impl AcquiredExtensionTreeReceipt {
+    /// Derives the upstream high-water candidate from the exact original
+    /// manifest in this completely streamed tree. This does not classify the
+    /// manifest's capabilities or authorize installation. The durable adapter
+    /// must compare and commit the checkpoint before accepting an update.
+    pub fn upstream_checkpoint(
+        &self,
+        manifest_bytes: &[u8],
+    ) -> Result<ExtensionUpstreamCheckpoint, AcquiredExtensionTreeReceiptError> {
+        let invalid = || AcquiredExtensionTreeReceiptError::InvalidUpstreamManifest;
+        let manifest = self
+            .index
+            .files()
+            .iter()
+            .find(|file| file.path().as_str() == "manifest.json")
+            .ok_or_else(invalid)?;
+        if manifest_bytes.len() > MAX_EXTENSION_MANIFEST_BYTES
+            || manifest_bytes.len() as u64 != manifest.length()
+            || <[u8; 32]>::from(Sha256::digest(manifest_bytes)) != manifest.sha256()
+        {
+            return Err(invalid());
+        }
+        let value = zephium_extension_package::parse_bounded_json(
+            manifest_bytes,
+            zephium_extension_package::BoundedJsonLimits::extension_manifest(),
+        )
+        .map_err(|_| invalid())?
+        .into_value();
+        let object = value.as_object().ok_or_else(invalid)?;
+        if object
+            .get("manifest_version")
+            .and_then(serde_json::Value::as_u64)
+            != Some(3)
+        {
+            return Err(invalid());
+        }
+        let version = object
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .and_then(ExtensionUpstreamVersion::parse)
+            .ok_or_else(invalid)?;
+        if let Some(key) = object.get("key") {
+            let key = key
+                .as_str()
+                .and_then(|value| {
+                    zephium_extension_package::ChromiumManifestKey::parse_canonical(value).ok()
+                })
+                .ok_or_else(invalid)?;
+            if key.digest() != self.developer_key_sha256 {
+                return Err(invalid());
+            }
+        }
+        let (_, archive) = self.payload.acquired_zip_evidence().ok_or_else(invalid)?;
+        Ok(ExtensionUpstreamCheckpoint::from_parts(
+            ExtensionPackageKey::from_bytes(self.developer_key_sha256.bytes()),
+            version,
+            self.original_crx_sha256,
+            archive.bytes(),
+        ))
+    }
+
+    /// Returns SHA-256 of the original authenticated CRX envelope and payload.
+    pub const fn original_crx_sha256(&self) -> [u8; 32] {
+        self.original_crx_sha256
+    }
+
     /// Returns the exact authenticated acquired-ZIP identity.
     pub const fn payload_identity(&self) -> ExtensionPackagePayloadIdentity {
         self.payload
@@ -308,9 +381,32 @@ pub struct AcquiredExtensionArchive<'archive> {
     total_bytes: u64,
     signature_proofs: usize,
     retained_bytes: usize,
+    original_crx_sha256: [u8; 32],
 }
 
 impl<'archive> AcquiredExtensionArchive<'archive> {
+    /// Authenticates an upstream download without inventing a reviewed catalog
+    /// row. On updates, `expected_developer_key` must come from the installed
+    /// provenance. The result proves bytes and bounded archive structure only:
+    /// Beta policy, legal/provider eligibility, grants, and repository/native
+    /// admission are still required independently.
+    pub fn authenticate_upstream_crx3(
+        bytes: &'archive [u8],
+        expected_id: &ChromiumExtensionId,
+        expected_developer_key: Option<ChromiumManifestKeyDigest>,
+    ) -> Result<Self, AcquiredExtensionArchiveError> {
+        let crx = VerifiedCrx3Package::parse_and_verify(bytes, Some(expected_id))?;
+        if expected_developer_key.is_some_and(|key| key != crx.developer_key_sha256()) {
+            return Err(AcquiredExtensionArchiveError::DeveloperKeyMismatch);
+        }
+        let payload = ExtensionPackagePayloadIdentity::acquired_zip(
+            crx.archive_bytes().len() as u64,
+            ExtensionArchiveDigest::from_bytes(crx.archive_sha256()),
+        )
+        .ok_or(AcquiredExtensionArchiveError::ExpectedAcquiredZip)?;
+        Self::from_verified_crx3(crx, payload)
+    }
+
     /// Authenticates CRX3 bytes against one structurally parsed release row.
     ///
     /// The caller must separately prove that the release row belongs to an
@@ -357,7 +453,7 @@ impl<'archive> AcquiredExtensionArchive<'archive> {
         if usize::try_from(expected_length.get()).ok() != Some(zip_bytes.len()) {
             return Err(AcquiredExtensionArchiveError::ArchiveLengthMismatch);
         }
-        if <[u8; 32]>::from(Sha256::digest(zip_bytes)) != expected_digest.bytes() {
+        if crx.archive_sha256() != expected_digest.bytes() {
             return Err(AcquiredExtensionArchiveError::ArchiveDigestMismatch);
         }
         let envelope = preflight_envelope(zip_bytes)?;
@@ -383,7 +479,13 @@ impl<'archive> AcquiredExtensionArchive<'archive> {
             total_bytes,
             signature_proofs: crx.signature_proof_count(),
             retained_bytes,
+            original_crx_sha256: crx.package_sha256(),
         })
+    }
+
+    /// Returns SHA-256 of the complete original authenticated upstream CRX.
+    pub const fn original_crx_sha256(&self) -> [u8; 32] {
+        self.original_crx_sha256
     }
 
     /// Returns the expected id proved by the signed developer key.
@@ -618,6 +720,7 @@ impl<'archive> AcquiredExtensionArchive<'archive> {
             index_bytes: encoded.into_boxed_slice(),
             index,
             retained_bytes,
+            original_crx_sha256: self.original_crx_sha256,
         })
     }
 }
@@ -1322,6 +1425,79 @@ mod tests {
         let mut manifest = Vec::new();
         let _receipt = acquired.copy_file(0, &mut manifest).unwrap();
         assert_eq!(manifest, br#"{"manifest_version":3}"#);
+    }
+
+    #[test]
+    fn upstream_acquisition_preserves_original_crx_and_requires_update_key_continuity() {
+        let archive = zip(&[("manifest.json", br#"{"manifest_version":3,"version":"1"}"#)]);
+        let (crx, id) = signed_crx(&archive);
+        let mut acquired =
+            AcquiredExtensionArchive::authenticate_upstream_crx3(&crx, &id, None).unwrap();
+        assert_eq!(
+            acquired.original_crx_sha256(),
+            <[u8; 32]>::from(Sha256::digest(&crx))
+        );
+        assert_eq!(acquired.payload_identity(), payload(&archive));
+        let key = acquired.developer_key_sha256();
+        let mut foreign_key = key.bytes();
+        foreign_key[31] ^= 1; // Same Chromium id prefix, different complete key.
+        assert!(AcquiredExtensionArchive::authenticate_upstream_crx3(&crx, &id, Some(key)).is_ok());
+        assert!(matches!(
+            AcquiredExtensionArchive::authenticate_upstream_crx3(
+                &crx,
+                &id,
+                Some(ChromiumManifestKeyDigest::from_bytes(foreign_key))
+            ),
+            Err(AcquiredExtensionArchiveError::DeveloperKeyMismatch)
+        ));
+        let mut output = Vec::new();
+        let receipt = acquired.copy_file(0, &mut output).unwrap();
+        let tree = acquired.finish_tree(vec![receipt]).unwrap();
+        assert_eq!(tree.original_crx_sha256(), acquired.original_crx_sha256());
+        let checkpoint = tree.upstream_checkpoint(&output).unwrap();
+        assert_eq!(
+            checkpoint.version(),
+            ExtensionUpstreamVersion::parse("1").unwrap()
+        );
+        assert_eq!(
+            checkpoint.original_crx_sha256(),
+            acquired.original_crx_sha256()
+        );
+        assert_eq!(checkpoint.publisher().bytes(), key.bytes());
+        assert!(tree
+            .upstream_checkpoint(br#"{"manifest_version":3,"version":"2"}"#)
+            .is_err());
+        let (_, foreign_id) = signed_crx(&archive);
+        assert!(
+            AcquiredExtensionArchive::authenticate_upstream_crx3(&crx, &foreign_id, None).is_err()
+        );
+        let mut tampered = crx.clone();
+        *tampered.last_mut().unwrap() ^= 1;
+        assert!(
+            AcquiredExtensionArchive::authenticate_upstream_crx3(&tampered, &id, None).is_err()
+        );
+    }
+
+    #[test]
+    fn authenticated_but_ambiguous_upstream_manifests_cannot_mint_checkpoints() {
+        for manifest in [
+            br#"{"manifest_version":3,"version":"1","key":"AA=="}"#.as_slice(),
+            br#"{"manifest_version":3,"version":"1","version":"2"}"#.as_slice(),
+            br#"{"manifest_version":3,"version":"01"}"#.as_slice(),
+            br#"{"manifest_version":2,"version":"1"}"#.as_slice(),
+        ] {
+            let archive = zip(&[("manifest.json", manifest)]);
+            let (crx, id) = signed_crx(&archive);
+            let mut acquired =
+                AcquiredExtensionArchive::authenticate_upstream_crx3(&crx, &id, None).unwrap();
+            let mut output = Vec::new();
+            let receipt = acquired.copy_file(0, &mut output).unwrap();
+            let tree = acquired.finish_tree([receipt]).unwrap();
+            assert!(matches!(
+                tree.upstream_checkpoint(&output),
+                Err(AcquiredExtensionTreeReceiptError::InvalidUpstreamManifest)
+            ));
+        }
     }
 
     #[test]

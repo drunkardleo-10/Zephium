@@ -11,6 +11,7 @@ mod blocker_seed;
 mod crx3;
 mod extension_catalog;
 mod extension_lab;
+mod extension_public_policy;
 mod extension_release;
 mod extension_runtime_acquisition_boundary;
 mod extension_tree;
@@ -104,6 +105,17 @@ fn main() {
             if let Err(error) = blocker_seed::check(&repository) {
                 eprintln!("bundled blocker seed policy failed: {error}");
                 exit(1);
+            }
+        }
+        Some("check-extension-public-policy")
+            if arguments.len() == 3 && arguments[1] == "--policy" =>
+        {
+            match extension_public_policy::check(std::path::Path::new(&arguments[2])) {
+                Ok(report) => println!("{report}"),
+                Err(error) => {
+                    eprintln!("extension public policy check failed: {error}");
+                    exit(1);
+                }
             }
         }
         Some("check-crx3")
@@ -432,7 +444,7 @@ fn main() {
         Some("check-webview2-floor") => check_engine_floors(),
         _ => {
             eprintln!(
-                "usage: cargo xtask <ci|check-engine-floors|check-release-engine-security|check-agentic-probe-boundary|check-advisory-exceptions|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|check-extension-runtime-host-assembler|check-extension-runtime-acquisition-boundary|check-webview2-extension-boundary|check-macos-extension-compatibility-asset|measure-macos-extension-product|classify-macos-extension-alarms|measure-macos-process-family --bundle-id ID --duration-seconds N [--interval-millis N] [--label LABEL]|serve-password-manager-webauthn-qa [--port PORT]|check-blocker-seed|check-crx3 --archive PATH --expected-id ID|materialize-crx3-probe --archive PATH --expected-id ID --output PATH|prepare-extension-crx3-signing-message --archive PATH --public-key PATH --output PATH|assemble-extension-crx3 --archive PATH --public-key PATH --signature PATH --output PATH|prepare-extension-crx3-release-archive --extension PATH --tree-index PATH --public-key PATH --output PATH|prepare-extension-compatibility-crx3-release-archive --compatibility-artifact PATH --public-key PATH --output PATH|publish-extension-catalog --review PATH --output PATH|finalize-extension-manifest-profiles --publication PATH --review PATH --output PATH|prepare-local-extension-lab-release --compatibility-artifact PATH --output PATH|prepare-local-extension-lab-generation --publication PATH --classified-profiles PATH --output PATH|stage-local-extension-lab --publication PATH --classified-profiles PATH --rollback-lab PATH --output PATH|index-extension-probe-tree --extension PATH --output PATH|materialize-macos-extension-compatibility --extension PATH --tree-index PATH --output PATH|materialize-macos-extension-compatibility-document-background --extension PATH --tree-index PATH --output PATH|materialize-macos-extension-compatibility-publisher-native --extension PATH --tree-index PATH --output PATH|materialize-macos-extension-compatibility-publisher-native-document-background --extension PATH --tree-index PATH --output PATH|materialize-macos-extension-compatibility-brokered --extension PATH --tree-index PATH --output PATH|check-bitwarden-core-source --source PATH|materialize-bitwarden-core-macos-probe-overlay --source PATH --output PATH|finalize-bitwarden-core-macos-probe-artifact --build PATH --output PATH [--wasm-response-mime-adapter]|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor>"
+                "usage: cargo xtask <ci|check-engine-floors|check-release-engine-security|check-agentic-probe-boundary|check-advisory-exceptions|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|check-extension-runtime-host-assembler|check-extension-runtime-acquisition-boundary|check-webview2-extension-boundary|check-macos-extension-compatibility-asset|measure-macos-extension-product|classify-macos-extension-alarms|measure-macos-process-family --bundle-id ID --duration-seconds N [--interval-millis N] [--label LABEL]|serve-password-manager-webauthn-qa [--port PORT]|check-blocker-seed|check-extension-public-policy --policy PATH|check-crx3 --archive PATH --expected-id ID|materialize-crx3-probe --archive PATH --expected-id ID --output PATH|prepare-extension-crx3-signing-message --archive PATH --public-key PATH --output PATH|assemble-extension-crx3 --archive PATH --public-key PATH --signature PATH --output PATH|prepare-extension-crx3-release-archive --extension PATH --tree-index PATH --public-key PATH --output PATH|prepare-extension-compatibility-crx3-release-archive --compatibility-artifact PATH --public-key PATH --output PATH|publish-extension-catalog --review PATH --output PATH|finalize-extension-manifest-profiles --publication PATH --review PATH --output PATH|prepare-local-extension-lab-release --compatibility-artifact PATH --output PATH|prepare-local-extension-lab-generation --publication PATH --classified-profiles PATH --output PATH|stage-local-extension-lab --publication PATH --classified-profiles PATH --rollback-lab PATH --output PATH|index-extension-probe-tree --extension PATH --output PATH|materialize-macos-extension-compatibility --extension PATH --tree-index PATH --output PATH|materialize-macos-extension-compatibility-document-background --extension PATH --tree-index PATH --output PATH|materialize-macos-extension-compatibility-publisher-native --extension PATH --tree-index PATH --output PATH|materialize-macos-extension-compatibility-publisher-native-document-background --extension PATH --tree-index PATH --output PATH|materialize-macos-extension-compatibility-brokered --extension PATH --tree-index PATH --output PATH|check-bitwarden-core-source --source PATH|materialize-bitwarden-core-macos-probe-overlay --source PATH --output PATH|finalize-bitwarden-core-macos-probe-artifact --build PATH --output PATH [--wasm-response-mime-adapter]|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor>"
             );
             exit(2);
         }

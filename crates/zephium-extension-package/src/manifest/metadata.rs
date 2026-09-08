@@ -409,18 +409,7 @@ pub(super) fn parse_inert_metadata(
 }
 
 fn valid_extension_version(value: &str) -> bool {
-    let parts = value.split('.').collect::<Vec<_>>();
-    !parts.is_empty()
-        && parts.len() <= 4
-        && parts
-            .iter()
-            .any(|part| part.bytes().any(|byte| byte != b'0'))
-        && parts.iter().all(|part| {
-            !part.is_empty()
-                && part.bytes().all(|byte| byte.is_ascii_digit())
-                && (*part == "0" || !part.starts_with('0'))
-                && part.parse::<u16>().is_ok()
-        })
+    zephium_core::extensions::ExtensionUpstreamVersion::parse(value).is_some()
 }
 
 fn take_optional_unresolved_display_text(

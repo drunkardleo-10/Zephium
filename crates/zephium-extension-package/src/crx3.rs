@@ -187,6 +187,8 @@ pub struct VerifiedCrx3Package<'a> {
     developer_key_sha256: ChromiumManifestKeyDigest,
     archive: &'a [u8],
     signature_proofs: usize,
+    package_sha256: [u8; 32],
+    archive_sha256: [u8; 32],
 }
 
 impl<'a> VerifiedCrx3Package<'a> {
@@ -279,6 +281,8 @@ impl<'a> VerifiedCrx3Package<'a> {
             developer_key_sha256: ChromiumManifestKeyDigest::from_bytes(developer_key_sha256),
             archive,
             signature_proofs: parsed.proofs.len(),
+            package_sha256: Sha256::digest(bytes).into(),
+            archive_sha256: Sha256::digest(archive).into(),
         })
     }
 
@@ -295,6 +299,17 @@ impl<'a> VerifiedCrx3Package<'a> {
     /// Borrows the authenticated ZIP payload without extracting it.
     pub const fn archive_bytes(&self) -> &'a [u8] {
         self.archive
+    }
+
+    /// Returns SHA-256 of the complete authenticated original CRX, including
+    /// its signed envelope. This is distinct from the embedded ZIP digest.
+    pub const fn package_sha256(&self) -> [u8; 32] {
+        self.package_sha256
+    }
+
+    /// Returns SHA-256 of the authenticated ZIP payload without rehashing it.
+    pub const fn archive_sha256(&self) -> [u8; 32] {
+        self.archive_sha256
     }
 
     /// Returns the number of cryptographic proofs verified in the CRX3 header.

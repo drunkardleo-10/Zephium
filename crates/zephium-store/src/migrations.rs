@@ -1920,11 +1920,76 @@ pub static PROFILE: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 14,
+        up: |tx| {
+            tx.execute_batch(
+            // No source authority is inferred for existing reviewed installs.
+            // History deliberately has no install FK: uninstall is not a
+            // rollback-protection reset. Profile deletion removes both tables.
+            "CREATE TABLE extension_upstream_history (
+                 publisher BLOB PRIMARY KEY CHECK (typeof(publisher) = 'blob' AND length(publisher) = 32),
+                 checkpoint BLOB NOT NULL CHECK (typeof(checkpoint) = 'blob' AND length(checkpoint) = 105)
+             ) STRICT, WITHOUT ROWID;
+             CREATE TRIGGER extension_upstream_history_capacity BEFORE INSERT ON extension_upstream_history
+             WHEN NOT EXISTS (SELECT 1 FROM extension_upstream_history WHERE publisher = NEW.publisher)
+                  AND (SELECT count(*) FROM extension_upstream_history) >= 128
+             BEGIN SELECT RAISE(ABORT, 'extension upstream history capacity exceeded'); END;
+             CREATE TABLE extension_install_provenance (
+                 install_id BLOB PRIMARY KEY REFERENCES extension_installs(id) ON DELETE CASCADE
+                    CHECK (typeof(install_id) = 'blob' AND length(install_id) = 16),
+                 provenance BLOB NOT NULL CHECK (typeof(provenance) = 'blob' AND length(provenance) BETWEEN 1 AND 1024)
+             ) STRICT, WITHOUT ROWID;"
+        )
+        },
+    },
 ];
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_v14_adds_empty_bounded_provenance_without_inventing_legacy_evidence() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &PROFILE[..13]).unwrap();
+        let before: i64 = conn
+            .query_row("PRAGMA page_count", [], |row| row.get(0))
+            .unwrap();
+        apply(&mut conn, PROFILE).unwrap();
+        let after: i64 = conn
+            .query_row("PRAGMA page_count", [], |row| row.get(0))
+            .unwrap();
+        let page_size: i64 = conn
+            .query_row("PRAGMA page_size", [], |row| row.get(0))
+            .unwrap();
+        eprintln!(
+            "profile v14 empty provenance schema: {} bytes ({} pages)",
+            (after - before) * page_size,
+            after - before
+        );
+        for table in ["extension_install_provenance", "extension_upstream_history"] {
+            assert_eq!(
+                conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        for bytes in [0, 104, 106] {
+            assert!(conn
+                .execute(
+                    "INSERT INTO extension_upstream_history(publisher, checkpoint) VALUES (?1, ?2)",
+                    rusqlite::params![vec![3_u8; 32], vec![0_u8; bytes]]
+                )
+                .is_err());
+        }
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            14
+        );
+    }
 
     fn insert_native_ownership_test_row(
         conn: &Connection,
@@ -2323,7 +2388,7 @@ mod tests {
     fn profile_v13_adds_bounded_default_allow_extension_policy() {
         let mut conn = Connection::open_in_memory().unwrap();
         apply(&mut conn, &PROFILE[..12]).unwrap();
-        apply(&mut conn, PROFILE).unwrap();
+        apply(&mut conn, &PROFILE[..13]).unwrap();
         assert_eq!(
             conn.query_row(
                 "SELECT revision, paused FROM extension_profile_policy WHERE id = 1",
@@ -3046,7 +3111,6 @@ mod tests {
                 .unwrap(),
             14
         );
-        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(13));
     }
 
     #[test]

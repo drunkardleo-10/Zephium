@@ -32,8 +32,10 @@ mod json;
 mod limits;
 mod manifest;
 mod native_messaging;
+mod public_policy;
 mod relative_path;
 mod release;
+mod store_listing;
 mod tree;
 
 pub use chromium::{
@@ -60,6 +62,12 @@ pub use native_messaging::{
     NativeMessagingHostManifest, NativeMessagingHostManifestError, NativeMessagingHostName,
     NativeMessagingMessageError,
 };
+pub use public_policy::{
+    ExtensionBetaTargetPolicy, ExtensionPolicyChannel, ExtensionPolicyRevocation,
+    ExtensionPublicPolicy, ExtensionPublicPolicyError, ExtensionRecommendation,
+    ExtensionTestedVersion, EXTENSION_PUBLIC_POLICY_TARGET, MAX_EXTENSION_PUBLIC_POLICY_BYTES,
+    MAX_EXTENSION_PUBLIC_POLICY_ENTRIES, MAX_EXTENSION_PUBLIC_POLICY_LIFETIME_SECONDS,
+};
 pub use relative_path::{PortableRelativePath, PortableRelativePathError};
 pub use release::{
     ExpectedChromiumIdentity, ExtensionCompatibilityReceiptDigest,
@@ -71,6 +79,7 @@ pub use release::{
     ExtensionReleasePackageProvenance, ExtensionReleasePolicyBinding,
     ExtensionReleaseSourceReference, ExtensionReleaseTreeBinding,
 };
+pub use store_listing::ChromeWebStoreListing;
 pub use tree::{
     CanonicalExtensionTreeIndex, ExtensionTreeFile, ExtensionTreeIndexDigest,
     ExtensionTreeIndexError,

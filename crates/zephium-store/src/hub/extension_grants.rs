@@ -130,6 +130,15 @@ impl Hub {
         {
             return Ok(ExtensionGrantCohortLoadOutcome::Invalid);
         }
+        for binding in bindings.iter() {
+            if !super::extension_provenance::matches(
+                &tx,
+                binding.install_id(),
+                binding.provenance(),
+            )? {
+                return Ok(ExtensionGrantCohortLoadOutcome::Invalid);
+            }
+        }
         let authorities = load_all_authorities(&tx, &catalog, &bindings)?;
         let profile_policy = super::extension_profile_policy::load_policy(&tx)?;
         let cohort = zephium_core::extensions::ExtensionGrantCohort::from_persisted(
@@ -193,6 +202,7 @@ impl Hub {
         if install.package() != manifest.package() {
             return Ok(ExtensionGrantMutationOutcome::Invalid);
         }
+        super::extension_provenance::validate_manifest(&tx, install_id, &manifest)?;
 
         let (authority, persistence, live_owner_validated) = match write {
             ExtensionGrantWrite::Initialize { authority } => {
@@ -541,6 +551,7 @@ pub(super) fn load_authority(
     install: &ExtensionInstall,
     manifest: &ExtensionManifestDescriptor,
 ) -> rusqlite::Result<Option<ExtensionGrantAuthority>> {
+    super::extension_provenance::validate_manifest(conn, install.id(), manifest)?;
     let id = install.id().bytes();
     let raw = conn
         .query_row(

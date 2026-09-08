@@ -6,8 +6,12 @@ const STARTUP_GATE_API: &str = "vendor/wry/src/lib.rs";
 const LIFECYCLE_ADAPTER: &str =
     "crates/zephium-engine/src/host/extension_runtime/windows_adapter.rs";
 const RUNTIME_REGISTRY: &str = "crates/zephium-engine/src/host/extension_runtime.rs";
-const REVIEWED_ENVIRONMENT_FORWARDERS: [(&str, usize); 4] = [
+const AGENT_CONTEXT_OWNER: &str = "crates/zephium-engine/src/platform/windows/agent_context.rs";
+const AGENT_SEMANTIC_PROBE: &str =
+    "crates/zephium-engine/src/platform/windows/agentic_semantic_probe.rs";
+const REVIEWED_ENVIRONMENT_FORWARDERS: [(&str, usize); 5] = [
     ("crates/zephium-engine/src/host/construction.rs", 1),
+    (AGENT_CONTEXT_OWNER, 1),
     ("vendor/tauri-runtime-wry/src/lib.rs", 1),
     ("vendor/tauri/src/webview/mod.rs", 2),
     ("vendor/tauri/src/webview/webview_window.rs", 3),
@@ -212,6 +216,30 @@ fn validate_constructor(source: &str) -> Result<(), String> {
 }
 
 fn validate_shipping_source(relative: &Path, source: &str) -> Result<(), String> {
+    if relative == Path::new(AGENT_SEMANTIC_PROBE) {
+        let source = compact(source);
+        for required in [
+            ".with_browser_extension_startup_gate(move|environment,core|{",
+            "attest_environment(environment,&bootstrap_path)?;",
+            "core.cast::<ICoreWebView2_13>()?.Profile()?",
+            "matchsuper::extensions::profile_inventory_is_empty(&native_profile,construction_deadline,){Ok(true)=>Ok(()),",
+        ] {
+            if !source.contains(required) {
+                return Err(format!("{AGENT_SEMANTIC_PROBE} is missing its empty bootstrap fence: {required}"));
+            }
+        }
+        if !matches!(
+            (source.find(".with_browser_extension_startup_gate("), source.find(".build_as_child(&host)")),
+            (Some(gate), Some(construction)) if gate < construction
+        ) {
+            return Err(format!(
+                "{AGENT_SEMANTIC_PROBE} must install its inventory fence before construction"
+            ));
+        }
+    }
+    if relative == Path::new(AGENT_CONTEXT_OWNER) {
+        validate_agent_context_owner(source)?;
+    }
     if has_native_install_token(source) && relative != Path::new(NATIVE_OWNER) {
         return Err(format!(
             "{} contains the native extension-install token; only {NATIVE_OWNER} may own it",
@@ -254,6 +282,32 @@ fn validate_shipping_source(relative: &Path, source: &str) -> Result<(), String>
     }
 
     reject_direct_enablement(relative, &compact)
+}
+
+fn validate_agent_context_owner(source: &str) -> Result<(), String> {
+    let source = compact(source);
+    for required in [
+        "fnattest_profile_before_initialization(",
+        "super::attest_environment(environment,expected_user_data_folder)",
+        "if!controller_environment_matches(environment,core)",
+        ".attest_controller(environment,core,deadline,&[])",
+        "matchprofile_inventory_is_empty(&profile,deadline){Ok(true)=>Ok(()),Ok(false)=>Err(AgentOwnedViewConstructionError::ExtensionIsolation)",
+        "profile_name(&profile).as_deref()!=Ok(name.as_str())",
+        "profile_is_private(&profile)!=Ok(storage_class==ContextProfileStorageClass::Ephemeral)",
+        "attest_profile_before_initialization(&gate_profile,environment,core,storage_class,&expected_path,deadline,)",
+    ] {
+        if !source.contains(required) {
+            return Err(format!("{AGENT_CONTEXT_OWNER} is missing its empty-profile startup proof: {required}"));
+        }
+    }
+    let gate = source.find("builder=builder.with_browser_extension_startup_gate(gate);");
+    let construction = source.find("letview=builder.build_as_child(parent)");
+    if !matches!((gate, construction), (Some(gate), Some(construction)) if gate < construction) {
+        return Err(format!(
+            "{AGENT_CONTEXT_OWNER} must fence its profile before native construction"
+        ));
+    }
+    Ok(())
 }
 
 fn validate_native_owner(source: &str) -> Result<(), String> {
@@ -477,7 +531,10 @@ fn reject_direct_enablement(relative: &Path, compact: &str) -> Result<(), String
     let startup_gate = "with_browser_extension_startup_gate";
     let observed_gates = identifier_occurrences(compact, startup_gate);
     let expected_gates = usize::from(
-        relative == Path::new(STARTUP_GATE_OWNER) || relative == Path::new(STARTUP_GATE_API),
+        relative == Path::new(STARTUP_GATE_OWNER)
+            || relative == Path::new(STARTUP_GATE_API)
+            || relative == Path::new(AGENT_CONTEXT_OWNER)
+            || relative == Path::new(AGENT_SEMANTIC_PROBE),
     );
     if observed_gates != expected_gates {
         return Err(format!(
@@ -827,6 +884,39 @@ fn create_environment() {
             "| ReservationBinding::Activation {",
             1,
         ))
+        .is_err());
+    }
+
+    #[test]
+    fn agent_forwarder_requires_empty_profile_attestation_before_initialization() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let source = read_source(&repository.join(AGENT_CONTEXT_OWNER)).unwrap();
+        assert!(validate_shipping_source(Path::new(AGENT_CONTEXT_OWNER), &source).is_ok());
+        for token in [
+            ".attest_controller(environment, core, deadline, &[])",
+            "profile_inventory_is_empty(&profile, deadline)",
+            "builder = builder.with_browser_extension_startup_gate(gate);",
+        ] {
+            assert!(
+                source.contains(token),
+                "negative control must alter real source"
+            );
+            assert!(
+                validate_shipping_source(
+                    Path::new(AGENT_CONTEXT_OWNER),
+                    &source.replacen(token, "missing_proof()", 1)
+                )
+                .is_err(),
+                "{token}"
+            );
+        }
+        assert!(validate_shipping_source(Path::new("crates/unreviewed.rs"), &source).is_err());
+        let probe = read_source(&repository.join(AGENT_SEMANTIC_PROBE)).unwrap();
+        assert!(validate_shipping_source(Path::new(AGENT_SEMANTIC_PROBE), &probe).is_ok());
+        assert!(validate_shipping_source(
+            Path::new(AGENT_SEMANTIC_PROBE),
+            &probe.replacen("profile_inventory_is_empty(", "missing_inventory_proof(", 1)
+        )
         .is_err());
     }
 

@@ -25,7 +25,8 @@ const COHORT_FIXED_BYTES: usize = 256;
 pub const MAX_EXTENSION_GRANT_MANIFEST_BINDINGS_RETAINED_BYTES: usize = BINDINGS_FIXED_BYTES
     + MAX_EXTENSION_INSTALLS_PER_PROFILE
         * (std::mem::size_of::<ExtensionGrantManifestBinding>()
-            + MAX_EXTENSION_MANIFEST_RETAINED_BYTES);
+            + MAX_EXTENSION_MANIFEST_RETAINED_BYTES
+            + super::MAX_EXTENSION_INSTALL_PROVENANCE_BYTES);
 
 pub const MAX_EXTENSION_GRANT_COHORT_RETAINED_BYTES: usize = COHORT_FIXED_BYTES
     + MAX_EXTENSION_INSTALL_CATALOG_RETAINED_BYTES
@@ -40,6 +41,7 @@ pub const MAX_EXTENSION_GRANT_COHORT_RETAINED_BYTES: usize = COHORT_FIXED_BYTES
 pub struct ExtensionGrantManifestBinding {
     install_id: ExtensionInstallId,
     manifest: Arc<ExtensionManifestDescriptor>,
+    provenance: Option<Arc<super::ExtensionInstallProvenance>>,
 }
 
 impl ExtensionGrantManifestBinding {
@@ -47,7 +49,27 @@ impl ExtensionGrantManifestBinding {
         Self {
             install_id,
             manifest,
+            provenance: None,
         }
+    }
+
+    /// Binds separately reauthenticated upstream provenance. This constructor
+    /// proves structural consistency only; it cannot mint Beta or Verified authority.
+    pub fn with_provenance(
+        install_id: ExtensionInstallId,
+        manifest: Arc<ExtensionManifestDescriptor>,
+        provenance: Arc<super::ExtensionInstallProvenance>,
+    ) -> Option<Self> {
+        provenance.matches_manifest(&manifest).then_some(Self {
+            install_id,
+            manifest,
+            provenance: Some(provenance),
+        })
+    }
+
+    /// Exact source/transform provenance expected in the atomic Store snapshot.
+    pub fn provenance(&self) -> Option<&super::ExtensionInstallProvenance> {
+        self.provenance.as_deref()
     }
 
     pub const fn install_id(&self) -> ExtensionInstallId {
@@ -107,6 +129,13 @@ impl ExtensionGrantManifestBindings {
             |bytes, binding| {
                 bytes
                     .checked_add(binding.manifest.retained_bytes())
+                    .and_then(|bytes| {
+                        bytes.checked_add(
+                            binding
+                                .provenance()
+                                .map_or(0, super::ExtensionInstallProvenance::retained_bytes),
+                        )
+                    })
                     .ok_or(ExtensionGrantCohortError::AccountingOverflow)
             },
         )?;
@@ -203,6 +232,12 @@ impl<'a> ExtensionGrantCohortEntry<'a> {
 
     pub const fn manifest_arc(self) -> &'a Arc<ExtensionManifestDescriptor> {
         self.binding.manifest_arc()
+    }
+
+    /// Source evidence compared in the same Store snapshot as this install
+    /// and its grants. It remains data, not repository/native authority.
+    pub fn provenance(self) -> Option<&'a super::ExtensionInstallProvenance> {
+        self.binding.provenance()
     }
 
     pub const fn grant_state(self) -> &'a ExtensionGrantInitializationState {

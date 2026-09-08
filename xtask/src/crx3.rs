@@ -122,8 +122,7 @@ pub(crate) fn check(path: &Path, expected_id: &str) -> Result<(), String> {
     let expected_id = parse_expected_id(expected_id)?;
     let package = VerifiedCrx3Package::parse_and_verify(&bytes, Some(&expected_id))
         .map_err(|error| error.to_string())?;
-    let payload = acquired_payload(package.archive_bytes())?;
-    let acquired = AcquiredExtensionArchive::authenticate_crx3(&bytes, &expected_id, payload)
+    let acquired = AcquiredExtensionArchive::authenticate_upstream_crx3(&bytes, &expected_id, None)
         .map_err(|error| error.to_string())?;
     print_authentication(&bytes, &package, &acquired);
     Ok(())

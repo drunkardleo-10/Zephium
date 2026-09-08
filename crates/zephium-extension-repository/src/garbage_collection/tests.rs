@@ -1026,7 +1026,10 @@ fn product_shaped_residue_collects_with_bounded_revalidation_and_cached_admissio
     assert_eq!(operation.work.tree_object_retirements, 1);
     assert_eq!(operation.work.tree_entries, 1);
     assert_eq!(operation.work.tree_directory_syncs, 1);
-    assert_eq!(operation.work.durability_syncs(), Some(30));
+    assert_eq!(
+        operation.work.durability_syncs(),
+        Some(30 + TREE_PUBLICATION_ROOT_RESEAL_SYNCS)
+    );
     assert!(operation.work.durability_syncs().unwrap() <= MAX_GC_FRESH_DURABILITY_SYNCS);
     assert_eq!(catalogs.inventory_passes, 3);
     assert_eq!(catalogs.content_revalidated_catalogs, 5);
@@ -1046,13 +1049,22 @@ fn product_shaped_residue_collects_with_bounded_revalidation_and_cached_admissio
     assert_eq!(recovery.catalog_admission_bytes, 0);
     assert_eq!(recovery.catalog_cache_hits, 3);
     assert_eq!(filesystem.file_syncs(), 12);
-    assert_eq!(filesystem.directory_syncs(), 18);
-    assert_eq!(filesystem.file_syncs() + filesystem.directory_syncs(), 30);
+    assert_eq!(
+        filesystem.directory_syncs(),
+        18 + TREE_PUBLICATION_ROOT_RESEAL_SYNCS
+    );
+    assert_eq!(
+        filesystem.file_syncs() + filesystem.directory_syncs(),
+        30 + TREE_PUBLICATION_ROOT_RESEAL_SYNCS
+    );
     assert_eq!(filesystem.regular_creates(), 6);
     assert_eq!(filesystem.regular_unlinks(), 4);
     assert_eq!(filesystem.directory_unlinks(), 1);
     assert_eq!(filesystem.renames(), 7);
-    assert_eq!(filesystem.directory_mode_changes(), 1);
+    assert_eq!(
+        filesystem.directory_mode_changes(),
+        1 + 2 * TREE_PUBLICATION_ROOT_RESEAL_SYNCS
+    );
     assert!(filesystem.bytes_written() <= MAX_GC_FRESH_CONTROL_BYTES_WRITTEN);
     assert_eq!(MAX_GC_FRESH_CONTROL_BYTES_WRITTEN, 2_129_920);
     assert!(repository
@@ -1113,7 +1125,10 @@ fn pending_one_tree_settlement_stays_inside_the_startup_sync_ceiling() {
     assert_eq!(settlement.work.tree_jobs, 1);
     assert_eq!(settlement.work.tree_object_retirements, 1);
     assert_eq!(settlement.work.tree_directory_syncs, 1);
-    assert_eq!(settlement.work.durability_syncs(), Some(17));
+    assert_eq!(
+        settlement.work.durability_syncs(),
+        Some(17 + TREE_PUBLICATION_ROOT_RESEAL_SYNCS)
+    );
     assert!(settlement.work.durability_syncs().unwrap() <= MAX_GC_PENDING_DURABILITY_SYNCS);
     assert_eq!(catalogs.inventory_passes, 3);
     assert_eq!(catalogs.content_revalidated_catalogs, 5);
@@ -1133,13 +1148,22 @@ fn pending_one_tree_settlement_stays_inside_the_startup_sync_ceiling() {
     assert_eq!(recovery.catalog_admission_bytes, 0);
     assert_eq!(recovery.catalog_cache_hits, 2);
     assert_eq!(filesystem.file_syncs(), 6);
-    assert_eq!(filesystem.directory_syncs(), 11);
-    assert_eq!(filesystem.file_syncs() + filesystem.directory_syncs(), 17);
+    assert_eq!(
+        filesystem.directory_syncs(),
+        11 + TREE_PUBLICATION_ROOT_RESEAL_SYNCS
+    );
+    assert_eq!(
+        filesystem.file_syncs() + filesystem.directory_syncs(),
+        17 + TREE_PUBLICATION_ROOT_RESEAL_SYNCS
+    );
     assert_eq!(filesystem.regular_creates(), 3);
     assert_eq!(filesystem.regular_unlinks(), 3);
     assert_eq!(filesystem.directory_unlinks(), 1);
     assert_eq!(filesystem.renames(), 4);
-    assert_eq!(filesystem.directory_mode_changes(), 1);
+    assert_eq!(
+        filesystem.directory_mode_changes(),
+        1 + 2 * TREE_PUBLICATION_ROOT_RESEAL_SYNCS
+    );
     assert!(filesystem.bytes_written() <= MAX_GC_PENDING_CONTROL_BYTES_WRITTEN);
     assert_eq!(MAX_GC_PENDING_CONTROL_BYTES_WRITTEN, 1_064_960);
     assert!(repository
@@ -1194,9 +1218,15 @@ fn real_maximum_cohort_has_constant_bounded_durability_and_operation_amplificati
     );
     assert_eq!(operation.work.tree_directory_syncs, MAX_GC_TREE_JOBS);
     operation.work.validate(2).unwrap();
-    assert_eq!(operation.work.durability_syncs(), Some(107));
+    assert_eq!(
+        operation.work.durability_syncs(),
+        Some(107 + MAX_GC_TREE_JOBS * TREE_PUBLICATION_ROOT_RESEAL_SYNCS)
+    );
     assert_eq!(filesystem.file_syncs(), 12);
-    assert_eq!(filesystem.directory_syncs(), 95);
+    assert_eq!(
+        filesystem.directory_syncs(),
+        95 + MAX_GC_TREE_JOBS * TREE_PUBLICATION_ROOT_RESEAL_SYNCS
+    );
     assert_eq!(filesystem.regular_creates(), 6);
     assert_eq!(
         filesystem.regular_unlinks(),
@@ -1209,19 +1239,20 @@ fn real_maximum_cohort_has_constant_bounded_durability_and_operation_amplificati
     assert_eq!(filesystem.renames(), 14);
     assert_eq!(
         filesystem.directory_mode_changes(),
-        fixture.actual_tree_directories
+        fixture.actual_tree_directories + 2 * MAX_GC_TREE_JOBS * TREE_PUBLICATION_ROOT_RESEAL_SYNCS
     );
     assert!(filesystem.bytes_written() <= MAX_GC_FRESH_CONTROL_BYTES_WRITTEN);
     assert_eq!(
         compose_maximum_cohort_operations(filesystem, operation.work),
         ComposedMaximumCohortOperations {
-            durability_syncs: 107,
+            durability_syncs: 107 + MAX_GC_TREE_JOBS * TREE_PUBLICATION_ROOT_RESEAL_SYNCS,
             regular_creates: 6,
             maximum_regular_unlinks: 32_827,
             maximum_directory_unlinks: 32_768,
             maximum_total_unlinks: 32_835,
             renames: 14,
-            maximum_directory_mode_changes: 32_768,
+            maximum_directory_mode_changes: 32_768
+                + 2 * MAX_GC_TREE_JOBS * TREE_PUBLICATION_ROOT_RESEAL_SYNCS,
         }
     );
     assert_maximum_cohort_collected(&mut repository, &fixture);
@@ -1277,9 +1308,15 @@ fn real_maximum_cohort_pending_intent_settles_inside_the_mutation_operation_ceil
     );
     assert_eq!(settlement.work.tree_directory_syncs, MAX_GC_TREE_JOBS);
     settlement.work.validate(1).unwrap();
-    assert_eq!(settlement.work.durability_syncs(), Some(94));
+    assert_eq!(
+        settlement.work.durability_syncs(),
+        Some(94 + MAX_GC_TREE_JOBS * TREE_PUBLICATION_ROOT_RESEAL_SYNCS)
+    );
     assert_eq!(filesystem.file_syncs(), 6);
-    assert_eq!(filesystem.directory_syncs(), 88);
+    assert_eq!(
+        filesystem.directory_syncs(),
+        88 + MAX_GC_TREE_JOBS * TREE_PUBLICATION_ROOT_RESEAL_SYNCS
+    );
     assert_eq!(filesystem.regular_creates(), 3);
     assert_eq!(
         filesystem.regular_unlinks(),
@@ -1292,19 +1329,20 @@ fn real_maximum_cohort_pending_intent_settles_inside_the_mutation_operation_ceil
     assert_eq!(filesystem.renames(), 11);
     assert_eq!(
         filesystem.directory_mode_changes(),
-        fixture.actual_tree_directories
+        fixture.actual_tree_directories + 2 * MAX_GC_TREE_JOBS * TREE_PUBLICATION_ROOT_RESEAL_SYNCS
     );
     assert!(filesystem.bytes_written() <= MAX_GC_PENDING_CONTROL_BYTES_WRITTEN);
     assert_eq!(
         compose_maximum_cohort_operations(filesystem, settlement.work),
         ComposedMaximumCohortOperations {
-            durability_syncs: 94,
+            durability_syncs: 94 + MAX_GC_TREE_JOBS * TREE_PUBLICATION_ROOT_RESEAL_SYNCS,
             regular_creates: 3,
             maximum_regular_unlinks: 32_826,
             maximum_directory_unlinks: 32_768,
             maximum_total_unlinks: 32_834,
             renames: 11,
-            maximum_directory_mode_changes: 32_768,
+            maximum_directory_mode_changes: 32_768
+                + 2 * MAX_GC_TREE_JOBS * TREE_PUBLICATION_ROOT_RESEAL_SYNCS,
         }
     );
     assert_maximum_cohort_collected(&mut repository, &fixture);
@@ -1397,13 +1435,22 @@ fn open_settles_an_existing_intent_without_planning_another_batch() {
     );
     assert_eq!(recovery.catalog_cache_hits, 2);
     assert_eq!(filesystem.file_syncs(), 6);
-    assert_eq!(filesystem.directory_syncs(), 11);
-    assert_eq!(filesystem.file_syncs() + filesystem.directory_syncs(), 17);
+    assert_eq!(
+        filesystem.directory_syncs(),
+        11 + TREE_PUBLICATION_ROOT_RESEAL_SYNCS
+    );
+    assert_eq!(
+        filesystem.file_syncs() + filesystem.directory_syncs(),
+        17 + TREE_PUBLICATION_ROOT_RESEAL_SYNCS
+    );
     assert_eq!(filesystem.regular_creates(), 3);
     assert_eq!(filesystem.regular_unlinks(), 3);
     assert_eq!(filesystem.directory_unlinks(), 1);
     assert_eq!(filesystem.renames(), 4);
-    assert_eq!(filesystem.directory_mode_changes(), 1);
+    assert_eq!(
+        filesystem.directory_mode_changes(),
+        1 + 2 * TREE_PUBLICATION_ROOT_RESEAL_SYNCS
+    );
     assert!(reopened
         .writer_catalog_object_ids()
         .contains(&residue.active_catalog));
