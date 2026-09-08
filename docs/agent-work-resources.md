@@ -198,6 +198,25 @@ drift still refuse. Only the exact successful terminal publishes the successor
 URL and epochs. The resource identity, native view, profile and execution lease
 stay unchanged; the next document requires a fresh observation before automation.
 
+`DocumentQueryFinalization` is a separate trusted operation policy for real
+documents which add one opaque query without loading another path. The model
+still selects an exact observed, query-free HTTPS destination; the immutable
+manifest and authorized native request carry the policy. After the same exact
+native event lineage and semantic load drain, macOS requires a 500 ms native URL
+quiet period. A policy-valid KVO update invalidates that content-free revision
+ticket and requires another bounded quiet period without consuming a URL sample.
+Missing, invalid, noncanonical, fragment/credential-bearing, origin/path-changing
+or otherwise forbidden KVO values fail immediately even if the page later moves
+back. Once the revision stays quiet, one current-URL sample is fenced against a
+racing callback and becomes the exact effective document. The timer does not
+reset the navigation or lease deadline. Exact-policy documents pay no delay.
+
+The requested destination and effective document remain separate facts through
+native completion, policy settlement, observation binding and provider context.
+The query cannot become a future model-authored destination. The legacy context
+adapters reject this policy as Unsupported; Windows must implement equivalent
+native proof before claiming support.
+
 Core navigation debt and the native request/task/callback-return debt remain
 separate and both join lease revocation, destruction and global shutdown. A
 successful terminal arriving after revocation records physical document facts
@@ -371,8 +390,9 @@ retained but cannot issue an observation.
 synthetic retained fixture policy). This opt-in accepts only an initially
 query-free, fragment-free, credential-free HTTPS request. After the same exact
 native start/commit/finish lineage, a separate non-dispatching finalization state
-freezes one bounded native current-URL sample: either the exact request or one
-opaque nonempty query addition with all other URL bytes unchanged. There is no
+uses the same bounded native quiet-period/revision fence described above and
+then freezes one current-URL sample: either the exact request or one opaque
+nonempty query addition with all other URL bytes unchanged. There is no
 query-name/value whitelist, interpretation, second load, redirect allowance,
 general same-document continuation, or origin-only fallback. Noncanonical raw
 URLs, missing/oversized samples and changed components fail closed.

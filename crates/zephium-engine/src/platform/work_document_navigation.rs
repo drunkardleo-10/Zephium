@@ -2,7 +2,7 @@
 //! successor loads share one gate; unsolicited transitions, redirects and
 //! same-document continuation never acquire authority from native callbacks.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use zephium_agentic::{
     ContextJoin, ContextNavigationRequest, ContextNavigationTarget, ContextOperationJoin,
     ContextPortFailure,
@@ -29,6 +29,7 @@ struct State {
     target: Option<ContextNavigationTarget>,
     effective: Option<ContextNavigationTarget>,
     policy: zephium_agentic::WorkBrowserDocumentPolicy,
+    finalization_generation: u64,
     location_revision: u64,
     native_id: Option<wry::NavigationId>,
     requested: bool,
@@ -57,7 +58,8 @@ pub struct NavigationEvidence {
 }
 
 /// Component relations only: no URL, digest, query key/value, or native handle.
-/// Equality here is diagnostic; only the original exact gate admits a document.
+/// Equality here is diagnostic; only the original policy-bound gate admits a
+/// document.
 #[cfg(feature = "native-agentic-work-resource-probe")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CurrentDocumentEvidence {
@@ -118,6 +120,22 @@ pub(crate) struct WorkDocumentStamp {
     native_id: wry::NavigationId,
     epoch: u64,
 }
+/// Content-free revision captured before one bounded native URL quiet period.
+/// It is not document authority and cannot itself authorize a sample.
+#[derive(Clone, Debug)]
+pub(crate) struct WorkDocumentFinalizationTicket {
+    gate: Weak<Mutex<State>>,
+    generation: u64,
+    location_revision: u64,
+}
+impl PartialEq for WorkDocumentFinalizationTicket {
+    fn eq(&self, other: &Self) -> bool {
+        Weak::ptr_eq(&self.gate, &other.gate)
+            && self.generation == other.generation
+            && self.location_revision == other.location_revision
+    }
+}
+impl Eq for WorkDocumentFinalizationTicket {}
 #[cfg(test)]
 impl WorkDocumentStamp {
     pub(crate) fn for_test(epoch: u64) -> Self {
@@ -138,6 +156,7 @@ impl Default for WorkDocumentNavigation {
             target: None,
             effective: None,
             policy: zephium_agentic::WorkBrowserDocumentPolicy::Exact,
+            finalization_generation: 0,
             location_revision: 0,
             native_id: None,
             requested: false,
@@ -206,15 +225,20 @@ impl WorkDocumentNavigation {
             || source.navigation_epoch().get().checked_add(1) != Some(next.navigation_epoch().get())
             || source.frame_generation().get().checked_add(1) != Some(next.frame_generation().get())
             || request.redirect_policy().is_some()
+            || request.document_policy()
+                == zephium_agentic::WorkBrowserDocumentPolicy::InitialQueryFinalization
+            || !request.document_policy().admits_request(request.target())
         {
             return Err(());
         }
         state.operation = Some(request.operation());
         state.target = Some(request.target().clone());
         state.effective = None;
-        state.policy = zephium_agentic::WorkBrowserDocumentPolicy::Exact;
+        state.policy = request.document_policy();
         state.native_id = None;
         state.requested = false;
+        state.finalization_generation = state.finalization_generation.checked_add(1).ok_or(())?;
+        state.location_revision = 0;
         #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
         {
             state.url_observation_failure = None;
@@ -283,6 +307,8 @@ impl WorkDocumentNavigation {
         state.bootstrap_id = None;
         state.target = Some(target);
         state.policy = policy;
+        state.finalization_generation = state.finalization_generation.checked_add(1).ok_or(())?;
+        state.location_revision = 0;
         #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
         {
             state.url_observation_failure = None;
@@ -423,6 +449,33 @@ impl WorkDocumentNavigation {
             state.phase = Phase::Refused;
             return Ok(true);
         }
+        if matches!(
+            state.phase,
+            Phase::Committed | Phase::Finalizing | Phase::Sampling
+        ) && state.policy != zephium_agentic::WorkBrowserDocumentPolicy::Exact
+        {
+            let observed = current.and_then(|raw| {
+                ContextNavigationTarget::parse(raw)
+                    .ok()
+                    .filter(|target| target.as_url().as_str() == raw)
+            });
+            if !observed
+                .as_ref()
+                .zip(state.target.as_ref())
+                .is_some_and(|(observed, requested)| {
+                    state.policy.admits_final_document(requested, observed)
+                })
+            {
+                #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                {
+                    state.url_observation_failure = Some(
+                        crate::WorkUrlObservationFailure::compare(state.target.as_ref(), current),
+                    );
+                }
+                state.phase = Phase::Refused;
+                return Ok(true);
+            }
+        }
         if matches!(state.phase, Phase::Finalizing | Phase::Sampling) {
             let Some(revision) = state.location_revision.checked_add(1) else {
                 state.phase = Phase::Refused;
@@ -443,16 +496,35 @@ impl WorkDocumentNavigation {
             .lock()
             .is_ok_and(|state| state.phase == Phase::Finalizing)
     }
+    /// Captures the current URL-observation revision before a host-owned quiet
+    /// period. A later KVO notification invalidates only this ticket; it does
+    /// not consume the operation's sole authoritative native URL sample.
+    pub(crate) fn finalization_ticket(&self) -> Option<WorkDocumentFinalizationTicket> {
+        let state = self.0.lock().ok()?;
+        (state.phase == Phase::Finalizing).then(|| WorkDocumentFinalizationTicket {
+            gate: Arc::downgrade(&self.0),
+            generation: state.finalization_generation,
+            location_revision: state.location_revision,
+        })
+    }
     /// One native sample outside the lock. A callback racing the getter closes
-    /// this attempt; it never authorizes a retry or a second location sample.
-    pub(crate) fn finalize(
+    /// this attempt. A stale pre-sample quiet-period ticket consumes no sample
+    /// and asks the host to establish a fresh bounded quiet period.
+    pub(crate) fn finalize_after_quiet_period(
         &self,
+        ticket: WorkDocumentFinalizationTicket,
         sample: impl FnOnce() -> Option<String>,
-    ) -> Result<ContextNavigationTarget, ()> {
+    ) -> Result<Option<ContextNavigationTarget>, ()> {
         let revision = {
             let mut state = self.0.lock().map_err(|_| ())?;
             if state.phase != Phase::Finalizing {
                 return Err(());
+            }
+            if !Weak::ptr_eq(&ticket.gate, &Arc::downgrade(&self.0))
+                || state.finalization_generation != ticket.generation
+                || state.location_revision != ticket.location_revision
+            {
+                return Ok(None);
             }
             state.phase = Phase::Sampling;
             state.location_revision
@@ -476,7 +548,15 @@ impl WorkDocumentNavigation {
         let effective = effective.ok_or(())?;
         state.effective = Some(effective.clone());
         state.phase = Phase::Ready;
-        Ok(effective)
+        Ok(Some(effective))
+    }
+    #[cfg(test)]
+    fn finalize(
+        &self,
+        sample: impl FnOnce() -> Option<String>,
+    ) -> Result<ContextNavigationTarget, ()> {
+        let ticket = self.finalization_ticket().ok_or(())?;
+        self.finalize_after_quiet_period(ticket, sample)?.ok_or(())
     }
     pub(crate) fn refuse(&self) {
         if let Ok(mut state) = self.0.lock() {
@@ -526,6 +606,11 @@ mod tests {
     use wry::NavigationEventPhase as E;
     const URL: &str = "https://example.test/frozen";
     fn next_request() -> (ContextJoin, ContextNavigationRequest) {
+        next_request_with_policy(zephium_agentic::WorkBrowserDocumentPolicy::Exact)
+    }
+    fn next_request_with_policy(
+        policy: zephium_agentic::WorkBrowserDocumentPolicy,
+    ) -> (ContextJoin, ContextNavigationRequest) {
         use zephium_agentic::*;
         let identity = ContextIdentity::new(
             ContextId::generate(),
@@ -559,9 +644,10 @@ mod tests {
             .unwrap();
         (
             source,
-            ContextNavigationRequest::try_new(
+            ContextNavigationRequest::try_new_with_document_policy(
                 operation,
                 ContextNavigationTarget::parse("https://example.test/next").unwrap(),
+                policy,
             )
             .unwrap(),
         )
@@ -1023,6 +1109,100 @@ mod tests {
         assert!(finalizing.failed());
     }
     #[test]
+    fn stale_quiet_period_ticket_reschedules_without_sampling_or_widening_authority() {
+        let gate = finalizing();
+        let stale = gate.finalization_ticket().unwrap();
+        assert_eq!(
+            gate.location_changed(Some("https://example.test/frozen?opaque=late")),
+            Ok(false)
+        );
+        assert_eq!(
+            gate.finalize_after_quiet_period(stale, || panic!("stale ticket must not sample")),
+            Ok(None)
+        );
+        assert!(gate.finalization_pending());
+        let current = "https://example.test/frozen?opaque=late";
+        let effective = gate
+            .finalize_after_quiet_period(gate.finalization_ticket().unwrap(), || {
+                Some(current.into())
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(effective.as_url().as_str(), current);
+        assert!(gate.ready(Some(current)));
+    }
+    #[test]
+    fn quiet_period_ticket_is_bound_to_its_gate_and_navigation_episode() {
+        let gate = finalizing();
+        let initial_ticket = gate.finalization_ticket().unwrap();
+        gate.finalize_after_quiet_period(initial_ticket.clone(), || Some(URL.into()))
+            .unwrap()
+            .unwrap();
+
+        let (source, request) = next_request_with_policy(
+            zephium_agentic::WorkBrowserDocumentPolicy::DocumentQueryFinalization,
+        );
+        let requested = request.target().as_url().as_str();
+        gate.arm_successor(source, &request).unwrap();
+        assert!(gate.allows(requested));
+        // Deliberately reuse the native test ID and keep the URL-observation
+        // revision at zero. The episode generation must still reject the old
+        // initial-document ticket without sampling.
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, requested)).unwrap();
+        }
+        assert_eq!(
+            gate.finalize_after_quiet_period(initial_ticket, || {
+                panic!("an earlier navigation ticket must not sample")
+            }),
+            Ok(None)
+        );
+
+        let foreign = finalizing();
+        let foreign_ticket = foreign.finalization_ticket().unwrap();
+        assert_eq!(
+            gate.finalize_after_quiet_period(foreign_ticket, || {
+                panic!("a different gate's ticket must not sample")
+            }),
+            Ok(None)
+        );
+
+        let effective = "https://example.test/next?opaque=native";
+        gate.finalize_after_quiet_period(gate.finalization_ticket().unwrap(), || {
+            Some(effective.into())
+        })
+        .unwrap()
+        .unwrap();
+        assert!(gate.ready(Some(effective)));
+    }
+    #[test]
+    fn successor_query_finalization_uses_its_exact_operation_and_effective_document() {
+        let gate = ready_gate();
+        let (source, request) = next_request_with_policy(
+            zephium_agentic::WorkBrowserDocumentPolicy::DocumentQueryFinalization,
+        );
+        let requested = request.target().as_url().as_str();
+        gate.arm_successor(source, &request).unwrap();
+        assert!(gate.allows(requested));
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(2, phase, requested)).unwrap();
+        }
+        assert!(gate.finalization_pending());
+        assert!(gate.take_successor_terminal().is_none());
+        let current = "https://example.test/next?opaque=native";
+        gate.finalize_after_quiet_period(gate.finalization_ticket().unwrap(), || {
+            Some(current.into())
+        })
+        .unwrap()
+        .unwrap();
+        let (operation, outcome) = gate.take_successor_terminal().unwrap();
+        assert_eq!(operation, request.operation());
+        assert_eq!(outcome.unwrap().as_url().as_str(), current);
+        assert!(gate.ready(Some(current)));
+        assert_eq!(gate.location_changed(Some(requested)), Ok(true));
+        assert!(gate.failed());
+    }
+    #[test]
     fn startup_finalization_freezes_original_navigation_before_any_dispatch() {
         let current = "https://example.test/frozen?opaque=one";
         let gate = finalizing();
@@ -1079,6 +1259,42 @@ mod tests {
             assert!(gate.finalize(|| current.map(str::to_owned)).is_err());
             assert!(gate.failed());
         }
+    }
+    #[test]
+    fn query_finalization_refuses_transient_forbidden_kvo_before_any_sample() {
+        for current in [
+            None,
+            Some("https://example.test/other?x=1"),
+            Some("https://else.test/frozen?x=1"),
+            Some("https://example.test/frozen?x=1#fragment"),
+            Some("not a URL"),
+        ] {
+            let gate = finalizing();
+            let ticket = gate.finalization_ticket().unwrap();
+            assert_eq!(gate.location_changed(current), Ok(true));
+            assert!(gate.failed());
+            assert!(gate
+                .finalize_after_quiet_period(ticket, || panic!(
+                    "forbidden KVO cannot be hidden by a later sample"
+                ),)
+                .is_err());
+        }
+
+        let committed =
+            armed_policy(zephium_agentic::WorkBrowserDocumentPolicy::InitialQueryFinalization);
+        assert_eq!(
+            committed.observe(event(1, E::Started, URL)),
+            Ok((false, false))
+        );
+        assert_eq!(
+            committed.observe(event(1, E::Committed, URL)),
+            Ok((true, false))
+        );
+        assert_eq!(
+            committed.location_changed(Some("https://example.test/other?x=1")),
+            Ok(true)
+        );
+        assert!(committed.failed());
     }
     #[test]
     fn startup_never_finalizes_missing_foreign_or_redirected_native_lineage() {

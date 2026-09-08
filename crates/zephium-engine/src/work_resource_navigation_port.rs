@@ -108,9 +108,12 @@ impl WorkNavigationTask {
             return;
         };
         let operation = request.navigation().operation();
-        let committed = outcome
-            .as_ref()
-            .is_ok_and(|target| target == request.navigation().target());
+        let committed = outcome.as_ref().is_ok_and(|target| {
+            request
+                .navigation()
+                .document_policy()
+                .admits_final_document(request.navigation().target(), target)
+        });
         if !committed {
             self.guard.fail();
         }

@@ -2054,6 +2054,10 @@ impl EngineHost {
         task: AgentContextTask,
         request: ContextNavigationRequest,
     ) {
+        if request.document_policy() != zephium_agentic::WorkBrowserDocumentPolicy::Exact {
+            task.refuse(ContextPortFailure::Unsupported);
+            return;
+        }
         let operation = request.operation();
         let requested = operation.context();
         let id = requested.identity().id();
@@ -3567,6 +3571,10 @@ impl EngineHost {
         task: AgentContextTask,
         request: ContextNavigationRequest,
     ) {
+        if request.document_policy() != zephium_agentic::WorkBrowserDocumentPolicy::Exact {
+            task.refuse(ContextPortFailure::Unsupported);
+            return;
+        }
         let operation = request.operation();
         let requested = operation.context();
         let id = requested.identity().id();

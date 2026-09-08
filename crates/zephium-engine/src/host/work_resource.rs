@@ -26,6 +26,22 @@ use zephium_core::{ids::ProfileId, ports::engine::Partition};
 
 const CONSTRUCTION_BUDGET: Duration = Duration::from_secs(30);
 const DRAIN_BUDGET: Duration = Duration::from_secs(5);
+// Web pages may perform a bounded same-document URL finalization shortly after
+// their exact native navigation finishes. Only an explicitly trusted document
+// policy enters this native quiet-period fence. Exact documents pay no delay.
+const DOCUMENT_FINALIZATION_QUIET_PERIOD: Duration = Duration::from_millis(500);
+
+struct DocumentFinalizationWake {
+    timer: Option<crate::platform::imp::ContentPolicyTimeout>,
+    ticket: crate::platform::work_document_navigation::WorkDocumentFinalizationTicket,
+}
+
+enum DocumentFinalizationProgress {
+    Pending,
+    Ready(zephium_agentic::ContextNavigationTarget),
+    WakeUnavailable,
+    Refused,
+}
 
 #[cfg(feature = "native-agentic-work-resource-probe")]
 #[path = "work_resource_witness.rs"]
@@ -44,6 +60,9 @@ pub(super) struct WorkNativeResource {
     watchdog: Option<crate::platform::imp::ContentPolicyTimeout>,
     observation: Option<observation::WorkObservation>,
     navigation: Option<navigation::WorkNavigation>,
+    document_finalization_wake: Option<DocumentFinalizationWake>,
+    document_finalization_ready:
+        Option<crate::platform::work_document_navigation::WorkDocumentFinalizationTicket>,
     last_invocation: u64,
     document_started: bool,
     retirement_clean: bool,
@@ -114,6 +133,8 @@ impl WorkNativeResource {
             watchdog: None,
             observation: None,
             navigation: None,
+            document_finalization_wake: None,
+            document_finalization_ready: None,
             last_invocation: 0,
             document_started: false,
             retirement_clean: true,
@@ -153,6 +174,68 @@ impl WorkNativeResource {
             || self.destruction.is_some()
             || self.observation.is_some()
             || self.navigation.is_some()
+    }
+    fn schedule_document_finalization_wake(
+        &mut self,
+        ticket: crate::platform::work_document_navigation::WorkDocumentFinalizationTicket,
+    ) -> bool {
+        if self.document_finalization_wake.is_some() || self.document_finalization_ready.is_some() {
+            return false;
+        }
+        let guard = self.guard.clone();
+        let rejected = guard.clone();
+        let wake_ticket = ticket.clone();
+        let timer = crate::platform::imp::schedule_content_policy_timeout(
+            DOCUMENT_FINALIZATION_QUIET_PERIOD,
+            move || {
+                if !crate::host::try_with_agent_context_terminal(move |host| {
+                    host.wake_work_document_finalization(&guard, wake_ticket)
+                }) {
+                    rejected.fail();
+                }
+            },
+        );
+        let Some(timer) = timer else {
+            return false;
+        };
+        self.document_finalization_wake = Some(DocumentFinalizationWake {
+            timer: Some(timer),
+            ticket,
+        });
+        true
+    }
+    fn progress_document_finalization(
+        &mut self,
+        gate: &crate::platform::work_document_navigation::WorkDocumentNavigation,
+    ) -> DocumentFinalizationProgress {
+        let Some(ticket) = self.document_finalization_ready.take() else {
+            if self.document_finalization_wake.is_some() {
+                return DocumentFinalizationProgress::Pending;
+            }
+            return match gate
+                .finalization_ticket()
+                .filter(|ticket| self.schedule_document_finalization_wake(ticket.clone()))
+            {
+                Some(_) => DocumentFinalizationProgress::Pending,
+                None => DocumentFinalizationProgress::WakeUnavailable,
+            };
+        };
+        let outcome = self.view.as_ref().map_or(Err(()), |view| {
+            gate.finalize_after_quiet_period(ticket, || {
+                crate::platform::imp::current_url(view.view())
+            })
+        });
+        match outcome {
+            Ok(Some(effective)) => DocumentFinalizationProgress::Ready(effective),
+            Ok(None) => match gate
+                .finalization_ticket()
+                .filter(|ticket| self.schedule_document_finalization_wake(ticket.clone()))
+            {
+                Some(_) => DocumentFinalizationProgress::Pending,
+                None => DocumentFinalizationProgress::WakeUnavailable,
+            },
+            Err(()) => DocumentFinalizationProgress::Refused,
+        }
     }
     pub(super) fn resident(&self) -> bool {
         self.view.is_some()
@@ -330,6 +413,40 @@ impl EngineHost {
             .values()
             .filter(|resource| resource.guard.execution_reserved())
             .count()
+    }
+    fn wake_work_document_finalization(
+        &mut self,
+        guard: &Arc<WorkResourceGuard>,
+        ticket: crate::platform::work_document_navigation::WorkDocumentFinalizationTicket,
+    ) {
+        let id = guard.resource().identity().context();
+        let ready = self
+            .work_resources
+            .get_mut(&id)
+            .filter(|resource| Arc::ptr_eq(&resource.guard, guard))
+            .is_some_and(|resource| {
+                let Some(mut wake) = resource.document_finalization_wake.take() else {
+                    return false;
+                };
+                if wake.ticket != ticket {
+                    resource.document_finalization_wake = Some(wake);
+                    return false;
+                }
+                // The one-shot entered before the host turn. Dropping its
+                // handle here cannot manufacture another wake.
+                wake.timer = None;
+                if resource
+                    .document_finalization_ready
+                    .replace(ticket)
+                    .is_some()
+                {
+                    guard.fail();
+                }
+                true
+            });
+        if ready {
+            self.progress_work_resource(guard);
+        }
     }
     pub(crate) fn handle_work_lifecycle_task(&mut self, task: WorkLifecycleTask) {
         let Some(request) = task.request() else {
@@ -572,6 +689,8 @@ impl EngineHost {
             watchdog: None,
             observation: None,
             navigation: None,
+            document_finalization_wake: None,
+            document_finalization_ready: None,
             last_invocation: 0,
             document_started: false,
             retirement_clean: false,
@@ -722,6 +841,8 @@ impl EngineHost {
                 resource.record_construction_failure("native_health");
             }
             resource.watchdog = None;
+            resource.document_finalization_wake = None;
+            resource.document_finalization_ready = None;
             resource.lifecycle_deadline = None;
             if let Some(task) = resource.construction.take() {
                 task.complete(Outcome::Refused);
@@ -781,53 +902,65 @@ impl EngineHost {
                 .as_ref()
                 .is_some_and(|view| view.semantic_pending_for_audit() == Some(false))
             {
-                if let Some(view) = resource.view.as_ref() {
-                    if let Some(gate) = view
-                        .work_navigation()
-                        .filter(|gate| gate.finalization_pending())
-                    {
-                        // No lease/read exists here. Freeze one revision-fenced
-                        // native location under the original navigation identity.
-                        match gate.finalize(|| crate::platform::imp::current_url(view.view())) {
-                            Ok(effective) if guard.construction_current() => {
-                                resource.watchdog = None;
-                                resource.lifecycle_deadline = None;
-                                if let Some(task) = resource.construction.take() {
-                                    task.complete_document(effective);
-                                }
-                            }
-                            _ => {
-                                #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
-                                guard.record_failure_cause(
-                                    ResourceFailureCause::DocumentFinalizationRefused,
-                                );
-                                #[cfg(feature = "native-agentic-work-resource-probe")]
-                                guard.record_construction_evidence(|| {
-                                    // Finalization already consumed its sole
-                                    // sample. Do not inspect the URL again to
-                                    // describe a failed/raced attempt.
-                                    crate::agent_context_port::resource_witness::ConstructionEvidence {
-                                        cause: "document_finalization",
-                                        port_failure: None,
-                                        navigation: gate.construction_evidence(),
-                                        document_started: resource.document_started,
-                                        deadline_expired: resource.deadline_expired,
-                                        guard_healthy: guard.is_healthy(),
-                                        current_document: false,
-                                        current_components: None,
-                                        semantic_pending: view.semantic_pending_for_audit(),
-                                    }
-                                });
-                                guard.fail();
-                                resource.watchdog = None;
-                                resource.lifecycle_deadline = None;
-                                if let Some(task) = resource.construction.take() {
-                                    task.complete(Outcome::Refused);
-                                }
+                let finalizing = resource
+                    .view
+                    .as_ref()
+                    .and_then(|view| view.work_navigation())
+                    .filter(|gate| gate.finalization_pending())
+                    .cloned();
+                if let Some(gate) = finalizing {
+                    // No lease/read exists here. Require one native quiet
+                    // period, then freeze one revision-fenced location sample
+                    // under the original navigation identity.
+                    match resource.progress_document_finalization(&gate) {
+                        DocumentFinalizationProgress::Pending => return,
+                        DocumentFinalizationProgress::Ready(effective)
+                            if guard.construction_current() =>
+                        {
+                            resource.watchdog = None;
+                            resource.lifecycle_deadline = None;
+                            if let Some(task) = resource.construction.take() {
+                                task.complete_document(effective);
                             }
                         }
-                        return;
+                        DocumentFinalizationProgress::Ready(_)
+                        | DocumentFinalizationProgress::WakeUnavailable
+                        | DocumentFinalizationProgress::Refused => {
+                            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                            guard.record_failure_cause(
+                                ResourceFailureCause::DocumentFinalizationRefused,
+                            );
+                            #[cfg(feature = "native-agentic-work-resource-probe")]
+                            guard.record_construction_evidence(|| {
+                                // A raced authoritative sample is never repeated
+                                // for diagnostics. A stale quiet ticket consumed
+                                // no sample and would have remained Pending.
+                                crate::agent_context_port::resource_witness::ConstructionEvidence {
+                                    cause: "document_finalization",
+                                    port_failure: None,
+                                    navigation: gate.construction_evidence(),
+                                    document_started: resource.document_started,
+                                    deadline_expired: resource.deadline_expired,
+                                    guard_healthy: guard.is_healthy(),
+                                    current_document: false,
+                                    current_components: None,
+                                    semantic_pending: resource
+                                        .view
+                                        .as_ref()
+                                        .and_then(|view| view.semantic_pending_for_audit()),
+                                }
+                            });
+                            guard.fail();
+                            resource.watchdog = None;
+                            resource.document_finalization_wake = None;
+                            resource.document_finalization_ready = None;
+                            resource.lifecycle_deadline = None;
+                            if let Some(task) = resource.construction.take() {
+                                task.complete(Outcome::Refused);
+                            }
+                        }
                     }
+                    return;
                 }
             }
             if resource.ready()

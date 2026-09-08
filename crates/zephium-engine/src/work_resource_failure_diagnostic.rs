@@ -49,6 +49,8 @@ pub enum WorkSuccessorNavigationFailure {
         gate_failed: bool,
         relation: WorkUrlObservationFailure,
     },
+    FinalizationTimerUnavailable,
+    FinalizationRefused,
     TimerUnavailable,
     ArmRefused,
     SemanticPreparationRefused,
