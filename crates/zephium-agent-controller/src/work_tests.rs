@@ -1925,7 +1925,12 @@ fn provider_fixture_with_account(
         return;
     }
     if let ProviderFault::Read(fault) = fault {
-        assert_eq!(server.join().expect("read fixture server"), requests / 2);
+        assert_eq!(
+            server.join().unwrap_or_else(|error| panic!(
+                "read fixture server: {fault:?}; outcome={outcome:?}; {error:?}"
+            )),
+            requests / 2
+        );
         read_tests::assert_outcome(fault, outcome, shutdown, &calls, &events);
         return;
     }

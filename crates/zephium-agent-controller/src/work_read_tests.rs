@@ -4,6 +4,8 @@ use super::*;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ReadFault {
     None,
+    LocateMiss,
+    LocateMissCeiling,
     Extraction,
     AfterActionExtraction,
     Disabled,
@@ -22,7 +24,7 @@ impl ReadFault {
         match self {
             Self::AfterActionExtraction => 8,
             Self::Disabled | Self::Subtree => 2,
-            Self::Ceiling => 16,
+            Self::Ceiling | Self::LocateMissCeiling => 16,
             Self::CountRefused | Self::CancelCount | Self::SuspendCount => 3,
             Self::StreamRefused | Self::TakeoverStream => 4,
             _ => 6,
@@ -44,6 +46,13 @@ impl ReadFault {
             )
     }
     pub(super) fn stream(self, turn: u8) -> String {
+        if self == Self::LocateMissCeiling || (self == Self::LocateMiss && turn == 1) {
+            return named_tool_stream(
+                turn,
+                "locate",
+                r#"{\"semantic_query\":\"missing specifications\",\"scope\":{\"kind\":\"initial\"}}"#,
+            );
+        }
         if matches!(self, Self::Extraction | Self::AfterActionExtraction) {
             let turn_in_read = if self == Self::AfterActionExtraction {
                 if turn == 1 {
@@ -82,7 +91,15 @@ impl ReadFault {
         if turns == 0 {
             assert_eq!(body.contains("\"name\":\"read\""), self != Self::Disabled);
         }
-        if turns > u8::from(self == Self::AfterActionExtraction) {
+        if turns > 0 && matches!(self, Self::LocateMiss | Self::LocateMissCeiling) {
+            assert!(body.contains("ZLOC1 content=untrusted"));
+            assert!(body.contains("matches=0 matched=0"));
+            assert!(body.contains("Every continuation consumes the existing turn/token budget"));
+        }
+        if turns > u8::from(self == Self::AfterActionExtraction)
+            && self != Self::LocateMissCeiling
+            && !(self == Self::LocateMiss && turns == 1)
+        {
             assert!(body.contains("ZREAD3 content=untrusted"));
             assert!(body.contains("Field"));
         }
@@ -175,6 +192,8 @@ fn read_continuations_preserve_baseline_budget_stop_and_cleanup_ownership() {
     let _serial = lock(&SERIAL);
     for fault in [
         ReadFault::None,
+        ReadFault::LocateMiss,
+        ReadFault::LocateMissCeiling,
         ReadFault::Extraction,
         ReadFault::AfterActionExtraction,
         ReadFault::Disabled,
@@ -221,7 +240,7 @@ pub(super) fn assert_outcome(
             actions as usize
         );
         assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
-    } else if fault == ReadFault::None {
+    } else if matches!(fault, ReadFault::None | ReadFault::LocateMiss) {
         let AgentWorkOutcome::Succeeded(success) = outcome else {
             panic!("{fault:?}: {outcome:?}")
         };
@@ -235,8 +254,18 @@ pub(super) fn assert_outcome(
                 .filter(|event| event.kind()
                     == AgentWorkEventKind::ToolProposed(AgentBrowserToolKind::Read))
                 .count(),
-            2
+            if fault == ReadFault::LocateMiss { 1 } else { 2 }
         );
+        if fault == ReadFault::LocateMiss {
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event.kind()
+                        == AgentWorkEventKind::ToolProposed(AgentBrowserToolKind::Locate))
+                    .count(),
+                1
+            );
+        }
     } else if matches!(fault, ReadFault::ActionLost | ReadFault::AuditLost) {
         let AgentWorkOutcome::Recovery(recovery) = outcome else {
             panic!("{fault:?}: {outcome:?}")
@@ -287,7 +316,7 @@ pub(super) fn assert_outcome(
         if let Some(stop) = stop {
             assert_eq!(closed.failure(), stop);
         }
-        if fault == ReadFault::Ceiling {
+        if matches!(fault, ReadFault::Ceiling | ReadFault::LocateMissCeiling) {
             assert_eq!(
                 closed.failure(),
                 AgentWorkFailure::Browser(AgentBrowserProviderError::TurnLimit)

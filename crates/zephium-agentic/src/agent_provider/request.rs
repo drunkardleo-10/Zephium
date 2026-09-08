@@ -5067,7 +5067,7 @@ fn tool_description(kind: AgentBrowserToolKind) -> &'static str {
         AgentBrowserToolKind::Reload => "Propose reloading the exact current document.",
         AgentBrowserToolKind::Snapshot => "Request one bounded semantic observation.",
         AgentBrowserToolKind::Locate => {
-            "Locate a visible control or latent collapsed-control option by semantics, never by selector."
+            "Search only the current retained semantic observation, including collapsed option labels; this does not capture more page content. Use a short name or content phrase, optionally with role/context. Partial context matches require the complete accessible name or safe value, not a few words in a text excerpt. matches=0 is a completed lookup, not a page-wide absence claim. Simplify the query or inspect a different current scope with snapshot when available; repeating the same lookup cannot discover omitted content. Every continuation consumes the existing turn/token budget. Never use selectors or invent refs."
         }
         AgentBrowserToolKind::Act => "Propose one bounded, homogeneous semantic action batch.",
         AgentBrowserToolKind::Wait => "Wait for one typed observable condition.",

@@ -303,7 +303,8 @@ pub enum SemanticLocateMatchQuality {
     AllTermsInText,
     /// Every query term occurs across name, text, safe value, role, or state.
     AllTermsAcrossSemantics,
-    /// A distinctive content term matched with the strongest bounded context coverage.
+    /// The complete accessible name or safe value occurs in the query; extra
+    /// contextual qualifiers are unmatched. Role/state labels alone cannot anchor this.
     PartialSemantics,
 }
 
@@ -773,7 +774,6 @@ fn match_node(
     let node = nodes.get(node_index)?;
     let required = query.required_term_bits();
     let mut across = 0_u16;
-    let mut content_bits = 0_u16;
     let mut name_bits = 0_u16;
     let mut text_bits = 0_u16;
     let mut exact_name = false;
@@ -781,19 +781,19 @@ fn match_node(
     let mut exact_value = false;
     let mut name_phrase = false;
     let mut text_phrase = false;
+    let mut content_anchor = false;
 
     if let Some(name) = node.name() {
         normalize_into(scratch, name.as_str());
         name_bits = term_bits(scratch, &query.terms);
-        content_bits |= name_bits;
         across |= name_bits;
         exact_name = scratch == &query.normalized;
         name_phrase = contains_normalized_phrase(scratch, &query.normalized);
+        content_anchor = query_contains_content_anchor(query, scratch);
     }
     if let Some(text) = node.text() {
         normalize_into(scratch, text.as_str());
         text_bits = term_bits(scratch, &query.terms);
-        content_bits |= text_bits;
         across |= text_bits;
         exact_text = scratch == &query.normalized;
         text_phrase = contains_normalized_phrase(scratch, &query.normalized);
@@ -801,9 +801,9 @@ fn match_node(
     if let Some(SemanticValueSummary::Text(value)) = node.value() {
         normalize_into(scratch, value.preview().text());
         let value_bits = term_bits(scratch, &query.terms);
-        content_bits |= value_bits;
         across |= value_bits;
         exact_value = scratch == &query.normalized;
+        content_anchor |= query_contains_content_anchor(query, scratch);
     }
     normalize_into(scratch, role_label(node.role()));
     across |= term_bits(scratch, &query.terms) | role_alias_bits(node.role(), &query.terms);
@@ -819,10 +819,6 @@ fn match_node(
     let matched_terms = (across & required).count_ones();
     let required_terms = required.count_ones();
     let unmatched_terms = u8::try_from(required_terms.saturating_sub(matched_terms)).ok()?;
-    let exact_name_term = node.name().is_some_and(|name| {
-        normalize_into(scratch, name.as_str());
-        query.terms.iter().any(|term| term == scratch)
-    });
 
     let quality = if exact_name {
         SemanticLocateMatchQuality::ExactName
@@ -842,7 +838,7 @@ fn match_node(
         SemanticLocateMatchQuality::AllTermsInText
     } else if across & required == required {
         SemanticLocateMatchQuality::AllTermsAcrossSemantics
-    } else if content_bits & required != 0 && (matched_terms >= 2 || exact_name_term) {
+    } else if content_anchor {
         SemanticLocateMatchQuality::PartialSemantics
     } else {
         return None;
@@ -851,6 +847,64 @@ fn match_node(
         quality,
         unmatched_terms,
     })
+}
+
+/// Partial context needs an explicit complete content anchor. A few words in
+/// a long text excerpt plus a role/ancestor match cannot stand in for an absent
+/// target. Structural labels remain useful as exact/all-term queries only.
+fn query_contains_content_anchor(query: &SemanticLocateQuery, anchor: &str) -> bool {
+    !anchor.is_empty()
+        && anchor.split(' ').any(|term| {
+            !is_query_stopword(term)
+                && !ALL_SEMANTIC_STATES
+                    .iter()
+                    .any(|state| state_label(*state) == term)
+                && !matches!(
+                    term,
+                    "document"
+                        | "region"
+                        | "group"
+                        | "landmark"
+                        | "heading"
+                        | "paragraph"
+                        | "section"
+                        | "button"
+                        | "link"
+                        | "textbox"
+                        | "searchbox"
+                        | "spinbutton"
+                        | "password"
+                        | "checkbox"
+                        | "radio"
+                        | "combobox"
+                        | "listbox"
+                        | "option"
+                        | "slider"
+                        | "tab"
+                        | "table"
+                        | "row"
+                        | "cell"
+                        | "header"
+                        | "image"
+                        | "text"
+                        | "list"
+                        | "item"
+                        | "menu"
+                        | "dialog"
+                        | "progress"
+                        | "status"
+                        | "frame"
+                        | "boundary"
+                        | "select"
+                        | "selector"
+                        | "dropdown"
+                        | "choice"
+                        | "input"
+                        | "field"
+                        | "control"
+                )
+        })
+        && contains_normalized_phrase(&query.normalized, anchor)
 }
 
 fn ancestor_term_bits(
@@ -1380,6 +1434,62 @@ mod tests {
         assert_eq!(
             account.matches()[0].quality(),
             SemanticLocateMatchQuality::PartialSemantics
+        );
+    }
+
+    #[test]
+    fn partial_context_requires_a_complete_content_anchor_not_excerpt_and_role_overlap() {
+        let context = context(170);
+        let main = snapshot(
+            context,
+            FrameId::MAIN,
+            context.frame_generation(),
+            "https://locate.example.test/product",
+            1,
+            1,
+            json!([
+                {"k": 1, "r": "heading", "l": 1, "n": "Paris – City of Love",
+                 "t": "Paris – City of Love 1 / 17 View all Architecture Available now Add to Bag Product details"},
+                {"k": 2, "r": "heading", "l": 2, "n": "heading"}
+            ]),
+        );
+        let observation = SemanticObservationAssembler::new(
+            SemanticObservationRequest::initial(
+                SemanticObservationId::new(190).unwrap(),
+                context,
+                SemanticObservationBudget::try_new(8, 8 * 1024, 1).unwrap(),
+            ),
+            main,
+        )
+        .unwrap()
+        .finish()
+        .unwrap();
+        for query in [
+            "the visible Specifications section or heading for the product",
+            "Specifications section or heading",
+            "product dimensions width depth height",
+        ] {
+            assert!(
+                locate(&observation, 1, query, SemanticLocateScope::Initial, 8)
+                    .matches()
+                    .is_empty(),
+                "{query}"
+            );
+        }
+        let named = locate(
+            &observation,
+            2,
+            "Paris City of Love product heading",
+            SemanticLocateScope::Initial,
+            8,
+        );
+        assert_eq!(named.matches().len(), 1);
+        assert_eq!(named.matches()[0].reference().get(), 1);
+        assert_eq!(
+            locate(&observation, 3, "heading", SemanticLocateScope::Initial, 8)
+                .matches()
+                .len(),
+            2
         );
     }
 

@@ -2260,10 +2260,6 @@ impl AgentBrowserSession {
             .map(|snapshot| snapshot.frame().clone())
             .collect::<Vec<_>>();
         let query = query.into_locate_query();
-        let query_bytes =
-            u16::try_from(query.byte_len()).map_err(|_| AgentBrowserProviderError::Authority)?;
-        let query_terms =
-            u8::try_from(query.term_count()).map_err(|_| AgentBrowserProviderError::Authority)?;
         let request = SemanticLocateRequest::bind(
             SemanticLocateId::new(locate_id).ok_or(AgentBrowserProviderError::Authority)?,
             observation,
@@ -2278,13 +2274,9 @@ impl AgentBrowserSession {
         .map_err(|_| AgentBrowserProviderError::Locate)?;
         let result = locate_semantic_observation(observation, request)
             .map_err(|_| AgentBrowserProviderError::Locate)?;
-        if result.matches().is_empty() {
-            return Err(AgentBrowserProviderError::LocateNoMatches {
-                query_bytes,
-                query_terms,
-                scanned_nodes: result.stats().scanned_nodes(),
-            });
-        }
+        // A miss is a completed inspection of this bounded baseline. Deliver
+        // it through the same authenticated, budgeted continuation as a match;
+        // the model may simplify its query or request a fresh scoped snapshot.
         let payload = encode_semantic_locate_result(
             &result,
             SemanticModelEncodingBudget::LOCATE_RESULT_PROVIDER_EXACT_CONSERVATIVE,
@@ -3515,16 +3507,6 @@ pub enum AgentBrowserProviderError {
     /// The fixed semantic matcher refused the acknowledged observation.
     #[error("Terra probe semantic locate failed")]
     Locate,
-    /// The fixed semantic matcher found no non-secret result for the query.
-    #[error("Terra probe semantic locate returned no matches")]
-    LocateNoMatches {
-        /// Bounded UTF-8 length of the redacted model query.
-        query_bytes: u16,
-        /// Distinct normalized query-term count.
-        query_terms: u8,
-        /// In-scope semantic nodes examined by the fixed matcher.
-        scanned_nodes: u16,
-    },
     /// The bounded semantic locate result could not be encoded.
     #[error("Terra probe locate result encoding failed")]
     LocateEncoding(SemanticModelEncodingError),
