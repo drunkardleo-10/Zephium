@@ -1305,6 +1305,52 @@ async function finish() {
     unicodeWindow.n.every(node => !node.t || Buffer.byteLength(node.t) <= 4096),
   "window suffix, UTF-8 field clipping, or later source discovery regressed");
 
+  // Inline semantic words must stay in order in their actual prose source.
+  // Otherwise dropping the link "not" can reverse an extracted claim.
+  const fidelityPage = new Element("main");
+  const fidelityHeading = fidelityPage.append(new Element("h2"));
+  fidelityHeading.append(new CharacterData("Availability evidence"));
+  const negativeProse = fidelityPage.append(new Element("p"));
+  negativeProse.append(new CharacterData("This model is "));
+  const inlineNegation = negativeProse.append(new HTMLAnchorElement({ href: "https://example.test/terms", "aria-label": "Terms" }));
+  inlineNegation.append(new CharacterData("not"));
+  negativeProse.append(new CharacterData(" available."));
+  fidelityPage.append(new Element("p")).append(new CharacterData("Another model is available."));
+  const inlineHeading = fidelityPage.append(new Element("h3"));
+  inlineHeading.append(new CharacterData("Do "));
+  inlineHeading.append(new HTMLAnchorElement({ href: "https://example.test/shipping" })).append(new CharacterData("not"));
+  inlineHeading.append(new CharacterData(" ship."));
+  const interruptedProse = fidelityPage.append(new Element("li"));
+  interruptedProse.append(new CharacterData("Shipping is "));
+  interruptedProse.append(new Element("p")).append(new CharacterData("not"));
+  interruptedProse.append(new CharacterData(" available."));
+  const fencedProse = fidelityPage.append(new Element("p"));
+  fencedProse.append(new CharacterData("Private result is "));
+  fencedProse.append(new Element("span", { contenteditable: "true" })).append(new CharacterData("private-negation"));
+  fencedProse.append(new CharacterData(" approved."));
+  document._root = fidelityPage; setOwner(fidelityPage, document);
+  const fidelityInitial = JSON.parse(invoke(135, 135, { k: "initial" }));
+  const fidelityKey = fidelityInitial.n.find(node => node.n === "Availability evidence").k;
+  const negativeProseKey = fidelityInitial.n.find(node => node.t === "This model is not available.").k;
+  const fidelityWindowWire = invoke(136, 136, { k: "surrounding_text", a: fidelityKey, p: 0, n: 2048 });
+  const fidelityWindow = JSON.parse(fidelityWindowWire);
+  assert(fidelityWindow.n.find(node => node.k === negativeProseKey)?.t === "This model is not available.",
+    "inline negation was omitted from its surrounding source quote");
+  assert(JSON.stringify(fidelityWindow.n.slice(1).map(node => node.t)) === JSON.stringify([
+    "This model is not available.", "Another model is available.", "Do not ship.",
+    "Shipping is", "not", "Private result is"
+  ]), "surrounding source order or contiguous quote fidelity changed");
+  assert(fidelityWindow.c === "scope_boundary" && !fidelityWindowWire.includes("Shipping is available.") &&
+    !fidelityWindowWire.includes("Private result is approved.") && !fidelityWindowWire.includes("private-negation") &&
+    fidelityWindow.n.every(node => !node.o && !node.u && node.p === undefined),
+  "discontiguous/private prose became a false quote or gained authority");
+  const fidelityAgain = JSON.parse(invoke(137, 137, { k: "initial" }));
+  const omittedNegationKey = fidelityAgain.n.find(node => node.n === "Terms").k;
+  const aroundInline = JSON.parse(invoke(138, 138, { k: "surrounding_text", a: omittedNegationKey, p: 14, n: 11 }));
+  assert(aroundInline.c === "scope_boundary" && aroundInline.n.find(node => node.k === negativeProseKey)?.t === "This model is" &&
+    !JSON.stringify(aroundInline).includes("This model is available."),
+  "before/after context joined across the omitted anchor into a false quote");
+
   process.stdout.write(`${JSON.stringify({
     offscreen_anchor_wire_bytes: inventoryExtraBytes,
     parent_region_nodes: region.n.length,
@@ -1312,6 +1358,7 @@ async function finish() {
     surrounding_source_nodes: surrounding.n.length,
     field_local_discovery: true,
     surrounding_fresh_source_continuation: true,
+    surrounding_source_quote_fidelity: true,
     schema: "zephium.agentic.semantic-runtime-smoke.v1",
     initial_nodes: initial.n.length,
     expanded_nodes: expansion.n.length,

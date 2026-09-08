@@ -389,6 +389,10 @@ or observed on either platform.
   using a bounded tail scan; editable, private, hidden and frame subtrees are fenced.
   A single oversized source can still be incomplete; surrounding it reads after
   that source's subtree, not a byte-offset continuation inside it.
+  Inline visible words retain their surrounding textual source in DOM order.
+  A source that reappears after another source, an omitted anchor, or a privacy
+  boundary retains only its first contiguous run and reports `scope_boundary`;
+  separated fragments never become a fabricated contiguous source quote.
 - The initial projection is viewport-filtered while retaining document,
   meaningful landmark, dialog, and focused-element semantics. Closed anchored
   region, subtree, table, frame-boundary, and surrounding-text requests resolve

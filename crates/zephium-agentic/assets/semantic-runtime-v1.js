@@ -1742,7 +1742,7 @@
         bytes += separator + chunkBytes;
       } else {
         const keep = mathMax(0, byteLimit - bytes - separator);
-        const last = { element: chunks[index].element, text: utf8Suffix(chunks[index].text, keep) };
+        const last = { element: chunks[index].element, run: chunks[index].run, text: utf8Suffix(chunks[index].text, keep) };
         chunks.splice(0, index + 1, last);
         mark(state, "scope_boundary", false);
         return;
@@ -1771,15 +1771,18 @@
     const after = [];
     let afterBytes = 0;
     let seenAnchor = false;
+    let previousSource = null;
+    let run = 0;
     const root = read(documentElementGetter, document);
     if (root === null || root === undefined) return [];
-    const stack = [{ node: root, source: document }];
+    const stack = [{ node: root, source: document, textual: false }];
     while (stack.length !== 0 && !state.stopped) {
       const item = stack.pop();
       const current = item.node;
       if (!visit(state)) break;
       if (current === anchor) {
         seenAnchor = true;
+        previousSource = null;
         continue;
       }
       const type = nodeType(current);
@@ -1787,14 +1790,13 @@
         if (!textNodeVisible(current)) continue;
         const raw = read(characterDataGetter, current);
         if (typeof raw !== "string") continue;
+        if (previousSource !== item.source) { run += 1; previousSource = item.source; }
         if (!seenAnchor) {
-          // Keep the nearest suffix, not the beginning of a long preceding
-          // text node. Both the scan and temporary normalized string are
-          // bounded independently of a hostile node's total length.
+          // Keep the nearest suffix with a bounded tail scan and storage.
           const scan = beforeLimit * 8 + 256;
           const tail = apply(stringSlice, raw, [-scan]);
           const normalized = normalizeText(tail, scan * 3);
-          addRollingChunk(before, { element: item.source, text: utf8Suffix(normalized.value, beforeLimit) }, beforeLimit, state);
+          addRollingChunk(before, { element: item.source, run, text: utf8Suffix(normalized.value, beforeLimit) }, beforeLimit, state);
           if (normalized.truncated || normalized.bytes > beforeLimit || tail.length < raw.length) {
             mark(state, "scope_boundary", false);
           }
@@ -1803,7 +1805,7 @@
           const normalized = normalizeText(raw, mathMax(0, afterLimit - afterBytes - separator));
           if (normalized.value !== "") {
             if (after.length >= state.request.b.n) { mark(state, "node_limit", false); break; }
-            after.push({ element: item.source, text: normalized.value });
+            after.push({ element: item.source, run, text: normalized.value });
             afterBytes += separator + normalized.bytes;
           }
           if (normalized.truncated) { mark(state, "scope_boundary", false); break; }
@@ -1815,6 +1817,7 @@
         continue;
       }
       let source = item.source;
+      let textual = item.textual;
       if (type === 1) {
         // A read window does not expose editable values, hidden ancestors, or
         // credential descendants through an unrelated prose/heading source.
@@ -1825,10 +1828,21 @@
         if ((editable !== null && lower(editable) !== "false") ||
             sensitivityFor(current) !== "public" || role === "textbox" || role === "password" ||
             role === "searchbox" || role === "spinbutton" || role === "combobox" ||
-            role === "listbox" || role === "option" || role === "frame_boundary") continue;
-        if (descriptor !== null && elementRect(current) !== null) source = current;
+            role === "listbox" || role === "option" || role === "frame_boundary") {
+          previousSource = null;
+          continue;
+        }
+        if (descriptor !== null && elementRect(current) !== null) {
+          const sink = recordSink(descriptor, false);
+          // Visible inline names belong to their surrounding prose/name too.
+          // Nested block prose remains an independent semantic source.
+          if (!textual || sink === "text") {
+            source = current;
+            textual = sink === "name" || sink === "text";
+          }
+        }
       }
-      if (type === 1 || type === 9 || type === 11) pushChildren(stack, current, { source }, state);
+      if (type === 1 || type === 9 || type === 11) pushChildren(stack, current, { source, textual }, state);
       if (seenAnchor && afterLimit === 0) {
         if (stack.length !== 0) mark(state, "scope_boundary", false);
         break;
@@ -1849,8 +1863,7 @@
     delete record.wire.u;
     const records = [record];
     const chunks = surroundingChunks(anchor, state, state.request.s.p, state.request.s.n);
-    // Inspection may stop before projection. Preserve the bounded prefix and
-    // its truthful status; projecting it performs no additional DOM walk.
+    // Project the collected prefix without resuming an exhausted DOM walk.
     const inspectionStopped = state.stopped;
     state.stopped = false;
     for (const chunk of chunks) {
@@ -1863,16 +1876,20 @@
         if (records.length >= state.request.b.n) { mark(state, "node_limit"); break; }
         const sourceDescriptor = classify(chunk.element);
         if (sourceDescriptor === null) continue;
-        // Only actual source identity/role and its observed window text are
-        // projected. Partial windows cannot grant actions or navigation, and
-        // siblings are independent roots, never false children of the anchor.
+        // Actual source roots grant neither actions nor navigation.
         const wire = { k: keyFor(chunk.element, state.request.g), r: sourceDescriptor.role };
         if (sourceDescriptor.role === "heading") {
           const level = sourceDescriptor.level || Number(attribute(chunk.element, "aria-level", 8));
           wire.l = numberIsSafeInteger(level) && level >= 1 && level <= 6 ? level : 2;
         }
-        source = { wire, element: chunk.element, sink: "text", sinkBytes: 0, sensitivity: "public", depth: 0 };
+        source = { wire, element: chunk.element, run: chunk.run, sink: "text", sinkBytes: 0, sensitivity: "public", depth: 0 };
         records.push(source);
+      }
+      if (source.run !== chunk.run) {
+        // Never stitch text across another source, the omitted anchor, or a
+        // privacy boundary into a fabricated contiguous source quote.
+        mark(state, "scope_boundary", false);
+        continue;
       }
       appendSink(source, chunk.text, state);
     }

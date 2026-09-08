@@ -23,7 +23,7 @@ rejects malformed/non-link fields and omits sensitive, secret-shaped or
 noncanonical URLs. Destinations participate in observation fingerprints and
 semantic diffs. Model `navigate` proposals still dispatch the original exact
 native navigation operation, without invoking page click handlers.
-The pinned runtime is 97,643 source bytes; its installation cap is 96 KiB
+The pinned runtime is 98,189 source bytes; its installation cap is 96 KiB
 (previously 92 KiB). This accommodates the added fixed implementation, not
 additional observed page content or model input.
 
