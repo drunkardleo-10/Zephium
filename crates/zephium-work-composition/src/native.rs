@@ -78,12 +78,12 @@ enum NativeLifetimeOwner {
 
 impl MacosWorkComposition {
     #[cfg(feature = "retained-product-qualification")]
-    pub fn retained_construction_failure(
+    pub fn retained_resource_failure_cause(
         &self,
         view: &zephium_app::RetainedWorkHandle,
-    ) -> Option<zephium_engine::WorkConstructionFailure> {
+    ) -> Option<zephium_engine::WorkResourceFailureCause> {
         self.engine
-            .work_construction_failure(&view.construction_resource_for_qualification()?)
+            .work_resource_failure_cause(&view.construction_resource_for_qualification()?)
     }
     /// Launches a stateless, single-page retained Work request through the
     /// original Shell. No qualification owner, rendering or navigation lease

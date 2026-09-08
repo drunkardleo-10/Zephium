@@ -14,31 +14,32 @@ mod pane_geometry;
 mod platform;
 
 #[cfg(all(
-    feature = "native-agentic-work-construction-probe",
+    feature = "native-agentic-work-lifetime-diagnostic",
     not(debug_assertions)
 ))]
-compile_error!("native Work construction diagnostics are forbidden in optimized builds");
+compile_error!("native Work lifetime diagnostics are forbidden in optimized builds");
 
 #[cfg(all(
     target_os = "macos",
-    feature = "native-agentic-work-construction-probe"
+    feature = "native-agentic-work-lifetime-diagnostic"
 ))]
 #[doc(hidden)]
-pub use agent_context_port::work_construction_diagnostic::WorkConstructionFailure;
+pub use agent_context_port::work_resource_failure_diagnostic::WorkResourceFailureCause;
 
 #[cfg(all(
     target_os = "macos",
-    feature = "native-agentic-work-construction-probe"
+    feature = "native-agentic-work-lifetime-diagnostic"
 ))]
 impl WebviewEngine {
     /// Descriptive only, for the exact retained qualifier resource. No native
     /// getters, replacement authority, page data, or lifetime acquisition.
     #[doc(hidden)]
-    pub fn work_construction_failure(
+    pub fn work_resource_failure_cause(
         &self,
         resource: &zephium_agentic::WorkBrowserResourceJoin,
-    ) -> Option<WorkConstructionFailure> {
-        self.agent_context_port.work_construction_failure(resource)
+    ) -> Option<WorkResourceFailureCause> {
+        self.agent_context_port
+            .work_resource_failure_cause(resource)
     }
 }
 

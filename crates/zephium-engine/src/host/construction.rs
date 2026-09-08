@@ -1520,7 +1520,7 @@ impl EngineHost {
         let observation_id = id.clone();
         let observation_permit = event_permit.clone();
         let observation_navigation = navigation.clone();
-        let observer = match crate::platform::imp::install_navigation_observer(&view, move || {
+        let observer = match crate::platform::imp::install_navigation_observer(&view, move |_| {
             if observation_permit.active_token().is_none() {
                 return;
             }

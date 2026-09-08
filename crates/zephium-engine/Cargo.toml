@@ -69,8 +69,8 @@ native-agentic-foreground-probe = ["native-agentic-semantic-probe"]
 # Two execution leases over one page in that same actual-app qualification shell.
 native-agentic-work-resource-probe = ["native-agentic-foreground-probe"]
 native-agentic-public-resource-probe = ["native-agentic-work-resource-probe"]
-# Content-free construction failure evidence; no witness or rendering authority.
-native-agentic-work-construction-probe = ["agentic-browser"]
+# Content-free first lifetime-failure cause; no witness or rendering authority.
+native-agentic-work-lifetime-diagnostic = ["agentic-browser"]
 # Compiles the production, zero-idle agent-browser native port. The feature is
 # intentionally separate from the release-excluded probe vocabulary.
 agentic-browser = ["dep:zephium-agentic", "dep:zeroize"]

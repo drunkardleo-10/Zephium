@@ -177,23 +177,23 @@ pub struct ApplicationObserver {
     report: ApplicationReport,
     sequence: u64,
     failed: bool,
-    construction_failure: Option<zephium_engine::WorkConstructionFailure>,
+    resource_failure_cause: Option<zephium_engine::WorkResourceFailureCause>,
 }
 impl ApplicationObserver {
     /// Descriptive first cause only, read from the original resource before
     /// shutdown removes it. Does not affect native or controller decisions.
-    fn observe_construction_failure(
+    fn observe_resource_failure_cause(
         &mut self,
-        failure: Option<zephium_engine::WorkConstructionFailure>,
+        failure: Option<zephium_engine::WorkResourceFailureCause>,
     ) {
-        if self.construction_failure.is_none() {
-            self.construction_failure = failure;
+        if self.resource_failure_cause.is_none() {
+            self.resource_failure_cause = failure;
         }
     }
-    fn construction_diagnostic(&self) -> String {
+    fn resource_failure_diagnostic(&self) -> String {
         format!(
-            "work-retained-product-construction: cause={:?} content=redacted",
-            self.construction_failure
+            "work-retained-product-resource-failure: cause={:?} content=redacted",
+            self.resource_failure_cause
         )
     }
     pub fn report(&self) -> ApplicationReport {
@@ -205,7 +205,7 @@ impl ApplicationObserver {
     pub fn poll(
         &mut self,
         view: &RetainedWorkHandle,
-        construction_failure: impl FnOnce() -> Option<zephium_engine::WorkConstructionFailure>,
+        resource_failure_cause: impl FnOnce() -> Option<zephium_engine::WorkResourceFailureCause>,
     ) -> Option<ApplicationReport> {
         let snapshot = view.snapshot();
         for _ in 0..256 {
@@ -234,7 +234,7 @@ impl ApplicationObserver {
         // Sample after the terminal projection, not before it: a native failure
         // racing this poll must publish its cause before its resource terminal.
         // The ordinary shutdown owner has not yet removed the original guard.
-        self.observe_construction_failure(construction_failure());
+        self.observe_resource_failure_cause(resource_failure_cause());
         self.report.durable_terminal_verified = snapshot.record.is_some_and(|record| {
             record.disposition() == AgentWorkDisposition::Succeeded
                 && record.debt() == AgentWorkDebt::NONE
@@ -261,7 +261,7 @@ impl ApplicationObserver {
         self.report.accepted &= writeln!(
             std::io::stdout().lock(),
             "{}",
-            self.construction_diagnostic()
+            self.resource_failure_diagnostic()
         )
         .is_ok();
         Some(self.report)
@@ -319,13 +319,18 @@ mod objective_tests;
 mod tests {
     use super::*;
     #[test]
-    fn construction_failure_survives_observer_to_closed_content_free_log() {
-        use zephium_engine::WorkConstructionFailure as Failure;
+    fn resource_failure_cause_survives_observer_to_closed_content_free_log() {
+        use zephium_engine::WorkResourceFailureCause as Failure;
         for (cause, label) in [
-            (Failure::StrictNavigation, "StrictNavigation"),
+            (Failure::NavigationEventRefused, "NavigationEventRefused"),
+            (Failure::UrlObservationRefused, "UrlObservationRefused"),
+            (
+                Failure::DocumentFinalizationRefused,
+                "DocumentFinalizationRefused",
+            ),
             (Failure::RendererLost, "RendererLost"),
             (Failure::SemanticNativeInvariant, "SemanticNativeInvariant"),
-            (Failure::Deadline, "Deadline"),
+            (Failure::LifecycleDeadline, "LifecycleDeadline"),
             (
                 Failure::UnattributedResourceFailure,
                 "UnattributedResourceFailure",
@@ -336,13 +341,15 @@ mod tests {
             ),
         ] {
             let mut observer = ApplicationObserver::default();
-            observer.observe_construction_failure(None);
-            observer.observe_construction_failure(Some(cause));
-            observer.observe_construction_failure(None);
-            observer.observe_construction_failure(Some(Failure::Deadline));
+            observer.observe_resource_failure_cause(None);
+            observer.observe_resource_failure_cause(Some(cause));
+            observer.observe_resource_failure_cause(None);
+            observer.observe_resource_failure_cause(Some(Failure::LifecycleDeadline));
             assert_eq!(
-                observer.construction_diagnostic(),
-                format!("work-retained-product-construction: cause=Some({label}) content=redacted")
+                observer.resource_failure_diagnostic(),
+                format!(
+                    "work-retained-product-resource-failure: cause=Some({label}) content=redacted"
+                )
             );
             assert!(observer.healthy());
             assert_eq!(observer.report().model_calls, 0);

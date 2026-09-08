@@ -211,7 +211,7 @@ const PAGE_URL_UTF8_LIMIT: usize = 8 * 1_024;
 
 pub fn install_navigation_observer(
     view: &wry::WebView,
-    on_change: impl Fn() + 'static,
+    on_change: impl Fn(navigation::NavigationObservation) + 'static,
 ) -> Result<InstalledNavigationObserver, &'static str> {
     use objc2_foundation::MainThreadMarker;
 

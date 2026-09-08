@@ -362,8 +362,9 @@ impl WorkDocumentNavigation {
         let mut state = self.0.lock().map_err(|_| ())?;
         #[cfg(feature = "native-agentic-work-resource-probe")]
         if state.phase == Phase::Committed {
-            // This observer also includes back/forward availability. It is
-            // evidence of a callback, not proof of a URL or History API change.
+            // This is now a classified URL notification rather than erased
+            // back/forward availability. It remains evidence only: readiness
+            // still requires the native navigation terminal and URL sample.
             state.evidence.location_callback_after_commit_before_ready = true;
         }
         if state.phase == Phase::Ready {
@@ -378,6 +379,12 @@ impl WorkDocumentNavigation {
             state.location_revision = revision;
         }
         Ok(false)
+    }
+    /// Back/forward availability is browser-chrome state, not document
+    /// authority. Work deliberately ignores it in every phase, including the
+    /// revision-fenced finalization window.
+    pub(crate) const fn history_availability_changed(&self) -> bool {
+        false
     }
     pub(crate) fn finalization_pending(&self) -> bool {
         self.0
@@ -766,6 +773,47 @@ mod tests {
         assert!(gate.finalization_pending());
         assert!(!gate.ready(Some(URL)));
         gate
+    }
+    #[test]
+    fn history_availability_is_not_document_authority_when_ready_or_finalizing() {
+        let ready = armed();
+        for phase in [E::Started, E::Committed, E::Finished] {
+            ready.observe(event(1, phase, URL)).unwrap();
+        }
+        assert!(ready.ready(Some(URL)));
+        assert!(!ready.history_availability_changed());
+        assert!(ready.ready(Some(URL)));
+        assert!(!ready.failed());
+
+        let finalizing = finalizing();
+        assert!(!finalizing.history_availability_changed());
+        let effective = finalizing
+            .finalize(|| {
+                assert!(!finalizing.history_availability_changed());
+                Some("https://example.test/frozen?opaque=history".into())
+            })
+            .unwrap();
+        assert!(finalizing.ready(Some(effective.as_url().as_str())));
+        assert!(!finalizing.failed());
+    }
+    #[test]
+    fn url_observation_remains_fail_closed_when_ready_or_during_finalization_sample() {
+        let ready = armed();
+        for phase in [E::Started, E::Committed, E::Finished] {
+            ready.observe(event(1, phase, URL)).unwrap();
+        }
+        assert!(ready.ready(Some(URL)));
+        assert_eq!(ready.location_changed(), Ok(true));
+        assert!(ready.failed());
+
+        let finalizing = finalizing();
+        assert!(finalizing
+            .finalize(|| {
+                assert_eq!(finalizing.location_changed(), Ok(false));
+                Some(URL.into())
+            })
+            .is_err());
+        assert!(finalizing.failed());
     }
     #[test]
     fn startup_finalization_freezes_original_navigation_before_any_dispatch() {

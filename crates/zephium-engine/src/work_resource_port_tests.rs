@@ -24,15 +24,17 @@ fn source() -> (WorkBrowserResources, WorkBrowserResourceRequest) {
     (rows, request)
 }
 
-#[cfg(feature = "native-agentic-work-construction-probe")]
+#[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
 #[test]
-fn construction_failure_is_exact_first_wins_and_survives_original_factory_seal() {
-    use crate::WorkConstructionFailure as Failure;
+fn resource_failure_cause_is_exact_first_wins_and_survives_retention_and_factory_seal() {
+    use crate::WorkResourceFailureCause as Failure;
     for cause in [
-        Failure::StrictNavigation,
+        Failure::NavigationEventRefused,
+        Failure::UrlObservationRefused,
+        Failure::DocumentFinalizationRefused,
         Failure::RendererLost,
         Failure::SemanticNativeInvariant,
-        Failure::Deadline,
+        Failure::LifecycleDeadline,
         Failure::NativeAdmission(ContextPortFailure::NativeRefused),
         Failure::UnattributedResourceFailure,
     ] {
@@ -50,16 +52,19 @@ fn construction_failure_is_exact_first_wins_and_survives_original_factory_seal()
             .rows
             .insert(resource.identity().context(), guard.clone());
         assert!(guard.construction_current());
-        assert_eq!(slot.work_construction_failure(&resource), None);
-        guard.record_construction_failure(cause);
+        assert_eq!(slot.work_resource_failure_cause(&resource), None);
+        guard.record_failure_cause(cause);
         // Observation is not a failure/reporting owner and cannot poison state.
         assert!(guard.construction_current());
         guard.fail();
-        guard.record_construction_failure(Failure::Deadline);
+        guard.record_failure_cause(Failure::LifecycleDeadline);
         guard.outcome(&request, Outcome::Refused);
-        guard.record_construction_failure(Failure::SemanticNativeInvariant);
-        assert_eq!(slot.work_construction_failure(&resource), Some(cause));
-        assert_eq!(slot.work_construction_failure(source().1.resource()), None);
+        guard.record_failure_cause(Failure::SemanticNativeInvariant);
+        assert_eq!(slot.work_resource_failure_cause(&resource), Some(cause));
+        assert_eq!(
+            slot.work_resource_failure_cause(source().1.resource()),
+            None
+        );
         let mut foreign_rows =
             WorkBrowserResources::new(WorkId::generate(), resource.identity().profile());
         let foreign = foreign_rows
@@ -70,13 +75,18 @@ fn construction_failure_is_exact_first_wins_and_survives_original_factory_seal()
                 tick(0),
             )
             .unwrap();
-        assert_eq!(slot.work_construction_failure(foreign.resource()), None);
+        assert_eq!(slot.work_resource_failure_cause(foreign.resource()), None);
         slot.seal();
-        assert_eq!(slot.work_construction_failure(&resource), Some(cause));
+        assert_eq!(slot.work_resource_failure_cause(&resource), Some(cause));
     }
     let (_, admission, retained) = setup();
-    retained.record_construction_failure(Failure::RendererLost);
-    assert_eq!(admission.construction_failure(retained.resource()), None);
+    assert!(!retained.construction_current());
+    retained.record_failure_cause(Failure::RendererLost);
+    retained.record_failure_cause(Failure::LifecycleDeadline);
+    assert_eq!(
+        admission.resource_failure_cause(retained.resource()),
+        Some(Failure::RendererLost)
+    );
 }
 pub(super) fn setup() -> (
     WorkBrowserResources,

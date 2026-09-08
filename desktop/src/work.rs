@@ -104,16 +104,16 @@ pub fn admit_retained_trusted_work(
 }
 
 #[cfg(feature = "macos-work-retained-product-probe")]
-pub(crate) fn retained_construction_failure(
+pub(crate) fn retained_resource_failure_cause(
     app: &tauri::AppHandle,
     view: &zephium_app::RetainedWorkHandle,
-) -> Option<zephium_engine::WorkConstructionFailure> {
+) -> Option<zephium_engine::WorkResourceFailureCause> {
     let state = app.try_state::<WorkCompositionState>()?;
     let owner = state.0.lock().ok()?;
     owner
         .composition
         .as_ref()?
-        .retained_construction_failure(view)
+        .retained_resource_failure_cause(view)
 }
 
 /// Explicit fresh trusted work after an exact completed predecessor. This is

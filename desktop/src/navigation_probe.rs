@@ -213,7 +213,7 @@ fn run(app: &tauri::AppHandle, control: &Control) -> Result<ApplicationReport, &
         }
         #[cfg(feature = "macos-work-retained-product-probe")]
         let report = observer.poll(&view, || {
-            super::work::retained_construction_failure(app, &view)
+            super::work::retained_resource_failure_cause(app, &view)
         });
         #[cfg(not(feature = "macos-work-retained-product-probe"))]
         let report = observer.poll(&view);

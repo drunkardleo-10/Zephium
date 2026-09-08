@@ -52,9 +52,9 @@ struct State {
 }
 
 pub(crate) struct WorkResourceGuard {
-    #[cfg(feature = "native-agentic-work-construction-probe")]
-    pub(super) construction_failure:
-        Mutex<Option<super::work_construction_diagnostic::WorkConstructionFailure>>,
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    pub(super) failure_cause:
+        Mutex<Option<super::work_resource_failure_diagnostic::WorkResourceFailureCause>>,
     #[cfg(feature = "native-agentic-work-resource-probe")]
     pub(super) construction_evidence_claimed: AtomicBool,
     #[cfg(feature = "native-agentic-work-resource-probe")]
@@ -76,28 +76,22 @@ pub(crate) struct WorkNotificationPermit {
     _permit: AgentTaskPermit,
 }
 impl WorkResourceGuard {
-    #[cfg(feature = "native-agentic-work-construction-probe")]
-    pub(crate) fn record_construction_failure(
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    pub(crate) fn record_failure_cause(
         &self,
-        failure: super::work_construction_diagnostic::WorkConstructionFailure,
+        failure: super::work_resource_failure_diagnostic::WorkResourceFailureCause,
     ) {
-        // Diagnostics neither fail nor wake the guard. Ignore later execution,
-        // cleanup and poisoned diagnostic storage rather than replacing cause.
-        if !self
-            .state
-            .lock()
-            .is_ok_and(|state| state.construction_pending)
-        {
-            return;
-        }
-        if let Ok(mut first) = self.construction_failure.lock() {
+        // Diagnostics neither fail nor wake the guard. Preserve the first
+        // content-free cause across construction, retention, execution and
+        // cleanup; poisoned diagnostic storage stays observationally absent.
+        if let Ok(mut first) = self.failure_cause.lock() {
             first.get_or_insert(failure);
         }
     }
     fn new(request: &WorkBrowserResourceRequest, admission: &Arc<AgentPortAdmission>) -> Self {
         Self {
-            #[cfg(feature = "native-agentic-work-construction-probe")]
-            construction_failure: Mutex::new(None),
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            failure_cause: Mutex::new(None),
             #[cfg(feature = "native-agentic-work-resource-probe")]
             construction_evidence_claimed: AtomicBool::new(false),
             #[cfg(feature = "native-agentic-work-resource-probe")]
@@ -591,11 +585,11 @@ pub(super) struct WorkIngress {
     rows: BTreeMap<ContextId, Arc<WorkResourceGuard>>,
 }
 impl AgentPortAdmission {
-    #[cfg(feature = "native-agentic-work-construction-probe")]
-    pub(super) fn construction_failure(
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    pub(super) fn resource_failure_cause(
         &self,
         resource: &WorkBrowserResourceJoin,
-    ) -> Option<super::work_construction_diagnostic::WorkConstructionFailure> {
+    ) -> Option<super::work_resource_failure_diagnostic::WorkResourceFailureCause> {
         let guard = self
             .work
             .lock()
@@ -604,7 +598,7 @@ impl AgentPortAdmission {
             .get(&resource.identity().context())
             .filter(|guard| guard.resource() == resource)?
             .clone();
-        let result = *guard.construction_failure.lock().ok()?;
+        let result = *guard.failure_cause.lock().ok()?;
         result
     }
     #[cfg(feature = "native-agentic-work-resource-probe")]

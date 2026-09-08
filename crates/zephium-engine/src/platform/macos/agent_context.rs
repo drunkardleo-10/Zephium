@@ -256,8 +256,8 @@ const fn map_semantic_runtime_failure(
 
 /// Typed callback cohort retained by one native view delegate graph.
 pub(crate) struct AgentOwnedViewCallbacks<Navigation, Location, RendererLost, Invariant, Panic> {
-    #[cfg(feature = "native-agentic-work-construction-probe")]
-    construction_diagnostic: Option<Rc<dyn Fn(crate::WorkConstructionFailure)>>,
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    failure_diagnostic: Option<Rc<dyn Fn(crate::WorkResourceFailureCause)>>,
     navigation: Navigation,
     location: Location,
     renderer_lost: RendererLost,
@@ -276,8 +276,8 @@ impl<Navigation, Location, RendererLost, Invariant, Panic>
         panic: Panic,
     ) -> Self {
         Self {
-            #[cfg(feature = "native-agentic-work-construction-probe")]
-            construction_diagnostic: None,
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            failure_diagnostic: None,
             navigation,
             location,
             renderer_lost,
@@ -285,12 +285,12 @@ impl<Navigation, Location, RendererLost, Invariant, Panic>
             panic,
         }
     }
-    #[cfg(feature = "native-agentic-work-construction-probe")]
-    pub(crate) fn with_construction_diagnostic(
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    pub(crate) fn with_failure_diagnostic(
         mut self,
-        diagnostic: impl Fn(crate::WorkConstructionFailure) + 'static,
+        diagnostic: impl Fn(crate::WorkResourceFailureCause) + 'static,
     ) -> Self {
-        self.construction_diagnostic = Some(Rc::new(diagnostic));
+        self.failure_diagnostic = Some(Rc::new(diagnostic));
         self
     }
 }
@@ -371,16 +371,16 @@ where
     Panic: Fn() + 'static,
 {
     let AgentOwnedViewCallbacks {
-        #[cfg(feature = "native-agentic-work-construction-probe")]
-        construction_diagnostic,
+        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+        failure_diagnostic,
         navigation: on_navigation,
         location: on_location,
         renderer_lost: on_renderer_lost,
         invariant: on_invariant_failure,
         panic: on_callback_panic,
     } = callbacks;
-    #[cfg(feature = "native-agentic-work-construction-probe")]
-    let navigation_diagnostic = construction_diagnostic.clone();
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    let navigation_diagnostic = failure_diagnostic.clone();
     let navigation = AgentNavigationController::default();
     let navigation_policy = navigation.clone();
     let navigation_events = navigation.clone();
@@ -439,9 +439,9 @@ where
                 match gate.observe(event) {
                     Ok((committed, notify)) => {
                         if gate.failed() {
-                            #[cfg(feature = "native-agentic-work-construction-probe")]
+                            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
                             if let Some(report) = &navigation_diagnostic {
-                                report(crate::WorkConstructionFailure::StrictNavigation);
+                                report(crate::WorkResourceFailureCause::NavigationEventRefused);
                             }
                             invoke_owned_unit_callback(
                                 navigation_invariant_failure.as_ref(),
@@ -548,33 +548,37 @@ where
     let location_invariant = invariant_failure_callback.clone();
     let location_panic = on_callback_panic.clone();
     let work_location_semantic = semantic.controller().clone();
-    let navigation_observer =
-        super::install_navigation_observer(&view, move || {
-            match work_location.as_ref().map_or_else(
-                || location_events.request_location_check(),
-                crate::platform::work_document_navigation::WorkDocumentNavigation::location_changed,
-            ) {
-                Ok(true) => {
-                    if work_location.as_ref().is_some_and(|gate| gate.failed()) {
-                        #[cfg(feature = "native-agentic-work-construction-probe")]
-                        if let Some(report) = &construction_diagnostic {
-                            report(crate::WorkConstructionFailure::StrictNavigation);
-                        }
-                        invoke_owned_unit_callback(
-                            location_invariant.as_ref(),
-                            location_panic.as_ref(),
-                        );
-                        work_location_semantic.cancel();
+    let navigation_observer = super::install_navigation_observer(&view, move |observation| {
+        match work_location.as_ref().map_or_else(
+            || location_events.request_location_check(),
+            |gate| match observation {
+                super::navigation::NavigationObservation::Url => gate.location_changed(),
+                super::navigation::NavigationObservation::HistoryAvailability => {
+                    Ok(gate.history_availability_changed())
+                }
+            },
+        ) {
+            Ok(true) => {
+                if work_location.as_ref().is_some_and(|gate| gate.failed()) {
+                    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                    if let Some(report) = &failure_diagnostic {
+                        report(crate::WorkResourceFailureCause::UrlObservationRefused);
                     }
-                    invoke_owned_unit_callback(location_callback.as_ref(), location_panic.as_ref())
+                    invoke_owned_unit_callback(
+                        location_invariant.as_ref(),
+                        location_panic.as_ref(),
+                    );
+                    work_location_semantic.cancel();
                 }
-                Ok(false) => {}
-                Err(()) => {
-                    invoke_owned_unit_callback(location_invariant.as_ref(), location_panic.as_ref())
-                }
+                invoke_owned_unit_callback(location_callback.as_ref(), location_panic.as_ref())
             }
-        })
-        .map_err(|_| AgentOwnedViewConstructionError::Native)?;
+            Ok(false) => {}
+            Err(()) => {
+                invoke_owned_unit_callback(location_invariant.as_ref(), location_panic.as_ref())
+            }
+        }
+    })
+    .map_err(|_| AgentOwnedViewConstructionError::Native)?;
     Ok(AgentOwnedView {
         navigation,
         work_navigation,
