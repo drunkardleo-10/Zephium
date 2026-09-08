@@ -23,6 +23,7 @@ const DISCOVERY: bool = false;
 
 pub(crate) struct QualificationDefinition {
     pub initial: &'static str,
+    pub document_policy: WorkBrowserDocumentPolicy,
     pub origin: &'static str,
     pub task_name: &'static str,
     pub retention_name: &'static str,
@@ -36,6 +37,7 @@ pub(crate) struct QualificationDefinition {
 }
 const DEFINITION: QualificationDefinition = QualificationDefinition {
     initial: "https://react.dev/learn",
+    document_policy: WorkBrowserDocumentPolicy::Exact,
     origin: ORIGIN,
     task_name: "react-one-hop-v1",
     retention_name: "stateless",

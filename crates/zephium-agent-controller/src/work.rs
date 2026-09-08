@@ -138,6 +138,7 @@ pub struct AgentWorkContextSpec {
     storage: ContextProfileStorageClass,
     target: ContextNavigationTarget,
     origin: SemanticOrigin,
+    document_policy: WorkBrowserDocumentPolicy,
 }
 
 impl AgentWorkContextSpec {
@@ -148,16 +149,37 @@ impl AgentWorkContextSpec {
         storage: ContextProfileStorageClass,
         target: ContextNavigationTarget,
     ) -> Result<Self, AgentWorkFailure> {
+        Self::try_new_with_document_policy(
+            identity,
+            storage,
+            target,
+            WorkBrowserDocumentPolicy::Exact,
+        )
+    }
+
+    /// Validates one trusted initial-document policy together with the exact
+    /// owned target. This policy is application-authored before native work;
+    /// it grants no model or successor-navigation authority.
+    pub fn try_new_with_document_policy(
+        identity: ContextIdentity,
+        storage: ContextProfileStorageClass,
+        target: ContextNavigationTarget,
+        document_policy: WorkBrowserDocumentPolicy,
+    ) -> Result<Self, AgentWorkFailure> {
         if identity.kind() != ContextKind::Owned {
             return Err(AgentWorkFailure::Contract);
         }
         let origin = SemanticOrigin::parse(target.as_url().as_ref())
             .map_err(|_| AgentWorkFailure::Contract)?;
+        if !document_policy.admits_request(&target) {
+            return Err(AgentWorkFailure::Contract);
+        }
         Ok(Self {
             identity,
             storage,
             target,
             origin,
+            document_policy,
         })
     }
 }
@@ -212,6 +234,7 @@ impl AgentWorkRunInput {
             identity: self.context.identity,
             storage: self.context.storage,
             target: self.context.target.clone(),
+            document_policy: self.context.document_policy,
             clock: self.settings.clock.clone(),
             deadline: self.settings.deadline,
             expires_at: self
@@ -337,6 +360,8 @@ pub struct AgentWorkRetainedResourceSpec {
     pub storage: ContextProfileStorageClass,
     /// Exact approved initial document, not navigation authority.
     pub target: ContextNavigationTarget,
+    /// Trusted initial-document construction policy, frozen before native work.
+    pub document_policy: WorkBrowserDocumentPolicy,
     /// Original policy clock, shared with controller admission.
     pub clock: Arc<dyn TerraControllerClock>,
     /// Original absolute execution deadline.

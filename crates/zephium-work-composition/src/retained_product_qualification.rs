@@ -15,9 +15,10 @@ mod objective;
 #[path = "retained_svelte_objective.rs"]
 mod objective;
 pub use objective::OBJECTIVE;
-use objective::{INITIAL, ORIGIN, PATH_PREFIX, TASK_NAME};
+use objective::{DOCUMENT_POLICY, INITIAL, ORIGIN, PATH_PREFIX, TASK_NAME};
 pub(crate) const DEFINITION: QualificationDefinition = QualificationDefinition {
     initial: INITIAL,
+    document_policy: DOCUMENT_POLICY,
     origin: ORIGIN,
     task_name: TASK_NAME,
     retention_name: "inspectable-public",

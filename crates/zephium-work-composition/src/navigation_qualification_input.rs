@@ -131,10 +131,11 @@ fn input(
     AgentWorkRunInput::try_new(
         manifest,
         AgentPlanLeaseBinding::new(AgentPlanLeaseId::generate(), node),
-        AgentWorkContextSpec::try_new(
+        AgentWorkContextSpec::try_new_with_document_policy(
             identity,
             storage,
             ContextNavigationTarget::parse(definition.initial).map_err(|_| "target")?,
+            definition.document_policy,
         )
         .map_err(|_| "context")?,
         definition.objective.into(),
@@ -154,9 +155,16 @@ mod tests {
 
     #[test]
     fn configuration_diagnostic_matches_selected_static_witness() {
+        assert_eq!(DEFINITION.document_policy, WorkBrowserDocumentPolicy::Exact);
         assert_eq!(super::super::configuration_diagnostic(), "work-application-navigation-config: provider=OpenAIResponses model=gpt-5.6-luna retention=stateless task=react-one-hop-v1");
         #[cfg(feature = "discovery-qualification")]
-        assert_eq!(crate::discovery_qualification::configuration_diagnostic(), "work-application-navigation-config: provider=OpenAIResponses model=gpt-5.6-luna retention=inspectable-public task=react-open-objective-v1");
+        {
+            assert_eq!(
+                crate::discovery_qualification::DEFINITION.document_policy,
+                WorkBrowserDocumentPolicy::Exact
+            );
+            assert_eq!(crate::discovery_qualification::configuration_diagnostic(), "work-application-navigation-config: provider=OpenAIResponses model=gpt-5.6-luna retention=inspectable-public task=react-open-objective-v1");
+        }
     }
 
     #[test]
@@ -196,6 +204,10 @@ mod tests {
                 assert!(
                     prepared.retained_resource_spec().is_ok(),
                     "the selected witness must remain valid for the retained product entry"
+                );
+                assert_eq!(
+                    prepared.retained_resource_spec().unwrap().document_policy,
+                    definition.document_policy
                 );
             }
             let task = (definition.task)(identity).unwrap();

@@ -9,6 +9,56 @@ use zephium_agent_runtime::{
 static SERIAL: Mutex<()> = Mutex::new(());
 
 #[test]
+fn initial_document_policy_is_trusted_validated_and_preserved_for_retention() {
+    let original = input();
+    assert_eq!(
+        original.context.document_policy,
+        WorkBrowserDocumentPolicy::Exact,
+        "the ordinary constructor must remain exact"
+    );
+    let context = AgentWorkContextSpec::try_new_with_document_policy(
+        original.context.identity,
+        original.context.storage,
+        original.context.target.clone(),
+        WorkBrowserDocumentPolicy::InitialQueryFinalization,
+    )
+    .expect("query-free HTTPS target admits trusted initial finalization");
+    // Re-admission is only testing the policy join; keep its absolute wall
+    // horizon well inside the unchanged policy expiry instead of reusing the
+    // fixture's deliberately maximal horizon after setup time has elapsed.
+    let mut settings = original.settings;
+    settings.deadline = Instant::now() + Duration::from_secs(1);
+    let admitted = AgentWorkRunInput::try_new(
+        original.manifest,
+        original.lease,
+        context,
+        "Verify a deterministic fixture.".into(),
+        settings,
+    )
+    .expect("trusted policy is part of ordinary run admission");
+    assert_eq!(
+        admitted.retained_resource_spec().unwrap().document_policy,
+        WorkBrowserDocumentPolicy::InitialQueryFinalization
+    );
+
+    let identity = ContextIdentity::new(
+        ContextId::generate(),
+        ContextRunId::generate(),
+        AgentWorkProfileId::generate(),
+        ContextKind::Owned,
+    );
+    let already_queried =
+        ContextNavigationTarget::parse("https://work-fixture.invalid/?page=1").unwrap();
+    assert!(AgentWorkContextSpec::try_new_with_document_policy(
+        identity,
+        ContextProfileStorageClass::Ephemeral,
+        already_queried,
+        WorkBrowserDocumentPolicy::InitialQueryFinalization,
+    )
+    .is_err());
+}
+
+#[test]
 fn temporal_admission_millisecond_crossing_keeps_the_original_deadline() {
     struct CrossingClock(AtomicU64);
     impl TerraControllerClock for CrossingClock {

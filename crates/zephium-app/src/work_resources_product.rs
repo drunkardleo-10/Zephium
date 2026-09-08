@@ -324,11 +324,12 @@ impl ProductWork {
             self.fail();
             return;
         };
-        match owner.construct(
+        match owner.construct_with_policy(
             WorkBrowserResourceId::generate(),
             prepared.spec.identity.id(),
             prepared.spec.storage,
             prepared.spec.target,
+            prepared.spec.document_policy,
             now,
         ) {
             Ok(pending) => {

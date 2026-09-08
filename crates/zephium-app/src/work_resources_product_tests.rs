@@ -85,6 +85,28 @@ fn prepared_until<S: AgentWorkJournalPort + AgentAuditPort + 'static>(
     servers: Servers,
     deadline: Instant,
 ) -> PreparedRetainedWork {
+    prepared_until_with_document_policy(
+        profile,
+        engine,
+        store,
+        native,
+        factories,
+        servers,
+        deadline,
+        WorkBrowserDocumentPolicy::Exact,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn prepared_until_with_document_policy<S: AgentWorkJournalPort + AgentAuditPort + 'static>(
+    profile: crate::AgentWorkProfileBinding,
+    engine: crate::SharedEngine,
+    store: Arc<S>,
+    native: Arc<Native>,
+    factories: Arc<AtomicUsize>,
+    servers: Servers,
+    deadline: Instant,
+    document_policy: WorkBrowserDocumentPolicy,
+) -> PreparedRetainedWork {
     let target = ContextNavigationTarget::parse("https://retained-fixture.invalid/frozen").unwrap();
     let identity = ContextIdentity::new(
         ContextId::generate(),
@@ -92,14 +114,15 @@ fn prepared_until<S: AgentWorkJournalPort + AgentAuditPort + 'static>(
         profile.profile(),
         ContextKind::Owned,
     );
-    let input = input_for_context_until(
+    let input = input_for_context_authority_with_document_policy(
         identity,
         SemanticOrigin::parse(target.as_url().as_ref()).unwrap(),
         Arc::new(Clock(AtomicU64::new(2))),
         profile.storage_class(),
         target,
         AgentRunBudget::try_new(24, 1_000_000, 1_000_000, 1).unwrap(),
-        deadline,
+        (deadline, None),
+        document_policy,
     );
     let spec = input.retained_resource_spec().unwrap();
     let actor = ActorRequest {
@@ -403,7 +426,7 @@ fn stop_during_original_construction_never_acquires_or_starts_and_shell_cleans_i
     if child("stop_during_original_construction_never_acquires_or_starts_and_shell_cleans_it") {
         return;
     }
-    interrupted_construction(false);
+    interrupted_construction(false, WorkBrowserDocumentPolicy::Exact);
 }
 
 #[test]
@@ -411,10 +434,18 @@ fn expiry_during_original_construction_never_acquires_or_starts_and_shell_cleans
     if child("expiry_during_original_construction_never_acquires_or_starts_and_shell_cleans_it") {
         return;
     }
-    interrupted_construction(true);
+    interrupted_construction(true, WorkBrowserDocumentPolicy::Exact);
 }
 
-fn interrupted_construction(expire: bool) {
+#[test]
+fn trusted_initial_document_policy_reaches_the_original_native_construction() {
+    if child("trusted_initial_document_policy_reaches_the_original_native_construction") {
+        return;
+    }
+    interrupted_construction(false, WorkBrowserDocumentPolicy::InitialQueryFinalization);
+}
+
+fn interrupted_construction(expire: bool, document_policy: WorkBrowserDocumentPolicy) {
     let _serial = crate::WORK_RUNTIME_TEST_SERIAL
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -445,7 +476,7 @@ fn interrupted_construction(expire: bool) {
             Duration::from_secs(600)
         };
     let view = callback
-        .attach_retained_work(prepared_until(
+        .attach_retained_work(prepared_until_with_document_policy(
             profile,
             engine,
             store.clone(),
@@ -453,12 +484,21 @@ fn interrupted_construction(expire: bool) {
             factories.clone(),
             servers.clone(),
             deadline,
+            document_policy,
         ))
         .unwrap();
     pump(&queue, &mut shell, || {
         view.snapshot().phase == RetainedWorkPhase::Constructing
     });
-    assert!(native.construction.lock().unwrap().is_some());
+    assert_eq!(
+        native
+            .construction
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(request, _)| request.document_policy()),
+        Some(document_policy)
+    );
     if expire {
         std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
         assert!(callback.dispatch(Command::WorkWake));

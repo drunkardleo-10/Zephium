@@ -557,6 +557,28 @@ fn input_for_context_authority(
     budget: AgentRunBudget,
     (deadline, discovery): (Instant, Option<AgentNavigationDiscovery>),
 ) -> AgentWorkRunInput {
+    input_for_context_authority_with_document_policy(
+        identity,
+        origin,
+        clock,
+        storage,
+        target,
+        budget,
+        (deadline, discovery),
+        WorkBrowserDocumentPolicy::Exact,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn input_for_context_authority_with_document_policy(
+    identity: ContextIdentity,
+    origin: SemanticOrigin,
+    clock: Arc<dyn TerraControllerClock>,
+    storage: ContextProfileStorageClass,
+    target: ContextNavigationTarget,
+    budget: AgentRunBudget,
+    (deadline, discovery): (Instant, Option<AgentNavigationDiscovery>),
+    document_policy: WorkBrowserDocumentPolicy,
+) -> AgentWorkRunInput {
     let effects = AgentEffectScope::try_new(&[SemanticEffectClass::Read]).unwrap();
     let node = AgentPlanNodeId::generate();
     let expires = AgentPolicyInstant::from_millis(600_002);
@@ -602,7 +624,13 @@ fn input_for_context_authority(
     AgentWorkRunInput::try_new(
         manifest,
         AgentPlanLeaseBinding::new(AgentPlanLeaseId::generate(), node),
-        AgentWorkContextSpec::try_new(identity, storage, target).unwrap(),
+        AgentWorkContextSpec::try_new_with_document_policy(
+            identity,
+            storage,
+            target,
+            document_policy,
+        )
+        .unwrap(),
         "Read the current page and extract its label with source evidence.".into(),
         AgentWorkRunSettings::new(AgentBrowserModel::Luna, ids, clock, deadline),
     )

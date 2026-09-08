@@ -259,7 +259,11 @@ fn selected_result_verifier_checks_current_source_shape_not_a_preselected_recomm
 
 #[cfg(feature = "retained-commerce-qualification")]
 #[test]
-fn commerce_selection_is_exact_and_cannot_silently_be_the_docs_witness() {
+fn commerce_selection_is_static_and_cannot_silently_be_the_docs_witness() {
+    assert_eq!(
+        DEFINITION.document_policy,
+        WorkBrowserDocumentPolicy::InitialQueryFinalization
+    );
     assert_eq!(INITIAL, "https://www.lego.com/en-us/themes/architecture");
     assert_eq!(ORIGIN, "https://www.lego.com");
     assert_eq!(PATH_PREFIX, "/en-us/");
@@ -272,4 +276,10 @@ fn commerce_selection_is_exact_and_cannot_silently_be_the_docs_witness() {
     );
     assert!(configuration_diagnostic().contains("rendering=observation_owned"));
     assert!(configuration_diagnostic().contains(TASK_NAME));
+}
+
+#[cfg(not(feature = "retained-commerce-qualification"))]
+#[test]
+fn docs_selection_keeps_exact_initial_document_policy() {
+    assert_eq!(DEFINITION.document_policy, WorkBrowserDocumentPolicy::Exact);
 }

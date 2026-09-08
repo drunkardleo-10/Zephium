@@ -1,4 +1,6 @@
 //! Frozen original public objective; its route and answer are model-selected.
+pub(super) const DOCUMENT_POLICY: zephium_agentic::WorkBrowserDocumentPolicy =
+    zephium_agentic::WorkBrowserDocumentPolicy::Exact;
 pub(super) const ORIGIN: &str = "https://svelte.dev";
 pub(super) const INITIAL: &str = "https://svelte.dev/docs/svelte/overview";
 pub(super) const PATH_PREFIX: &str = "/docs/svelte/";

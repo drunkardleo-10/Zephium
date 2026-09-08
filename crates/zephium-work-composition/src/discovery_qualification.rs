@@ -11,6 +11,7 @@ const MAX_HOPS: u64 = 2;
 const DISCOVERY: bool = true;
 pub(crate) const DEFINITION: QualificationDefinition = QualificationDefinition {
     initial: "https://react.dev/learn",
+    document_policy: WorkBrowserDocumentPolicy::Exact,
     origin: ORIGIN,
     task_name: "react-open-objective-v1",
     retention_name: "inspectable-public",
