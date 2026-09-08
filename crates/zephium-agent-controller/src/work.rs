@@ -2108,17 +2108,8 @@ impl AgentWorkController {
             // accounting. Recovery must drain even if that accounting fails.
             state.native.action_pending = matches!(dispatch, ContextDispatch::Scheduled);
             session
-                .action
-                .as_mut()
-                .ok_or(AgentWorkFailure::Contract)?
-                .account_dispatch(
-                    dispatch,
-                    &mut session.policy,
-                    &mut session.action_executions,
-                )
-                .map_err(|error| {
-                    AgentWorkFailure::Browser(AgentBrowserProviderError::Action(error))
-                })?;
+                .account_action_dispatch(dispatch)
+                .map_err(AgentWorkFailure::Browser)?;
             let terminal = match state.native.next_action_event(worker, browser).await? {
                 AgentRuntimeEvent::SemanticActionTerminal(terminal)
                     if session.action.as_ref().is_some_and(|action| {
@@ -3188,6 +3179,9 @@ pub enum AgentWorkEventKind {
     InspectionRefused,
     /// An independently authorized native effect is active.
     ActionActive,
+    /// Native synchronously refused admission; the failed effect and batch
+    /// were accounted. No native execution or retry is implied.
+    ActionRejected(SemanticActionFailure),
     /// A native effect was independently verified and accounted.
     Verified,
     /// An explicit policy/human boundary stopped execution.
@@ -3537,6 +3531,31 @@ impl WorkJournal {
             .map_err(|_| AgentWorkFailure::Accounting)?;
         self.record()?;
         self.emit(AgentWorkEventKind::Verified)
+    }
+
+    pub(super) fn action_rejected(
+        &mut self,
+        batch: &SemanticActionBatchResult,
+    ) -> Result<(), AgentWorkFailure> {
+        let failure = batch.failure().ok_or(AgentWorkFailure::Accounting)?;
+        let receipt = failure.receipt();
+        let AgentEffectSettlement::Failed(reason) = receipt.settlement() else {
+            return Err(AgentWorkFailure::Accounting);
+        };
+        self.accounting
+            .record_effect_receipt(receipt)
+            .map_err(|_| AgentWorkFailure::Accounting)?;
+        self.actions
+            .record_batch_result(batch)
+            .map_err(|_| AgentWorkFailure::Accounting)?;
+        self.supervisor
+            .record_effect_result(
+                self.execution.as_ref().ok_or(AgentWorkFailure::Contract)?,
+                receipt,
+            )
+            .map_err(|_| AgentWorkFailure::Accounting)?;
+        self.record()?;
+        self.emit(AgentWorkEventKind::ActionRejected(reason))
     }
 }
 

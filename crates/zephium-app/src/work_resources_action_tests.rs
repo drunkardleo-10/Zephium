@@ -43,7 +43,7 @@ pub(super) fn action_result(
     assert!(delivery.publish_returned());
     assert!(notification.notify());
 }
-fn act_stream(value: &str) -> String {
+pub(super) fn act_stream(value: &str) -> String {
     let arguments = serde_json::json!({"actions":[{"kind":"fill","target":"@a2","value":value,"effect":"local_write","wait":{"kind":"immediate"},"verification":{"kind":"target_value_matches_input"},"settle_millis":2000}]}).to_string().replace('"', "\\\"");
     response_stream(1)
         .replace("\"extract\"", "\"act\"")
@@ -56,6 +56,19 @@ fn prepare(
     browser: RetainedBrowser,
     responses: Vec<String>,
     approved: bool,
+) -> (
+    AgentWorkRetainedController,
+    AgentWorkRetainedHandle,
+    AgentRuntimeScopedBinding,
+    std::thread::JoinHandle<usize>,
+) {
+    prepare_with_audit(browser, responses, approved, false)
+}
+fn prepare_with_audit(
+    browser: RetainedBrowser,
+    responses: Vec<String>,
+    approved: bool,
+    lose_audit: bool,
 ) -> (
     AgentWorkRetainedController,
     AgentWorkRetainedHandle,
@@ -110,11 +123,85 @@ fn prepare(
             "fixture-not-a-secret".into(),
         )
         .unwrap(),
-        Arc::new(Audit(false)),
+        Arc::new(Audit(lose_audit)),
         Box::new(task),
     )
     .unwrap();
     (controller, handle, scope, server)
+}
+
+#[test]
+fn synchronous_rejected_action_closes_exact_failed_receipt_without_retry() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for lose_audit in [false, true] {
+        let (owner, native, resource, browser) = setup();
+        native.form_actions.store(true, Ordering::Release);
+        native.reject_action.store(true, Ordering::Release);
+        let (controller, mut result, scope, server) =
+            prepare_with_audit(browser, vec![act_stream("fixture value")], true, lose_audit);
+        let (_, lifecycle) = start(controller, scope);
+        let mut outcome = None;
+        let mut events = Vec::new();
+        wait_until(|| {
+            while let Some(event) = result.take_event() {
+                events.push(event.kind());
+            }
+            outcome = result.take_outcome();
+            outcome.is_some()
+        });
+        let drained = lifecycle.drain_until(Instant::now() + Duration::from_secs(2));
+        if lose_audit {
+            assert!(matches!(
+                outcome,
+                Some(AgentWorkRetainedOutcome::Recovery(_))
+            ));
+            assert!(matches!(drained, AgentRuntimeScopedDrain::Unproven));
+        } else {
+            let Some(AgentWorkRetainedOutcome::ClosedUnsuccessfully(closed)) = outcome else {
+                panic!("proved non-admission must close as failed");
+            };
+            assert_eq!(
+                closed.failure(),
+                AgentWorkFailure::Browser(AgentBrowserProviderError::Action(
+                    AgentBrowserActionError::Failed(SemanticActionFailure::BackendRefused)
+                ))
+            );
+            let closure = closed.policy_settlement().closure();
+            assert_eq!(closure.model_calls(), 1);
+            assert_eq!(closure.effects(), 1);
+            assert_eq!(closure.actions(), 1);
+            assert!(matches!(
+                closure.outcome(),
+                AgentRunProgressOutcome::Failed(_)
+            ));
+            assert!(matches!(drained, AgentRuntimeScopedDrain::Drained(_)));
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|kind| **kind == AgentWorkEventKind::Terminal)
+                    .count(),
+                1
+            );
+        }
+        assert_eq!(
+            events
+                .iter()
+                .filter(|kind| matches!(kind, AgentWorkEventKind::ActionRejected(_)))
+                .count(),
+            1
+        );
+        assert!(!events.contains(&AgentWorkEventKind::Verified));
+        assert_eq!(native.actions.load(Ordering::Acquire), 1);
+        assert_eq!(native.reads.load(Ordering::Acquire), 1);
+        assert!(!native.form_applied.load(Ordering::Acquire));
+        native.join();
+        assert_eq!(server.join().unwrap(), 1);
+        let mut destroy = owner.destroy(&resource).unwrap();
+        assert!(destroy.poll(now()).unwrap().is_some());
+        owner.seal_resources().unwrap();
+    }
 }
 fn finish(result: &mut AgentWorkRetainedHandle) -> AgentWorkRetainedOutcome {
     let mut outcome = None;

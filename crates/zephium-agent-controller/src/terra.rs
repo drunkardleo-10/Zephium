@@ -3020,6 +3020,62 @@ impl AgentBrowserSession {
         Ok(native)
     }
 
+    /// Accounts native admission; a fully accounted rejection stops the task
+    /// while permitting the ordinary unsuccessful resource closure.
+    pub(crate) fn account_action_dispatch(
+        &mut self,
+        dispatch: ContextDispatch,
+    ) -> Result<(), AgentBrowserProviderError> {
+        let result = self
+            .action
+            .as_mut()
+            .ok_or(AgentBrowserProviderError::ActionPending)?
+            .account_dispatch(dispatch, &mut self.policy, &mut self.action_executions);
+        let Err(error) = result else {
+            return Ok(());
+        };
+        let original = AgentBrowserProviderError::Action(error);
+        self.failure = Some(original);
+        // Rejected is the native port's synchronous non-admission contract.
+        // Scheduled failures, absent/mismatched callbacks and pending settlement
+        // retain their original action owner and can never enter this branch.
+        if !matches!(dispatch, ContextDispatch::Rejected(_))
+            || !matches!(error, crate::AgentBrowserActionError::Failed(_))
+            || self.action_executions.status().pending() != 0
+            || self.action_settlements.status().pending() != 0
+            || self.action_terminal.is_some()
+        {
+            return Err(original);
+        }
+        let action = self
+            .action
+            .take()
+            .ok_or(AgentBrowserProviderError::ActionPending)?;
+        let terminal = match action.into_rejected_batch() {
+            Ok(terminal) => terminal,
+            Err(action) => {
+                self.action = Some(*action);
+                return Err(original);
+            }
+        };
+        // Preserve the exact batch before any fallible reducer/audit work. A
+        // partial journal update remains Recovery and is never replayed.
+        self.action_terminal = Some(terminal);
+        let recorded = self.journal.as_mut().is_some_and(|journal| {
+            journal
+                .action_rejected(self.action_terminal.as_ref().expect("retained terminal"))
+                .is_ok()
+        });
+        if !recorded {
+            self.failure = Some(AgentBrowserProviderError::Journal);
+            return Err(AgentBrowserProviderError::Journal);
+        }
+        self.action_terminal.take();
+        // Accounting a refusal closes debt, not the failed task. The sticky
+        // failure prevents another provider turn or any automatic retry.
+        Err(original)
+    }
+
     /// Independently verifies and accounts the pending action before continuation.
     pub fn settle_action(
         &mut self,

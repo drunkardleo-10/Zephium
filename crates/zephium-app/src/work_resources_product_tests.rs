@@ -114,23 +114,60 @@ fn prepared_until_with_document_policy<S: AgentWorkJournalPort + AgentAuditPort 
         profile.profile(),
         ContextKind::Owned,
     );
-    let input = input_for_context_authority_with_document_policy(
+    let form_action = native.form_actions.load(Ordering::Acquire);
+    let effects = if form_action {
+        vec![SemanticEffectClass::Read, SemanticEffectClass::LocalWrite]
+    } else {
+        vec![SemanticEffectClass::Read]
+    };
+    let origin = SemanticOrigin::parse(target.as_url().as_ref()).unwrap();
+    let input = input_for_context_effects(
         identity,
-        SemanticOrigin::parse(target.as_url().as_ref()).unwrap(),
+        origin.clone(),
         Arc::new(Clock(AtomicU64::new(2))),
         profile.storage_class(),
         target,
         AgentRunBudget::try_new(24, 1_000_000, 1_000_000, 1).unwrap(),
         (deadline, None),
         document_policy,
+        AgentEffectScope::try_new(&effects).unwrap(),
     );
     let spec = input.retained_resource_spec().unwrap();
     let actor = ActorRequest {
         run: identity.owner(),
         deadline: spec.expires_at,
         prepare: Box::new(move |browser, audit| {
-            let (transport, server) =
-                fixture_provider_responses(vec![response_stream(1), response_stream(2)]);
+            let responses = if form_action {
+                vec![action_tests::act_stream("fixture value")]
+            } else {
+                vec![response_stream(1), response_stream(2)]
+            };
+            let task: Box<dyn AgentWorkTask> = if form_action {
+                Box::new(
+                    AgentWorkFormTask::try_new_local_preparation(
+                        identity,
+                        origin,
+                        AgentAccountScope::Anonymous,
+                        vec![AgentWorkFormPhase::try_new(vec![AgentWorkFormGoal::fill(
+                            Some("Draft".into()),
+                            "fixture value".into(),
+                        )
+                        .unwrap()])
+                        .unwrap()],
+                    )
+                    .unwrap()
+                    .with_extraction(vec![SemanticExtractionFieldSchema::try_text(
+                        "label".into(),
+                        true,
+                        64,
+                    )
+                    .unwrap()])
+                    .unwrap(),
+                )
+            } else {
+                Box::new(task())
+            };
+            let (transport, server) = fixture_provider_responses(responses);
             servers.lock().unwrap().push(server);
             StagedActor::for_probe(
                 input,
@@ -142,7 +179,7 @@ fn prepared_until_with_document_policy<S: AgentWorkJournalPort + AgentAuditPort 
                 )
                 .unwrap(),
                 audit,
-                Box::new(task()),
+                task,
             )
         }),
     };
@@ -263,6 +300,112 @@ fn shipping_preparation_checks_profile_storage_original_audit_and_result_contrac
         );
         assert_eq!(result.is_ok(), mode == 0);
     }
+}
+
+#[test]
+fn synchronous_action_rejection_persists_failed_terminal_and_shell_shuts_down_cleanly() {
+    if child("synchronous_action_rejection_persists_failed_terminal_and_shell_shuts_down_cleanly") {
+        return;
+    }
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(zephium_store::SqliteStore::open(directory.path()).unwrap());
+    let engine = Arc::new(crate::shell::tests::FakeEngine::default());
+    let queue = crate::actor::CommandQueue::new();
+    let owner = crate::actor::Handle::new(queue.clone());
+    let mut shell = crate::Shell::new(
+        engine.clone(),
+        store.clone(),
+        Arc::new(crate::shell::tests::FakeChrome),
+        Box::new(|_| {}),
+    );
+    shell.attach_queue(queue.clone());
+    shell.handle(Command::Bootstrap);
+    let profile = selected(&owner, &queue, &mut shell);
+    let native = Arc::new(Native::default());
+    native.allow_global_shutdown.store(true, Ordering::Release);
+    native.form_actions.store(true, Ordering::Release);
+    native.reject_action.store(true, Ordering::Release);
+    let factories = Arc::new(AtomicUsize::new(0));
+    let servers = Servers::default();
+    let view = owner
+        .callback_handle()
+        .attach_retained_work(prepared(
+            profile,
+            engine,
+            store.clone(),
+            native.clone(),
+            factories.clone(),
+            servers.clone(),
+        ))
+        .unwrap();
+    let mut events = Vec::new();
+    pump(&queue, &mut shell, || {
+        while let Some(event) = view.take_event() {
+            events.push(event.kind());
+        }
+        matches!(
+            view.snapshot().phase,
+            RetainedWorkPhase::Terminal | RetainedWorkPhase::Uncertain
+        )
+    });
+    let snapshot = view.snapshot();
+    assert_eq!(snapshot.phase, RetainedWorkPhase::Terminal);
+    assert_eq!(snapshot.persistence_failure, None);
+    assert_eq!(
+        snapshot.failure,
+        Some(AgentWorkFailure::Browser(
+            AgentBrowserProviderError::Action(AgentBrowserActionError::Failed(
+                SemanticActionFailure::BackendRefused
+            ),)
+        ))
+    );
+    let record = snapshot.record.unwrap();
+    assert_eq!(record.disposition(), AgentWorkDisposition::Failed);
+    assert_eq!(record.debt(), AgentWorkDebt::NONE);
+    let (tx, rx) = mpsc::sync_channel(1);
+    store
+        .dispatch(
+            AgentWorkJournalRequest::Read {
+                owner: record.incarnation(),
+                key: record.key(),
+            },
+            Box::new(move |reply| tx.send(reply).unwrap()),
+        )
+        .unwrap();
+    assert!(matches!(rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+        Ok(AgentWorkJournalReply::Record(Some(durable))) if durable == record));
+    assert!(view.take_extraction().is_none());
+    assert!(!events.contains(&AgentWorkEventKind::Verified));
+    assert!(!events.contains(&AgentWorkEventKind::Recovery));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|kind| matches!(kind, AgentWorkEventKind::ActionRejected(_)))
+            .count(),
+        1
+    );
+    assert_eq!(factories.load(Ordering::Acquire), 1);
+    assert_eq!(native.actions.load(Ordering::Acquire), 1);
+    assert_eq!(native.reads.load(Ordering::Acquire), 1);
+    assert!(!native.form_applied.load(Ordering::Acquire));
+    native.join();
+    for server in servers.lock().unwrap().drain(..) {
+        assert_eq!(server.join().unwrap(), 1);
+    }
+    let shutdown = owner.shutdown_with_deadline(Instant::now() + Duration::from_secs(5));
+    while let Some(command) = queue.try_recv() {
+        let terminal = matches!(command, Command::Shutdown { .. });
+        shell.handle(command);
+        if terminal {
+            break;
+        }
+    }
+    assert_eq!(shutdown.recv(), Ok(crate::ShutdownOutcome::Clean));
+    assert_eq!(native.destructions.load(Ordering::Acquire), 1);
+    assert!(native.global_sealed.load(Ordering::Acquire));
 }
 
 #[test]

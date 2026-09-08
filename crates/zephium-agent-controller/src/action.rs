@@ -259,6 +259,32 @@ impl AgentBrowserAction {
         self.failed = Some(failed);
         AgentBrowserActionError::Failed(failure)
     }
+
+    /// Consumes only the exact fully-accounted synchronous refusal. The caller
+    /// proves native non-admission; a native failure callback is insufficient.
+    pub(crate) fn into_rejected_batch(mut self) -> Result<SemanticActionBatchResult, Box<Self>> {
+        if !self.finished
+            || self.native.is_some()
+            || self.pending.is_some()
+            || self.terminal.is_some()
+            || self.journal_failed
+            || self.failed.as_ref().is_none_or(|failed| {
+                failed.execution().is_some() || self.receipt != Some(failed.receipt())
+            })
+        {
+            return Err(Box::new(self));
+        }
+        let failed = self.failed.take().expect("checked original failed owner");
+        match self.proposal.batch.fail(&self.proposal.action, failed) {
+            Ok(terminal) => Ok(terminal),
+            Err(refusal) => {
+                let (batch, failed, _) = refusal.into_parts();
+                self.proposal.batch = batch;
+                self.failed = Some(failed);
+                Err(Box::new(self))
+            }
+        }
+    }
     pub(crate) const fn journal_failed(&self) -> bool {
         self.journal_failed
     }
