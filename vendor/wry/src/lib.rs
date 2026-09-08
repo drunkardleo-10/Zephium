@@ -875,7 +875,11 @@ struct WebViewAttributes<'a> {
   ///
   /// ## Platform-specific:
   ///
-  /// - **macOS / Android / iOS:** Unsupported.
+  /// - **macOS:** `false` suppresses construction-time application activation.
+  ///   Child WebViews additionally preserve existing first-responder ownership;
+  ///   non-child construction still installs and focuses its content view. Use
+  ///   [`WebView::focus`] when exact child first-responder focus is required.
+  /// - **Android / iOS:** Unsupported.
   pub focused: bool,
 
   /// The webview bounds. Defaults to `x: 0, y: 0, width: 200, height: 200`.
@@ -1011,7 +1015,7 @@ impl WebViewAttributes<'_> {
   /// WebKitGTK keeps a guarded child unmapped through construction, then lets
   /// the embedder's presentation stage perform its first map at validated
   /// offscreen geometry. Other backends use their native hidden state.
-  #[cfg(any(gtk, test))]
+  #[cfg(any(gtk, target_os = "macos", test))]
   fn guards_initial_presentation(&self) -> bool {
     self.navigation_presentation_guard.is_some()
   }
@@ -1021,7 +1025,7 @@ impl WebViewAttributes<'_> {
     self.visible && !self.guards_initial_presentation()
   }
 
-  #[cfg(any(gtk, test))]
+  #[cfg(any(gtk, target_os = "macos", test))]
   fn focuses_during_initial_construction(&self) -> bool {
     self.focused && !self.guards_initial_presentation()
   }
@@ -1680,7 +1684,11 @@ impl<'a> WebViewBuilder<'a> {
   ///
   /// ## Platform-specific:
   ///
-  /// - **macOS / Android / iOS:** Unsupported.
+  /// - **macOS:** `false` suppresses construction-time application activation.
+  ///   Child WebViews additionally preserve existing first-responder ownership;
+  ///   non-child construction still installs and focuses its content view. Use
+  ///   [`WebView::focus`] when exact child first-responder focus is required.
+  /// - **Android / iOS:** Unsupported.
   pub fn with_focused(mut self, focused: bool) -> Self {
     self.attrs.focused = focused;
     self

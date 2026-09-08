@@ -226,6 +226,17 @@ the presentation before delivering a snapshot. It creates no second browser,
 profile, model tool or foreground-control capability. Other native adapters remain
 Unsupported at the existing retained-resource port.
 
+Hidden, unfocused macOS child construction is itself a fail-closed focus
+transaction. Wry retains the pre-construction key window, main window and first
+responder across callback-capable AppKit parenting, suppresses application
+activation, and accepts only unchanged responder ownership or focus captured by
+the new child subtree. It restores only that owned focus. If preservation fails,
+the child is detached before constructor teardown; rollback retries restoration
+only while the same retained window authority and child-owned responder remain,
+and never overwrites a foreign responder selected by the user or a callback.
+Non-child Wry construction retains its upstream content-view focus behavior and
+is not used for this Work resource path.
+
 The exact resource guard/incarnation, execution lease, observation correlation,
 committed document epoch/native navigation stamp and current native URL are
 rechecked through completion. Only one such presentation is admitted at a time.

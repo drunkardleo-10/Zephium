@@ -124,6 +124,9 @@ pub enum Error {
   #[cfg(any(target_os = "macos", target_os = "ios"))]
   #[error("native WebKit object is unavailable: {0}")]
   NativeObjectUnavailable(&'static str),
+  #[cfg(target_os = "macos")]
+  #[error("macOS WebView construction could not preserve the existing first responder")]
+  MacosFocusPreservationFailed,
   #[cfg(any(target_os = "macos", target_os = "ios"))]
   #[error("internal WebKit state lock was poisoned: {0}")]
   WebKitStatePoisoned(&'static str),

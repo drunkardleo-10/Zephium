@@ -500,6 +500,62 @@ fn raw_native_views_never_request_focus_during_construction() {
     assert_eq!(raw_policy.matches(".with_focused(false)").count(), 1);
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn hidden_wkwebview_construction_preserves_responder_and_cannot_activate() {
+    let source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../vendor/wry/src/wkwebview/mod.rs"
+    ));
+    let constructor = source
+        .split("fn new_ns_view(")
+        .nth(1)
+        .and_then(|source| source.split("  pub fn id(&self)").next())
+        .expect("bounded WKWebView constructor");
+    let policy = constructor
+        .find("let focuses_during_initial_construction =")
+        .expect("initial focus policy capture");
+    let responder_capture = constructor
+        .find("let unfocused_child_focus =")
+        .expect("unfocused child responder capture");
+    let parenting = constructor
+        .find("ns_view.addSubview(&webview)")
+        .expect("child WebView parenting");
+    let responder_settlement = constructor
+        .find("preserve_unfocused_child_focus(snapshot")
+        .expect("same-stack responder settlement");
+    let responder_rollback = constructor
+        .find("rollback_unfocused_child_attachment(snapshot")
+        .expect("failed focus settlement rollback");
+    let error_return = constructor
+        .find("return Err(error)")
+        .expect("constructor failure after rollback");
+    let gate = constructor
+        .find("if focuses_during_initial_construction {")
+        .expect("application activation focus gate");
+    let activation = constructor
+        .find("NSApplication::activate(&app)")
+        .expect("application activation");
+
+    assert!(policy < responder_capture);
+    assert!(responder_capture < parenting);
+    assert!(parenting < responder_settlement);
+    assert!(responder_settlement < responder_rollback);
+    assert!(responder_rollback < error_return);
+    assert!(error_return < gate);
+    assert!(gate < activation);
+    assert_eq!(
+        constructor.matches("NSApplication::activate(&app)").count(),
+        1
+    );
+    assert_eq!(
+        constructor
+            .matches("NSApplication::activateIgnoringOtherApps(&app, true)")
+            .count(),
+        1
+    );
+}
+
 #[test]
 fn native_completion_waits_for_shell_ordered_presentation_acknowledgement() {
     let navigation = include_str!(concat!(
