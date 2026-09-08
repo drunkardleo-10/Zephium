@@ -10,7 +10,12 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{MainThreadMarker, NSAlignmentOptions, NSPoint, NSRect, NSSize};
 use objc2_web_kit::WKWebView;
+#[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+use std::rc::Rc;
 use std::time::Instant;
+
+#[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+use crate::WorkObservationPresentationFailure as PresentationFailure;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PresentationState {
@@ -24,9 +29,71 @@ pub(crate) enum PresentationState {
     Failed,
 }
 
+#[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+const PREPARE_VIEW_FAILURES: [PresentationFailure; 3] = [
+    PresentationFailure::PreparePageNotHidden,
+    PresentationFailure::PrepareFrameMismatch,
+    PresentationFailure::PreparePageIsResponder,
+];
+#[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+const PRESENT_SURFACE_FAILURES: [PresentationFailure; 5] = [
+    PresentationFailure::PresentSurfaceAlreadyVisible,
+    PresentationFailure::PresentSurfaceFrameMismatch,
+    PresentationFailure::PresentSurfaceCanBecomeKey,
+    PresentationFailure::PresentSurfaceCanBecomeMain,
+    PresentationFailure::PresentSurfaceAlphaMismatch,
+];
+#[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+const POLL_FAILURES: [PresentationFailure; 14] = [
+    PresentationFailure::PollFrameNotAdmitted,
+    PresentationFailure::PollSurfaceFrameMismatch,
+    PresentationFailure::PollPageFrameMismatch,
+    PresentationFailure::PollSurfaceNotVisible,
+    PresentationFailure::PollPageHidden,
+    PresentationFailure::PollSurfaceIsKey,
+    PresentationFailure::PollSurfaceIsMain,
+    PresentationFailure::PollSurfaceCanBecomeKey,
+    PresentationFailure::PollSurfaceCanBecomeMain,
+    PresentationFailure::PollSurfaceReceivesMouse,
+    PresentationFailure::PollSurfaceNotOpaque,
+    PresentationFailure::PollSurfaceAlphaMismatch,
+    PresentationFailure::PollPageAlphaMismatch,
+    PresentationFailure::PollPageWindowMismatch,
+];
+#[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+const RETIRE_FAILURES: [PresentationFailure; 4] = [
+    PresentationFailure::RetirePageStillVisible,
+    PresentationFailure::RetireHumanOwnershipChanged,
+    PresentationFailure::RetireFrameMismatch,
+    PresentationFailure::RetireParentMismatch,
+];
+
+#[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+fn classify_predicates<const N: usize>(
+    facts: [bool; N],
+    failures: [PresentationFailure; N],
+) -> Option<PresentationFailure> {
+    facts
+        .into_iter()
+        .zip(failures)
+        .find_map(|(valid, failure)| (!valid).then_some(failure))
+}
+
+#[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+fn invoke_failure_diagnostic(
+    diagnostic: &dyn Fn(PresentationFailure),
+    failure: PresentationFailure,
+) {
+    // Diagnostics are observational only. A diagnostic consumer panic cannot
+    // alter native ownership, presentation state or the semantic terminal.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| diagnostic(failure)));
+}
+
 /// The resource retains this owner before the first hierarchy mutation. The
 /// host separately binds its exact lease, document and observation correlation.
 pub(crate) struct WorkObservationPresentation {
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    failure_diagnostic: Rc<dyn Fn(PresentationFailure)>,
     app: Retained<NSApplication>,
     main: Retained<NSWindow>,
     responder: Retained<NSResponder>,
@@ -54,8 +121,19 @@ impl WorkObservationPresentation {
     pub(crate) fn prepare(
         view: &wry::WebView,
         deadline: Instant,
+        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")] failure_diagnostic: impl Fn(PresentationFailure)
+            + 'static,
     ) -> Result<Self, PresentationState> {
-        let mtm = MainThreadMarker::new().ok_or(PresentationState::Failed)?;
+        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+        let failure_diagnostic: Rc<dyn Fn(PresentationFailure)> = Rc::new(failure_diagnostic);
+        let Some(mtm) = MainThreadMarker::new() else {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            invoke_failure_diagnostic(
+                failure_diagnostic.as_ref(),
+                PresentationFailure::PrepareMainThread,
+            );
+            return Err(PresentationState::Failed);
+        };
         let app = NSApplication::sharedApplication(mtm);
         let page = super::native_webview(view);
         let main = page.window().ok_or(PresentationState::Unavailable)?;
@@ -67,12 +145,25 @@ impl WorkObservationPresentation {
         }
         // SAFETY: the exact native page is read on its owning main thread;
         // retain its original parent before any hierarchy effect.
-        let parent = unsafe { page.superview() }.ok_or(PresentationState::Failed)?;
+        let Some(parent) = (unsafe { page.superview() }) else {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            invoke_failure_diagnostic(
+                failure_diagnostic.as_ref(),
+                PresentationFailure::PrepareMissingParent,
+            );
+            return Err(PresentationState::Failed);
+        };
         let original_frame = page.frame();
-        if !page.isHidden()
-            || original_frame.size != viewport().size
-            || Retained::as_ptr(&responder).addr() == Retained::as_ptr(&page).addr()
-        {
+        let resting_facts = [
+            page.isHidden(),
+            original_frame.size == viewport().size,
+            Retained::as_ptr(&responder).addr() != Retained::as_ptr(&page).addr(),
+        ];
+        if !resting_facts.into_iter().all(|fact| fact) {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            if let Some(failure) = classify_predicates(resting_facts, PREPARE_VIEW_FAILURES) {
+                invoke_failure_diagnostic(failure_diagnostic.as_ref(), failure);
+            }
             return Err(PresentationState::Failed);
         }
         let native_screen = main.screen().ok_or(PresentationState::Unavailable)?;
@@ -108,6 +199,8 @@ impl WorkObservationPresentation {
         surface.setIgnoresMouseEvents(true);
         surface.setOpaque(true);
         Ok(Self {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            failure_diagnostic,
             app,
             main,
             responder,
@@ -126,6 +219,11 @@ impl WorkObservationPresentation {
 
     pub(crate) fn present(&mut self) -> PresentationState {
         if self.state != PresentationState::Prepared {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            invoke_failure_diagnostic(
+                self.failure_diagnostic.as_ref(),
+                PresentationFailure::PresentInvalidState,
+            );
             self.state = PresentationState::Failed;
             return self.state;
         }
@@ -138,19 +236,35 @@ impl WorkObservationPresentation {
             return self.state;
         }
         let Some(surface) = &self.surface else {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            invoke_failure_diagnostic(
+                self.failure_diagnostic.as_ref(),
+                PresentationFailure::PresentMissingSurface,
+            );
             self.state = PresentationState::Failed;
             return self.state;
         };
-        if surface.isVisible()
-            || surface.frame() != self.frame
-            || surface.canBecomeKeyWindow()
-            || surface.canBecomeMainWindow()
-            || surface.alphaValue() != 1.0
-        {
+        let surface_facts = [
+            !surface.isVisible(),
+            surface.frame() == self.frame,
+            !surface.canBecomeKeyWindow(),
+            !surface.canBecomeMainWindow(),
+            surface.alphaValue() == 1.0,
+        ];
+        if !surface_facts.into_iter().all(|fact| fact) {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            if let Some(failure) = classify_predicates(surface_facts, PRESENT_SURFACE_FAILURES) {
+                invoke_failure_diagnostic(self.failure_diagnostic.as_ref(), failure);
+            }
             self.state = PresentationState::Failed;
             return self.state;
         }
         let Some(parent) = surface.contentView() else {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            invoke_failure_diagnostic(
+                self.failure_diagnostic.as_ref(),
+                PresentationFailure::PresentMissingContentView,
+            );
             self.state = PresentationState::Failed;
             return self.state;
         };
@@ -210,6 +324,30 @@ impl WorkObservationPresentation {
                 .occlusionState()
                 .contains(NSWindowOcclusionState::Visible)
                 && self.page.visibleRect() == viewport();
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            if !exact {
+                let poll_facts = [
+                    admitted_frame(self.frame, self.screen),
+                    surface.frame() == self.frame,
+                    self.page.frame() == viewport(),
+                    surface.isVisible(),
+                    !self.page.isHiddenOrHasHiddenAncestor(),
+                    !surface.isKeyWindow(),
+                    !surface.isMainWindow(),
+                    !surface.canBecomeKeyWindow(),
+                    !surface.canBecomeMainWindow(),
+                    surface.ignoresMouseEvents(),
+                    surface.isOpaque(),
+                    surface.alphaValue() == 1.0,
+                    self.page.alphaValue() == 1.0,
+                    self.page
+                        .window()
+                        .is_some_and(|window| std::ptr::eq(&*window, &**surface)),
+                ];
+                if let Some(failure) = classify_predicates(poll_facts, POLL_FAILURES) {
+                    invoke_failure_diagnostic(self.failure_diagnostic.as_ref(), failure);
+                }
+            }
             self.state = if !exact {
                 PresentationState::Failed
             } else if visible {
@@ -220,6 +358,11 @@ impl WorkObservationPresentation {
                 PresentationState::Unavailable
             };
         } else {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            invoke_failure_diagnostic(
+                self.failure_diagnostic.as_ref(),
+                PresentationFailure::PollMissingSurface,
+            );
             self.state = PresentationState::Failed;
         }
         self.state
@@ -248,10 +391,21 @@ impl WorkObservationPresentation {
         // the main thread. No pointer escapes this identity comparison.
         let original_parent = unsafe { self.page.superview() }
             .is_some_and(|parent| std::ptr::eq(&*parent, &*self.parent));
-        self.cleanup_failed |= !self.page.isHidden()
-            || human_owners(&self.app) != before
-            || self.page.frame() != self.original_frame
-            || !original_parent;
+        let human_ownership_changed = human_owners(&self.app) != before;
+        let retirement_facts = [
+            self.page.isHidden(),
+            !human_ownership_changed,
+            self.page.frame() == self.original_frame,
+            original_parent,
+        ];
+        let cleanup_failed = !retirement_facts.into_iter().all(|fact| fact);
+        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+        if !self.cleanup_failed && cleanup_failed {
+            if let Some(failure) = classify_predicates(retirement_facts, RETIRE_FAILURES) {
+                invoke_failure_diagnostic(self.failure_diagnostic.as_ref(), failure);
+            }
+        }
+        self.cleanup_failed |= cleanup_failed;
         self.poll()
     }
 
@@ -365,6 +519,37 @@ fn human_owners(app: &NSApplication) -> HumanOwners {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    #[test]
+    fn every_failed_presentation_predicate_has_one_exact_content_free_cause() {
+        fn assert_matrix<const N: usize>(failures: [PresentationFailure; N]) {
+            assert_eq!(classify_predicates([true; N], failures), None);
+            for (index, expected) in failures.into_iter().enumerate() {
+                let mut facts = [true; N];
+                facts[index] = false;
+                assert_eq!(classify_predicates(facts, failures), Some(expected));
+            }
+        }
+        assert_matrix(PREPARE_VIEW_FAILURES);
+        assert_matrix(PRESENT_SURFACE_FAILURES);
+        assert_matrix(POLL_FAILURES);
+        assert_matrix(RETIRE_FAILURES);
+
+        let trace = format!("{:?}", PresentationFailure::PollPageWindowMismatch);
+        for forbidden in ["http", "/", "0x", "NSPoint", "NSRect"] {
+            assert!(!trace.contains(forbidden));
+        }
+    }
+
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    #[test]
+    fn diagnostic_consumer_panic_cannot_cross_the_presentation_boundary() {
+        invoke_failure_diagnostic(
+            &|_| panic!("contained diagnostic panic"),
+            PresentationFailure::PresentInvalidState,
+        );
+    }
+
     #[test]
     fn fixed_viewport_never_scales_clips_or_admits_nonfinite_screen_geometry() {
         for screen in [

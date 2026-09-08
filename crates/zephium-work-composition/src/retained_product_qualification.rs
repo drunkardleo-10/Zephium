@@ -322,6 +322,7 @@ mod tests {
     #[test]
     fn resource_failure_cause_survives_observer_to_closed_content_free_log() {
         use zephium_engine::{
+            WorkObservationPresentationFailure as PresentationFailure,
             WorkResourceDeadlineStage as Stage, WorkResourceFailureCause as Failure,
         };
         for (cause, label) in [
@@ -336,6 +337,10 @@ mod tests {
             (
                 Failure::LifecycleDeadline(Stage::ConstructionTargetProvisional),
                 "LifecycleDeadline(ConstructionTargetProvisional)",
+            ),
+            (
+                Failure::ObservationPresentation(PresentationFailure::PollSurfaceNotVisible),
+                "ObservationPresentation(PollSurfaceNotVisible)",
             ),
             (
                 Failure::UnattributedResourceFailure,

@@ -27,7 +27,10 @@ fn source() -> (WorkBrowserResources, WorkBrowserResourceRequest) {
 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
 #[test]
 fn resource_failure_cause_is_exact_first_wins_and_survives_retention_and_factory_seal() {
-    use crate::{WorkResourceDeadlineStage as Stage, WorkResourceFailureCause as Failure};
+    use crate::{
+        WorkObservationPresentationFailure as PresentationFailure,
+        WorkResourceDeadlineStage as Stage, WorkResourceFailureCause as Failure,
+    };
     for cause in [
         Failure::NavigationEventRefused,
         Failure::UrlObservationRefused,
@@ -35,6 +38,7 @@ fn resource_failure_cause_is_exact_first_wins_and_survives_retention_and_factory
         Failure::RendererLost,
         Failure::SemanticNativeInvariant,
         Failure::LifecycleDeadline(Stage::ConstructionTargetProvisional),
+        Failure::ObservationPresentation(PresentationFailure::PollSurfaceNotVisible),
         Failure::NativeAdmission(ContextPortFailure::NativeRefused),
         Failure::UnattributedResourceFailure,
     ] {

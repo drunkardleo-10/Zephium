@@ -256,7 +256,18 @@ impl EngineHost {
         let presentation = if external_witness {
             None
         } else {
-            match WorkObservationPresentation::prepare(view.view(), deadline) {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            let prepared = {
+                let diagnostic_guard = guard.clone();
+                WorkObservationPresentation::prepare(view.view(), deadline, move |failure| {
+                    diagnostic_guard.record_failure_cause(
+                        ResourceFailureCause::ObservationPresentation(failure),
+                    );
+                })
+            };
+            #[cfg(not(feature = "native-agentic-work-lifetime-diagnostic"))]
+            let prepared = WorkObservationPresentation::prepare(view.view(), deadline);
+            match prepared {
                 Ok(native) => Some(native),
                 Err(state) => {
                     task.refuse(presentation_failure(state));

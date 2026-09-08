@@ -18,10 +18,49 @@ pub enum WorkResourceFailureCause {
     RendererLost,
     SemanticNativeInvariant,
     LifecycleDeadline(WorkResourceDeadlineStage),
+    ObservationPresentation(WorkObservationPresentationFailure),
     NativeAdmission(ContextPortFailure),
     /// No original native edge supplied a more specific cause (for example,
     /// external resource invalidation). Never guess navigation or focus loss.
     UnattributedResourceFailure,
+}
+
+/// First failed native presentation predicate for one Work observation.
+/// Variants encode relations only; no native value or page data is retained.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkObservationPresentationFailure {
+    PrepareMainThread,
+    PrepareMissingParent,
+    PreparePageNotHidden,
+    PrepareFrameMismatch,
+    PreparePageIsResponder,
+    PresentInvalidState,
+    PresentMissingSurface,
+    PresentSurfaceAlreadyVisible,
+    PresentSurfaceFrameMismatch,
+    PresentSurfaceCanBecomeKey,
+    PresentSurfaceCanBecomeMain,
+    PresentSurfaceAlphaMismatch,
+    PresentMissingContentView,
+    PollFrameNotAdmitted,
+    PollSurfaceFrameMismatch,
+    PollPageFrameMismatch,
+    PollSurfaceNotVisible,
+    PollPageHidden,
+    PollSurfaceIsKey,
+    PollSurfaceIsMain,
+    PollSurfaceCanBecomeKey,
+    PollSurfaceCanBecomeMain,
+    PollSurfaceReceivesMouse,
+    PollSurfaceNotOpaque,
+    PollSurfaceAlphaMismatch,
+    PollPageAlphaMismatch,
+    PollPageWindowMismatch,
+    PollMissingSurface,
+    RetirePageStillVisible,
+    RetireHumanOwnershipChanged,
+    RetireFrameMismatch,
+    RetireParentMismatch,
 }
 
 /// Closed native stage captured when one exact Work resource lifecycle
