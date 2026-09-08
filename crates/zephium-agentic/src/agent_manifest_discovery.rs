@@ -9,6 +9,7 @@ pub struct AgentNavigationDiscovery {
     origin: SemanticOrigin,
     path_prefix: String,
     max_hops: usize,
+    document_policy: crate::WorkBrowserDocumentPolicy,
 }
 
 impl AgentNavigationDiscovery {
@@ -19,9 +20,27 @@ impl AgentNavigationDiscovery {
         path_prefix: String,
         max_hops: usize,
     ) -> Result<Self, AgentManifestContractError> {
+        Self::try_new_with_document_policy(
+            departure,
+            path_prefix,
+            max_hops,
+            crate::WorkBrowserDocumentPolicy::Exact,
+        )
+    }
+
+    /// Adds trusted operation-bound document finalization without broadening
+    /// model-selected destinations. Query-bearing proposals remain forbidden.
+    pub fn try_new_with_document_policy(
+        departure: crate::ContextNavigationTarget,
+        path_prefix: String,
+        max_hops: usize,
+        document_policy: crate::WorkBrowserDocumentPolicy,
+    ) -> Result<Self, AgentManifestContractError> {
         let origin = SemanticOrigin::parse(departure.as_url().as_str())
             .map_err(|_| AgentManifestContractError::NavigationRoute)?;
-        if max_hops == 0
+        if document_policy == crate::WorkBrowserDocumentPolicy::InitialQueryFinalization
+            || !document_policy.admits_request(&departure)
+            || max_hops == 0
             || max_hops > MAX_AGENT_NAVIGATION_ROUTE_HOPS
             || !path_prefix.starts_with('/')
             || !path_prefix.ends_with('/')
@@ -41,6 +60,7 @@ impl AgentNavigationDiscovery {
             origin,
             path_prefix,
             max_hops,
+            document_policy,
         })
     }
 
@@ -59,6 +79,10 @@ impl AgentNavigationDiscovery {
     /// Total navigation allowance under the original run budgets.
     pub const fn max_hops(&self) -> usize {
         self.max_hops
+    }
+    /// Trusted finalization policy for each separately admitted navigation.
+    pub const fn document_policy(&self) -> crate::WorkBrowserDocumentPolicy {
+        self.document_policy
     }
     /// Tests scope only; the policy additionally requires current source links.
     pub fn admits(&self, target: &crate::ContextNavigationTarget) -> bool {
@@ -119,5 +143,34 @@ mod tests {
             );
         }
         assert!(!format!("{scope:?}").contains("example.test"));
+    }
+    #[test]
+    fn trusted_finalization_does_not_admit_query_targets_or_legacy_startup_policy() {
+        use crate::WorkBrowserDocumentPolicy as P;
+        let departure = target("https://example.test/docs");
+        let scope = AgentNavigationDiscovery::try_new_with_document_policy(
+            departure.clone(),
+            "/docs/".into(),
+            2,
+            P::DocumentQueryFinalization,
+        )
+        .unwrap();
+        assert_eq!(scope.document_policy(), P::DocumentQueryFinalization);
+        assert!(scope.admits(&target("https://example.test/docs/topic")));
+        assert!(!scope.admits(&target("https://example.test/docs/topic?opaque=one")));
+        assert!(AgentNavigationDiscovery::try_new_with_document_policy(
+            departure,
+            "/docs/".into(),
+            2,
+            P::InitialQueryFinalization
+        )
+        .is_err());
+        assert!(AgentNavigationDiscovery::try_new_with_document_policy(
+            target("http://example.test/docs"),
+            "/docs/".into(),
+            2,
+            P::DocumentQueryFinalization
+        )
+        .is_err());
     }
 }

@@ -29,6 +29,21 @@ fn navigation_fixture(
     destinations: Vec<ContextNavigationTarget>,
     discovery: bool,
 ) -> (PolicyFixture, ContextRegistry, SemanticObservation) {
+    navigation_fixture_with_document_policy(
+        operations,
+        tokens,
+        destinations,
+        discovery,
+        crate::WorkBrowserDocumentPolicy::Exact,
+    )
+}
+fn navigation_fixture_with_document_policy(
+    operations: u32,
+    tokens: u64,
+    destinations: Vec<ContextNavigationTarget>,
+    discovery: bool,
+    document_policy: crate::WorkBrowserDocumentPolicy,
+) -> (PolicyFixture, ContextRegistry, SemanticObservation) {
     let (mut registry, context) = make_context_registry(901, 902, 903);
     registry
         .acknowledge_observation(context.identity().id(), context)
@@ -62,8 +77,13 @@ fn navigation_fixture(
     let authority = if discovery {
         authority
             .with_navigation_discovery(
-                crate::AgentNavigationDiscovery::try_new(route.departure().clone(), "/".into(), 2)
-                    .unwrap(),
+                crate::AgentNavigationDiscovery::try_new_with_document_policy(
+                    route.departure().clone(),
+                    "/".into(),
+                    2,
+                    document_policy,
+                )
+                .unwrap(),
             )
             .unwrap()
     } else {
@@ -113,6 +133,181 @@ fn navigation_fixture(
 
 fn final_target() -> ContextNavigationTarget {
     ContextNavigationTarget::parse("https://source.example.test/final").unwrap()
+}
+
+#[test]
+fn initial_effective_metadata_requires_original_retained_binding_before_model_calls() {
+    use crate::*;
+    for fault in 0..4 {
+        let (f, _, _) = navigation_fixture(5, 10_000, vec![target(), final_target()], true);
+        let mut policy = if fault == 3 {
+            f.policy
+        } else {
+            AgentRunPolicy::try_new(
+                f.policy.manifest,
+                vec![AgentPlanLeaseBinding::new(
+                    f.lease,
+                    AgentPlanNodeId::from_raw(1),
+                )],
+            )
+            .unwrap()
+        };
+        let requested = ContextNavigationTarget::parse(if fault == 1 {
+            "https://source.example.test/other"
+        } else {
+            "https://source.example.test/start"
+        })
+        .unwrap();
+        let effective =
+            ContextNavigationTarget::parse(&format!("{}?opaque=initial", requested.as_url()))
+                .unwrap();
+        let mut rows = WorkBrowserResources::new(WorkId::generate(), profile(902));
+        let construction = rows
+            .construct_document_with_policy(
+                WorkBrowserResourceId::generate(),
+                ContextId::generate(),
+                ContextProfileStorageClass::Ephemeral,
+                requested.clone(),
+                WorkBrowserDocumentPolicy::DocumentQueryFinalization,
+                AgentPolicyInstant::from_millis(0),
+            )
+            .unwrap();
+        let resource = construction.resource().clone();
+        let _ = rows
+            .settle_at(
+                construction.complete_document(effective.clone()),
+                AgentPolicyInstant::from_millis(0),
+            )
+            .unwrap();
+        let acquire = rows
+            .acquire(
+                &resource,
+                ContextRunId::from_raw(if fault == 2 { 999 } else { 901 }),
+                AgentPolicyInstant::from_millis(1),
+                AgentPolicyInstant::from_millis(EXPIRES_AT),
+            )
+            .unwrap();
+        let lease = acquire.lease().unwrap().clone();
+        let _ = rows
+            .settle_at(
+                acquire.complete(WorkBrowserResourceNativeOutcome::Acquired),
+                AgentPolicyInstant::from_millis(1),
+            )
+            .unwrap();
+        let binding = rows
+            .read_binding(&lease, AgentPolicyInstant::from_millis(2))
+            .unwrap();
+        let result = policy.bind_retained_initial_document(&binding);
+        assert_eq!(result.is_ok(), fault == 0, "fault {fault}");
+        if fault == 0 {
+            let context = binding.frame().context();
+            let observed = discovery_observation(context, 1);
+            let request = call_request(1, f.lease, account(context, NOW), 0, 0, 0, NOW);
+            let checkpoint = policy
+                .provider_navigation_checkpoint(request, &observed)
+                .unwrap()
+                .unwrap();
+            assert_eq!(checkpoint.current_document(), Some(&effective));
+            assert_eq!(checkpoint.current_requested_document(), Some(&requested));
+            assert!(policy.bind_retained_initial_document(&binding).is_err());
+        }
+    }
+}
+
+#[test]
+fn trusted_finalization_preserves_requested_progress_and_binds_effective_document() {
+    use crate::WorkBrowserDocumentPolicy as P;
+    for (policy, effective, accepted) in [
+        (
+            P::Exact,
+            "https://source.example.test/next?opaque=one",
+            false,
+        ),
+        (
+            P::DocumentQueryFinalization,
+            "https://source.example.test/next?opaque=one",
+            true,
+        ),
+        (
+            P::DocumentQueryFinalization,
+            "https://source.example.test/other?opaque=one",
+            false,
+        ),
+        (
+            P::DocumentQueryFinalization,
+            "https://foreign.test/next?opaque=one",
+            false,
+        ),
+        (
+            P::DocumentQueryFinalization,
+            "https://source.example.test/next?opaque=one#fragment",
+            false,
+        ),
+    ] {
+        let (mut f, mut registry, observed) = navigation_fixture_with_document_policy(
+            5,
+            10_000,
+            vec![target(), final_target()],
+            true,
+            policy,
+        );
+        // The actual fixture link remains the sole requested destination.
+        let destination = target();
+        let effective = ContextNavigationTarget::parse(effective).unwrap();
+        let request = route_request(
+            &f,
+            &registry,
+            &observed,
+            account(observed.request().context(), NOW - 1),
+        );
+        let permit = f
+            .policy
+            .authorize_navigation(request, &observed, &baseline(&observed), &destination)
+            .unwrap();
+        let operation = registry
+            .begin_navigation(
+                observed.request().context().identity().id(),
+                ContextOperationId::new(2).unwrap(),
+            )
+            .unwrap();
+        let active = f
+            .policy
+            .dispatch_navigation(permit, operation, AgentPolicyInstant::from_millis(NOW))
+            .unwrap();
+        let native = active.native_request().unwrap();
+        assert_eq!(native.target(), &destination);
+        assert_eq!(native.document_policy(), policy);
+        assert!(native.redirect_policy().is_none());
+        let result = f.policy.settle_navigation(
+            &active,
+            &ContextNavigationSettlement::try_new(operation, Ok(effective.clone())).unwrap(),
+            AgentPolicyInstant::from_millis(NOW),
+        );
+        assert_eq!(result.is_ok(), accepted, "{effective:?}");
+        if !accepted {
+            continue;
+        }
+        let receipt = result.unwrap();
+        assert!(receipt.matches_source(&baseline(&observed), &destination));
+        assert!(!receipt.matches_source(&baseline(&observed), &effective));
+        assert_eq!(receipt.progress_id(), active.progress_id());
+        let successor = discovery_observation(operation.context(), 2);
+        let request = call_request(2, f.lease, account(operation.context(), NOW), 0, 0, 0, NOW);
+        let checkpoint = f
+            .policy
+            .provider_navigation_checkpoint(request, &successor)
+            .unwrap()
+            .unwrap();
+        assert_eq!(checkpoint.current_document(), Some(&effective));
+        assert_eq!(checkpoint.current_requested_document(), Some(&destination));
+        f.policy.navigation_effective_destinations[0] = Some(destination.clone());
+        assert!(
+            f.policy
+                .provider_navigation_checkpoint(request, &successor)
+                .is_err(),
+            "even an otherwise policy-valid effective substitution must fail the receipt hash"
+        );
+    }
 }
 
 fn committed_route() -> (

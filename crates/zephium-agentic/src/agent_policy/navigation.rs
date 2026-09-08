@@ -40,6 +40,7 @@ pub(super) struct AgentNavigationRow {
     account: AgentContextAccountBinding,
     source_guard: [u8; 32],
     target: ContextNavigationTarget,
+    document_policy: crate::WorkBrowserDocumentPolicy,
     operation: Option<ContextOperationJoin>,
     started_at: AgentPolicyInstant,
     hop: usize,
@@ -126,7 +127,11 @@ impl AgentActiveNavigation {
     pub fn native_request(
         &self,
     ) -> Result<ContextNavigationRequest, crate::ContextPortContractError> {
-        ContextNavigationRequest::try_new(self.operation, self.row.target.clone())
+        ContextNavigationRequest::try_new_with_document_policy(
+            self.operation,
+            self.row.target.clone(),
+            self.row.document_policy,
+        )
     }
 }
 
@@ -149,6 +154,7 @@ pub struct AgentNavigationReceipt {
     source: ContextJoin,
     source_guard: [u8; 32],
     target_guard: [u8; 32],
+    effective_guard: [u8; 32],
     operation: ContextOperationJoin,
     settlement: AgentNavigationSettlement,
     account: AgentAccountScope,
@@ -239,6 +245,41 @@ impl fmt::Debug for AgentNavigationReceipt {
 }
 
 impl AgentRunPolicy {
+    /// Binds descriptive initial-document metadata to the original retained
+    /// resource receipt before any provider call. It grants no navigation.
+    pub fn bind_retained_initial_document(
+        &mut self,
+        binding: &crate::WorkBrowserReadBinding,
+    ) -> Result<(), AgentPolicyError> {
+        if self.sealed
+            || !self.calls.is_empty()
+            || self.last_call.is_some()
+            || self.navigation_attempts != 0
+            || self.initial_navigation_document.is_some()
+            || binding.frame().context().identity().owner() != self.manifest.run()
+            || binding.frame().context().navigation_epoch().get() != 1
+            || !binding
+                .document_policy()
+                .admits_final_document(binding.requested_document(), binding.document())
+            || !self.manifest.plan_nodes().iter().any(|node| {
+                node.profiles()
+                    .contains(&binding.frame().context().identity().profile())
+                    && self
+                        .leases
+                        .iter()
+                        .any(|lease| lease.binding.node() == node.id())
+                    && node.navigation_discovery().is_some_and(|scope| {
+                        scope.departure() == binding.requested_document()
+                            && scope.origin() == binding.frame().origin()
+                    })
+            })
+        {
+            return Err(AgentPolicyError::Navigation);
+        }
+        self.initial_navigation_document =
+            Some((binding.frame().context(), binding.document().clone()));
+        Ok(())
+    }
     pub(crate) fn reject_unstructured_navigation_input(
         &self,
         request: AgentModelCallRequest,
@@ -305,6 +346,19 @@ impl AgentRunPolicy {
             |scope| scope.max_hops(),
         );
         let completed = self.navigation_attempts;
+        if self
+            .initial_navigation_document
+            .as_ref()
+            .is_some_and(|(initial, _)| {
+                if completed == 0 {
+                    *initial != context
+                } else {
+                    self.navigation_receipts[0].is_none_or(|receipt| receipt.source != *initial)
+                }
+            })
+        {
+            return Err(AgentPolicyError::Navigation);
+        }
         if self.navigation.is_some()
             || completed > total_hops
             || self.navigation_receipts.iter().flatten().count() != completed
@@ -321,7 +375,9 @@ impl AgentRunPolicy {
         for (hop, receipt) in self.navigation_receipts.iter().enumerate() {
             if hop >= completed {
                 if receipt.is_some()
-                    || (discovery.is_some() && self.navigation_destinations[hop].is_some())
+                    || (discovery.is_some()
+                        && (self.navigation_destinations[hop].is_some()
+                            || self.navigation_effective_destinations[hop].is_some()))
                 {
                     return Err(AgentPolicyError::Navigation);
                 }
@@ -334,6 +390,14 @@ impl AgentRunPolicy {
                     .is_some_and(|destination| {
                         scope.admits(destination)
                             && target_guard(destination) == receipt.target_guard
+                            && self.navigation_effective_destinations[hop]
+                                .as_ref()
+                                .is_some_and(|effective| {
+                                    scope
+                                        .document_policy()
+                                        .admits_final_document(destination, effective)
+                                        && target_guard(effective) == receipt.effective_guard
+                                })
                     })
             }) {
                 return Err(AgentPolicyError::Navigation);
@@ -368,6 +432,10 @@ impl AgentRunPolicy {
         Ok(Some(AgentNavigationCheckpoint {
             binding: AgentNavigationCheckpointBinding {
                 manifest_guard: self.manifest.guard(),
+                initial_document_guard: self
+                    .initial_navigation_document
+                    .as_ref()
+                    .map(|(_, document)| target_guard(document)),
                 lease: request.lease(),
                 node: node_id,
                 context,
@@ -381,7 +449,12 @@ impl AgentRunPolicy {
             next_target: route.and_then(|route| route.destinations().get(completed)),
             discovery: discovery.is_some(),
             departure: discovery.map(|scope| scope.departure()),
+            initial_effective: self
+                .initial_navigation_document
+                .as_ref()
+                .map(|(_, document)| document),
             destinations: &self.navigation_destinations[..completed],
+            effective_destinations: &self.navigation_effective_destinations[..completed],
         }))
     }
 
@@ -512,6 +585,9 @@ impl AgentRunPolicy {
             account: request.account,
             source_guard: fingerprint.digest(),
             target: target.clone(),
+            document_policy: discovery.map_or(crate::WorkBrowserDocumentPolicy::Exact, |scope| {
+                scope.document_policy()
+            }),
             operation: None,
             started_at: request.now,
             hop,
@@ -584,8 +660,8 @@ impl AgentRunPolicy {
         })
     }
 
-    /// Settles only the original native operation and exact requested destination.
-    /// A foreign/redirected terminal seals policy and leaves the original debt.
+    /// Settles only the original native operation under its frozen document
+    /// policy. A foreign terminal seals policy and leaves the original debt.
     pub fn settle_navigation(
         &mut self,
         active: &AgentActiveNavigation,
@@ -593,10 +669,12 @@ impl AgentRunPolicy {
         now: AgentPolicyInstant,
     ) -> Result<AgentNavigationReceipt, AgentPolicyError> {
         if terminal.operation() != active.operation
-            || terminal
-                .outcome()
-                .as_ref()
-                .is_ok_and(|target| target != &active.row.target)
+            || terminal.outcome().as_ref().is_ok_and(|target| {
+                !active
+                    .row
+                    .document_policy
+                    .admits_final_document(&active.row.target, target)
+            })
         {
             self.sealed = true;
             return Err(AgentPolicyError::Navigation);
@@ -605,7 +683,7 @@ impl AgentRunPolicy {
             Ok(_) => AgentNavigationSettlement::Committed,
             Err(failure) => AgentNavigationSettlement::Failed(*failure),
         };
-        self.finish_navigation(active, settlement, now)
+        self.finish_navigation(active, settlement, terminal.outcome().as_ref().ok(), now)
     }
 
     /// Accounts an explicit synchronous non-dispatch refusal as one failed
@@ -616,13 +694,19 @@ impl AgentRunPolicy {
         failure: ContextPortFailure,
         now: AgentPolicyInstant,
     ) -> Result<AgentNavigationReceipt, AgentPolicyError> {
-        self.finish_navigation(active, AgentNavigationSettlement::Failed(failure), now)
+        self.finish_navigation(
+            active,
+            AgentNavigationSettlement::Failed(failure),
+            None,
+            now,
+        )
     }
 
     fn finish_navigation(
         &mut self,
         active: &AgentActiveNavigation,
         settlement: AgentNavigationSettlement,
+        effective: Option<&ContextNavigationTarget>,
         now: AgentPolicyInstant,
     ) -> Result<AgentNavigationReceipt, AgentPolicyError> {
         if !active.matches_manifest_revision(self.manifest.id(), self.manifest.guard())
@@ -666,6 +750,7 @@ impl AgentRunPolicy {
             source: active.row.account.context(),
             source_guard: active.row.source_guard,
             target_guard: target_guard(&active.row.target),
+            effective_guard: effective.map_or([0; 32], target_guard),
             operation: active.operation,
             settlement,
             account: active.row.account.account(),
@@ -675,6 +760,7 @@ impl AgentRunPolicy {
         *slot = Some(receipt);
         if discovery && settlement == AgentNavigationSettlement::Committed {
             self.navigation_destinations[active.row.hop] = Some(active.row.target.clone());
+            self.navigation_effective_destinations[active.row.hop] = effective.cloned();
         }
         Ok(receipt)
     }
@@ -694,7 +780,9 @@ pub(crate) struct AgentNavigationCheckpoint<'a> {
     next_target: Option<&'a ContextNavigationTarget>,
     discovery: bool,
     departure: Option<&'a ContextNavigationTarget>,
+    initial_effective: Option<&'a ContextNavigationTarget>,
     destinations: &'a [Option<ContextNavigationTarget>],
+    effective_destinations: &'a [Option<ContextNavigationTarget>],
 }
 
 impl AgentNavigationCheckpoint<'_> {
@@ -715,6 +803,15 @@ impl AgentNavigationCheckpoint<'_> {
     }
     /// Exact current document under the validated committed receipt prefix.
     pub(crate) fn current_document(&self) -> Option<&ContextNavigationTarget> {
+        self.effective_destinations
+            .last()
+            .and_then(Option::as_ref)
+            .or(self.initial_effective)
+            .or(self.departure)
+    }
+    /// Exact requested target remains separately inspectable after native
+    /// finalization changes the effective current-document URL.
+    pub(crate) fn current_requested_document(&self) -> Option<&ContextNavigationTarget> {
         self.destinations
             .last()
             .and_then(Option::as_ref)
@@ -722,11 +819,12 @@ impl AgentNavigationCheckpoint<'_> {
     }
     /// Completed documents no longer current. Descriptive facts, not sources.
     pub(crate) fn prior_documents(&self) -> impl Iterator<Item = &ContextNavigationTarget> {
-        self.departure
+        self.initial_effective
+            .or(self.departure)
             .filter(|_| self.completed_hops > 0)
             .into_iter()
             .chain(
-                self.destinations[..self.completed_hops.saturating_sub(1)]
+                self.effective_destinations[..self.completed_hops.saturating_sub(1)]
                     .iter()
                     .filter_map(Option::as_ref),
             )
@@ -737,6 +835,7 @@ impl AgentNavigationCheckpoint<'_> {
 /// Fresh account IDs may change, but document/scope/route/terminal identity may not.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) struct AgentNavigationCheckpointBinding {
+    initial_document_guard: Option<[u8; 32]>,
     manifest_guard: [u8; 32],
     lease: AgentPlanLeaseId,
     node: AgentPlanNodeId,

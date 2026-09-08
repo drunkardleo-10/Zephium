@@ -123,6 +123,14 @@ fn selected_definition_binds_same_scope_in_task_and_read_only_manifest() {
     assert_eq!(scope.origin(), &SemanticOrigin::parse(ORIGIN).unwrap());
     assert_eq!(scope.path_prefix(), PATH_PREFIX);
     assert_eq!(scope.max_hops(), 2);
+    assert_eq!(
+        scope.document_policy(),
+        if cfg!(feature = "retained-commerce-qualification") {
+            WorkBrowserDocumentPolicy::DocumentQueryFinalization
+        } else {
+            WorkBrowserDocumentPolicy::Exact
+        }
+    );
     let authority = (DEFINITION.authority)(
         AgentPlanNodeAuthority::try_new(
             vec![context.identity().profile()],
@@ -262,7 +270,7 @@ fn selected_result_verifier_checks_current_source_shape_not_a_preselected_recomm
 fn commerce_selection_is_static_and_cannot_silently_be_the_docs_witness() {
     assert_eq!(
         DEFINITION.document_policy,
-        WorkBrowserDocumentPolicy::InitialQueryFinalization
+        WorkBrowserDocumentPolicy::DocumentQueryFinalization
     );
     assert_eq!(INITIAL, "https://www.lego.com/en-us/themes/architecture");
     assert_eq!(ORIGIN, "https://www.lego.com");

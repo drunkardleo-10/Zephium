@@ -28,6 +28,7 @@ pub struct WorkBrowserReadBinding {
     frame: SemanticFrameJoin,
     document: Arc<ContextNavigationTarget>,
     requested_document: Arc<ContextNavigationTarget>,
+    current_requested_document: Arc<ContextNavigationTarget>,
     document_policy: crate::WorkBrowserDocumentPolicy,
     storage: ContextProfileStorageClass,
 }
@@ -49,6 +50,11 @@ impl WorkBrowserReadBinding {
     /// Original user/task-authored request; never replaced by finalization.
     pub fn requested_document(&self) -> &ContextNavigationTarget {
         &self.requested_document
+    }
+    /// Exact request that produced this current document. The initial resource
+    /// request remains separately available through `requested_document`.
+    pub fn current_requested_document(&self) -> &ContextNavigationTarget {
+        &self.current_requested_document
     }
     /// Original trusted initial-document policy from the retained resource.
     pub const fn document_policy(&self) -> crate::WorkBrowserDocumentPolicy {
@@ -168,6 +174,12 @@ impl WorkBrowserResources {
             lease: lease.clone(),
             frame,
             document: Arc::clone(document),
+            current_requested_document: row
+                .current_requested_document
+                .as_ref()
+                .or(row.document.as_ref())
+                .cloned()
+                .ok_or(WorkBrowserResourceError::Phase)?,
             requested_document: row
                 .document
                 .clone()

@@ -41,6 +41,26 @@ cart, purchase, arbitrary JS or secondary HTTP/DOM extraction.
 
 ## Same product architecture
 
+The commerce composition explicitly selects `DocumentQueryFinalization` for
+construction and its trusted observed-link discovery manifest. Each successor
+authorization carries that policy into its exact operation request. The model
+must still select an exact current observed query-free URL. A native receipt may
+finalize that request at a URL with one opaque nonempty query addition, with all
+other raw URL bytes unchanged and the same native start/commit/finish lineage.
+Both resource completion and agent policy independently check this relation.
+Default navigation and the original Svelte successor workflow remain `Exact`;
+the older `InitialQueryFinalization` policy cannot authorize a successor.
+
+Requested targets remain the basis of model continuation, repeats and navigation
+progress. Effective native URLs are separately bound to the committed receipts
+and exposed as current-document metadata. When different, provider context also
+includes the exact requested document URL. Initial metadata is joined to the
+original retained construction receipt before any provider call. Resource read
+bindings preserve both the original construction request and the request that
+produced the current document. Existing source, ref, account, invocation, token,
+URL and transcript ceilings continue to apply; an over-budget metadata envelope
+refuses rather than dropping lineage or increasing a limit.
+
 The new compile-time feature `macos-work-retained-commerce-probe` inherits
 `macos-work-retained-product-probe`; the composition feature similarly inherits
 `retained-product-qualification`. Only frozen objective constants are selected.

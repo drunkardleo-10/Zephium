@@ -43,10 +43,15 @@ pub fn load_request(
     navigation::load_configured_request(started, profile, &DEFINITION)
 }
 fn discovery() -> Result<AgentNavigationDiscovery, AgentWorkFailure> {
-    AgentNavigationDiscovery::try_new(
+    AgentNavigationDiscovery::try_new_with_document_policy(
         ContextNavigationTarget::parse(INITIAL).map_err(|_| AgentWorkFailure::Contract)?,
         PATH_PREFIX.into(),
         2,
+        if DOCUMENT_POLICY == WorkBrowserDocumentPolicy::DocumentQueryFinalization {
+            DOCUMENT_POLICY
+        } else {
+            WorkBrowserDocumentPolicy::Exact
+        },
     )
     .map_err(|_| AgentWorkFailure::Contract)
 }

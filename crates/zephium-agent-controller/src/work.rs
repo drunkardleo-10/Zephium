@@ -1601,6 +1601,14 @@ impl AgentWorkController {
             state.retention,
         )
         .map_err(AgentWorkFailure::Browser)?;
+        if state.navigation_discovery.is_some() {
+            if let Some(retained) = &state.native.retained {
+                session
+                    .policy
+                    .bind_retained_initial_document(retained.binding())
+                    .map_err(|_| AgentWorkFailure::Contract)?;
+            }
+        }
         session.journal = state.journal.take();
         if state.extraction_schema.is_some() {
             session.config = match (state.actions_before_extraction, state.subtree_extraction) {

@@ -1180,12 +1180,17 @@ fn manifest_guard(
         .filter(|node| node.navigation_discovery().is_some())
         .count();
     if discovered != 0 {
-        hasher.update(b"ZEPHIUM-AGENT-NAVIGATION-DISCOVERY-1\0");
+        hasher.update(b"ZEPHIUM-AGENT-NAVIGATION-DISCOVERY-2\0");
         hasher.update((discovered as u64).to_be_bytes());
         for node in nodes {
             if let Some(discovery) = node.navigation_discovery() {
                 hasher.update(node.id().bytes());
                 hasher.update((discovery.max_hops() as u64).to_be_bytes());
+                hasher.update([match discovery.document_policy() {
+                    crate::WorkBrowserDocumentPolicy::Exact => 0,
+                    crate::WorkBrowserDocumentPolicy::InitialQueryFinalization => 1,
+                    crate::WorkBrowserDocumentPolicy::DocumentQueryFinalization => 2,
+                }]);
                 for value in [
                     discovery.departure().as_url().as_str(),
                     discovery.path_prefix(),
@@ -1568,15 +1573,31 @@ mod tests {
                 .unwrap()
         };
         let mut guards = vec![manifest().guard()];
-        for (departure, prefix, hops) in [
-            ("start", "/", 1),
-            ("start", "/", 2),
-            ("other", "/", 2),
-            ("start", "/docs/", 2),
+        for (departure, prefix, hops, policy) in [
+            ("start", "/", 1, crate::WorkBrowserDocumentPolicy::Exact),
+            ("start", "/", 2, crate::WorkBrowserDocumentPolicy::Exact),
+            ("other", "/", 2, crate::WorkBrowserDocumentPolicy::Exact),
+            (
+                "start",
+                "/docs/",
+                2,
+                crate::WorkBrowserDocumentPolicy::Exact,
+            ),
+            (
+                "start",
+                "/",
+                2,
+                crate::WorkBrowserDocumentPolicy::DocumentQueryFinalization,
+            ),
         ] {
             let mut candidate = manifest();
-            let discovery =
-                AgentNavigationDiscovery::try_new(target(departure), prefix.into(), hops).unwrap();
+            let discovery = AgentNavigationDiscovery::try_new_with_document_policy(
+                target(departure),
+                prefix.into(),
+                hops,
+                policy,
+            )
+            .unwrap();
             let authority = authority(
                 vec![profile(1)],
                 vec![AgentAccountScope::Anonymous],

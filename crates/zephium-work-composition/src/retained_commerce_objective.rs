@@ -1,6 +1,6 @@
 //! Public storefront decision, not a catalog/product adapter or answer oracle.
 pub(super) const DOCUMENT_POLICY: zephium_agentic::WorkBrowserDocumentPolicy =
-    zephium_agentic::WorkBrowserDocumentPolicy::InitialQueryFinalization;
+    zephium_agentic::WorkBrowserDocumentPolicy::DocumentQueryFinalization;
 pub(super) const ORIGIN: &str = "https://www.lego.com";
 pub(super) const INITIAL: &str = "https://www.lego.com/en-us/themes/architecture";
 pub(super) const PATH_PREFIX: &str = "/en-us/";

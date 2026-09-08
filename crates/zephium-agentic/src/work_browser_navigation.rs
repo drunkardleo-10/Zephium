@@ -71,6 +71,7 @@ impl WorkBrowserNavigationRequest {
         WorkBrowserNavigationCompletion {
             join: self.join,
             target: self.request.target().clone(),
+            document_policy: self.request.document_policy(),
             outcome: Err(ContextPortFailure::Shutdown),
         }
     }
@@ -82,14 +83,21 @@ impl WorkBrowserNavigationRequest {
 pub struct WorkBrowserNavigationCompletion {
     join: NavigationJoin,
     target: ContextNavigationTarget,
+    document_policy: crate::WorkBrowserDocumentPolicy,
     outcome: Result<ContextNavigationTarget, ContextPortFailure>,
 }
 impl WorkBrowserNavigationCompletion {
-    /// The adapter reports its original exact native commit. A destination
-    /// substitution fails closed and cannot install another current document.
+    /// The adapter reports its original native document. The frozen request
+    /// policy independently rejects any unapproved effective destination.
     pub fn settle(mut self, outcome: Result<ContextNavigationTarget, ContextPortFailure>) -> Self {
         self.outcome = match outcome {
-            Ok(target) if target == self.target => Ok(target),
+            Ok(target)
+                if self
+                    .document_policy
+                    .admits_final_document(&self.target, &target) =>
+            {
+                Ok(target)
+            }
             Ok(_) => Err(ContextPortFailure::NativeRefused),
             Err(failure) => Err(failure),
         };
@@ -227,6 +235,7 @@ impl WorkBrowserResources {
         .map_err(|_| WorkBrowserResourceError::Phase)?;
         row.navigation = None;
         if let Ok(target) = completion.outcome {
+            row.current_requested_document = Some(Arc::new(completion.target));
             row.effective_document = Some(Arc::new(target));
             row.navigation_epoch = completion.join.operation.context().navigation_epoch();
             row.frame_generation = completion.join.operation.context().frame_generation();
@@ -416,6 +425,62 @@ mod tests {
                     .as_deref(),
                 Some(&target("source"))
             );
+        }
+    }
+    #[test]
+    fn operation_policy_accepts_only_its_effective_query_and_preserves_all_requested_lineage() {
+        for (policy, suffix, accepted) in [
+            (WorkBrowserDocumentPolicy::Exact, "next?opaque=one", false),
+            (
+                WorkBrowserDocumentPolicy::DocumentQueryFinalization,
+                "next?opaque=one",
+                true,
+            ),
+            (
+                WorkBrowserDocumentPolicy::DocumentQueryFinalization,
+                "next?",
+                false,
+            ),
+            (
+                WorkBrowserDocumentPolicy::DocumentQueryFinalization,
+                "next?opaque=one#fragment",
+                false,
+            ),
+            (
+                WorkBrowserDocumentPolicy::DocumentQueryFinalization,
+                "foreign?opaque=one",
+                false,
+            ),
+        ] {
+            let (mut rows, _, lease) = fixture();
+            let mut request = request(&mut rows, &lease);
+            request.request = ContextNavigationRequest::try_new_with_document_policy(
+                request.navigation().operation(),
+                target("next"),
+                policy,
+            )
+            .unwrap();
+            let event = rows
+                .settle_navigation(request.into_completion().settle(Ok(target(suffix))), now(5))
+                .unwrap();
+            assert_eq!(event.is_current(), accepted);
+            if accepted {
+                let binding = rows.read_binding(&lease, now(6)).unwrap();
+                assert_eq!(binding.document(), &target(suffix));
+                assert_eq!(binding.requested_document(), &target("source"));
+                assert_eq!(binding.current_requested_document(), &target("next"));
+                assert!(!rows
+                    .automation_state(&lease, now(6))
+                    .unwrap()
+                    .can_automate());
+                observe(&mut rows, &lease, 7);
+                assert!(rows
+                    .automation_state(&lease, now(7))
+                    .unwrap()
+                    .can_automate());
+            } else {
+                assert!(rows.read_binding(&lease, now(6)).is_err());
+            }
         }
     }
     #[test]

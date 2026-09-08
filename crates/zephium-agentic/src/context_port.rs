@@ -354,6 +354,7 @@ pub struct ContextNavigationRequest {
     operation: ContextOperationJoin,
     target: ContextNavigationTarget,
     redirect_policy: Option<ContextNavigationRedirectPolicy>,
+    document_policy: crate::WorkBrowserDocumentPolicy,
 }
 
 impl ContextNavigationRequest {
@@ -367,6 +368,7 @@ impl ContextNavigationRequest {
             operation,
             target,
             redirect_policy: None,
+            document_policy: crate::WorkBrowserDocumentPolicy::Exact,
         })
     }
 
@@ -381,7 +383,30 @@ impl ContextNavigationRequest {
             operation,
             target,
             redirect_policy: Some(redirect_policy),
+            document_policy: crate::WorkBrowserDocumentPolicy::Exact,
         })
+    }
+
+    /// Freezes trusted finalization authority into this exact operation. This
+    /// never authorizes a different load or any redirect.
+    pub fn try_new_with_document_policy(
+        operation: ContextOperationJoin,
+        target: ContextNavigationTarget,
+        document_policy: crate::WorkBrowserDocumentPolicy,
+    ) -> Result<Self, ContextPortContractError> {
+        let mut request = Self::try_new(operation, target)?;
+        if document_policy == crate::WorkBrowserDocumentPolicy::InitialQueryFinalization
+            || !document_policy.admits_request(request.target())
+        {
+            return Err(ContextPortContractError::NavigationTarget);
+        }
+        request.document_policy = document_policy;
+        Ok(request)
+    }
+
+    /// Operation-specific finalization authority, separate from redirect scope.
+    pub const fn document_policy(&self) -> crate::WorkBrowserDocumentPolicy {
+        self.document_policy
     }
 
     /// Exact navigation operation and complete lifecycle join.
@@ -417,6 +442,7 @@ impl fmt::Debug for ContextNavigationRequest {
             .field("operation", &self.operation)
             .field("target", &self.target)
             .field("redirect_policy", &self.redirect_policy)
+            .field("document_policy", &self.document_policy)
             .finish()
     }
 }
@@ -1334,7 +1360,39 @@ mod tests {
         let exact = ContextNavigationRequest::try_new(navigation, requested.clone())
             .expect("exact request");
         assert!(exact.redirect_policy().is_none());
+        assert_eq!(
+            exact.document_policy(),
+            crate::WorkBrowserDocumentPolicy::Exact
+        );
         assert!(!exact.allows_redirect_target(&redirected));
+
+        let finalized = ContextNavigationRequest::try_new_with_document_policy(
+            navigation,
+            requested.clone(),
+            crate::WorkBrowserDocumentPolicy::DocumentQueryFinalization,
+        )
+        .unwrap();
+        assert_eq!(finalized.target(), &requested);
+        assert!(finalized.redirect_policy().is_none());
+        assert!(!finalized.allows_redirect_target(&redirected));
+        assert!(ContextNavigationRequest::try_new_with_document_policy(
+            navigation,
+            requested.clone(),
+            crate::WorkBrowserDocumentPolicy::InitialQueryFinalization,
+        )
+        .is_err());
+        for invalid in [
+            "http://start.test/path",
+            "https://start.test/path?x=1",
+            "https://start.test/path#fragment",
+        ] {
+            assert!(ContextNavigationRequest::try_new_with_document_policy(
+                navigation,
+                ContextNavigationTarget::parse(invalid).unwrap(),
+                crate::WorkBrowserDocumentPolicy::DocumentQueryFinalization,
+            )
+            .is_err());
+        }
 
         let scoped =
             ContextNavigationRequest::try_new_with_redirect_policy(navigation, requested, policy)
@@ -1344,6 +1402,10 @@ mod tests {
             Some(1)
         );
         assert!(scoped.allows_redirect_target(&redirected));
+        assert_eq!(
+            scoped.document_policy(),
+            crate::WorkBrowserDocumentPolicy::Exact
+        );
         assert!(!format!("{scoped:?}").contains("final.test"));
     }
 
