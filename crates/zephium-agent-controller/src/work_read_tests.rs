@@ -94,7 +94,7 @@ impl ReadFault {
         if turns > 0 && matches!(self, Self::LocateMiss | Self::LocateMissCeiling) {
             assert!(body.contains("ZLOC1 content=untrusted"));
             assert!(body.contains("matches=0 matched=0"));
-            assert!(body.contains("Every continuation consumes the existing turn/token budget"));
+            assert!(body.contains("No matches is recoverable, not page-wide absence"));
         }
         if turns > u8::from(self == Self::AfterActionExtraction)
             && self != Self::LocateMissCeiling

@@ -109,7 +109,7 @@ fn main() {
         }
         let _ = writeln!(
             std::io::stderr().lock(),
-            "macos-terra-agentic-probe: failed; stage={}; action_step={}; tool_kind={}; engine_reason={}; encoding_reason={}; verification_reason={}; wait={}; settle_millis={}; locate_query_bytes={}; locate_query_terms={}; locate_scanned_nodes={}; protocol_event={}; content=redacted",
+            "macos-terra-agentic-probe: failed; stage={}; action_step={}; tool_kind={}; engine_reason={}; encoding_reason={}; verification_reason={}; wait={}; settle_millis={}; protocol_event={}; content=redacted",
             error.label(),
             error.action_step(),
             error.tool_kind_label(),
@@ -118,9 +118,6 @@ fn main() {
             error.verification_reason_label(),
             error.wait_label(),
             error.settle_millis(),
-            error.locate_query_bytes(),
-            error.locate_query_terms(),
-            error.locate_scanned_nodes(),
             error.protocol_event_label()
         );
         std::process::exit(1);
@@ -202,9 +199,6 @@ impl ProbeFailure {
             Self::Provider(TerraProbeProviderError::DiffEncoding(_)) => "provider_diff_encoding",
             Self::Provider(TerraProbeProviderError::LocateTool) => "provider_locate_tool",
             Self::Provider(TerraProbeProviderError::Locate) => "provider_locate",
-            Self::Provider(TerraProbeProviderError::LocateNoMatches { .. }) => {
-                "provider_locate_no_matches"
-            }
             Self::Provider(TerraProbeProviderError::LocateEncoding(_)) => {
                 "provider_locate_encoding"
             }
@@ -425,42 +419,6 @@ impl ProbeFailure {
         match self {
             Self::PostFirstActionVerification { settle_millis, .. }
             | Self::PostSecondActionVerification { settle_millis, .. } => settle_millis,
-            _ => 0,
-        }
-    }
-
-    const fn locate_query_bytes(self) -> u16 {
-        match self {
-            Self::Provider(
-                zephium_agent_controller::TerraProbeProviderError::LocateNoMatches {
-                    query_bytes,
-                    ..
-                },
-            ) => query_bytes,
-            _ => 0,
-        }
-    }
-
-    const fn locate_query_terms(self) -> u8 {
-        match self {
-            Self::Provider(
-                zephium_agent_controller::TerraProbeProviderError::LocateNoMatches {
-                    query_terms,
-                    ..
-                },
-            ) => query_terms,
-            _ => 0,
-        }
-    }
-
-    const fn locate_scanned_nodes(self) -> u16 {
-        match self {
-            Self::Provider(
-                zephium_agent_controller::TerraProbeProviderError::LocateNoMatches {
-                    scanned_nodes,
-                    ..
-                },
-            ) => scanned_nodes,
             _ => 0,
         }
     }
