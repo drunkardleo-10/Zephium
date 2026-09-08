@@ -223,6 +223,7 @@ pub use agent_provider::{
     AgentProviderKind, AgentProviderLocalInputTokenCounter, AgentProviderLocateRequestDraft,
     AgentProviderModelRevision, AgentProviderNavigationCheckpoint, AgentProviderObjective,
     AgentProviderObjectiveError, AgentProviderObservationCheckpoint,
+    AgentProviderObservationRefusal, AgentProviderObservationResolution,
     AgentProviderPricingAttribution, AgentProviderPricingContractError, AgentProviderPricingError,
     AgentProviderPricingProfile, AgentProviderPricingRevision, AgentProviderPricingSchedule,
     AgentProviderPricingSettlement, AgentProviderPricingSettlementError,

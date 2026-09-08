@@ -6171,6 +6171,7 @@ dependencies = [
 name = "zephium-agent-controller"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "zephium-agent-model-catalog",

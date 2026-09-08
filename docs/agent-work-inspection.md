@@ -133,3 +133,40 @@ secret withholding, query and raw-scan bounds, Unicode output ceilings,
 complete versus incomplete misses, and substituted query/source authority.
 This capability does not qualify hidden disclosure controls or retained-page
 action execution; those require their own effect and native ownership join.
+
+## Recovering an invalid inspection scope
+
+A model can request a well-formed `text_search` against a heading after a
+`surrounding_text` capture. A heading is not a tree-search boundary. The
+controller now returns an authenticated `invalid_snapshot_scope` tool result
+and lets the model select another operation within the original call,
+operation, token and time budgets. Unknown current refs and unsupported
+inspection scope classes use the same pre-dispatch refusal. No rejected
+capture runs, no generation advances, and the trusted capture timestamp and
+retained evidence remain unchanged. Repeated invalid choices stop at the
+existing limit, preserving the terminal mapper reservation.
+
+`AgentProviderObservationResolution` separates an admitted capture checkpoint
+from a move-only refusal bound to the exact settled proposal and observation.
+Configuration, baseline, lineage, stale-frame and expansion-limit failures
+remain terminal. Recovery does not turn a heading into its parent region or
+silently issue a replacement search.
+
+The refusal uses the existing OpenAI Responses whole-request-counted transport
+and the original authentication. Its stateless body contains the current
+observation exactly once, the approved objective and policy-bound progress,
+the exact rejected call with its provider replay, and a compact content-free
+error. Prior obsolete tool replay is discarded as with progressive capture
+checkpoints; model-call budgets are not reset. The error reports
+`executed:false`, `observation_unchanged:true`, and fixed guidance about eligible
+scope roles. It cannot carry arbitrary host instructions or claim new page
+evidence. Other provider/accounting combinations retain their explicit refusal
+until their equivalent whole-input path is qualified.
+
+The native product journal emits `InspectionRefused`. Deterministic shipping
+controller coverage reproduces navigation → surrounding heading → invalid
+search → refusal → cited extraction, also exercises an unknown ref and
+repeated invalid choices, and checks exact native capture counts, accounting,
+stateless call correlation, one observation per request and clean shutdown.
+Core tests additionally reject baseline/config substitution and retain valid
+scope admission for both provider correlation codecs.

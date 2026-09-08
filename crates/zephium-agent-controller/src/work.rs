@@ -1927,8 +1927,52 @@ impl AgentWorkController {
                 ));
             }
             if turn.turn.proposal().kind() == AgentBrowserToolKind::Snapshot {
+                if session.turns.saturating_add(2) > session.max_model_calls
+                    || session
+                        .policy
+                        .remaining_operations(session.lease.lease())
+                        .map_err(|_| {
+                            AgentWorkFailure::Browser(AgentBrowserProviderError::Authority)
+                        })?
+                        < 2
+                {
+                    return Err(AgentWorkFailure::Browser(
+                        AgentBrowserProviderError::TurnLimit,
+                    ));
+                }
+                let resolution = turn
+                    .into_tool_turn()
+                    .into_parts()
+                    .1
+                    .resolve_observation(&observation, &session.config)
+                    .map_err(|_| {
+                        AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation)
+                    })?;
+                let checkpoint = match resolution {
+                    AgentProviderObservationResolution::Capture(checkpoint) => *checkpoint,
+                    AgentProviderObservationResolution::Refused(refusal) => {
+                        state.native.check_control(worker, browser)?;
+                        state.refresh_account(worker, browser)?;
+                        state.journal_mut()?.emit(AgentWorkEventKind::ToolProposed(
+                            AgentBrowserToolKind::Snapshot,
+                        ))?;
+                        state
+                            .journal_mut()?
+                            .emit(AgentWorkEventKind::InspectionRefused)?;
+                        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+                        turn = Self::provider(
+                            &mut state.native,
+                            worker,
+                            browser,
+                            session.cancellation.clone(),
+                            session.continue_after_scope_refusal(*refusal, &observation),
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
                 let next =
-                    Self::inspect_current(state, worker, browser, turn, &observation).await?;
+                    Self::inspect_current(state, worker, browser, checkpoint, &observation).await?;
                 observation = next.0;
                 captured_at = next.1;
                 progress = next.2;
@@ -3139,6 +3183,9 @@ pub enum AgentWorkEventKind {
     },
     /// The model proposed a bounded typed tool.
     ToolProposed(AgentBrowserToolKind),
+    /// Snapshot scope was incompatible with the delivered baseline. No native
+    /// capture ran; one budgeted provider turn can select a different operation.
+    InspectionRefused,
     /// An independently authorized native effect is active.
     ActionActive,
     /// A native effect was independently verified and accounted.

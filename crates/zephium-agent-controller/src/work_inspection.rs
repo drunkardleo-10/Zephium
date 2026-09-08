@@ -6,7 +6,7 @@ impl AgentWorkController {
         state: &mut WorkState,
         worker: &mut AgentRuntimeWorker,
         browser: &WorkBrowser<'_>,
-        turn: AgentBrowserProviderTurn,
+        checkpoint: AgentProviderObservationCheckpoint,
         previous: &SemanticObservation,
     ) -> Result<
         (
@@ -36,12 +36,6 @@ impl AgentWorkController {
                 AgentBrowserProviderError::TurnLimit,
             ));
         }
-        let checkpoint = turn
-            .into_tool_turn()
-            .into_parts()
-            .1
-            .retire_for_observation(previous, &session.config)
-            .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation))?;
         state.native.check_control(worker, browser)?;
         state.refresh_account(worker, browser)?;
         state.journal_mut()?.emit(AgentWorkEventKind::ToolProposed(
@@ -93,6 +87,31 @@ impl AgentWorkController {
 }
 
 impl AgentBrowserSession {
+    pub(super) async fn continue_after_scope_refusal(
+        &mut self,
+        refusal: AgentProviderObservationRefusal,
+        observation: &SemanticObservation,
+    ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
+        self.check_live()?;
+        let request = self.next_model_call_request()?;
+        let payload = encode_semantic_observation(
+            observation,
+            SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
+        .map_err(AgentBrowserProviderError::InitialEncoding)?;
+        let prepared = AgentPreparedObservationRequest::try_scope_refusal_for_provider_exact_count(
+            &mut self.policy,
+            request,
+            observation,
+            payload,
+            self.config.clone(),
+            refusal,
+        )
+        .map_err(|_| AgentBrowserProviderError::Authority)?;
+        self.drive(prepared.into_transport_input()).await
+    }
+
     async fn continue_after_observation(
         &mut self,
         checkpoint: AgentProviderObservationCheckpoint,

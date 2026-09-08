@@ -35,7 +35,10 @@ mod observation_checkpoint;
 #[cfg(any(test, feature = "provider-transport"))]
 use super::{AgentCommittedProviderInput, AgentProviderInputEvidence};
 pub(super) use observation_checkpoint::AgentInspectionProgress;
-pub use observation_checkpoint::AgentProviderObservationCheckpoint;
+pub use observation_checkpoint::{
+    AgentProviderObservationCheckpoint, AgentProviderObservationRefusal,
+    AgentProviderObservationResolution,
+};
 
 /// Maximum initial semantic-observation bytes retained for stateless replay.
 ///
@@ -232,7 +235,7 @@ impl AgentProviderBoundTranscript {
         &self.latest
     }
 
-    fn into_transcript(self) -> AgentProviderTranscript {
+    pub(super) fn into_transcript(self) -> AgentProviderTranscript {
         let Self {
             mut prior,
             latest,
@@ -2019,6 +2022,54 @@ mod tests {
                     .retire_for_observation(&previous, &config)
                     .is_err()
             );
+            for target in ["@a2", "@a99"] {
+                let refused = || match continuation(
+                    json!({"kind":"text_search","target":target,"query":"$"}),
+                )
+                .resolve_observation(&previous, &config)
+                .unwrap()
+                {
+                    AgentProviderObservationResolution::Refused(refusal) => refusal,
+                    _ => panic!("incompatible/unknown target must not admit a capture"),
+                };
+                let (prior, transcript) = refused()
+                    .bind(&previous, &config, "current observation".into())
+                    .unwrap();
+                assert_eq!(prior, call(1));
+                let result: serde_json::Value =
+                    serde_json::from_str(transcript.latest().tool_result()).unwrap();
+                assert_eq!(result["executed"], false);
+                assert_eq!(result["code"], "invalid_snapshot_scope");
+                assert_eq!(result["observation_unchanged"], true);
+                assert_eq!(transcript.initial_observation(), "current observation");
+                assert!(result.get("observation").is_none());
+                assert!(refused()
+                    .bind(
+                        &observation(context(), 1, 1, 1, "substituted state"),
+                        &config,
+                        "forged".into()
+                    )
+                    .is_err());
+                let mut changed = config.clone();
+                changed.progressive_observation = false;
+                assert!(refused()
+                    .bind(&previous, &changed, "forged".into())
+                    .is_err());
+                assert!(matches!(
+                    continuation(json!({"kind":"text_search","target":target,"query":"$"}))
+                        .resolve_observation(
+                            &observation(context(), 1, 1, 1, "substituted state"),
+                            &config
+                        ),
+                    Err(AgentProviderContinuationError::Baseline)
+                ));
+            }
+            assert!(matches!(
+                continuation(json!({"kind":"text_search","target":"@a1","query":"$"}))
+                    .resolve_observation(&previous, &config)
+                    .unwrap(),
+                AgentProviderObservationResolution::Capture(_)
+            ));
             let search_request = search_checkpoint()
                 .request(&previous, SemanticObservationId::new(2).unwrap())
                 .unwrap();

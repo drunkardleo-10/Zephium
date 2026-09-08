@@ -1532,6 +1532,70 @@ pub struct AgentPreparedObservationRequest {
 }
 
 impl AgentPreparedObservationRequest {
+    /// Return an exact pre-dispatch scope refusal through the authenticated
+    /// provider tool-result protocol. The current observation is redelivered,
+    /// not recaptured; all bytes and the next call use the original run budget.
+    /// This uses the existing qualified OpenAI whole-input accounting path.
+    pub fn try_scope_refusal_for_provider_exact_count(
+        policy: &mut AgentRunPolicy,
+        call_request: AgentModelCallRequest,
+        observation: &SemanticObservation,
+        payload: SemanticModelPayload,
+        config: AgentProviderCallConfig,
+        refusal: super::AgentProviderObservationRefusal,
+    ) -> Result<Self, AgentProviderRequestError> {
+        let semantic_payload_tokens =
+            AgentProviderInputTokenCount::from_measurement(payload.token_measurement());
+        let (prior, transcript) = refusal
+            .bind(observation, &config, payload.as_str().to_owned())
+            .map_err(|_| AgentPolicyError::Authority)?;
+        if !prior.matches_manifest_revision(policy.manifest().id(), policy.manifest().guard())
+            || prior.lease() != call_request.lease()
+            || prior.call() == call_request.id()
+        {
+            return Err(AgentPolicyError::Authority.into());
+        }
+        let body = encode_openai_continuation_body(&config, &transcript)?;
+        let body = encode_decision_budget(
+            body,
+            &config,
+            call_request.id(),
+            policy.remaining_operations(call_request.lease())?,
+        )?;
+        let continuation_transcript = transcript.into_transcript();
+        continuation_transcript.validate_navigation_checkpoint(policy, call_request)?;
+        let structured_input = conservative_request_measurement(&config, &body)?;
+        config.validate_provider_exact_continuation_request(
+            call_request,
+            Some(payload.token_measurement()),
+            &structured_input,
+        )?;
+        let admission = policy.prepare_provider_observation_input(
+            call_request,
+            observation,
+            &payload,
+            u64::from(structured_input.tokens()),
+        )?;
+        let call = AgentProviderCallIdentity::from_admission(&admission);
+        let (_, semantic_stats, delivery) = payload.into_provider_parts();
+        Ok(Self {
+            request: AgentProviderRequest {
+                call,
+                config,
+                endpoint: AgentProviderEndpoint::OpenAiResponses,
+                body,
+            },
+            admission,
+            delivery,
+            semantic_stats,
+            semantic_payload_tokens,
+            structured_input_tokens: Some(AgentProviderInputTokenCount::from_measurement(
+                &structured_input,
+            )),
+            continuation_transcript: Some(continuation_transcript),
+        })
+    }
+
     /// Existing structured discovery accounting is the sole currently qualified
     /// host-progress delivery path. Other provider adapters keep their explicit
     /// navigation refusal instead of silently dropping or undercounting history.

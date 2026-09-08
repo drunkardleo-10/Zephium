@@ -24,3 +24,6 @@ zephium-agentic.workspace = true
 zephium-agent-model-catalog.workspace = true
 zephium-agent-provider-transport = { workspace = true, optional = true }
 zephium-agent-runtime.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

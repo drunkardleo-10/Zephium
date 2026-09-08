@@ -63,6 +63,16 @@ fn discovery_preserves_sources_after_empty_inspection_without_cross_document_lea
 }
 
 #[test]
+fn discovery_returns_invalid_search_scope_without_capture_and_preserves_budgets() {
+    let _serial = lock(&SERIAL);
+    for case in 0..4 {
+        provider_fixture(ProviderFault::Navigation(
+            NavigationFault::DiscoveryScopeRefusal(case),
+        ));
+    }
+}
+
+#[test]
 fn per_run_model_call_allowance_cannot_widen_product_limits() {
     for limit in [0, 1, 9, u8::MAX] {
         assert!(input().settings.with_max_model_calls(limit).is_err());
@@ -163,6 +173,7 @@ pub(super) enum NavigationFault {
     Discovery,
     DiscoveryBudget(u8, bool, u32),
     DiscoveryEvidence(bool),
+    DiscoveryScopeRefusal(u8),
     DiscoveryTwoHops,
     DiscoveryTwoHopsBlockedFrame,
     DiscoveryMissingLink,
@@ -213,6 +224,7 @@ impl NavigationFault {
     }
     pub(super) fn requests(self) -> u8 {
         match self {
+            Self::DiscoveryScopeRefusal(_) => 10,
             Self::DiscoveryEvidence(_) => 8,
             Self::DiscoveryBudget(limit, refusal, operations) => {
                 2 * (limit.min((operations - 1) as u8) - u8::from(refusal))
@@ -242,6 +254,38 @@ impl NavigationFault {
         self == Self::CancelMapCount && turns == 2 && count
     }
     pub(super) fn stream(self, turn: u8) -> String {
+        if let Self::DiscoveryScopeRefusal(case) = self {
+            return match turn {
+                1 => Self::Discovery.stream(1),
+                2 => named_tool_stream(
+                    turn,
+                    "snapshot",
+                    r#"{\"scope\":{\"kind\":\"surrounding_text\",\"target\":\"@a2\",\"before_bytes\":0,\"after_bytes\":1024}}"#,
+                ),
+                3 => named_tool_stream(
+                    turn,
+                    "snapshot",
+                    &format!(
+                        r#"{{\"scope\":{{\"kind\":\"text_search\",\"target\":\"{}\",\"query\":\"$\"}}}}"#,
+                        if case == 1 { "@a99" } else { "@a1" }
+                    ),
+                ),
+                4 | 5 if case == 2 => named_tool_stream(
+                    turn,
+                    "snapshot",
+                    r#"{\"scope\":{\"kind\":\"text_search\",\"target\":\"@a1\",\"query\":\"$\"}}"#,
+                ),
+                4 => named_tool_stream(
+                    turn,
+                    "extract",
+                    r#"{\"scope\":{\"kind\":\"initial\"},\"schema_id\":1}"#,
+                ),
+                _ => Self::Discovery
+                    .stream(3)
+                    .replace("resp_3", "resp_5")
+                    .replace("msg_3", "msg_5"),
+            };
+        }
         if let Self::DiscoveryEvidence(foreign) = self {
             return match turn {
                 1 => Self::Discovery.stream(1),
@@ -353,6 +397,48 @@ impl NavigationFault {
         }
     }
     pub(super) fn check_request(self, bytes: &[u8], turns: u8) {
+        if let Self::DiscoveryScopeRefusal(case) = self {
+            if turns == 3 || (case == 2 && turns == 4) {
+                let body: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+                let results: Vec<_> = body["input"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|item| item["type"] == "function_call_output")
+                    .collect();
+                let result = results.last().unwrap();
+                assert_eq!(result["call_id"], format!("call_{turns}"));
+                let error: serde_json::Value =
+                    serde_json::from_str(result["output"].as_str().unwrap()).unwrap();
+                assert_eq!(error["code"], "invalid_snapshot_scope");
+                assert_eq!(error["executed"], false);
+                assert_eq!(error["observation_unchanged"], true);
+                assert!(error.get("observation").is_none());
+                let observation = body["input"][1]["content"][0]["text"].as_str().unwrap();
+                assert!(observation.contains("scope=surrounding_text"));
+                assert!(observation.contains("r=heading"));
+                assert!(observation.contains("Arrival certificate"));
+                assert_eq!(
+                    std::str::from_utf8(bytes).unwrap().matches("ZSEM3").count(),
+                    1,
+                    "refusal replays the current observation exactly once"
+                );
+                assert!(std::str::from_utf8(bytes).unwrap().contains(&format!(
+                    "decision_calls_remaining_including_this={}",
+                    if case == 3 { 1 } else { 5 - turns }
+                )));
+                if case == 3 {
+                    let tools = body["tools"].as_array().unwrap();
+                    assert_eq!(
+                        tools.len(),
+                        1,
+                        "operation budget still reserves terminal mapping"
+                    );
+                    assert_eq!(tools[0]["name"], "extract");
+                }
+            }
+            return;
+        }
         if let Self::DiscoveryEvidence(_) = self {
             let text = std::str::from_utf8(bytes).unwrap();
             if turns == 2 {
@@ -670,7 +756,10 @@ pub(super) fn capture(
     }
     let arrived = lock(&port.calls).contains(&9);
     let correlation = invocation.correlation();
-    if !matches!(fault, NavigationFault::DiscoveryEvidence(_)) {
+    if !matches!(
+        fault,
+        NavigationFault::DiscoveryEvidence(_) | NavigationFault::DiscoveryScopeRefusal(_)
+    ) {
         assert_eq!(
             correlation.snapshot_generation().get(),
             1,
@@ -707,6 +796,7 @@ pub(super) fn capture(
             NavigationFault::Discovery
                 | NavigationFault::DiscoveryBudget(..)
                 | NavigationFault::DiscoveryEvidence(_)
+                | NavigationFault::DiscoveryScopeRefusal(_)
         ) {
         wire.replace("]}", r#",{"k":3,"p":0,"r":"link","n":"A relevant source","u":"https://work-fixture.invalid/arrival"}]}"#)
     } else {
@@ -717,6 +807,17 @@ pub(super) fn capture(
     {
         format!(
             r#"{{"v":1,"i":{},"g":{},"c":"complete","n":[{{"k":1,"r":"document","o":16}}]}}"#,
+            correlation.invocation().get(),
+            correlation.snapshot_generation().get()
+        )
+    } else {
+        wire
+    };
+    let wire = if matches!(fault, NavigationFault::DiscoveryScopeRefusal(_))
+        && correlation.snapshot_generation().get() > 1
+    {
+        format!(
+            r#"{{"v":1,"i":{},"g":{},"c":"complete","n":[{{"k":2,"r":"heading","l":1,"n":"Arrival certificate"}},{{"k":4,"r":"paragraph","t":"Visible product detail"}}]}}"#,
             correlation.invocation().get(),
             correlation.snapshot_generation().get()
         )
@@ -797,6 +898,40 @@ pub(super) fn assert_outcome(
     calls: &[u8],
     events: &[AgentWorkEvent],
 ) {
+    if let NavigationFault::DiscoveryScopeRefusal(case) = fault {
+        if case == 2 {
+            let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!(
+                closed.failure(),
+                AgentWorkFailure::Browser(AgentBrowserProviderError::TurnLimit)
+            );
+            assert_eq!(closed.policy_settlement().closure().model_calls(), 5);
+            assert_eq!(closed.policy_settlement().closure().operations(), 6);
+        } else {
+            let AgentWorkOutcome::Succeeded(mut success) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!(success.closure().model_calls(), 5);
+            assert_eq!(success.closure().operations(), 6);
+            assert!(success.take_extraction().is_some());
+        }
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind() == AgentWorkEventKind::InspectionRefused)
+                .count(),
+            if case == 2 { 2 } else { 1 }
+        );
+        assert_eq!(
+            calls,
+            [1, 2, 3, 2, 9, 3, 3, 4, 5, 6],
+            "invalid target never dispatches a native capture"
+        );
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        return;
+    }
     if let NavigationFault::DiscoveryEvidence(foreign) = fault {
         if foreign {
             let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {

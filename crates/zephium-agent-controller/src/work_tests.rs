@@ -1744,6 +1744,7 @@ fn provider_fixture_with_account(
         ProviderFault::Navigation(
             NavigationFault::Discovery
                 | NavigationFault::DiscoveryEvidence(_)
+                | NavigationFault::DiscoveryScopeRefusal(_)
                 | NavigationFault::DiscoveryBudget(..)
                 | NavigationFault::DiscoveryTwoHops
                 | NavigationFault::DiscoveryTwoHopsBlockedFrame
@@ -1755,6 +1756,7 @@ fn provider_fixture_with_account(
             None,
             Some(navigation_tests::discovery_scope()),
             match fault {
+                ProviderFault::Navigation(NavigationFault::DiscoveryScopeRefusal(3)) => 6,
                 ProviderFault::Navigation(NavigationFault::DiscoveryBudget(_, _, operations)) => {
                     operations
                 }
@@ -1772,6 +1774,9 @@ fn provider_fixture_with_account(
         input()
     };
     let navigation_schedule = if let ProviderFault::Navigation(fault) = fault {
+        if matches!(fault, NavigationFault::DiscoveryScopeRefusal(case) if case != 3) {
+            approved.settings = approved.settings.with_max_model_calls(6).unwrap();
+        }
         if let NavigationFault::DiscoveryBudget(limit, _, _) = fault {
             approved.settings = approved.settings.with_max_model_calls(limit).unwrap();
         }
@@ -1807,6 +1812,7 @@ fn provider_fixture_with_account(
             fault,
             NavigationFault::Discovery
                 | NavigationFault::DiscoveryEvidence(_)
+                | NavigationFault::DiscoveryScopeRefusal(_)
                 | NavigationFault::DiscoveryBudget(..)
                 | NavigationFault::DiscoveryTwoHops
                 | NavigationFault::DiscoveryTwoHopsBlockedFrame

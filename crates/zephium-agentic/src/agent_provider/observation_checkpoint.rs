@@ -19,55 +19,56 @@ pub struct AgentProviderObservationCheckpoint {
 }
 
 impl AgentProviderContinuation {
-    /// Retires the exact acknowledged Snapshot turn before native dispatch.
-    pub fn retire_for_observation(
+    /// Resolve a model inspection proposal without confusing an invalid target
+    /// with a broken authority chain. A refusal grants no native dispatch.
+    pub fn resolve_observation(
         self,
         observation: &SemanticObservation,
         config: &AgentProviderCallConfig,
-    ) -> Result<AgentProviderObservationCheckpoint, AgentProviderContinuationError> {
+    ) -> Result<AgentProviderObservationResolution, AgentProviderContinuationError> {
         if config != &self.config || !config.permits_progressive_observation() {
             return Err(AgentProviderContinuationError::Config);
         }
         if self.correlation.kind() != AgentBrowserToolKind::Snapshot {
             return Err(AgentProviderContinuationError::ToolKind);
         }
-        let scope = self
-            .correlation
-            .snapshot_scope
-            .ok_or(AgentProviderContinuationError::Scope)?;
-        if !matches!(
-            scope,
-            AgentBrowserScopeProposal::Initial
-                | AgentBrowserScopeProposal::Region(_)
-                | AgentBrowserScopeProposal::Subtree(_)
-                | AgentBrowserScopeProposal::SurroundingText { .. }
-                | AgentBrowserScopeProposal::TextSearch { .. }
-        ) {
-            return Err(AgentProviderContinuationError::Scope);
-        }
-        if !self.baseline.matches(observation) {
-            return Err(AgentProviderContinuationError::Baseline);
-        }
-        let navigation = self.transcript.navigation_checkpoint;
-        let navigation_progress = navigation.is_some();
-        let inspections = navigation.and_then(|checkpoint| checkpoint.inspections);
-        if inspections
-            .as_ref()
-            .is_some_and(|progress| !progress.matches(observation))
+        if !self.baseline.matches(observation)
+            || observation.frames().len() != 1
+            || self
+                .transcript
+                .navigation_checkpoint
+                .as_ref()
+                .and_then(|checkpoint| checkpoint.inspections.as_ref())
+                .is_some_and(|progress| !progress.matches(observation))
         {
             return Err(AgentProviderContinuationError::Baseline);
         }
-        let checkpoint = AgentProviderObservationCheckpoint {
-            prior_call: self.prior_call,
-            config: self.config,
-            baseline: self.baseline,
-            scope,
-            navigation_progress,
-            inspections,
+        let scope = self
+            .correlation
+            .snapshot_scope
+            .as_ref()
+            .ok_or(AgentProviderContinuationError::Scope)?;
+        let expansion = match scope.clone() {
+            AgentBrowserScopeProposal::Initial => None,
+            AgentBrowserScopeProposal::Region(target) => {
+                Some((target, SemanticExpansionKind::Region))
+            }
+            AgentBrowserScopeProposal::Subtree(target) => {
+                Some((target, SemanticExpansionKind::Subtree))
+            }
+            AgentBrowserScopeProposal::SurroundingText { target, window } => {
+                Some((target, SemanticExpansionKind::SurroundingText(window)))
+            }
+            AgentBrowserScopeProposal::TextSearch { target, query } => {
+                Some((target, SemanticExpansionKind::TextSearch(query)))
+            }
+            _ => {
+                return Ok(AgentProviderObservationResolution::Refused(Box::new(
+                    AgentProviderObservationRefusal(self),
+                )))
+            }
         };
-        // Validate the requested anchor now, not after a native capture.
-        if let Some((target, kind)) = checkpoint.expansion() {
-            let frame = checkpoint.frame(observation, target)?;
+        if let Some((target, kind)) = expansion {
             let id = observation
                 .request()
                 .id()
@@ -75,17 +76,111 @@ impl AgentProviderContinuation {
                 .checked_add(1)
                 .and_then(SemanticObservationId::new)
                 .ok_or(AgentProviderContinuationError::Baseline)?;
-            observation
-                .begin_expansion(
-                    id,
-                    target,
-                    frame,
-                    kind,
-                    SemanticObservationBudget::INITIAL_FILTERED,
-                )
-                .map_err(|_| AgentProviderContinuationError::Scope)?;
+            match observation.begin_expansion(
+                id,
+                target,
+                observation.frames()[0].frame(),
+                kind,
+                SemanticObservationBudget::INITIAL_FILTERED,
+            ) {
+                Ok(_) => {}
+                Err(
+                    crate::SemanticObservationError::ScopeIncompatible
+                    | crate::SemanticObservationError::Reference(
+                        crate::SemanticReferenceError::Unknown,
+                    ),
+                ) => {
+                    return Ok(AgentProviderObservationResolution::Refused(Box::new(
+                        AgentProviderObservationRefusal(self),
+                    )));
+                }
+                Err(_) => return Err(AgentProviderContinuationError::Scope),
+            }
         }
-        Ok(checkpoint)
+        let scope = scope.clone();
+        let navigation = self.transcript.navigation_checkpoint;
+        Ok(AgentProviderObservationResolution::Capture(Box::new(
+            AgentProviderObservationCheckpoint {
+                prior_call: self.prior_call,
+                config: self.config,
+                baseline: self.baseline,
+                scope,
+                navigation_progress: navigation.is_some(),
+                inspections: navigation.and_then(|checkpoint| checkpoint.inspections),
+            },
+        )))
+    }
+
+    /// Retires the exact acknowledged Snapshot turn before native dispatch.
+    pub fn retire_for_observation(
+        self,
+        observation: &SemanticObservation,
+        config: &AgentProviderCallConfig,
+    ) -> Result<AgentProviderObservationCheckpoint, AgentProviderContinuationError> {
+        match self.resolve_observation(observation, config)? {
+            AgentProviderObservationResolution::Capture(checkpoint) => Ok(*checkpoint),
+            AgentProviderObservationResolution::Refused(_) => {
+                Err(AgentProviderContinuationError::Scope)
+            }
+        }
+    }
+}
+
+/// An authenticated model proposal either permits a capture or receives a
+/// bounded tool error. Config, baseline and lineage errors are never recovery.
+#[must_use]
+pub enum AgentProviderObservationResolution {
+    /// Exact scope admitted for a separately authorized native capture.
+    Capture(Box<AgentProviderObservationCheckpoint>),
+    /// Invalid scope on the exact delivered observation; no browser work ran.
+    Refused(Box<AgentProviderObservationRefusal>),
+}
+
+/// Move-only proof that one exact Snapshot proposal was refused before dispatch.
+/// The provider call, correlation, configuration and baseline cannot be replaced.
+#[must_use]
+pub struct AgentProviderObservationRefusal(AgentProviderContinuation);
+
+impl AgentProviderObservationRefusal {
+    pub(in crate::agent_provider) fn bind(
+        self,
+        observation: &SemanticObservation,
+        config: &AgentProviderCallConfig,
+        payload: String,
+    ) -> Result<
+        (AgentProviderCallIdentity, AgentProviderBoundTranscript),
+        AgentProviderContinuationError,
+    > {
+        if config != &self.0.config {
+            return Err(AgentProviderContinuationError::Config);
+        }
+        if !self.0.baseline.matches(observation) {
+            return Err(AgentProviderContinuationError::Baseline);
+        }
+        let result = serde_json::json!({
+            "status": "refused", "code": "invalid_snapshot_scope", "executed": false,
+            "guidance": "No capture occurred; this observation and its refs remain current. text_search and region require a current document/landmark/group/dialog ref. A heading is only eligible for surrounding_text or subtree; its subtree excludes following prose. If no eligible search boundary exists here, snapshot(initial) can restore current viewport anchors. You may extract retained evidence instead. Choose another operation within the remaining budget; do not repeat the rejected scope.",
+            "observation_unchanged": true,
+        }).to_string();
+        let (call, _, _, correlation, transcript) = self.0.into_parts();
+        // Match progressive capture checkpointing: keep current refs exactly
+        // once, approved intent and policy-bound progress. Old tool replay is
+        // unnecessary for reporting a rejected operation and may contain refs
+        // from previous captures. The failed proposal retains its exact ID and
+        // provider-authored replay. Model-call budgets are never reset here.
+        let transcript = AgentProviderTranscript::try_initial_with_navigation_checkpoint(
+            transcript.objective,
+            payload,
+            transcript.navigation_checkpoint,
+        )
+        .ok_or(AgentProviderContinuationError::TranscriptLimit)?;
+        Ok((call, transcript.try_bind(correlation, result)?))
+    }
+}
+
+impl fmt::Debug for AgentProviderObservationRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("AgentProviderObservationRefusal(invalid_snapshot_scope, [owned, redacted])")
     }
 }
 
