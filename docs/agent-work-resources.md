@@ -234,6 +234,10 @@ the new child subtree. It restores only that owned focus. If preservation fails,
 the child is detached before constructor teardown; rollback retries restoration
 only while the same retained window authority and child-owned responder remain,
 and never overwrites a foreign responder selected by the user or a callback.
+The native Wry subclass also rejects both first-responder eligibility and
+`becomeFirstResponder` while hidden, closing delayed AppKit/WebKit focus attempts
+after the constructor stack returns. Making the view visible restores WebKit's
+ordinary native responder behavior, so explicit human takeover remains possible.
 Non-child Wry construction retains its upstream content-view focus behavior and
 is not used for this Work resource path.
 

@@ -49,6 +49,26 @@ define_class!(
 
   /// Overridden NSView methods.
   impl WryWebView {
+    #[cfg(target_os = "macos")]
+    #[unsafe(method(acceptsFirstResponder))]
+    fn accepts_first_responder(&self) -> Bool {
+      if self.isHidden() {
+        Bool::NO
+      } else {
+        unsafe { objc2::msg_send![super(self), acceptsFirstResponder] }
+      }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[unsafe(method(becomeFirstResponder))]
+    fn become_first_responder(&self) -> Bool {
+      if self.isHidden() {
+        Bool::NO
+      } else {
+        unsafe { objc2::msg_send![super(self), becomeFirstResponder] }
+      }
+    }
+
     #[unsafe(method(performKeyEquivalent:))]
     fn perform_key_equivalent(&self, event: &NSEvent) -> Bool {
       // This is a temporary workaround for https://github.com/tauri-apps/tauri/issues/9426
@@ -174,6 +194,22 @@ impl WryWebView {
 
 #[cfg(test)]
 mod tests {
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn hidden_webview_refuses_both_responder_admission_routes() {
+    let source = include_str!("wry_web_view.rs");
+    for method in ["fn accepts_first_responder", "fn become_first_responder"] {
+      let body = source
+        .split(method)
+        .nth(1)
+        .and_then(|source| source.split("    #[").next())
+        .expect("bounded responder override");
+      assert!(body.contains("if self.isHidden()"));
+      assert!(body.contains("Bool::NO"));
+      assert!(body.contains("super(self)"));
+    }
+  }
+
   #[test]
   fn native_context_menu_preserves_default_before_bounded_embedder_merge() {
     let source = include_str!("wry_web_view.rs");

@@ -556,6 +556,27 @@ fn hidden_wkwebview_construction_preserves_responder_and_cannot_activate() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn hidden_wkwebviews_cannot_become_first_responder_after_construction() {
+    let source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../vendor/wry/src/wkwebview/class/wry_web_view.rs"
+    ));
+    for method in ["fn accepts_first_responder", "fn become_first_responder"] {
+        let body = source
+            .split(method)
+            .nth(1)
+            .and_then(|source| source.split("    #[").next())
+            .expect("bounded responder override");
+        let hidden = body.find("if self.isHidden()").expect("hidden-state gate");
+        let refusal = body.find("Bool::NO").expect("hidden focus refusal");
+        let native = body.find("super(self)").expect("visible native behavior");
+        assert!(hidden < refusal);
+        assert!(refusal < native);
+    }
+}
+
 #[test]
 fn native_completion_waits_for_shell_ordered_presentation_acknowledgement() {
     let navigation = include_str!(concat!(
