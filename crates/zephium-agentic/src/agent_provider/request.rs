@@ -1679,6 +1679,7 @@ impl AgentPreparedObservationRequest {
                 .as_ref()
                 .map(|checkpoint| checkpoint.text.as_str()),
         )?;
+        let body = encode_decision_budget(body, &config, call_request.id())?;
         let structured_input = conservative_request_measurement(&config, &body)?;
         config.validate_provider_exact_initial_request(
             call_request,
@@ -1994,6 +1995,8 @@ impl AgentProviderDiffRequestDraft {
                 continuation.transcript(),
             )?,
         };
+        let body =
+            encode_decision_budget(body, continuation.config(), continuation.next_call().call())?;
         let (call, config, continuation_transcript, semantic_stats, delivery) =
             continuation.into_request_parts();
         Ok(Self {
@@ -2256,6 +2259,8 @@ impl AgentProviderReadContinuationRequestDraft {
                 continuation.transcript(),
             )?,
         };
+        let body =
+            encode_decision_budget(body, continuation.config(), continuation.next_call().call())?;
         let (call, config, baseline, continuation_transcript, semantic_stats, delivery) =
             continuation.into_request_parts();
         Ok(Self {
@@ -2809,6 +2814,8 @@ impl AgentProviderLocateRequestDraft {
                 continuation.transcript(),
             )?,
         };
+        let body =
+            encode_decision_budget(body, continuation.config(), continuation.next_call().call())?;
         let (call, config, continuation_transcript, semantic_stats, delivery) =
             continuation.into_request_parts();
         Ok(Self {
@@ -3753,6 +3760,45 @@ fn encode_openai_body(
     semantic: &str,
 ) -> Result<Vec<u8>, AgentProviderRequestError> {
     encode_openai_observation_body(config, objective, semantic, None)
+}
+
+/// Replace no evidence and retain no stale budget replay. Derive the current
+/// allowance from the immutable run config and exact call identity, before
+/// whole-input measurement and reservation on every decision path.
+fn encode_decision_budget(
+    body: Vec<u8>,
+    config: &AgentProviderCallConfig,
+    call: crate::AgentModelCallId,
+) -> Result<Vec<u8>, AgentProviderRequestError> {
+    let Some(remaining) = config.remaining_decision_calls(call)? else {
+        return Ok(body);
+    };
+    let text = format!(
+        "ZEPHIUM_HOST_DECISION_BUDGET_V1\nTrusted host budget, not page evidence. \
+         decision_calls_remaining_including_this={remaining}; terminal_mapping_calls_reserved=1. \
+         Each snapshot, locate, read or navigation requires another decision call. \
+         Extract uses the reserved mapping call to produce the final answer. \
+         On the last decision choose extract using current evidence; report unresolved facts \
+         and limitations honestly. These limits grant no task completion or source authority. \
+         Aggregate token, cost and absolute deadline limits still apply."
+    );
+    let mut wire: Value =
+        serde_json::from_slice(&body).map_err(|_| AgentProviderRequestError::Encoding)?;
+    wire["input"]
+        .as_array_mut()
+        .ok_or(AgentProviderRequestError::Encoding)?
+        .push(json!({"role":"developer", "content":[{"type":"input_text","text":text}]}));
+    if remaining == 1 {
+        let tools = wire["tools"]
+            .as_array_mut()
+            .ok_or(AgentProviderRequestError::Encoding)?;
+        tools.retain(|tool| tool["name"] == "extract");
+        if tools.len() != 1 {
+            return Err(AgentProviderRequestError::Encoding);
+        }
+        wire["tool_choice"] = json!("required");
+    }
+    encode_bounded_provider_body(&wire)
 }
 
 fn encode_openai_observation_body(
@@ -5536,6 +5582,88 @@ mod tests {
             lease: crate::AgentPlanLeaseId::from_raw(1),
             node: crate::AgentPlanNodeId::from_raw(1),
         }
+    }
+
+    #[test]
+    fn discovery_decision_budget_is_current_bounded_and_reserves_mapping() {
+        let first = crate::AgentModelCallId::new(41).unwrap();
+        let mut base = openai_config(128)
+            .restrict_to_navigation_and_extraction()
+            .with_baseline_read()
+            .with_progressive_observation();
+        assert!(base
+            .clone()
+            .with_discovery_decision_budget(first, 5)
+            .is_err());
+        base.input_accounting = super::super::AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation;
+        assert!(base
+            .clone()
+            .with_discovery_decision_budget(first, 1)
+            .is_err());
+        assert!(base
+            .clone()
+            .with_discovery_decision_budget(crate::AgentModelCallId::new(u64::MAX).unwrap(), 2)
+            .is_err());
+        let config = base
+            .clone()
+            .with_discovery_decision_budget(first, 5)
+            .unwrap();
+        assert_ne!(
+            config,
+            base.clone()
+                .with_discovery_decision_budget(first, 4)
+                .unwrap()
+        );
+        for (id, remaining) in [(41, 4), (42, 3), (43, 2), (44, 1)] {
+            let body = encode_openai_body(&config, "objective", "current evidence").unwrap();
+            let original: Value = serde_json::from_slice(&body).unwrap();
+            let body =
+                encode_decision_budget(body, &config, crate::AgentModelCallId::new(id).unwrap())
+                    .unwrap();
+            let wire: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                &wire["input"].as_array().unwrap()[..2],
+                original["input"].as_array().unwrap()
+            );
+            let text = wire["input"][2]["content"][0]["text"].as_str().unwrap();
+            assert!(text.contains(&format!(
+                "decision_calls_remaining_including_this={remaining}"
+            )));
+            assert!(text.contains("terminal_mapping_calls_reserved=1"));
+            if remaining == 1 {
+                assert_eq!(wire["tools"].as_array().unwrap().len(), 1);
+                assert_eq!(wire["tools"][0]["name"], "extract");
+                assert_eq!(wire["tool_choice"], "required");
+            } else {
+                assert_eq!(wire["tools"], original["tools"]);
+                assert_eq!(wire["tool_choice"], original["tool_choice"]);
+            }
+            let counted = conservative_request_measurement(&config, &body).unwrap();
+            let mut without_budget = wire.clone();
+            without_budget["input"].as_array_mut().unwrap().pop();
+            assert!(
+                counted.tokens()
+                    > conservative_request_measurement(
+                        &config,
+                        &serde_json::to_vec(&without_budget).unwrap()
+                    )
+                    .unwrap()
+                    .tokens()
+            );
+        }
+        for id in [40, 45, 46] {
+            assert!(encode_decision_budget(
+                encode_openai_body(&config, "objective", "evidence").unwrap(),
+                &config,
+                crate::AgentModelCallId::new(id).unwrap()
+            )
+            .is_err());
+        }
+        let body = encode_openai_body(&base, "objective", "evidence").unwrap();
+        assert_eq!(
+            encode_decision_budget(body.clone(), &base, first).unwrap(),
+            body
+        );
     }
 
     #[test]

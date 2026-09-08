@@ -33,6 +33,33 @@ fn two_discovered_hops_settle_original_progress_accounting_and_extract() {
 }
 
 #[test]
+fn discovery_budget_reserves_mapping_and_rejects_last_decision_inspection() {
+    let _serial = lock(&SERIAL);
+    for (limit, refusal) in [(8, false), (4, false), (8, true)] {
+        provider_fixture(ProviderFault::Navigation(NavigationFault::DiscoveryBudget(
+            limit, refusal,
+        )));
+    }
+}
+
+#[test]
+fn per_run_model_call_allowance_cannot_widen_product_limits() {
+    for limit in [0, 1, 9, u8::MAX] {
+        assert!(input().settings.with_max_model_calls(limit).is_err());
+    }
+    for limit in [2, 4, 8] {
+        assert_eq!(
+            input()
+                .settings
+                .with_max_model_calls(limit)
+                .unwrap()
+                .max_model_calls,
+            limit
+        );
+    }
+}
+
+#[test]
 fn two_discovered_hops_preserve_policy_blocked_final_page_frames() {
     let _serial = lock(&SERIAL);
     provider_fixture(ProviderFault::Navigation(
@@ -114,6 +141,7 @@ impl TerraControllerClock for NavigationClock {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum NavigationFault {
     Discovery,
+    DiscoveryBudget(u8, bool),
     DiscoveryTwoHops,
     DiscoveryTwoHopsBlockedFrame,
     DiscoveryMissingLink,
@@ -164,6 +192,7 @@ impl NavigationFault {
     }
     pub(super) fn requests(self) -> u8 {
         match self {
+            Self::DiscoveryBudget(limit, refusal) => 2 * (limit - u8::from(refusal)),
             Self::DiscoveryTwoHops | Self::DiscoveryTwoHopsBlockedFrame => {
                 route_tests::RouteFault::None.requests()
             }
@@ -189,6 +218,36 @@ impl NavigationFault {
         self == Self::CancelMapCount && turns == 2 && count
     }
     pub(super) fn stream(self, turn: u8) -> String {
+        if let Self::DiscoveryBudget(limit, refusal) = self {
+            if turn == 1 {
+                return Self::Discovery.stream(turn);
+            }
+            if turn == 2 {
+                return named_tool_stream(turn, "read", r#"{\"scope\":{\"kind\":\"initial\"}}"#);
+            }
+            if turn < limit - 1 {
+                return named_tool_stream(
+                    turn,
+                    "locate",
+                    r#"{\"semantic_query\":\"missing specifications\",\"scope\":{\"kind\":\"initial\"}}"#,
+                );
+            }
+            if turn == limit - 1 {
+                return if refusal {
+                    named_tool_stream(turn, "snapshot", r#"{\"scope\":{\"kind\":\"initial\"}}"#)
+                } else {
+                    named_tool_stream(
+                        turn,
+                        "extract",
+                        r#"{\"scope\":{\"kind\":\"initial\"},\"schema_id\":1}"#,
+                    )
+                };
+            }
+            return Self::Discovery
+                .stream(3)
+                .replace("resp_3", &format!("resp_{turn}"))
+                .replace("msg_3", &format!("msg_{turn}"));
+        }
         if self.two_discovery_hops() {
             return route_tests::RouteFault::None.stream(turn);
         }
@@ -245,6 +304,35 @@ impl NavigationFault {
         }
     }
     pub(super) fn check_request(self, bytes: &[u8], turns: u8) {
+        if let Self::DiscoveryBudget(limit, _) = self {
+            let text = std::str::from_utf8(bytes).unwrap();
+            assert!(text.contains("ZEPHIUM_HOST_LINK_DISCOVERY_V1"));
+            assert_eq!(
+                text.matches("ZEPHIUM_HOST_DECISION_BUDGET_V1").count(),
+                usize::from(turns < limit - 1)
+            );
+            if turns < limit - 1 {
+                assert!(text.contains(&format!(
+                    "decision_calls_remaining_including_this={}",
+                    limit - turns - 1
+                )));
+                assert!(text.contains("terminal_mapping_calls_reserved=1"));
+                let tools = text.split("\"tools\":").nth(1).unwrap();
+                if turns == limit - 2 {
+                    assert_eq!(tools.matches("\"name\":").count(), 1);
+                    assert!(tools.contains("\"name\":\"extract\""));
+                } else {
+                    assert!(tools.contains("\"name\":\"locate\""));
+                }
+            }
+            if turns == 2 {
+                assert!(text.contains("ZREAD3 content=untrusted"));
+            }
+            if turns > 2 && turns < limit - 1 {
+                assert!(text.contains("matches=0 matched=0"));
+            }
+            return;
+        }
         if self.two_discovery_hops() {
             let text = std::str::from_utf8(bytes).unwrap();
             assert!(
@@ -539,7 +627,11 @@ pub(super) fn capture(
         correlation.invocation().get(),
         correlation.snapshot_generation().get()
     );
-    let wire = if !arrived && fault == NavigationFault::Discovery {
+    let wire = if !arrived
+        && matches!(
+            fault,
+            NavigationFault::Discovery | NavigationFault::DiscoveryBudget(..)
+        ) {
         wire.replace("]}", r#",{"k":3,"p":0,"r":"link","n":"A relevant source","u":"https://work-fixture.invalid/arrival"}]}"#)
     } else {
         wire
@@ -618,6 +710,29 @@ pub(super) fn assert_outcome(
     calls: &[u8],
     events: &[AgentWorkEvent],
 ) {
+    if let NavigationFault::DiscoveryBudget(limit, refusal) = fault {
+        let calls_used = if refusal {
+            let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!(
+                closed.failure(),
+                AgentWorkFailure::Browser(AgentBrowserProviderError::TurnLimit)
+            );
+            closed.policy_settlement().closure().model_calls()
+        } else {
+            let AgentWorkOutcome::Succeeded(mut success) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!(success.closure().navigations(), 1);
+            assert!(success.take_extraction().is_some());
+            success.closure().model_calls()
+        };
+        assert_eq!(calls_used, u32::from(limit - u8::from(refusal)));
+        assert_eq!(calls, [1, 2, 3, 2, 9, 3, 4, 5, 6]);
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        return;
+    }
     if fault.two_discovery_hops() {
         return route_tests::assert_outcome(
             route_tests::RouteFault::None,

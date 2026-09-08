@@ -25,7 +25,7 @@ impl AgentWorkController {
         session.check_live().map_err(AgentWorkFailure::Browser)?;
         // Inspection must leave room for the next decision and terminal mapper.
         // It never renews the original model-call or wall-clock budget.
-        if usize::from(session.turns) + 2 > usize::from(super::super::MAX_BROWSER_MODEL_TURNS) {
+        if usize::from(session.turns) + 2 > usize::from(session.max_model_calls) {
             return Err(AgentWorkFailure::Browser(
                 AgentBrowserProviderError::TurnLimit,
             ));

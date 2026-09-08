@@ -274,6 +274,7 @@ pub struct TerraControllerRunInput {
     ids: TerraControllerIds,
     clock: Arc<dyn TerraControllerClock>,
     deadline: Instant,
+    max_model_calls: u8,
 }
 
 impl TerraControllerRunInput {
@@ -377,6 +378,7 @@ impl TerraControllerRunInput {
             ids,
             clock,
             deadline,
+            max_model_calls: MAX_BROWSER_MODEL_TURNS,
         })
     }
 }
@@ -1953,6 +1955,7 @@ pub struct AgentBrowserSession {
     failure: Option<AgentBrowserProviderError>,
     deadline: Instant,
     turns: u8,
+    max_model_calls: u8,
     finished: bool,
 }
 
@@ -2102,6 +2105,7 @@ impl AgentBrowserSession {
             ids,
             clock,
             deadline,
+            max_model_calls,
             ..
         } = input;
         if Instant::now() >= deadline {
@@ -2143,7 +2147,7 @@ impl AgentBrowserSession {
             attempt: None,
             retained_terminal: None,
             extraction_output: None,
-            model_receipts: Vec::with_capacity(usize::from(MAX_BROWSER_MODEL_TURNS)),
+            model_receipts: Vec::with_capacity(usize::from(max_model_calls)),
             config,
             objective: Some(objective),
             model,
@@ -2151,6 +2155,7 @@ impl AgentBrowserSession {
             account,
             account_attestations,
             next_call,
+            max_model_calls,
             clock,
             last_policy_at: now,
             cancellation: AgentProviderCancellation::new(),
@@ -2207,7 +2212,7 @@ impl AgentBrowserSession {
         transition: AgentBrowserVerifiedTransition,
     ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
         self.check_live()?;
-        if self.turns >= MAX_BROWSER_MODEL_TURNS {
+        if self.turns >= self.max_model_calls {
             return Err(AgentBrowserProviderError::TurnLimit);
         }
         if Instant::now() >= self.deadline {
@@ -2244,7 +2249,7 @@ impl AgentBrowserSession {
         locate_id: u64,
     ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
         self.check_live()?;
-        if self.turns >= MAX_BROWSER_MODEL_TURNS {
+        if self.turns >= self.max_model_calls {
             return Err(AgentBrowserProviderError::TurnLimit);
         }
         if Instant::now() >= self.deadline {
@@ -2326,7 +2331,7 @@ impl AgentBrowserSession {
     ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
         use zephium_agentic::*;
         self.check_live()?;
-        if self.turns >= MAX_BROWSER_MODEL_TURNS {
+        if self.turns >= self.max_model_calls {
             return Err(AgentBrowserProviderError::TurnLimit);
         }
         let (proposal, continuation) = turn.into_parts();
@@ -2390,7 +2395,7 @@ impl AgentBrowserSession {
     ) -> Result<zephium_agentic::SemanticExtractionResult<'a>, AgentBrowserProviderError> {
         use zephium_agentic::*;
         self.check_live()?;
-        if self.turns >= MAX_BROWSER_MODEL_TURNS {
+        if self.turns >= self.max_model_calls {
             return Err(AgentBrowserProviderError::TurnLimit);
         }
         if frames.len() != observation.frames().len()
@@ -2509,7 +2514,7 @@ impl AgentBrowserSession {
             let _ = input.cancel(&mut self.policy);
             return Err(error);
         }
-        if self.turns >= MAX_BROWSER_MODEL_TURNS {
+        if self.turns >= self.max_model_calls {
             let _ = input.cancel(&mut self.policy);
             return Err(AgentBrowserProviderError::TurnLimit);
         }

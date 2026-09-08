@@ -190,6 +190,7 @@ pub struct AgentWorkRunSettings {
     ids: TerraControllerIds,
     clock: Arc<dyn TerraControllerClock>,
     deadline: Instant,
+    max_model_calls: u8,
 }
 
 impl AgentWorkRunSettings {
@@ -206,7 +207,19 @@ impl AgentWorkRunSettings {
             ids,
             clock,
             deadline,
+            max_model_calls: super::MAX_BROWSER_MODEL_TURNS,
         }
+    }
+
+    /// Narrows this run's total provider-call allowance, including terminal
+    /// mapping. It cannot increase the product ceiling or renew any manifest
+    /// token/cost budget or absolute deadline.
+    pub fn with_max_model_calls(mut self, max_calls: u8) -> Result<Self, AgentWorkFailure> {
+        if !(2..=super::MAX_BROWSER_MODEL_TURNS).contains(&max_calls) {
+            return Err(AgentWorkFailure::Contract);
+        }
+        self.max_model_calls = max_calls;
+        Ok(self)
     }
 }
 
@@ -1592,6 +1605,7 @@ impl AgentWorkController {
             ids: input.settings.ids,
             clock: input.settings.clock,
             deadline: input.settings.deadline,
+            max_model_calls: input.settings.max_model_calls,
         };
         let mut session = AgentBrowserSession::try_new_with_transport(
             run,
@@ -1626,6 +1640,15 @@ impl AgentWorkController {
         }
         if state.progressive_observation {
             session.config = session.config.with_progressive_observation();
+        }
+        if state.navigation_discovery.is_some() {
+            session.config = session
+                .config
+                .with_discovery_decision_budget(
+                    AgentModelCallId::new(session.next_call).ok_or(AgentWorkFailure::Contract)?,
+                    session.max_model_calls,
+                )
+                .map_err(|_| AgentWorkFailure::Contract)?;
         }
         state.session = Some(session);
         Ok(())
@@ -1853,6 +1876,18 @@ impl AgentWorkController {
             .collect::<Vec<_>>();
         loop {
             state.check_task_contract()?;
+            // The last decision was advertised as Extract-only. Independently
+            // enforce that narrowing before any native capture, navigation or
+            // local inspection can consume the reserved mapping call.
+            let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+            if state.navigation_discovery.is_some()
+                && session.turns.saturating_add(1) >= session.max_model_calls
+                && turn.turn.proposal().kind() != AgentBrowserToolKind::Extract
+            {
+                return Err(AgentWorkFailure::Browser(
+                    AgentBrowserProviderError::TurnLimit,
+                ));
+            }
             if turn.turn.proposal().kind() == AgentBrowserToolKind::Snapshot {
                 let next =
                     Self::inspect_current(state, worker, browser, turn, &observation).await?;
@@ -1871,13 +1906,8 @@ impl AgentWorkController {
                 turn.turn.proposal().kind(),
                 AgentBrowserToolKind::Locate | AgentBrowserToolKind::Read
             ) {
-                if state
-                    .session
-                    .as_ref()
-                    .ok_or(AgentWorkFailure::Contract)?
-                    .turns
-                    >= super::MAX_BROWSER_MODEL_TURNS
-                {
+                let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+                if session.turns >= session.max_model_calls {
                     return Err(AgentWorkFailure::Browser(
                         AgentBrowserProviderError::TurnLimit,
                     ));
@@ -2068,13 +2098,8 @@ impl AgentWorkController {
                     .iter()
                     .map(|snapshot| snapshot.frame().clone()),
             );
-            if state
-                .session
-                .as_ref()
-                .ok_or(AgentWorkFailure::Contract)?
-                .turns
-                >= super::MAX_BROWSER_MODEL_TURNS
-            {
+            let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+            if session.turns >= session.max_model_calls {
                 return Err(AgentWorkFailure::Browser(
                     AgentBrowserProviderError::TurnLimit,
                 ));
@@ -2103,7 +2128,7 @@ impl AgentWorkController {
         state.check_task_contract()?;
         let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
         session.check_live().map_err(AgentWorkFailure::Browser)?;
-        if session.turns >= super::MAX_BROWSER_MODEL_TURNS {
+        if session.turns >= session.max_model_calls {
             // Do not capture data when no mapping call can be admitted.
             return Err(AgentWorkFailure::Browser(
                 AgentBrowserProviderError::TurnLimit,

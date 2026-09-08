@@ -731,6 +731,7 @@ pub struct AgentProviderCallConfig {
     tools: BrowserToolProfile,
     baseline_read: bool,
     progressive_observation: bool,
+    decision_budget: Option<(AgentModelCallId, u8)>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -780,6 +781,7 @@ impl AgentProviderCallConfig {
             tools: BrowserToolProfile::Full,
             baseline_read: false,
             progressive_observation: false,
+            decision_budget: None,
         })
     }
 
@@ -840,6 +842,52 @@ impl AgentProviderCallConfig {
     pub fn restrict_to_navigation_and_extraction(mut self) -> Self {
         self.tools = BrowserToolProfile::NavigationExtraction;
         self
+    }
+
+    /// Freezes the host's total model-call allowance for one discovery run.
+    /// Call identities advance once per attempt; the last call is reserved for
+    /// terminal mapping. This only narrows decisions, never policy budgets or
+    /// the task's independent extraction/navigation preconditions.
+    pub fn with_discovery_decision_budget(
+        mut self,
+        first_call: AgentModelCallId,
+        max_calls: u8,
+    ) -> Result<Self, AgentProviderContractError> {
+        if self.tools != BrowserToolProfile::NavigationExtraction
+            || self.provider() != AgentProviderKind::OpenAiResponses
+            || self.input_accounting
+                != AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation
+        {
+            return Err(AgentProviderContractError::InputAccountingMode);
+        }
+        if max_calls < 2
+            || first_call
+                .get()
+                .checked_add(u64::from(max_calls) - 1)
+                .is_none()
+        {
+            return Err(AgentProviderContractError::AdmissionBudget);
+        }
+        self.decision_budget = Some((first_call, max_calls));
+        Ok(self)
+    }
+
+    pub(super) fn remaining_decision_calls(
+        &self,
+        call: AgentModelCallId,
+    ) -> Result<Option<u8>, AgentProviderContractError> {
+        let Some((first, max_calls)) = self.decision_budget else {
+            return Ok(None);
+        };
+        let remaining = call
+            .get()
+            .checked_sub(first.get())
+            .and_then(|used| u64::from(max_calls).checked_sub(used))
+            .and_then(|remaining| remaining.checked_sub(1))
+            .filter(|remaining| *remaining > 0)
+            .and_then(|remaining| u8::try_from(remaining).ok())
+            .ok_or(AgentProviderContractError::AdmissionBudget)?;
+        Ok(Some(remaining))
     }
 
     /// Restricts a trusted combined task to snapshot actions, bounded locate

@@ -82,9 +82,7 @@ impl AgentWorkController {
                 .checked_sub(state.navigation_hops)
                 .ok_or(AgentWorkFailure::Contract)?
         };
-        if usize::from(session.turns) + remaining_hops + 1
-            > usize::from(super::super::MAX_BROWSER_MODEL_TURNS)
-        {
+        if usize::from(session.turns) + remaining_hops + 1 > usize::from(session.max_model_calls) {
             return Err(AgentWorkFailure::Browser(
                 AgentBrowserProviderError::TurnLimit,
             ));
@@ -402,7 +400,7 @@ impl AgentBrowserSession {
         account: AgentContextAccountBinding,
     ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
         self.check_live()?;
-        if self.turns >= super::super::MAX_BROWSER_MODEL_TURNS {
+        if self.turns >= self.max_model_calls {
             return Err(AgentBrowserProviderError::TurnLimit);
         }
         if receipt.source() != self.account.context()

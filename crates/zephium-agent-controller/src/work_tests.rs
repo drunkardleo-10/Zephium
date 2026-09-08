@@ -1730,6 +1730,7 @@ fn provider_fixture_with_account(
         fault,
         ProviderFault::Navigation(
             NavigationFault::Discovery
+                | NavigationFault::DiscoveryBudget(..)
                 | NavigationFault::DiscoveryTwoHops
                 | NavigationFault::DiscoveryTwoHopsBlockedFrame
                 | NavigationFault::DiscoveryMissingLink
@@ -1751,6 +1752,9 @@ fn provider_fixture_with_account(
         input()
     };
     let navigation_schedule = if let ProviderFault::Navigation(fault) = fault {
+        if let NavigationFault::DiscoveryBudget(limit, _) = fault {
+            approved.settings = approved.settings.with_max_model_calls(limit).unwrap();
+        }
         let schedule = Arc::new(navigation_tests::NavigationSchedule::new(fault));
         approved.settings.clock =
             Arc::new(navigation_tests::NavigationClock::new(schedule.clone()));
@@ -1782,6 +1786,7 @@ fn provider_fixture_with_account(
         if matches!(
             fault,
             NavigationFault::Discovery
+                | NavigationFault::DiscoveryBudget(..)
                 | NavigationFault::DiscoveryTwoHops
                 | NavigationFault::DiscoveryTwoHopsBlockedFrame
                 | NavigationFault::DiscoveryMissingLink
