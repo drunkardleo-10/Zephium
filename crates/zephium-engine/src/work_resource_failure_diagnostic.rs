@@ -15,6 +15,9 @@ pub enum WorkResourceFailureCause {
     UrlObservationRefused(WorkUrlObservationFailure),
     /// The single revision-fenced URL sample could not seal the document.
     DocumentFinalizationRefused,
+    /// One exact retained-page successor navigation failed inside the native
+    /// host after policy admission.
+    SuccessorNavigation(WorkSuccessorNavigationFailure),
     RendererLost,
     SemanticNativeInvariant,
     LifecycleDeadline(WorkResourceDeadlineStage),
@@ -23,6 +26,33 @@ pub enum WorkResourceFailureCause {
     /// No original native edge supplied a more specific cause (for example,
     /// external resource invalidation). Never guess navigation or focus loss.
     UnattributedResourceFailure,
+}
+
+/// Content-free first cause for one retained-page successor navigation. These
+/// variants describe only the failed authority/lifecycle edge; they never
+/// retain a URL, native identifier, page value, model value, or timestamp.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkSuccessorNavigationFailure {
+    MissingRequest,
+    HostAdmissionRefused,
+    ClockUnavailable,
+    HostDeadlineExpired,
+    LeaseDeadlineExpired,
+    AuthorityChanged,
+    ResourceUnavailable,
+    MissingView,
+    GateUnavailableOrFailed,
+    TerminalOperationMismatch,
+    TerminalTargetMismatch,
+    TerminalFailure(ContextPortFailure),
+    PostTerminalReadback {
+        gate_failed: bool,
+        relation: WorkUrlObservationFailure,
+    },
+    TimerUnavailable,
+    ArmRefused,
+    SemanticPreparationRefused,
+    NativeLoadRefused,
 }
 
 /// Content-free relation between one refused bounded KVO sample and the sealed
@@ -34,6 +64,7 @@ pub enum WorkUrlObservationFailure {
     SealedValueUnavailable,
     InvalidValue,
     Compared {
+        raw_equal: bool,
         canonical_equal: bool,
         scheme_equal: bool,
         host_equal: bool,
@@ -64,6 +95,7 @@ impl WorkUrlObservationFailure {
         };
         let expected = expected.as_url();
         Self::Compared {
+            raw_equal: expected.as_str() == current,
             canonical_equal: expected == &actual,
             scheme_equal: expected.scheme() == actual.scheme(),
             host_equal: expected.host() == actual.host(),

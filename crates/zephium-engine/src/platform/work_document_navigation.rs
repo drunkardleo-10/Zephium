@@ -960,6 +960,7 @@ mod tests {
         assert!(matches!(
             changed.url_observation_failure(),
             Some(Failure::Compared {
+                raw_equal: false,
                 canonical_equal: false,
                 scheme_equal: true,
                 host_equal: true,
@@ -977,6 +978,20 @@ mod tests {
         assert!(!diagnostic.contains("private"));
         assert!(!diagnostic.contains("value"));
         assert!(!diagnostic.contains("example.test"));
+
+        let canonical_only = ready_gate();
+        assert_eq!(
+            canonical_only.location_changed(Some("https://EXAMPLE.test/frozen")),
+            Ok(true)
+        );
+        assert!(matches!(
+            canonical_only.url_observation_failure(),
+            Some(Failure::Compared {
+                raw_equal: false,
+                canonical_equal: true,
+                ..
+            })
+        ));
     }
 
     #[test]

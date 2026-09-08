@@ -26,7 +26,7 @@ compile_error!("native Work lifetime diagnostics are forbidden in optimized buil
 #[doc(hidden)]
 pub use agent_context_port::work_resource_failure_diagnostic::{
     WorkObservationPresentationFailure, WorkResourceDeadlineStage, WorkResourceFailureCause,
-    WorkUrlObservationFailure,
+    WorkSuccessorNavigationFailure, WorkUrlObservationFailure,
 };
 
 #[cfg(all(

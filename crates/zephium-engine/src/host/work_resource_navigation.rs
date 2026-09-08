@@ -18,48 +18,133 @@ impl WorkNavigation {
     }
 }
 impl WorkNativeResource {
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    fn record_successor_navigation_failure(&self, failure: crate::WorkSuccessorNavigationFailure) {
+        self.guard
+            .record_failure_cause(ResourceFailureCause::SuccessorNavigation(failure));
+    }
+
     pub(super) fn progress_navigation(&mut self, erased: bool) {
         let Some(pending) = self.navigation.as_ref() else {
             return;
         };
         let Some(request) = pending.task.request() else {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            self.record_successor_navigation_failure(
+                crate::WorkSuccessorNavigationFailure::MissingRequest,
+            );
             self.guard.fail();
             return;
         };
         let operation = request.navigation().operation();
         let outcome = if erased || !self.guard.is_healthy() {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            self.record_successor_navigation_failure(
+                crate::WorkSuccessorNavigationFailure::ResourceUnavailable,
+            );
             Some(Err(ContextPortFailure::NativeRefused))
-        } else if Instant::now() >= pending.deadline
-            || !work_browser_monotonic_now().is_some_and(|now| {
-                self.guard
-                    .navigation_current(request.lease(), operation, now, true)
-            })
-        {
+        } else if Instant::now() >= pending.deadline {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            self.record_successor_navigation_failure(
+                crate::WorkSuccessorNavigationFailure::HostDeadlineExpired,
+            );
             Some(Err(ContextPortFailure::TimedOut))
-        } else if let Some(view) = self.view.as_ref() {
-            if view.work_navigation().is_none_or(|gate| gate.failed()) {
-                Some(Err(ContextPortFailure::NativeRefused))
-            } else if view.semantic_pending_for_audit() != Some(false) {
-                None
-            } else {
-                view.work_navigation()
-                    .and_then(|gate| gate.take_successor_terminal())
-                    .map(|(actual, outcome)| {
-                        if actual != operation
-                            || outcome
+        } else if let Some(now) = work_browser_monotonic_now() {
+            if now >= request.lease().deadline() {
+                #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                self.record_successor_navigation_failure(
+                    crate::WorkSuccessorNavigationFailure::LeaseDeadlineExpired,
+                );
+                Some(Err(ContextPortFailure::TimedOut))
+            } else if !self
+                .guard
+                .navigation_current(request.lease(), operation, now, true)
+            {
+                #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                self.record_successor_navigation_failure(
+                    crate::WorkSuccessorNavigationFailure::AuthorityChanged,
+                );
+                Some(Err(ContextPortFailure::TimedOut))
+            } else if let Some(view) = self.view.as_ref() {
+                if let Some(gate) = view.work_navigation() {
+                    if gate.failed() {
+                        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                        self.record_successor_navigation_failure(
+                            crate::WorkSuccessorNavigationFailure::GateUnavailableOrFailed,
+                        );
+                        Some(Err(ContextPortFailure::NativeRefused))
+                    } else if view.semantic_pending_for_audit() != Some(false) {
+                        None
+                    } else {
+                        gate.take_successor_terminal().map(|(actual, outcome)| {
+                            if actual != operation {
+                                #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                                self.record_successor_navigation_failure(
+                                    crate::WorkSuccessorNavigationFailure::TerminalOperationMismatch,
+                                );
+                                Err(ContextPortFailure::Stale)
+                            } else if outcome
                                 .as_ref()
                                 .is_ok_and(|target| target != request.navigation().target())
-                        {
-                            Err(ContextPortFailure::Stale)
-                        } else if outcome.is_ok() && !self.ready() {
-                            Err(ContextPortFailure::NativeRefused)
-                        } else {
-                            outcome
-                        }
-                    })
+                            {
+                                #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                                self.record_successor_navigation_failure(
+                                    crate::WorkSuccessorNavigationFailure::TerminalTargetMismatch,
+                                );
+                                Err(ContextPortFailure::Stale)
+                            } else {
+                                match outcome {
+                                    Err(failure) => {
+                                        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                                        self.record_successor_navigation_failure(
+                                            crate::WorkSuccessorNavigationFailure::TerminalFailure(
+                                                failure,
+                                            ),
+                                        );
+                                        Err(failure)
+                                    }
+                                    Ok(target) => {
+                                        let current = crate::platform::imp::current_url(view.view());
+                                        if gate.ready(current.as_deref()) {
+                                            Ok(target)
+                                        } else {
+                                            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                                            self.record_successor_navigation_failure(
+                                                crate::WorkSuccessorNavigationFailure::PostTerminalReadback {
+                                                    gate_failed: gate.failed(),
+                                                    relation: crate::WorkUrlObservationFailure::compare(
+                                                        Some(request.navigation().target()),
+                                                        current.as_deref(),
+                                                    ),
+                                                },
+                                            );
+                                            Err(ContextPortFailure::NativeRefused)
+                                        }
+                                    }
+                                }
+                            }
+                        })
+                    }
+                } else {
+                    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                    self.record_successor_navigation_failure(
+                        crate::WorkSuccessorNavigationFailure::GateUnavailableOrFailed,
+                    );
+                    Some(Err(ContextPortFailure::NativeRefused))
+                }
+            } else {
+                #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                self.record_successor_navigation_failure(
+                    crate::WorkSuccessorNavigationFailure::MissingView,
+                );
+                Some(Err(ContextPortFailure::Stale))
             }
         } else {
-            Some(Err(ContextPortFailure::Stale))
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            self.record_successor_navigation_failure(
+                crate::WorkSuccessorNavigationFailure::ClockUnavailable,
+            );
+            Some(Err(ContextPortFailure::TimedOut))
         };
         if let Some(outcome) = outcome {
             if outcome.is_err() {
@@ -81,6 +166,10 @@ impl EngineHost {
     pub(crate) fn handle_work_navigation_task(&mut self, task: WorkNavigationTask) {
         let guard = task.guard();
         let Some(request) = task.request() else {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            guard.record_failure_cause(ResourceFailureCause::SuccessorNavigation(
+                crate::WorkSuccessorNavigationFailure::MissingRequest,
+            ));
             guard.fail();
             return;
         };
@@ -93,6 +182,10 @@ impl EngineHost {
             .get_mut(&guard.resource().identity().context())
             .filter(|resource| Arc::ptr_eq(&resource.guard, &guard))
         else {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            guard.record_failure_cause(ResourceFailureCause::SuccessorNavigation(
+                crate::WorkSuccessorNavigationFailure::ResourceUnavailable,
+            ));
             task.complete(Err(ContextPortFailure::Stale));
             return;
         };
@@ -108,10 +201,18 @@ impl EngineHost {
         #[cfg(feature = "native-agentic-work-resource-probe")]
         let accepted = accepted && resource.witness.is_none();
         if !accepted {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            guard.record_failure_cause(ResourceFailureCause::SuccessorNavigation(
+                crate::WorkSuccessorNavigationFailure::HostAdmissionRefused,
+            ));
             task.complete(Err(ContextPortFailure::Stale));
             return;
         }
         let Some(now) = work_browser_monotonic_now() else {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            guard.record_failure_cause(ResourceFailureCause::SuccessorNavigation(
+                crate::WorkSuccessorNavigationFailure::ClockUnavailable,
+            ));
             task.complete(Err(ContextPortFailure::TimedOut));
             return;
         };
@@ -119,6 +220,10 @@ impl EngineHost {
             lease.deadline().millis().saturating_sub(now.millis()),
         ));
         let Some(deadline) = Instant::now().checked_add(duration) else {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            guard.record_failure_cause(ResourceFailureCause::SuccessorNavigation(
+                crate::WorkSuccessorNavigationFailure::HostDeadlineExpired,
+            ));
             task.complete(Err(ContextPortFailure::TimedOut));
             return;
         };
@@ -136,21 +241,85 @@ impl EngineHost {
             timer,
             deadline,
         });
-        let dispatched = resource
+        let mut dispatched = true;
+        if resource
             .navigation
             .as_ref()
-            .is_some_and(|navigation| navigation.timer.is_some())
-            && work_browser_monotonic_now()
-                .is_some_and(|now| guard.navigation_current(&lease, operation, now, false))
-            && resource.view.as_mut().is_some_and(|view| {
-                view.work_navigation()
-                    .is_some_and(|gate| gate.arm_successor(source, &native).is_ok())
-                    && view.prepare_semantic_document_load().is_ok()
-                    && view
+            .is_none_or(|navigation| navigation.timer.is_none())
+        {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            guard.record_failure_cause(ResourceFailureCause::SuccessorNavigation(
+                crate::WorkSuccessorNavigationFailure::TimerUnavailable,
+            ));
+            dispatched = false;
+        }
+        if dispatched {
+            match work_browser_monotonic_now() {
+                None => {
+                    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                    guard.record_failure_cause(ResourceFailureCause::SuccessorNavigation(
+                        crate::WorkSuccessorNavigationFailure::ClockUnavailable,
+                    ));
+                    dispatched = false;
+                }
+                Some(now) if now >= lease.deadline() => {
+                    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                    guard.record_failure_cause(ResourceFailureCause::SuccessorNavigation(
+                        crate::WorkSuccessorNavigationFailure::LeaseDeadlineExpired,
+                    ));
+                    dispatched = false;
+                }
+                Some(now) if !guard.navigation_current(&lease, operation, now, false) => {
+                    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                    guard.record_failure_cause(ResourceFailureCause::SuccessorNavigation(
+                        crate::WorkSuccessorNavigationFailure::AuthorityChanged,
+                    ));
+                    dispatched = false;
+                }
+                Some(_) => {}
+            }
+        }
+        if dispatched {
+            if let Some(view) = resource.view.as_mut() {
+                if let Some(gate) = view.work_navigation() {
+                    if gate.arm_successor(source, &native).is_err() {
+                        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                        guard.record_failure_cause(ResourceFailureCause::SuccessorNavigation(
+                            crate::WorkSuccessorNavigationFailure::ArmRefused,
+                        ));
+                        dispatched = false;
+                    } else if view.prepare_semantic_document_load().is_err() {
+                        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                        guard.record_failure_cause(ResourceFailureCause::SuccessorNavigation(
+                            crate::WorkSuccessorNavigationFailure::SemanticPreparationRefused,
+                        ));
+                        dispatched = false;
+                    } else if view
                         .view()
                         .load_url(native.target().as_url().as_str())
-                        .is_ok()
-            });
+                        .is_err()
+                    {
+                        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                        guard.record_failure_cause(ResourceFailureCause::SuccessorNavigation(
+                            crate::WorkSuccessorNavigationFailure::NativeLoadRefused,
+                        ));
+                        dispatched = false;
+                    }
+                } else {
+                    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                    guard.record_failure_cause(ResourceFailureCause::SuccessorNavigation(
+                        crate::WorkSuccessorNavigationFailure::GateUnavailableOrFailed,
+                    ));
+                    dispatched = false;
+                }
+            } else {
+                #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                guard.record_failure_cause(ResourceFailureCause::SuccessorNavigation(
+                    crate::WorkSuccessorNavigationFailure::MissingView,
+                ));
+                dispatched = false;
+            }
+        }
         if !dispatched {
             guard.fail();
         }

@@ -324,6 +324,7 @@ mod tests {
         use zephium_engine::{
             WorkObservationPresentationFailure as PresentationFailure,
             WorkResourceDeadlineStage as Stage, WorkResourceFailureCause as Failure,
+            WorkSuccessorNavigationFailure as NavigationFailure,
             WorkUrlObservationFailure as UrlFailure,
         };
         for (cause, label) in [
@@ -335,6 +336,13 @@ mod tests {
             (
                 Failure::DocumentFinalizationRefused,
                 "DocumentFinalizationRefused",
+            ),
+            (
+                Failure::SuccessorNavigation(NavigationFailure::PostTerminalReadback {
+                    gate_failed: false,
+                    relation: UrlFailure::NativeValueUnavailable,
+                }),
+                "SuccessorNavigation(PostTerminalReadback { gate_failed: false, relation: NativeValueUnavailable })",
             ),
             (Failure::RendererLost, "RendererLost"),
             (Failure::SemanticNativeInvariant, "SemanticNativeInvariant"),
