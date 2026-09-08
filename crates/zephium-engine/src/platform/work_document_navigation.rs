@@ -34,6 +34,8 @@ struct State {
     requested: bool,
     navigation_epoch: u64,
     operation: Option<ContextOperationJoin>,
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    url_observation_failure: Option<crate::WorkUrlObservationFailure>,
     #[cfg(feature = "native-agentic-work-resource-probe")]
     evidence: NavigationEvidence,
 }
@@ -141,6 +143,8 @@ impl Default for WorkDocumentNavigation {
             requested: false,
             navigation_epoch: 1,
             operation: None,
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            url_observation_failure: None,
             #[cfg(feature = "native-agentic-work-resource-probe")]
             evidence: NavigationEvidence::default(),
         })))
@@ -211,6 +215,10 @@ impl WorkDocumentNavigation {
         state.policy = zephium_agentic::WorkBrowserDocumentPolicy::Exact;
         state.native_id = None;
         state.requested = false;
+        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+        {
+            state.url_observation_failure = None;
+        }
         state.phase = Phase::Armed;
         Ok(())
     }
@@ -275,6 +283,10 @@ impl WorkDocumentNavigation {
         state.bootstrap_id = None;
         state.target = Some(target);
         state.policy = policy;
+        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+        {
+            state.url_observation_failure = None;
+        }
         state.phase = Phase::Armed;
         Ok(())
     }
@@ -401,6 +413,13 @@ impl WorkDocumentNavigation {
             }) {
                 return Ok(false);
             }
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            {
+                state.url_observation_failure = Some(crate::WorkUrlObservationFailure::compare(
+                    state.effective.as_ref(),
+                    current,
+                ));
+            }
             state.phase = Phase::Refused;
             return Ok(true);
         }
@@ -477,6 +496,13 @@ impl WorkDocumentNavigation {
         self.0.lock().map_or(true, |state| {
             matches!(state.phase, Phase::Refused | Phase::Retired)
         })
+    }
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    pub(crate) fn url_observation_failure(&self) -> Option<crate::WorkUrlObservationFailure> {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|state| state.url_observation_failure)
     }
     pub(crate) fn bootstrap_ready(&self) -> bool {
         self.0
@@ -912,6 +938,45 @@ mod tests {
             assert_eq!(gate.location_changed(current), Ok(true));
             assert!(gate.failed());
         }
+    }
+
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    #[test]
+    fn ready_url_refusal_records_only_content_free_component_relations() {
+        use crate::WorkUrlObservationFailure as Failure;
+
+        let missing = ready_gate();
+        assert_eq!(missing.location_changed(None), Ok(true));
+        assert_eq!(
+            missing.url_observation_failure(),
+            Some(Failure::NativeValueUnavailable)
+        );
+
+        let changed = ready_gate();
+        assert_eq!(
+            changed.location_changed(Some("https://example.test/frozen?private=value")),
+            Ok(true)
+        );
+        assert!(matches!(
+            changed.url_observation_failure(),
+            Some(Failure::Compared {
+                canonical_equal: false,
+                scheme_equal: true,
+                host_equal: true,
+                port_equal: true,
+                path_equal: true,
+                query_equal: false,
+                fragment_equal: true,
+                credentials_equal: true,
+                query_present: true,
+                fragment_present: false,
+                credentials_present: false,
+            })
+        ));
+        let diagnostic = format!("{:?}", changed.url_observation_failure());
+        assert!(!diagnostic.contains("private"));
+        assert!(!diagnostic.contains("value"));
+        assert!(!diagnostic.contains("example.test"));
     }
 
     #[test]

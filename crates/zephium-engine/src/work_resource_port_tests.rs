@@ -30,10 +30,11 @@ fn resource_failure_cause_is_exact_first_wins_and_survives_retention_and_factory
     use crate::{
         WorkObservationPresentationFailure as PresentationFailure,
         WorkResourceDeadlineStage as Stage, WorkResourceFailureCause as Failure,
+        WorkUrlObservationFailure as UrlFailure,
     };
     for cause in [
         Failure::NavigationEventRefused,
-        Failure::UrlObservationRefused,
+        Failure::UrlObservationRefused(UrlFailure::NativeValueUnavailable),
         Failure::DocumentFinalizationRefused,
         Failure::RendererLost,
         Failure::SemanticNativeInvariant,

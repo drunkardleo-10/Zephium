@@ -12,7 +12,7 @@ pub enum WorkResourceFailureCause {
     /// The native navigation-event stream refused the fixed document.
     NavigationEventRefused,
     /// A classified WKWebView `URL` observation refused the fixed document.
-    UrlObservationRefused,
+    UrlObservationRefused(WorkUrlObservationFailure),
     /// The single revision-fenced URL sample could not seal the document.
     DocumentFinalizationRefused,
     RendererLost,
@@ -23,6 +23,61 @@ pub enum WorkResourceFailureCause {
     /// No original native edge supplied a more specific cause (for example,
     /// external resource invalidation). Never guess navigation or focus loss.
     UnattributedResourceFailure,
+}
+
+/// Content-free relation between one refused bounded KVO sample and the sealed
+/// Work document. No URL text, native object, digest, or query value crosses
+/// this diagnostic boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkUrlObservationFailure {
+    NativeValueUnavailable,
+    SealedValueUnavailable,
+    InvalidValue,
+    Compared {
+        canonical_equal: bool,
+        scheme_equal: bool,
+        host_equal: bool,
+        port_equal: bool,
+        path_equal: bool,
+        query_equal: bool,
+        fragment_equal: bool,
+        credentials_equal: bool,
+        query_present: bool,
+        fragment_present: bool,
+        credentials_present: bool,
+    },
+}
+
+impl WorkUrlObservationFailure {
+    pub(crate) fn compare(
+        expected: Option<&zephium_agentic::ContextNavigationTarget>,
+        current: Option<&str>,
+    ) -> Self {
+        let Some(expected) = expected else {
+            return Self::SealedValueUnavailable;
+        };
+        let Some(current) = current else {
+            return Self::NativeValueUnavailable;
+        };
+        let Ok(actual) = url::Url::parse(current) else {
+            return Self::InvalidValue;
+        };
+        let expected = expected.as_url();
+        Self::Compared {
+            canonical_equal: expected == &actual,
+            scheme_equal: expected.scheme() == actual.scheme(),
+            host_equal: expected.host() == actual.host(),
+            port_equal: expected.port_or_known_default() == actual.port_or_known_default(),
+            path_equal: expected.path() == actual.path(),
+            query_equal: expected.query() == actual.query(),
+            fragment_equal: expected.fragment() == actual.fragment(),
+            credentials_equal: expected.username() == actual.username()
+                && expected.password() == actual.password(),
+            query_present: actual.query().is_some(),
+            fragment_present: actual.fragment().is_some(),
+            credentials_present: !actual.username().is_empty() || actual.password().is_some(),
+        }
+    }
 }
 
 /// First failed native presentation predicate for one Work observation.

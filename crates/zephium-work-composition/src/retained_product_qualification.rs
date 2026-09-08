@@ -324,10 +324,14 @@ mod tests {
         use zephium_engine::{
             WorkObservationPresentationFailure as PresentationFailure,
             WorkResourceDeadlineStage as Stage, WorkResourceFailureCause as Failure,
+            WorkUrlObservationFailure as UrlFailure,
         };
         for (cause, label) in [
             (Failure::NavigationEventRefused, "NavigationEventRefused"),
-            (Failure::UrlObservationRefused, "UrlObservationRefused"),
+            (
+                Failure::UrlObservationRefused(UrlFailure::NativeValueUnavailable),
+                "UrlObservationRefused(NativeValueUnavailable)",
+            ),
             (
                 Failure::DocumentFinalizationRefused,
                 "DocumentFinalizationRefused",

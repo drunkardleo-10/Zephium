@@ -564,7 +564,15 @@ where
                 if work_location.as_ref().is_some_and(|gate| gate.failed()) {
                     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
                     if let Some(report) = &failure_diagnostic {
-                        report(crate::WorkResourceFailureCause::UrlObservationRefused);
+                        report(
+                            work_location
+                                .as_ref()
+                                .and_then(|gate| gate.url_observation_failure())
+                                .map_or(
+                                    crate::WorkResourceFailureCause::SemanticNativeInvariant,
+                                    crate::WorkResourceFailureCause::UrlObservationRefused,
+                                ),
+                        );
                     }
                     invoke_owned_unit_callback(
                         location_invariant.as_ref(),
