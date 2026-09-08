@@ -1430,11 +1430,12 @@ async function finish() {
   dimensionParagraph.append(new CharacterData("; depth 19 cm. Not suitable for a 30 cm shelf."));
   searchable.append(new Element("p"))
     .append(new CharacterData("Available now. Includes 3745 pieces."));
-  searchable.append(new Element("p", { hidden: "" })).append(new CharacterData("Dimensions hidden-answer"));
-  searchable.append(new Element("div", { contenteditable: "true" })).append(new CharacterData("Dimensions editable-answer"));
-  searchable.append(new HTMLInputElement({ type: "password", value: "Dimensions secret-answer" }));
-  searchable.append(new Element("iframe")).append(new CharacterData("Dimensions frame-answer"));
-  body.append(new Element("p")).append(new CharacterData("Dimensions outside-answer"));
+  searchable.append(new Element("p")).append(new CharacterData("$349.99 / €319.99; 15% discount."));
+  searchable.append(new Element("p", { hidden: "" })).append(new CharacterData("$ Dimensions hidden-answer"));
+  searchable.append(new Element("div", { contenteditable: "true" })).append(new CharacterData("$ Dimensions editable-answer"));
+  searchable.append(new HTMLInputElement({ type: "password", value: "$ Dimensions secret-answer" }));
+  searchable.append(new Element("iframe")).append(new CharacterData("$ Dimensions frame-answer"));
+  body.append(new Element("p")).append(new CharacterData("$ Dimensions outside-answer"));
   document._root = body; setOwner(body, document);
   const searchInitial = JSON.parse(invoke(146, 146, { k: "initial" }));
   assert(!JSON.stringify(searchInitial).includes("89 cm"), "search fixture did not saturate initial inventory");
@@ -1457,7 +1458,20 @@ async function finish() {
     "page wording failed to recover evidence after an abstract-field search miss");
   const searchLimited = JSON.parse(invoke(149, 149, { k: "text_search", a: searchAnchor, q: "dimensions" }, { x: 128 }));
   assert(searchLimited.c === "inspection_limit" && searchLimited.n.length === 1, "search scan ceiling became a false complete miss");
-  for (const query of ["", "x".repeat(257), "dimensions\nwidth", "$[]", "width\u202edepth", "width\u200bdepth", "sk-private-search-query-value"]) {
+  for (const query of ["$", " € ", "%"]) {
+    const symbolSearch = JSON.parse(invoke(149, 149, { k: "text_search", a: searchAnchor, q: query }));
+    assert(symbolSearch.n.length === 2 && symbolSearch.n[1].t === "$349.99 / €319.99; 15% discount.",
+      "literal symbol query failed to recover unlabeled numeric evidence");
+    assert(symbolSearch.n.every(node => !node.o && !node.u && node.p === undefined),
+      "symbol search widened action authority");
+  }
+  const metacharacterSearch = JSON.parse(invoke(149, 149, { k: "text_search", a: searchAnchor, q: "$[]" }));
+  assert(metacharacterSearch.n.length === 1 && metacharacterSearch.c === "complete",
+    "symbol query was treated as a regex or split into broad punctuation alternatives");
+  const punctuatedWordSearch = JSON.parse(invoke(149, 149, { k: "text_search", a: searchAnchor, q: "Available?" }));
+  assert(punctuatedWordSearch.n.length === 2 && punctuatedWordSearch.n[1].t === "Available now. Includes 3745 pieces.",
+    "sentence punctuation changed exact-word matching");
+  for (const query of ["", "   ", "x".repeat(257), "dimensions\nwidth", "width\u202edepth", "width\u200bdepth", "sk-private-search-query-value"]) {
     assert(invoke(150, 150, { k: "text_search", a: searchAnchor, q: query }).includes("invalid_request"), "invalid search query admitted");
   }
   const searchSecret = searchable.append(new Element("p"));

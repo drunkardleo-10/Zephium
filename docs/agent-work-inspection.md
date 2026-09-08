@@ -85,7 +85,13 @@ passages; equal scores preserve traversal order. This is deterministic lexical
 retrieval, not embedding search or a claim of semantic understanding. Concise
 discriminating page words, numbers and units are appropriate. There is no
 stemming or synonym expansion: `availability` does not match `Available now`,
-and `price` does not match a currency amount by itself. The provider tool
+and `price` does not match a currency amount by itself. Symbol-only queries
+match the entire trimmed query as a literal substring, so `$`, `€` or `%` can
+find unlabeled amounts. A symbol-only query has one match score; punctuation
+in a query containing words/numbers remains a separator, not another OR term.
+For example, `$[]` searches for those three consecutive characters, without
+regex interpretation. Blank queries, controls, unsafe formatting characters
+and secret-like values remain rejected. The provider tool
 description states this contract so the model can choose actual page wording
 after a lexical miss. Query strings never become selectors,
 regular expressions, JavaScript, attributes or page instructions.

@@ -252,7 +252,8 @@ pub const MAX_SEMANTIC_TEXT_SEARCH_BYTES: usize = 8192;
 pub struct SemanticTextSearch(String);
 
 impl SemanticTextSearch {
-    /// At most 256 UTF-8 bytes of plain search text, containing a word/number.
+    /// At most 256 UTF-8 bytes of nonblank plain search text. Symbol-only
+    /// queries are literal substrings; words/numbers retain exact-token matching.
     pub fn try_new(query: String) -> Result<Self, SemanticObservationError> {
         if query.is_empty()
             || query.len() > MAX_SEMANTIC_TEXT_SEARCH_QUERY_BYTES
@@ -260,7 +261,7 @@ impl SemanticTextSearch {
                 character.is_control() || crate::semantic_locate::invalid_query_character(character)
             })
             || crate::semantic_wire::looks_like_secret_value(&query)
-            || !query.chars().any(char::is_alphanumeric)
+            || query.chars().all(char::is_whitespace)
         {
             return Err(SemanticObservationError::ScopeIncompatible);
         }
@@ -1371,7 +1372,7 @@ mod tests {
             "x".repeat(257),
             "é".repeat(129),
             "width\ndepth".into(),
-            "$[]".into(),
+            "   ".into(),
             "width\u{202e}depth".into(),
             "width\u{200b}depth".into(),
             "sk-private-search-query-value".into(),
@@ -1383,6 +1384,10 @@ mod tests {
             "尺寸 宽度",
             "89",
             "price; document.cookie",
+            "$",
+            " € ",
+            "%",
+            "$[]",
         ] {
             let search = SemanticTextSearch::try_new(query.into()).unwrap();
             assert_eq!(search.as_str(), query);

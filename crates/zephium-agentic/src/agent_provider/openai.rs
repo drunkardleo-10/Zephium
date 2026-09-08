@@ -2618,6 +2618,59 @@ mod tests {
     }
 
     #[test]
+    fn literal_symbol_search_stream_preserves_arguments_and_eof_boundary() {
+        // Run 27's stored Luna call was valid Responses JSON. The previous
+        // failure at arguments.done was our semantic query validator rejecting
+        // "$", not an SSE framing or repeated-arguments mismatch.
+        let arguments = r#"{"scope":{"kind":"text_search","query":"$","target":"@a23"}}"#;
+        let mut events = natural_language_locate_events();
+        for index in [1, 5] {
+            events[index]["item"]["name"] = json!("snapshot");
+        }
+        events[2]["delta"] = json!(&arguments[..31]);
+        events[3]["delta"] = json!(&arguments[31..]);
+        events[4]["name"] = json!("snapshot");
+        events[4]["arguments"] = json!(arguments);
+        events[5]["item"]["arguments"] = json!(arguments);
+        events[6]["response"]["output"][0] = events[5]["item"].clone();
+        let wire = encode_test_events(&events);
+        for chunk_size in [1, 7, wire.len()] {
+            let mut decoder = OpenAiResponsesStreamDecoder::try_new(
+                call(),
+                &config_with_effective_models(64, &["gpt-5.6-terra", "gpt-5.6-luna"]),
+            )
+            .unwrap();
+            for chunk in wire.as_bytes().chunks(chunk_size) {
+                assert!(decoder.push(chunk).unwrap().deltas().is_empty());
+            }
+            let (_, tool) = decoder.finish().unwrap().into_parts();
+            let tool = tool.unwrap();
+            let crate::AgentBrowserToolProposal::Snapshot(
+                crate::AgentBrowserScopeProposal::TextSearch { target, query },
+            ) = tool.proposal()
+            else {
+                panic!("text search");
+            };
+            assert_eq!(target.get(), 23);
+            assert_eq!(query.as_str(), "$");
+        }
+        for event_count in 1..events.len() {
+            let mut decoder = OpenAiResponsesStreamDecoder::try_new(
+                call(),
+                &config_with_effective_models(64, &["gpt-5.6-terra", "gpt-5.6-luna"]),
+            )
+            .unwrap();
+            decoder
+                .push(encode_test_events(&events[..event_count]).as_bytes())
+                .unwrap();
+            assert!(
+                decoder.finish().is_err(),
+                "prefix {event_count} releases no tool"
+            );
+        }
+    }
+
+    #[test]
     fn natural_language_locate_stream_retains_fail_closed_protocol_checks() {
         let original = natural_language_locate_events();
         let mut rejected = Vec::new();

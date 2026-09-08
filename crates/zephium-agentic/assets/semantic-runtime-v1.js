@@ -236,7 +236,7 @@
     } else if (scope.k === "text_search") {
       if (!hasExactKeys(scope, ["k", "a", "q"]) || !isPositiveSafeInteger(scope.a) ||
           typeof scope.q !== "string" || utf8Length(scope.q, 257) > 256 ||
-          /[\u0000-\u001f\u007f-\u009f]/u.test(scope.q) || !/[\p{Alphabetic}\p{N}]/u.test(scope.q)) return null;
+          /[\u0000-\u001f\u007f-\u009f]/u.test(scope.q) || apply(stringTrim, scope.q, []) === "") return null;
       for (const character of scope.q) if (isForbiddenTextPoint(character.codePointAt(0))) return null;
       if (looksLikeSecret(scope.q)) return null;
     } else if (scope.k === "surrounding_text") {
@@ -1960,6 +1960,10 @@
     }
     const terms = new Set(apply(stringSplit, lower(state.request.s.q), [/[^\p{Alphabetic}\p{N}]+/u]));
     terms.delete("");
+    // Symbol-only queries (for example "$" on an unlabeled price) are plain
+    // substrings. Never interpret them as regular expressions or add sentence
+    // punctuation to the exact-word OR terms of normal language queries.
+    const literal = terms.size === 0 ? apply(stringTrim, state.request.s.q, []) : null;
     const candidates = [];
     let pending = null;
     let ordinal = 0;
@@ -1967,8 +1971,12 @@
     const flush = () => {
       if (pending === null) return;
       const matched = new Set();
-      for (const word of apply(stringSplit, lower(pending.text), [/[^\p{Alphabetic}\p{N}]+/u])) {
-        if (terms.has(word)) matched.add(word);
+      if (literal !== null) {
+        if (apply(stringIncludes, pending.text, [literal])) matched.add(literal);
+      } else {
+        for (const word of apply(stringSplit, lower(pending.text), [/[^\p{Alphabetic}\p{N}]+/u])) {
+          if (terms.has(word)) matched.add(word);
+        }
       }
       if (matched.size !== 0) {
         pending.score = matched.size;
