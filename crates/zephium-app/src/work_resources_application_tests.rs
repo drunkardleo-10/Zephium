@@ -400,6 +400,138 @@ fn drain_events(work: &mut RetainedWork) {
     while work.take_event().is_some() {}
 }
 
+fn start_held_read_recovery(work: &mut RetainedWork, native: &Arc<Native>, servers: &Servers) {
+    native.hold_read.store(true, Ordering::Release);
+    assert!(work
+        .submit(
+            request(ContextRunId::generate(), Vec::new(), servers.clone()),
+            now(),
+        )
+        .is_ok());
+    poll_until(work, |_| native.read.lock().unwrap().is_some());
+    native
+        .reporters
+        .lock()
+        .unwrap()
+        .values()
+        .next()
+        .expect("retained resource health reporter")
+        .invalidate();
+}
+
+#[test]
+fn recovery_classification_acknowledgement_gates_global_native_shutdown() {
+    if child("recovery_classification_acknowledgement_gates_global_native_shutdown") {
+        return;
+    }
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let directory = tempfile::tempdir().unwrap();
+    let (mut work, native, store) = coordinator(directory.path());
+    let servers = Servers::default();
+    poll_until(&mut work, RetainedWork::ready);
+    store.hold.store(
+        AgentWorkDisposition::RecoveryRequired as u8,
+        Ordering::Release,
+    );
+    start_held_read_recovery(&mut work, &native, &servers);
+    poll_until(&mut work, |_| store.pending.lock().unwrap().is_some());
+    let running = work.record().unwrap();
+    assert_eq!(running.disposition(), AgentWorkDisposition::Running);
+    assert_eq!(running.debt(), AgentWorkDebt::UNKNOWN);
+    assert!(work.take_extraction().is_none());
+
+    let (read, callback) = native.read.lock().unwrap().take().unwrap();
+    Native::read_result(read, callback);
+    native.join();
+    work.begin_shutdown();
+    assert!(!work.poll_shutdown(now()).unwrap());
+    assert!(work.resource_destroyed());
+    assert_eq!(
+        native.global_audits.load(Ordering::Acquire),
+        0,
+        "global native proof cannot precede the original recovery CAS ACK"
+    );
+
+    store.release(0);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    assert!(!work.shutdown_until(&Clock(AtomicU64::new(2)), deadline));
+    assert!(
+        Instant::now() < deadline,
+        "classified recovery has no clean-state notification to wait for"
+    );
+    assert_eq!(work.phase(), AdmissionPhase::Uncertain);
+    assert_eq!(
+        work.record().unwrap(),
+        AgentWorkJournalMutation::transition(running, AgentWorkDisposition::RecoveryRequired,)
+            .unwrap()
+            .next()
+    );
+    assert_eq!(work.record().unwrap().debt(), AgentWorkDebt::UNKNOWN);
+    assert!(work.take_extraction().is_none());
+    assert_eq!(native.global_audits.load(Ordering::Acquire), 1);
+    assert!(native.global_sealed.load(Ordering::Acquire));
+    for server in servers.lock().unwrap().drain(..) {
+        assert_eq!(server.join().unwrap(), 0);
+    }
+}
+
+#[test]
+fn recovery_shutdown_waits_for_original_late_read_then_returns_unclean_promptly() {
+    if child("recovery_shutdown_waits_for_original_late_read_then_returns_unclean_promptly") {
+        return;
+    }
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let directory = tempfile::tempdir().unwrap();
+    let (mut work, native, _) = coordinator(directory.path());
+    let servers = Servers::default();
+    poll_until(&mut work, RetainedWork::ready);
+    start_held_read_recovery(&mut work, &native, &servers);
+    poll_until(&mut work, |work| {
+        work.record()
+            .is_some_and(|record| record.disposition() == AgentWorkDisposition::RecoveryRequired)
+    });
+    assert_eq!(work.record().unwrap().debt(), AgentWorkDebt::UNKNOWN);
+
+    work.begin_shutdown();
+    assert!(!work.poll_shutdown(now()).unwrap());
+    assert!(
+        !work.resource_destroyed(),
+        "an outstanding original read callback must remain physically owned"
+    );
+    assert_eq!(native.destructions.load(Ordering::Acquire), 1);
+    assert_eq!(native.global_audits.load(Ordering::Acquire), 0);
+
+    let (read, callback) = native.read.lock().unwrap().take().unwrap();
+    let deliver = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(40));
+        Native::read_result(read, callback);
+    });
+    let deadline = Instant::now() + Duration::from_secs(2);
+    assert!(!work.shutdown_until(&Clock(AtomicU64::new(2)), deadline));
+    deliver.join().unwrap();
+    native.join();
+    assert!(
+        Instant::now() < deadline,
+        "the returned callback permits cleanup but cannot turn Recovery clean"
+    );
+    assert!(work.resource_destroyed());
+    assert_eq!(native.destructions.load(Ordering::Acquire), 1);
+    assert_eq!(native.global_audits.load(Ordering::Acquire), 1);
+    assert_eq!(
+        work.record().unwrap().disposition(),
+        AgentWorkDisposition::RecoveryRequired
+    );
+    assert_eq!(work.record().unwrap().debt(), AgentWorkDebt::UNKNOWN);
+    assert!(work.take_extraction().is_none());
+    for server in servers.lock().unwrap().drain(..) {
+        assert_eq!(server.join().unwrap(), 0);
+    }
+}
+
 #[test]
 fn drained_failed_mapping_projects_original_typed_failure_through_terminal_ack() {
     if child("drained_failed_mapping_projects_original_typed_failure_through_terminal_ack") {

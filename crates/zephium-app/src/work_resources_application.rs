@@ -484,6 +484,13 @@ impl RetainedWork {
                         // Immutable no-replay classification, not scoped closure.
                         self.phase = AdmissionPhase::Uncertain;
                     }
+                    (AdmissionPhase::Closing, AgentWorkDisposition::RecoveryRequired) => {
+                        // The exact scoped controller ended in Recovery, so the
+                        // durable row must remain nonterminal with its original
+                        // conservative debt. This acknowledgement classifies
+                        // the interruption; it is not a clean actor closure.
+                        self.phase = AdmissionPhase::Uncertain;
+                    }
                     _ => return Err(AgentWorkJournalError::Transition),
                 }
             }
@@ -713,6 +720,37 @@ impl RetainedWork {
                 }
             }
         }
+        // A scoped Recovery is the controller's final move-only outcome, but
+        // carries no policy settlement that could authorize Failed, Cancelled
+        // or Succeeded. Classify the exact Running row conservatively before
+        // Store shutdown. The transition preserves UNKNOWN debt and remains
+        // nonterminal, so it cannot be mistaken for a clean run or successor
+        // admission merely because physical resource cleanup later succeeds.
+        if self.flight.is_none()
+            && self.active.as_ref().is_some_and(|active| {
+                active.completion.is_stopped()
+                    && active.lifecycle.is_none()
+                    && matches!(active.outcome, Some(AgentWorkRetainedOutcome::Recovery(_)))
+            })
+        {
+            if let Some(record) = self
+                .record
+                .filter(|record| record.disposition() == AgentWorkDisposition::Running)
+            {
+                match AgentWorkJournalMutation::transition(
+                    record,
+                    AgentWorkDisposition::RecoveryRequired,
+                ) {
+                    Ok(mutation) => {
+                        self.phase = AdmissionPhase::Closing;
+                        self.dispatch(AgentWorkJournalRequest::CompareAndSet(mutation));
+                    }
+                    Err(error) => {
+                        self.persistence_failure.get_or_insert(error);
+                    }
+                }
+            }
+        }
         // A hard-deadline/spawn refusal can occur after Running ACK but before
         // an ActiveActor exists. Persist no-replay classification, not success
         // or revocation, from that exact acknowledged predecessor too.
@@ -862,8 +900,17 @@ impl RetainedWork {
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Ok(false);
         }
+        // A controller can end in Recovery while an exact native callback is
+        // still owned by its abandoned operation slot. Drain only callbacks
+        // that have actually arrived; an outstanding callback remains counted
+        // and therefore continues to block reap/global shutdown below.
+        self.owner.drain_abandoned(now)?;
         if self.destroyed {
-            return self.poll_native_shutdown(deadline);
+            let native_clean = self.poll_native_shutdown(deadline)?;
+            if native_clean && self.final_scoped_recovery_is_classified() {
+                return Err(Refusal::Uncertain);
+            }
+            return Ok(native_clean && self.local_shutdown_settled());
         }
         if self.construction.is_some()
             || self.acquisition.is_some()
@@ -900,7 +947,30 @@ impl RetainedWork {
         }
         self.owner.seal_resources()?;
         self.destroyed = true;
-        self.poll_native_shutdown(deadline)
+        let native_clean = self.poll_native_shutdown(deadline)?;
+        if native_clean && self.final_scoped_recovery_is_classified() {
+            return Err(Refusal::Uncertain);
+        }
+        Ok(native_clean && self.local_shutdown_settled())
+    }
+
+    /// A final scoped Recovery cannot gain a policy settlement or a different
+    /// runtime outcome inside this coordinator. Once its conservative Store
+    /// classification is acknowledged there is no logical event left to wait
+    /// for. Physical/native cleanup still runs first; the caller then receives
+    /// an immediate unclean result instead of losing the remaining global
+    /// shutdown budget to a notification that cannot make the run clean.
+    fn final_scoped_recovery_is_classified(&self) -> bool {
+        self.flight.is_none()
+            && self.persistence_failure.is_none()
+            && self.record.is_some_and(|record| {
+                record.disposition() == AgentWorkDisposition::RecoveryRequired
+            })
+            && self.active.as_ref().is_some_and(|active| {
+                active.completion.is_stopped()
+                    && active.lifecycle.is_none()
+                    && matches!(active.outcome, Some(AgentWorkRetainedOutcome::Recovery(_)))
+            })
     }
 
     fn local_shutdown_settled(&self) -> bool {
@@ -920,9 +990,13 @@ impl RetainedWork {
     }
 
     fn poll_native_shutdown(&mut self, deadline: Option<Instant>) -> Result<bool, Refusal> {
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline)
-            || !self.local_shutdown_settled()
-        {
+        let local_ready = self.local_shutdown_settled()
+            || (self.destroyed
+                && self.owner.locally_retired()
+                && self.unexpected_native.is_none()
+                && self.unstarted.is_none()
+                && self.final_scoped_recovery_is_classified());
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) || !local_ready {
             return Ok(false);
         }
         if self.native_shutdown.is_none() {
