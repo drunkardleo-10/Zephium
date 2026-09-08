@@ -87,8 +87,9 @@ navigation hops and one 150-second absolute deadline
 including credential lookup. Luna and explicit diagnostic `store:true` retain
 the public requests for human inspection; production remains stateless. The
 original 4,096-byte summary / important_claims / caveats value ceiling remains.
-Only exact current-document source evidence can be mapped; catalog facts may
-guide selection but must not silently become current-page citations later.
+Terminal mapping may receive bounded same-document retained source evidence with
+its original capture provenance; catalog facts from a prior document may guide
+selection but must not silently become current-page citations later.
 
 ## Live macOS evidence
 
@@ -143,10 +144,44 @@ fragments before counting or sending a mapper request. It also corrects the
 tool contract: TextSearch is case-insensitive exact-word OR matching without
 stemming or synonyms, so `availability` does not match `Available now` and
 `price` does not match an unlabeled currency amount. Neither correction claims
-to recover discarded evidence or complete the objective. The remaining generic
-work is bounded historical evidence with per-source provenance, separate from
-current action refs, followed by a retained action lifecycle for explicitly
-authorized page interactions.
+to recover discarded evidence or complete the objective. At that point the
+remaining generic work was bounded historical evidence with per-source
+provenance, separate from current action refs, followed by a retained action
+lifecycle for explicitly authorized page interactions.
+
+Run twenty-seven was built from `84a148c`; its executable SHA-256 is
+`425056acb1b8599472708be75dce29611452c29707bd98cc65de8ebaa9957963`
+and whole-bundle manifest SHA-256 is
+`517f7e65235bab956fa9c2d5f0028ac10bd04873dcf384440304ca0b85e4df1d`.
+The committed build contains bounded progressive evidence retention, which was
+independently reviewed without findings; 12 focused retention tests and five
+archive v1/v2 compatibility/provenance tests passed. The run selected and
+navigated to Tower Bridge, then requested subtree and initial snapshots. Its
+fourth decision proposed a TextSearch under the current main landmark with the
+literal query `$`.
+
+That proposal did not reach native inspection. The provider boundary closed
+with `ModelProtocol(ToolCall, OpenAiToolArgumentsDone)` and published no
+artifact. Dashboard response
+`resp_01ec1aaa64bb2a95006aa060b309ac87d2a51eb1c562bd3284` proves the stored
+Luna response was not malformed or 8,192 output tokens: it contained a valid
+94-token snapshot function call after 5,939 input tokens. The runtime charged
+its 8,192-token reservation ceiling because the typed tool decoder rejected the
+arguments before authenticated terminal usage became releasable. The exact
+contract mismatch is that the strict wire schema permits any nonempty query,
+while `SemanticTextSearch` rejects queries without an alphanumeric character;
+the fixed native matcher also discards standalone currency symbols. This is not
+an OpenAI streaming-framing defect. Resource retention and ordinary shutdown
+were clean, and the immutable SQLite integrity check passed. Full evidence is
+preserved under
+`/private/tmp/zephium-retained-commerce-twenty-seventh.7CDCJg`.
+
+The corrective gate is a bounded literal symbol-search capability with an exact
+stream regression from the stored arguments. It must not weaken authenticated
+stream ordering, typed decoding, scope authority, search bounds, or turn the
+query into regex/selector/JavaScript. A new live run is required after that
+generic contract is implemented and reviewed; run twenty-seven is not a useful
+commerce success.
 
 ## Deterministic gate
 
