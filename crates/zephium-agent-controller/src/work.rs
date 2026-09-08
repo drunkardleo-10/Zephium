@@ -483,6 +483,7 @@ impl AgentWorkSuccess {
 /// is frozen before admission; no native action is allowed.
 pub struct AgentWorkExtractionTask {
     baseline_read: bool,
+    progressive_observation: bool,
     schema: SemanticExtractionSchema,
     account: AgentAccountScope,
     account_sample: std::cell::Cell<Option<AgentContextAccountBinding>>,
@@ -503,6 +504,7 @@ impl AgentWorkExtractionTask {
             account_sample: std::cell::Cell::new(None),
             subtree: false,
             baseline_read: false,
+            progressive_observation: false,
         })
     }
 
@@ -528,10 +530,22 @@ impl AgentWorkExtractionTask {
         self.baseline_read = true;
         self
     }
+
+    /// Allows bounded, reference-anchored expansion of the acknowledged
+    /// current document before terminal mapping. This grants neither
+    /// navigation nor native action authority and requires baseline reads so
+    /// the model can inspect the evidence from which it selects a scope.
+    pub fn with_progressive_observation(mut self) -> Self {
+        self.progressive_observation = true;
+        self
+    }
 }
 impl AgentWorkTask for AgentWorkExtractionTask {
     fn allows_baseline_read(&self) -> bool {
         self.baseline_read
+    }
+    fn allows_progressive_observation(&self) -> bool {
+        self.progressive_observation
     }
     fn allows_subtree_extraction(&self) -> bool {
         self.subtree
@@ -805,7 +819,7 @@ impl AgentWorkController {
         let navigation_route = task.navigation_route().cloned();
         let navigation_discovery = task.navigation_discovery().cloned();
         if progressive_observation
-            && (navigation_discovery.is_none()
+            && (extraction_schema.is_none()
                 || !baseline_read
                 || retained
                     .as_ref()

@@ -7,6 +7,10 @@ license.workspace = true
 [features]
 # Frozen one-hop witness through ordinary trusted Work admission, never retained.
 macos-work-navigation-probe = ["macos-work", "zephium-work-composition/navigation-qualification", "tauri/custom-protocol"]
+# Release-excluded normal Browse session under the exact isolated qualification
+# identity. It creates the durable profile state used by an authenticated Work
+# witness but deliberately installs no automatic qualification observer.
+macos-work-profile-enrollment = ["macos-work-navigation-probe"]
 # Same actual-application owners, public inspectable unknown-route objective.
 macos-work-discovery-probe = ["macos-work-navigation-probe", "zephium-work-composition/discovery-qualification"]
 # Same isolated launcher, but only the shipping retained product entry/handle.
@@ -14,6 +18,12 @@ macos-work-retained-product-probe = ["macos-work-navigation-probe", "zephium-wor
 # Same retained owners, rendering and limits; selects the open commerce objective.
 macos-work-retained-commerce-probe = ["macos-work-retained-product-probe", "zephium-work-composition/retained-commerce-qualification"]
 macos-work-retained-action-probe = ["macos-work-retained-product-probe", "zephium-work-composition/retained-action-qualification"]
+# Same deliberately enrolled isolated profile, one authenticated synthetic
+# Notion page, and the shipping retained read-only Work entry.
+macos-work-retained-notion-probe = [
+    "macos-work-retained-product-probe",
+    "zephium-work-composition/retained-notion-qualification",
+]
 # Same release-excluded retained path, one closed real-public product-brief task.
 macos-work-retained-public-probe = [
     "macos-work-retained-controller-probe",

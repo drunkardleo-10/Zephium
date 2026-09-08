@@ -403,6 +403,55 @@ fn baseline_read_capability_is_frozen_before_any_provider_or_native_action() {
 }
 
 #[test]
+fn progressive_extraction_requires_baseline_read_but_not_navigation_authority() {
+    let _serial = lock(&SERIAL);
+    let task = AgentWorkExtractionTask::try_new(
+        vec![SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap()],
+        AgentAccountScope::Anonymous,
+    )
+    .unwrap()
+    .with_progressive_observation();
+    assert!(task.allows_progressive_observation());
+    assert!(!task.allows_baseline_read());
+    assert!(matches!(
+        AgentWorkController::try_new(
+            input(),
+            AgentProviderTransportConfig::STANDARD,
+            AgentProviderCredential::try_new(
+                AgentProviderKind::OpenAiResponses,
+                "synthetic-not-a-secret".into(),
+            )
+            .unwrap(),
+            Arc::new(Audit(Fault::None)),
+            Box::new(task),
+        ),
+        Err(AgentWorkFailure::Contract)
+    ));
+
+    let task = AgentWorkExtractionTask::try_new(
+        vec![SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap()],
+        AgentAccountScope::Anonymous,
+    )
+    .unwrap()
+    .with_baseline_read()
+    .with_progressive_observation();
+    assert!(task.allows_baseline_read());
+    assert!(task.allows_progressive_observation());
+    let admitted = AgentWorkController::try_new(
+        input(),
+        AgentProviderTransportConfig::STANDARD,
+        AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "synthetic-not-a-secret".into(),
+        )
+        .unwrap(),
+        Arc::new(Audit(Fault::None)),
+        Box::new(task),
+    );
+    assert!(admitted.is_ok());
+}
+
+#[test]
 fn production_form_initial_completion_or_missing_field_never_calls_provider() {
     let _serial = lock(&SERIAL);
     for name in ["Field", "Missing"] {

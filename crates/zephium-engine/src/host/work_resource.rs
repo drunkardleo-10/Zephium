@@ -798,10 +798,10 @@ impl EngineHost {
         let expired_lifecycle = resource
             .lifecycle_deadline
             .and_then(|(deadline, operation)| (Instant::now() >= deadline).then_some(operation));
-        if let Some(operation) = expired_lifecycle {
+        if let Some(_operation) = expired_lifecycle {
             resource.deadline_expired = true;
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
-            guard.record_failure_cause(resource.deadline_failure_cause(operation));
+            guard.record_failure_cause(resource.deadline_failure_cause(_operation));
             #[cfg(feature = "native-agentic-work-resource-probe")]
             if resource.construction.is_some() {
                 resource.record_construction_failure("construction_deadline");

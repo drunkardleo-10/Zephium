@@ -18,6 +18,7 @@ retained-product-qualification = ["navigation-qualification", "public-qualificat
 # A compile-time-only objective selection on the same retained product entry.
 retained-commerce-qualification = ["retained-product-qualification"]
 retained-action-qualification = ["retained-product-qualification", "zephium-agentic/probe-harness"]
+retained-notion-qualification = ["retained-product-qualification"]
 retained-qualification = ["public-qualification", "zephium-engine/native-agentic-work-resource-probe", "dep:zephium-agentic", "dep:zephium-core", "dep:zephium-agent-runtime"]
 retained-public-qualification = ["retained-qualification", "zephium-engine/native-agentic-public-resource-probe"]
 

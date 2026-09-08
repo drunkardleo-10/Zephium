@@ -10,10 +10,19 @@ compile_error!("public Work qualification is forbidden in optimized builds");
     feature = "retained-action-qualification",
     any(
         feature = "retained-commerce-qualification",
-        feature = "discovery-qualification"
+        feature = "discovery-qualification",
+        feature = "retained-notion-qualification"
     )
 ))]
 compile_error!("select the retained local action qualification without another objective");
+#[cfg(all(
+    feature = "retained-notion-qualification",
+    any(
+        feature = "retained-commerce-qualification",
+        feature = "discovery-qualification"
+    )
+))]
+compile_error!("select the authenticated Notion qualification without another objective");
 
 #[cfg(feature = "macos-work")]
 mod native;
@@ -31,6 +40,9 @@ mod qualification;
 #[cfg(feature = "retained-action-qualification")]
 #[doc(hidden)]
 pub mod retained_action_qualification;
+#[cfg(feature = "retained-notion-qualification")]
+#[doc(hidden)]
+pub mod retained_notion_qualification;
 #[cfg(feature = "retained-product-qualification")]
 #[doc(hidden)]
 pub mod retained_product_qualification;

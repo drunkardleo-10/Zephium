@@ -26,9 +26,14 @@ use zephium_work_composition::navigation_qualification::{
 use zephium_work_composition::retained_action_qualification::{
     self as qualifier, ApplicationObserver, ApplicationReport,
 };
+#[cfg(feature = "macos-work-retained-notion-probe")]
+use zephium_work_composition::retained_notion_qualification::{
+    self as qualifier, ApplicationObserver, ApplicationReport,
+};
 #[cfg(all(
     feature = "macos-work-retained-product-probe",
-    not(feature = "macos-work-retained-action-probe")
+    not(feature = "macos-work-retained-action-probe"),
+    not(feature = "macos-work-retained-notion-probe")
 ))]
 use zephium_work_composition::retained_product_qualification::{
     self as qualifier, ApplicationObserver, ApplicationReport,
@@ -46,6 +51,11 @@ const CHROME_WAIT: Duration = Duration::from_secs(30);
 // This does not extend the request's original 150-second execution deadline.
 // After this observation window the ordinary shutdown owner handles any debt.
 const OBSERVER_HANDOFF: Duration = Duration::from_secs(160);
+#[cfg(any(
+    feature = "macos-work-profile-enrollment",
+    feature = "macos-work-retained-notion-probe"
+))]
+const ENROLLED_PROFILE_MARKER: &[u8] = b"zephium-authenticated-qualification-profile-v1\n";
 
 #[derive(Default)]
 struct Control {
@@ -62,6 +72,17 @@ pub(super) fn validate_data_root(root: &std::path::Path) -> std::io::Result<()> 
     configuration::validate(&serde_json::from_str(include_str!(
         "../tauri.work-navigation-probe.conf.json"
     ))?)?;
+    #[cfg(feature = "macos-work-profile-enrollment")]
+    return validate_enrolled_profile_root(root, false);
+    #[cfg(all(
+        not(feature = "macos-work-profile-enrollment"),
+        feature = "macos-work-retained-notion-probe"
+    ))]
+    return validate_enrolled_profile_root(root, true);
+    #[cfg(not(any(
+        feature = "macos-work-profile-enrollment",
+        feature = "macos-work-retained-notion-probe"
+    )))]
     match std::fs::read_dir(root) {
         Ok(mut entries) => {
             if entries.next().is_none() {
@@ -76,6 +97,116 @@ pub(super) fn validate_data_root(root: &std::path::Path) -> std::io::Result<()> 
         _ => Err(std::io::Error::other(
             "navigation qualification requires a fresh empty data root",
         )),
+    }
+}
+
+#[cfg(any(
+    feature = "macos-work-profile-enrollment",
+    feature = "macos-work-retained-notion-probe"
+))]
+fn validate_enrolled_profile_root(
+    root: &std::path::Path,
+    marker_required: bool,
+) -> std::io::Result<()> {
+    let metadata = match std::fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !marker_required => {
+            return Ok(())
+        }
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err(std::io::Error::other(
+            "authenticated qualification data root is not a private directory",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(std::io::Error::other(
+                "authenticated qualification data root is not private",
+            ));
+        }
+    }
+    let mut entries = std::fs::read_dir(root)?;
+    if !marker_required && entries.next().is_none() {
+        return Ok(());
+    }
+    let regular_nonempty = |path: &std::path::Path| -> std::io::Result<bool> {
+        let metadata = std::fs::symlink_metadata(path)?;
+        Ok(metadata.file_type().is_file()
+            && !metadata.file_type().is_symlink()
+            && metadata.len() > 0)
+    };
+    if !regular_nonempty(&root.join("meta.sqlite"))?
+        || !std::fs::symlink_metadata(root.join("web-content"))?
+            .file_type()
+            .is_dir()
+    {
+        return Err(std::io::Error::other(
+            "authenticated qualification profile storage is incomplete",
+        ));
+    }
+    let mut profiles = 0_u8;
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return Err(std::io::Error::other(
+                "authenticated qualification data root contains a non-UTF-8 entry",
+            ));
+        };
+        if name.starts_with("profile-") && name.ends_with(".sqlite") {
+            if !regular_nonempty(&entry.path())? {
+                return Err(std::io::Error::other(
+                    "authenticated qualification profile database is invalid",
+                ));
+            }
+            profiles = profiles.saturating_add(1);
+        }
+    }
+    if profiles != 1 {
+        return Err(std::io::Error::other(
+            "authenticated qualification requires exactly one enrolled profile",
+        ));
+    }
+    if marker_required {
+        let marker = root.join("authenticated-qualification-profile-v1");
+        if !regular_nonempty(&marker)? || std::fs::read(marker)? != ENROLLED_PROFILE_MARKER {
+            return Err(std::io::Error::other(
+                "authenticated qualification profile enrollment is missing",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "macos-work-profile-enrollment")]
+pub(super) fn mark_profile_enrollment(root: &std::path::Path) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let path = root.join("authenticated-qualification-profile-v1");
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            file.write_all(ENROLLED_PROFILE_MARKER)?;
+            file.sync_all()
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if std::fs::read(path)? == ENROLLED_PROFILE_MARKER {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(
+                    "authenticated qualification profile marker is invalid",
+                ))
+            }
+        }
+        Err(error) => Err(error),
     }
 }
 

@@ -15,7 +15,13 @@ mod foreground_rendering_probe;
 ))]
 compile_error!("the actual-application navigation witness is macOS debug-only");
 #[cfg(all(feature = "macos-work-navigation-probe", target_os = "macos"))]
+#[cfg_attr(feature = "macos-work-profile-enrollment", allow(dead_code))]
 mod navigation_probe;
+#[cfg(all(
+    feature = "macos-work-profile-enrollment",
+    feature = "macos-work-retained-notion-probe"
+))]
+compile_error!("profile enrollment and authenticated execution are separate application builds");
 
 #[cfg(feature = "macos-work")]
 pub use zephium_work_composition::{MacosWorkComposition, TrustedWorkRequest};
@@ -3811,7 +3817,11 @@ fn build_profile_menu(
 }
 
 fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
-    #[cfg(all(feature = "macos-work-navigation-probe", target_os = "macos"))]
+    #[cfg(all(
+        feature = "macos-work-navigation-probe",
+        not(feature = "macos-work-profile-enrollment"),
+        target_os = "macos"
+    ))]
     if navigation_probe::on_run_event(app, &event) {
         return;
     }
@@ -4005,6 +4015,8 @@ pub fn run() {
                     use std::os::unix::fs::PermissionsExt;
                     std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700))?;
                 }
+                #[cfg(all(feature = "macos-work-profile-enrollment", target_os = "macos"))]
+                navigation_probe::mark_profile_enrollment(&data_dir)?;
                 // Validate the fixed repository namespace before consuming
                 // either one-shot extension authority. Live filesystem
                 // admission remains private to the extension worker.
@@ -4557,7 +4569,11 @@ pub fn run() {
             if !foreground_rendering_probe::install(app.handle(), engine.clone(), store.clone()) {
                 return Err(std::io::Error::other("rendering probe owner already installed").into());
             }
-            #[cfg(all(feature = "macos-work-navigation-probe", target_os = "macos"))]
+            #[cfg(all(
+                feature = "macos-work-navigation-probe",
+                not(feature = "macos-work-profile-enrollment"),
+                target_os = "macos"
+            ))]
             navigation_probe::install(app.handle())?;
             #[cfg(feature = "curated-extension-distribution")]
             if let Some(extension_distribution) =
