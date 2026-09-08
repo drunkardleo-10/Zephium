@@ -1001,7 +1001,11 @@
     const lightLength = listLength(lightList);
     const lightTake = mathMin(lightLength, remaining);
     if (shadowTake < shadowLength || lightTake < lightLength) {
-      mark(state, "inspection_limit", false);
+      // Later queued siblings must not be joined to an earlier source across
+      // children that were never inspected (which may contain a negation).
+      // Retain the proven prefix and end this traversal at the first gap.
+      mark(state, "inspection_limit");
+      return;
     }
     for (let index = lightTake - 1; index >= 0; index -= 1) {
       const child = listItem(lightList, index);
@@ -2005,6 +2009,10 @@
           }
           if (part.truncated) { mark(state, "scope_boundary", false); flush(); }
         }
+        // A raw scan can skip meaningful text after a tiny normalized prefix
+        // (for example whitespace followed by a negation). End that quote here
+        // before any later sibling fragment from the same source is admitted.
+        if (normalized.truncated) flush();
         if (scannedBytes >= 131072) { state.completeness = "inspection_limit"; state.stopped = true; break; }
         continue;
       }

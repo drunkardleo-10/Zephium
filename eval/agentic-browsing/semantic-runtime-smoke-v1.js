@@ -1487,6 +1487,56 @@ async function finish() {
     "an acknowledged region bypassed its newly editable ancestor");
   delete body.attributes.contenteditable;
 
+  // A bounded raw-fragment scan is an omitted-content boundary, even when
+  // normalization produced only a short prefix. Never join the next sibling
+  // onto that prefix and silently remove a skipped negation from the quote.
+  searchable._children.values = [];
+  const scanInterrupted = searchable.append(new Element("p"));
+  scanInterrupted.append(new CharacterData(`width ${" ".repeat(40000)}not `));
+  scanInterrupted.append(new CharacterData("supported"));
+  setOwner(body, document);
+  const scanInitial = JSON.parse(invoke(155, 155, { k: "initial" }));
+  const scanAnchor = scanInitial.n.find(node => node.r === "landmark").k;
+  const scanInterruptedResult = JSON.parse(invoke(156, 156, { k: "text_search", a: scanAnchor, q: "width supported" }));
+  assert(scanInterruptedResult.c === "scope_boundary" &&
+    scanInterruptedResult.n.some(node => node.t === "width") &&
+    !scanInterruptedResult.n.some(node => node.t === "width supported"),
+    "raw scan truncation stitched a false quote across an omitted negation");
+  scanInterrupted._children.values = [];
+  scanInterrupted.append(new CharacterData("width"));
+  scanInterrupted.append(new CharacterData(`${" ".repeat(40000)}not `));
+  scanInterrupted.append(new CharacterData("supported"));
+  setOwner(body, document);
+  const emptyScanPrefix = JSON.parse(invoke(157, 157, { k: "text_search", a: scanAnchor, q: "width supported" }));
+  assert(emptyScanPrefix.c === "scope_boundary" && !emptyScanPrefix.n.some(node => node.t === "width supported"),
+    "an empty scan-truncated prefix failed to break the pending quote");
+  scanInterrupted._children.values = [];
+  for (const fragment of ["width", "not", "supported"]) scanInterrupted.append(new CharacterData(fragment));
+  setOwner(body, document);
+  const intactSearchQuote = JSON.parse(invoke(158, 158, { k: "text_search", a: scanAnchor, q: "width supported" }));
+  assert(intactSearchQuote.n.some(node => node.t === "width not supported"),
+    "untruncated sibling fragments lost contiguous quote coalescing");
+  scanInterrupted._children.values = [];
+  scanInterrupted.append(new CharacterData("width"));
+  const boundedChildren = scanInterrupted.append(new Element("span"));
+  for (let index = 0; index < 200; index += 1) boundedChildren.append(new Element("span"));
+  boundedChildren.append(new CharacterData("not"));
+  scanInterrupted.append(new CharacterData("supported"));
+  setOwner(body, document);
+  const childScanBoundary = JSON.parse(invoke(159, 159, { k: "text_search", a: scanAnchor, q: "width supported" }, { x: 128 }));
+  assert(childScanBoundary.c === "inspection_limit" && childScanBoundary.n.some(node => node.t === "width") &&
+    !childScanBoundary.n.some(node => node.t === "width supported"),
+    "bounded child enumeration stitched a quote across an omitted negation");
+  searchable._children.values = [];
+  searchable.append(new Element("h2")).append(new CharacterData("Clipped source region"));
+  searchable.append(scanInterrupted);
+  setOwner(body, document);
+  const clippedInitial = JSON.parse(invoke(160, 160, { k: "initial" }));
+  const clippedHeading = clippedInitial.n.find(node => node.n === "Clipped source region").k;
+  const clippedWindow = JSON.parse(invoke(161, 161, { k: "surrounding_text", a: clippedHeading, p: 0, n: 1024 }, { x: 128 }));
+  assert(!clippedWindow.n.some(node => node.t === "width supported"),
+    "surrounding text stitched a quote across clipped child enumeration");
+
   process.stdout.write(`${JSON.stringify({
     bounded_visible_text_search: true,
     offscreen_anchor_wire_bytes: inventoryExtraBytes,
