@@ -44,6 +44,9 @@ fn document() -> ArchivedDocument {
             },
         ],
         sources: vec![ArchivedSource {
+            observation: None,
+            observation_generation: None,
+            captured_millis: None,
             id: 1,
             origin: "https://artifact.fixture.invalid/".into(),
             role: "paragraph".into(),
@@ -147,6 +150,24 @@ fn archive_identity_digest_length_and_canonical_encoding_are_exact() {
         MAX_AGENT_WORK_ARTIFACT_BYTES as u32 + 1
     )
     .is_none());
+}
+
+#[test]
+fn archive_v2_preserves_individual_source_capture_lineage_and_rejects_partial_metadata() {
+    let mut document = document();
+    document.version = 2;
+    document.sources[0].observation = Some(31);
+    document.sources[0].observation_generation = Some(2);
+    document.sources[0].captured_millis = Some(101);
+    let (descriptor, bytes) = encode(&document);
+    let result = AgentWorkArchivedExtraction::decode(descriptor, &bytes).unwrap();
+    let source = &result.document.sources[0];
+    assert_eq!(source.observation(), Some(31));
+    assert_eq!(source.observation_generation(), Some(2));
+    assert_eq!(source.captured_millis(), Some(101));
+    document.sources[0].captured_millis = None;
+    let (descriptor, bytes) = encode(&document);
+    assert!(AgentWorkArchivedExtraction::decode(descriptor, &bytes).is_err());
 }
 
 #[test]

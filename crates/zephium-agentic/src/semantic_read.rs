@@ -20,6 +20,9 @@ use crate::{
     SemanticValueSummary,
 };
 
+mod retained;
+pub use retained::SemanticRetainedReadEvidence;
+
 /// Process-wide maximum readable fields retained in one result.
 pub const MAX_SEMANTIC_READ_ITEMS: u16 = 256;
 /// Process-wide maximum page-derived UTF-8 bytes retained by one read result.
@@ -554,7 +557,7 @@ impl fmt::Debug for SemanticReadFragment<'_> {
 }
 
 /// Content-free aggregate counts for one read result.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SemanticReadStats {
     items: u16,
     content_bytes: u32,
@@ -628,6 +631,9 @@ pub struct SemanticReadResult<'a> {
     omissions: SemanticReadOmissions,
     stats: SemanticReadStats,
     guard: [u8; 32],
+    // Historical read-only sources, never observation/action acknowledgements
+    // for the active document. Only the bounded evidence owner constructs this.
+    historical: Vec<SemanticObservationAcknowledgement>,
 }
 
 // Evidence for one terminal scoped mapping, not an acknowledgement that the
@@ -700,6 +706,21 @@ impl<'a> SemanticReadResult<'a> {
             && acknowledgement.generation() == self.observation_generation
             && acknowledgement.context() == self.context
             && acknowledgement.guard() == self.observation_fingerprint.digest()
+    }
+
+    pub(crate) fn source_acknowledgement(
+        &self,
+        provenance: SemanticReadProvenance<'_>,
+    ) -> Option<&SemanticObservationAcknowledgement> {
+        self.historical.iter().find(|ack| {
+            ack.context() == provenance.context()
+                && ack.observation() == provenance.observation()
+                && ack.generation() == provenance.observation_generation()
+        })
+    }
+
+    pub(crate) fn has_retained_evidence(&self) -> bool {
+        !self.historical.is_empty()
     }
 
     pub(crate) fn matches_subtree(
@@ -1104,6 +1125,7 @@ impl<'a> SemanticReadBuilder<'a> {
             omissions: self.omissions,
             stats: self.stats,
             guard,
+            historical: Vec::new(),
         }
     }
 }
@@ -1131,7 +1153,7 @@ fn read_guard(
     roles: SemanticReadRoleSelection,
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"ZEPHIUM-SEMANTIC-READ-GUARD-2\0");
+    hasher.update(b"ZEPHIUM-SEMANTIC-READ-GUARD-3\0");
     hasher.update(roles.bits().to_be_bytes());
     hasher.update(fingerprint.digest());
     hasher.update(captured_at.millis().to_be_bytes());
@@ -1149,6 +1171,14 @@ fn read_guard(
         hasher.update(fragment.id.get().to_be_bytes());
         hasher.update([read_field_code(fragment.field), role_code(fragment.role)]);
         let provenance = fragment.provenance;
+        hasher.update(provenance.observation.get().to_be_bytes());
+        hasher.update(provenance.observation_generation.get().to_be_bytes());
+        hasher.update(provenance.captured_at.millis().to_be_bytes());
+        hasher.update(provenance.frame.frame().get().to_be_bytes());
+        hasher.update(provenance.frame.frame_generation().get().to_be_bytes());
+        let origin = provenance.origin().as_url().as_str();
+        hasher.update((origin.len() as u64).to_be_bytes());
+        hasher.update(origin.as_bytes());
         hasher.update(provenance.invocation.get().to_be_bytes());
         hasher.update(provenance.snapshot.get().to_be_bytes());
         hasher.update(provenance.reference.get().to_be_bytes());
@@ -1255,8 +1285,12 @@ mod tests {
     use zephium_core::ids::ProfileId;
 
     fn context() -> ContextJoin {
+        context_with_id(111)
+    }
+
+    fn context_with_id(id: u128) -> ContextJoin {
         let identity = ContextIdentity::new(
-            ContextId::from_raw(111),
+            ContextId::from_raw(id),
             ContextRunId::from_raw(112),
             ProfileId::from(113),
             ContextKind::Owned,
@@ -1353,6 +1387,282 @@ mod tests {
         SemanticObservationAcknowledgement::from_fingerprint(
             SemanticObservationFingerprint::from_observation(observation),
         )
+    }
+
+    fn retained_observation(id: u64, nodes: Value) -> SemanticObservation {
+        let context = context();
+        let frame = SemanticFrameJoin::try_new(
+            context,
+            FrameId::MAIN,
+            context.frame_generation(),
+            SemanticOrigin::parse("https://read-private.example.test/path").unwrap(),
+            SemanticFrameTrust::SameOrigin,
+        )
+        .unwrap();
+        SemanticObservationAssembler::new(
+            crate::SemanticObservationRequest::initial(
+                SemanticObservationId::new(id).unwrap(),
+                context,
+                SemanticObservationBudget::INITIAL_FILTERED,
+            ),
+            snapshot(frame, id, id, "complete", nodes),
+        )
+        .unwrap()
+        .finish()
+        .unwrap()
+    }
+
+    #[test]
+    fn retained_read_survives_empty_capture_with_exact_provenance_and_bounded_cleanup() {
+        let source = retained_observation(
+            1,
+            json!([
+                {"k":1,"r":"document","o":16},
+                {"k":2,"p":0,"r":"paragraph","t":"Width 29 cm; not waterproof"}
+            ]),
+        );
+        let empty = retained_observation(2, json!([{"k":1,"r":"document","o":16}]));
+        let source_ack = acknowledgement(&source);
+        let empty_ack = acknowledgement(&empty);
+        let read = read_semantic_observation(
+            &source,
+            SemanticReadAuthority::Acknowledged(&source_ack),
+            SemanticCaptureInstant::from_millis(100),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .unwrap();
+        let mut evidence = SemanticRetainedReadEvidence::default();
+        evidence.retain(&read, &source_ack).unwrap();
+        evidence.retain(&read, &source_ack).unwrap();
+        assert_eq!(evidence.retained_items(), 1);
+        assert!(evidence.retain(&read, &empty_ack).is_err());
+        let current = read_semantic_observation(
+            &empty,
+            SemanticReadAuthority::Acknowledged(&empty_ack),
+            SemanticCaptureInstant::from_millis(200),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .unwrap();
+        evidence.retain(&current, &empty_ack).unwrap();
+        let merged = evidence.merge_for_extraction(current).unwrap();
+        assert!(merged.matches_acknowledgement(&empty_ack));
+        assert!(!merged.matches_acknowledgement(&source_ack));
+        assert_eq!(merged.fragments().len(), 1);
+        let fragment = merged.fragments()[0];
+        assert_eq!(fragment.provenance().observation(), source.request().id());
+        assert_eq!(fragment.provenance().captured_at().millis(), 100);
+        assert_eq!(fragment.content(), read.fragments()[0].content());
+        let encoded = crate::encode_semantic_read(
+            &merged,
+            crate::SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .unwrap();
+        assert_eq!(encoded.stats().items(), 1);
+        assert!(!format!("{evidence:?}").contains("Width"));
+        drop(merged);
+        evidence.clear();
+        assert_eq!(evidence.retained_bytes(), 0);
+        assert_eq!(evidence.retained_items(), 0);
+    }
+
+    #[test]
+    fn retained_read_refuses_sensitive_and_foreign_document_inputs_atomically() {
+        let source = initial_observation("complete");
+        let ack = acknowledgement(&source);
+        let sensitive = read_semantic_observation(
+            &source,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(100),
+            SemanticReadSensitivityLimit::Sensitive,
+            SemanticReadBudget::STANDARD,
+        )
+        .unwrap();
+        let mut evidence = SemanticRetainedReadEvidence::default();
+        assert!(evidence.retain(&sensitive, &ack).is_err());
+        assert_eq!(evidence.retained_items(), 0);
+        let public = read_semantic_observation(
+            &source,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(100),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .unwrap();
+        evidence.retain(&public, &ack).unwrap();
+        let items = evidence.retained_items();
+        // Role and document substitution both refuse before changing retention.
+        let other = retained_observation(2, json!([{"k":1,"r":"document","o":16}]));
+        let other_ack = acknowledgement(&other);
+        let mut current = read_semantic_observation(
+            &other,
+            SemanticReadAuthority::Acknowledged(&other_ack),
+            SemanticCaptureInstant::from_millis(200),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .unwrap();
+        current.roles = SemanticReadRoleSelection::try_new(&[SemanticRole::Paragraph]).unwrap();
+        assert!(evidence.merge_for_extraction(current).is_err());
+        let mut current = read_semantic_observation(
+            &other,
+            SemanticReadAuthority::Acknowledged(&other_ack),
+            SemanticCaptureInstant::from_millis(200),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .unwrap();
+        current.context = context_with_id(999);
+        assert!(evidence.merge_for_extraction(current).is_err());
+        assert_eq!(evidence.retained_items(), items);
+    }
+
+    #[test]
+    fn retained_read_capture_and_byte_pressure_are_explicit_and_do_not_erase_on_miss() {
+        let mut evidence = SemanticRetainedReadEvidence::default();
+        for id in 1..=12 {
+            let source = retained_observation(
+                id,
+                json!([
+                    {"k":1,"r":"document","o":16},
+                    {"k":2,"p":0,"r":"paragraph","t":format!("Capture {id}: {}", "x".repeat(4000))}
+                ]),
+            );
+            let ack = acknowledgement(&source);
+            let read = read_semantic_observation(
+                &source,
+                SemanticReadAuthority::Acknowledged(&ack),
+                SemanticCaptureInstant::from_millis(id),
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::STANDARD,
+            )
+            .unwrap();
+            evidence.retain(&read, &ack).unwrap();
+            assert!(evidence.retained_bytes() <= SemanticReadBudget::STANDARD.max_bytes());
+            assert!(evidence.retained_items() <= SemanticReadBudget::STANDARD.max_items());
+        }
+        let empty = retained_observation(13, json!([{"k":1,"r":"document","o":16}]));
+        let ack = acknowledgement(&empty);
+        let read = read_semantic_observation(
+            &empty,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(13),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .unwrap();
+        let merged = evidence.merge_for_extraction(read).unwrap();
+        assert!(merged.omissions().contains(SemanticReadOmission::ItemLimit));
+        assert!(merged.stats().omitted_items() > 0);
+        assert_eq!(merged.fragments()[0].provenance().observation().get(), 12);
+        assert!(merged.fragments().len() <= 8);
+    }
+
+    #[test]
+    fn retained_read_keeps_contradictory_captures_and_remaps_colliding_refs() {
+        let mut evidence = SemanticRetainedReadEvidence::default();
+        for (id, text) in [(1, "Available now"), (2, "Not available")] {
+            let observation = retained_observation(
+                id,
+                json!([
+                    {"k":1,"r":"document","o":16},
+                    {"k":2,"p":0,"r":"paragraph","t":text}
+                ]),
+            );
+            let ack = acknowledgement(&observation);
+            let read = read_semantic_observation(
+                &observation,
+                SemanticReadAuthority::Acknowledged(&ack),
+                SemanticCaptureInstant::from_millis(id),
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::STANDARD,
+            )
+            .unwrap();
+            evidence.retain(&read, &ack).unwrap();
+        }
+        let empty = retained_observation(3, json!([{"k":1,"r":"document","o":16}]));
+        let ack = acknowledgement(&empty);
+        let current = read_semantic_observation(
+            &empty,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(3),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .unwrap();
+        let merged = evidence.merge_for_extraction(current).unwrap();
+        let [newer, older] = merged.fragments() else {
+            panic!("both captures retained")
+        };
+        assert_ne!(newer.id(), older.id());
+        assert_eq!(
+            newer.provenance().reference(),
+            older.provenance().reference()
+        );
+        assert_ne!(
+            newer.provenance().observation(),
+            older.provenance().observation()
+        );
+        assert!(
+            matches!(newer.content(), SemanticReadContent::Text(text) if text.as_str() == "Not available")
+        );
+        assert!(
+            matches!(older.content(), SemanticReadContent::Text(text) if text.as_str() == "Available now")
+        );
+        assert!(crate::encode_semantic_read(
+            &merged,
+            crate::SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn retained_empty_private_capture_keeps_omission_counts_without_duplicate_admission() {
+        let source = retained_observation(
+            1,
+            json!([
+                {"k":1,"r":"document","o":16},
+                {"k":2,"p":0,"r":"paragraph","t":"private note","q":"sensitive"},
+                {"k":3,"p":0,"r":"password","n":"Password","q":"secret","v":{"k":"redacted"}}
+            ]),
+        );
+        let ack = acknowledgement(&source);
+        let read = read_semantic_observation(
+            &source,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(1),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .unwrap();
+        assert!(read.fragments().is_empty());
+        let expected = read.stats();
+        let mut evidence = SemanticRetainedReadEvidence::default();
+        evidence.retain(&read, &ack).unwrap();
+        evidence.retain(&read, &ack).unwrap();
+        let merged = evidence.merge_for_extraction(read).unwrap();
+        assert_eq!(merged.stats().omitted_items(), expected.omitted_items());
+        drop(merged);
+        let empty = retained_observation(2, json!([{"k":1,"r":"document","o":16}]));
+        let ack = acknowledgement(&empty);
+        let current = read_semantic_observation(
+            &empty,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(2),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .unwrap();
+        evidence.retain(&current, &ack).unwrap();
+        let merged = evidence.merge_for_extraction(current).unwrap();
+        assert_eq!(merged.stats().omitted_items(), expected.omitted_items());
+        assert_eq!(merged.stats().secret_nodes(), expected.secret_nodes());
+        assert_eq!(
+            merged.stats().withheld_sensitive_nodes(),
+            expected.withheld_sensitive_nodes()
+        );
+        assert_eq!(merged.stats().redacted_values(), expected.redacted_values());
     }
 
     #[test]

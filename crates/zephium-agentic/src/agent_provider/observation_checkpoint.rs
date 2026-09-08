@@ -412,7 +412,7 @@ impl AgentInspectionProgress {
             "Choose a current narrower region or heading/window when needed. ",
             "snapshot(initial) restores the viewport; it does not scroll or advance a page cursor. ",
             "Region captures expose nested regions as anchors, not their descendants. ",
-            "Earlier results are not current citable evidence. Every inspection uses the same finite run budget.\n").to_owned();
+            "Earlier action refs are retired. Terminal mapping may use bounded retained sources supplied in its own read inventory. Every inspection uses the same finite run budget.\n").to_owned();
         text.push_str(
             &serde_json::json!({"completed_inspections": captures.len(), "captures": captures})
                 .to_string(),

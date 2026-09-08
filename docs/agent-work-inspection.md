@@ -105,13 +105,16 @@ same source are never stitched across nested sources, omitted content or privacy
 boundaries. The fresh forest carries no action operations, navigation URLs,
 editable values or invented parent relationships. Shared Rust verifies exact
 query/scope/predecessor, frame and snapshot generation, source shape, source
-count and text ceiling before model delivery. Previous refs/evidence retire as
-for every progressive snapshot. Search results can themselves supply current
+count and text ceiling before model delivery. Previous action refs retire as
+for every progressive snapshot. Work retains bounded public read-only evidence
+for terminal mapping under the [retained evidence contract](agent-work-retained-inspection-evidence.md).
+Search results can themselves supply current
 source refs for narrower inspection; the original region anchor remains
 available for another explicitly requested search.
 
-Terminal extraction uses only the current acknowledged observation. If its
-authorized read has no source fragments and the trusted schema requires a
+Terminal extraction uses the current acknowledged observation plus admitted
+same-document retained evidence. If the combined authorized inventory has no
+source fragments and the trusted schema requires a
 field, the controller closes with `NoExtractionEvidence` before sending or
 counting a mapper request. Zero sources cannot support a required value. This
 is an incomplete workflow outcome, not evidence that the requested facts do

@@ -587,6 +587,13 @@ pub struct SemanticValuePreview<'a> {
 }
 
 impl<'a> SemanticValuePreview<'a> {
+    pub(crate) fn retained(text: &'a str, source_bytes: usize, truncated: bool) -> Self {
+        Self {
+            text,
+            source_bytes,
+            truncated,
+        }
+    }
     /// Model-visible UTF-8 prefix, never larger than 1 KiB.
     pub const fn text(self) -> &'a str {
         self.text

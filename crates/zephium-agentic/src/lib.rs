@@ -538,7 +538,8 @@ pub use semantic_read::{
     SemanticReadError, SemanticReadField, SemanticReadFragment, SemanticReadFragmentId,
     SemanticReadOmission, SemanticReadOmissions, SemanticReadProvenance, SemanticReadResult,
     SemanticReadRoleSelection, SemanticReadRoleSelectionError, SemanticReadSensitivityLimit,
-    SemanticReadStats, MAX_SEMANTIC_READ_BYTES, MAX_SEMANTIC_READ_ITEMS,
+    SemanticReadStats, SemanticRetainedReadEvidence, MAX_SEMANTIC_READ_BYTES,
+    MAX_SEMANTIC_READ_ITEMS,
 };
 pub use semantic_read_model::{
     encode_semantic_read, SemanticEncodedRead, SemanticReadDeliveryReceipt,

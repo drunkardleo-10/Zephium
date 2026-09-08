@@ -53,6 +53,16 @@ fn discovery_operation_budget_preserves_the_mapping_call_after_navigation() {
 }
 
 #[test]
+fn discovery_preserves_sources_after_empty_inspection_without_cross_document_leakage() {
+    let _serial = lock(&SERIAL);
+    for foreign in [false, true] {
+        provider_fixture(ProviderFault::Navigation(
+            NavigationFault::DiscoveryEvidence(foreign),
+        ));
+    }
+}
+
+#[test]
 fn per_run_model_call_allowance_cannot_widen_product_limits() {
     for limit in [0, 1, 9, u8::MAX] {
         assert!(input().settings.with_max_model_calls(limit).is_err());
@@ -152,6 +162,7 @@ impl TerraControllerClock for NavigationClock {
 pub(super) enum NavigationFault {
     Discovery,
     DiscoveryBudget(u8, bool, u32),
+    DiscoveryEvidence(bool),
     DiscoveryTwoHops,
     DiscoveryTwoHopsBlockedFrame,
     DiscoveryMissingLink,
@@ -202,6 +213,7 @@ impl NavigationFault {
     }
     pub(super) fn requests(self) -> u8 {
         match self {
+            Self::DiscoveryEvidence(_) => 8,
             Self::DiscoveryBudget(limit, refusal, operations) => {
                 2 * (limit.min((operations - 1) as u8) - u8::from(refusal))
             }
@@ -230,6 +242,22 @@ impl NavigationFault {
         self == Self::CancelMapCount && turns == 2 && count
     }
     pub(super) fn stream(self, turn: u8) -> String {
+        if let Self::DiscoveryEvidence(foreign) = self {
+            return match turn {
+                1 => Self::Discovery.stream(1),
+                2 => named_tool_stream(turn, "snapshot", r#"{\"scope\":{\"kind\":\"initial\"}}"#),
+                3 => named_tool_stream(
+                    turn,
+                    "extract",
+                    r#"{\"scope\":{\"kind\":\"initial\"},\"schema_id\":1}"#,
+                ),
+                _ => Self::Discovery
+                    .stream(3)
+                    .replace("resp_3", "resp_4")
+                    .replace("msg_3", "msg_4")
+                    .replace("@r1", if foreign { "@r2" } else { "@r1" }),
+            };
+        }
         if let Self::DiscoveryBudget(limit, refusal, operations) = self {
             let limit = limit.min((operations - 1) as u8);
             if turn == 1 {
@@ -325,6 +353,27 @@ impl NavigationFault {
         }
     }
     pub(super) fn check_request(self, bytes: &[u8], turns: u8) {
+        if let Self::DiscoveryEvidence(_) = self {
+            let text = std::str::from_utf8(bytes).unwrap();
+            if turns == 2 {
+                assert!(
+                    !text.contains("Arrival certificate"),
+                    "fresh empty decision has no old actionable baseline"
+                );
+            }
+            if turns == 3 {
+                assert!(
+                    text.contains("Arrival certificate"),
+                    "terminal mapping receives retained evidence"
+                );
+                assert!(text.contains("historical_observation="));
+                assert!(
+                    !text.contains("Departure certificate"),
+                    "navigation clears the prior document"
+                );
+            }
+            return;
+        }
         if let Self::DiscoveryBudget(configured_limit, _, operations) = self {
             let limit = configured_limit.min((operations - 1) as u8);
             let text = std::str::from_utf8(bytes).unwrap();
@@ -621,11 +670,13 @@ pub(super) fn capture(
     }
     let arrived = lock(&port.calls).contains(&9);
     let correlation = invocation.correlation();
-    assert_eq!(
-        correlation.snapshot_generation().get(),
-        1,
-        "new document rotates the semantic world"
-    );
+    if !matches!(fault, NavigationFault::DiscoveryEvidence(_)) {
+        assert_eq!(
+            correlation.snapshot_generation().get(),
+            1,
+            "new document rotates the semantic world"
+        );
+    }
     if arrived
         && matches!(
             fault,
@@ -653,9 +704,22 @@ pub(super) fn capture(
     let wire = if !arrived
         && matches!(
             fault,
-            NavigationFault::Discovery | NavigationFault::DiscoveryBudget(..)
+            NavigationFault::Discovery
+                | NavigationFault::DiscoveryBudget(..)
+                | NavigationFault::DiscoveryEvidence(_)
         ) {
         wire.replace("]}", r#",{"k":3,"p":0,"r":"link","n":"A relevant source","u":"https://work-fixture.invalid/arrival"}]}"#)
+    } else {
+        wire
+    };
+    let wire = if matches!(fault, NavigationFault::DiscoveryEvidence(_))
+        && correlation.snapshot_generation().get() > 1
+    {
+        format!(
+            r#"{{"v":1,"i":{},"g":{},"c":"complete","n":[{{"k":1,"r":"document","o":16}}]}}"#,
+            correlation.invocation().get(),
+            correlation.snapshot_generation().get()
+        )
     } else {
         wire
     };
@@ -733,6 +797,35 @@ pub(super) fn assert_outcome(
     calls: &[u8],
     events: &[AgentWorkEvent],
 ) {
+    if let NavigationFault::DiscoveryEvidence(foreign) = fault {
+        if foreign {
+            let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert!(matches!(
+                closed.failure(),
+                AgentWorkFailure::Browser(AgentBrowserProviderError::Extraction(_))
+            ));
+        } else {
+            let AgentWorkOutcome::Succeeded(mut success) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!(success.closure().model_calls(), 4);
+            let result = success.take_extraction().unwrap();
+            let SemanticExtractedValue::Text(value) = result.fields()[0].value() else {
+                panic!();
+            };
+            let source = result.sources(value.source_span()).unwrap().next().unwrap();
+            assert!(source.observation < result.observation());
+            assert!(source.captured_at.millis() < result.captured_at().millis());
+            assert!(
+                matches!(&source.content, SemanticOwnedReadContent::Text(text) if text == "Arrival certificate")
+            );
+        }
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        assert!(!calls.contains(&7));
+        return;
+    }
     if let NavigationFault::DiscoveryBudget(limit, refusal, operations) = fault {
         let limit = limit.min((operations - 1) as u8);
         let calls_used = if refusal {

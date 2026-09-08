@@ -706,6 +706,9 @@ impl<'a> SemanticExtractionResult<'a> {
                         field: fragment.field(),
                         role: fragment.role(),
                         frame: provenance.frame().clone(),
+                        observation: provenance.observation(),
+                        observation_generation: provenance.observation_generation(),
+                        captured_at: provenance.captured_at(),
                         invocation: provenance.invocation(),
                         snapshot: provenance.snapshot(),
                         reference: provenance.reference(),
@@ -736,17 +739,17 @@ impl<'a> SemanticExtractionResult<'a> {
         self.schema
     }
 
-    /// Exact source observation identity.
+    /// Terminal read baseline identity. Each source retains its own observation.
     pub const fn observation(&self) -> SemanticObservationId {
         self.observation
     }
 
-    /// Exact progressive source-observation generation.
+    /// Terminal read baseline generation; source generations may be historical.
     pub const fn observation_generation(&self) -> SemanticObservationGeneration {
         self.observation_generation
     }
 
-    /// Trusted-shell capture time of the delivered source read.
+    /// Terminal read baseline capture time; each source keeps its original time.
     pub const fn captured_at(&self) -> SemanticCaptureInstant {
         self.captured_at
     }
@@ -801,6 +804,12 @@ pub enum SemanticOwnedReadContent {
 
 /// Owned provenance and one deduplicated safe source quote. No live ref authority.
 pub struct SemanticOwnedExtractionSource {
+    /// Historical source observation, independent of the terminal baseline.
+    pub observation: SemanticObservationId,
+    /// Historical source observation generation.
+    pub observation_generation: SemanticObservationGeneration,
+    /// Original source capture time, never refreshed by extraction.
+    pub captured_at: SemanticCaptureInstant,
     /// Read-local non-actionable fragment identity.
     pub id: SemanticReadFragmentId,
     /// Source semantic field.
@@ -860,15 +869,15 @@ impl SemanticOwnedExtractionResult {
     pub const fn schema(&self) -> SemanticExtractionSchemaId {
         self.schema
     }
-    /// Historical source observation.
+    /// Historical terminal read baseline; source observations are per-source.
     pub const fn observation(&self) -> SemanticObservationId {
         self.observation
     }
-    /// Historical source observation generation.
+    /// Historical terminal read baseline generation.
     pub const fn observation_generation(&self) -> SemanticObservationGeneration {
         self.observation_generation
     }
-    /// Trusted original source capture time.
+    /// Terminal read baseline capture time; inspect sources for original times.
     pub const fn captured_at(&self) -> SemanticCaptureInstant {
         self.captured_at
     }

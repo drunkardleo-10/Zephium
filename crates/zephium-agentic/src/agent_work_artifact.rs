@@ -127,6 +127,9 @@ impl AgentWorkArtifactPublication {
                             invocation: source.invocation.get(),
                             snapshot: source.snapshot.get(),
                             reference: source.reference.get(),
+                            observation: Some(source.observation.get()),
+                            observation_generation: Some(source.observation_generation.get()),
+                            captured_millis: Some(source.captured_at.millis()),
                             browser_derived: source.trust == SemanticTrust::BrowserDerived,
                             content: match &source.content {
                                 SemanticOwnedReadContent::Text(value) => {
@@ -190,7 +193,7 @@ impl AgentWorkArtifactPublication {
             });
         }
         let document = ArchivedDocument {
-            version: 1,
+            version: 2,
             id: ulid::Ulid::new().0.to_be_bytes(),
             profile,
             key: mutation.next().key(),
@@ -338,6 +341,12 @@ pub enum ArchivedSourceContent {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArchivedSource {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    observation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    observation_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    captured_millis: Option<u64>,
     id: u16,
     origin: String,
     role: String,
@@ -354,6 +363,18 @@ pub struct ArchivedSource {
     content: ArchivedSourceContent,
 }
 impl ArchivedSource {
+    /// Exact source capture lineage in v2 archives; v1 used document-wide data.
+    pub const fn observation(&self) -> Option<u64> {
+        self.observation
+    }
+    /// Exact source generation in v2 archives.
+    pub const fn observation_generation(&self) -> Option<u64> {
+        self.observation_generation
+    }
+    /// Original source capture time in v2 archives.
+    pub const fn captured_millis(&self) -> Option<u64> {
+        self.captured_millis
+    }
     /// Historical read-local identity, not an action ref.
     pub const fn id(&self) -> u16 {
         self.id
@@ -449,7 +470,7 @@ impl fmt::Debug for AgentWorkArchivedExtraction {
 impl ArchivedDocument {
     fn validate(&self) -> Result<(), AgentWorkJournalError> {
         let invalid = AgentWorkJournalError::Uncertain;
-        if self.version != 1
+        if !matches!(self.version, 1 | 2)
             || self.id == [0; 16]
             || self.schema == 0
             || self.observation == 0
@@ -462,6 +483,17 @@ impl ArchivedDocument {
         }
         let mut source_bytes = 0;
         for source in &self.sources {
+            if (self.version == 1
+                && (source.observation.is_some()
+                    || source.observation_generation.is_some()
+                    || source.captured_millis.is_some()))
+                || (self.version == 2
+                    && (source.observation.is_none_or(|id| id == 0)
+                        || source.observation_generation.is_none_or(|id| id == 0)
+                        || source.captured_millis.is_none()))
+            {
+                return Err(invalid);
+            }
             if source.id == 0
                 || source.reference == 0
                 || source.context_generation == 0

@@ -2393,6 +2393,29 @@ impl AgentBrowserSession {
         captured_at: zephium_agentic::SemanticCaptureInstant,
         schema: &zephium_agentic::SemanticExtractionSchema,
     ) -> Result<zephium_agentic::SemanticExtractionResult<'a>, AgentBrowserProviderError> {
+        self.extract_from_with_evidence(
+            turn,
+            observation,
+            previous,
+            frames,
+            captured_at,
+            schema,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn extract_from_with_evidence<'a>(
+        &mut self,
+        turn: AgentBrowserProviderTurn,
+        observation: &'a zephium_agentic::SemanticObservation,
+        previous: Option<&zephium_agentic::SemanticObservation>,
+        frames: &[zephium_agentic::SemanticFrameJoin],
+        captured_at: zephium_agentic::SemanticCaptureInstant,
+        schema: &zephium_agentic::SemanticExtractionSchema,
+        evidence: Option<&'a zephium_agentic::SemanticRetainedReadEvidence>,
+    ) -> Result<zephium_agentic::SemanticExtractionResult<'a>, AgentBrowserProviderError> {
         use zephium_agentic::*;
         self.check_live()?;
         if self.turns >= self.max_model_calls {
@@ -2450,6 +2473,12 @@ impl AgentBrowserSession {
             schema.source_roles(),
         )
         .map_err(AgentBrowserProviderError::Read)?;
+        let read = match evidence {
+            Some(evidence) => evidence
+                .merge_for_extraction(read)
+                .map_err(AgentBrowserProviderError::Read)?,
+            None => read,
+        };
         // Every mapped value requires a delivered source fragment. An empty
         // read cannot satisfy a required field, so do not spend a provider
         // request asking the model to manufacture an impossible result.

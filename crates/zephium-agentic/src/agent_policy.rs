@@ -1527,9 +1527,12 @@ impl AgentRunPolicy {
             return Err(AgentPolicyError::PayloadMismatch);
         }
         let candidates = match input.subtree_target {
-            None => {
-                provider_read_taints(input.read, input.baseline, request.account(), &self.taints)?
-            }
+            None => provider_extraction_read_taints(
+                input.read,
+                input.baseline,
+                request.account(),
+                &self.taints,
+            )?,
             Some(target) => provider_subtree_read_taints(
                 input.read,
                 input.baseline,
@@ -2602,10 +2605,22 @@ fn provider_read_taints(
     account: AgentContextAccountBinding,
     retained: &[AgentTaintCohort],
 ) -> Result<Vec<AgentTaintCohort>, AgentPolicyError> {
+    if read.has_retained_evidence() {
+        return Err(AgentPolicyError::Authority);
+    }
+    provider_extraction_read_taints(read, baseline, account, retained)
+}
+
+fn provider_extraction_read_taints(
+    read: &SemanticReadResult<'_>,
+    baseline: &SemanticObservationAcknowledgement,
+    account: AgentContextAccountBinding,
+    retained: &[AgentTaintCohort],
+) -> Result<Vec<AgentTaintCohort>, AgentPolicyError> {
     if account.context() != read.context() || !read.matches_acknowledgement(baseline) {
         return Err(AgentPolicyError::Authority);
     }
-    let candidates = retained
+    let mut candidates = retained
         .iter()
         .filter(|cohort| {
             cohort.context == baseline.context()
@@ -2621,15 +2636,22 @@ fn provider_read_taints(
     }
     for fragment in read.fragments() {
         let provenance = fragment.provenance();
-        let mut sources = candidates
-            .iter()
-            .filter(|cohort| cohort.contains_reference(provenance.reference()));
+        let source_baseline = read.source_acknowledgement(provenance).unwrap_or(baseline);
+        let mut sources = retained.iter().filter(|cohort| {
+            cohort.context == provenance.context()
+                && cohort.observation == provenance.observation()
+                && cohort.observation_generation == provenance.observation_generation()
+                && cohort.source_guard == source_baseline.guard()
+                && cohort.account == account.account()
+                && cohort.contains_reference(provenance.reference())
+        });
         let Some(source) = sources.next() else {
             return Err(AgentPolicyError::ReadBaselineMissing);
         };
         if sources.next().is_some() || source.origin() != provenance.origin() {
             return Err(AgentPolicyError::ReadBaselineMissing);
         }
+        merge_taint(&mut candidates, source.clone());
     }
     Ok(candidates)
 }
@@ -6095,6 +6117,73 @@ mod tests {
             provider_read_taints(&read, &baseline, binding, &[])
                 .expect_err("missing retained baseline"),
             AgentPolicyError::ReadBaselineMissing
+        );
+    }
+
+    #[test]
+    fn retained_extraction_requires_every_original_committed_source_and_current_baseline() {
+        let context = make_context(9_281, 9_282, 9_283);
+        let origin = origin("retained-provider-read");
+        let source = observation(
+            context,
+            origin.clone(),
+            1,
+            vec![
+                json!({"k":1,"r":"document","o":16}),
+                json!({"k":2,"p":0,"r":"paragraph","t":"Observed historical evidence"}),
+            ],
+        );
+        let empty = document_only_observation(context, origin, 2);
+        let acknowledge = |observation: &SemanticObservation| {
+            observation_payload(observation, 10)
+                .settle_delivery(SemanticModelDeliverySettlement::Committed)
+                .unwrap()
+        };
+        let prior_ack = acknowledge(&source);
+        let current_ack = acknowledge(&empty);
+        let binding = account(context, NOW - 1);
+        let mut retained = observation_taints(&source, binding).unwrap();
+        retained.extend(observation_taints(&empty, binding).unwrap());
+        let read = |observation, acknowledgement, at| {
+            read_semantic_observation(
+                observation,
+                SemanticReadAuthority::Acknowledged(acknowledgement),
+                SemanticCaptureInstant::from_millis(at),
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::STANDARD,
+            )
+            .unwrap()
+        };
+        let prior = read(&source, &prior_ack, NOW - 3);
+        let mut evidence = crate::SemanticRetainedReadEvidence::default();
+        evidence.retain(&prior, &prior_ack).unwrap();
+        let merged = evidence
+            .merge_for_extraction(read(&empty, &current_ack, NOW - 2))
+            .unwrap();
+        assert!(!merged.fragments().is_empty());
+        assert!(provider_extraction_read_taints(&merged, &current_ack, binding, &retained).is_ok());
+        assert_eq!(
+            provider_read_taints(&merged, &current_ack, binding, &retained),
+            Err(AgentPolicyError::Authority)
+        );
+        assert_eq!(
+            provider_extraction_read_taints(&merged, &prior_ack, binding, &retained),
+            Err(AgentPolicyError::Authority)
+        );
+        let current_only = observation_taints(&empty, binding).unwrap();
+        assert_eq!(
+            provider_extraction_read_taints(&merged, &current_ack, binding, &current_only),
+            Err(AgentPolicyError::ReadBaselineMissing)
+        );
+        let other_account = AgentContextAccountBinding::new(
+            AgentAccountAttestationId::generate(),
+            context,
+            AgentAccountScope::Authenticated(AgentAccountId::generate()),
+            AgentPolicyInstant::from_millis(NOW),
+        );
+        assert_eq!(
+            provider_extraction_read_taints(&merged, &current_ack, other_account, &retained),
+            Err(AgentPolicyError::ReadBaselineMissing)
         );
     }
 

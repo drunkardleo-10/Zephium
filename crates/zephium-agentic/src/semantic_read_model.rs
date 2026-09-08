@@ -430,6 +430,12 @@ pub fn encode_semantic_read(
         ),
     )?;
     write_omissions(&mut output, read)?;
+    if read.has_retained_evidence() {
+        checked_write(
+            &mut output,
+            format_args!(" retained_history=true refs=historical_read_only"),
+        )?;
+    }
     if read.source_roles() != crate::SemanticReadRoleSelection::ALL {
         checked_write(&mut output, format_args!(" selected_roles="))?;
         for (index, role) in read.source_roles().roles().enumerate() {
@@ -503,6 +509,14 @@ pub fn encode_semantic_read(
         if frame != 1 {
             checked_write(&mut output, format_args!(" f=f{frame}"))?;
         }
+        if read.has_retained_evidence() {
+            let source = fragment.provenance();
+            checked_write(&mut output, format_args!(
+                " historical_observation={} generation={} captured_at_ms={} invocation={} snapshot={}",
+                source.observation().get(), source.observation_generation().get(),
+                source.captured_at().millis(), source.invocation().get(), source.snapshot().get(),
+            ))?;
+        }
         if fragment.provenance().trust() != crate::SemanticTrust::UntrustedPage {
             checked_write(
                 &mut output,
@@ -553,9 +567,11 @@ fn validate_read(read: &SemanticReadResult<'_>) -> Result<(), SemanticModelEncod
             u16::try_from(index + 1).map_err(|_| SemanticModelEncodingError::Invariant)?;
         let provenance = fragment.provenance();
         if fragment.id().get() != expected
-            || provenance.observation() != read.observation()
-            || provenance.observation_generation() != read.observation_generation()
-            || provenance.captured_at() != read.captured_at()
+            || provenance.context() != read.context()
+            || ((provenance.observation() != read.observation()
+                || provenance.observation_generation() != read.observation_generation()
+                || provenance.captured_at() != read.captured_at())
+                && read.source_acknowledgement(provenance).is_none())
             || provenance.sensitivity() == SemanticSensitivity::Secret
             || !read.source_roles().contains(fragment.role())
             || !field_matches_content(fragment.field(), fragment.content())

@@ -918,6 +918,7 @@ impl AgentWorkController {
                     navigation_discovery,
                     navigation_hops: 0,
                     extraction: None,
+                    retained_read_evidence: SemanticRetainedReadEvidence::default(),
                     failure: None,
                     observation: None,
                     native_terminal: None,
@@ -931,6 +932,7 @@ impl AgentWorkController {
 }
 
 struct WorkState {
+    retained_read_evidence: SemanticRetainedReadEvidence,
     navigation_target: Option<ContextNavigationTarget>,
     navigation_route: Option<AgentNavigationRoute>,
     navigation_discovery: Option<AgentNavigationDiscovery>,
@@ -1876,6 +1878,32 @@ impl AgentWorkController {
             .collect::<Vec<_>>();
         loop {
             state.check_task_contract()?;
+            if state.progressive_observation
+                && turn.turn.proposal().kind() == AgentBrowserToolKind::Snapshot
+            {
+                if let Some(schema) = &state.extraction_schema {
+                    let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+                    let acknowledgement = turn.turn.continuation().baseline();
+                    let read = read_selected_semantic_observation(
+                        &observation,
+                        SemanticReadAuthority::Acknowledged(acknowledgement),
+                        captured_at,
+                        SemanticReadSensitivityLimit::PublicOnly,
+                        SemanticReadBudget::STANDARD,
+                        schema.source_roles(),
+                    )
+                    .map_err(|error| {
+                        AgentWorkFailure::Browser(AgentBrowserProviderError::Read(error))
+                    })?;
+                    session.check_live().map_err(AgentWorkFailure::Browser)?;
+                    state
+                        .retained_read_evidence
+                        .retain(&read, acknowledgement)
+                        .map_err(|error| {
+                            AgentWorkFailure::Browser(AgentBrowserProviderError::Read(error))
+                        })?;
+                }
+            }
             // The last decision was advertised as Extract-only. Independently
             // enforce that narrowing before any native capture, navigation or
             // local inspection can consume the reserved mapping call.
@@ -1938,6 +1966,7 @@ impl AgentWorkController {
             }
             let step = turn;
             if step.turn.proposal().kind() == AgentBrowserToolKind::Navigate {
+                state.retained_read_evidence.clear();
                 let next =
                     Self::navigate_current(state, worker, browser, step, &observation, progress)
                         .await?;
@@ -2218,13 +2247,18 @@ impl AgentWorkController {
             worker,
             browser,
             session.cancellation.clone(),
-            session.extract_from(
+            session.extract_from_with_evidence(
                 turn,
                 source,
                 expanded.as_ref().map(|_| observation),
                 &frames,
                 captured_at,
                 schema,
+                if state.progressive_observation {
+                    Some(&state.retained_read_evidence)
+                } else {
+                    None
+                },
             ),
         )
         .await?;
@@ -2245,6 +2279,7 @@ impl AgentWorkController {
         worker: &mut AgentRuntimeWorker,
         browser: &WorkBrowser<'_>,
     ) -> Result<(), AgentWorkFailure> {
+        state.retained_read_evidence.clear();
         let id = state.native.identity.id();
         // Revoke before teardown even on trusted successful completion.
         state.native.revoke(browser)?;
@@ -2845,6 +2880,7 @@ impl AgentWorkController {
         let Some(state) = self.state.as_mut() else {
             return deadline;
         };
+        state.retained_read_evidence.clear();
         if Instant::now() < deadline {
             // Reconcile one already-known synchronous terminal, never reissue
             // native work. Time/audit refusal retains its exact original owner.
