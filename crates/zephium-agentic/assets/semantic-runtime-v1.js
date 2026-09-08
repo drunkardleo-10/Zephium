@@ -580,7 +580,10 @@
   }
 
   function mark(state, completeness, stop = true) {
-    if (state.completeness === "complete") state.completeness = completeness;
+    if (state.completeness === "complete" || completeness === "text_limit" ||
+        (state.completeness === "field_limit" && completeness !== "field_limit")) {
+      state.completeness = completeness;
+    }
     if (stop) state.stopped = true;
   }
 
@@ -1021,10 +1024,10 @@
             const clipped = normalizeText(normalized.value, limit - bytes);
             chunks.push(clipped.value);
             bytes += clipped.bytes;
-            if (clipped.truncated) mark(state, "text_limit");
+            if (clipped.truncated) mark(state, "field_limit", false);
           }
         }
-        if (normalized.truncated) mark(state, "text_limit");
+        if (normalized.truncated) mark(state, "field_limit", false);
         continue;
       }
       if (type === 1 && shouldSkipSubtree(current)) continue;
@@ -1276,8 +1279,8 @@
     return chunks.join("");
   }
 
-  function consumeField(raw, fieldLimit, state) {
-    const remaining = mathMax(0, state.request.b.t - state.textBytes);
+  function consumeField(raw, fieldLimit, state, reserved = 0) {
+    const remaining = mathMax(0, state.request.b.t - state.textBytes - reserved);
     const normalized = normalizeText(raw, mathMin(fieldLimit, remaining));
     let value = normalized.value;
     let bytes = normalized.bytes;
@@ -1293,8 +1296,14 @@
       }
     }
     state.textBytes += bytes;
-    if (normalized.truncated || (raw.length !== 0 && remaining === 0)) mark(state, "text_limit");
-    return { value, bytes, secret };
+    if (normalized.truncated || (raw.length !== 0 && remaining === 0)) {
+      // A saturated name/prose field must not hide unrelated later evidence.
+      // Global exhaustion still stops the walk; descriptor revalidation rejects
+      // either incomplete status before admitting any action.
+      const aggregate = remaining <= fieldLimit;
+      mark(state, aggregate ? "text_limit" : "field_limit", aggregate);
+    }
+    return { value, bytes, secret, truncated: normalized.truncated };
   }
 
   function consumeValueField(raw, state) {
@@ -1343,7 +1352,7 @@
   }
 
   function appendSink(record, raw, state) {
-    if (record.sink === null || state.stopped) return;
+    if (record.sink === null || record.saturated || state.stopped) return;
     let current = "";
     if (record.sink === "name") current = record.wire.n || "";
     if (record.sink === "text") current = record.wire.t || "";
@@ -1355,8 +1364,8 @@
     const separator = current === "" ? "" : " ";
     const remainingField = mathMax(0, fieldLimit - record.sinkBytes - (separator === "" ? 0 : 1));
     const separatorBytes = separator === "" ? 0 : 1;
-    const remainingGlobal = mathMax(0, state.request.b.t - state.textBytes - separatorBytes);
-    const field = consumeField(raw, mathMin(remainingField, remainingGlobal), state);
+    const field = consumeField(raw, remainingField, state, separatorBytes);
+    if (field.truncated) record.saturated = true;
     if (field.value === "") return;
     const combined = `${current}${separator}${field.value}`;
     if (separator !== "") {
@@ -1718,18 +1727,24 @@
     return false;
   }
 
-  function addRollingChunk(chunks, chunk, byteLimit) {
-    if (chunk === "" || byteLimit === 0) return;
+  function addRollingChunk(chunks, chunk, byteLimit, state) {
+    if (chunk.text === "" || byteLimit === 0) return;
     chunks.push(chunk);
+    if (chunks.length > state.request.b.n) {
+      chunks.shift();
+      mark(state, "node_limit", false);
+    }
     let bytes = 0;
     for (let index = chunks.length - 1; index >= 0; index -= 1) {
       const separator = index === chunks.length - 1 ? 0 : 1;
-      const chunkBytes = utf8Length(chunks[index], byteLimit + 1);
+      const chunkBytes = utf8Length(chunks[index].text, byteLimit + 1);
       if (bytes + separator + chunkBytes <= byteLimit) {
         bytes += separator + chunkBytes;
       } else {
         const keep = mathMax(0, byteLimit - bytes - separator);
-        chunks.splice(0, index + 1, utf8Suffix(chunks[index], keep));
+        const last = { element: chunks[index].element, text: utf8Suffix(chunks[index].text, keep) };
+        chunks.splice(0, index + 1, last);
+        mark(state, "scope_boundary", false);
         return;
       }
     }
@@ -1751,16 +1766,17 @@
     return suffix.join("");
   }
 
-  function surroundingText(anchor, state, beforeLimit, afterLimit) {
+  function surroundingChunks(anchor, state, beforeLimit, afterLimit) {
     const before = [];
     const after = [];
     let afterBytes = 0;
     let seenAnchor = false;
     const root = read(documentElementGetter, document);
-    if (root === null || root === undefined) return "";
-    const stack = [{ node: root }];
+    if (root === null || root === undefined) return [];
+    const stack = [{ node: root, source: document }];
     while (stack.length !== 0 && !state.stopped) {
-      const current = stack.pop().node;
+      const item = stack.pop();
+      const current = item.node;
       if (!visit(state)) break;
       if (current === anchor) {
         seenAnchor = true;
@@ -1772,32 +1788,53 @@
         const raw = read(characterDataGetter, current);
         if (typeof raw !== "string") continue;
         if (!seenAnchor) {
-          const normalized = normalizeText(raw, beforeLimit);
-          addRollingChunk(before, normalized.value, beforeLimit);
-        } else if (afterBytes < afterLimit) {
-          const normalized = normalizeText(raw, afterLimit - afterBytes);
-          if (normalized.value !== "") {
-            if (afterBytes !== 0 && afterBytes < afterLimit) {
-              after.push(" ");
-              afterBytes += 1;
-            }
-            const clipped = normalizeText(normalized.value, afterLimit - afterBytes);
-            after.push(clipped.value);
-            afterBytes += clipped.bytes;
+          // Keep the nearest suffix, not the beginning of a long preceding
+          // text node. Both the scan and temporary normalized string are
+          // bounded independently of a hostile node's total length.
+          const scan = beforeLimit * 8 + 256;
+          const tail = apply(stringSlice, raw, [-scan]);
+          const normalized = normalizeText(tail, scan * 3);
+          addRollingChunk(before, { element: item.source, text: utf8Suffix(normalized.value, beforeLimit) }, beforeLimit, state);
+          if (normalized.truncated || normalized.bytes > beforeLimit || tail.length < raw.length) {
+            mark(state, "scope_boundary", false);
           }
+        } else if (afterBytes < afterLimit) {
+          const separator = after.length === 0 ? 0 : 1;
+          const normalized = normalizeText(raw, mathMax(0, afterLimit - afterBytes - separator));
+          if (normalized.value !== "") {
+            if (after.length >= state.request.b.n) { mark(state, "node_limit", false); break; }
+            after.push({ element: item.source, text: normalized.value });
+            afterBytes += separator + normalized.bytes;
+          }
+          if (normalized.truncated) { mark(state, "scope_boundary", false); break; }
+        }
+        if (seenAnchor && afterBytes >= afterLimit) {
+          if (stack.length !== 0) mark(state, "scope_boundary", false);
+          break;
         }
         continue;
       }
-      if (type === 1 && shouldSkipSubtree(current)) continue;
-      if (type === 1 || type === 9 || type === 11) pushChildren(stack, current, {}, state);
-      if (seenAnchor && afterBytes >= afterLimit) break;
+      let source = item.source;
+      if (type === 1) {
+        // A read window does not expose editable values, hidden ancestors, or
+        // credential descendants through an unrelated prose/heading source.
+        if (shouldSkipSubtree(current) || !styleIsVisible(current)) continue;
+        const editable = attribute(current, "contenteditable", 16);
+        const descriptor = classify(current);
+        const role = descriptor === null ? null : descriptor.role;
+        if ((editable !== null && lower(editable) !== "false") ||
+            sensitivityFor(current) !== "public" || role === "textbox" || role === "password" ||
+            role === "searchbox" || role === "spinbutton" || role === "combobox" ||
+            role === "listbox" || role === "option" || role === "frame_boundary") continue;
+        if (descriptor !== null && elementRect(current) !== null) source = current;
+      }
+      if (type === 1 || type === 9 || type === 11) pushChildren(stack, current, { source }, state);
+      if (seenAnchor && afterLimit === 0) {
+        if (stack.length !== 0) mark(state, "scope_boundary", false);
+        break;
+      }
     }
-    if (!seenAnchor) return "";
-    const beforeText = before.join(" ");
-    const afterText = after.join("");
-    if (beforeText === "") return afterText;
-    if (afterText === "") return beforeText;
-    return `${beforeText} | ${afterText}`;
+    return seenAnchor ? before.concat(after) : [];
   }
 
   function surroundingRecords(anchor, descriptor, state) {
@@ -1808,11 +1845,39 @@
     const disabled = nodeType(anchor) === 1 ? disabledState(anchor, false) : false;
     const record = buildRecord(anchor, descriptor, null, rect, disabled, focused.has(anchor), state);
     record.depth = 0;
-    record.sink = "text";
-    record.sinkBytes = 0;
-    const context = surroundingText(anchor, state, state.request.s.p, state.request.s.n);
-    if (context !== "") appendSink(record, context, state);
-    return [record];
+    delete record.wire.o;
+    delete record.wire.u;
+    const records = [record];
+    const chunks = surroundingChunks(anchor, state, state.request.s.p, state.request.s.n);
+    // Inspection may stop before projection. Preserve the bounded prefix and
+    // its truthful status; projecting it performs no additional DOM walk.
+    const inspectionStopped = state.stopped;
+    state.stopped = false;
+    for (const chunk of chunks) {
+      if (state.stopped) break;
+      let source;
+      for (const candidate of records) {
+        if (candidate.element === chunk.element) { source = candidate; break; }
+      }
+      if (source === undefined) {
+        if (records.length >= state.request.b.n) { mark(state, "node_limit"); break; }
+        const sourceDescriptor = classify(chunk.element);
+        if (sourceDescriptor === null) continue;
+        // Only actual source identity/role and its observed window text are
+        // projected. Partial windows cannot grant actions or navigation, and
+        // siblings are independent roots, never false children of the anchor.
+        const wire = { k: keyFor(chunk.element, state.request.g), r: sourceDescriptor.role };
+        if (sourceDescriptor.role === "heading") {
+          const level = sourceDescriptor.level || Number(attribute(chunk.element, "aria-level", 8));
+          wire.l = numberIsSafeInteger(level) && level >= 1 && level <= 6 ? level : 2;
+        }
+        source = { wire, element: chunk.element, sink: "text", sinkBytes: 0, sensitivity: "public", depth: 0 };
+        records.push(source);
+      }
+      appendSink(source, chunk.text, state);
+    }
+    state.stopped = state.stopped || inspectionStopped;
+    return records;
   }
 
   function encodeSnapshot(request, records, completeness) {

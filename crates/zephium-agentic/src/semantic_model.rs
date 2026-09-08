@@ -1041,6 +1041,7 @@ fn completeness_label(completeness: SemanticCompleteness) -> &'static str {
         SemanticCompleteness::Complete => "complete",
         SemanticCompleteness::Truncated(SemanticTruncation::NodeLimit) => "truncated_nodes",
         SemanticCompleteness::Truncated(SemanticTruncation::TextLimit) => "truncated_text",
+        SemanticCompleteness::Truncated(SemanticTruncation::FieldLimit) => "truncated_field",
         SemanticCompleteness::Truncated(SemanticTruncation::DepthLimit) => "truncated_depth",
         SemanticCompleteness::Truncated(SemanticTruncation::InspectionLimit) => {
             "truncated_inspection"

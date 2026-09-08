@@ -746,6 +746,8 @@ pub enum SemanticTruncation {
     NodeLimit,
     /// Fixed total text ceiling reached.
     TextLimit,
+    /// One bounded name/prose field was clipped; other evidence may still be retained.
+    FieldLimit,
     /// Fixed tree-depth ceiling reached.
     DepthLimit,
     /// Fixed DOM/open-shadow inspection ceiling reached before the scope completed.

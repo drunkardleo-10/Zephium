@@ -372,6 +372,23 @@ or observed on either platform.
   snapshot states. UTF-8 output size is counted before return; a parent-valid
   suffix is omitted under `wire_limit`, and even the minimum result refuses
   with `output_limit` if it cannot fit.
+- Per-field name/prose saturation is `field_limit` (`truncated_field` in the
+  model projection), not aggregate `text_limit`. The clipped sink stops accepting
+  text while the same bounded traversal can discover later independent evidence.
+  Aggregate text exhaustion still stops traversal. Action descriptor revalidation
+  continues to reject every incomplete descriptor, including a field-local clip.
+- Surrounding-text windows retain the original anchor plus actual semantic
+  sources for the bounded nearby text, with independently minted current refs.
+  Sources are independent roots, not invented children of the anchor; following
+  prose is no longer attributed to a heading. A fresh paragraph/heading can be
+  inspected with the existing subtree or surrounding-text scope, without reusing
+  earlier observation refs. Window records grant no operations or link destinations.
+  The combined before/after limit remains 8 KiB, each source text remains 4 KiB,
+  and node/text/inspection/wire ceilings remain unchanged. Window boundaries and
+  omitted chunks are reported truthfully. Before-context keeps the nearest suffix
+  using a bounded tail scan; editable, private, hidden and frame subtrees are fenced.
+  A single oversized source can still be incomplete; surrounding it reads after
+  that source's subtree, not a byte-offset continuation inside it.
 - The initial projection is viewport-filtered while retaining document,
   meaningful landmark, dialog, and focused-element semantics. Closed anchored
   region, subtree, table, frame-boundary, and surrounding-text requests resolve

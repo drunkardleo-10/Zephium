@@ -1042,7 +1042,7 @@ async function finish() {
   const metadataOverflowWire = invoke(102, 102, { k: "initial" });
   const metadataOverflowSnapshot = JSON.parse(metadataOverflowWire);
   assert(
-    metadataOverflowSnapshot.c === "text_limit" &&
+    metadataOverflowSnapshot.c === "field_limit" &&
       metadataOverflowSnapshot.n.filter((node) =>
         node.r === "textbox" && node.v && node.v.k === "redacted" && node.q === "secret"
       ).length >= 9 &&
@@ -1144,7 +1144,7 @@ async function finish() {
   document._root = largeProse;
   setOwner(largeProse, document);
   const largeProseSnapshot = JSON.parse(invoke(109, 109, { k: "initial" }));
-  assert(largeProseSnapshot.c === "text_limit" && largeProseSnapshot.n.some((node) => node.r === "paragraph" && Buffer.byteLength(node.t) <= 4096), "inline copies escaped the original per-prose-field ceiling");
+  assert(largeProseSnapshot.c === "field_limit" && largeProseSnapshot.n.some((node) => node.r === "paragraph" && Buffer.byteLength(node.t) <= 4096), "inline copies escaped the original per-prose-field ceiling");
 
   // Generic below-viewport evidence: TOC links are not section bodies. The
   // initial inventory may expose actual rendered headings at spare capacity;
@@ -1219,10 +1219,99 @@ async function finish() {
   const limitedRegion = JSON.parse(invoke(120, 120, { k: "region", a: restoredKey }, { n: 3 }));
   assert(limitedRegion.c === "node_limit", "intentional region boundaries hid actual node-budget exhaustion");
 
+  // A field-local ceiling must not consume the traversal's remaining capacity.
+  const product = new Element("main");
+  const productHeading = product.append(new Element("h1"));
+  productHeading.append(new CharacterData("Display model"));
+  const longDescription = product.append(new Element("p"));
+  longDescription.append(new CharacterData("Building detail ".repeat(300)));
+  const dimensionsHeading = product.append(new Element("h2"));
+  dimensionsHeading.append(new CharacterData("Dimensions"));
+  const dimensions = product.append(new Element("p"));
+  dimensions.append(new CharacterData("Width 28 cm; depth 18 cm; height 32 cm."));
+  product.append(new Element("p")).append(new CharacterData("Price USD 129.99. In stock."));
+  const oversizedButton = product.append(new Element("button"));
+  oversizedButton.append(new CharacterData("b".repeat(700)));
+  product.append(new Element("p")).append(new CharacterData("Later evidence remains visible."));
+  const privateWindow = product.append(new Element("div", { contenteditable: "true" }));
+  privateWindow.append(new Element("p")).append(new CharacterData("private-window-value"));
+  product.append(new Element("p", { hidden: "" })).append(new CharacterData("hidden-window-value"));
+  product.append(new Element("p")).append(new CharacterData("sk-window-private-token-value"));
+  document._root = product; setOwner(product, document);
+  const productInitial = JSON.parse(invoke(121, 121, { k: "initial" }));
+  assert(productInitial.c === "field_limit", "local field saturation was reported as aggregate exhaustion");
+  assert(productInitial.n.some(node => node.t === "Later evidence remains visible.") &&
+    productInitial.n.some(node => node.t === "Width 28 cm; depth 18 cm; height 32 cm."),
+  "a long earlier field starved independent later evidence");
+  const productKey = productInitial.n.find(node => node.n === "Display model").k;
+  const surroundingWire = invoke(122, 122, { k: "surrounding_text", a: productKey, p: 0, n: 8192 });
+  const surrounding = JSON.parse(surroundingWire);
+  const dimensionSource = surrounding.n.find(node => node.t === "Width 28 cm; depth 18 cm; height 32 cm.");
+  assert(surrounding.c === "field_limit" && surrounding.n.length > 2 && dimensionSource,
+    "surrounding evidence collapsed into its anchor or lost evidence after a 4-KiB source");
+  assert(surrounding.n[0].k === productKey && surrounding.n[0].t === undefined &&
+    surrounding.n.every(node => node.p === undefined && !node.o && !node.u),
+  "a read window invented ancestry, anchor text, actions, or navigation authority");
+  assert(!surroundingWire.includes("private-window-value") && !surroundingWire.includes("hidden-window-value") &&
+    !surroundingWire.includes("sk-window-private-token-value"), "window projection exposed private or hidden descendants");
+  const dimensionsSubtree = invoke(123, 123, { k: "subtree", a: dimensionSource.k });
+  assert(dimensionsSubtree.includes("Width 28 cm; depth 18 cm; height 32 cm.") &&
+    !dimensionsSubtree.includes("Price USD"), "fresh window source cannot be inspected without widening its subtree");
+
+  const productAgain = JSON.parse(invoke(124, 124, { k: "initial" }));
+  const productAgainKey = productAgain.n.find(node => node.n === "Display model").k;
+  const shortWindow = JSON.parse(invoke(125, 125, { k: "surrounding_text", a: productAgainKey, p: 0, n: 1024 }));
+  const paragraphAnchor = shortWindow.n.find(node => node.r === "paragraph" && node.t);
+  assert(shortWindow.c === "scope_boundary" && paragraphAnchor && !JSON.stringify(shortWindow).includes("Width 28"),
+    "short window hid its boundary or escaped its requested text ceiling");
+  const followingWindow = invoke(126, 126, { k: "surrounding_text", a: paragraphAnchor.k, p: 0, n: 1024 });
+  assert(followingWindow.includes("Width 28 cm"), "a bounded window retained no fresh anchor for following evidence");
+  dimensions._owner = null;
+  assert(invoke(127, 127, { k: "subtree", a: dimensionSource.k }) === "E1:anchor_missing",
+    "a detached surrounding source remained inspectable");
+  setOwner(dimensions, document);
+
+  const textExhausted = JSON.parse(invoke(128, 128, { k: "initial" }, { t: 64 }));
+  assert(textExhausted.c === "text_limit" && !JSON.stringify(textExhausted).includes("Later evidence"),
+    "aggregate text exhaustion no longer stopped bounded traversal");
+  const windowLimited = JSON.parse(invoke(129, 129, { k: "surrounding_text", a: productAgainKey, p: 0, n: 8192 }, { n: 2 }));
+  assert(windowLimited.n.length <= 2 && windowLimited.c === "node_limit", "window sources escaped the node bound");
+  const inspectionWindow = JSON.parse(invoke(130, 130, { k: "surrounding_text", a: productAgainKey, p: 0, n: 8192 }, { n: 2, x: 2 }));
+  assert(inspectionWindow.c === "inspection_limit", "window collection hid its inspection ceiling");
+  const windowWireLimited = invoke(131, 131, { k: "surrounding_text", a: productAgainKey, p: 0, n: 8192 }, { w: 1024 });
+  assert(Buffer.byteLength(windowWireLimited) <= 1024 && JSON.parse(windowWireLimited).c === "wire_limit",
+    "structured window escaped the original wire ceiling");
+  const clippedActionSnapshot = JSON.parse(invoke(132, 132, { k: "initial" }));
+  const clippedButton = clippedActionSnapshot.n.find(node => node.r === "button");
+  document._hit = oversizedButton;
+  const clippedAction = JSON.parse(actionRequest(200));
+  clippedAction.i = 132; clippedAction.g = 132; clippedAction.t = clippedButton.k;
+  clippedAction.f.n = clippedButton.n;
+  const clippedActionResult = runtime.invoke(JSON.stringify(clippedAction));
+  assert(clippedActionResult === "E2:target_changed" && !oversizedButton._fixedClickCount,
+    `a field-clipped descriptor became actionable during live revalidation: ${clippedActionResult}`);
+  const unicodePage = new Element("main");
+  unicodePage.append(new Element("p")).append(new CharacterData("Earlier words then nearest"));
+  const unicodeHeading = unicodePage.append(new Element("h2"));
+  unicodeHeading.append(new CharacterData("Unicode sources"));
+  unicodePage.append(new Element("p")).append(new CharacterData("é".repeat(3000)));
+  unicodePage.append(new Element("p")).append(new CharacterData("Following UTF-8 evidence"));
+  document._root = unicodePage; setOwner(unicodePage, document);
+  const unicodeInitial = JSON.parse(invoke(133, 133, { k: "initial" }));
+  const unicodeKey = unicodeInitial.n.find(node => node.n === "Unicode sources").k;
+  const unicodeWindow = JSON.parse(invoke(134, 134, { k: "surrounding_text", a: unicodeKey, p: 7, n: 8185 }));
+  assert(unicodeWindow.n.some(node => node.t === "nearest") &&
+    unicodeWindow.n.some(node => node.t === "Following UTF-8 evidence") &&
+    unicodeWindow.n.every(node => !node.t || Buffer.byteLength(node.t) <= 4096),
+  "window suffix, UTF-8 field clipping, or later source discovery regressed");
+
   process.stdout.write(`${JSON.stringify({
     offscreen_anchor_wire_bytes: inventoryExtraBytes,
     parent_region_nodes: region.n.length,
     parent_region_wire_bytes: Buffer.byteLength(regionWire),
+    surrounding_source_nodes: surrounding.n.length,
+    field_local_discovery: true,
+    surrounding_fresh_source_continuation: true,
     schema: "zephium.agentic.semantic-runtime-smoke.v1",
     initial_nodes: initial.n.length,
     expanded_nodes: expansion.n.length,

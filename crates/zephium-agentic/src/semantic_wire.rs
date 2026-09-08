@@ -563,6 +563,7 @@ enum RawCompleteness {
     Complete,
     NodeLimit,
     TextLimit,
+    FieldLimit,
     DepthLimit,
     InspectionLimit,
     WireLimit,
@@ -576,6 +577,7 @@ impl From<RawCompleteness> for SemanticCompleteness {
             RawCompleteness::Complete => Self::Complete,
             RawCompleteness::NodeLimit => Self::Truncated(SemanticTruncation::NodeLimit),
             RawCompleteness::TextLimit => Self::Truncated(SemanticTruncation::TextLimit),
+            RawCompleteness::FieldLimit => Self::Truncated(SemanticTruncation::FieldLimit),
             RawCompleteness::DepthLimit => Self::Truncated(SemanticTruncation::DepthLimit),
             RawCompleteness::InspectionLimit => {
                 Self::Truncated(SemanticTruncation::InspectionLimit)
@@ -875,8 +877,12 @@ mod tests {
     }
 
     #[test]
-    fn inspection_and_wire_truncation_are_preserved() {
+    fn field_inspection_and_wire_truncation_are_preserved() {
         for (wire, expected) in [
+            (
+                "field_limit",
+                SemanticCompleteness::Truncated(SemanticTruncation::FieldLimit),
+            ),
             (
                 "inspection_limit",
                 SemanticCompleteness::Truncated(SemanticTruncation::InspectionLimit),
