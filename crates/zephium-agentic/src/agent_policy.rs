@@ -6175,6 +6175,11 @@ mod tests {
             provider_extraction_read_taints(&merged, &current_ack, binding, &current_only),
             Err(AgentPolicyError::ReadBaselineMissing)
         );
+        let prior_only = observation_taints(&source, binding).unwrap();
+        assert_eq!(
+            provider_extraction_read_taints(&merged, &current_ack, binding, &prior_only),
+            Err(AgentPolicyError::ReadBaselineMissing)
+        );
         let other_account = AgentContextAccountBinding::new(
             AgentAccountAttestationId::generate(),
             context,

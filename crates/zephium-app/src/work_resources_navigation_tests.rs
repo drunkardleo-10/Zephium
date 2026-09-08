@@ -167,11 +167,15 @@ fn retained_surrounding_inspection_is_citable_only_after_fresh_delivery() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let (owner, native, resource, browser) = setup();
+    let context = browser.binding().frame().context().identity();
     native.discovery.store(true, Ordering::Release);
     let mut responses = vec![inspection_stream(
         r#"{"kind":"surrounding_text","target":"@a1","before_bytes":0,"after_bytes":1024}"#,
     )];
     responses.extend(final_streams());
+    // Cite the prior capture, which is delivered only in the terminal inventory.
+    // The current scoped capture owns @r1; the retained same-document quote owns @r2.
+    *responses.last_mut().unwrap() = responses.last().unwrap().replace("@r1", "@r2");
     let (controller, mut result, scope, server, requests) = prepare(browser, responses);
     let (_, lifecycle) = start(controller, scope);
     let AgentWorkRetainedOutcome::Accepted {
@@ -183,6 +187,22 @@ fn retained_surrounding_inspection_is_citable_only_after_fresh_delivery() {
     };
     assert_eq!(settlement.closure().model_calls(), 3);
     assert_eq!(extraction.stats().source_edges(), 1);
+    let zephium_agentic::SemanticExtractedValue::Text(value) = extraction.fields()[0].value()
+    else {
+        panic!("expected cited text");
+    };
+    let source = extraction
+        .sources(value.source_span())
+        .unwrap()
+        .next()
+        .unwrap();
+    assert_eq!(source.id.get(), 2);
+    assert!(source.observation < extraction.observation());
+    assert_eq!(source.frame.context().identity(), context);
+    assert!(
+        matches!(&source.content, zephium_agentic::SemanticOwnedReadContent::Text(text)
+        if text == "Fixture result document_marker_0")
+    );
     assert_eq!(native.reads.load(Ordering::Acquire), 2);
     assert!(matches!(
         lifecycle.drain_until(Instant::now() + Duration::from_secs(2)),
@@ -196,8 +216,76 @@ fn retained_surrounding_inspection_is_citable_only_after_fresh_delivery() {
         requests[1].contains("new_scoped_evidence") && !requests[1].contains("document_marker_0")
     );
     assert!(
-        requests[2].contains("new_scoped_evidence") && !requests[2].contains("document_marker_0")
+        !requests[1].contains("First source"),
+        "old actionable links are retired"
     );
+    let mapper: serde_json::Value =
+        serde_json::from_str(requests[2].split_once("\r\n\r\n").unwrap().1).unwrap();
+    let evidence = mapper["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["output"].as_str())
+        .find(|text| text.starts_with("ZEXTRACT"))
+        .unwrap();
+    assert!(evidence.contains("refs=historical_read_only provenance=cohorts_v1"));
+    assert!(evidence.contains("R @r1 @a1 text paragraph \"Fixture result new_scoped_evidence\"\n"));
+    assert!(
+        evidence.contains("R @r2 @a1 text paragraph \"Fixture result document_marker_0\" p=p2\n")
+    );
+    assert!(evidence.contains(&format!(
+        "historical_observation={} generation={} captured_at_ms={} invocation={} snapshot={}",
+        source.observation.get(),
+        source.observation_generation.get(),
+        source.captured_at.millis(),
+        source.invocation.get(),
+        source.snapshot.get()
+    )));
+    assert!(
+        mapper.get("tools").is_none(),
+        "historical refs grant no model action surface"
+    );
+    let mut destroy = owner.destroy(&resource).unwrap();
+    assert!(destroy.poll(now()).unwrap().is_some());
+    owner.seal_resources().unwrap();
+    assert!(owner.locally_retired());
+}
+
+#[test]
+fn retained_history_does_not_restore_inspection_authority_for_old_refs() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (owner, native, resource, browser) = setup();
+    native.discovery.store(true, Ordering::Release);
+    // @a2 was a link in the original capture. The new surrounding capture has
+    // only @a1; retaining the original evidence must not make @a2 live again.
+    let responses = vec![
+        inspection_stream(
+            r#"{"kind":"surrounding_text","target":"@a1","before_bytes":0,"after_bytes":1024}"#,
+        ),
+        inspection_stream(r#"{"kind":"subtree","target":"@a2"}"#)
+            .replace("resp_1", "resp_2")
+            .replace("fc_1", "fc_2")
+            .replace("call_1", "call_2"),
+    ];
+    let (controller, mut result, scope, server, _) = prepare(browser, responses);
+    let (_, lifecycle) = start(controller, scope);
+    assert!(!matches!(
+        finish(&mut result),
+        AgentWorkRetainedOutcome::Accepted { .. }
+    ));
+    assert_eq!(
+        native.reads.load(Ordering::Acquire),
+        2,
+        "stale ref must refuse before native dispatch"
+    );
+    assert!(matches!(
+        lifecycle.drain_until(Instant::now() + Duration::from_secs(2)),
+        AgentRuntimeScopedDrain::Drained(_)
+    ));
+    native.join();
+    assert_eq!(server.join().unwrap(), 2);
     let mut destroy = owner.destroy(&resource).unwrap();
     assert!(destroy.poll(now()).unwrap().is_some());
     owner.seal_resources().unwrap();
@@ -403,14 +491,50 @@ fn retained_dense_region_reaches_counted_mapping_with_exact_sources_and_cleanup(
     assert_eq!(
         evidence
             .lines()
+            .filter(|line| line.starts_with("P "))
+            .count(),
+        2
+    );
+    assert_eq!(
+        evidence
+            .lines()
             .filter(|line| line.starts_with("R @r"))
+            .count(),
+        122
+    );
+    assert_eq!(
+        evidence
+            .lines()
+            .filter(|line| line.starts_with("R @r") && !line.contains(" p="))
             .count(),
         117
     );
     assert!(evidence.contains("R @r117 @a118 text paragraph"));
     assert!(
-        !requests[3].contains("document_marker_0") && !requests[3].contains("document_marker_1")
+        !evidence.contains("document_marker_0"),
+        "departure document is never retained across navigation"
     );
+    // The five initial arrival-page sources remain historical evidence beside
+    // the 117 expanded-region sources, under the same 16 KiB ceiling.
+    assert!(
+        evidence.contains("R @r118 @a1 text landmark \"Fixture result document_marker_1\" p=p2\n")
+    );
+    for (index, name) in [
+        "First source",
+        "Second source",
+        "Out of scope source",
+        "Original source",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert!(evidence.contains(&format!(
+            "R @r{} @a{} name link \"{}\" p=p2\n",
+            index + 119,
+            index + 2,
+            name
+        )));
+    }
     assert!(mapper.get("tools").is_none());
     eprintln!("retained dense mapping: snapshot_request_bytes={} mapper_request_bytes={} extraction_payload_bytes={}",requests[2].split_once("\r\n\r\n").unwrap().1.len(),mapper_body.len(),evidence.len());
     let mut destroy = owner.destroy(&resource).unwrap();

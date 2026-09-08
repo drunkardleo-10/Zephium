@@ -15,8 +15,8 @@ use crate::{
     ContextJoin, SemanticCaptureInstant, SemanticFrameJoin, SemanticModelDeliveryError,
     SemanticModelDeliverySettlement, SemanticModelEncodingBudget, SemanticModelEncodingError,
     SemanticObservationGeneration, SemanticObservationId, SemanticReadContent, SemanticReadField,
-    SemanticReadOmission, SemanticReadResult, SemanticSensitivity, SemanticTokenCounter,
-    SemanticTokenMeasurement, SemanticTokenizerRevision,
+    SemanticReadOmission, SemanticReadProvenance, SemanticReadResult, SemanticSensitivity,
+    SemanticTokenCounter, SemanticTokenMeasurement, SemanticTokenizerRevision,
 };
 
 /// Version of the compact semantic-read model-input grammar.
@@ -415,6 +415,15 @@ pub fn encode_semantic_read(
 ) -> Result<SemanticEncodedRead, SemanticModelEncodingError> {
     validate_read(read)?;
     let frames = read_frames(read);
+    let mut cohorts = Vec::new();
+    if read.has_retained_evidence() {
+        for fragment in read.fragments() {
+            let source = fragment.provenance();
+            if !cohorts.iter().any(|prior| same_capture(*prior, source)) {
+                cohorts.push(source);
+            }
+        }
+    }
     let capacity = usize::try_from(budget.max_bytes().min(8 * 1024))
         .map_err(|_| SemanticModelEncodingError::Budget)?;
     let mut output = BoundedModelBuffer::new(capacity, budget.max_bytes());
@@ -433,7 +442,7 @@ pub fn encode_semantic_read(
     if read.has_retained_evidence() {
         checked_write(
             &mut output,
-            format_args!(" retained_history=true refs=historical_read_only"),
+            format_args!(" retained_history=true refs=historical_read_only provenance=cohorts_v1"),
         )?;
     }
     if read.source_roles() != crate::SemanticReadRoleSelection::ALL {
@@ -447,14 +456,32 @@ pub fn encode_semantic_read(
     }
     checked_write(&mut output, format_args!("\n"))?;
     // Explicit columns and defaults remove repeated metadata, never evidence.
-    // Nondefault provenance is written on the exact row; quoted values cannot
-    // introduce a row, column declaration or override of their own.
+    // Nondefault provenance is written on the exact row or its capture cohort;
+    // quoted values cannot introduce a row, declaration or override.
     checked_write(
         &mut output,
-        format_args!(
-            "C columns=id,ref,field,role,value default_f={} default_source=page default_sensitivity=public\n",
-            if frames.is_empty() { "none" } else { "f1" },
-        ),
+        format_args!("C columns=id,ref,field,role,value"),
+    )?;
+    if read.has_retained_evidence() {
+        checked_write(
+            &mut output,
+            format_args!(
+                " default_p={}",
+                if cohorts.is_empty() { "none" } else { "p1" }
+            ),
+        )?;
+    } else {
+        checked_write(
+            &mut output,
+            format_args!(
+                " default_f={}",
+                if frames.is_empty() { "none" } else { "f1" }
+            ),
+        )?;
+    }
+    checked_write(
+        &mut output,
+        format_args!(" default_source=page default_sensitivity=public\n"),
     )?;
 
     for (index, frame) in frames.iter().enumerate() {
@@ -468,13 +495,32 @@ pub fn encode_semantic_read(
         write_quoted(&mut output, frame.origin().as_url().as_str())?;
         checked_write(
             &mut output,
-            format_args!(
-                " trust={} invocation={} snapshot={}\n",
-                frame_trust_label(frame.trust()),
-                source.invocation().get(),
-                source.snapshot().get(),
-            ),
+            format_args!(" trust={}", frame_trust_label(frame.trust())),
         )?;
+        if !read.has_retained_evidence() {
+            checked_write(
+                &mut output,
+                format_args!(
+                    " invocation={} snapshot={}",
+                    source.invocation().get(),
+                    source.snapshot().get()
+                ),
+            )?;
+        }
+        checked_write(&mut output, format_args!("\n"))?;
+    }
+
+    for (index, source) in cohorts.iter().enumerate() {
+        let frame = frames
+            .iter()
+            .position(|frame| *frame == source.frame())
+            .ok_or(SemanticModelEncodingError::Invariant)?
+            + 1;
+        checked_write(&mut output, format_args!(
+            "P p{} f=f{} historical_observation={} generation={} captured_at_ms={} invocation={} snapshot={}\n",
+            index + 1, frame, source.observation().get(), source.observation_generation().get(),
+            source.captured_at().millis(), source.invocation().get(), source.snapshot().get(),
+        ))?;
     }
 
     for fragment in read.fragments() {
@@ -506,16 +552,18 @@ pub fn encode_semantic_read(
                 checked_write(&mut output, format_args!("{value}"))?;
             }
         }
-        if frame != 1 {
+        if frame != 1 && !read.has_retained_evidence() {
             checked_write(&mut output, format_args!(" f=f{frame}"))?;
         }
         if read.has_retained_evidence() {
-            let source = fragment.provenance();
-            checked_write(&mut output, format_args!(
-                " historical_observation={} generation={} captured_at_ms={} invocation={} snapshot={}",
-                source.observation().get(), source.observation_generation().get(),
-                source.captured_at().millis(), source.invocation().get(), source.snapshot().get(),
-            ))?;
+            let cohort = cohorts
+                .iter()
+                .position(|source| same_capture(*source, fragment.provenance()))
+                .ok_or(SemanticModelEncodingError::Invariant)?
+                + 1;
+            if cohort != 1 {
+                checked_write(&mut output, format_args!(" p=p{cohort}"))?;
+            }
         }
         if fragment.provenance().trust() != crate::SemanticTrust::UntrustedPage {
             checked_write(
@@ -556,6 +604,17 @@ pub fn encode_semantic_read(
         captured_at: read.captured_at(),
         read_guard: read.guard(),
     })
+}
+
+// A cohort shares capture coordinates only. Reference, source class and
+// sensitivity remain on each row, and values are never merged or deduplicated.
+fn same_capture(a: SemanticReadProvenance<'_>, b: SemanticReadProvenance<'_>) -> bool {
+    a.frame() == b.frame()
+        && a.observation() == b.observation()
+        && a.observation_generation() == b.observation_generation()
+        && a.captured_at() == b.captured_at()
+        && a.invocation() == b.invocation()
+        && a.snapshot() == b.snapshot()
 }
 
 fn validate_read(read: &SemanticReadResult<'_>) -> Result<(), SemanticModelEncodingError> {

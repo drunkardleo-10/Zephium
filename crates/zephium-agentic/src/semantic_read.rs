@@ -1468,6 +1468,74 @@ mod tests {
     }
 
     #[test]
+    fn retained_wire_deduplicates_capture_coordinates_without_merging_quotes_or_refs() {
+        let nodes = json!([
+            {"k":1,"r":"document","o":16},
+            {"k":2,"p":0,"r":"paragraph","t":"Same quote"},
+            {"k":3,"p":0,"r":"paragraph","t":"Another quote"}
+        ]);
+        let older = retained_observation(1, nodes.clone());
+        let newer = retained_observation(2, nodes);
+        let empty = retained_observation(3, json!([{"k":1,"r":"document","o":16}]));
+        let mut evidence = SemanticRetainedReadEvidence::default();
+        for (observation, at) in [(&older, 100), (&newer, 200)] {
+            let ack = acknowledgement(observation);
+            let read = read_semantic_observation(
+                observation,
+                SemanticReadAuthority::Acknowledged(&ack),
+                SemanticCaptureInstant::from_millis(at),
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::STANDARD,
+            )
+            .unwrap();
+            evidence.retain(&read, &ack).unwrap();
+        }
+        let ack = acknowledgement(&empty);
+        let current = read_semantic_observation(
+            &empty,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(300),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .unwrap();
+        let merged = evidence.merge_for_extraction(current).unwrap();
+        let encode = || {
+            crate::encode_semantic_read(
+                &merged,
+                crate::SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE,
+            )
+            .unwrap()
+            .into_extraction_parts()
+            .content
+        };
+        let wire = encode();
+        assert_eq!(wire, encode());
+        assert!(wire.contains("provenance=cohorts_v1"));
+        assert!(wire.contains("default_p=p1"));
+        assert_eq!(
+            wire.lines().filter(|line| line.starts_with("P ")).count(),
+            2
+        );
+        assert_eq!(
+            wire.lines().filter(|line| line.starts_with("R ")).count(),
+            4
+        );
+        assert!(wire.contains("P p1 f=f1 historical_observation=2 generation=1 captured_at_ms=200 invocation=2 snapshot=2\n"));
+        assert!(wire.contains("P p2 f=f1 historical_observation=1 generation=1 captured_at_ms=100 invocation=1 snapshot=1\n"));
+        assert!(wire.contains("R @r1 @a2 text paragraph \"Same quote\"\n"));
+        assert!(wire.contains("R @r3 @a2 text paragraph \"Same quote\" p=p2\n"));
+        assert!(wire
+            .lines()
+            .filter(|line| line.starts_with("R "))
+            .all(|line| !line.contains("invocation=")));
+        assert!(wire
+            .lines()
+            .filter(|line| line.starts_with("F "))
+            .all(|line| !line.contains("snapshot=")));
+    }
+
+    #[test]
     fn retained_read_refuses_sensitive_and_foreign_document_inputs_atomically() {
         let source = initial_observation("complete");
         let ack = acknowledgement(&source);

@@ -36,6 +36,19 @@ encoding labels retained history and emits each source's original coordinates;
 they never enter the active observation or authorize actions, locate or native
 inspection. The full-request token, policy, cost and deadline gates still apply.
 
+Retained `ZREAD3` uses the explicit `provenance=cohorts_v1` extension. A `P pN`
+declaration records one exact frame, observation, generation, capture time,
+invocation and snapshot tuple. The column declaration sets `default_p=p1`;
+rows from any other capture use `p=pN`. Frame origin/trust remains in `F` and
+the cohort selects that frame. Retained `F` declarations do not claim a shared
+invocation or snapshot across captures. Reference, field, role, value and any
+nondefault source/sensitivity remain on each individual row. Identical quotes
+and reused `@a` numbers from different captures are still distinct sources.
+The extension changes only model encoding: ordinary `ZREAD3` bytes, native
+guards, receipt validation and archive v2 are unchanged. No input ceiling is
+raised; the dense-region regression retains all 117 expanded sources plus five
+earlier same-document sources in two cohorts below 16 KiB.
+
 The resulting owned sources preserve individual capture coordinates. Archived
 result format v2 records those coordinates for each source and accepts existing
 canonical v1 archives without upgrading them into execution authority. The
@@ -81,3 +94,11 @@ departure document, preserves the earlier source timestamp, and rejects an
 invented result-local citation. Real Luna qualification is recorded separately;
 these deterministic tests establish the implementation contract, not answer
 quality or general website compatibility.
+
+The dense app fixture delivers 122 sources (117 current and five historical)
+in two provenance cohorts: 13,622 extraction bytes, down from 23,059 with
+repeated row metadata. Its complete mapper request is 34,969 bytes and still
+passes the existing provider count/admission path. App regressions cite an
+exact historical quote from the delivered inventory and refuse an old ref's
+inspection before native dispatch. The current baseline's policy taint remains
+required even when all cited content comes from an earlier capture.

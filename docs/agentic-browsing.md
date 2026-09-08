@@ -571,6 +571,11 @@ source selection and baseline-read behavior are unchanged.
 `ZREAD3` declares row columns and default frame/page/public provenance once;
 nondefault frame, source and sensitivity remain explicit on each affected row.
 Every fragment, quoted value, source ID and receipt binding is preserved.
+Retained reads explicitly declare `provenance=cohorts_v1`: `P` records hold
+exact capture coordinates once, `default_p=p1` selects the default, and `p=pN`
+selects another cohort per row. Historical frame invocation/snapshot come from
+that cohort. This additive extension leaves ordinary reads byte-compatible;
+retained quotes and per-source policy checks are unchanged.
 Terminal extraction has its own 112-KiB conservative encoding envelope instead
 of reusing the 16-KiB initial-observation envelope: the existing STANDARD read
 can contain 32 KiB of values, which require up to 64 KiB after escaping, plus
