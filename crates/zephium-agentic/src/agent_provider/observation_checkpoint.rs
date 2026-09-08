@@ -219,25 +219,76 @@ impl AgentProviderObservationCheckpoint {
         {
             return Err(AgentProviderContinuationError::Baseline);
         }
-        if expected.scope().anchor().is_some_and(|anchor| {
-            current.frames()[0]
-                .nodes()
+        if let Some(anchor) = expected.scope().anchor() {
+            let nodes = current.frames()[0].nodes();
+            if nodes
                 .first()
                 .is_none_or(|root| root.key() != anchor.capability().node_key())
-                || current.frames()[0]
-                    .nodes()
-                    .iter()
-                    .skip(1)
-                    .any(|node| node.parent().is_none())
-                || (matches!(
-                    expected.scope(),
-                    crate::SemanticScope::SurroundingText { .. }
-                ) && current.frames()[0].nodes().len() != 1)
-        }) {
-            return Err(AgentProviderContinuationError::Scope);
+            {
+                return Err(AgentProviderContinuationError::Scope);
+            }
+            let valid = match expected.scope() {
+                crate::SemanticScope::SurroundingText { window, .. } => {
+                    valid_surrounding_sources(current, *window)
+                }
+                _ => nodes.iter().skip(1).all(|node| node.parent().is_some()),
+            };
+            if !valid {
+                return Err(AgentProviderContinuationError::Scope);
+            }
         }
         Ok(())
     }
+}
+
+/// The fixed runtime returns the anchor followed by independent readable source
+/// roots, not a subtree or context text attributed to the anchor. New source keys
+/// need not occur in the predecessor: only the fresh native capture discloses
+/// them. This projection grants neither operations nor navigation destinations.
+fn valid_surrounding_sources(
+    current: &SemanticObservation,
+    window: crate::SemanticTextWindow,
+) -> bool {
+    use crate::{SemanticCompleteness, SemanticRole, SemanticSensitivity, SemanticStates};
+    let frame = &current.frames()[0];
+    let nodes = frame.nodes();
+    if nodes.iter().any(|node| {
+        node.parent().is_some()
+            || !node.operations().is_empty()
+            || node.link_destination().is_some()
+            || node.role() == SemanticRole::FrameBoundary
+    }) {
+        return false;
+    }
+    let mut text_bytes = 0;
+    for node in nodes.iter().skip(1) {
+        if node.name().is_some()
+            || node.value().is_some()
+            || node.states() != SemanticStates::NONE
+            || node.geometry().is_some()
+            || node.sensitivity() == SemanticSensitivity::Sensitive
+            || matches!(
+                node.role(),
+                SemanticRole::Textbox
+                    | SemanticRole::Password
+                    | SemanticRole::Searchbox
+                    | SemanticRole::Spinbutton
+                    | SemanticRole::Combobox
+                    | SemanticRole::Listbox
+                    | SemanticRole::Option
+            )
+            || (node.text().is_none() && frame.completeness() == SemanticCompleteness::Complete)
+        {
+            return false;
+        }
+        // The decoder can replace a short secret with a longer redaction marker.
+        // Withheld secret text conveys no window evidence. Empty source anchors
+        // are possible at a truthful text/scope/inspection truncation boundary.
+        if node.sensitivity() == SemanticSensitivity::Public {
+            text_bytes += node.text().map_or(0, |text| text.len());
+        }
+    }
+    text_bytes <= usize::from(window.before_bytes()) + usize::from(window.after_bytes())
 }
 
 /// Content-free capture history for the existing policy-bound discovery

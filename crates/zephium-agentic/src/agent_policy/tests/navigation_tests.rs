@@ -136,6 +136,162 @@ fn final_target() -> ContextNavigationTarget {
 }
 
 #[test]
+fn structured_product_window_reaches_third_provider_request_with_original_policy() {
+    // Shape/route regression from retained commerce run twenty-second:
+    // 128 / NodeLimit -> @a122 window(1000,5000) -> 87 / ScopeBoundary.
+    // Page strings below are synthetic; no stored response or provider is used.
+    let (mut f, _, initial) = navigation_fixture(6, 200_000, vec![target(), final_target()], true);
+    let context = initial.request().context();
+    let make = |request: SemanticObservationRequest, generation, completeness, nodes| {
+        let wire = serde_json::to_vec(&json!({
+            "v":1,"i":generation,"g":generation,"c":completeness,"n":nodes
+        }))
+        .unwrap();
+        let snapshot = decode_semantic_snapshot(
+            SemanticDecodeContext::new(
+                SemanticInvocationId::new(generation).unwrap(),
+                initial.frames()[0].frame().clone(),
+                SemanticSnapshotGeneration::new(generation).unwrap(),
+            ),
+            &wire,
+        )
+        .unwrap();
+        SemanticObservationAssembler::new(request, snapshot)
+            .unwrap()
+            .finish()
+            .unwrap()
+    };
+    let mut nodes: Vec<_> = (1..=128)
+        .map(|key| json!({"k":key,"r":"paragraph","t":"previous-only product inventory"}))
+        .collect();
+    nodes[121] = json!({"k":122,"r":"heading","l":1,"n":"Product title"});
+    let previous = make(
+        SemanticObservationRequest::initial(
+            SemanticObservationId::new(2).unwrap(),
+            context,
+            SemanticObservationBudget::INITIAL_FILTERED,
+        ),
+        12,
+        "node_limit",
+        nodes,
+    );
+    let selected = tokenizer();
+    let config = provider_exact_config(selected.clone(), 128, 64_000)
+        .restrict_to_navigation_and_extraction()
+        .with_baseline_read()
+        .with_progressive_observation();
+    let objective = AgentProviderObjective::try_admit_conservative_utf8(
+        "Research the observed product without buying".into(),
+        &selected,
+    )
+    .unwrap();
+    let payload = |observation: &SemanticObservation| {
+        encode_semantic_observation(
+            observation,
+            SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .unwrap()
+        .admit_conservative_utf8(&selected)
+        .unwrap()
+    };
+    let binding = account(context, NOW);
+    let committed = AgentPreparedObservationRequest::try_openai_for_provider_exact_count(
+        &mut f.policy,
+        call_request(2, f.lease, binding, 64_000, 128, 1_000, NOW),
+        &previous,
+        payload(&previous),
+        &objective,
+        config.clone(),
+    )
+    .unwrap()
+    .into_transport_input()
+    .commit(&mut f.policy)
+    .unwrap();
+    let (second, input, seed) = committed.into_parts();
+    let (active, evidence) = input.into_parts();
+    let old_ack = evidence.observation_acknowledgement().unwrap().clone();
+    f.policy
+        .settle_model_call(active, AgentModelCallSettlement::Completed, 10_000, 4, 80)
+        .unwrap();
+    let arguments = r#"{"scope":{"kind":"surrounding_text","after_bytes":5000,"before_bytes":1000,"target":"@a122"}}"#;
+    let tool = crate::AgentBrowserToolCall::decode_openai(
+        second.call(),
+        "fc_window".into(),
+        "call_window".into(),
+        "snapshot",
+        arguments.into(),
+    )
+    .unwrap();
+    let completion = crate::AgentProviderCompletion::new(
+        second.call(),
+        crate::AgentProviderStopReason::ToolCalls,
+        crate::AgentProviderUsage::try_new(10_000, 4, 0, 0, 0).unwrap(),
+        crate::AgentProviderStreamStats::new(200, 8, 0, 1, arguments.len() as u32),
+        true,
+    );
+    let checkpoint = seed
+        .unwrap()
+        .join_terminal_tool_for_test(completion, tool.into_continuation_parts_for_test().0)
+        .unwrap()
+        .retire_for_observation(&previous, &config)
+        .unwrap();
+    let request = checkpoint
+        .request(&previous, SemanticObservationId::new(3).unwrap())
+        .unwrap();
+    let mut nodes = vec![json!({"k":122,"r":"heading","l":1,"n":"Product title"})];
+    nodes.extend(
+        (201..=286)
+            .map(|key| json!({"k":key,"r":"paragraph","t":"new product dimension evidence"})),
+    );
+    let current = make(request, 13, "scope_boundary", nodes);
+    assert_eq!(previous.node_count(), 128);
+    assert_eq!(current.node_count(), 87);
+    assert!(current.frames()[0]
+        .nodes()
+        .iter()
+        .all(|node| node.parent().is_none()
+            && node.operations().is_empty()
+            && node.link_destination().is_none()));
+    let prepared = checkpoint
+        .prepare_successor(
+            &mut f.policy,
+            &previous,
+            &current,
+            call_request(3, f.lease, binding, 64_000, 128, 1_000, NOW),
+            config,
+            payload(&current),
+            &objective,
+        )
+        .expect("structured window reaches original third-call admission");
+    assert_eq!(
+        prepared.request().call().call(),
+        AgentModelCallId::new(3).unwrap()
+    );
+    let body = std::str::from_utf8(prepared.request().body()).unwrap();
+    assert!(
+        body.contains("ZEPHIUM_HOST_INSPECTION_PROGRESS_V1")
+            && body.contains("new product dimension evidence")
+    );
+    assert!(!body.contains("previous-only product inventory") && !body.contains("@a122"));
+    let (third, input, _) = prepared
+        .into_transport_input()
+        .commit(&mut f.policy)
+        .unwrap()
+        .into_parts();
+    assert_eq!(third.call().call(), AgentModelCallId::new(3).unwrap());
+    let (active, evidence) = input.into_parts();
+    assert!(evidence
+        .observation_acknowledgement()
+        .unwrap()
+        .matches(&current));
+    assert!(!old_ack.matches(&current));
+    f.policy
+        .settle_model_call(active, AgentModelCallSettlement::Completed, 10_000, 4, 80)
+        .unwrap();
+    assert_eq!(f.policy.pending_model_calls(), 0);
+}
+
+#[test]
 fn initial_effective_metadata_requires_original_retained_binding_before_model_calls() {
     use crate::*;
     for fault in 0..4 {

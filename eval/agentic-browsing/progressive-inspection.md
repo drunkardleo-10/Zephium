@@ -49,8 +49,16 @@ silently followed. Hidden and editable/private heading descendants stay excluded
   still require all presentation, semantic callback and watchdog debt to retire
   before delivery.
 - Provider-neutral checkpoint tests reject changed configuration, substituted
-  predecessor, unsupported/foreign refs, older call, widened scope, wrong root and
-  disconnected extra roots. Fresh scoped read rejects the old acknowledgement.
+  predecessor, unsupported/foreign refs, older call, widened scope and wrong root.
+  Region/subtree captures reject disconnected extra roots. Surrounding windows
+  admit only the anchor-first read-only source forest within the requested text
+  window; additional values/names/state/geometry or action/navigation surfaces
+  fail closed. Fresh scoped read rejects the old acknowledgement.
+- A policy-backed synthetic replay of retained commerce run twenty-second uses
+  the observed 128-node / NodeLimit product, `@a122` surrounding window with
+  1,000 before / 5,000 after bytes, and 87-node / ScopeBoundary successor. It
+  admits and commits the third provider request through the original policy,
+  without old page text or reference ordinals. No provider call is performed.
 - 200 earlier offscreen headings cannot starve later visible controls/content
   under tight node or text limits. The existing initial fixture remains 2,454
   native wire bytes; one extra heading costs 97 native wire bytes in the targeted

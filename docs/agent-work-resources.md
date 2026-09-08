@@ -145,14 +145,24 @@ The registry and native adapter independently require the current invocation /
 snapshot generation. A refused or uncertain invocation cannot reuse an old anchor.
 
 Fresh provider delivery requires the requested scope/context/frame, the exact
-next snapshot generation and private anchor key, a connected scoped subtree
-(one text-root for surrounding text), original manifest revision, refreshed
-account and original cumulative admission. It never manufactures an
-acknowledgement for undisclosed data. Once delivered, `read(initial)` may format
+next snapshot generation and private anchor key, a connected region/subtree or
+an anchor-first forest of independent surrounding-text sources, original manifest
+revision, refreshed account and original cumulative admission. It never
+manufactures an acknowledgement for undisclosed data. Once delivered, `read(initial)` may format
 that exact scoped baseline, and subsequent navigation still uses the original
 observed-link policy. No native ref or previous body survives the new baseline.
 Cancellation and missing callbacks remain owned by the original retained read;
 failure cannot convert unresolved native debt to clean lease delivery.
+
+Every surrounding-window node is a root with no operations, navigation
+destination or frame boundary. The anchor retains its ordinary bounded metadata;
+additional roots contain only semantic role/heading level and optional visible
+text, without names, values, state or geometry. Decoder-redacted secrets remain
+withheld, and truncated windows may retain empty source anchors. Disclosed public
+source text must fit the requested combined before/after window as well as the
+original observation limits. New source keys need not have appeared in the prior
+snapshot; their fresh native capture supplies the references. Directional byte
+placement and DOM/source fidelity remain obligations of the pinned runtime.
 
 Region traversal stops at nested landmark/document roots and leaves them as
 current, separately expandable anchors with scope-boundary completeness. This
@@ -160,7 +170,8 @@ prevents a long nested navigation tree from exhausting a parent's prose budget.
 The policy-bound discovery checkpoint retains bounded content-free inspection
 progress across scope/initial refreshes, without old body text or ref authority.
 Any target hint is resolved again against the exact current native observation;
-navigation retires this document-local metadata. Metadata is encoded before the
+this includes independent source roots and never reuses a prior reference ordinal.
+Navigation retires this document-local metadata. Metadata is encoded before the
 original model-input reservation and shares its existing ceilings.
 
 See [discovery semantics](agent-work-discovery.md) and

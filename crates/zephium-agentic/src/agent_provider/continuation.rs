@@ -2037,7 +2037,7 @@ mod tests {
                 .unwrap();
             let fresh = |key: u64| {
                 let snapshot = decode_semantic_snapshot(SemanticDecodeContext::new(SemanticInvocationId::new(2).unwrap(), previous.frames()[0].frame().clone(), SemanticSnapshotGeneration::new(2).unwrap()),
-                    format!(r#"{{"v":1,"i":2,"g":2,"c":"complete","n":[{{"k":{key},"r":"status","t":"newly scoped evidence"}}]}}"#).as_bytes()).unwrap();
+                    format!(r#"{{"v":1,"i":2,"g":2,"c":"complete","n":[{{"k":{key},"r":"status"}},{{"k":20,"r":"paragraph","t":"newly scoped evidence"}}]}}"#).as_bytes()).unwrap();
                 SemanticObservationAssembler::new(request.clone(), snapshot)
                     .unwrap()
                     .finish()
@@ -2046,21 +2046,150 @@ mod tests {
             assert!(checkpoint()
                 .validate_successor(&previous, &fresh(99), model_request(context(), 2), &config)
                 .is_err());
-            let widened = decode_semantic_snapshot(
-                SemanticDecodeContext::new(
-                    SemanticInvocationId::new(2).unwrap(),
-                    previous.frames()[0].frame().clone(),
-                    SemanticSnapshotGeneration::new(2).unwrap(),
-                ),
-                br#"{"v":1,"i":2,"g":2,"c":"complete","n":[{"k":2,"r":"status","t":"requested"},{"k":3,"r":"paragraph","t":"unrequested sibling"}]}"#,
-            ).unwrap();
-            let widened = SemanticObservationAssembler::new(request.clone(), widened)
-                .unwrap()
-                .finish()
+            let forest = |nodes: serde_json::Value, completeness| {
+                let snapshot = decode_semantic_snapshot(
+                    SemanticDecodeContext::new(
+                        SemanticInvocationId::new(2).unwrap(),
+                        previous.frames()[0].frame().clone(),
+                        SemanticSnapshotGeneration::new(2).unwrap(),
+                    ),
+                    &serde_json::to_vec(&json!({"v":1,"i":2,"g":2,"c":completeness,"n":nodes}))
+                        .unwrap(),
+                )
                 .unwrap();
-            assert!(checkpoint()
-                .validate_successor(&previous, &widened, model_request(context(), 2), &config)
-                .is_err());
+                let boundaries: Vec<_> = snapshot
+                    .nodes()
+                    .iter()
+                    .filter(|node| node.role() == crate::SemanticRole::FrameBoundary)
+                    .map(|node| node.reference())
+                    .collect();
+                let mut assembled =
+                    SemanticObservationAssembler::new(request.clone(), snapshot).unwrap();
+                for boundary in boundaries {
+                    assembled
+                        .mark_frame_unsupported(
+                            FrameId::MAIN,
+                            boundary,
+                            crate::SemanticFrameUnsupported::PlatformIsolationUnavailable,
+                        )
+                        .unwrap();
+                }
+                assembled.finish().unwrap()
+            };
+            for nodes in [
+                json!([{"k":2,"r":"status"}]),
+                json!([{"k":2,"r":"status","n":"anchor name","t":"anchor's own bounded text","s":64,"b":{"x":0,"y":0,"w":10,"h":10}}]),
+                json!([{"k":2,"r":"status"},{"k":3,"r":"paragraph","t":"new independent source"}]),
+                json!([{"k":2,"r":"link","n":"anchor link"},{"k":3,"r":"heading","l":2,"t":"source heading"},{"k":4,"r":"link","t":"source link"}]),
+                json!([{"k":2,"r":"status"},{"k":3,"r":"paragraph","t":"sk-private-test-source"}]),
+            ] {
+                checkpoint()
+                    .validate_successor(
+                        &previous,
+                        &forest(nodes, "complete"),
+                        model_request(context(), 2),
+                        &config,
+                    )
+                    .unwrap();
+            }
+            checkpoint()
+                .validate_successor(
+                    &previous,
+                    &forest(
+                        json!([{"k":2,"r":"status"},{"k":3,"r":"paragraph"}]),
+                        "scope_boundary",
+                    ),
+                    model_request(context(), 2),
+                    &config,
+                )
+                .unwrap();
+            for nodes in [
+                json!([{"k":2,"r":"link","o":1}]),
+                json!([{"k":2,"r":"link","u":"https://example.test/added"}]),
+                json!([{"k":2,"r":"status"},{"k":3,"p":0,"r":"paragraph","t":"invented child"}]),
+                json!([{"k":2,"r":"status"},{"k":3,"r":"paragraph"}]),
+                json!([{"k":2,"r":"status"},{"k":3,"r":"link","o":1,"t":"action"}]),
+                json!([{"k":2,"r":"status"},{"k":3,"r":"link","u":"https://example.test/added","t":"navigation"}]),
+                json!([{"k":2,"r":"status"},{"k":3,"r":"paragraph","n":"unexpected name","t":"source"}]),
+                json!([{"k":2,"r":"status"},{"k":3,"r":"textbox","v":{"k":"text","value":"unexpected value"},"t":"source"}]),
+                json!([{"k":2,"r":"status"},{"k":3,"r":"paragraph","s":64,"t":"source"}]),
+                json!([{"k":2,"r":"status"},{"k":3,"r":"paragraph","b":{"x":0,"y":0,"w":10,"h":10},"t":"source"}]),
+                json!([{"k":2,"r":"status"},{"k":3,"r":"paragraph","q":"sensitive","t":"private surface"}]),
+                json!([{"k":2,"r":"status"},{"k":3,"r":"frame_boundary"}]),
+                json!([{"k":2,"r":"status"},{"k":3,"r":"paragraph","t":"x".repeat(1025)}]),
+            ] {
+                assert!(checkpoint()
+                    .validate_successor(
+                        &previous,
+                        &forest(nodes, "complete"),
+                        model_request(context(), 2),
+                        &config
+                    )
+                    .is_err());
+            }
+            assert!(decode_semantic_snapshot(
+                SemanticDecodeContext::new(SemanticInvocationId::new(2).unwrap(), previous.frames()[0].frame().clone(), SemanticSnapshotGeneration::new(2).unwrap()),
+                br#"{"v":1,"i":2,"g":2,"c":"complete","n":[{"k":2,"r":"status"},{"k":2,"r":"paragraph","t":"duplicate source"}]}"#,
+            ).is_err());
+            for (generation, source_origin) in [
+                (1, None),
+                (3, None),
+                (2, Some("https://other.example.test")),
+            ] {
+                let frame = match source_origin {
+                    Some(source) => SemanticFrameJoin::try_new(
+                        context(),
+                        FrameId::MAIN,
+                        context().frame_generation(),
+                        SemanticOrigin::parse(source).unwrap(),
+                        SemanticFrameTrust::SameOrigin,
+                    )
+                    .unwrap(),
+                    None => previous.frames()[0].frame().clone(),
+                };
+                let snapshot = decode_semantic_snapshot(
+                    SemanticDecodeContext::new(SemanticInvocationId::new(2).unwrap(), frame, SemanticSnapshotGeneration::new(generation).unwrap()),
+                    &serde_json::to_vec(&json!({"v":1,"i":2,"g":generation,"c":"complete","n":[{"k":2,"r":"status"}]})).unwrap(),
+                ).unwrap();
+                assert!(SemanticObservationAssembler::new(request.clone(), snapshot)
+                    .and_then(|assembled| assembled.finish())
+                    .is_err());
+            }
+            for kind in ["region", "subtree"] {
+                let tree_checkpoint = || {
+                    continuation(json!({"kind":kind,"target":"@a1"}))
+                        .retire_for_observation(&previous, &config)
+                        .unwrap()
+                };
+                let tree_request = tree_checkpoint()
+                    .request(&previous, SemanticObservationId::new(2).unwrap())
+                    .unwrap();
+                for connected in [false, true] {
+                    let mut child = json!({"k":3,"r":"paragraph","t":"tree source"});
+                    if connected {
+                        child["p"] = json!(0);
+                    }
+                    let snapshot = decode_semantic_snapshot(
+                        SemanticDecodeContext::new(SemanticInvocationId::new(2).unwrap(), previous.frames()[0].frame().clone(), SemanticSnapshotGeneration::new(2).unwrap()),
+                        &serde_json::to_vec(&json!({"v":1,"i":2,"g":2,"c":"complete","n":[{"k":1,"r":"document"},child]})).unwrap(),
+                    ).unwrap();
+                    let tree = SemanticObservationAssembler::new(tree_request.clone(), snapshot)
+                        .unwrap()
+                        .finish()
+                        .unwrap();
+                    assert_eq!(
+                        tree_checkpoint()
+                            .validate_successor(
+                                &previous,
+                                &tree,
+                                model_request(context(), 2),
+                                &config
+                            )
+                            .is_ok(),
+                        connected
+                    );
+                }
+            }
             let fresh = fresh(2);
             assert!(checkpoint()
                 .validate_successor(&previous, &fresh, model_request(context(), 1), &config)
@@ -2156,16 +2285,40 @@ mod tests {
                 && !text.contains("hostile page instruction")
         );
         assert!(text.contains(r#""incomplete":true"#));
+        let window = make(
+            restored
+                .begin_expansion(
+                    SemanticObservationId::new(4).unwrap(),
+                    restored.frames()[0].nodes()[2].reference(),
+                    restored.frames()[0].frame(),
+                    crate::SemanticExpansionKind::SurroundingText(
+                        crate::SemanticTextWindow::try_new(0, 128).unwrap(),
+                    ),
+                    SemanticObservationBudget::INITIAL_FILTERED,
+                )
+                .unwrap(),
+            4,
+            r#"[{"k":2,"r":"status","n":"current anchor"},{"k":1,"r":"document","t":"independent source body"}]"#,
+        );
+        let history = AgentInspectionProgress::record(Some(history), &restored, &window).unwrap();
+        let text = history.encode(&window).unwrap();
+        let progress: serde_json::Value =
+            serde_json::from_str(text.lines().last().unwrap()).unwrap();
+        // The earlier region anchor survives as a non-first independent source;
+        // the new window anchor was @a3, but is now only the current @a1.
+        assert_eq!(progress["captures"][0]["current_target"], "@a2");
+        assert_eq!(progress["captures"][2]["current_target"], "@a1");
+        assert!(!text.contains("@a3") && !text.contains("independent source body"));
         let absent = make(
             SemanticObservationRequest::initial(
-                SemanticObservationId::new(4).unwrap(),
+                SemanticObservationId::new(5).unwrap(),
                 context(),
                 SemanticObservationBudget::INITIAL_FILTERED,
             ),
-            4,
+            5,
             r#"[{"k":9,"r":"paragraph","t":"different current scope"}]"#,
         );
-        let history = AgentInspectionProgress::record(Some(history), &restored, &absent).unwrap();
+        let history = AgentInspectionProgress::record(Some(history), &window, &absent).unwrap();
         let text = history.encode(&absent).unwrap();
         assert!(!text.contains("@a") && text.contains(r#""current_target":null"#));
         assert!(text.len() < 2048);
