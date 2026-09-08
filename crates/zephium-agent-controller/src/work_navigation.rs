@@ -82,7 +82,16 @@ impl AgentWorkController {
                 .checked_sub(state.navigation_hops)
                 .ok_or(AgentWorkFailure::Contract)?
         };
-        if usize::from(session.turns) + remaining_hops + 1 > usize::from(session.max_model_calls) {
+        if usize::from(session.turns) + remaining_hops + 1 > usize::from(session.max_model_calls)
+            || usize::try_from(
+                session
+                    .policy
+                    .remaining_operations(session.lease.lease())
+                    .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Authority))?,
+            )
+            .map_err(|_| AgentWorkFailure::Contract)?
+                < 2 * remaining_hops + 1
+        {
             return Err(AgentWorkFailure::Browser(
                 AgentBrowserProviderError::TurnLimit,
             ));

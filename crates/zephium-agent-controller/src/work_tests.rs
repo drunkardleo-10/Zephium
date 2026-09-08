@@ -675,6 +675,15 @@ fn input_with_navigation(
     route: Option<AgentNavigationRoute>,
     discovery: Option<AgentNavigationDiscovery>,
 ) -> AgentWorkRunInput {
+    input_with_navigation_budget(allowed, route, discovery, 24)
+}
+
+fn input_with_navigation_budget(
+    allowed: &[SemanticEffectClass],
+    route: Option<AgentNavigationRoute>,
+    discovery: Option<AgentNavigationDiscovery>,
+    operations: u32,
+) -> AgentWorkRunInput {
     let profile = 1_u128.into();
     let context = ContextIdentity::new(
         ContextId::generate(),
@@ -684,7 +693,7 @@ fn input_with_navigation(
     );
     let origin = SemanticOrigin::parse("https://work-fixture.invalid/").expect("origin");
     let effects = AgentEffectScope::try_new(allowed).expect("effects");
-    let budget = AgentRunBudget::try_new(24, 1_000_000, 1_000_000, 1).expect("budget");
+    let budget = AgentRunBudget::try_new(operations, 1_000_000, 1_000_000, 1).expect("budget");
     let node = AgentPlanNodeId::generate();
     let policy_expires = FIXTURE_POLICY_NOW_MILLIS
         + zephium_agent_provider_transport::MAX_AGENT_PROVIDER_REQUEST_TIMEOUT_MILLIS;
@@ -1736,10 +1745,16 @@ fn provider_fixture_with_account(
                 | NavigationFault::DiscoveryMissingLink
         )
     ) {
-        input_with_navigation(
+        input_with_navigation_budget(
             &[SemanticEffectClass::Read],
             None,
             Some(navigation_tests::discovery_scope()),
+            match fault {
+                ProviderFault::Navigation(NavigationFault::DiscoveryBudget(_, _, operations)) => {
+                    operations
+                }
+                _ => 24,
+            },
         )
     } else if let ProviderFault::Navigation(NavigationFault::Route(_)) = fault {
         input_with_route(
@@ -1752,7 +1767,7 @@ fn provider_fixture_with_account(
         input()
     };
     let navigation_schedule = if let ProviderFault::Navigation(fault) = fault {
-        if let NavigationFault::DiscoveryBudget(limit, _) = fault {
+        if let NavigationFault::DiscoveryBudget(limit, _, _) = fault {
             approved.settings = approved.settings.with_max_model_calls(limit).unwrap();
         }
         let schedule = Arc::new(navigation_tests::NavigationSchedule::new(fault));

@@ -79,13 +79,31 @@ finish; no qualification-only presentation is substituted. See the independent
 [native rendering qualification](macos-retained-observation-rendering.md) for
 the actual RAF and delayed-provider proof behind this inherited contract.
 
-Budgets are unchanged: eight model calls, 100,000 aggregate tokens, 100,000
-micro-USD, one context, two navigation hops and one 150-second absolute deadline
+Budgets are unchanged: at most eight model calls within eight total policy
+operations, 100,000 aggregate tokens, 100,000 micro-USD, one context, two
+navigation hops and one 150-second absolute deadline
 including credential lookup. Luna and explicit diagnostic `store:true` retain
 the public requests for human inspection; production remains stateless. The
 original 4,096-byte summary / important_claims / caveats value ceiling remains.
 Only exact current-document source evidence can be mapped; catalog facts may
 guide selection but must not silently become current-page citations later.
+
+Retained commerce run twenty-fifth exposed a budget-contract mismatch: seven
+model decisions and one navigation had consumed all eight policy operations,
+although the decision guidance still promised a mapper call. Extract was
+proposed but mapping admission failed before transport. The deterministic
+controller reproduction reaches the same `Browser(Authority)` with eight
+operations; the older budget regression used 24 and could not expose it.
+
+Decision preparation now derives its remaining allowance from both the fixed
+model-call ceiling and unreserved run/lease-node operations, before whole-input
+counting. One operation remains for mapping; navigation is omitted when its
+operation, next decision and mapping cannot fit. Native inspection/navigation
+admission independently protects that reserve. Under the same eight-operation
+manifest the corrected one-hop regression finishes with seven model calls
+including mapping plus one navigation, with source mapping and clean closure.
+No operation, call, token, cost, navigation or time ceiling was increased.
+This is deterministic evidence; live useful-result qualification remains pending.
 
 ## Deterministic gate
 

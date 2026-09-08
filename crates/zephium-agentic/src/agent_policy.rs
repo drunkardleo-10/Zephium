@@ -1192,6 +1192,30 @@ impl AgentRunPolicy {
         )
     }
 
+    /// Unreserved operations still available under both the run and lease node.
+    /// This is advisory accounting, not a reservation or dispatch authority.
+    pub fn remaining_operations(&self, lease: AgentPlanLeaseId) -> Result<u32, AgentPolicyError> {
+        let index = self.lease_index(lease).ok_or(AgentPolicyError::Lease)?;
+        let node = self
+            .manifest
+            .plan_node(self.leases[index].binding.node())
+            .ok_or(AgentPolicyError::Invariant)?;
+        let remaining = |budget: AgentRunBudget, accounting: AgentPolicyAccounting| {
+            budget
+                .operations()
+                .checked_sub(accounting.consumed_operations())
+                .and_then(|value| value.checked_sub(accounting.reserved_operations()))
+                .ok_or(AgentPolicyError::Budget)
+        };
+        Ok(
+            remaining(self.manifest.budget(), self.accounting())?.min(remaining(
+                node.budget(),
+                self.lease_accounting(lease)
+                    .ok_or(AgentPolicyError::Invariant)?,
+            )?),
+        )
+    }
+
     /// Consumed and reserved accounting for one exact plan lease.
     pub fn lease_accounting(&self, lease: AgentPlanLeaseId) -> Option<AgentPolicyAccounting> {
         let state = self
@@ -3615,6 +3639,26 @@ mod tests {
         effect_values: &[SemanticEffectClass],
         budget: AgentRunBudget,
     ) -> PolicyFixture {
+        policy_fixture_with_node_budget(
+            run,
+            profile_value,
+            source,
+            max_sensitivity,
+            effect_values,
+            budget,
+            budget,
+        )
+    }
+
+    fn policy_fixture_with_node_budget(
+        run: u128,
+        profile_value: u128,
+        source: SemanticOrigin,
+        max_sensitivity: SemanticSensitivity,
+        effect_values: &[SemanticEffectClass],
+        budget: AgentRunBudget,
+        node_budget: AgentRunBudget,
+    ) -> PolicyFixture {
         let effect_scope = effects(effect_values);
         let scope = AgentRunScope::try_new(
             vec![profile(profile_value)],
@@ -3644,7 +3688,7 @@ mod tests {
             vec![AgentPlanNodeScope::new(
                 node_id,
                 authority,
-                budget,
+                node_budget,
                 AgentPolicyInstant::from_millis(EXPIRES_AT - 1),
             )],
         )
@@ -3898,13 +3942,21 @@ mod tests {
         let context = make_context(7, 8, 9);
         let observation = mixed_observation(context, source.clone(), 1);
         let payload = observation_payload(&observation, 50);
-        let mut fixture = policy_fixture(
+        let mut fixture = policy_fixture_with_node_budget(
             7,
             8,
             source,
             SemanticSensitivity::Sensitive,
             &[SemanticEffectClass::Read],
             run_budget(10, 1_000, 10_000),
+            run_budget(3, 1_000, 10_000),
+        );
+        assert_eq!(fixture.policy.remaining_operations(fixture.lease), Ok(3));
+        assert_eq!(
+            fixture
+                .policy
+                .remaining_operations(AgentPlanLeaseId::from_raw(999)),
+            Err(AgentPolicyError::Lease)
         );
         let binding = account(context, NOW - 1);
         let admission = fixture
@@ -3921,6 +3973,7 @@ mod tests {
         let admission_debug = format!("{admission:?}");
 
         assert_eq!(fixture.policy.pending_model_calls(), 1);
+        assert_eq!(fixture.policy.remaining_operations(fixture.lease), Ok(2));
         assert_eq!(fixture.policy.taints(), &[]);
         assert_eq!(
             fixture.policy.accounting(),
@@ -3971,6 +4024,7 @@ mod tests {
         assert_eq!(receipt.output_tokens(), 10);
         assert_eq!(receipt.cost_micro_usd(), 80);
         assert_eq!(fixture.policy.pending_model_calls(), 0);
+        assert_eq!(fixture.policy.remaining_operations(fixture.lease), Ok(2));
         assert_eq!(
             fixture.policy.accounting(),
             AgentPolicyAccounting {

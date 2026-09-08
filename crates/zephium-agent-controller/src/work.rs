@@ -1881,7 +1881,14 @@ impl AgentWorkController {
             // local inspection can consume the reserved mapping call.
             let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
             if state.navigation_discovery.is_some()
-                && session.turns.saturating_add(1) >= session.max_model_calls
+                && (session.turns.saturating_add(1) >= session.max_model_calls
+                    || session
+                        .policy
+                        .remaining_operations(session.lease.lease())
+                        .map_err(|_| {
+                            AgentWorkFailure::Browser(AgentBrowserProviderError::Authority)
+                        })?
+                        <= 1)
                 && turn.turn.proposal().kind() != AgentBrowserToolKind::Extract
             {
                 return Err(AgentWorkFailure::Browser(

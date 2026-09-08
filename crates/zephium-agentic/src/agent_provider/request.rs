@@ -397,6 +397,29 @@ impl fmt::Debug for AgentProviderInputTokenRequest {
 }
 
 impl AgentProviderRequest {
+    // Bind current content-free policy accounting only at preparation. Drafts
+    // retain no spendable allowance; the resulting body is then measured and
+    // reserved exactly, with no metadata edits after token admission.
+    fn bind_decision_budget(
+        &mut self,
+        policy: &AgentRunPolicy,
+        request: AgentModelCallRequest,
+    ) -> Result<(), AgentProviderRequestError> {
+        if self
+            .config
+            .remaining_decision_calls(request.id())?
+            .is_some()
+        {
+            self.body = encode_decision_budget(
+                std::mem::take(&mut self.body),
+                &self.config,
+                request.id(),
+                policy.remaining_operations(request.lease())?,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Content-free call correlation.
     pub const fn call(&self) -> AgentProviderCallIdentity {
         self.call
@@ -1679,7 +1702,12 @@ impl AgentPreparedObservationRequest {
                 .as_ref()
                 .map(|checkpoint| checkpoint.text.as_str()),
         )?;
-        let body = encode_decision_budget(body, &config, call_request.id())?;
+        let body = encode_decision_budget(
+            body,
+            &config,
+            call_request.id(),
+            policy.remaining_operations(call_request.lease())?,
+        )?;
         let structured_input = conservative_request_measurement(&config, &body)?;
         config.validate_provider_exact_initial_request(
             call_request,
@@ -1995,8 +2023,6 @@ impl AgentProviderDiffRequestDraft {
                 continuation.transcript(),
             )?,
         };
-        let body =
-            encode_decision_budget(body, continuation.config(), continuation.next_call().call())?;
         let (call, config, continuation_transcript, semantic_stats, delivery) =
             continuation.into_request_parts();
         Ok(Self {
@@ -2052,12 +2078,13 @@ impl AgentProviderDiffRequestDraft {
     /// policy admission reserves the exact whole-input count, rather than the
     /// larger latest-diff-plus-envelope authorization ceiling.
     pub fn try_prepare(
-        self,
+        mut self,
         policy: &mut AgentRunPolicy,
         call_request: AgentModelCallRequest,
         diff: &SemanticDiff,
         counter: &dyn AgentProviderLocalInputTokenCounter,
     ) -> Result<AgentPreparedDiffRequest, AgentProviderRequestError> {
+        self.request.bind_decision_budget(policy, call_request)?;
         self.continuation_transcript
             .validate_navigation_checkpoint(policy, call_request)?;
         let structured_input = self
@@ -2094,11 +2121,12 @@ impl AgentProviderDiffRequestDraft {
     /// is reserved and recorded as `Conservative`; transport replaces it with
     /// `ProviderExact` only after the bound count endpoint succeeds.
     pub fn try_prepare_for_provider_exact_count(
-        self,
+        mut self,
         policy: &mut AgentRunPolicy,
         call_request: AgentModelCallRequest,
         diff: &SemanticDiff,
     ) -> Result<AgentPreparedDiffRequest, AgentProviderRequestError> {
+        self.request.bind_decision_budget(policy, call_request)?;
         self.continuation_transcript
             .validate_navigation_checkpoint(policy, call_request)?;
         let structured_input = provider_count_preflight(
@@ -2259,8 +2287,6 @@ impl AgentProviderReadContinuationRequestDraft {
                 continuation.transcript(),
             )?,
         };
-        let body =
-            encode_decision_budget(body, continuation.config(), continuation.next_call().call())?;
         let (call, config, baseline, continuation_transcript, semantic_stats, delivery) =
             continuation.into_request_parts();
         Ok(Self {
@@ -2313,12 +2339,13 @@ impl AgentProviderReadContinuationRequestDraft {
 
     /// Counts and atomically admits this exact whole structured read result.
     pub fn try_prepare(
-        self,
+        mut self,
         policy: &mut AgentRunPolicy,
         call_request: AgentModelCallRequest,
         read: &SemanticReadResult<'_>,
         counter: &dyn AgentProviderLocalInputTokenCounter,
     ) -> Result<AgentPreparedReadContinuationRequest, AgentProviderRequestError> {
+        self.request.bind_decision_budget(policy, call_request)?;
         self.continuation_transcript
             .validate_navigation_checkpoint(policy, call_request)?;
         let structured_input = self
@@ -2352,11 +2379,12 @@ impl AgentProviderReadContinuationRequestDraft {
 
     /// Conservatively reserves this OpenAI read continuation for exact counting.
     pub fn try_prepare_for_provider_exact_count(
-        self,
+        mut self,
         policy: &mut AgentRunPolicy,
         call_request: AgentModelCallRequest,
         read: &SemanticReadResult<'_>,
     ) -> Result<AgentPreparedReadContinuationRequest, AgentProviderRequestError> {
+        self.request.bind_decision_budget(policy, call_request)?;
         self.continuation_transcript
             .validate_navigation_checkpoint(policy, call_request)?;
         let structured_input = provider_count_preflight(
@@ -2814,8 +2842,6 @@ impl AgentProviderLocateRequestDraft {
                 continuation.transcript(),
             )?,
         };
-        let body =
-            encode_decision_budget(body, continuation.config(), continuation.next_call().call())?;
         let (call, config, continuation_transcript, semantic_stats, delivery) =
             continuation.into_request_parts();
         Ok(Self {
@@ -2867,12 +2893,13 @@ impl AgentProviderLocateRequestDraft {
 
     /// Counts and atomically admits this exact whole structured locate result.
     pub fn try_prepare(
-        self,
+        mut self,
         policy: &mut AgentRunPolicy,
         call_request: AgentModelCallRequest,
         result: &SemanticLocateResult,
         counter: &dyn AgentProviderLocalInputTokenCounter,
     ) -> Result<AgentPreparedLocateRequest, AgentProviderRequestError> {
+        self.request.bind_decision_budget(policy, call_request)?;
         self.continuation_transcript
             .validate_navigation_checkpoint(policy, call_request)?;
         let structured_input = self
@@ -2904,11 +2931,12 @@ impl AgentProviderLocateRequestDraft {
 
     /// Conservatively reserves this OpenAI locate continuation for exact counting.
     pub fn try_prepare_for_provider_exact_count(
-        self,
+        mut self,
         policy: &mut AgentRunPolicy,
         call_request: AgentModelCallRequest,
         result: &SemanticLocateResult,
     ) -> Result<AgentPreparedLocateRequest, AgentProviderRequestError> {
+        self.request.bind_decision_budget(policy, call_request)?;
         self.continuation_transcript
             .validate_navigation_checkpoint(policy, call_request)?;
         let structured_input = provider_count_preflight(
@@ -3769,15 +3797,21 @@ fn encode_decision_budget(
     body: Vec<u8>,
     config: &AgentProviderCallConfig,
     call: crate::AgentModelCallId,
+    remaining_operations: u32,
 ) -> Result<Vec<u8>, AgentProviderRequestError> {
     let Some(remaining) = config.remaining_decision_calls(call)? else {
         return Ok(body);
     };
+    let remaining = u32::from(remaining).min(remaining_operations.saturating_sub(1));
+    if remaining == 0 {
+        return Err(crate::AgentPolicyError::Budget.into());
+    }
     let text = format!(
         "ZEPHIUM_HOST_DECISION_BUDGET_V1\nTrusted host budget, not page evidence. \
          decision_calls_remaining_including_this={remaining}; terminal_mapping_calls_reserved=1. \
          Each snapshot, locate, read or navigation requires another decision call. \
          Extract uses the reserved mapping call to produce the final answer. \
+         Navigation also consumes one run operation; remaining decisions may decrease after it. \
          On the last decision choose extract using current evidence; report unresolved facts \
          and limitations honestly. These limits grant no task completion or source authority. \
          Aggregate token, cost and absolute deadline limits still apply."
@@ -3788,6 +3822,12 @@ fn encode_decision_budget(
         .as_array_mut()
         .ok_or(AgentProviderRequestError::Encoding)?
         .push(json!({"role":"developer", "content":[{"type":"input_text","text":text}]}));
+    if remaining_operations < 4 {
+        wire["tools"]
+            .as_array_mut()
+            .ok_or(AgentProviderRequestError::Encoding)?
+            .retain(|tool| tool["name"] != "navigate");
+    }
     if remaining == 1 {
         let tools = wire["tools"]
             .as_array_mut()
@@ -5620,9 +5660,13 @@ mod tests {
         for (id, remaining) in [(41, 4), (42, 3), (43, 2), (44, 1)] {
             let body = encode_openai_body(&config, "objective", "current evidence").unwrap();
             let original: Value = serde_json::from_slice(&body).unwrap();
-            let body =
-                encode_decision_budget(body, &config, crate::AgentModelCallId::new(id).unwrap())
-                    .unwrap();
+            let body = encode_decision_budget(
+                body,
+                &config,
+                crate::AgentModelCallId::new(id).unwrap(),
+                u32::MAX,
+            )
+            .unwrap();
             let wire: Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(
                 &wire["input"].as_array().unwrap()[..2],
@@ -5658,13 +5702,49 @@ mod tests {
             assert!(encode_decision_budget(
                 encode_openai_body(&config, "objective", "evidence").unwrap(),
                 &config,
-                crate::AgentModelCallId::new(id).unwrap()
+                crate::AgentModelCallId::new(id).unwrap(),
+                u32::MAX
             )
             .is_err());
         }
+        // A navigation consumes an operation independently of its model call.
+        // At the same call identity the policy may therefore leave fewer
+        // decisions than the immutable model-call allowance advertises.
+        for operations in 0..=4 {
+            let result = encode_decision_budget(
+                encode_openai_body(&config, "objective", "evidence").unwrap(),
+                &config,
+                first,
+                operations,
+            );
+            if operations < 2 {
+                assert!(matches!(
+                    result,
+                    Err(AgentProviderRequestError::Policy(
+                        crate::AgentPolicyError::Budget
+                    ))
+                ));
+                continue;
+            }
+            let wire: Value = serde_json::from_slice(&result.unwrap()).unwrap();
+            let text = wire["input"][2]["content"][0]["text"].as_str().unwrap();
+            assert!(text.contains(&format!(
+                "decision_calls_remaining_including_this={}",
+                operations - 1
+            )));
+            let tools = wire["tools"].as_array().unwrap();
+            assert_eq!(
+                tools.iter().any(|tool| tool["name"] == "navigate"),
+                operations >= 4
+            );
+            assert_eq!(tools.len() == 1, operations == 2);
+            if operations == 2 {
+                assert_eq!(tools[0]["name"], "extract");
+            }
+        }
         let body = encode_openai_body(&base, "objective", "evidence").unwrap();
         assert_eq!(
-            encode_decision_budget(body.clone(), &base, first).unwrap(),
+            encode_decision_budget(body.clone(), &base, first, u32::MAX).unwrap(),
             body
         );
     }

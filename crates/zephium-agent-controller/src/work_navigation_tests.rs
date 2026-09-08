@@ -37,7 +37,17 @@ fn discovery_budget_reserves_mapping_and_rejects_last_decision_inspection() {
     let _serial = lock(&SERIAL);
     for (limit, refusal) in [(8, false), (4, false), (8, true)] {
         provider_fixture(ProviderFault::Navigation(NavigationFault::DiscoveryBudget(
-            limit, refusal,
+            limit, refusal, 24,
+        )));
+    }
+}
+
+#[test]
+fn discovery_operation_budget_preserves_the_mapping_call_after_navigation() {
+    let _serial = lock(&SERIAL);
+    for refusal in [false, true] {
+        provider_fixture(ProviderFault::Navigation(NavigationFault::DiscoveryBudget(
+            8, refusal, 8,
         )));
     }
 }
@@ -141,7 +151,7 @@ impl TerraControllerClock for NavigationClock {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum NavigationFault {
     Discovery,
-    DiscoveryBudget(u8, bool),
+    DiscoveryBudget(u8, bool, u32),
     DiscoveryTwoHops,
     DiscoveryTwoHopsBlockedFrame,
     DiscoveryMissingLink,
@@ -192,7 +202,9 @@ impl NavigationFault {
     }
     pub(super) fn requests(self) -> u8 {
         match self {
-            Self::DiscoveryBudget(limit, refusal) => 2 * (limit - u8::from(refusal)),
+            Self::DiscoveryBudget(limit, refusal, operations) => {
+                2 * (limit.min((operations - 1) as u8) - u8::from(refusal))
+            }
             Self::DiscoveryTwoHops | Self::DiscoveryTwoHopsBlockedFrame => {
                 route_tests::RouteFault::None.requests()
             }
@@ -218,7 +230,8 @@ impl NavigationFault {
         self == Self::CancelMapCount && turns == 2 && count
     }
     pub(super) fn stream(self, turn: u8) -> String {
-        if let Self::DiscoveryBudget(limit, refusal) = self {
+        if let Self::DiscoveryBudget(limit, refusal, operations) = self {
+            let limit = limit.min((operations - 1) as u8);
             if turn == 1 {
                 return Self::Discovery.stream(turn);
             }
@@ -234,7 +247,15 @@ impl NavigationFault {
             }
             if turn == limit - 1 {
                 return if refusal {
-                    named_tool_stream(turn, "snapshot", r#"{\"scope\":{\"kind\":\"initial\"}}"#)
+                    if operations <= u32::from(limit) + 1 {
+                        named_tool_stream(
+                            turn,
+                            "locate",
+                            r#"{\"semantic_query\":\"missing specifications\",\"scope\":{\"kind\":\"initial\"}}"#,
+                        )
+                    } else {
+                        named_tool_stream(turn, "snapshot", r#"{\"scope\":{\"kind\":\"initial\"}}"#)
+                    }
                 } else {
                     named_tool_stream(
                         turn,
@@ -304,7 +325,8 @@ impl NavigationFault {
         }
     }
     pub(super) fn check_request(self, bytes: &[u8], turns: u8) {
-        if let Self::DiscoveryBudget(limit, _) = self {
+        if let Self::DiscoveryBudget(configured_limit, _, operations) = self {
+            let limit = configured_limit.min((operations - 1) as u8);
             let text = std::str::from_utf8(bytes).unwrap();
             assert!(text.contains("ZEPHIUM_HOST_LINK_DISCOVERY_V1"));
             assert_eq!(
@@ -314,7 +336,8 @@ impl NavigationFault {
             if turns < limit - 1 {
                 assert!(text.contains(&format!(
                     "decision_calls_remaining_including_this={}",
-                    limit - turns - 1
+                    u32::from(configured_limit - turns - 1)
+                        .min(operations - u32::from(turns) - u32::from(turns > 0) - 1)
                 )));
                 assert!(text.contains("terminal_mapping_calls_reserved=1"));
                 let tools = text.split("\"tools\":").nth(1).unwrap();
@@ -710,7 +733,8 @@ pub(super) fn assert_outcome(
     calls: &[u8],
     events: &[AgentWorkEvent],
 ) {
-    if let NavigationFault::DiscoveryBudget(limit, refusal) = fault {
+    if let NavigationFault::DiscoveryBudget(limit, refusal, operations) = fault {
+        let limit = limit.min((operations - 1) as u8);
         let calls_used = if refusal {
             let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
                 panic!("{outcome:?}");
@@ -719,12 +743,19 @@ pub(super) fn assert_outcome(
                 closed.failure(),
                 AgentWorkFailure::Browser(AgentBrowserProviderError::TurnLimit)
             );
+            assert_eq!(
+                closed.policy_settlement().closure().operations(),
+                u32::from(limit)
+            );
+            assert!(closed.policy_settlement().closure().operations() < operations);
             closed.policy_settlement().closure().model_calls()
         } else {
             let AgentWorkOutcome::Succeeded(mut success) = outcome else {
                 panic!("{outcome:?}");
             };
             assert_eq!(success.closure().navigations(), 1);
+            assert_eq!(success.closure().operations(), u32::from(limit) + 1);
+            assert!(success.closure().operations() <= operations);
             assert!(success.take_extraction().is_some());
             success.closure().model_calls()
         };
