@@ -183,6 +183,42 @@ query into regex/selector/JavaScript. A new live run is required after that
 generic contract is implemented and reviewed; run twenty-seven is not a useful
 commerce success.
 
+Run twenty-eight was built from `6f49adc`; its executable SHA-256 is
+`2cce97d4fbe58b637fb7bde991251093c710d14ccca0eb9a4e81fed1df0f0a8d`
+and whole-bundle manifest SHA-256 is
+`654ca4294118117972c08c311344022d9b0e65b00b62d0aad30594eb51964352`.
+The probe configuration SHA-256 is
+`93ce7e65840926e885c4da9ff0e0cb232a33ce4fef643296d6ddfa5c6bb04331`;
+all three hashes were unchanged after execution. The run selected London,
+navigated once to `/en-us/product/london-21034`, located relevant content and
+requested a surrounding-text snapshot. Five Luna calls consumed 27,547 input
+and 398 output tokens in 20.332 seconds, costing 5,473 micro-USD. The native
+resource remained healthy and reusable, observer join and shutdown were clean,
+and the moved source-data database passed an immutable integrity check.
+
+The fifth decision proposed `snapshot` with a literal `$` TextSearch targeted
+at `@a1`. Stored response
+`resp_0f4e6d3082c747b7006aa069b5b1a487d2b398f186ae64a8b7` proves that this was
+a valid 82-output-token tool call after 4,752 input tokens. In the acknowledged
+surrounding-text projection, however, `@a1` was a heading. TextSearch deliberately
+accepts only document, landmark, group or dialog boundaries, because silently
+turning a heading into its surrounding region would change the requested scope.
+The typed native authority check therefore refused the request before any native
+capture or effect. The controller then incorrectly promoted this ordinary,
+recoverable model-argument error into terminal `Browser(Continuation)`. No
+artifact was published, and run twenty-eight is not a useful commerce success.
+
+This is a recoverability gap rather than a WebView or semantic-observation
+capability blocker. The production correction is a compact, typed refusal bound
+to the exact rejected tool call and unchanged acknowledged observation. It must
+permit a budgeted model correction without widening scope, fabricating a native
+receipt, revealing unobserved refs, resetting budgets, or recovering authority,
+lineage, cancellation, takeover, lease, account or baseline failures. Full
+evidence is preserved under
+`/private/tmp/zephium-retained-commerce-twenty-eighth.7Wov6i`. A fresh run is
+required after that generic correction is implemented and reviewed; the failed
+request must not be retried unchanged.
+
 ## Deterministic gate
 
 The exact selected wrapper and original observer are tested, not just the bare
