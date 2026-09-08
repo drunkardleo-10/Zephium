@@ -143,7 +143,7 @@ impl WorkBrowserResources {
     ) -> Result<WorkBrowserReadBinding, WorkBrowserResourceError> {
         self.admits_lease(lease, now)?;
         let row = self.row_mut(lease.resource())?;
-        if !row.document_available || row.navigation.is_some() {
+        if !row.document_available || row.navigation.is_some() || row.action.is_some() {
             return Err(WorkBrowserResourceError::Pending);
         }
         let document = row

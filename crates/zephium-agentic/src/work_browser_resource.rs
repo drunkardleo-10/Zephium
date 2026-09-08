@@ -428,6 +428,7 @@ struct Resource {
     document_available: bool,
     observed: bool,
     navigation: Option<navigation::NavigationJoin>,
+    action: Option<action::ActionJoin>,
     observation_sequence: u16,
     observation: Option<observation::ObservationJoin>,
 }
@@ -620,6 +621,7 @@ impl WorkBrowserResources {
                 document_available: false,
                 observed: false,
                 navigation: None,
+                action: None,
                 observation_sequence: 0,
                 observation: None,
             },
@@ -661,6 +663,7 @@ impl WorkBrowserResources {
             || row.lease.is_some()
             || row.observation.is_some()
             || row.navigation.is_some()
+            || row.action.is_some()
         {
             return Err(WorkBrowserResourceError::Phase);
         }
@@ -922,6 +925,7 @@ impl WorkBrowserResources {
                     && resource_retained
                     && row.observation.is_none()
                     && row.navigation.is_none()
+                    && row.action.is_none()
                 {
                     if let Some(lease) = row.lease.take() {
                         row.phase = WorkBrowserResourcePhase::Retained;
@@ -1026,6 +1030,7 @@ impl WorkBrowserResources {
                     && row.lease.is_none()
                     && row.observation.is_none()
                     && row.navigation.is_none()
+                    && row.action.is_none()
             })
     }
     /// Admits the existing global native seal/audit protocol once, only after
@@ -1062,6 +1067,7 @@ impl WorkBrowserResources {
             || row.destruction.is_some()
             || row.observation.is_some()
             || row.navigation.is_some()
+            || row.action.is_some()
         {
             return Err(WorkBrowserResourceError::Pending);
         }
@@ -1089,6 +1095,14 @@ pub use navigation::{
     WorkBrowserNavigationCompletion, WorkBrowserNavigationCompletionCallback,
     WorkBrowserNavigationDispatch, WorkBrowserNavigationEvent, WorkBrowserNavigationPreparation,
     WorkBrowserNavigationRequest,
+};
+
+#[path = "work_browser_action.rs"]
+mod action;
+pub use action::{
+    WorkBrowserActionCompletion, WorkBrowserActionCompletionCallback,
+    WorkBrowserActionCompletionOwner, WorkBrowserActionDispatch, WorkBrowserActionEvent,
+    WorkBrowserActionRefusal, WorkBrowserActionRequest,
 };
 
 #[path = "work_browser_delivery.rs"]

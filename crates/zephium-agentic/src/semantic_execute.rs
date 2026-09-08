@@ -167,6 +167,23 @@ struct NativeCorrelation {
     guard: [u8; 32],
 }
 
+/// Resource owners retain exact native correlation without retaining an action
+/// recipe, fill text, or a second dispatch capability.
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct SemanticActionNativeCorrelation(NativeCorrelation);
+
+impl SemanticActionNativeCorrelation {
+    pub(crate) fn matches(&self, terminal: &SemanticActionNativeSettlement) -> bool {
+        self.0 == terminal.correlation
+    }
+}
+
+impl fmt::Debug for SemanticActionNativeCorrelation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SemanticActionNativeCorrelation([redacted])")
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) struct SemanticActionCoordinatorKey {
     effect: AgentEffectId,
@@ -316,6 +333,10 @@ pub struct SemanticActionNativeRequest {
 }
 
 impl SemanticActionNativeRequest {
+    pub(crate) fn correlation(&self) -> SemanticActionNativeCorrelation {
+        SemanticActionNativeCorrelation(self.correlation.clone())
+    }
+
     /// Exact policy-dispatched action attempt.
     pub const fn attempt(&self) -> SemanticActionAttemptId {
         self.correlation.attempt

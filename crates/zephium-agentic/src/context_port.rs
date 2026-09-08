@@ -1001,6 +1001,21 @@ pub type SemanticActionNativeCompletion =
 /// never project owned contexts into tab/session/extension inventories and
 /// must retain no queue, worker, timer, or page when no contexts exist.
 pub trait AgentBrowserPort: Send + Sync {
+    /// Already policy-authorized semantic effect on one retained execution
+    /// lease. An adapter must own the exact recipe, native callback and physical
+    /// callback-return debt; it must not route this through legacy tab contexts.
+    /// Unsupported adapters preserve the original request without a callback.
+    fn work_resource_act(
+        &self,
+        request: crate::WorkBrowserActionRequest,
+        _completion: crate::WorkBrowserActionCompletionCallback,
+    ) -> crate::WorkBrowserActionDispatch {
+        crate::WorkBrowserActionDispatch::Rejected {
+            request: Box::new(request),
+            failure: ContextPortFailure::Unsupported,
+        }
+    }
+
     /// Policy-bound exact document transition on an existing execution lease.
     /// Unsupported adapters return the original request without a callback.
     fn work_resource_navigate(
