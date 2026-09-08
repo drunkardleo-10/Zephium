@@ -7,7 +7,11 @@ license.workspace = true
 [features]
 default = []
 macos-work = ["dep:zephium-app", "dep:zephium-engine", "dep:zephium-store", "dep:zephium-agent-controller", "dep:zephium-agent-provider-transport"]
-public-qualification = ["macos-work", "zephium-app/work-execution-probe"]
+public-qualification = [
+    "macos-work",
+    "zephium-app/work-execution-probe",
+    "zephium-agent-provider-transport/probe-harness",
+]
 navigation-qualification = ["macos-work", "dep:zephium-agentic", "dep:zephium-core", "dep:zephium-agent-runtime"]
 discovery-qualification = ["navigation-qualification", "public-qualification"]
 retained-product-qualification = ["navigation-qualification", "public-qualification", "zephium-engine/native-agentic-work-lifetime-diagnostic"]

@@ -3,9 +3,11 @@
 use super::*;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use zephium_agent_provider_transport::{
-    load_macos_development_openai_credential, AgentProviderCredential, AgentProviderTransportConfig,
-};
+#[cfg(not(feature = "public-qualification"))]
+use zephium_agent_provider_transport::load_macos_development_openai_credential;
+#[cfg(feature = "public-qualification")]
+use zephium_agent_provider_transport::load_macos_probe_openai_credential;
+use zephium_agent_provider_transport::{AgentProviderCredential, AgentProviderTransportConfig};
 use zephium_agent_runtime::AgentRuntimeConfig;
 
 const TOTAL: Duration = Duration::from_secs(150);
@@ -37,7 +39,13 @@ pub(crate) fn load_configured_request(
     profile: zephium_app::AgentWorkProfileBinding,
     definition: &'static QualificationDefinition,
 ) -> Result<crate::TrustedWorkRequest, &'static str> {
+    #[cfg(not(feature = "public-qualification"))]
     let credential = load_macos_development_openai_credential().map_err(|_| "credential")?;
+    // Public qualifications are release-forbidden and rebuilt frequently. Use
+    // Apple's stable signed Keychain client so a new ad-hoc app signature does
+    // not manufacture a fresh authorization prompt on every test build.
+    #[cfg(feature = "public-qualification")]
+    let credential = load_macos_probe_openai_credential().map_err(|_| "credential")?;
     request(credential, started, profile, definition)
 }
 

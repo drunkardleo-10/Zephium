@@ -182,8 +182,9 @@ fn run(app: &tauri::AppHandle, control: &Control) -> Result<ApplicationReport, &
     }
     let started = Instant::now();
     let profile = wait_for_profile(app, control, started, None)?;
-    // Security.framework lookup is noncancellable. A quit keeps this original
-    // worker retained; its late result is dropped, never admitted or detached.
+    // Qualification credential loading is noncancellable. A quit keeps this
+    // original worker retained; its late result is dropped, never admitted or
+    // detached.
     let request = qualifier::load_request(started, profile)?;
     // Lookup can outlive a browser selection/policy transition. Reconcile only
     // this same binding before admission; never follow a new profile silently.
