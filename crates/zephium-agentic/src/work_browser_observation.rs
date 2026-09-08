@@ -28,6 +28,7 @@ pub struct WorkBrowserReadBinding {
     frame: SemanticFrameJoin,
     document: Arc<ContextNavigationTarget>,
     requested_document: Arc<ContextNavigationTarget>,
+    document_policy: crate::WorkBrowserDocumentPolicy,
     storage: ContextProfileStorageClass,
 }
 
@@ -48,6 +49,10 @@ impl WorkBrowserReadBinding {
     /// Original user/task-authored request; never replaced by finalization.
     pub fn requested_document(&self) -> &ContextNavigationTarget {
         &self.requested_document
+    }
+    /// Original trusted initial-document policy from the retained resource.
+    pub const fn document_policy(&self) -> crate::WorkBrowserDocumentPolicy {
+        self.document_policy
     }
     /// Immutable selected-profile persistence class from the original row.
     pub const fn storage(&self) -> ContextProfileStorageClass {
@@ -167,6 +172,7 @@ impl WorkBrowserResources {
                 .document
                 .clone()
                 .ok_or(WorkBrowserResourceError::Phase)?,
+            document_policy: row.document_policy,
             storage: row.storage,
         })
     }

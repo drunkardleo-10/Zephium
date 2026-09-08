@@ -716,32 +716,79 @@ fn retained_admission_requires_exact_frozen_target_and_original_storage_class() 
 #[test]
 fn startup_finalized_binding_reaches_common_controller_without_rebasing_original_request() {
     let requested = "https://retained-fixture.invalid/frozen";
-    let final_url = "https://retained-fixture.invalid/frozen?opaque=one";
-    for (input_url, invalidate, accepted) in [
-        (final_url, false, true),
-        (requested, false, false),
+    let finalized = "https://retained-fixture.invalid/frozen?opaque=one";
+    for (row_policy, effective_url, input_url, input_policy, invalidate, accepted) in [
         (
-            "https://retained-fixture.invalid/frozen?opaque=two",
+            WorkBrowserDocumentPolicy::InitialQueryFinalization,
+            Some(finalized),
+            requested,
+            WorkBrowserDocumentPolicy::InitialQueryFinalization,
+            false,
+            true,
+        ),
+        (
+            WorkBrowserDocumentPolicy::InitialQueryFinalization,
+            Some("https://retained-fixture.invalid/frozen?opaque=two"),
+            requested,
+            WorkBrowserDocumentPolicy::InitialQueryFinalization,
+            false,
+            true,
+        ),
+        (
+            WorkBrowserDocumentPolicy::InitialQueryFinalization,
+            Some(finalized),
+            finalized,
+            WorkBrowserDocumentPolicy::Exact,
             false,
             false,
         ),
-        (final_url, true, false),
+        (
+            WorkBrowserDocumentPolicy::InitialQueryFinalization,
+            Some(finalized),
+            requested,
+            WorkBrowserDocumentPolicy::Exact,
+            false,
+            false,
+        ),
+        (
+            WorkBrowserDocumentPolicy::Exact,
+            None,
+            requested,
+            WorkBrowserDocumentPolicy::InitialQueryFinalization,
+            false,
+            false,
+        ),
+        (
+            WorkBrowserDocumentPolicy::InitialQueryFinalization,
+            Some(finalized),
+            requested,
+            WorkBrowserDocumentPolicy::InitialQueryFinalization,
+            true,
+            false,
+        ),
     ] {
         let (owner, native, resource, browser) = setup_with_document_policy(
             ContextProfileStorageClass::Ephemeral,
-            zephium_agentic::WorkBrowserDocumentPolicy::InitialQueryFinalization,
-            Some(ContextNavigationTarget::parse(final_url).unwrap()),
+            row_policy,
+            effective_url.map(|url| ContextNavigationTarget::parse(url).unwrap()),
         );
         assert_eq!(
             browser.binding().requested_document().as_url().as_str(),
             requested
         );
-        assert_eq!(browser.binding().document().as_url().as_str(), final_url);
-        let input = input_with_source(
-            browser.binding(),
+        assert_eq!(
+            browser.binding().document().as_url().as_str(),
+            effective_url.unwrap_or(requested)
+        );
+        let input = input_for_context_authority_with_document_policy(
+            browser.binding().frame().context().identity(),
+            browser.binding().frame().origin().clone(),
             Arc::new(Clock(AtomicU64::new(2))),
             ContextProfileStorageClass::Ephemeral,
             ContextNavigationTarget::parse(input_url).unwrap(),
+            AgentRunBudget::try_new(24, 1_000_000, 1_000_000, 1).unwrap(),
+            (Instant::now() + Duration::from_secs(600), None),
+            input_policy,
         );
         if invalidate {
             native

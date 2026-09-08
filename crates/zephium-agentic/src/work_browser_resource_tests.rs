@@ -264,6 +264,10 @@ fn finalized_document_receipt_keeps_requested_lineage_and_binds_only_effective_s
     let binding = rows.read_binding(&lease, tick(0)).unwrap();
     assert_eq!(binding.requested_document(), &requested);
     assert_eq!(binding.document(), &effective);
+    assert_eq!(
+        binding.document_policy(),
+        crate::WorkBrowserDocumentPolicy::InitialQueryFinalization
+    );
     assert_eq!(binding.lease().resource(), &resource);
 }
 #[test]
