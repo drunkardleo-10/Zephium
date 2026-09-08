@@ -25,7 +25,9 @@ mod action;
 #[cfg(feature = "provider-transport")]
 mod work_form;
 #[cfg(feature = "provider-transport")]
-pub use work_form::{AgentWorkFormGoal, AgentWorkFormPhase, AgentWorkFormTask};
+pub use work_form::{
+    AgentWorkFormExtractionTask, AgentWorkFormGoal, AgentWorkFormPhase, AgentWorkFormTask,
+};
 #[cfg(feature = "provider-transport")]
 mod work_discovery;
 #[cfg(feature = "provider-transport")]

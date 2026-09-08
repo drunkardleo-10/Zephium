@@ -87,6 +87,7 @@ pub(super) struct RetainedBrowser {
     listener: Option<Arc<LeaseSignal>>,
     read: Option<(PendingRead, SemanticObservationRequest)>,
     navigation: Option<PendingNavigation>,
+    action: Option<PendingAction>,
     revoke: Option<PendingLifecycle>,
     delivered: bool,
 }
@@ -104,6 +105,7 @@ impl WorkResourceOwner {
             listener: None,
             read: None,
             navigation: None,
+            action: None,
             revoke: None,
             delivered: false,
         })
@@ -145,6 +147,7 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
         if self.listener.is_some()
             || self.read.is_some()
             || self.navigation.is_some()
+            || self.action.is_some()
             || self.revoke.is_some()
         {
             return Err(Self::error(self.browser.refusal()));
@@ -189,6 +192,50 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
     fn supports_navigation(&self) -> bool {
         true
     }
+    fn supports_actions(&self) -> bool {
+        true
+    }
+    fn dispatch_action(
+        &mut self,
+        request: SemanticActionNativeRequest,
+        now: AgentPolicyInstant,
+    ) -> ContextDispatch {
+        if self.listener().is_err()
+            || self.check_health(now).is_err()
+            || self.read.is_some()
+            || self.navigation.is_some()
+            || self.action.is_some()
+            || self.revoke.is_some()
+            || self.delivered
+        {
+            return ContextDispatch::Rejected(ContextPortFailure::Stale);
+        }
+        match PendingAction::dispatch(&self.browser, request, now) {
+            Ok((pending, dispatch)) => {
+                if !pending.finished() {
+                    self.action = Some(pending);
+                }
+                dispatch
+            }
+            Err(Refusal::NativeAdmission(failure)) => ContextDispatch::Rejected(failure),
+            Err(_) => ContextDispatch::Rejected(ContextPortFailure::NativeRefused),
+        }
+    }
+    fn poll_action(
+        &mut self,
+        now: AgentPolicyInstant,
+    ) -> Result<Option<SemanticActionNativeSettlement>, AgentWorkFailure> {
+        self.listener()
+            .map_err(Self::error)?
+            .rearm()
+            .map_err(Self::error)?;
+        let pending = self.action.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let Some(event) = pending.poll(now).map_err(Self::error)? else {
+            return Ok(None);
+        };
+        self.action.take();
+        Ok(Some(event.into_terminal()))
+    }
     fn automation_state(
         &self,
         now: AgentPolicyInstant,
@@ -211,6 +258,7 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
         self.check_health(now)?;
         if self.read.is_some()
             || self.navigation.is_some()
+            || self.action.is_some()
             || self.revoke.is_some()
             || self.delivered
         {
@@ -271,6 +319,7 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
         self.check_health(now)?;
         if self.read.is_some()
             || self.navigation.is_some()
+            || self.action.is_some()
             || self.revoke.is_some()
             || self.delivered
         {
@@ -309,6 +358,7 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
         self.check_health(now)?;
         if self.read.is_some()
             || self.navigation.is_some()
+            || self.action.is_some()
             || self.revoke.is_some()
             || self.delivered
         {
@@ -421,7 +471,7 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
         // The scoped controller must first consume the exact navigation event
         // and reconcile its independent policy/audit receipt. Never silently
         // drain navigation here just to make the resource lease look closed.
-        if self.navigation.is_some() {
+        if self.navigation.is_some() || self.action.is_some() {
             return Ok(None);
         }
         if let Some((pending, _)) = self.read.as_mut() {

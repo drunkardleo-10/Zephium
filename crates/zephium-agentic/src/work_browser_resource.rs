@@ -1101,7 +1101,8 @@ pub use navigation::{
 mod action;
 pub use action::{
     WorkBrowserActionCompletion, WorkBrowserActionCompletionCallback,
-    WorkBrowserActionCompletionOwner, WorkBrowserActionDispatch, WorkBrowserActionEvent,
+    WorkBrowserActionCompletionOwner, WorkBrowserActionDeliveryCompletion,
+    WorkBrowserActionDeliveryTicket, WorkBrowserActionDispatch, WorkBrowserActionEvent,
     WorkBrowserActionRefusal, WorkBrowserActionRequest,
 };
 

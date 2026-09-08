@@ -1,4 +1,4 @@
-//! Retained read/discovery backing for the common Work controller.
+//! Retained observation, navigation and authorized-action backing for Work.
 
 use super::*;
 use std::task::Waker;
@@ -7,6 +7,29 @@ use std::task::Waker;
 /// operation slots outside the worker; no native port or registry is exposed.
 /// Registration is immutable, bounded and precedes every native dispatch.
 pub trait AgentWorkRetainedBrowser: Send {
+    /// Whether the exact backing owns authorized semantic action callbacks.
+    /// This is ownership support only; the task and policy still approve
+    /// effects, and the native platform may reject an unsupported recipe.
+    fn supports_actions(&self) -> bool {
+        false
+    }
+    /// Dispatches one existing policy-authorized recipe under the current lease.
+    /// Synchronous refusal transfers no native callback obligation.
+    fn dispatch_action(
+        &mut self,
+        _request: SemanticActionNativeRequest,
+        _now: AgentPolicyInstant,
+    ) -> ContextDispatch {
+        ContextDispatch::Unsupported
+    }
+    /// Accounts the resource callback and returns the original native terminal
+    /// to the independent policy owner, including after lease revocation.
+    fn poll_action(
+        &mut self,
+        _now: AgentPolicyInstant,
+    ) -> Result<Option<SemanticActionNativeSettlement>, AgentWorkFailure> {
+        Err(AgentWorkFailure::Contract)
+    }
     /// Original-row description only; this is not read admission.
     fn binding(&self) -> &WorkBrowserReadBinding;
     /// Installs the one original worker listener, without replacing the Work sink.
@@ -78,7 +101,7 @@ pub trait AgentWorkRetainedBrowser: Send {
     /// Seals this lease before dispatch; never stops loading or destroys the page.
     fn begin_revocation(&mut self) -> Result<(), AgentWorkFailure>;
     /// Drains original read/revocation/delivery owners after the caller consumed
-    /// any original navigation terminal. Wake is not a receipt.
+    /// any original navigation/action terminal. Wake is not a receipt.
     fn poll_revocation(
         &mut self,
         now: AgentPolicyInstant,
@@ -450,6 +473,26 @@ impl WorkNative {
         if self.retained.is_none() {
             return self.next_event(worker, browser).await;
         }
+        self.next_retained_operation_event(worker, browser, false)
+            .await
+    }
+    pub(super) async fn next_action_event(
+        &mut self,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+    ) -> Result<AgentRuntimeEvent, AgentWorkFailure> {
+        if self.retained.is_none() {
+            return self.next_event(worker, browser).await;
+        }
+        self.next_retained_operation_event(worker, browser, true)
+            .await
+    }
+    async fn next_retained_operation_event(
+        &mut self,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        action: bool,
+    ) -> Result<AgentRuntimeEvent, AgentWorkFailure> {
         self.check_control(worker, browser)?;
         let clock = self
             .clock
@@ -474,7 +517,19 @@ impl WorkNative {
                         .map_err(|_| AgentWorkFailure::Contract)
                         .and_then(|now| {
                             retained.check_health(now)?;
-                            retained.poll_navigation(now)
+                            if action {
+                                retained.poll_action(now).map(|terminal| {
+                                    terminal.map(AgentRuntimeEvent::SemanticActionTerminal)
+                                })
+                            } else {
+                                retained.poll_navigation(now).map(|terminal| {
+                                    terminal.map(|terminal| {
+                                        AgentRuntimeEvent::NativeTerminal(
+                                            ContextNativeEvent::NavigationSettled(terminal),
+                                        )
+                                    })
+                                })
+                            }
                         }) {
                         Ok(None) => std::task::Poll::Pending,
                         Ok(Some(terminal)) => std::task::Poll::Ready(Ok(Ok(terminal))),
@@ -485,9 +540,7 @@ impl WorkNative {
             })
             .await;
         match result {
-            Ok(Ok(Ok(terminal))) => Ok(AgentRuntimeEvent::NativeTerminal(
-                ContextNativeEvent::NavigationSettled(terminal),
-            )),
+            Ok(Ok(Ok(terminal))) => Ok(terminal),
             Ok(Ok(Err(error))) => Err(error),
             Ok(Err(Ok(
                 AgentRuntimeEvent::CancellationRequested | AgentRuntimeEvent::ShutdownRequested,
@@ -592,6 +645,49 @@ impl WorkNative {
 }
 
 impl AgentWorkController {
+    /// Reconcile resource debt after stop without inventing effect verification.
+    /// The original policy owner and native terminal remain in recovery whenever
+    /// cancellation prevents fresh post-action verification.
+    pub(super) async fn drain_retained_action(state: &mut WorkState, deadline: Instant) {
+        if state.native.retained.is_none() || !state.native.action_pending {
+            return;
+        }
+        let Some(clock) = state.native.clock.clone() else {
+            return;
+        };
+        let Some(browser) = state.native.retained.as_mut() else {
+            return;
+        };
+        let terminal = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            std::future::poll_fn(|_| {
+                match clock
+                    .now()
+                    .map_err(|_| AgentWorkFailure::Contract)
+                    .and_then(|now| browser.poll_action(now))
+                {
+                    Ok(None) => std::task::Poll::Pending,
+                    Ok(Some(terminal)) => std::task::Poll::Ready(Some(terminal)),
+                    Err(_) => std::task::Poll::Ready(None),
+                }
+            }),
+        )
+        .await
+        .ok()
+        .flatten();
+        if let Some(terminal) = terminal {
+            if state.session.as_ref().is_some_and(|session| {
+                session.action.as_ref().is_some_and(|action| {
+                    action.accepts_settlement(&session.action_executions, &terminal)
+                })
+            }) {
+                state.native.action_pending = false;
+            }
+            let _ = state
+                .native
+                .retain(AgentRuntimeEvent::SemanticActionTerminal(terminal));
+        }
+    }
     /// Resource receipt and policy/audit receipt are two independent owners.
     /// Stop cannot discard the former while leaving the latter unaccounted.
     pub(super) async fn drain_retained_navigation(state: &mut WorkState, deadline: Instant) {

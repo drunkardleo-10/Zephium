@@ -816,7 +816,10 @@ impl AgentWorkController {
         if retained.is_some()
             && (input.durable_result
                 || extraction_schema.is_none()
-                || actions_before_extraction
+                || (actions_before_extraction
+                    && !retained
+                        .as_ref()
+                        .is_some_and(|browser| browser.supports_actions()))
                 || subtree_extraction
                 || navigation_target.is_some()
                 || navigation_route.is_some()
@@ -2034,12 +2037,16 @@ impl AgentWorkController {
             state.refresh_account(worker, browser)?;
             let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
             let id = state.native.identity.id();
-            let automation = state
-                .native
-                .contexts()?
-                .automation_state(id)
-                .map_err(|_| AgentWorkFailure::Context)?;
             let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
+            let automation = if let Some(retained) = &state.native.retained {
+                retained.automation_state(now)?
+            } else {
+                state
+                    .native
+                    .contexts()?
+                    .automation_state(id)
+                    .map_err(|_| AgentWorkFailure::Context)?
+            };
             let request = session
                 .authorize_action(
                     proposal,
@@ -2048,8 +2055,14 @@ impl AgentWorkController {
                     SemanticActionExecutionInstant::from_millis(now.millis()),
                 )
                 .map_err(AgentWorkFailure::Browser)?;
-            let dispatch =
-                browser.execute_semantic_action(request, worker.semantic_action_completion());
+            let dispatch = if let Some(retained) = &mut state.native.retained {
+                retained.dispatch_action(request, now)
+            } else {
+                browser.execute_semantic_action(request, worker.semantic_action_completion())
+            };
+            // Native ownership starts at dispatch, before fallible policy
+            // accounting. Recovery must drain even if that accounting fails.
+            state.native.action_pending = matches!(dispatch, ContextDispatch::Scheduled);
             session
                 .action
                 .as_mut()
@@ -2062,8 +2075,7 @@ impl AgentWorkController {
                 .map_err(|error| {
                     AgentWorkFailure::Browser(AgentBrowserProviderError::Action(error))
                 })?;
-            state.native.action_pending = true;
-            let terminal = match state.native.next_event(worker, browser).await? {
+            let terminal = match state.native.next_action_event(worker, browser).await? {
                 AgentRuntimeEvent::SemanticActionTerminal(terminal)
                     if session.action.as_ref().is_some_and(|action| {
                         action.accepts_settlement(&session.action_executions, &terminal)
@@ -2895,6 +2907,7 @@ impl AgentWorkController {
             // preserving foreign or otherwise unaccounted terminals in order.
             Self::reconcile_deferred_audit(state);
             Self::drain_retained_navigation(state, deadline).await;
+            Self::drain_retained_action(state, deadline).await;
         }
         // Drain already-dispatched callbacks only; no action or provider retry.
         while state.native.operation.is_some()

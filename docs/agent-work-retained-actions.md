@@ -1,10 +1,11 @@
 # Retained semantic action ownership
 
 The retained resource core now owns pending semantic actions alongside pending
-reads and navigations. This is the resource and native-port contract for the next
-action-capable Work integration. The shipping retained discovery task remains
-read-only: its effect assessor, controller admission, app lease adapter and
-native executor do not yet admit retained actions.
+reads and navigations. The app lease adapter and common controller now connect
+this ownership to the existing action authorization, execution accounting, fresh
+observation and verification loop. Retained discovery remains read-only: its
+task assessor refuses effects, and discovery admission refuses action-capable
+tasks. A separate trusted task must supply the actual effect contract.
 
 ## Authority and lifecycle
 
@@ -47,6 +48,22 @@ payload, worker, timer or unbounded queue.
 
 ## Native and controller integration contract
 
+See [native retained action integration](agent-work-native-actions.md) for the
+engine guard, native execution and platform-specific evidence.
+
+Native callback arrival is not callback return. Each action carries a separate
+move-only delivery ticket and native completion, using the existing bounded
+delivery rendezvous behind action-specific types. The app registers one listener
+before dispatch and retains the terminal until the exact native callback has
+returned and its action/task guard permits a new observation. Native publishes
+that physical fact and wakes outside locks. A missing publisher, callback panic,
+or lost notification remains unproven. Revocation does not erase the original
+terminal or prevent publication of a genuine physical return during cleanup.
+
+This barrier closes an in-process race: an awakened worker could otherwise see
+the terminal and request fresh state while native still holds the action guard.
+Neither time delays nor automatic observation retries substitute for the barrier.
+
 `AgentBrowserPort::work_resource_act` defaults to lossless `Unsupported`.
 Enabling an adapter requires all of the following together:
 
@@ -72,6 +89,20 @@ contract; it is not a safe generic assessor for arbitrary production websites
 with autosave, submission or account actions. The product must supply the actual
 approval contract for those effects.
 
+`AgentWorkFormTask::with_extraction` composes that exact trusted goal contract
+with a source-bound result. The controller exposes actions only while those
+goals are unfinished, requires independent post-action observation and effect
+verification, and then switches to extraction. A model-proposed field value,
+accessible label, or extraction response cannot create or change a goal.
+
+Cancellation/human takeover seals admission before waiting for outstanding
+native work. The app still drains the original action and physical-return
+owners. If stop prevents post-action verification, the controller retains the
+original policy reservation and terminal in recovery; it does not claim a
+verified effect or retry the action. Resource drain and policy closure remain
+independent. If the controller disappears, the app retains an orphaned native
+terminal rather than throwing effect evidence away during physical cleanup.
+
 ## Evidence
 
 Deterministic core tests exercise exact native/coordinator receipt preservation,
@@ -80,4 +111,12 @@ checkpoints, foreign resources, deadline boundaries, synchronous refusal,
 substituted terminals, revocation, expiry, quarantine, clock regression, and
 destruction with a missing action callback. They isolate resource ownership;
 they do not claim native retained action execution or a successful real-site
-workflow. Those require the integration above and a bundled native witness.
+workflow. App loopback tests now additionally exercise the real common
+controller/provider/policy path: explicit local-write approval, one exact fill,
+fresh post-action verification, source-bound extraction, refusal without plan
+authority or with a different model-proposed value, synchronous native refusal,
+and cancellation/human takeover with an already-applied late terminal. A
+deterministic poll inside the native callback proves terminal arrival cannot
+release action debt before the physical-return publication. These tests use
+isolated native and model fixtures; a bundled native witness and real-site
+qualification remain separate evidence requirements.

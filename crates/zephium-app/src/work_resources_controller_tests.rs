@@ -21,6 +21,9 @@ mod product_tests;
 #[path = "work_resources_navigation_tests.rs"]
 mod navigation_tests;
 
+#[path = "work_resources_action_tests.rs"]
+mod action_tests;
+
 struct Clock(AtomicU64);
 impl TerraControllerClock for Clock {
     fn now(&self) -> Result<AgentPolicyInstant, TerraControllerClockError> {
@@ -85,6 +88,18 @@ struct Native {
     before_publication: Mutex<Option<mpsc::Receiver<()>>>,
     final_document: Mutex<Option<ContextNavigationTarget>>,
     discovery: AtomicBool,
+    form_actions: AtomicBool,
+    form_applied: AtomicBool,
+    actions: AtomicUsize,
+    hold_action: AtomicBool,
+    reject_action: AtomicBool,
+    before_action_return: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    action: Mutex<
+        Option<(
+            WorkBrowserActionRequest,
+            WorkBrowserActionCompletionCallback,
+        )>,
+    >,
     navigation_count: AtomicUsize,
     hold_navigation: AtomicBool,
     reject_navigation: AtomicBool,
@@ -290,13 +305,41 @@ impl AgentBrowserPort for Native {
         {
             *self.read.lock().unwrap() = Some((request, callback));
         } else {
-            if self.discovery.load(Ordering::Acquire) {
+            if self.form_actions.load(Ordering::Acquire) {
+                action_tests::read_result(self, request, callback);
+            } else if self.discovery.load(Ordering::Acquire) {
                 navigation_tests::read_result(self, request, callback);
             } else {
                 Self::read_result(request, callback);
             }
         }
         WorkBrowserObservationDispatch::Scheduled
+    }
+    fn work_resource_act(
+        &self,
+        request: WorkBrowserActionRequest,
+        callback: WorkBrowserActionCompletionCallback,
+    ) -> WorkBrowserActionDispatch {
+        assert!(self.form_actions.load(Ordering::Acquire));
+        self.actions.fetch_add(1, Ordering::AcqRel);
+        if self.reject_action.load(Ordering::Acquire) {
+            drop(callback);
+            return WorkBrowserActionDispatch::Rejected {
+                request: Box::new(request),
+                failure: ContextPortFailure::NativeRefused,
+            };
+        }
+        if self.hold_action.load(Ordering::Acquire) {
+            assert!(self
+                .action
+                .lock()
+                .unwrap()
+                .replace((request, callback))
+                .is_none());
+        } else {
+            action_tests::action_result(self, request, callback);
+        }
+        WorkBrowserActionDispatch::Scheduled
     }
     fn work_resource_navigate(
         &self,
@@ -579,7 +622,30 @@ fn input_for_context_authority_with_document_policy(
     (deadline, discovery): (Instant, Option<AgentNavigationDiscovery>),
     document_policy: WorkBrowserDocumentPolicy,
 ) -> AgentWorkRunInput {
-    let effects = AgentEffectScope::try_new(&[SemanticEffectClass::Read]).unwrap();
+    input_for_context_effects(
+        identity,
+        origin,
+        clock,
+        storage,
+        target,
+        budget,
+        (deadline, discovery),
+        document_policy,
+        AgentEffectScope::try_new(&[SemanticEffectClass::Read]).unwrap(),
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn input_for_context_effects(
+    identity: ContextIdentity,
+    origin: SemanticOrigin,
+    clock: Arc<dyn TerraControllerClock>,
+    storage: ContextProfileStorageClass,
+    target: ContextNavigationTarget,
+    budget: AgentRunBudget,
+    (deadline, discovery): (Instant, Option<AgentNavigationDiscovery>),
+    document_policy: WorkBrowserDocumentPolicy,
+    effects: AgentEffectScope,
+) -> AgentWorkRunInput {
     let node = AgentPlanNodeId::generate();
     let expires = AgentPolicyInstant::from_millis(600_002);
     let authority = AgentPlanNodeAuthority::try_new(

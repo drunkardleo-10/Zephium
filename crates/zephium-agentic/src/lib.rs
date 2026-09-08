@@ -56,7 +56,8 @@ mod work_browser_resource;
 pub use work_browser_document::WorkBrowserDocumentPolicy;
 pub use work_browser_resource::{
     WorkBrowserActionCompletion, WorkBrowserActionCompletionCallback,
-    WorkBrowserActionCompletionOwner, WorkBrowserActionDispatch, WorkBrowserActionEvent,
+    WorkBrowserActionCompletionOwner, WorkBrowserActionDeliveryCompletion,
+    WorkBrowserActionDeliveryTicket, WorkBrowserActionDispatch, WorkBrowserActionEvent,
     WorkBrowserActionRefusal, WorkBrowserActionRequest, WorkBrowserExecutionLease,
     WorkBrowserLeaseDeliveryCompletion, WorkBrowserLeaseDeliveryNotification,
     WorkBrowserLeaseDeliveryPollError, WorkBrowserLeaseDeliveryProof,

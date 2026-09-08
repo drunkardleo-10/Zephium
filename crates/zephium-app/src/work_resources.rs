@@ -24,6 +24,12 @@ mod navigation;
 use navigation::PendingNavigation;
 
 #[cfg(feature = "work-execution")]
+#[path = "work_resources_action.rs"]
+mod action;
+#[cfg(feature = "work-execution")]
+use action::PendingAction;
+
+#[cfg(feature = "work-execution")]
 #[path = "work_resources_application.rs"]
 mod application;
 
@@ -108,6 +114,8 @@ struct Resource {
     flights: AtomicUsize,
     reads: AtomicUsize,
     navigations: AtomicUsize,
+    actions: AtomicUsize,
+    orphaned_actions: AtomicUsize,
     reusable: AtomicBool,
     slots: Mutex<Vec<OwnedSlot>>,
     facade: Mutex<Option<WorkBrowserExecutionLease>>,
@@ -149,7 +157,7 @@ impl Resource {
                 index += 1;
             }
         }
-        // One lifecycle, one document operation (read OR navigation), and one
+        // One lifecycle, one document operation (read/navigation/action), and one
         // overtaking destruction maximum; the core enforces the exclusion.
         let result = if slots.len() >= 3 {
             self.fail();
@@ -363,6 +371,8 @@ impl WorkResourceOwner {
             flights: AtomicUsize::new(0),
             reads: AtomicUsize::new(0),
             navigations: AtomicUsize::new(0),
+            actions: AtomicUsize::new(0),
+            orphaned_actions: AtomicUsize::new(0),
             reusable: AtomicBool::new(false),
             slots: Mutex::new(Vec::with_capacity(3)),
             facade: Mutex::new(None),
@@ -383,6 +393,7 @@ impl WorkResourceOwner {
         let resource = self.shared.resource(join)?;
         self.shared.current(&resource)?;
         if resource.flights.load(Ordering::Acquire) != 0
+            || resource.orphaned_actions.load(Ordering::Acquire) != 0
             || !resource.reusable.load(Ordering::Acquire)
         {
             return Err(Refusal::Busy);
@@ -442,6 +453,7 @@ impl WorkResourceOwner {
     ) -> Result<WorkBrowserResourceIdentity, Refusal> {
         let resource = self.shared.resource(join)?;
         if resource.flights.load(Ordering::Acquire) != 0
+            || resource.orphaned_actions.load(Ordering::Acquire) != 0
             || !resource.lock_local(&resource.health)?.reporter_retired()
         {
             return Err(Refusal::Busy);
@@ -473,6 +485,7 @@ impl WorkResourceOwner {
             && self.shared.lock_resources().is_ok_and(|resources| {
                 resources.values().all(|resource| {
                     resource.flights.load(Ordering::Acquire) == 0
+                        && resource.orphaned_actions.load(Ordering::Acquire) == 0
                         && resource.lock_local(&resource.health).is_ok_and(|health| {
                             health.reporter_retired()
                                 && matches!(
@@ -669,6 +682,7 @@ struct Flight<T> {
     contradictory: bool,
     read: bool,
     navigation: bool,
+    action: bool,
 }
 impl<T: Send + 'static> Flight<T> {
     fn new(
@@ -702,6 +716,7 @@ impl<T: Send + 'static> Flight<T> {
                 contradictory: false,
                 read,
                 navigation: false,
+                action: false,
             },
             callback,
         )
@@ -741,6 +756,9 @@ impl<T: Send + 'static> Flight<T> {
             }
             if self.navigation {
                 resource.navigations.fetch_sub(1, Ordering::AcqRel);
+            }
+            if self.action {
+                resource.actions.fetch_sub(1, Ordering::AcqRel);
             }
         }
     }
@@ -853,7 +871,8 @@ impl LifecycleOperation {
         // core's zero-read revocation terminal; never infer drain from order.
         if self.delivery.is_some()
             && (resource.reads.load(Ordering::Acquire) != 0
-                || resource.navigations.load(Ordering::Acquire) != 0)
+                || resource.navigations.load(Ordering::Acquire) != 0
+                || resource.actions.load(Ordering::Acquire) != 0)
         {
             return Ok(None);
         }
@@ -1056,6 +1075,8 @@ enum OwnedSlot {
     Read(Arc<Mutex<ReadOperation>>),
     #[cfg(feature = "work-execution")]
     Navigation(Arc<Mutex<navigation::NavigationOperation>>),
+    #[cfg(feature = "work-execution")]
+    Action(Arc<Mutex<action::ActionOperation>>),
 }
 impl OwnedSlot {
     fn is_poisoned(&self) -> bool {
@@ -1064,6 +1085,8 @@ impl OwnedSlot {
             Self::Read(slot) => slot.is_poisoned(),
             #[cfg(feature = "work-execution")]
             Self::Navigation(slot) => slot.is_poisoned(),
+            #[cfg(feature = "work-execution")]
+            Self::Action(slot) => slot.is_poisoned(),
         }
     }
     fn finished(&self, resource: &Resource) -> bool {
@@ -1089,6 +1112,15 @@ impl OwnedSlot {
             #[cfg(feature = "work-execution")]
             Self::Navigation(slot) => match slot.try_lock() {
                 Ok(slot) => slot.flight.finished,
+                Err(TryLockError::Poisoned(_)) => {
+                    resource.fail();
+                    false
+                }
+                Err(TryLockError::WouldBlock) => false,
+            },
+            #[cfg(feature = "work-execution")]
+            Self::Action(slot) => match slot.try_lock() {
+                Ok(slot) => slot.finished(),
                 Err(TryLockError::Poisoned(_)) => {
                     resource.fail();
                     false
@@ -1124,6 +1156,11 @@ impl OwnedSlot {
                     // The lost controller policy receipt remains recovery debt.
                     let _ = slot.poll(shared, resource, now);
                 }
+            }
+            #[cfg(feature = "work-execution")]
+            Self::Action(slot) => {
+                let mut slot = resource.lock_local(slot)?;
+                slot.drain_abandoned(shared, resource, now);
             }
         }
         Ok(())

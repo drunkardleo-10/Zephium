@@ -136,6 +136,40 @@ fn terminal(request: SemanticActionNativeRequest, tick: u64) -> SemanticActionNa
 }
 
 #[test]
+fn action_delivery_requires_original_physical_return_and_is_not_terminal_arrival() {
+    let mut f = Fixture::new();
+    let (_, _, native) = f.native(1, 3);
+    let mut request = f.rows.prepare_action(&f.lease, native, now(3)).unwrap();
+    let mut ticket = request.take_delivery_ticket().unwrap();
+    assert!(request.take_delivery_ticket().is_none());
+    let (native, mut owner) = request.into_parts();
+    let delivery = owner.take_delivery_completion().unwrap();
+    assert!(owner.take_delivery_completion().is_none());
+    let completion = owner.settle(terminal(native, 4)).unwrap();
+    assert_eq!(ticket.try_take_returned().unwrap(), None);
+    let _ = f.rows.settle_action(completion, now(4)).unwrap();
+    assert_eq!(ticket.try_take_returned().unwrap(), None);
+    assert!(delivery.publish_returned());
+    assert_eq!(ticket.try_take_returned().unwrap(), Some(true));
+    assert_eq!(
+        ticket.try_take_returned().unwrap_err(),
+        WorkBrowserLeaseDeliveryPollError::Consumed
+    );
+}
+
+#[test]
+fn lost_action_delivery_publisher_is_explicitly_unproven() {
+    let mut f = Fixture::new();
+    let (_, _, native) = f.native(1, 3);
+    let mut request = f.rows.prepare_action(&f.lease, native, now(3)).unwrap();
+    let mut ticket = request.take_delivery_ticket().unwrap();
+    let (_, mut owner) = request.into_parts();
+    drop(owner.take_delivery_completion());
+    assert_eq!(ticket.try_take_returned().unwrap(), Some(false));
+    assert!(f.rows.row_mut(&f.resource).unwrap().action.is_some());
+}
+
+#[test]
 fn action_serializes_page_operations_and_requires_fresh_observation_after_terminal() {
     let mut f = Fixture::new();
     let (mut coordinator, reservation, native) = f.native(1, 3);

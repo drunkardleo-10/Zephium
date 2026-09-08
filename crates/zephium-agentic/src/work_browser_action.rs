@@ -42,8 +42,14 @@ impl<T> WorkBrowserActionRefusal<T> {
 pub struct WorkBrowserActionRequest {
     join: ActionJoin,
     native: SemanticActionNativeRequest,
+    delivery: super::delivery::DeliveryDispatch,
+    ticket: Option<WorkBrowserActionDeliveryTicket>,
 }
 impl WorkBrowserActionRequest {
+    /// App-owned exact callback-return barrier, registered before dispatch.
+    pub fn take_delivery_ticket(&mut self) -> Option<WorkBrowserActionDeliveryTicket> {
+        self.ticket.take()
+    }
     /// Exact resource incarnation and run lease, not account/effect authority.
     pub const fn lease(&self) -> &WorkBrowserExecutionLease {
         &self.join.lease
@@ -63,7 +69,13 @@ impl WorkBrowserActionRequest {
     ) {
         (
             self.native,
-            WorkBrowserActionCompletionOwner { join: self.join },
+            WorkBrowserActionCompletionOwner {
+                join: self.join,
+                delivery: self
+                    .delivery
+                    .completion
+                    .map(WorkBrowserActionDeliveryCompletion),
+            },
         )
     }
 }
@@ -74,8 +86,14 @@ impl WorkBrowserActionRequest {
 #[derive(Debug)]
 pub struct WorkBrowserActionCompletionOwner {
     join: ActionJoin,
+    delivery: Option<WorkBrowserActionDeliveryCompletion>,
 }
 impl WorkBrowserActionCompletionOwner {
+    /// Native must retain this until the original callback returned and its
+    /// action guard permits a fresh observation. Dropping it proves no return.
+    pub fn take_delivery_completion(&mut self) -> Option<WorkBrowserActionDeliveryCompletion> {
+        self.delivery.take()
+    }
     /// Joins only the original native terminal, including native failure. A
     /// substituted terminal returns both operands without clearing resource debt.
     pub fn settle(
@@ -173,7 +191,15 @@ impl WorkBrowserResources {
             Ok(join)
         })();
         match checked {
-            Ok(join) => Ok(WorkBrowserActionRequest { join, native }),
+            Ok(join) => {
+                let (delivery, ticket) = super::delivery::track(lease.clone());
+                Ok(WorkBrowserActionRequest {
+                    join,
+                    native,
+                    delivery,
+                    ticket: Some(WorkBrowserActionDeliveryTicket(ticket)),
+                })
+            }
             Err(error) => Err(WorkBrowserActionRefusal::new(error, native)),
         }
     }
@@ -241,6 +267,44 @@ impl WorkBrowserResources {
             }),
             Err(error) => Err(WorkBrowserActionRefusal::new(error, completion)),
         }
+    }
+}
+
+/// Exact action callback-return ticket. Deliberately cannot produce a lease
+/// retirement proof or grant effect authority.
+#[must_use]
+#[derive(Debug)]
+pub struct WorkBrowserActionDeliveryTicket(super::WorkBrowserLeaseDeliveryTicket);
+impl WorkBrowserActionDeliveryTicket {
+    /// Register the sole app notification listener before native dispatch.
+    pub fn register_waker(
+        &mut self,
+        waker: std::task::Waker,
+    ) -> Result<(), super::WorkBrowserLeaseDeliveryPollError> {
+        self.0.register_waker(waker)
+    }
+    /// Consume only the original physical-return fact. False is unproven.
+    pub fn try_take_returned(
+        &mut self,
+    ) -> Result<Option<bool>, super::WorkBrowserLeaseDeliveryPollError> {
+        self.0
+            .try_take()
+            .map(|receipt| receipt.map(|receipt| receipt.returned()))
+    }
+}
+/// Native action callback-return publisher, unrelated to lease retirement.
+#[must_use]
+#[derive(Debug)]
+pub struct WorkBrowserActionDeliveryCompletion(super::WorkBrowserLeaseDeliveryCompletion);
+impl WorkBrowserActionDeliveryCompletion {
+    /// Take before terminal callback; invoke outside native locks after publish.
+    pub fn take_notification(&mut self) -> Option<super::WorkBrowserLeaseDeliveryNotification> {
+        self.0.take_notification()
+    }
+    /// Call only after the exact callback returned normally and action/native
+    /// task debt no longer blocks the successor observation.
+    pub fn publish_returned(self) -> bool {
+        self.0.publish_returned()
     }
 }
 

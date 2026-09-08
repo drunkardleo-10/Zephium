@@ -1,7 +1,7 @@
 //! Trusted, bounded local form preparation; not a plan interpreter or submit tool.
 use zephium_agentic::*;
 
-use crate::{AgentWorkFailure, AgentWorkTask, AgentWorkTaskProgress};
+use crate::{AgentWorkExtractionTask, AgentWorkFailure, AgentWorkTask, AgentWorkTaskProgress};
 
 #[cfg(test)]
 #[path = "work_form_tests.rs"]
@@ -126,6 +126,21 @@ pub struct AgentWorkFormTask {
     refused: bool,
 }
 impl AgentWorkFormTask {
+    /// Follow explicitly trusted local form preparation with a source-bound
+    /// result from the fresh completed page. This retains the same goals/account
+    /// and local-only effect contract; it does not admit submission or autosave.
+    pub fn with_extraction(
+        self,
+        fields: Vec<SemanticExtractionFieldSchema>,
+    ) -> Result<AgentWorkFormExtractionTask, AgentWorkFailure> {
+        let extraction = AgentWorkExtractionTask::try_new(fields, self.account)?;
+        Ok(AgentWorkFormExtractionTask {
+            form: self,
+            extraction,
+            ready: None,
+            complete: false,
+        })
+    }
     /// Attests local-only preparation for these exact trusted fields and page.
     /// The product must independently establish that changing these fields is
     /// local, non-submitting work; neither an action kind nor an origin allowlist
@@ -293,6 +308,69 @@ impl AgentWorkFormTask {
         } else {
             AgentWorkTaskProgress::Continue
         })
+    }
+}
+
+/// Explicit local-preparation goals followed by one current-page extraction.
+/// The constructor's trusted local-only assurance and policy approval remain
+/// mandatory. Arbitrary website fields must not be admitted through this task.
+pub struct AgentWorkFormExtractionTask {
+    form: AgentWorkFormTask,
+    extraction: AgentWorkExtractionTask,
+    ready: Option<SemanticObservationId>,
+    complete: bool,
+}
+impl AgentWorkTask for AgentWorkFormExtractionTask {
+    fn allows_actions_before_extraction(&self) -> bool {
+        true
+    }
+    fn allows_baseline_read(&self) -> bool {
+        self.form.allows_baseline_read()
+    }
+    fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
+        self.extraction.extraction_schema()
+    }
+    fn evaluate(
+        &mut self,
+        observation: &SemanticObservation,
+    ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+        if self.ready.is_some() || self.complete {
+            return Err(AgentWorkFailure::Contract);
+        }
+        match self.form.evaluate(observation)? {
+            AgentWorkTaskProgress::Complete => {
+                self.ready = Some(observation.request().id());
+                Ok(AgentWorkTaskProgress::ReadyForExtraction)
+            }
+            progress => Ok(progress),
+        }
+    }
+    fn assess(
+        &self,
+        action: &SemanticPreparedAction,
+    ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+        if self.ready.is_some() || self.complete {
+            return Err(AgentWorkFailure::Contract);
+        }
+        self.form.assess(action)
+    }
+    fn attest_account(
+        &self,
+        context: ContextJoin,
+        now: AgentPolicyInstant,
+    ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
+        self.form.attest_account(context, now)
+    }
+    fn accept_extraction(
+        &mut self,
+        result: &SemanticExtractionResult<'_>,
+    ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+        if self.complete || self.ready != Some(result.observation()) {
+            return Err(AgentWorkFailure::Contract);
+        }
+        let progress = self.extraction.accept_extraction(result)?;
+        self.complete = true;
+        Ok(progress)
     }
 }
 
