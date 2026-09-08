@@ -1,9 +1,11 @@
 # Retained heterogeneous commerce objective
 
-Status: composition prepared; **no live model run or native commerce success
-claimed**. This is the next public workflow after the retained Luna Svelte
-kernel qualification. It deliberately changes the website and information
-shape without changing the agent kernel or adding a shop adapter.
+Status: live macOS/Luna workflow exercised; **no useful commerce success
+claimed**. The retained browser, model, navigation, inspection, policy and
+shutdown path are real, but the current read-only workflow has not yet produced
+a source-valid purchase brief. This is the next public workflow after the
+retained Luna Svelte kernel qualification. It deliberately changes the website
+and information shape without adding a shop adapter.
 
 ## Objective and scope
 
@@ -88,12 +90,23 @@ original 4,096-byte summary / important_claims / caveats value ceiling remains.
 Only exact current-document source evidence can be mapped; catalog facts may
 guide selection but must not silently become current-page citations later.
 
-Retained commerce run twenty-fifth exposed a budget-contract mismatch: seven
-model decisions and one navigation had consumed all eight policy operations,
-although the decision guidance still promised a mapper call. Extract was
-proposed but mapping admission failed before transport. The deterministic
-controller reproduction reaches the same `Browser(Authority)` with eight
-operations; the older budget regression used 24 and could not expose it.
+## Live macOS evidence
+
+Run twenty-four, pinned to `72bc603`, selected Tower Bridge from the observed
+catalog, navigated once and used Locate plus bounded snapshots. Seven planning
+calls consumed 33,838 input and 536 output tokens in 31.417 seconds, costing
+5,911 micro-USD. The final Locate could not leave both another decision and the
+mapper inside the fixed call ceiling, so the controller closed with
+`Browser(TurnLimit)`. This was a real planning-budget failure, not a useful
+answer.
+
+Run twenty-five, pinned to `1d208d3`, added the final-decision contract and
+reached Extract after one navigation and seven planning calls. Mapping was not
+admitted: the seven calls plus navigation had already consumed all eight policy
+operations even though the separate model-call guidance still promised a
+mapper. The controller closed with `Browser(Authority)`. A deterministic test
+reproduced the same mismatch; the older regression's 24-operation fixture had
+concealed it.
 
 Decision preparation now derives its remaining allowance from both the fixed
 model-call ceiling and unreserved run/lease-node operations, before whole-input
@@ -104,6 +117,36 @@ manifest the corrected one-hop regression finishes with seven model calls
 including mapping plus one navigation, with source mapping and clean closure.
 No operation, call, token, cost, navigation or time ceiling was increased.
 This is deterministic evidence; live useful-result qualification remains pending.
+
+Run twenty-six was built from `da39480`; its executable SHA-256 is
+`3b55a7678c7d1c9e3adc05ec3203eba1208cf325e55aefb09762364ed00f9c05`
+and whole-bundle manifest SHA-256 is
+`aed7903014b0fa73b19342872b8e76fd42233dd40f5c0716ef2d642758ed72cd`.
+The corrected budget completed one navigation, six planning decisions and the
+reserved mapper in 27.161 seconds: 31,828 input and 844 output tokens, costing
+4,906 micro-USD. The route was Navigate, Locate, subtree Snapshot, initial
+Snapshot, TextSearch, Extract. Native resource retention and ordinary shutdown
+were clean.
+
+That run still failed correctly with `Extraction(SourceMissing)`. Its final
+TextSearch targeted the current main landmark with the literal query
+`price dimensions availability`; the bounded exact-word search returned no
+passage. Because progressive inspection currently replaces the active
+observation, terminal ZREAD contained zero source items. Luna's mapper invented
+`@r1` for its uncertainty statements, and native source validation rejected it;
+no artifact was published. The full evidence, including the preserved clean
+SQLite state, is under
+`/private/tmp/zephium-retained-commerce-twenty-sixth.k8g0jW`.
+
+Commit `bea7974` now refuses a required-field extraction with zero source
+fragments before counting or sending a mapper request. It also corrects the
+tool contract: TextSearch is case-insensitive exact-word OR matching without
+stemming or synonyms, so `availability` does not match `Available now` and
+`price` does not match an unlabeled currency amount. Neither correction claims
+to recover discarded evidence or complete the objective. The remaining generic
+work is bounded historical evidence with per-source provenance, separate from
+current action refs, followed by a retained action lifecycle for explicitly
+authorized page interactions.
 
 ## Deterministic gate
 
@@ -135,7 +178,7 @@ requested a clean stop of that tail and the waiting architecture, baseline and
 desktop gates. Their intentional exit 143 is not a test failure or a completed
 gate. Sequential integration verification remains required before live launch.
 
-## Live handoff (not executed by this slice)
+## Live qualification procedure
 
 Build only after review with the pinned Node 24.18.0 / pnpm 11.17.0 toolchain:
 
