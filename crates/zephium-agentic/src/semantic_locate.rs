@@ -1219,7 +1219,7 @@ fn normalize_into(output: &mut String, input: &str) {
     }
 }
 
-fn invalid_query_character(character: char) -> bool {
+pub(crate) fn invalid_query_character(character: char) -> bool {
     (character.is_control() && !matches!(character, '\t' | '\n' | '\r'))
         || matches!(
             character,

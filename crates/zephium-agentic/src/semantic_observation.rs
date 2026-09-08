@@ -223,7 +223,7 @@ impl fmt::Debug for SemanticScopeAnchor {
 }
 
 /// Closed model-requestable progressive expansion class.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SemanticExpansionKind {
     /// Expand one meaningful region or landmark.
     Region,
@@ -235,6 +235,48 @@ pub enum SemanticExpansionKind {
     Frame,
     /// Expand bounded readable context around a node.
     SurroundingText(SemanticTextWindow),
+    /// Find bounded visible source passages inside one acknowledged region.
+    TextSearch(SemanticTextSearch),
+}
+
+/// Bounded literal keywords for native visible-text discovery. Query text is
+/// never code, a selector, or an instruction to the page runtime.
+pub const MAX_SEMANTIC_TEXT_SEARCH_QUERY_BYTES: usize = 256;
+/// Independent source passages per query, excluding the scope anchor.
+pub const MAX_SEMANTIC_TEXT_SEARCH_RESULTS: usize = 16;
+/// Aggregate disclosed passage text in one keyword-directed observation.
+pub const MAX_SEMANTIC_TEXT_SEARCH_BYTES: usize = 8192;
+
+/// Validated literal keywords, deliberately redacted from diagnostics.
+#[derive(Clone, Eq, PartialEq)]
+pub struct SemanticTextSearch(String);
+
+impl SemanticTextSearch {
+    /// At most 256 UTF-8 bytes of plain search text, containing a word/number.
+    pub fn try_new(query: String) -> Result<Self, SemanticObservationError> {
+        if query.is_empty()
+            || query.len() > MAX_SEMANTIC_TEXT_SEARCH_QUERY_BYTES
+            || query.chars().any(|character| {
+                character.is_control() || crate::semantic_locate::invalid_query_character(character)
+            })
+            || crate::semantic_wire::looks_like_secret_value(&query)
+            || !query.chars().any(char::is_alphanumeric)
+        {
+            return Err(SemanticObservationError::ScopeIncompatible);
+        }
+        Ok(Self(query))
+    }
+
+    /// Original bounded query; content-bearing, never a diagnostic field.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SemanticTextSearch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SemanticTextSearch([redacted])")
+    }
 }
 
 /// Closed scope admitted to the immutable semantic runtime.
@@ -257,6 +299,13 @@ pub enum SemanticScope {
         /// Hard surrounding byte budget.
         window: SemanticTextWindow,
     },
+    /// Bounded visible text matching literal keywords below an exact region.
+    TextSearch {
+        /// Exact prior-observation region capability.
+        anchor: SemanticScopeAnchor,
+        /// Bounded content-bearing query.
+        query: SemanticTextSearch,
+    },
 }
 
 impl SemanticScope {
@@ -268,7 +317,8 @@ impl SemanticScope {
             | Self::Subtree(anchor)
             | Self::Table(anchor)
             | Self::Frame(anchor)
-            | Self::SurroundingText { anchor, .. } => Some(anchor),
+            | Self::SurroundingText { anchor, .. }
+            | Self::TextSearch { anchor, .. } => Some(anchor),
         }
     }
 }
@@ -286,6 +336,9 @@ impl fmt::Debug for SemanticScope {
                 .field("anchor", anchor)
                 .field("window", window)
                 .finish(),
+            Self::TextSearch { anchor, .. } => {
+                formatter.debug_tuple("TextSearch").field(anchor).finish()
+            }
         }
     }
 }
@@ -962,7 +1015,7 @@ impl SemanticObservation {
         let node = frame
             .resolve_node(reference, current_frame, frame.generation())
             .map_err(SemanticObservationError::Reference)?;
-        validate_expansion_role(node.role(), kind)?;
+        validate_expansion_role(node.role(), &kind)?;
         if kind == SemanticExpansionKind::Frame {
             let boundary = self
                 .boundaries
@@ -992,6 +1045,7 @@ impl SemanticObservation {
             SemanticExpansionKind::SurroundingText(window) => {
                 SemanticScope::SurroundingText { anchor, window }
             }
+            SemanticExpansionKind::TextSearch(query) => SemanticScope::TextSearch { anchor, query },
         };
         let generation = self
             .request
@@ -1064,7 +1118,7 @@ impl fmt::Debug for SemanticObservation {
 
 fn validate_expansion_role(
     role: SemanticRole,
-    kind: SemanticExpansionKind,
+    kind: &SemanticExpansionKind,
 ) -> Result<(), SemanticObservationError> {
     let compatible = match kind {
         SemanticExpansionKind::Region => matches!(
@@ -1078,6 +1132,13 @@ fn validate_expansion_role(
         SemanticExpansionKind::Table => role == SemanticRole::Table,
         SemanticExpansionKind::Frame => role == SemanticRole::FrameBoundary,
         SemanticExpansionKind::SurroundingText(_) => role != SemanticRole::FrameBoundary,
+        SemanticExpansionKind::TextSearch(_) => matches!(
+            role,
+            SemanticRole::Document
+                | SemanticRole::Landmark
+                | SemanticRole::Group
+                | SemanticRole::Dialog
+        ),
     };
     if compatible {
         Ok(())
@@ -1301,6 +1362,50 @@ mod tests {
             SemanticTextWindow::try_new(MAX_SEMANTIC_SURROUNDING_TEXT_BYTES, 1),
             Err(SemanticObservationError::Budget)
         );
+    }
+
+    #[test]
+    fn native_text_search_is_plain_bounded_content_and_region_scoped() {
+        for query in [
+            String::new(),
+            "x".repeat(257),
+            "é".repeat(129),
+            "width\ndepth".into(),
+            "$[]".into(),
+            "width\u{202e}depth".into(),
+            "width\u{200b}depth".into(),
+            "sk-private-search-query-value".into(),
+        ] {
+            assert!(SemanticTextSearch::try_new(query).is_err());
+        }
+        for query in [
+            "dimensions width depth",
+            "尺寸 宽度",
+            "89",
+            "price; document.cookie",
+        ] {
+            let search = SemanticTextSearch::try_new(query.into()).unwrap();
+            assert_eq!(search.as_str(), query);
+            assert!(!format!("{search:?}").contains(query));
+            let kind = SemanticExpansionKind::TextSearch(search);
+            for role in [
+                SemanticRole::Document,
+                SemanticRole::Landmark,
+                SemanticRole::Group,
+                SemanticRole::Dialog,
+            ] {
+                assert!(validate_expansion_role(role, &kind).is_ok());
+            }
+            for role in [
+                SemanticRole::Button,
+                SemanticRole::Heading,
+                SemanticRole::FrameBoundary,
+                SemanticRole::Password,
+            ] {
+                assert!(validate_expansion_role(role, &kind).is_err());
+            }
+        }
+        assert!(SemanticTextSearch::try_new("é".repeat(128)).is_ok());
     }
 
     #[test]

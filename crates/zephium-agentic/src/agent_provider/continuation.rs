@@ -2009,6 +2009,76 @@ mod tests {
                 )
                 .unwrap()
             };
+            let search_checkpoint = || {
+                continuation(json!({"kind":"text_search","target":"@a1","query":"width depth"}))
+                    .retire_for_observation(&previous, &config)
+                    .unwrap()
+            };
+            assert!(
+                continuation(json!({"kind":"text_search","target":"@a2","query":"width"}))
+                    .retire_for_observation(&previous, &config)
+                    .is_err()
+            );
+            let search_request = search_checkpoint()
+                .request(&previous, SemanticObservationId::new(2).unwrap())
+                .unwrap();
+            let search_forest = |request: crate::SemanticObservationRequest,
+                                 nodes: serde_json::Value| {
+                let snapshot = decode_semantic_snapshot(
+                    SemanticDecodeContext::new(
+                        SemanticInvocationId::new(2).unwrap(),
+                        previous.frames()[0].frame().clone(),
+                        SemanticSnapshotGeneration::new(2).unwrap(),
+                    ),
+                    &serde_json::to_vec(&json!({"v":1,"i":2,"g":2,"c":"complete","n":nodes}))
+                        .unwrap(),
+                )
+                .unwrap();
+                SemanticObservationAssembler::new(request, snapshot)
+                    .unwrap()
+                    .finish()
+                    .unwrap()
+            };
+            let search_nodes = || json!([{"k":1,"r":"document"},{"k":200,"r":"paragraph","t":"Width 89 cm; depth 19 cm."}]);
+            search_checkpoint()
+                .validate_successor(
+                    &previous,
+                    &search_forest(search_request.clone(), search_nodes()),
+                    model_request(context(), 2),
+                    &config,
+                )
+                .unwrap();
+            let changed_query =
+                continuation(json!({"kind":"text_search","target":"@a1","query":"different"}))
+                    .retire_for_observation(&previous, &config)
+                    .unwrap()
+                    .request(&previous, SemanticObservationId::new(2).unwrap())
+                    .unwrap();
+            assert!(search_checkpoint()
+                .validate_successor(
+                    &previous,
+                    &search_forest(changed_query, search_nodes()),
+                    model_request(context(), 2),
+                    &config
+                )
+                .is_err());
+            for nodes in [
+                json!([{"k":99,"r":"document"}]),
+                json!([{"k":1,"r":"document","o":16}]),
+                json!([{"k":1,"r":"document"},{"k":200,"p":0,"r":"paragraph","t":"false source hierarchy"}]),
+                json!([{"k":1,"r":"document"},{"k":200,"r":"link","t":"source","u":"https://example.test/"}]),
+                json!([{"k":1,"r":"document"},{"k":200,"r":"textbox","t":"editable source"}]),
+                json!([{"k":1,"r":"document"},{"k":200,"r":"paragraph","t":"x".repeat(4096)},{"k":201,"r":"paragraph","t":"y".repeat(4096)},{"k":202,"r":"paragraph","t":"overflow"}]),
+            ] {
+                assert!(search_checkpoint()
+                    .validate_successor(
+                        &previous,
+                        &search_forest(search_request.clone(), nodes),
+                        model_request(context(), 2),
+                        &config
+                    )
+                    .is_err());
+            }
             let scope = || json!({"kind":"surrounding_text","target":"@a2","before_bytes":0,"after_bytes":1024});
             let checkpoint = || {
                 continuation(scope())

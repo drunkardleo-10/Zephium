@@ -1415,7 +1415,80 @@ async function finish() {
     JSON.stringify(["Before 137", "Before 138", "Before 139"]),
   "rolling source eviction lost the nearest byte-bounded suffix");
 
+  // Query-directed discovery must reach visible sources after an initially
+  // saturated inventory, while staying inside its exact region and refusing
+  // hidden, editable, credential and frame descendants.
+  body._children.values = [];
+  const searchable = body.append(new Element("main"));
+  for (let index = 0; index < 180; index += 1) {
+    searchable.append(new Element("button")).append(new CharacterData(`Furniture ${index}`));
+  }
+  const dimensionParagraph = searchable.append(new Element("p"));
+  dimensionParagraph.rect = { x: 0, y: 6000, width: 600, height: 30 };
+  dimensionParagraph.append(new CharacterData("Dimensions: width "));
+  dimensionParagraph.append(new Element("span")).append(new CharacterData("89 cm"));
+  dimensionParagraph.append(new CharacterData("; depth 19 cm. Not suitable for a 30 cm shelf."));
+  searchable.append(new Element("p"))
+    .append(new CharacterData("Available now. Includes 3745 pieces."));
+  searchable.append(new Element("p", { hidden: "" })).append(new CharacterData("Dimensions hidden-answer"));
+  searchable.append(new Element("div", { contenteditable: "true" })).append(new CharacterData("Dimensions editable-answer"));
+  searchable.append(new HTMLInputElement({ type: "password", value: "Dimensions secret-answer" }));
+  searchable.append(new Element("iframe")).append(new CharacterData("Dimensions frame-answer"));
+  body.append(new Element("p")).append(new CharacterData("Dimensions outside-answer"));
+  document._root = body; setOwner(body, document);
+  const searchInitial = JSON.parse(invoke(146, 146, { k: "initial" }));
+  assert(!JSON.stringify(searchInitial).includes("89 cm"), "search fixture did not saturate initial inventory");
+  const searchAnchor = searchInitial.n.find(node => node.r === "landmark").k;
+  const searchedWire = invoke(147, 147, { k: "text_search", a: searchAnchor, q: "dimensions width depth available pieces" });
+  const searched = JSON.parse(searchedWire);
+  assert(searched.n.some(node => node.t === "Dimensions: width 89 cm ; depth 19 cm. Not suitable for a 30 cm shelf.") &&
+    searched.n.some(node => node.t === "Available now. Includes 3745 pieces."), "keyword discovery missed omitted visible evidence");
+  assert(searched.n[0].k === searchAnchor && searched.n.every(node => !node.o && !node.u && node.p === undefined),
+    "text search widened action authority or attributed evidence to the region");
+  assert(!/hidden-answer|editable-answer|secret-answer|frame-answer|outside-answer/.test(searchedWire),
+    "text search escaped its exact region or privacy boundaries");
+  const searchAbsent = JSON.parse(invoke(148, 148, { k: "text_search", a: searchAnchor, q: "unmentioned" }));
+  assert(searchAbsent.n.length === 1 && searchAbsent.c === "complete", "complete search miss invented evidence");
+  const searchLimited = JSON.parse(invoke(149, 149, { k: "text_search", a: searchAnchor, q: "dimensions" }, { x: 128 }));
+  assert(searchLimited.c === "inspection_limit" && searchLimited.n.length === 1, "search scan ceiling became a false complete miss");
+  for (const query of ["", "x".repeat(257), "dimensions\nwidth", "$[]", "width\u202edepth", "width\u200bdepth", "sk-private-search-query-value"]) {
+    assert(invoke(150, 150, { k: "text_search", a: searchAnchor, q: query }).includes("invalid_request"), "invalid search query admitted");
+  }
+  const searchSecret = searchable.append(new Element("p"));
+  searchSecret.append(new CharacterData("dimensions sk-private-search-source-value"));
+  const interruptedQuote = searchable.append(new Element("p"));
+  interruptedQuote.append(new CharacterData("width"));
+  interruptedQuote.append(new Element("span", { contenteditable: "true" })).append(new CharacterData("not"));
+  interruptedQuote.append(new CharacterData("supported"));
+  setOwner(body, document);
+  invoke(150, 150, { k: "initial" });
+  const sourcePrivacyWire = invoke(151, 151, { k: "text_search", a: searchAnchor, q: "dimensions width supported" });
+  assert(!sourcePrivacyWire.includes("sk-private-search-source-value") && !sourcePrivacyWire.includes("width supported"),
+    "search disclosed a credential or joined a quote across an excluded editable boundary");
+  searchable._children.values = [];
+  for (let index = 0; index < 20; index += 1) {
+    searchable.append(new Element("p")).append(new CharacterData(`dimensions ${index} ${"界".repeat(700)}`));
+  }
+  setOwner(body, document);
+  const searchOutput = JSON.parse(invoke(152, 152, { k: "text_search", a: searchAnchor, q: "dimensions" }));
+  assert(searchOutput.n.length <= 17 && searchOutput.n.reduce((sum, node) => sum + Buffer.byteLength(node.t || ""), 0) <= 8192 &&
+    searchOutput.c !== "complete", "keyword search exceeded source/text budget or hid omissions");
+  searchable._children.values = [];
+  for (let index = 0; index < 40; index += 1) {
+    searchable.append(new Element("p")).append(new CharacterData(" ".repeat(4000)));
+  }
+  searchable.append(new Element("p")).append(new CharacterData("dimensions beyond scan budget"));
+  setOwner(body, document);
+  const searchWhitespace = JSON.parse(invoke(153, 153, { k: "text_search", a: searchAnchor, q: "dimensions" }));
+  assert(searchWhitespace.c === "inspection_limit" && searchWhitespace.n.length === 1,
+    "raw whitespace evaded the native search byte-scan ceiling");
+  body.attributes.contenteditable = "true";
+  assert(invoke(154, 154, { k: "text_search", a: searchAnchor, q: "dimensions" }).includes("anchor_missing"),
+    "an acknowledged region bypassed its newly editable ancestor");
+  delete body.attributes.contenteditable;
+
   process.stdout.write(`${JSON.stringify({
+    bounded_visible_text_search: true,
     offscreen_anchor_wire_bytes: inventoryExtraBytes,
     parent_region_nodes: region.n.length,
     parent_region_wire_bytes: Buffer.byteLength(regionWire),

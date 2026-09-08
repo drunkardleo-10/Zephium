@@ -831,6 +831,9 @@ fn validate_authority(
                 return Err(SemanticReadError::BaselineNotAcknowledged);
             }
             let kind = match request.scope() {
+                crate::SemanticScope::TextSearch { query, .. } => {
+                    crate::SemanticExpansionKind::TextSearch(query.clone())
+                }
                 crate::SemanticScope::Region(_) => crate::SemanticExpansionKind::Region,
                 crate::SemanticScope::Subtree(_) => crate::SemanticExpansionKind::Subtree,
                 crate::SemanticScope::Table(_) => crate::SemanticExpansionKind::Table,
@@ -845,7 +848,7 @@ fn validate_authority(
                     request.id(),
                     anchor.reference(),
                     anchor.frame(),
-                    kind,
+                    kind.clone(),
                     request.budget(),
                 )
                 .map_err(|_| SemanticReadError::ExpansionMismatch)?;

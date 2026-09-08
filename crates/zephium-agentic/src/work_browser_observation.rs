@@ -213,7 +213,7 @@ impl WorkBrowserResources {
     ) -> Result<WorkBrowserObservationRequest, WorkBrowserResourceError> {
         if !acknowledgement.matches(previous)
             || matches!(
-                kind,
+                &kind,
                 crate::SemanticExpansionKind::Frame | crate::SemanticExpansionKind::Table
             )
         {
@@ -466,12 +466,12 @@ mod tests {
                 &initial,
                 &ack,
                 SemanticReferenceId::new(99).unwrap(),
-                kind,
+                kind.clone(),
                 tick(2)
             )
             .is_err());
         let expanded = rows
-            .observe_expansion(&lease, &initial, &ack, target, kind, tick(2))
+            .observe_expansion(&lease, &initial, &ack, target, kind.clone(), tick(2))
             .unwrap();
         assert_eq!(expanded.lease(), &lease);
         assert_eq!(expanded.invocation().frame(), initial.frames()[0].frame());
@@ -481,7 +481,7 @@ mod tests {
             initial.request().id()
         );
         assert!(rows
-            .observe_expansion(&lease, &initial, &ack, target, kind, tick(2))
+            .observe_expansion(&lease, &initial, &ack, target, kind.clone(), tick(2))
             .is_err());
         let revoke = rows.revoke(&lease).unwrap();
         assert!(rows.observe_initial(&lease, tick(2)).is_err());
@@ -502,7 +502,7 @@ mod tests {
             )
             .unwrap();
         assert!(rows
-            .observe_expansion(&successor, &initial, &ack, target, kind, tick(2))
+            .observe_expansion(&successor, &initial, &ack, target, kind.clone(), tick(2))
             .is_err());
         assert!(rows
             .observe_expansion(&lease, &initial, &ack, target, kind, tick(2))

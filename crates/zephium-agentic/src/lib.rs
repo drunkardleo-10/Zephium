@@ -511,9 +511,11 @@ pub use semantic_observation::{
     SemanticFrameDeferral, SemanticFrameUnsupported, SemanticObservation,
     SemanticObservationAssembler, SemanticObservationBudget, SemanticObservationError,
     SemanticObservationGeneration, SemanticObservationId, SemanticObservationParent,
-    SemanticObservationRequest, SemanticScope, SemanticScopeAnchor, SemanticTextWindow,
-    MAX_SEMANTIC_OBSERVATION_EXPANSIONS, MAX_SEMANTIC_OBSERVATION_NODES,
+    SemanticObservationRequest, SemanticScope, SemanticScopeAnchor, SemanticTextSearch,
+    SemanticTextWindow, MAX_SEMANTIC_OBSERVATION_EXPANSIONS, MAX_SEMANTIC_OBSERVATION_NODES,
     MAX_SEMANTIC_OBSERVATION_TEXT_BYTES, MAX_SEMANTIC_SURROUNDING_TEXT_BYTES,
+    MAX_SEMANTIC_TEXT_SEARCH_BYTES, MAX_SEMANTIC_TEXT_SEARCH_QUERY_BYTES,
+    MAX_SEMANTIC_TEXT_SEARCH_RESULTS,
 };
 #[cfg(feature = "probe-harness")]
 pub use semantic_probe_evidence::{

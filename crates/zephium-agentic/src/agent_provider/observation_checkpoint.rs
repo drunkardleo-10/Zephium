@@ -41,6 +41,7 @@ impl AgentProviderContinuation {
                 | AgentBrowserScopeProposal::Region(_)
                 | AgentBrowserScopeProposal::Subtree(_)
                 | AgentBrowserScopeProposal::SurroundingText { .. }
+                | AgentBrowserScopeProposal::TextSearch { .. }
         ) {
             return Err(AgentProviderContinuationError::Scope);
         }
@@ -134,7 +135,10 @@ impl AgentProviderObservationCheckpoint {
 
     /// Closed same-document expansion, or an explicit initial-viewport refresh.
     pub fn expansion(&self) -> Option<(SemanticReferenceId, SemanticExpansionKind)> {
-        match self.scope {
+        match self.scope.clone() {
+            AgentBrowserScopeProposal::TextSearch { target, query } => {
+                Some((target, SemanticExpansionKind::TextSearch(query)))
+            }
             AgentBrowserScopeProposal::Region(target) => {
                 Some((target, SemanticExpansionKind::Region))
             }
@@ -228,6 +232,10 @@ impl AgentProviderObservationCheckpoint {
                 return Err(AgentProviderContinuationError::Scope);
             }
             let valid = match expected.scope() {
+                crate::SemanticScope::TextSearch { .. } => {
+                    nodes.len() <= crate::MAX_SEMANTIC_TEXT_SEARCH_RESULTS + 1
+                        && valid_text_sources(current, crate::MAX_SEMANTIC_TEXT_SEARCH_BYTES)
+                }
                 crate::SemanticScope::SurroundingText { window, .. } => {
                     valid_surrounding_sources(current, *window)
                 }
@@ -249,6 +257,13 @@ fn valid_surrounding_sources(
     current: &SemanticObservation,
     window: crate::SemanticTextWindow,
 ) -> bool {
+    valid_text_sources(
+        current,
+        usize::from(window.before_bytes()) + usize::from(window.after_bytes()),
+    )
+}
+
+fn valid_text_sources(current: &SemanticObservation, max_bytes: usize) -> bool {
     use crate::{SemanticCompleteness, SemanticRole, SemanticSensitivity, SemanticStates};
     let frame = &current.frames()[0];
     let nodes = frame.nodes();
@@ -260,7 +275,10 @@ fn valid_surrounding_sources(
     }) {
         return false;
     }
-    let mut text_bytes = 0;
+    let mut text_bytes = nodes
+        .first()
+        .and_then(|node| node.text())
+        .map_or(0, |text| text.len());
     for node in nodes.iter().skip(1) {
         if node.name().is_some()
             || node.value().is_some()
@@ -288,7 +306,7 @@ fn valid_surrounding_sources(
             text_bytes += node.text().map_or(0, |text| text.len());
         }
     }
-    text_bytes <= usize::from(window.before_bytes()) + usize::from(window.after_bytes())
+    text_bytes <= max_bytes
 }
 
 /// Content-free capture history for the existing policy-bound discovery
@@ -339,6 +357,7 @@ impl AgentInspectionProgress {
             return Err(crate::AgentProviderRequestError::Encoding);
         }
         let (scope, window) = match current.request().scope() {
+            crate::SemanticScope::TextSearch { .. } => ("text_search", None),
             crate::SemanticScope::Initial => ("initial", None),
             crate::SemanticScope::Region(_) => ("region", None),
             crate::SemanticScope::Subtree(_) => ("subtree", None),

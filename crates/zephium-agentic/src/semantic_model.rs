@@ -1025,6 +1025,7 @@ fn scope_label(scope: &SemanticScope) -> &'static str {
         SemanticScope::Table(_) => "table",
         SemanticScope::Frame(_) => "frame",
         SemanticScope::SurroundingText { .. } => "surrounding_text",
+        SemanticScope::TextSearch { .. } => "text_search",
     }
 }
 

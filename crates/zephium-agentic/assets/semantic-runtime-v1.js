@@ -233,6 +233,12 @@
       scope.k === "frame"
     ) {
       if (!hasExactKeys(scope, ["k", "a"]) || !isPositiveSafeInteger(scope.a)) return null;
+    } else if (scope.k === "text_search") {
+      if (!hasExactKeys(scope, ["k", "a", "q"]) || !isPositiveSafeInteger(scope.a) ||
+          typeof scope.q !== "string" || utf8Length(scope.q, 257) > 256 ||
+          /[\u0000-\u001f\u007f-\u009f]/u.test(scope.q) || !/[\p{Alphabetic}\p{N}]/u.test(scope.q)) return null;
+      for (const character of scope.q) if (isForbiddenTextPoint(character.codePointAt(0))) return null;
+      if (looksLikeSecret(scope.q)) return null;
     } else if (scope.k === "surrounding_text") {
       if (
         !hasExactKeys(scope, ["k", "a", "p", "n"]) ||
@@ -408,14 +414,15 @@
     );
   }
 
-  function normalizeText(raw, byteLimit) {
+  function normalizeText(raw, byteLimit, scanBytesLimit = Infinity) {
     if (typeof raw !== "string" || byteLimit <= 0) {
-      return { value: "", bytes: 0, truncated: typeof raw === "string" && raw.length > 0 };
+      return { value: "", bytes: 0, scannedBytes: 0, truncated: typeof raw === "string" && raw.length > 0 };
     }
     let value = "";
     let bytes = 0;
     let pendingSpace = false;
     let inspected = 0;
+    let scannedBytes = 0;
     let truncated = false;
     const scanLimit = byteLimit * 8 + 256;
     for (const character of raw) {
@@ -425,12 +432,14 @@
         break;
       }
       const point = character.codePointAt(0);
+      const characterBytes = point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
+      if (scannedBytes + characterBytes > scanBytesLimit) { truncated = true; break; }
+      scannedBytes += characterBytes;
       if (isWhitespace(point)) {
         if (value.length !== 0) pendingSpace = true;
         continue;
       }
       if (isForbiddenTextPoint(point)) continue;
-      const characterBytes = point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
       const separatorBytes = pendingSpace && value.length !== 0 ? 1 : 0;
       if (bytes + separatorBytes + characterBytes > byteLimit) {
         truncated = true;
@@ -444,7 +453,7 @@
       bytes += characterBytes;
       pendingSpace = false;
     }
-    return { value, bytes, truncated };
+    return { value, bytes, scannedBytes, truncated };
   }
 
   function exactValueText(raw, byteLimit) {
@@ -1716,7 +1725,7 @@
 
   function compatibleScope(scope, descriptor) {
     if (descriptor === null) return false;
-    if (scope === "region") {
+    if (scope === "region" || scope === "text_search") {
       return ["document", "landmark", "group", "dialog"].includes(descriptor.role);
     }
     if (scope === "table") return descriptor.role === "table";
@@ -1918,6 +1927,131 @@
       appendSink(source, chunk.text, state);
     }
     state.stopped = state.stopped || inspectionStopped;
+    return records;
+  }
+
+  function searchTextExcluded(element) {
+    if (shouldSkipSubtree(element) || !styleIsVisible(element)) return true;
+    const editable = attribute(element, "contenteditable", 16);
+    const described = classify(element);
+    const role = described === null ? null : described.role;
+    return (editable !== null && lower(editable) !== "false") || sensitivityFor(element) !== "public" ||
+      ["textbox", "password", "searchbox", "spinbutton", "combobox", "listbox", "option", "frame_boundary"].includes(role);
+  }
+
+  function searchTextRecords(anchor, descriptor, state) {
+    // Fixed native recipe: bounded literal-token matching over rendered source
+    // passages. It does not query selectors, inspect hidden values, or execute
+    // query text. Scan and retained output have independent hard ceilings.
+    // A fresh region ref cannot jump over an excluded ancestor. Include open
+    // shadow hosts when checking the path back to the original document.
+    let ancestor = anchor;
+    while (ancestor !== document) {
+      if (ancestor === null || !visit(state)) return null;
+      const type = nodeType(ancestor);
+      if (type === 1 && searchTextExcluded(ancestor)) return null;
+      const parent = read(nodeParentGetter, ancestor);
+      ancestor = parent === null && type === 11 ? read(shadowHostGetter, ancestor) : parent;
+      if (ancestor === undefined) return null;
+    }
+    const terms = new Set(apply(stringSplit, lower(state.request.s.q), [/[^\p{Alphabetic}\p{N}]+/u]));
+    terms.delete("");
+    const candidates = [];
+    let pending = null;
+    let ordinal = 0;
+    let scannedBytes = 0;
+    const flush = () => {
+      if (pending === null) return;
+      const matched = new Set();
+      for (const word of apply(stringSplit, lower(pending.text), [/[^\p{Alphabetic}\p{N}]+/u])) {
+        if (terms.has(word)) matched.add(word);
+      }
+      if (matched.size !== 0) {
+        pending.score = matched.size;
+        const duplicate = candidates.findIndex((candidate) => candidate.element === pending.element);
+        if (duplicate >= 0) {
+          // Keep one contiguous passage per real source; never stitch separate
+          // runs across descendants or a privacy boundary into a false quote.
+          if (candidates[duplicate].score >= pending.score) { pending = null; return; }
+          candidates.splice(duplicate, 1);
+        }
+        candidates.push(pending);
+        candidates.sort((left, right) => right.score - left.score || left.ordinal - right.ordinal);
+        if (candidates.length > 16) { candidates.pop(); mark(state, "scope_boundary", false); }
+      }
+      pending = null;
+    };
+    const stack = [{ node: anchor, source: anchor, textual: false }];
+    while (stack.length !== 0 && !state.stopped) {
+      const item = stack.pop();
+      if (!visit(state)) break;
+      const current = item.node;
+      const type = nodeType(current);
+      if (type === 3) {
+        if (!textNodeVisible(current)) { flush(); continue; }
+        const raw = read(characterDataGetter, current);
+        if (typeof raw !== "string") continue;
+        const remaining = 131072 - scannedBytes;
+        const normalized = normalizeText(raw, mathMin(4096, remaining), remaining);
+        scannedBytes += normalized.scannedBytes;
+        if (normalized.truncated) mark(state, "scope_boundary", false);
+        if (normalized.value !== "") {
+          if (pending !== null && pending.element !== item.source) flush();
+          if (pending === null) pending = { element: item.source, text: "", bytes: 0, ordinal: ordinal++ };
+          const part = normalizeText(normalized.value, mathMax(0, 4096 - pending.bytes - (pending.bytes === 0 ? 0 : 1)));
+          if (part.value !== "") {
+            pending.text += `${pending.bytes === 0 ? "" : " "}${part.value}`;
+            pending.bytes += part.bytes + (pending.bytes === 0 ? 0 : 1);
+          }
+          if (part.truncated) { mark(state, "scope_boundary", false); flush(); }
+        }
+        if (scannedBytes >= 131072) { state.completeness = "inspection_limit"; state.stopped = true; break; }
+        continue;
+      }
+      let source = item.source;
+      let textual = item.textual;
+      if (type === 1) {
+        if (searchTextExcluded(current)) { flush(); continue; }
+        const described = classify(current);
+        if (described !== null && elementRect(current) !== null) {
+          const sink = recordSink(described, false);
+          if (!textual || sink === "text") { source = current; textual = sink === "name" || sink === "text"; }
+        }
+      }
+      if (type === 1 || type === 9 || type === 11) {
+        pushChildren(stack, current, { source, textual }, state);
+      }
+    }
+    flush();
+    const record = { wire: { k: keyFor(anchor, state.request.g), r: descriptor.role }, element: anchor,
+      sink: "text", sinkBytes: 0, sensitivity: "public", depth: 0 };
+    const records = [record];
+    const stopped = state.stopped;
+    state.stopped = false;
+    // Highest coverage first is deterministic. Each independent result keeps
+    // its actual source key, never the searched region's provenance.
+    let outputBytes = 0;
+    for (const chunk of candidates) {
+      if (records.length >= state.request.b.n && chunk.element !== anchor) { mark(state, "node_limit", false); break; }
+      const part = normalizeText(chunk.text, mathMax(0, 8192 - outputBytes));
+      if (part.value === "") { mark(state, "text_limit", false); break; }
+      outputBytes += part.bytes;
+      const described = classify(chunk.element);
+      if (described === null) continue;
+      const source = chunk.element === anchor ? record : {
+        wire: { k: keyFor(chunk.element, state.request.g), r: described.role }, element: chunk.element,
+        sink: "text", sinkBytes: 0, sensitivity: "public", depth: 0
+      };
+      if (described.role === "heading") {
+        const level = described.level || Number(attribute(chunk.element, "aria-level", 8));
+        source.wire.l = numberIsSafeInteger(level) && level >= 1 && level <= 6 ? level : 2;
+      }
+      if (source !== record) records.push(source);
+      appendSink(source, part.value, state);
+      if (part.truncated) mark(state, "text_limit", false);
+      if (state.stopped) break;
+    }
+    state.stopped = state.stopped || stopped;
     return records;
   }
 
@@ -2509,7 +2643,10 @@
       if (nodeType(anchor) === 1 && descriptor.role !== "option") {
         if (!styleIsVisible(anchor) || elementRect(anchor) === null) return fault("anchor_missing");
       }
-      if (request.s.k === "surrounding_text") {
+      if (request.s.k === "text_search") {
+        records = searchTextRecords(anchor, descriptor, state);
+        if (records === null) return fault("anchor_missing");
+      } else if (request.s.k === "surrounding_text") {
         records = surroundingRecords(anchor, descriptor, state);
         if (records === null) return fault("anchor_missing");
       } else if (request.s.k === "frame") {

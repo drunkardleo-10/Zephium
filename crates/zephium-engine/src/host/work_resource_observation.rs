@@ -26,7 +26,8 @@ fn current_scope(scope: &zephium_agentic::SemanticScope, last_invocation: u64) -
         SemanticScope::Initial => true,
         SemanticScope::Region(anchor)
         | SemanticScope::Subtree(anchor)
-        | SemanticScope::SurroundingText { anchor, .. } => {
+        | SemanticScope::SurroundingText { anchor, .. }
+        | SemanticScope::TextSearch { anchor, .. } => {
             anchor.snapshot_generation().get() == last_invocation
         }
         SemanticScope::Table(_) | SemanticScope::Frame(_) => false,
@@ -588,6 +589,9 @@ mod tests {
             SemanticExpansionKind::Region,
             SemanticExpansionKind::Subtree,
             SemanticExpansionKind::SurroundingText(SemanticTextWindow::try_new(0, 1024).unwrap()),
+            SemanticExpansionKind::TextSearch(
+                zephium_agentic::SemanticTextSearch::try_new("width depth".into()).unwrap(),
+            ),
         ] {
             let request = observed
                 .begin_expansion(

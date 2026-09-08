@@ -322,6 +322,13 @@ pub enum AgentBrowserScopeProposal {
         /// Existing hard-bounded surrounding window.
         window: SemanticTextWindow,
     },
+    /// Discover visible source passages omitted by compact observations.
+    TextSearch {
+        /// Exact acknowledged document/region reference.
+        target: SemanticReferenceId,
+        /// Plain literal keywords, never code or selectors.
+        query: crate::SemanticTextSearch,
+    },
 }
 
 impl AgentBrowserScopeProposal {
@@ -338,7 +345,9 @@ impl AgentBrowserScopeProposal {
             Self::Subtree(reference) => Ok(SemanticLocateScope::Subtree(reference)),
             Self::Table(reference) => Ok(SemanticLocateScope::Table(reference)),
             Self::Frame(reference) => Ok(SemanticLocateScope::Frame(reference)),
-            Self::SurroundingText { .. } => Err(AgentBrowserToolContractError::Scope),
+            Self::SurroundingText { .. } | Self::TextSearch { .. } => {
+                Err(AgentBrowserToolContractError::Scope)
+            }
         }
     }
 }
@@ -980,6 +989,11 @@ fn decode_scope(
     scope: Option<ScopeWire>,
 ) -> Result<AgentBrowserScopeProposal, AgentBrowserToolContractError> {
     match scope.unwrap_or(ScopeWire::Initial) {
+        ScopeWire::TextSearch { target, query } => Ok(AgentBrowserScopeProposal::TextSearch {
+            target: reference(target)?,
+            query: crate::SemanticTextSearch::try_new(query)
+                .map_err(|_| AgentBrowserToolContractError::Scope)?,
+        }),
         ScopeWire::Initial => Ok(AgentBrowserScopeProposal::Initial),
         ScopeWire::Region { target } => Ok(AgentBrowserScopeProposal::Region(reference(target)?)),
         ScopeWire::Subtree { target } => Ok(AgentBrowserScopeProposal::Subtree(reference(target)?)),
@@ -1209,6 +1223,10 @@ struct ScopeArgumentsWire {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum ScopeWire {
+    TextSearch {
+        target: String,
+        query: String,
+    },
     Initial,
     Region {
         target: String,
@@ -1604,6 +1622,35 @@ mod tests {
             human.proposal(),
             AgentBrowserToolProposal::ShowForHuman(AgentBrowserHumanReason::UnsupportedInteraction)
         ));
+    }
+
+    #[test]
+    fn text_search_scope_is_literal_snapshot_content_not_lookup_or_code() {
+        let value = decode(
+            "snapshot",
+            r#"{"scope":{"kind":"text_search","target":"@a1","query":"dimensions width depth"}}"#,
+        )
+        .unwrap();
+        let AgentBrowserToolProposal::Snapshot(
+            scope @ AgentBrowserScopeProposal::TextSearch { target, query },
+        ) = value.proposal()
+        else {
+            panic!("text search");
+        };
+        assert_eq!(target.get(), 1);
+        assert_eq!(query.as_str(), "dimensions width depth");
+        assert!(scope.clone().try_into_locate_scope().is_err());
+        for query in ["", "\n", &"é".repeat(129)] {
+            let arguments =
+                serde_json::json!({"scope":{"kind":"text_search","target":"@a1","query":query}})
+                    .to_string();
+            assert!(decode("snapshot", &arguments).is_err());
+        }
+        assert!(decode(
+            "snapshot",
+            r#"{"scope":{"kind":"text_search","target":"@a1","query":"width","selector":"body"}}"#
+        )
+        .is_err());
     }
 
     #[test]

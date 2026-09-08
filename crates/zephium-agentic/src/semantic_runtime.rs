@@ -55,10 +55,10 @@ pub const MAX_SEMANTIC_RUNTIME_VISITED_NODES: u32 = 32 * 1024;
 pub const MAX_SEMANTIC_RUNTIME_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 /// Maximum immutable production runtime source bytes installed per document.
 ///
-/// The fixed 100 KiB ceiling covers the digest-pinned semantic runtime including
+/// The fixed 108 KiB ceiling covers the digest-pinned semantic runtime including
 /// production Fill, native-select, public links and bounded source-coalesced
-/// windows while preserving an explicit installation bound on every platform.
-pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 100 * 1024;
+/// windows and keyword discovery with an explicit installation bound per platform.
+pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 108 * 1024;
 /// Sole fixed isolated-world global installed by the production runtime.
 pub const SEMANTIC_RUNTIME_GLOBAL_NAME: &str = "__zephiumSemanticRuntimeV1";
 /// Sole fixed native message handler visible in the production isolated world.
@@ -81,8 +81,8 @@ pub const MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES: usize =
 
 const SEMANTIC_RUNTIME_SOURCE: &str = include_str!("../assets/semantic-runtime-v1.js");
 const SEMANTIC_RUNTIME_SOURCE_SHA256: [u8; 32] = [
-    0x57, 0x3d, 0x3e, 0xb4, 0x2a, 0x0e, 0x32, 0x4c, 0xa8, 0x8d, 0xd9, 0xa4, 0x1e, 0x72, 0xf2, 0x07,
-    0xff, 0xb5, 0x21, 0xec, 0x26, 0x9e, 0xb5, 0xfa, 0x9a, 0x2c, 0x54, 0x7d, 0x64, 0xd2, 0x69, 0x6c,
+    0xa8, 0xe3, 0x8f, 0xf0, 0x7d, 0x94, 0x36, 0x22, 0x3d, 0x33, 0xbf, 0xaf, 0xa4, 0x12, 0xdf, 0x85,
+    0x31, 0x2b, 0x54, 0x0f, 0x29, 0xc5, 0xae, 0xc3, 0x34, 0x0f, 0x5f, 0xac, 0x08, 0xe7, 0xbb, 0x7e,
 ];
 
 /// Immutable production program passed only to a trusted isolated-world adapter.
@@ -140,6 +140,8 @@ pub enum SemanticRuntimeScopeClass {
     Frame,
     /// Bounded readable context surrounding one anchor.
     SurroundingText,
+    /// Bounded keyword-directed visible text below one acknowledged region.
+    TextSearch,
 }
 
 /// Per-frame isolated-runtime ceilings under an aggregate observation budget.
@@ -519,6 +521,13 @@ pub fn encode_semantic_runtime_invocation(
     }
 
     let (scope, scope_class) = match request.scope() {
+        SemanticScope::TextSearch { anchor, query } => (
+            RuntimeScope::TextSearch {
+                anchor: validate_anchor(frame.clone(), anchor, snapshot_generation)?,
+                query: query.as_str().to_owned(),
+            },
+            SemanticRuntimeScopeClass::TextSearch,
+        ),
         SemanticScope::Initial => (RuntimeScope::Initial, SemanticRuntimeScopeClass::Initial),
         SemanticScope::Region(anchor) => {
             let anchor = validate_anchor(frame.clone(), anchor, snapshot_generation)?;
@@ -1045,6 +1054,12 @@ struct RuntimeInvocationWire {
 #[derive(Serialize)]
 #[serde(tag = "k", rename_all = "snake_case")]
 enum RuntimeScope {
+    TextSearch {
+        #[serde(rename = "a")]
+        anchor: u64,
+        #[serde(rename = "q")]
+        query: String,
+    },
     Initial,
     Region {
         #[serde(rename = "a")]
@@ -1427,6 +1442,35 @@ mod tests {
         let joined_context = context(2);
         let prior = observation(joined_context);
         let prior_frame = prior.frames()[0].frame().clone();
+        let search_request = prior
+            .begin_expansion(
+                SemanticObservationId::new(2).unwrap(),
+                SemanticReferenceId::new(2).unwrap(),
+                &prior_frame,
+                SemanticExpansionKind::TextSearch(
+                    crate::SemanticTextSearch::try_new("width \"quoted\" 尺寸".into()).unwrap(),
+                ),
+                SemanticObservationBudget::try_new(64, 8192, 1).unwrap(),
+            )
+            .unwrap();
+        let search_invocation = encode_semantic_runtime_invocation(
+            &search_request,
+            prior_frame.clone(),
+            SemanticInvocationId::new(12).unwrap(),
+            SemanticSnapshotGeneration::new(22).unwrap(),
+            SemanticRuntimeBudget::try_new(64, 8192, 32 * 1024, 4096, false).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            search_invocation.scope(),
+            SemanticRuntimeScopeClass::TextSearch
+        );
+        let wire: serde_json::Value = serde_json::from_str(search_invocation.as_str()).unwrap();
+        assert_eq!(
+            wire["s"],
+            json!({"k":"text_search","a":9002,"q":"width \"quoted\" 尺寸"})
+        );
+        assert!(!format!("{search_invocation:?}").contains("quoted"));
         let request = prior
             .begin_expansion(
                 SemanticObservationId::new(2).expect("observation id"),

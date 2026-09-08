@@ -850,6 +850,16 @@ fn semantic_diff_guard(baseline_guard: [u8; 32], current_guard: [u8; 32]) -> [u8
 
 fn scopes_match(previous: &SemanticScope, current: &SemanticScope) -> bool {
     match (previous, current) {
+        (
+            SemanticScope::TextSearch {
+                anchor: before,
+                query: before_query,
+            },
+            SemanticScope::TextSearch {
+                anchor: after,
+                query: after_query,
+            },
+        ) => before_query == after_query && anchors_match(before.capability(), after.capability()),
         (SemanticScope::Initial, SemanticScope::Initial) => true,
         (SemanticScope::Region(before), SemanticScope::Region(after))
         | (SemanticScope::Subtree(before), SemanticScope::Subtree(after))
@@ -1139,6 +1149,11 @@ fn hash_frame(hasher: &mut FingerprintHasher, frame: &SemanticFrameJoin) {
 
 fn hash_scope(hasher: &mut FingerprintHasher, scope: &SemanticScope) {
     match scope {
+        SemanticScope::TextSearch { anchor, query } => {
+            hasher.byte(7);
+            hash_scope_anchor(hasher, anchor);
+            hasher.bytes(query.as_str().as_bytes());
+        }
         SemanticScope::Initial => hasher.byte(1),
         SemanticScope::Region(anchor) => {
             hasher.byte(2);
