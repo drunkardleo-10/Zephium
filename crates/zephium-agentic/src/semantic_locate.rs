@@ -26,10 +26,78 @@ use crate::{
 /// Maximum UTF-8 bytes accepted in one semantic lookup query.
 pub const MAX_SEMANTIC_LOCATE_QUERY_BYTES: usize = 1_024;
 /// Maximum distinct normalized terms in one semantic lookup query.
-pub const MAX_SEMANTIC_LOCATE_QUERY_TERMS: usize = 16;
+/// Every term needs at least one source byte, with a separator between terms.
+/// Derive capacity from the advertised byte ceiling so valid natural language
+/// cannot hit a smaller, hidden term limit.
+pub const MAX_SEMANTIC_LOCATE_QUERY_TERMS: usize = MAX_SEMANTIC_LOCATE_QUERY_BYTES.div_ceil(2);
 /// Maximum retained matches in one semantic lookup result.
 pub const MAX_SEMANTIC_LOCATE_MATCHES: u8 = 32;
 const MAX_SEMANTIC_LOCATE_NORMALIZED_QUERY_BYTES: usize = 2_048;
+
+/// Fixed storage for every term possible within the source-byte ceiling.
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+struct QueryTermBits([u64; MAX_SEMANTIC_LOCATE_QUERY_TERMS.div_ceil(64)]);
+
+// Deterministic work accounting for complexity regressions. No counters or
+// observation content are retained in production builds.
+#[cfg(test)]
+#[derive(Clone, Copy, Default, Debug)]
+struct LocateWork {
+    normalization_bytes: usize,
+    normalization_calls: usize,
+    term_lookups: usize,
+    term_comparisons: usize,
+    ancestor_merges: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static LOCATE_WORK: std::cell::Cell<LocateWork> = std::cell::Cell::new(LocateWork::default());
+}
+
+#[cfg(test)]
+fn record_locate_work(update: impl FnOnce(&mut LocateWork)) {
+    LOCATE_WORK.with(|counter| {
+        let mut work = counter.get();
+        update(&mut work);
+        counter.set(work);
+    });
+}
+
+impl QueryTermBits {
+    fn insert(&mut self, index: usize) {
+        self.0[index / 64] |= 1_u64 << (index % 64);
+    }
+
+    fn count_ones(self) -> u32 {
+        self.0.iter().map(|word| word.count_ones()).sum()
+    }
+}
+
+impl std::ops::BitOrAssign for QueryTermBits {
+    fn bitor_assign(&mut self, other: Self) {
+        for (word, other) in self.0.iter_mut().zip(other.0) {
+            *word |= other;
+        }
+    }
+}
+
+impl std::ops::BitOr for QueryTermBits {
+    type Output = Self;
+
+    fn bitor(mut self, other: Self) -> Self {
+        self |= other;
+        self
+    }
+}
+
+impl std::ops::BitAnd for QueryTermBits {
+    type Output = Self;
+
+    fn bitand(self, other: Self) -> Self {
+        Self(std::array::from_fn(|index| self.0[index] & other.0[index]))
+    }
+}
 
 /// Nonzero shell-minted identity for one semantic lookup attempt.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -61,7 +129,10 @@ impl fmt::Debug for SemanticLocateId {
 pub struct SemanticLocateQuery {
     source: String,
     normalized: String,
+    // Sorted once: matching a semantic token takes logarithmic comparisons,
+    // independently of its position in the provider-authored sentence.
     terms: Vec<String>,
+    required_terms: QueryTermBits,
 }
 
 impl SemanticLocateQuery {
@@ -79,15 +150,11 @@ impl SemanticLocateQuery {
         if normalized.is_empty() || normalized.len() > MAX_SEMANTIC_LOCATE_NORMALIZED_QUERY_BYTES {
             return Err(SemanticLocateError::Query);
         }
-        let mut terms = Vec::new();
-        for term in normalized.split(' ') {
-            if terms.iter().any(|existing: &String| existing == term) {
-                continue;
-            }
-            if terms.len() >= MAX_SEMANTIC_LOCATE_QUERY_TERMS {
-                return Err(SemanticLocateError::QueryTerms);
-            }
-            terms.push(term.to_owned());
+        let mut terms = normalized.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        terms.sort_unstable();
+        terms.dedup();
+        if terms.len() > MAX_SEMANTIC_LOCATE_QUERY_TERMS {
+            return Err(SemanticLocateError::QueryTerms);
         }
         if terms.is_empty() {
             return Err(SemanticLocateError::Query);
@@ -95,10 +162,17 @@ impl SemanticLocateQuery {
         if terms.iter().all(|term| is_query_stopword(term)) {
             return Err(SemanticLocateError::Query);
         }
+        let mut required_terms = QueryTermBits::default();
+        for (index, term) in terms.iter().enumerate() {
+            if !is_query_stopword(term) {
+                required_terms.insert(index);
+            }
+        }
         Ok(Self {
             source,
             normalized,
             terms,
+            required_terms,
         })
     }
 
@@ -117,15 +191,8 @@ impl SemanticLocateQuery {
         self.terms.len()
     }
 
-    fn required_term_bits(&self) -> u16 {
-        debug_assert!(!self.terms.is_empty());
-        let mut bits = 0_u16;
-        for (index, term) in self.terms.iter().enumerate() {
-            if !is_query_stopword(term) {
-                bits |= 1_u16 << index;
-            }
-        }
-        bits
+    fn required_term_bits(&self) -> QueryTermBits {
+        self.required_terms
     }
 }
 
@@ -487,30 +554,50 @@ pub fn locate_semantic_observation(
     let mut ordinal = 0_u16;
 
     for frame in observation.frames() {
+        // Original node ordinals are retained even for scope-excluded and
+        // secret nodes. Ancestors contribute only their name/text/role masks;
+        // each field is normalized once, never once per descendant. At the
+        // 512-node ceiling this cache occupies at most 32 KiB for one frame.
+        let mut ancestor_contributions = vec![QueryTermBits::default(); frame.nodes().len()];
         for (node_index, node) in frame.nodes().iter().enumerate() {
-            if !node_is_in_scope(
+            let in_scope = node_is_in_scope(
                 request.bound_scope,
                 frame.frame().frame(),
                 frame.nodes(),
                 node_index,
-            ) {
-                continue;
-            }
-            scanned_nodes = scanned_nodes
-                .checked_add(1)
-                .ok_or(SemanticLocateError::Invariant)?;
-            ordinal = ordinal
-                .checked_add(1)
-                .ok_or(SemanticLocateError::Invariant)?;
-            if node.sensitivity() == SemanticSensitivity::Secret {
-                withheld_secret_nodes = withheld_secret_nodes
+            );
+            if in_scope {
+                scanned_nodes = scanned_nodes
                     .checked_add(1)
                     .ok_or(SemanticLocateError::Invariant)?;
+                ordinal = ordinal
+                    .checked_add(1)
+                    .ok_or(SemanticLocateError::Invariant)?;
+            }
+            if node.sensitivity() == SemanticSensitivity::Secret {
+                if in_scope {
+                    withheld_secret_nodes = withheld_secret_nodes
+                        .checked_add(1)
+                        .ok_or(SemanticLocateError::Invariant)?;
+                }
                 continue;
             }
-            let Some(candidate) =
-                match_node(frame.nodes(), node_index, &request.query, &mut scratch)
-            else {
+            let inherited = if in_scope {
+                ancestor_term_bits(frame.nodes(), node_index, &ancestor_contributions)
+            } else {
+                QueryTermBits::default()
+            };
+            let candidate = match_node(
+                node,
+                &request.query,
+                &mut scratch,
+                inherited,
+                &mut ancestor_contributions[node_index],
+            );
+            if !in_scope {
+                continue;
+            }
+            let Some(candidate) = candidate else {
                 continue;
             };
             matched_nodes = matched_nodes
@@ -599,7 +686,7 @@ pub enum SemanticLocateError {
 #[derive(Clone, Copy)]
 struct RankedMatch {
     ordinal: u16,
-    unmatched_terms: u8,
+    unmatched_terms: u16,
     value: SemanticLocateMatch,
 }
 
@@ -762,20 +849,20 @@ fn node_is_in_scope(
 #[derive(Clone, Copy)]
 struct NodeMatch {
     quality: SemanticLocateMatchQuality,
-    unmatched_terms: u8,
+    unmatched_terms: u16,
 }
 
 fn match_node(
-    nodes: &[SemanticNode],
-    node_index: usize,
+    node: &SemanticNode,
     query: &SemanticLocateQuery,
     scratch: &mut String,
+    inherited: QueryTermBits,
+    ancestor_contribution: &mut QueryTermBits,
 ) -> Option<NodeMatch> {
-    let node = nodes.get(node_index)?;
     let required = query.required_term_bits();
-    let mut across = 0_u16;
-    let mut name_bits = 0_u16;
-    let mut text_bits = 0_u16;
+    let mut across = QueryTermBits::default();
+    let mut name_bits = QueryTermBits::default();
+    let mut text_bits = QueryTermBits::default();
     let mut exact_name = false;
     let mut exact_text = false;
     let mut exact_value = false;
@@ -806,7 +893,9 @@ fn match_node(
         content_anchor |= query_contains_content_anchor(query, scratch);
     }
     normalize_into(scratch, role_label(node.role()));
-    across |= term_bits(scratch, &query.terms) | role_alias_bits(node.role(), &query.terms);
+    let role_bits = term_bits(scratch, &query.terms) | role_alias_bits(node.role(), &query.terms);
+    *ancestor_contribution = name_bits | text_bits | role_bits;
+    across |= role_bits;
     let exact_role = scratch == &query.normalized;
     for state in ALL_SEMANTIC_STATES {
         if node.states().contains(state) {
@@ -814,11 +903,11 @@ fn match_node(
             across |= term_bits(scratch, &query.terms);
         }
     }
-    across |= ancestor_term_bits(nodes, node_index, &query.terms, scratch);
+    across |= inherited;
 
     let matched_terms = (across & required).count_ones();
     let required_terms = required.count_ones();
-    let unmatched_terms = u8::try_from(required_terms.saturating_sub(matched_terms)).ok()?;
+    let unmatched_terms = u16::try_from(required_terms.saturating_sub(matched_terms)).ok()?;
 
     let quality = if exact_name {
         SemanticLocateMatchQuality::ExactName
@@ -910,10 +999,9 @@ fn query_contains_content_anchor(query: &SemanticLocateQuery, anchor: &str) -> b
 fn ancestor_term_bits(
     nodes: &[SemanticNode],
     node_index: usize,
-    terms: &[String],
-    scratch: &mut String,
-) -> u16 {
-    let mut bits = 0_u16;
+    contributions: &[QueryTermBits],
+) -> QueryTermBits {
+    let mut bits = QueryTermBits::default();
     let mut current = node_index;
     for _ in 0..MAX_SEMANTIC_DEPTH {
         let Some(parent_index) = nodes
@@ -926,27 +1014,18 @@ fn ancestor_term_bits(
         if parent_index >= current {
             break;
         }
-        let Some(parent) = nodes.get(parent_index) else {
+        let Some(contribution) = contributions.get(parent_index) else {
             break;
         };
-        if parent.sensitivity() != SemanticSensitivity::Secret {
-            if let Some(name) = parent.name() {
-                normalize_into(scratch, name.as_str());
-                bits |= term_bits(scratch, terms);
-            }
-            if let Some(text) = parent.text() {
-                normalize_into(scratch, text.as_str());
-                bits |= term_bits(scratch, terms);
-            }
-            normalize_into(scratch, role_label(parent.role()));
-            bits |= term_bits(scratch, terms) | role_alias_bits(parent.role(), terms);
-        }
+        bits |= *contribution;
+        #[cfg(test)]
+        record_locate_work(|work| work.ancestor_merges += 1);
         current = parent_index;
     }
     bits
 }
 
-fn role_alias_bits(role: SemanticRole, terms: &[String]) -> u16 {
+fn role_alias_bits(role: SemanticRole, terms: &[String]) -> QueryTermBits {
     let aliases: &[&str] = match role {
         SemanticRole::Combobox | SemanticRole::Listbox => {
             &["select", "selector", "dropdown", "choice"]
@@ -957,10 +1036,10 @@ fn role_alias_bits(role: SemanticRole, terms: &[String]) -> u16 {
         SemanticRole::Checkbox | SemanticRole::Radio => &["choice", "control"],
         _ => &[],
     };
-    let mut bits = 0_u16;
-    for (index, term) in terms.iter().enumerate() {
-        if aliases.contains(&term.as_str()) {
-            bits |= 1_u16 << index;
+    let mut bits = QueryTermBits::default();
+    for alias in aliases {
+        if let Some(index) = query_term_index(alias, terms) {
+            bits.insert(index);
         }
     }
     bits
@@ -988,16 +1067,26 @@ const fn state_label(state: SemanticState) -> &'static str {
     }
 }
 
-fn term_bits(normalized: &str, terms: &[String]) -> u16 {
-    let mut bits = 0_u16;
+fn term_bits(normalized: &str, terms: &[String]) -> QueryTermBits {
+    let mut bits = QueryTermBits::default();
     for token in normalized.split(' ') {
-        for (index, term) in terms.iter().enumerate() {
-            if token == term {
-                bits |= 1_u16 << index;
-            }
+        if let Some(index) = query_term_index(token, terms) {
+            bits.insert(index);
         }
     }
     bits
+}
+
+fn query_term_index(token: &str, terms: &[String]) -> Option<usize> {
+    #[cfg(test)]
+    record_locate_work(|work| work.term_lookups += 1);
+    terms
+        .binary_search_by(|term| {
+            #[cfg(test)]
+            record_locate_work(|work| work.term_comparisons += 1);
+            term.as_str().cmp(token)
+        })
+        .ok()
 }
 
 fn contains_normalized_phrase(value: &str, phrase: &str) -> bool {
@@ -1021,7 +1110,7 @@ fn retain_ranked(retained: &mut Vec<RankedMatch>, maximum: usize, candidate: Ran
     }
 }
 
-fn ranking_key(candidate: RankedMatch) -> (SemanticLocateMatchQuality, u8, bool, u16) {
+fn ranking_key(candidate: RankedMatch) -> (SemanticLocateMatchQuality, u16, bool, u16) {
     (
         candidate.value.quality,
         candidate.unmatched_terms,
@@ -1110,6 +1199,11 @@ fn is_query_stopword(term: &str) -> bool {
 }
 
 fn normalize_into(output: &mut String, input: &str) {
+    #[cfg(test)]
+    record_locate_work(|work| {
+        work.normalization_calls += 1;
+        work.normalization_bytes += input.len();
+    });
     output.clear();
     let mut pending_separator = false;
     for character in input.chars() {
@@ -1717,14 +1811,6 @@ mod tests {
                 .expect_err("bytes"),
             SemanticLocateError::Query
         );
-        let terms = (0..=MAX_SEMANTIC_LOCATE_QUERY_TERMS)
-            .map(|index| format!("term{index}"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        assert_eq!(
-            SemanticLocateQuery::try_new(terms).expect_err("terms"),
-            SemanticLocateError::QueryTerms
-        );
         assert_eq!(
             SemanticLocateBudget::try_new(0).expect_err("zero"),
             SemanticLocateError::Budget
@@ -1733,6 +1819,303 @@ mod tests {
             SemanticLocateBudget::try_new(MAX_SEMANTIC_LOCATE_MATCHES + 1).expect_err("ceiling"),
             SemanticLocateError::Budget
         );
+    }
+
+    #[test]
+    fn natural_language_queries_use_the_advertised_byte_bound() {
+        let source = "Find the current product price and product dimensions or measurements, plus any availability or stock status for Tower Bridge.";
+        let query = SemanticLocateQuery::try_new(source.to_owned()).expect("natural language");
+        assert_eq!(query.byte_len(), 126);
+        assert_eq!(query.term_count(), 17);
+        assert_eq!(query.as_str(), source);
+
+        // 350 distinct ASCII terms consume 1023 bytes, exercising more than
+        // 255 terms without relaxing the existing source/normalization bounds.
+        let terms = ('a'..='z')
+            .map(|letter| letter.to_string())
+            .chain(
+                ('a'..='z')
+                    .flat_map(|first| ('a'..='z').map(move |second| format!("{first}{second}"))),
+            )
+            .take(350)
+            .collect::<Vec<_>>();
+        let source = terms.join(" ");
+        assert_eq!(source.len(), MAX_SEMANTIC_LOCATE_QUERY_BYTES - 1);
+        let query = SemanticLocateQuery::try_new(format!("{source} ")).expect("byte ceiling");
+        assert_eq!(query.term_count(), terms.len());
+        assert_eq!(term_bits(&source, &query.terms).count_ones(), 350);
+        assert!(query.required_term_bits().count_ones() > 255);
+        let partial = observation(812, "bb");
+        let result = locate(&partial, 1, query.as_str(), SemanticLocateScope::Initial, 8);
+        assert!(
+            result.matches().iter().any(|matched| {
+                matched.quality() == SemanticLocateMatchQuality::PartialSemantics
+            }),
+            "more than 255 unmatched terms remain rankable"
+        );
+        assert_eq!(
+            SemanticLocateQuery::try_new(format!("{source}  ")).expect_err("over ceiling"),
+            SemanticLocateError::Query
+        );
+    }
+
+    #[test]
+    fn fixed_term_masks_preserve_every_bit_and_never_alias_word_boundaries() {
+        let mut all = QueryTermBits::default();
+        for index in 0..MAX_SEMANTIC_LOCATE_QUERY_TERMS {
+            let mut one = QueryTermBits::default();
+            one.insert(index);
+            assert_eq!(one.count_ones(), 1);
+            assert_eq!((all & one).count_ones(), 0);
+            all |= one;
+            assert_eq!(all.count_ones() as usize, index + 1);
+        }
+        assert_eq!(std::mem::size_of::<QueryTermBits>(), 64);
+        let mut terms = (0..70)
+            .map(|index| format!("a{index:02}"))
+            .collect::<Vec<_>>();
+        terms[69] = "input".to_owned();
+        let alias = role_alias_bits(SemanticRole::Textbox, &terms);
+        let exact = term_bits("input", &terms);
+        assert_eq!(alias.count_ones(), 1);
+        assert!(alias == exact);
+    }
+
+    #[test]
+    fn matching_requires_terms_beyond_the_first_mask_word() {
+        let terms = (0..70).map(|index| format!("t{index}")).collect::<Vec<_>>();
+        let query = terms.join(" ");
+        let reversed_name = terms.iter().rev().cloned().collect::<Vec<_>>().join(" ");
+        let complete = observation(810, &reversed_name);
+        let result = locate(&complete, 1, &query, SemanticLocateScope::Initial, 8);
+        assert!(result
+            .matches()
+            .iter()
+            .any(|matched| { matched.quality() == SemanticLocateMatchQuality::AllTermsInName }));
+
+        let missing_last = observation(811, &reversed_name.replace("t69", "unrelated"));
+        let result = locate(&missing_last, 1, &query, SemanticLocateScope::Initial, 8);
+        assert!(
+            result.matches().is_empty(),
+            "last terms must not be truncated"
+        );
+    }
+
+    #[test]
+    fn maximum_observation_lookup_scans_text_once_and_searches_terms_logarithmically() {
+        for frame_count in [1, 2] {
+            let context = context(820);
+            // 32 text-bearing ancestors consume the exact frame text ceiling;
+            // all remaining nodes are depth-32 descendants of that same chain.
+            let text = format!("{}a", "aa ".repeat(1_365));
+            assert_eq!(text.len(), crate::MAX_SEMANTIC_TEXT_BYTES);
+            let nodes_per_frame = crate::MAX_SEMANTIC_NODES / frame_count;
+            let nodes = (0..nodes_per_frame)
+                .map(|index| {
+                    let mut node =
+                        json!({"k":index + 1,"r":if index == 0 {"document"} else {"group"}});
+                    if index != 0 {
+                        node["p"] = json!((index - 1).min(MAX_SEMANTIC_DEPTH - 1));
+                    }
+                    if index < MAX_SEMANTIC_DEPTH {
+                        node["t"] = json!(text);
+                    }
+                    node
+                })
+                .collect::<Vec<_>>();
+            let mut main_nodes = nodes.clone();
+            if frame_count == 2 {
+                main_nodes[nodes_per_frame - 1]["r"] = json!("frame_boundary");
+            }
+            let main = snapshot(
+                context,
+                FrameId::MAIN,
+                context.frame_generation(),
+                "https://locate.example.test/max",
+                1,
+                1,
+                json!(main_nodes),
+            );
+            assert_eq!(main.nodes().len(), nodes_per_frame);
+            assert_eq!(
+                usize::from(main.nodes().last().expect("leaf").depth()),
+                MAX_SEMANTIC_DEPTH
+            );
+            let boundary = main.nodes().last().expect("leaf").reference();
+            let mut assembler = SemanticObservationAssembler::new(
+                SemanticObservationRequest::initial(
+                    SemanticObservationId::new(840).expect("id"),
+                    context,
+                    SemanticObservationBudget::try_new(
+                        crate::MAX_SEMANTIC_OBSERVATION_NODES,
+                        crate::MAX_SEMANTIC_OBSERVATION_TEXT_BYTES,
+                        frame_count as u8,
+                    )
+                    .expect("budget"),
+                ),
+                main,
+            )
+            .expect("assembler");
+            if frame_count == 2 {
+                let child = snapshot(
+                    context,
+                    FrameId::new(2).expect("frame"),
+                    FrameGeneration::new(2).expect("generation"),
+                    "https://child.locate.test/max",
+                    2,
+                    2,
+                    json!(nodes),
+                );
+                assembler
+                    .attach_frame(FrameId::MAIN, boundary, child)
+                    .expect("child");
+            }
+            let observation = assembler.finish().expect("observation");
+            let role_bytes = observation
+                .frames()
+                .iter()
+                .flat_map(|frame| frame.nodes())
+                .map(|node| role_label(node.role()).len())
+                .sum::<usize>();
+            let long_query =
+                ('a'..='z')
+                    .map(|letter| letter.to_string())
+                    .chain(('a'..='z').flat_map(|first| {
+                        ('a'..='z').map(move |second| format!("{first}{second}"))
+                    }))
+                    .take(350)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+            assert_eq!(long_query.len(), MAX_SEMANTIC_LOCATE_QUERY_BYTES - 1);
+            for source in ["one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen", long_query.as_str()] {
+            let query = SemanticLocateQuery::try_new(source.to_owned()).expect("query");
+            let comparison_ceiling = query.term_count().next_power_of_two().trailing_zeros() as usize + 1;
+            let request = SemanticLocateRequest::bind(SemanticLocateId::new(1).expect("id"),
+                &observation, &acknowledgement(&observation), &frames(&observation), query,
+                SemanticLocateScope::Initial, SemanticLocateBudget::try_new(32).expect("budget"))
+                .expect("request");
+            LOCATE_WORK.with(|counter| counter.set(LocateWork::default()));
+            let result = locate_semantic_observation(&observation, request).expect("lookup");
+            let work = LOCATE_WORK.with(std::cell::Cell::get);
+            assert_eq!(result.stats().scanned_nodes(), crate::MAX_SEMANTIC_NODES as u16);
+            assert_eq!(work.normalization_calls, crate::MAX_SEMANTIC_NODES + frame_count * MAX_SEMANTIC_DEPTH);
+            assert_eq!(work.normalization_bytes, frame_count * crate::MAX_SEMANTIC_TOTAL_TEXT_BYTES + role_bytes);
+            assert!(work.term_comparisons <= work.term_lookups * comparison_ceiling, "{work:?}");
+            assert_eq!(work.ancestor_merges, frame_count * (0..MAX_SEMANTIC_DEPTH).sum::<usize>()
+                + (crate::MAX_SEMANTIC_NODES - frame_count * MAX_SEMANTIC_DEPTH) * MAX_SEMANTIC_DEPTH);
+            assert_eq!(std::mem::size_of::<QueryTermBits>() * crate::MAX_SEMANTIC_NODES, 32 * 1024);
+        }
+        }
+    }
+
+    #[test]
+    fn cached_ancestor_masks_equal_reference_scans_without_state_value_or_secret_inheritance() {
+        let context = context(821);
+        let main = snapshot(
+            context,
+            FrameId::MAIN,
+            context.frame_generation(),
+            "https://locate.example.test/cache",
+            1,
+            1,
+            json!([
+                {"k":1,"r":"document","n":"Root"},
+                {"k":2,"p":0,"r":"textbox","n":"Parent","t":"Context","s":16,
+                    "v":{"k":"text","value":"ownvalue"}},
+                {"k":3,"p":1,"r":"group","n":"Publicchild"},
+                {"k":4,"p":2,"r":"password","n":"Secretancestor","q":"secret","v":{"k":"redacted"}},
+                {"k":5,"p":3,"r":"button","n":"Target"}
+            ]),
+        );
+        let observation = SemanticObservationAssembler::new(
+            SemanticObservationRequest::initial(
+                SemanticObservationId::new(841).expect("id"),
+                context,
+                SemanticObservationBudget::try_new(16, 16 * 1024, 1).expect("budget"),
+            ),
+            main,
+        )
+        .expect("assembler")
+        .finish()
+        .expect("observation");
+        let query = SemanticLocateQuery::try_new(
+            "root parent context input ownvalue required publicchild secretancestor target"
+                .to_owned(),
+        )
+        .expect("query");
+        for frame in observation.frames() {
+            let mut contributions = vec![QueryTermBits::default(); frame.nodes().len()];
+            for (index, node) in frame.nodes().iter().enumerate() {
+                let cached = ancestor_term_bits(frame.nodes(), index, &contributions);
+                let mut reference = QueryTermBits::default();
+                let mut current = index;
+                for _ in 0..MAX_SEMANTIC_DEPTH {
+                    let Some(parent_index) = frame.nodes()[current].parent().map(usize::from)
+                    else {
+                        break;
+                    };
+                    if parent_index >= current {
+                        break;
+                    }
+                    let parent = &frame.nodes()[parent_index];
+                    if parent.sensitivity() != SemanticSensitivity::Secret {
+                        let mut normalized = String::new();
+                        for source in [
+                            parent.name().map(|value| value.as_str()),
+                            parent.text().map(|value| value.as_str()),
+                            Some(role_label(parent.role())),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        {
+                            normalize_into(&mut normalized, source);
+                            for token in normalized.split(' ') {
+                                for (term_index, term) in query.terms.iter().enumerate() {
+                                    if token == term {
+                                        reference.insert(term_index);
+                                    }
+                                }
+                            }
+                        }
+                        reference |= role_alias_bits(parent.role(), &query.terms);
+                    }
+                    current = parent_index;
+                }
+                assert!(cached == reference, "node ordinal {index}");
+                if node.sensitivity() != SemanticSensitivity::Secret {
+                    let _ = match_node(
+                        node,
+                        &query,
+                        &mut String::new(),
+                        cached,
+                        &mut contributions[index],
+                    );
+                }
+            }
+            let inherited = ancestor_term_bits(frame.nodes(), 4, &contributions);
+            assert!(
+                (inherited & term_bits("ownvalue required secretancestor", &query.terms))
+                    == QueryTermBits::default()
+            );
+            let expected = term_bits("root parent context input publicchild", &query.terms);
+            assert!((inherited & expected) == expected);
+        }
+        // Parent context outside a requested subtree must still contribute,
+        // while cache construction must not change scoped counts or secrets.
+        let result = locate(
+            &observation,
+            1,
+            "parent context input target",
+            SemanticLocateScope::Subtree(SemanticReferenceId::new(3).expect("ref")),
+            8,
+        );
+        assert_eq!(result.stats().scanned_nodes(), 3);
+        assert_eq!(result.stats().withheld_secret_nodes(), 1);
+        assert!(result
+            .matches()
+            .iter()
+            .any(|matched| matched.reference().get() == 5
+                && matched.quality() == SemanticLocateMatchQuality::AllTermsAcrossSemantics));
     }
 
     #[test]
