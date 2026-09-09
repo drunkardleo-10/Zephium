@@ -170,3 +170,36 @@ repeated invalid choices, and checks exact native capture counts, accounting,
 stateless call correlation, one observation per request and clean shutdown.
 Core tests additionally reject baseline/config substitution and retain valid
 scope admission for both provider correlation codecs.
+
+## Inspection progress is not navigation progress
+
+Progressive inspection is a same-document capability and therefore retains its
+own bounded host checkpoint independently of route state. An OpenAI
+provider-exact continuation can receive up to 4 KiB of content-free inspection
+history even when the task has no navigation authority. Route checkpoints keep
+their separate policy binding and validation. Neither checkpoint is page
+evidence or a substitute for current semantic references.
+
+Each accepted capture records only its scope class, snapshot generation, node
+count, completeness, optional text window, and private stable native anchor
+key. Before delivery, private keys are remapped to references that actually
+exist in the current observation; absent keys become null. Page strings and old
+references are never retained in this history. A refusal preserves the exact
+history and current observation without advancing native generation.
+
+The engine refuses a subtree request when the same stable subtree was already
+captured, including after `snapshot(initial)` assigns it a different `@ref`.
+A different descendant remains eligible. The current-subtree check also lives
+in semantic observation construction, so provider correlation shape cannot
+bypass it. Rejected scopes reach the model as `invalid_snapshot_scope` without
+native capture or retained-evidence mutation.
+
+Retained read evidence is admitted only after a snapshot proposal passes scope
+resolution and immediately before its real replacement capture. A rejected
+proposal therefore cannot evict useful prior evidence. Decision-call budgeting
+applies to every progressive/read/action/extraction Work profile, not only
+navigation discovery, and reserves the final mapping call mechanically.
+
+The first authenticated same-page qualification and manual provider-trace
+review are recorded in the
+[macOS Notion evidence](../eval/agentic-browsing/macos-authenticated-notion.md).

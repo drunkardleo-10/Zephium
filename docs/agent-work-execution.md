@@ -188,16 +188,24 @@ The application qualifier additionally uses the [trusted macOS composition](agen
 actual shell admission, journal and application shutdown. It requires trusted
 task completion, durable success, focus isolation and clean native/store/worker
 teardown. See the [M6 record](../eval/agentic-browsing/m6-production-qualification.md).
-Only explicit public qualification can enable retained provider logs;
+Only an explicit synthetic qualification can enable retained provider logs;
 production/BYOK remains `store:false`. Local diagnostics contain only closed
 states, correlations, counters and timings; no page/provider data or secrets.
+
+The first exact authenticated read-only workflow is separately recorded in the
+[macOS Notion qualification](../eval/agentic-browsing/macos-authenticated-notion.md).
+It proves one user-attested disposable-workspace task, same-document progressive
+inspection, source-bound extraction, durable terminal publication, and clean
+retained-resource reuse. It does not implement or qualify native account
+discovery, writes, arbitrary Notion pages, Windows, or concurrent Browse.
 
 Next: trusted product task/plan authoring and a user-facing Work command over
 the opt-in Rust desktop admission port. No UI/IPC authority is added, and the
 full Tauri window/bootstrap path is not live-qualified. Local/hosted model
 transport adapters must share the same session semantics. Native macOS
-suspend/resume, authenticated/public multi-site qualification, concurrent Browse
-interaction, navigation and richer tool adapters remain open. A suspension
+suspend/resume, broader authenticated/public multi-site qualification,
+concurrent Browse interaction, navigation and richer tool adapters remain
+open. A suspension
 request currently revokes and closes: it is `Cancelled` only if all original
 owners drain, otherwise recovery. It does not claim an unimplemented native
 suspend operation succeeded or retain resumable execution.
