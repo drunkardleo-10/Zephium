@@ -66,6 +66,9 @@ struct State {
     reads: usize,
     navigation: Option<zephium_agentic::ContextOperationJoin>,
     action: Option<zephium_agentic::SemanticActionAttemptId>,
+    // Explicit lease retirement closes evidence waiting too, even when sticky
+    // quarantine prevents admission of the retirement lifecycle itself.
+    action_drain_closed: bool,
     observed: Option<zephium_agentic::ContextJoin>,
     document_epoch: u64,
     callbacks: usize,
@@ -135,6 +138,7 @@ impl WorkResourceGuard {
                 reads: 0,
                 navigation: None,
                 action: None,
+                action_drain_closed: false,
                 observed: None,
                 document_epoch: 1,
                 callbacks: 0,
@@ -252,6 +256,12 @@ impl WorkResourceGuard {
             .state
             .lock()
             .map_err(|_| ContextPortFailure::NativeRefused)?;
+        if request.operation() == Operation::Revoke
+            && request.lease().is_some()
+            && state.lease.as_ref() == request.lease()
+        {
+            state.action_drain_closed = true;
+        }
         match request.operation() {
             Operation::Acquire
                 if self.health_current()

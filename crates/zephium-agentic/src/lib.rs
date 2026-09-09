@@ -406,15 +406,15 @@ pub use protocol::{
     PROBE_PROTOCOL_VERSION,
 };
 pub use semantic::{
-    SemanticCompleteness, SemanticContractError, SemanticFrameJoin, SemanticFrameTrust,
-    SemanticHeadingLevel, SemanticInvocationId, SemanticNode, SemanticOperationClass,
-    SemanticOperations, SemanticOrigin, SemanticRect, SemanticReference, SemanticReferenceError,
-    SemanticReferenceId, SemanticRole, SemanticSensitivity, SemanticSnapshot,
-    SemanticSnapshotGeneration, SemanticState, SemanticStates, SemanticText, SemanticTruncation,
-    SemanticTrust, SemanticValuePreview, SemanticValueSummary, SemanticValueText,
-    MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_FRAMES, MAX_SEMANTIC_NAME_BYTES, MAX_SEMANTIC_NODES,
-    MAX_SEMANTIC_TEXT_BYTES, MAX_SEMANTIC_TOTAL_TEXT_BYTES, MAX_SEMANTIC_VALUE_BYTES,
-    MAX_SEMANTIC_VALUE_PREVIEW_BYTES,
+    SemanticCompleteness, SemanticContractError, SemanticEditableStructure, SemanticFillSupport,
+    SemanticFrameJoin, SemanticFrameTrust, SemanticHeadingLevel, SemanticInvocationId,
+    SemanticNode, SemanticOperationClass, SemanticOperations, SemanticOrigin, SemanticRect,
+    SemanticReference, SemanticReferenceError, SemanticReferenceId, SemanticRole,
+    SemanticSensitivity, SemanticSnapshot, SemanticSnapshotGeneration, SemanticState,
+    SemanticStates, SemanticText, SemanticTruncation, SemanticTrust, SemanticValuePreview,
+    SemanticValueSummary, SemanticValueText, MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_FRAMES,
+    MAX_SEMANTIC_NAME_BYTES, MAX_SEMANTIC_NODES, MAX_SEMANTIC_TEXT_BYTES,
+    MAX_SEMANTIC_TOTAL_TEXT_BYTES, MAX_SEMANTIC_VALUE_BYTES, MAX_SEMANTIC_VALUE_PREVIEW_BYTES,
 };
 pub(crate) use semantic_action::SemanticActionRuntimeDescriptor;
 pub use semantic_action::{

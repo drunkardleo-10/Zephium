@@ -198,9 +198,12 @@ pub(crate) fn request(
 
 impl WorkActionTask {
     pub(crate) fn native_for_test() -> SemanticActionNativeRequest {
+        Self::retained_for_test().into_parts().0
+    }
+    pub(crate) fn retained_for_test() -> WorkBrowserActionRequest {
         let (mut rows, _, guard) = setup();
         let lease = leased(&mut rows, &guard);
-        request(&mut rows, &guard, &lease).0.into_parts().0
+        request(&mut rows, &guard, &lease).0
     }
 }
 
@@ -330,6 +333,66 @@ fn losing_dispatched_recipe_keeps_action_debt_and_quarantines() {
     assert!(!guard.is_healthy());
     assert_eq!(guard.state.lock().unwrap().action, Some(attempt));
     assert!(!guard.callbacks_drained());
+}
+
+#[test]
+fn quarantine_keeps_only_exact_action_drain_and_callback_return_debt() {
+    let (mut rows, admission, guard) = setup();
+    let lease = leased(&mut rows, &guard);
+    let (mut request, _, _, _) = request(&mut rows, &guard, &lease);
+    let mut ticket = request.take_delivery_ticket().unwrap();
+    let attempt = request.action().attempt();
+    guard.admit_action(&request, tick(4)).unwrap();
+    guard.fail();
+    assert!(!guard.action_current(&lease, attempt, tick(4)));
+    assert!(!guard.admits(&lease, tick(4)));
+    assert!(guard.action_drain_current(&lease, attempt, tick(4)));
+    assert!(!guard.action_drain_current(
+        &lease,
+        SemanticActionAttemptId::new(attempt.get() + 1).unwrap(),
+        tick(4)
+    ));
+    assert!(!guard.action_drain_current(&lease, attempt, lease.deadline()));
+    let during = guard.clone();
+    *guard.notification_dispatch.lock().unwrap() = Some(Arc::new(|_| true));
+    let mut task = WorkActionTask {
+        request: Some(request),
+        owner: None,
+        delivery: None,
+        attempt,
+        completion: Some(Box::new(move |_| {
+            assert!(!during.callbacks_drained());
+            assert_eq!(during.state.lock().unwrap().action, Some(attempt));
+        })),
+        guard: guard.clone(),
+        permit: admission.reserve().unwrap(),
+    };
+    let native = task.take_native().unwrap();
+    task.complete(native.fail(
+        SemanticActionNativeFailure::AppliedUnverified,
+        SemanticActionExecutionInstant::from_millis(5),
+    ));
+    assert_eq!(ticket.try_take_returned().unwrap(), Some(true));
+    assert!(!guard.action_drain_current(&lease, attempt, tick(5)));
+    assert!(!guard.is_healthy());
+    assert!(guard.state.lock().unwrap().action.is_none());
+    assert_eq!(guard.state.lock().unwrap().callbacks, 0);
+    assert_eq!(admission.pending(), Some(0));
+}
+
+#[test]
+fn explicit_retirement_stops_quarantined_action_drain_even_when_lifecycle_is_refused() {
+    let (mut rows, _admission, guard) = setup();
+    let lease = leased(&mut rows, &guard);
+    let (request, _, _, _) = request(&mut rows, &guard, &lease);
+    let attempt = request.action().attempt();
+    guard.admit_action(&request, tick(4)).unwrap();
+    guard.fail();
+    assert!(guard.action_drain_current(&lease, attempt, tick(4)));
+    let revoke = rows.revoke(&lease).unwrap();
+    assert!(guard.admit_lifecycle(&revoke, tick(4)).is_err());
+    assert!(!guard.action_drain_current(&lease, attempt, tick(4)));
+    assert_eq!(guard.state.lock().unwrap().action, Some(attempt));
 }
 
 #[test]

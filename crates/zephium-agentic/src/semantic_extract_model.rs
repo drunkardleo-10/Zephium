@@ -737,7 +737,7 @@ mod tests {
         .unwrap();
         let diagnostic =
             encode_semantic_extraction_request(&schema, &read, diagnostic_budget).unwrap();
-        eprintln!("dense extraction: nodes={} items={} source_bytes={} read_bytes={} schema_bytes={} combined_bytes={}", observation.node_count(), read.stats().items(), observation.frames()[0].total_text_bytes(), diagnostic.stats().read().bytes(), diagnostic.stats().bytes()-diagnostic.stats().read().bytes(), diagnostic.stats().bytes());
+        assert!(diagnostic.stats().bytes() > diagnostic.stats().read().bytes());
         let encoded = encode_semantic_extraction_request(
             &schema,
             &read,
@@ -834,9 +834,6 @@ mod tests {
             SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE,
         )
         .unwrap();
-        eprintln!("maximum STANDARD extraction: source_bytes={} read_bytes={} schema_bytes={} combined_bytes={}",
-            read.stats().content_bytes(),encoded.stats().read().bytes(),
-            encoded.stats().bytes()-encoded.stats().read().bytes(),encoded.stats().bytes());
         assert_eq!(encoded.stats().read().items(), 128);
         assert_eq!(encoded.stats().fields(), 64);
         assert_eq!(

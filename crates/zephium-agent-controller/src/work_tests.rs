@@ -834,6 +834,7 @@ enum Fault {
     #[cfg(feature = "probe-harness")]
     Scoped(ScopedFault),
     None,
+    Hydration,
     EmbeddedFrame,
     ConstructDispatch,
     ConstructCallback,
@@ -1035,7 +1036,13 @@ impl AgentBrowserPort for Port {
         let correlation = invocation.correlation();
         assert_eq!(
             correlation.snapshot_generation().get(),
-            if lock(&self.calls).contains(&7) { 2 } else { 1 }
+            if self.fault == Fault::Hydration {
+                lock(&self.calls).iter().filter(|call| **call == 3).count() as u64
+            } else if lock(&self.calls).contains(&7) {
+                2
+            } else {
+                1
+            }
         );
         let wire = format!("{{\"v\":1,\"i\":{},\"g\":{},\"c\":\"complete\",\"n\":[{{\"k\":1,\"r\":\"document\",\"o\":16}},{{\"k\":2,\"p\":0,\"r\":\"textbox\",\"n\":\"Field\",\"s\":64,\"o\":2,\"v\":{{\"k\":\"text\",\"value\":\"\"}},\"b\":{{\"x\":10,\"y\":20,\"w\":120,\"h\":30}}}}]}}", correlation.invocation().get(), correlation.snapshot_generation().get());
         let wire = if self.fault == Fault::EmbeddedFrame {
@@ -1399,6 +1406,148 @@ fn explicit_readiness_preserves_snapshot_generation_and_stop_reasons_are_first_w
         assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
         assert_eq!(calls.iter().filter(|call| **call == 4).count(), 1);
         assert_eq!(calls.iter().filter(|call| **call == 5).count(), 1);
+    }
+}
+
+#[test]
+fn initial_hydration_is_read_only_fresh_bounded_and_reattests_account() {
+    struct Hydrating {
+        samples: Arc<AtomicU64>,
+        attestations: Arc<AtomicU64>,
+        ready_at: u64,
+        refuse_account_at: u64,
+    }
+    impl AgentWorkTask for Hydrating {
+        fn initial_readiness(
+            &self,
+            observation: &SemanticObservation,
+        ) -> Result<AgentWorkInitialReadiness, AgentWorkFailure> {
+            let sample = self.samples.fetch_add(1, Ordering::SeqCst) + 1;
+            assert_eq!(observation.frames()[0].generation().get(), sample);
+            assert_eq!(
+                validate_initial_readiness_successor(observation, observation),
+                Err(AgentWorkFailure::Context)
+            );
+            let foreign_frame = SemanticFrameJoin::try_new(
+                observation.request().context(),
+                FrameId::MAIN,
+                observation.request().context().frame_generation(),
+                SemanticOrigin::parse("https://different-fixture.invalid/").unwrap(),
+                SemanticFrameTrust::SameOrigin,
+            )
+            .unwrap();
+            let wire = format!(
+                r#"{{"v":1,"i":{},"g":{},"c":"complete","n":[{{"k":1,"r":"document","o":16}}]}}"#,
+                sample + 1,
+                sample + 1
+            );
+            let foreign_snapshot = decode_semantic_snapshot(
+                SemanticDecodeContext::new(
+                    SemanticInvocationId::new(sample + 1).unwrap(),
+                    foreign_frame,
+                    SemanticSnapshotGeneration::new(sample + 1).unwrap(),
+                ),
+                wire.as_bytes(),
+            )
+            .unwrap();
+            let foreign = SemanticObservationAssembler::new(
+                SemanticObservationRequest::initial(
+                    SemanticObservationId::new(sample + 1).unwrap(),
+                    observation.request().context(),
+                    SemanticObservationBudget::INITIAL_FILTERED,
+                ),
+                foreign_snapshot,
+            )
+            .unwrap()
+            .finish()
+            .unwrap();
+            assert_eq!(
+                validate_initial_readiness_successor(observation, &foreign),
+                Err(AgentWorkFailure::Context)
+            );
+            Ok(if sample >= self.ready_at {
+                AgentWorkInitialReadiness::Ready
+            } else {
+                AgentWorkInitialReadiness::Pending
+            })
+        }
+        fn evaluate(
+            &mut self,
+            _: &SemanticObservation,
+        ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+            assert!(self.samples.load(Ordering::SeqCst) >= self.ready_at);
+            Ok(AgentWorkTaskProgress::Complete)
+        }
+        fn assess(
+            &self,
+            _: &SemanticPreparedAction,
+        ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+            panic!("hydration must never admit an action")
+        }
+        fn attest_account(
+            &self,
+            context: ContextJoin,
+            now: AgentPolicyInstant,
+        ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
+            if self.attestations.fetch_add(1, Ordering::SeqCst) + 1 >= self.refuse_account_at {
+                return Err(AgentWorkFailure::Contract);
+            }
+            Task.attest_account(context, now)
+        }
+    }
+    let _guard = lock(&SERIAL);
+    for (ready_at, refuse_account_at) in [(2, u64::MAX), (u64::MAX, u64::MAX), (2, 3)] {
+        let samples = Arc::new(AtomicU64::new(0));
+        let attestations = Arc::new(AtomicU64::new(0));
+        let (mut controller, handle) = AgentWorkController::try_new(
+            input(),
+            AgentProviderTransportConfig::STANDARD,
+            AgentProviderCredential::try_new(
+                AgentProviderKind::OpenAiResponses,
+                "fixture-not-a-secret".into(),
+            )
+            .unwrap(),
+            Arc::new(Audit(Fault::Hydration)),
+            Box::new(Hydrating {
+                samples: samples.clone(),
+                attestations: attestations.clone(),
+                ready_at,
+                refuse_account_at,
+            }),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_millis(1200);
+        let state = controller.state.as_mut().unwrap();
+        state.input.as_mut().unwrap().settings.deadline = deadline;
+        state.native.deadline = deadline;
+        let (outcome, shutdown, calls, events) = drive(controller, handle, Fault::Hydration);
+        if ready_at == 2 && refuse_account_at == u64::MAX {
+            assert!(
+                matches!(outcome, AgentWorkOutcome::Succeeded(_)),
+                "{outcome:?}"
+            );
+            assert_eq!(samples.load(Ordering::SeqCst), 2);
+            assert!(attestations.load(Ordering::SeqCst) >= 3);
+        } else {
+            let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+                panic!("{outcome:?}")
+            };
+            assert_eq!(
+                closed.failure(),
+                if refuse_account_at == 3 {
+                    AgentWorkFailure::Contract
+                } else {
+                    AgentWorkFailure::Observation(SemanticRuntimePortFailure::NotReady)
+                }
+            );
+            assert!(samples.load(Ordering::SeqCst) <= 3);
+        }
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        assert!(!calls.contains(&7));
+        assert!(!events.iter().any(|event| matches!(
+            event.kind(),
+            AgentWorkEventKind::ModelActive | AgentWorkEventKind::ActionActive
+        )));
     }
 }
 

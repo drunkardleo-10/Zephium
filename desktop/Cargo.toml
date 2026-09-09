@@ -24,6 +24,12 @@ macos-work-retained-notion-probe = [
     "macos-work-retained-product-probe",
     "zephium-work-composition/retained-notion-qualification",
 ]
+# Same enrolled profile and exact page, but two reversible authenticated title
+# transitions followed by source-bound cleanup evidence.
+macos-work-retained-notion-write-probe = [
+    "macos-work-retained-product-probe",
+    "zephium-work-composition/retained-notion-write-qualification",
+]
 # Same release-excluded retained path, one closed real-public product-brief task.
 macos-work-retained-public-probe = [
     "macos-work-retained-controller-probe",

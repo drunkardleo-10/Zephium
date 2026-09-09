@@ -50,6 +50,38 @@ outcome admission, a fresh observation, effect verification, and policy/audit
 settlement remain separate requirements. The previous references remain retired
 after both callback completion and synchronous dispatch refusal.
 
+A post-handoff native URL observation may revoke the exact document even when
+only its same-origin path changed. The macOS runtime then closes reads, actions,
+references and preparation releases immediately, while retaining only the
+original handed-off action's receiver until its original deadline. A queued
+action that has not crossed the page handoff is stopped. The host preserves the
+existing checked rendering presentation while that exact command returns. If
+the runtime reports `AppliedUnverified`, it also retains that presentation for
+at most three seconds after the terminal, bounded by the original action and
+lease deadlines with a retirement margin. This gives application persistence
+already triggered by the command an opportunity to run; elapsed time is never
+evidence of a save. No additional input, observation, preparation release,
+automatic retry or continuation is admitted during revoked authority.
+
+The runtime retains the exact uncertain attempt identity solely as passive
+lifetime evidence. It survives same-document URL revocation regardless of
+whether the terminal or URL callback arrives first. Full document replacement,
+renderer loss, explicit retirement/cancellation, foreground ownership loss,
+timeout and teardown end the lifetime. The existing wake ceiling and resource
+capacity remain in force. Presentation retirement and callback return still
+complete before resource reuse. No route equality exception is introduced.
+Runtime eligibility uses the same fault classification as the native terminal,
+including logical-editor and postcondition uncertainty; it cannot silently
+disagree with the later `AppliedUnverified` result. The URL observer closes
+semantic authority before invoking failure diagnostics or host callbacks.
+
+The shared retained controller polls the original action terminal independently
+of resource health, with control and shutdown taking precedence. It accounts
+that evidence before checking health for any postcondition read or continuation.
+The terminal cannot restore document authority, verify success on its own, or
+authorize retry. If the terminal never arrives, the original action deadline
+ends the wait and its unproven ownership remains in recovery.
+
 Pending action debt prevents successful lease revocation, capacity reuse,
 resource reaping and global native shutdown. Native destruction does not erase
 a callback that can still arrive. Losing an owner leaves explicit debt; no

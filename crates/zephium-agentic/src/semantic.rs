@@ -892,6 +892,72 @@ impl fmt::Debug for SemanticReference {
     }
 }
 
+/// Closed, content-free explanation of fixed Fill support. Diagnostic only;
+/// never grants an operation or weakens native revalidation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SemanticFillSupport {
+    /// The fixed native recipe supports this observed control.
+    Supported,
+    /// No explicit supported contenteditable attribute was present.
+    MissingExplicitEditable,
+    /// Native isContentEditable was false.
+    NativeNotEditable,
+    /// Editing host tag is outside the fixed recipe allowlist.
+    UnsupportedTag,
+    /// A nested host lacks proven text-only shape or a safe editing context.
+    EditableAncestor,
+    /// Direct child count exceeds the bounded host inspection limit.
+    ChildLimit,
+    /// At least one direct element child would be erased by textContent.
+    ElementChild,
+    /// A direct non-text, non-element child is outside the recipe.
+    OtherChild,
+    /// Native host inspection failed; support was not proven.
+    NativeReadFailed,
+    /// The control declares read-only state.
+    ReadOnly,
+    /// The control declares disabled state.
+    Disabled,
+    /// Native control type is outside the fixed Fill recipe.
+    UnsupportedControl,
+}
+
+/// Content-free direct-child shape of an explicit editable target. Host-only
+/// evidence, never edit authority or a description of arbitrary descendants.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SemanticEditableStructure {
+    pub(crate) child_count: u16,
+    pub(crate) child_kinds: u8,
+    pub(crate) editable_parent: bool,
+}
+
+impl SemanticEditableStructure {
+    /// Exact direct-child count when at most 128; 129 means at least 129.
+    pub const fn child_count(self) -> u16 {
+        self.child_count
+    }
+    /// Whether inspection stopped at the 128-child ceiling.
+    pub const fn truncated(self) -> bool {
+        self.child_count == 129
+    }
+    /// Whether any inspected direct child was a DOM text node.
+    pub const fn has_text(self) -> bool {
+        self.child_kinds & 1 != 0
+    }
+    /// Whether any inspected direct child was a DOM element.
+    pub const fn has_elements(self) -> bool {
+        self.child_kinds & 2 != 0
+    }
+    /// Whether any inspected direct child was neither text nor an element.
+    pub const fn has_other(self) -> bool {
+        self.child_kinds & 4 != 0
+    }
+    /// Whether the immediate parent was natively contenteditable.
+    pub const fn editable_parent(self) -> bool {
+        self.editable_parent
+    }
+}
+
 /// One bounded allowlisted semantic node.
 #[derive(Clone, Eq, PartialEq)]
 pub struct SemanticNode {
@@ -906,6 +972,8 @@ pub struct SemanticNode {
     value: Option<SemanticValueSummary>,
     states: SemanticStates,
     operations: SemanticOperations,
+    fill_support: Option<SemanticFillSupport>,
+    editable_structure: Option<SemanticEditableStructure>,
     sensitivity: SemanticSensitivity,
     trust: SemanticTrust,
     geometry: Option<SemanticRect>,
@@ -962,6 +1030,16 @@ impl SemanticNode {
     /// Complete operation set.
     pub const fn operations(&self) -> SemanticOperations {
         self.operations
+    }
+
+    /// Optional host-only closed Fill diagnostic, not provider context or authority.
+    pub const fn fill_support(&self) -> Option<SemanticFillSupport> {
+        self.fill_support
+    }
+
+    /// Bounded host-only direct-child shape, omitted from provider context.
+    pub const fn editable_structure(&self) -> Option<SemanticEditableStructure> {
+        self.editable_structure
     }
 
     /// Deterministic sensitivity label.
@@ -1024,6 +1102,8 @@ pub(crate) struct SemanticNodeInput {
     pub(crate) value: Option<SemanticValueSummary>,
     pub(crate) states: SemanticStates,
     pub(crate) operations: SemanticOperations,
+    pub(crate) fill_support: Option<SemanticFillSupport>,
+    pub(crate) editable_structure: Option<SemanticEditableStructure>,
     pub(crate) sensitivity: SemanticSensitivity,
     pub(crate) trust: SemanticTrust,
     pub(crate) geometry: Option<SemanticRect>,
@@ -1202,6 +1282,8 @@ impl SemanticSnapshot {
                 value: input.value,
                 states: input.states,
                 operations: input.operations,
+                fill_support: input.fill_support,
+                editable_structure: input.editable_structure,
                 sensitivity: input.sensitivity,
                 trust: input.trust,
                 geometry: input.geometry,
@@ -1347,6 +1429,8 @@ mod tests {
             value: None,
             states: SemanticStates::NONE,
             operations,
+            fill_support: None,
+            editable_structure: None,
             sensitivity: SemanticSensitivity::Public,
             trust: SemanticTrust::UntrustedPage,
             geometry: Some(SemanticRect::try_new(1, 2, 30, 40).expect("rect")),

@@ -371,21 +371,54 @@ must not rely on private WebKit SPI. Its native state machine returns the typed
 `NotReady` refusal for a loading document; it does not encode that ordinary
 lifecycle state as an invariant abort.
 
-The macOS owned-agent-view constructor additionally installs one immutable,
-main-frame-only page-world compatibility shim for bounded Fill operations on
-text/search inputs and textareas. This is a narrow compatibility exception,
-not a general page-world execution surface: it is never installed in Browse or
-borrowed tabs, has no native bridge, selectors, arbitrary code input, user
-activation route, storage/network authority, or cross-document authority. The
-shim's command and terminal attributes are untrusted transport hints and can
-never authorize success. The isolated runtime first binds the exact target and
-private input, the shim independently revalidates connected control identity,
-writability, supported type, and bounded credential metadata before and after
-`beforeinput`, and only a complete adjacent isolated-world snapshot proving the
-exact post-value can authorize success. Once `beforeinput` has been observed,
-any cancellation, mutation, ambiguous terminal, or later exception is treated
-as applied-but-unverified and requires human judgment; it is never blindly
-retried.
+The macOS owned-agent-view constructor installs and attests exactly one
+immutable isolated-world script. Fill is a private fixed recipe reachable only
+from its admitted action path: resolve the private stable ref, revalidate the
+exact descriptor and native control, dispatch bounded untrusted
+`beforeinput`/`input` events, and use captured native value/text setters.
+There is no page-world request listener, transport marker, capability token,
+shared callback, or second mutating script. The former attribute/event relays
+were removed because page content could originate an edit independently of
+controller admission; payload correlation did not constitute authority.
+
+Editable replacement accepts only empty or direct-text explicit hosts with native
+contenteditable state. A nested host additionally binds a private bounded
+editing-context witness at observation: the exact ancestor identities through
+the document and each ancestor's native editability. The same context, visible
+unprotected state and credential boundaries must hold immediately before
+dispatch, after `beforeinput`, and after mutation. Only the exact leaf is ever
+replaced; its editor and siblings acquire no write authority. Element descendants,
+unproven editing contexts, unsupported hosts, and oversized text refuse.
+The full private descriptor, credential metadata,
+connected identity, writability and supported type are revalidated after
+`beforeinput`, before touching the setter. Once the page observes that event,
+cancellation, revalidation failure, mutation failure or postcondition exceptions
+are applied-but-unverified; they never become clean retryable refusals.
+
+Fill reports `FixedSemanticRecipe` with connected writable form readiness.
+Success still requires complete adjacent isolated-world exact-value proof and
+the core's independent fresh semantic postcondition. No user activation,
+arbitrary script, selector, page-facing native bridge, or global input route is
+introduced. Main-world prototype poisoning cannot replace captured isolated
+getters, setters, constructors or event dispatch. Windows native action
+integration and site-specific editing/persistence behavior require separate
+qualification.
+
+A release-excluded [isolated editing-command candidate](../eval/agentic-browsing/isolated-contenteditable-command-qualification.md)
+now runs through this same owned-view document-start channel. It captures the
+fixed native `insertText` command, consumes one document-local opportunity before
+focus preparation, revalidates exact refs/descriptors/range boundaries, and
+checks a fresh bounded logical-editor value after framework reconciliation.
+The real owned/presented normal and focus-retarget fixtures retained their model
+with trusted input and no observed activation; cancellation, replacement,
+same-origin adoption and protected-sibling mutation stayed unverified. Even a
+matching logical value returns the closed `AppliedUnverifiedLogicalEditor`
+diagnostic, mapped to nonretryable `AppliedUnverified`. It cannot mint the
+existing exact-ref Fill success proof. Shipping runtime bytes/digest, control
+setters, grammar and admission are unchanged. Production promotion still needs
+the exact effect/account/lease authority joined to independently fresh logical
+editor evidence and qualification of the supported retained-view activation
+and composition histories; DOM identity cannot supply those guarantees.
 
 On Windows, isolated CDP worlds may be an
 internal adapter mechanism, but CDP remains absent from domain and model
@@ -840,6 +873,65 @@ The runtime can choose among:
 Backend choice is measured per action/site and returned as diagnostic metadata,
 not exposed as a model choice. Zephium must never steal pointer or keyboard
 focus from normal browsing to make an invisible owned context work.
+
+### 8.3 Deferred native trusted-context text design
+
+There is no `trusted_text` module or native trusted-text capability in the
+current architecture. An earlier functional-core sketch was removed after the
+platform audit found no executable backend that could satisfy its recipient,
+composition, activation, cancellation, and lifetime assumptions. Keeping a
+dormant authority model without a qualifying implementation would create stale
+architecture rather than useful safety. Existing production Fill remains
+unchanged.
+
+If a native trusted-context text backend is revisited, it requires both the
+original live `AgentActiveEffect` and a separate trusted product approval for
+bounded text delivery within the approved owned
+same-origin context. Approval rechecks the actual policy row, exact manifest
+revision, plan/effect reservation, account, profile, retained resource and lease,
+document, bounded value and absolute deadline. It covers potential same-origin
+recipient changes as an explicit additional scope decision. An opaque DOM ref
+locates the intended logical editor; it is not authority against page-authored
+focus changes, framework reconstruction or adoption into another document.
+
+Activation permission is independent of trusted-event production. An explicitly
+approved potentially activating primitive taints its native-view lifetime
+before entry. Navigation, cancellation, successful verification, new action
+objects, blur and page telemetry never clear that state. A qualified primitive
+that cannot activate may preserve clear activation state, but still consumes
+the same one-shot native input opportunity and incurs native drain debt.
+
+The proposed initial composition assumption admits only one first native
+text operation in a newly allocated view with no prior human/native input
+exposure. A synchronous `hasMarkedText == false` report cannot restore that
+assumption. A future host would have to retain one native text-lifetime owner
+alongside the exact native view for its entire lifetime, serialize its entry
+with existing retained action/read/navigation debt, and close admission under
+the actual human-input fence.
+
+Entered requests are move-only and leave independent view-owned debt even if
+their callback owner is lost. Timeout, cancellation and takeover cannot retract
+queued input or fabricate drain. Exclusive human input must wait for exact
+native drain or exact native view destruction. Late drain can retire debt but
+cannot repair uncertainty or turn a revoked operation into success. A fresh,
+complete, unique logical-editor resolution must establish the requested full
+value and preserved protected content after drain; a replacement DOM leaf is
+allowed. Such evidence proves observed editor state, not remote persistence.
+Such a backend must not mint the existing exact-Fill success terminal from
+native delivery alone; an entered effect can only be accounted as unverified
+until independent semantic verification succeeds.
+
+Before any qualification constructor is added, the backend must prove continuous
+closure over every possible recipient, including dynamic initial blank/srcdoc,
+opaque/remote frames, effective-origin changes and DOM-adoptable destinations;
+deny unauthorized navigation and privileged capability transfers while native
+input remains queued; and establish trustworthy native drain plus independent
+editor observation. Neither top-level URL, child-navigation denial, command
+return values nor sampled activation/composition getters establish those facts.
+Any future implementation must add deterministic coverage for the authority
+joins, independent activation axis, first-input assumption, one-shot debt,
+takeover order, substituted drain owners, late completion, logical-editor
+mismatch, and content-redacted diagnostics before it can be admitted.
 
 ## 9. Native-input spike comes first
 

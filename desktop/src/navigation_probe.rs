@@ -30,10 +30,15 @@ use zephium_work_composition::retained_action_qualification::{
 use zephium_work_composition::retained_notion_qualification::{
     self as qualifier, ApplicationObserver, ApplicationReport,
 };
+#[cfg(feature = "macos-work-retained-notion-write-probe")]
+use zephium_work_composition::retained_notion_write_qualification::{
+    self as qualifier, ApplicationObserver, ApplicationReport,
+};
 #[cfg(all(
     feature = "macos-work-retained-product-probe",
     not(feature = "macos-work-retained-action-probe"),
-    not(feature = "macos-work-retained-notion-probe")
+    not(feature = "macos-work-retained-notion-probe"),
+    not(feature = "macos-work-retained-notion-write-probe")
 ))]
 use zephium_work_composition::retained_product_qualification::{
     self as qualifier, ApplicationObserver, ApplicationReport,
@@ -53,7 +58,8 @@ const CHROME_WAIT: Duration = Duration::from_secs(30);
 const OBSERVER_HANDOFF: Duration = Duration::from_secs(160);
 #[cfg(any(
     feature = "macos-work-profile-enrollment",
-    feature = "macos-work-retained-notion-probe"
+    feature = "macos-work-retained-notion-probe",
+    feature = "macos-work-retained-notion-write-probe"
 ))]
 const ENROLLED_PROFILE_MARKER: &[u8] = b"zephium-authenticated-qualification-profile-v1\n";
 
@@ -76,12 +82,16 @@ pub(super) fn validate_data_root(root: &std::path::Path) -> std::io::Result<()> 
     return validate_enrolled_profile_root(root, false);
     #[cfg(all(
         not(feature = "macos-work-profile-enrollment"),
-        feature = "macos-work-retained-notion-probe"
+        any(
+            feature = "macos-work-retained-notion-probe",
+            feature = "macos-work-retained-notion-write-probe"
+        )
     ))]
     return validate_enrolled_profile_root(root, true);
     #[cfg(not(any(
         feature = "macos-work-profile-enrollment",
-        feature = "macos-work-retained-notion-probe"
+        feature = "macos-work-retained-notion-probe",
+        feature = "macos-work-retained-notion-write-probe"
     )))]
     match std::fs::read_dir(root) {
         Ok(mut entries) => {
@@ -102,7 +112,8 @@ pub(super) fn validate_data_root(root: &std::path::Path) -> std::io::Result<()> 
 
 #[cfg(any(
     feature = "macos-work-profile-enrollment",
-    feature = "macos-work-retained-notion-probe"
+    feature = "macos-work-retained-notion-probe",
+    feature = "macos-work-retained-notion-write-probe"
 ))]
 fn validate_enrolled_profile_root(
     root: &std::path::Path,

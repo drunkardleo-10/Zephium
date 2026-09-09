@@ -584,6 +584,9 @@ where
         ) {
             Ok(true) => {
                 if work_location.as_ref().is_some_and(|gate| gate.failed()) {
+                    // Close semantic admission and install the exact in-flight
+                    // lifetime witness before any callback can progress the host.
+                    work_location_semantic.revoke_document_authority();
                     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
                     if let Some(report) = &failure_diagnostic {
                         report(
@@ -600,7 +603,6 @@ where
                         location_invariant.as_ref(),
                         location_panic.as_ref(),
                     );
-                    work_location_semantic.cancel();
                 }
                 invoke_owned_unit_callback(location_callback.as_ref(), location_panic.as_ref())
             }
@@ -720,6 +722,23 @@ mod tests {
         ContextRunId,
     };
     use zephium_core::ids::ProfileId;
+
+    #[test]
+    fn refused_url_closes_semantic_authority_before_notifying_any_observer() {
+        let source = include_str!("agent_context.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let branch = source
+            .split("if work_location.as_ref().is_some_and(|gate| gate.failed()) {")
+            .nth(1)
+            .unwrap();
+        let close = branch
+            .find("work_location_semantic.revoke_document_authority()")
+            .unwrap();
+        assert!(close < branch.find("report(").unwrap());
+        assert!(close < branch.find("invoke_owned_unit_callback(").unwrap());
+    }
 
     fn navigation_operation() -> zephium_agentic::ContextOperationJoin {
         let identity = ContextIdentity::new(

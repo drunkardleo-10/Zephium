@@ -1283,6 +1283,10 @@ mod tests {
     }
 
     fn observation_with_text_value(value: &str) -> SemanticObservation {
+        observation_with_fill_support(value, None)
+    }
+
+    fn observation_with_fill_support(value: &str, support: Option<u8>) -> SemanticObservation {
         let baseline = observation();
         let frame = baseline.frames()[0].frame().clone();
         let context = baseline.request().context();
@@ -1294,7 +1298,8 @@ mod tests {
             "n": [
                 {"k": 9101, "r": "document", "o": 16},
                 {"k": 9102, "p": 0, "r": "textbox", "n": "Long value",
-                 "v": {"k": "text", "value": value}, "o": 11}
+                 "v": {"k": "text", "value": value}, "o": 11, "fs": support,
+                 "es": support.map(|_| (1, 1, false))}
             ]
         }))
         .expect("wire");
@@ -1402,6 +1407,22 @@ mod tests {
         requirement: SemanticTokenCountRequirement,
     ) -> SemanticModelEncodingBudget {
         SemanticModelEncodingBudget::try_new(max_bytes, max_tokens, requirement).expect("budget")
+    }
+
+    #[test]
+    fn fill_support_diagnostics_never_enter_provider_projection() {
+        let encoding_budget = budget(8192, 1000, SemanticTokenCountRequirement::Exact);
+        let plain = encode_semantic_observation(
+            &observation_with_fill_support("fixture", None),
+            encoding_budget,
+        )
+        .unwrap();
+        let diagnostic = encode_semantic_observation(
+            &observation_with_fill_support("fixture", Some(1)),
+            encoding_budget,
+        )
+        .unwrap();
+        assert_eq!(plain.content, diagnostic.content);
     }
 
     #[test]

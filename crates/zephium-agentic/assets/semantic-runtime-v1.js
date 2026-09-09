@@ -23,17 +23,11 @@
   const MAX_ACTION_DESCRIPTOR_WIRE_BYTES = 16384;
   const MAX_ACTION_DESCRIPTOR_VISITED_NODES = 2048;
   const MAX_ACTION_TEXT_BYTES = 4096;
-  // Independently bounded page-world transport: fixed command grammar plus
-  // worst-case two-byte JSON expansion of one legal 4-KiB replacement.
-  const MAX_PAGE_RELAY_COMMAND_BYTES = 8320;
   const CHANNEL_PULL = "P1";
   const CHANNEL_RESULT_PREFIX = "R1:";
   const CHANNEL_ACK = "A1";
   const CHANNEL_STOP = "S1";
   const CHANNEL_EXHAUSTED = "X1";
-  const PAGE_RELAY_READY = "data-zephium-fill-relay-ready-v1";
-  const PAGE_RELAY_COMMAND = "data-zephium-fill-relay-command-v1";
-  const PAGE_RELAY_TERMINAL = "data-zephium-fill-relay-terminal-v1";
 
   const objectDefineProperty = Object.defineProperty;
   const objectFreeze = Object.freeze;
@@ -83,6 +77,7 @@
   const nodeParentGetter = getter(Node.prototype, "parentNode");
   const nodeOwnerDocumentGetter = getter(Node.prototype, "ownerDocument");
   const nodeConnectedGetter = getter(Node.prototype, "isConnected");
+  const nodeGetRoot = Node.prototype.getRootNode;
   const nodeChildNodesGetter = getter(Node.prototype, "childNodes");
   const nodeContains = Node.prototype.contains;
   const characterDataGetter = getter(CharacterData.prototype, "data");
@@ -106,6 +101,12 @@
   const htmlElementClick =
     typeof HTMLElement === "function" ? HTMLElement.prototype.click : null;
   const nativePromise = Promise;
+  const nativeInputEvent = globalThis.InputEvent;
+  const fixedDispatchEvent = EventTarget.prototype.dispatchEvent;
+  const inputValueSetter = setter(HTMLInputElement.prototype, "value");
+  const textareaValueSetter = setter(HTMLTextAreaElement.prototype, "value");
+  const nodeTextSetter = setter(Node.prototype, "textContent");
+  const editableGetter = getter(HTMLElement.prototype, "isContentEditable");
   const promiseResolve = Promise.resolve;
   const promiseThen = Promise.prototype.then;
   const weakMapGet = WeakMap.prototype.get;
@@ -745,11 +746,20 @@
       return { role: "password", tag, inputType };
     }
 
+    const editableAttribute = attribute(node, "contenteditable", 16);
+    const editable = editableAttribute !== null &&
+      ["", "true", "plaintext-only"].includes(lower(editableAttribute));
+    const editableStructure = editable ? [] : null;
+    const editableWitness = editable ? { context: null } : null;
+    const editableSupport = editable ? editableHostSupport(node, editableStructure, editableWitness) : 2;
+    const plainTextEditable = editableSupport === 1;
     const explicit = explicitRole(node);
     if (explicit !== null) {
       if (explicit.suppressed === true) return null;
-      return { role: explicit.role, tag, inputType };
+      return { role: explicit.role, tag, inputType, contentEditable: editable, plainTextEditable, editableSupport, editableStructure, editingContext: editableWitness && editableWitness.context };
     }
+
+    if (editable) return { role: "textbox", tag, inputType, contentEditable: true, plainTextEditable, editableSupport, editableStructure, editingContext: editableWitness.context };
 
     if (tag === "html" || tag === "body" || tag === "div" || tag === "fieldset" || tag === "details") {
       return tag === "fieldset" || tag === "details"
@@ -804,12 +814,6 @@
     }
     if (tag === "progress" || tag === "meter") return { role: "progress", tag, inputType };
     if (tag === "output") return { role: "status", tag, inputType };
-    const editable = lower(attribute(node, "contenteditable", 16) || "");
-    if (editable === "" || editable === "true" || editable === "plaintext-only") {
-      if (attribute(node, "contenteditable", 16) !== null) {
-        return { role: "textbox", tag, inputType, contentEditable: true };
-      }
-    }
     return null;
   }
 
@@ -941,8 +945,9 @@
       case "menu_item":
         return 1 | 8;
       case "textbox":
-      case "password":
       case "searchbox":
+        return readonly || fillControlKind(descriptor, "") === 0 ? 1 | 8 : 1 | 2 | 8;
+      case "password":
       case "spinbutton":
         return readonly ? 1 | 8 : 1 | 2 | 8;
       case "combobox":
@@ -1319,7 +1324,7 @@
     return { value, bytes, secret, truncated: normalized.truncated };
   }
 
-  function consumeValueField(raw, state) {
+  function consumeValueField(raw, state, fieldLimit = MAX_VALUE_BYTES) {
     const remaining = mathMax(0, state.request.b.t - state.textBytes);
     // Bound hostile-page work before trim/lower/split can allocate. Oversized
     // live values are conservatively redacted; only a complete <=4-KiB value
@@ -1334,10 +1339,13 @@
       state.textBytes += redactedBytes;
       return { value: "[redacted]", bytes: redactedBytes, secret: true };
     }
-    const exact = exactValueText(raw, mathMin(MAX_VALUE_BYTES, remaining));
+    const exact = exactValueText(raw, mathMin(fieldLimit, remaining));
     state.textBytes += exact.bytes;
-    if (exact.truncated || (raw.length !== 0 && remaining === 0)) mark(state, "text_limit");
-    return { value: exact.value, bytes: exact.bytes, secret: false };
+    if (exact.truncated || (raw.length !== 0 && remaining === 0)) {
+      const aggregate = remaining <= fieldLimit;
+      mark(state, aggregate ? "text_limit" : "field_limit", aggregate);
+    }
+    return { value: exact.value, bytes: exact.bytes, secret: false, truncated: exact.truncated };
   }
 
   function setSensitivity(record, sensitivity) {
@@ -1365,7 +1373,7 @@
   }
 
   function appendSink(record, raw, state) {
-    if (record.sink === null || record.saturated || state.stopped) return;
+    if (record.sink === null || record.saturated || state.stopped || record.sensitivity === "secret") return;
     let current = "";
     if (record.sink === "name") current = record.wire.n || "";
     if (record.sink === "text") current = record.wire.t || "";
@@ -1374,10 +1382,15 @@
     }
     if (current === "[redacted]") return;
     const fieldLimit = record.sink === "name" ? MAX_NAME_BYTES : record.sink === "value" ? MAX_VALUE_BYTES : MAX_NODE_TEXT_BYTES;
-    const separator = current === "" ? "" : " ";
+    // Editable values are exact DOM text, including whitespace and adjacency
+    // across inline text nodes. Prose/name normalization must never rewrite
+    // an action's before-value or its verification postcondition.
+    const separator = current === "" || record.sink === "value" ? "" : " ";
     const remainingField = mathMax(0, fieldLimit - record.sinkBytes - (separator === "" ? 0 : 1));
     const separatorBytes = separator === "" ? 0 : 1;
-    const field = consumeField(raw, remainingField, state, separatorBytes);
+    const field = record.sink === "value"
+      ? consumeValueField(raw, state, remainingField)
+      : consumeField(raw, remainingField, state, separatorBytes);
     if (field.truncated) record.saturated = true;
     if (field.value === "") return;
     const combined = `${current}${separator}${field.value}`;
@@ -1448,7 +1461,8 @@
     ) {
       return hasName ? null : "name";
     }
-    if (descriptor.contentEditable === true) return "value";
+    if (descriptor.contentEditable === true &&
+        (descriptor.role === "textbox" || descriptor.role === "searchbox")) return "value";
     if (
       descriptor.role === "paragraph" ||
       descriptor.role === "list_item" ||
@@ -1469,6 +1483,10 @@
 
   function buildRecord(element, descriptor, parent, rect, disabled, focused, state) {
     const wire = { k: keyFor(element, state.request.g) };
+    if (state.recordEditingWitness === true) {
+      keyNodes.get(wire.k).editingContext = descriptor.contentEditable === true && descriptor.plainTextEditable === true
+        ? descriptor.editingContext || null : undefined;
+    }
     if (parent !== null) wire.p = parent;
     wire.r = descriptor.role;
     if (descriptor.role === "heading") {
@@ -1484,6 +1502,16 @@
       (has(element, "readonly") || lower(attribute(element, "aria-readonly", 16) || "") === "true");
     const states = isDocument ? 0 : stateBits(element, descriptor, disabled, focused);
     const operations = operationBits(descriptor, disabled, readonly);
+    // Closed host diagnostics only, omitted from provider projections. No
+    // markup, tag strings, field values or page-authored reason reaches Rust.
+    if (descriptor.role === "textbox" || descriptor.role === "searchbox") {
+      wire.fs = disabled ? 11 : readonly ? 10 :
+        fillControlKind(descriptor, "") !== 0 ? 1 :
+        descriptor.tag === "input" || descriptor.tag === "textarea" ? 12 :
+        descriptor.editableSupport || 2;
+      if (descriptor.editableStructure !== null && descriptor.editableStructure !== undefined &&
+          descriptor.editableStructure.length === 3) wire.es = descriptor.editableStructure;
+    }
     if (states !== 0) wire.s = states;
     if (operations !== 0) wire.o = operations;
     if (rect !== null && state.request.b.geo) wire.b = wireRect(rect);
@@ -1495,6 +1523,7 @@
       const name = labelledText(element, descriptor, state);
       if (name !== null && name !== "") addName(record, name, state);
       record.sink = recordSink(descriptor, wire.n !== undefined);
+      if (record.sink === "value") record.sinkBytes = 0;
       if (descriptor.role === "link" && descriptor.tag === "a" && record.sensitivity === "public") {
         // Use the captured native getter, never an element-owned accessor or
         // a click. Exact URL bytes share the original text/wire ceilings.
@@ -2331,6 +2360,62 @@
     );
   }
 
+  function captureEditingContext(node) {
+    const context = [];
+    let current = read(nodeParentGetter, node);
+    for (let depth = 0; depth < MAX_TREE_DEPTH; depth += 1) {
+      if (current === document) return context;
+      if (current === null || nodeType(current) !== 1 || read(nodeConnectedGetter, current) !== true ||
+          apply(nodeGetRoot, current, []) !== document || disabledState(current, false) ||
+          has(current, "readonly") || has(current, "inert") || has(current, "hidden") ||
+          lower(attribute(current, "aria-readonly", 16) || "") === "true" ||
+          lower(attribute(current, "aria-hidden", 16) || "") === "true" || !styleIsVisible(current) ||
+          sensitivityFor(current) !== "public" ||
+          credentialField(current, { role: "group", tag: tagName(current) }, attribute(current, "aria-label", 512) || "")) return null;
+      context.push({ node: current, editable: read(editableGetter, current) === true });
+      current = read(nodeParentGetter, current);
+    }
+    return null;
+  }
+
+  function editingContextMatches(target, request, current) {
+    const entry = keyNodes.get(request.t);
+    if (entry === undefined || entry.node !== target || entry.generation !== request.g ||
+        entry.editingContext === undefined) return false;
+    const prior = entry.editingContext;
+    current = current || null;
+    if (prior === null || current === null) return prior === current;
+    return prior.length === current.length && prior.every((item, index) =>
+      item.node === current[index].node && item.editable === current[index].editable);
+  }
+
+  function editableHostSupport(node, structure, witness) {
+    try {
+      if (read(editableGetter, node) !== true) return 3;
+      if (!["div", "span", "p", "h1", "h2", "h3", "h4", "h5", "h6"].includes(tagName(node))) return 4;
+      const parent = read(nodeParentGetter, node);
+      const editableParent = parent !== null && nodeType(parent) === 1 && read(editableGetter, parent) === true;
+      const children = read(nodeChildNodesGetter, node);
+      const length = listLength(children);
+      let kinds = 0;
+      let firstUnsupported = 0;
+      for (let index = 0; index < mathMin(length, 128); index += 1) {
+        const kind = nodeType(listItem(children, index));
+        kinds |= kind === 3 ? 1 : kind === 1 ? 2 : 4;
+        if (kind !== 3 && firstUnsupported === 0) firstUnsupported = kind === 1 ? 7 : 8;
+      }
+      structure.push(mathMin(length, 129), kinds, editableParent);
+      if (editableParent) {
+        if (length > 128 || firstUnsupported !== 0) return 5;
+        const context = captureEditingContext(node);
+        if (context === null) return 5;
+        witness.context = context;
+      }
+      if (length > 128) return 6;
+      return firstUnsupported || 1;
+    } catch (_) { return 9; }
+  }
+
   function fillControlKind(descriptor, value) {
     if (descriptor.tag === "input") {
       if (
@@ -2348,86 +2433,67 @@
     if (descriptor.tag === "textarea" && descriptor.role === "textbox") {
       return 2;
     }
+    if (descriptor.contentEditable === true && descriptor.plainTextEditable === true &&
+        (descriptor.role === "textbox" || descriptor.role === "searchbox")) {
+      return 3;
+    }
     return 0;
   }
 
-  function pageRelayAttribute(target, name) {
-    try {
-      return apply(getAttribute, target, [name]);
-    } catch (_) {
-      return null;
-    }
-  }
-
-  function clearPageRelayAttributes(target) {
-    try {
-      apply(removeAttribute, target, [PAGE_RELAY_COMMAND]);
-      apply(removeAttribute, target, [PAGE_RELAY_TERMINAL]);
-    } catch (_) {
-      // A replaced document or target is handled as closed transport failure.
-    }
-  }
-
-  function runPageRelayFill(target, descriptor, value, attempt) {
-    const projected = exactValueText(value, MAX_VALUE_BYTES);
-    if (
-      projected.truncated || projected.value !== value ||
-      utf8Length(value, MAX_VALUE_BYTES + 1) > MAX_VALUE_BYTES
-    ) {
+  // Only runAction's admitted private ref can reach this recipe. There is no
+  // page-world request listener, shared callback, transport marker or token.
+  function runFixedFill(target, descriptor, request) {
+    const value = request.z;
+    const kind = fillControlKind(descriptor, value);
+    const valueSetter = kind === 1 ? inputValueSetter :
+      kind === 2 ? textareaValueSetter : kind === 3 ? nodeTextSetter : null;
+    if (valueSetter === null || typeof nativeInputEvent !== "function" ||
+        typeof fixedDispatchEvent !== "function" || !validActionText(value)) {
       return "unsupported_interaction";
     }
-    const control = fillControlKind(descriptor, value);
-    if (control === 0) {
-      return "unsupported_interaction";
-    }
-
-    let root;
-    let command;
+    const revalidate = () => {
+      if (resolveKeyAtGeneration(request.t, request.g) !== target ||
+          read(nodeConnectedGetter, target) !== true ||
+          apply(nodeGetRoot, target, []) !== document) return false;
+      const current = classify(target);
+      if (current === null || fillControlKind(current, value) !== kind ||
+          disabledState(target, false) || has(target, "readonly") ||
+          lower(attribute(target, "aria-readonly", 16) || "") === "true" ||
+          credentialField(target, current, attribute(target, "aria-label", 512) || "")) return false;
+      if (kind === 3 && !editingContextMatches(target, request, current.editingContext)) return false;
+      return descriptorMatches(request.f, runtimeDescriptor(target, request.g));
+    };
+    let before;
+    let input;
     try {
-      root = read(documentElementGetter, document);
-      if (root === null || pageRelayAttribute(root, PAGE_RELAY_READY) !== "1") {
-        return "page_relay_not_ready";
-      }
-      if (pageRelayAttribute(target, PAGE_RELAY_COMMAND) !== null) {
-        clearPageRelayAttributes(target);
-        return "stale_reference";
-      }
-      apply(removeAttribute, target, [PAGE_RELAY_TERMINAL]);
-      command = apply(jsonStringify, JSON, [{ v: 1, a: attempt, z: value }]);
-      if (
-        typeof command !== "string" ||
-        utf8Length(command, MAX_PAGE_RELAY_COMMAND_BYTES + 1) > MAX_PAGE_RELAY_COMMAND_BYTES
-      ) {
-        return "unsupported_interaction";
-      }
-      apply(setAttribute, target, [PAGE_RELAY_COMMAND, command]);
-    } catch (_) {
-      return "unsupported_interaction";
-    }
-
-    const checkpoint = apply(promiseResolve, nativePromise, []);
+      if (!revalidate()) return "target_changed";
+      before = new nativeInputEvent("beforeinput", {
+        bubbles: true, cancelable: true, composed: true, data: value,
+        inputType: "insertReplacementText", isComposing: false
+      });
+      input = new nativeInputEvent("input", {
+        bubbles: true, cancelable: false, composed: true, data: value,
+        inputType: "insertReplacementText", isComposing: false
+      });
+    } catch (_) { return "unsupported_interaction"; }
     try {
-      return apply(promiseThen, checkpoint, [() => {
-        const terminal = pageRelayAttribute(target, PAGE_RELAY_TERMINAL);
-        clearPageRelayAttributes(target);
-        if (terminal === `1|${attempt}|ok`) return "ok";
-        if (terminal === `1|${attempt}|refused-command`) return "invalid_request";
-        if (terminal === `1|${attempt}|refused-identity`) return "stale_reference";
-        if (terminal === `1|${attempt}|refused-type`) return "unsupported_interaction";
-        if (terminal === `1|${attempt}|refused-state`) return "target_disabled";
-        if (terminal === `1|${attempt}|refused-credential`) return "credential_boundary";
-        if (terminal === `1|${attempt}|refused-construct`) return "unsupported_interaction";
-        if (terminal === `1|${attempt}|indeterminate`) return "applied_unverified";
-        if (terminal === `1|0|duplicate`) return "target_occluded";
-        if (terminal === `1|0|invalid`) return "internal";
-        // The page-world recipe may already have called the native setter.
-        // This must never be surfaced as a clean retryable refusal.
-        return "applied_unverified";
-      }]);
-    } catch (_) {
-      clearPageRelayAttributes(target);
-      return "applied_unverified";
-    }
+      if (apply(fixedDispatchEvent, target, [before]) !== true) {
+        return "applied_unverified_beforeinput_cancelled";
+      }
+      if (!revalidate()) return "applied_unverified_beforeinput_revalidation";
+    } catch (_) { return "applied_unverified_beforeinput_revalidation"; }
+    try {
+      write(valueSetter, target, value);
+      apply(fixedDispatchEvent, target, [input]);
+    } catch (_) { return "applied_unverified_mutation"; }
+    try {
+      if (kind === 3) {
+        const current = classify(target);
+        if (current === null || !editingContextMatches(target, request, current.editingContext))
+          return "applied_unverified_postcondition";
+      }
+    } catch (_) { return "applied_unverified_postcondition"; }
+    return "ok";
   }
 
   function runFixedSelect(target, desired) {
@@ -2563,27 +2629,27 @@
         }
         const finalTarget = resolveKeyAtGeneration(request.t, request.g);
         const finalDescriptor = finalTarget === target ? classify(target) : null;
-        // The page-world setter has run once an `ok` terminal is observed.
+        // The captured isolated-world setter has run when the recipe returns ok.
         // Every later mismatch is indeterminate, never a retryable target fault.
         if (finalDescriptor === null || finalDescriptor.role !== request.r) {
-          return actionFault("applied_unverified");
+          return actionFault("applied_unverified_postcondition");
         }
         const finalDisabled = disabledState(target, false);
         const finalReadonly = has(target, "readonly") || lower(attribute(target, "aria-readonly", 16) || "") === "true";
-        if (finalDisabled || finalReadonly) return actionFault("applied_unverified");
+        if (finalDisabled || finalReadonly) return actionFault("applied_unverified_postcondition");
         if (
           credentialField(target, finalDescriptor, attribute(target, "aria-label", 512) || "") ||
           finalDescriptor.role === "password" || fillControlKind(finalDescriptor, request.z) === 0
         ) {
-          return actionFault("applied_unverified");
+          return actionFault("applied_unverified_postcondition");
         }
         const filledDescriptor = runtimeDescriptor(target, request.g);
         if (!descriptorMatchesFilledValue(request.f, filledDescriptor, request.z)) {
-          return actionFault("applied_unverified");
+          return actionFault("applied_unverified_postcondition");
         }
         return encodeActionEvidence(
           request,
-          "page_world_compatibility_fill",
+          "fixed_semantic_recipe",
           "form",
           geometry,
           viewport,
@@ -2591,12 +2657,11 @@
           delta
         );
       };
-      const result = runPageRelayFill(target, descriptor, request.z, request.a);
-      if (typeof result === "string") return finishFill(result);
+      const result = runFixedFill(target, descriptor, request);
       try {
-        return apply(promiseThen, result, [finishFill, () => actionFault("applied_unverified")]);
+        return finishFill(result);
       } catch (_) {
-        return actionFault("applied_unverified");
+        return actionFault("applied_unverified_postcondition");
       }
     } else if (request.k === "select") {
       const desired = read(optionIndexGetter, selectedOption);
@@ -2642,6 +2707,7 @@
     sweepIdentities(request.g);
     const state = {
       request,
+      recordEditingWitness: true,
       visited: 0,
       textBytes: 0,
       completeness: "complete",

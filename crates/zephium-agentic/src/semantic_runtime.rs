@@ -55,10 +55,11 @@ pub const MAX_SEMANTIC_RUNTIME_VISITED_NODES: u32 = 32 * 1024;
 pub const MAX_SEMANTIC_RUNTIME_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 /// Maximum immutable production runtime source bytes installed per document.
 ///
-/// The fixed 108 KiB ceiling covers the digest-pinned semantic runtime including
+/// The fixed 111 KiB ceiling covers the digest-pinned semantic runtime including
 /// production Fill, native-select, public links and bounded source-coalesced
-/// windows and keyword discovery with an explicit installation bound per platform.
-pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 108 * 1024;
+/// windows, keyword discovery and bounded asynchronous fill diagnostics with an
+/// explicit installation bound per platform.
+pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 111 * 1024;
 /// Sole fixed isolated-world global installed by the production runtime.
 pub const SEMANTIC_RUNTIME_GLOBAL_NAME: &str = "__zephiumSemanticRuntimeV1";
 /// Sole fixed native message handler visible in the production isolated world.
@@ -81,8 +82,8 @@ pub const MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES: usize =
 
 const SEMANTIC_RUNTIME_SOURCE: &str = include_str!("../assets/semantic-runtime-v1.js");
 const SEMANTIC_RUNTIME_SOURCE_SHA256: [u8; 32] = [
-    0x40, 0x47, 0x1a, 0xaf, 0x64, 0xe2, 0xe4, 0x7b, 0x2c, 0xa4, 0x3c, 0xaa, 0x87, 0xc1, 0xf7, 0xff,
-    0x66, 0xbf, 0x39, 0x6a, 0xec, 0x27, 0x15, 0xe6, 0x0d, 0x2a, 0x7f, 0xe1, 0x1c, 0x45, 0x0b, 0x3c,
+    0xb9, 0x52, 0xb1, 0x8e, 0x01, 0x66, 0xe6, 0x7e, 0x56, 0xd4, 0x02, 0x1c, 0x46, 0x8c, 0xa5, 0xfc,
+    0xc0, 0x5d, 0x35, 0xe9, 0xbf, 0x4d, 0x86, 0x26, 0x7c, 0xe4, 0x3a, 0xc7, 0x6c, 0x2a, 0xca, 0xe2,
 ];
 
 /// Immutable production program passed only to a trusted isolated-world adapter.
@@ -764,6 +765,46 @@ pub enum SemanticActionRuntimeFault {
     UnsupportedInteraction,
     /// The page may have observed or applied the action, but exact proof failed.
     AppliedUnverified,
+    /// The page cancelled the compatibility beforeinput event.
+    AppliedUnverifiedBeforeInputCancelled,
+    /// The target changed or failed revalidation after beforeinput.
+    AppliedUnverifiedBeforeInputRevalidation,
+    /// The compatibility mutation or its input notification threw.
+    AppliedUnverifiedMutation,
+    /// No correlated terminal was available from the compatibility relay.
+    AppliedUnverifiedRelay,
+    /// Closed relay diagnostic; never proof of a safely retryable action.
+    AppliedUnverifiedRelayDeadline,
+    /// Closed relay diagnostic; never proof of a safely retryable action.
+    AppliedUnverifiedRelayCommandGone,
+    /// Closed relay diagnostic; never proof of a safely retryable action.
+    AppliedUnverifiedRelayCommandChanged,
+    /// Closed relay diagnostic; never proof of a safely retryable action.
+    AppliedUnverifiedRelayDetached,
+    /// Closed relay diagnostic; never proof of a safely retryable action.
+    AppliedUnverifiedRelayRoot,
+    /// Closed relay diagnostic; never proof of a safely retryable action.
+    AppliedUnverifiedRelayTerminalMalformed,
+    /// Closed relay diagnostic; never proof of a safely retryable action.
+    AppliedUnverifiedRelayTerminalForeign,
+    /// Closed relay diagnostic; never proof of a safely retryable action.
+    AppliedUnverifiedRelayTerminalUnknown,
+    /// Closed relay diagnostic; never proof of a safely retryable action.
+    AppliedUnverifiedRelayRead,
+    /// Closed relay diagnostic; never proof of a safely retryable action.
+    AppliedUnverifiedRelaySetup,
+    /// Closed relay diagnostic; never proof of a safely retryable action.
+    AppliedUnverifiedRelayPublication,
+    /// Closed relay diagnostic; never proof of a safely retryable action.
+    AppliedUnverifiedRelayCleanup,
+    /// Closed relay diagnostic; never proof of a safely retryable action.
+    AppliedUnverifiedRelayOverflow,
+    /// Closed relay diagnostic; never proof of a safely retryable action.
+    AppliedUnverifiedRelayPageException,
+    /// The adjacent isolated projection did not prove the exact postcondition.
+    AppliedUnverifiedPostcondition,
+    /// A gated command matched a fresh logical value, without exact-ref proof.
+    AppliedUnverifiedLogicalEditor,
     /// Runtime hit a closed internal invariant.
     Internal,
 }
@@ -782,6 +823,42 @@ impl SemanticActionRuntimeFault {
             "target_occluded" => Some(Self::TargetOccluded),
             "unsupported_interaction" => Some(Self::UnsupportedInteraction),
             "applied_unverified" => Some(Self::AppliedUnverified),
+            "applied_unverified_beforeinput_cancelled" => {
+                Some(Self::AppliedUnverifiedBeforeInputCancelled)
+            }
+            "applied_unverified_beforeinput_revalidation" => {
+                Some(Self::AppliedUnverifiedBeforeInputRevalidation)
+            }
+            "applied_unverified_mutation" => Some(Self::AppliedUnverifiedMutation),
+            "applied_unverified_relay" => Some(Self::AppliedUnverifiedRelay),
+            "applied_unverified_relay_deadline" => Some(Self::AppliedUnverifiedRelayDeadline),
+            "applied_unverified_relay_command_gone" => {
+                Some(Self::AppliedUnverifiedRelayCommandGone)
+            }
+            "applied_unverified_relay_command_changed" => {
+                Some(Self::AppliedUnverifiedRelayCommandChanged)
+            }
+            "applied_unverified_relay_detached" => Some(Self::AppliedUnverifiedRelayDetached),
+            "applied_unverified_relay_root" => Some(Self::AppliedUnverifiedRelayRoot),
+            "applied_unverified_relay_terminal_malformed" => {
+                Some(Self::AppliedUnverifiedRelayTerminalMalformed)
+            }
+            "applied_unverified_relay_terminal_foreign" => {
+                Some(Self::AppliedUnverifiedRelayTerminalForeign)
+            }
+            "applied_unverified_relay_terminal_unknown" => {
+                Some(Self::AppliedUnverifiedRelayTerminalUnknown)
+            }
+            "applied_unverified_relay_read" => Some(Self::AppliedUnverifiedRelayRead),
+            "applied_unverified_relay_setup" => Some(Self::AppliedUnverifiedRelaySetup),
+            "applied_unverified_relay_publication" => Some(Self::AppliedUnverifiedRelayPublication),
+            "applied_unverified_relay_cleanup" => Some(Self::AppliedUnverifiedRelayCleanup),
+            "applied_unverified_relay_overflow" => Some(Self::AppliedUnverifiedRelayOverflow),
+            "applied_unverified_relay_page_exception" => {
+                Some(Self::AppliedUnverifiedRelayPageException)
+            }
+            "applied_unverified_postcondition" => Some(Self::AppliedUnverifiedPostcondition),
+            "applied_unverified_logical_editor" => Some(Self::AppliedUnverifiedLogicalEditor),
             "internal" => Some(Self::Internal),
             _ => None,
         }
@@ -1315,6 +1392,98 @@ mod tests {
     }
 
     #[test]
+    fn fill_fault_diagnostics_accept_only_closed_content_free_phases() {
+        for (code, expected) in [
+            (
+                "applied_unverified_beforeinput_cancelled",
+                SemanticActionRuntimeFault::AppliedUnverifiedBeforeInputCancelled,
+            ),
+            (
+                "applied_unverified_beforeinput_revalidation",
+                SemanticActionRuntimeFault::AppliedUnverifiedBeforeInputRevalidation,
+            ),
+            (
+                "applied_unverified_mutation",
+                SemanticActionRuntimeFault::AppliedUnverifiedMutation,
+            ),
+            (
+                "applied_unverified_relay",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelay,
+            ),
+            (
+                "applied_unverified_relay_deadline",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelayDeadline,
+            ),
+            (
+                "applied_unverified_relay_command_gone",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelayCommandGone,
+            ),
+            (
+                "applied_unverified_relay_command_changed",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelayCommandChanged,
+            ),
+            (
+                "applied_unverified_relay_detached",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelayDetached,
+            ),
+            (
+                "applied_unverified_relay_root",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelayRoot,
+            ),
+            (
+                "applied_unverified_relay_terminal_malformed",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelayTerminalMalformed,
+            ),
+            (
+                "applied_unverified_relay_terminal_foreign",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelayTerminalForeign,
+            ),
+            (
+                "applied_unverified_relay_terminal_unknown",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelayTerminalUnknown,
+            ),
+            (
+                "applied_unverified_relay_read",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelayRead,
+            ),
+            (
+                "applied_unverified_relay_setup",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelaySetup,
+            ),
+            (
+                "applied_unverified_relay_publication",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelayPublication,
+            ),
+            (
+                "applied_unverified_relay_cleanup",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelayCleanup,
+            ),
+            (
+                "applied_unverified_relay_overflow",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelayOverflow,
+            ),
+            (
+                "applied_unverified_relay_page_exception",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelayPageException,
+            ),
+            (
+                "applied_unverified_postcondition",
+                SemanticActionRuntimeFault::AppliedUnverifiedPostcondition,
+            ),
+            (
+                "applied_unverified_logical_editor",
+                SemanticActionRuntimeFault::AppliedUnverifiedLogicalEditor,
+            ),
+        ] {
+            assert_eq!(SemanticActionRuntimeFault::parse(code), Some(expected));
+            assert_eq!(
+                SemanticActionRuntimeFault::parse(&format!("{code}:page-detail")),
+                None
+            );
+        }
+    }
+
+    #[test]
     fn immutable_program_is_size_bounded_digest_pinned_and_bridge_free() {
         let source = SEMANTIC_RUNTIME_PROGRAM.source();
         assert!(source.len() <= MAX_SEMANTIC_RUNTIME_SOURCE_BYTES);
@@ -1347,11 +1516,8 @@ mod tests {
             "XMLHttpRequest",
             "WebSocket",
             "EventSource",
-            "MutationObserver",
-            "setTimeout",
             "setInterval",
             "requestAnimationFrame",
-            "addEventListener",
             ".dispatchEvent(",
             ".click(",
             ".focus(",
@@ -1378,11 +1544,24 @@ mod tests {
                 "forbidden runtime surface: {forbidden}"
             );
         }
+        // Fill has no page-originated transport or idle observer/timer.
+        for forbidden in [
+            "MutationObserver",
+            "CustomEvent",
+            "addEventListener",
+            "setTimeout",
+            "PAGE_RELAY",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "forbidden fill transport: {forbidden}"
+            );
+        }
         assert_eq!(
             source
                 .matches("EventTarget.prototype.dispatchEvent")
                 .count(),
-            0
+            1
         );
         assert_eq!(source.matches("Element.prototype.setAttribute").count(), 1);
         assert!(!source.contains(".setAttribute("));

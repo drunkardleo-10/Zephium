@@ -51,10 +51,50 @@ pub enum AgentWorkTaskProgress {
     Complete,
 }
 
+/// Trusted pre-model readiness of the initial document, never action progress.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentWorkInitialReadiness {
+    /// The task can evaluate this fresh observation normally.
+    Ready,
+    /// The exact task context exists but has not finished becoming usable.
+    /// The controller may obtain a bounded number of fresh read-only samples.
+    Pending,
+}
+
+fn validate_initial_readiness_successor(
+    prior: &SemanticObservation,
+    next: &SemanticObservation,
+) -> Result<(), AgentWorkFailure> {
+    if prior.request().context() != next.request().context()
+        || prior.request().scope() != next.request().scope()
+        || prior.request().generation() != next.request().generation()
+        || prior.request().id() == next.request().id()
+        || prior.frames().len() != next.frames().len()
+        || prior.frames().iter().zip(next.frames()).any(|(a, b)| {
+            a.frame() != b.frame()
+                || a.invocation() == b.invocation()
+                || a.generation() >= b.generation()
+        })
+    {
+        return Err(AgentWorkFailure::Context);
+    }
+    Ok(())
+}
+
 /// Trusted product execution contract. Never implement this from model text,
 /// page instructions, or a model-authored predicate. The UI does not receive
 /// this port; it receives only the content-free handle below.
 pub trait AgentWorkTask: Send {
+    /// Read-only startup gate, called only before the first task evaluation or
+    /// provider request. Pending grants no effect/ref authority or progress.
+    /// Implementations must reject changed/ambiguous task identity rather than
+    /// treating arbitrary missing content as hydration. Ready is the default.
+    fn initial_readiness(
+        &self,
+        _: &SemanticObservation,
+    ) -> Result<AgentWorkInitialReadiness, AgentWorkFailure> {
+        Ok(AgentWorkInitialReadiness::Ready)
+    }
     /// One immutable same-origin exact destination. The first navigation task
     /// shape is read-only, initial-extraction only, with no redirects/repeats.
     /// The task must independently prove departure and arrival from fresh state.
@@ -1142,6 +1182,17 @@ impl WorkNative {
         worker: &AgentRuntimeWorker,
         browser: &WorkBrowser<'_>,
     ) -> Result<(), AgentWorkFailure> {
+        self.check_stop(worker, browser)?;
+        self.check_retained_health()
+    }
+
+    // Exact in-flight terminal reconciliation must obey sticky controls even
+    // when document/resource authority is already gone.
+    fn check_stop(
+        &mut self,
+        worker: &AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+    ) -> Result<(), AgentWorkFailure> {
         let failure = if worker.shutdown_deadline().is_some() {
             Some(AgentWorkFailure::Shutdown)
         } else if worker.status().cancelled() {
@@ -1162,7 +1213,7 @@ impl WorkNative {
             self.revoke(browser)?;
             return Err(failure);
         }
-        self.check_retained_health()
+        Ok(())
     }
     fn new(
         identity: ContextIdentity,
@@ -1857,13 +1908,77 @@ impl AgentWorkController {
         }
     }
 
+    async fn observe_initial_ready(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+    ) -> Result<SemanticObservation, AgentWorkFailure> {
+        // Seven samples at most; backoff schedules work, it is never evidence
+        // of readiness. The original run deadline/control lane remains live.
+        const DELAYS_MS: [u64; 6] = [250, 500, 1000, 2000, 2000, 2000];
+        let mut observation = Self::observe(state, worker, browser).await?;
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(10))
+            .ok_or(AgentWorkFailure::Deadline)?
+            .min(state.native.deadline);
+        let mut delays = DELAYS_MS.into_iter();
+        loop {
+            state.check_task_contract()?;
+            let readiness = state.task.initial_readiness(&observation)?;
+            state.check_task_contract()?;
+            state.native.check_control(worker, browser)?;
+            if readiness == AgentWorkInitialReadiness::Ready {
+                return Ok(observation);
+            }
+            state.refresh_account(worker, browser)?;
+            if state
+                .native
+                .retained
+                .as_ref()
+                .is_some_and(|b| !b.allows_readiness_retry())
+            {
+                return Err(AgentWorkFailure::Observation(
+                    SemanticRuntimePortFailure::NotReady,
+                ));
+            }
+            let delay = delays.next().ok_or(AgentWorkFailure::Observation(
+                SemanticRuntimePortFailure::NotReady,
+            ))?;
+            let wake = Instant::now()
+                .checked_add(Duration::from_millis(delay))
+                .ok_or(AgentWorkFailure::Deadline)?;
+            if wake >= deadline {
+                return Err(AgentWorkFailure::Observation(
+                    SemanticRuntimePortFailure::NotReady,
+                ));
+            }
+            tokio::select! {
+                biased;
+                event = state.native.next_event(worker, browser) => {
+                    state.native.retain(event?)?;
+                    return Err(AgentWorkFailure::Mailbox);
+                }
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
+            }
+            state.refresh_account(worker, browser)?;
+            let next = Self::observe(state, worker, browser).await?;
+            validate_initial_readiness_successor(&observation, &next)?;
+            if Instant::now() >= deadline {
+                return Err(AgentWorkFailure::Observation(
+                    SemanticRuntimePortFailure::NotReady,
+                ));
+            }
+            observation = next;
+        }
+    }
+
     async fn browser_loop(
         &mut self,
         worker: &mut AgentRuntimeWorker,
         browser: &WorkBrowser<'_>,
     ) -> Result<(), AgentWorkFailure> {
         let state = self.state.as_mut().ok_or(AgentWorkFailure::Contract)?;
-        let mut observation = Self::observe(state, worker, browser).await?;
+        let mut observation = Self::observe_initial_ready(state, worker, browser).await?;
         let mut captured_at = SemanticCaptureInstant::from_millis(
             state
                 .journal_mut()?
@@ -2123,6 +2238,7 @@ impl AgentWorkController {
                     SemanticActionExecutionInstant::from_millis(now.millis()),
                 )
                 .map_err(AgentWorkFailure::Browser)?;
+            let action_deadline = request.deadline();
             let dispatch = if let Some(retained) = &mut state.native.retained {
                 retained.dispatch_action(request, now)
             } else {
@@ -2134,7 +2250,11 @@ impl AgentWorkController {
             session
                 .account_action_dispatch(dispatch)
                 .map_err(AgentWorkFailure::Browser)?;
-            let terminal = match state.native.next_action_event(worker, browser).await? {
+            let terminal = match state
+                .native
+                .next_action_event(worker, browser, action_deadline)
+                .await?
+            {
                 AgentRuntimeEvent::SemanticActionTerminal(terminal)
                     if session.action.as_ref().is_some_and(|action| {
                         action.accepts_settlement(&session.action_executions, &terminal)
@@ -2157,6 +2277,10 @@ impl AgentWorkController {
             let mut wake = session
                 .begin_action_settlement(terminal)
                 .map_err(AgentWorkFailure::Browser)?;
+            // Native evidence cannot restore a revoked document or authorize
+            // postcondition reads. Settle its original owner first, then fail
+            // closed before any continuation, success, or retry.
+            state.native.check_control(worker, browser)?;
             for _ in 0..8 {
                 let Some(next_wake) = wake else {
                     break;

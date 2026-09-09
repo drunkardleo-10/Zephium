@@ -1,4 +1,4 @@
-//! Trusted, bounded local form preparation; not a plan interpreter or submit tool.
+//! Trusted, bounded form transitions; not a plan interpreter or submit tool.
 use zephium_agentic::*;
 
 use crate::{AgentWorkExtractionTask, AgentWorkFailure, AgentWorkTask, AgentWorkTaskProgress};
@@ -15,6 +15,7 @@ const MAX_GOALS: usize = 8;
 #[derive(Clone)]
 pub struct AgentWorkFormGoal {
     name: Option<SemanticActionText>,
+    prior_value: Option<SemanticActionText>,
     value: SemanticActionText,
     kind: SemanticActionKind,
 }
@@ -23,29 +24,51 @@ impl AgentWorkFormGoal {
     /// Empty text explicitly means clearing the field. Values are bounded to
     /// the independently observable preview ceiling, not silently truncated.
     pub fn fill(name: Option<String>, value: String) -> Result<Self, AgentWorkFailure> {
-        Self::new(name, value, SemanticActionKind::Fill)
+        Self::new(name, None, value, SemanticActionKind::Fill)
+    }
+    /// Requires an exact, complete observed transition on a textbox or
+    /// searchbox. The prior value is both a target discriminator and a
+    /// fail-closed precondition: a field containing any third value grants no
+    /// action. Observing the destination value is already satisfied.
+    pub fn fill_transition(
+        name: Option<String>,
+        prior_value: String,
+        value: String,
+    ) -> Result<Self, AgentWorkFailure> {
+        Self::new(name, Some(prior_value), value, SemanticActionKind::Fill)
     }
     /// Requires the uniquely named descendant option of a unique combobox.
     /// Listboxes/multiselect, submission and navigation are not this contract.
     pub fn select(name: Option<String>, option: String) -> Result<Self, AgentWorkFailure> {
-        Self::new(name, option, SemanticActionKind::Select)
+        Self::new(name, None, option, SemanticActionKind::Select)
     }
     fn new(
         name: Option<String>,
+        prior_value: Option<String>,
         value: String,
         kind: SemanticActionKind,
     ) -> Result<Self, AgentWorkFailure> {
         if name
             .as_ref()
             .is_some_and(|name| name.is_empty() || name.len() > MAX_SEMANTIC_NAME_BYTES)
+            || prior_value
+                .as_ref()
+                .is_some_and(|value| value.len() > MAX_SEMANTIC_VALUE_PREVIEW_BYTES)
+            || prior_value.as_ref().is_some_and(|prior| prior == &value)
             || value.len() > MAX_SEMANTIC_VALUE_PREVIEW_BYTES
             || (kind == SemanticActionKind::Select
-                && (value.is_empty() || value.len() > MAX_SEMANTIC_NAME_BYTES))
+                && (prior_value.is_some()
+                    || value.is_empty()
+                    || value.len() > MAX_SEMANTIC_NAME_BYTES))
         {
             return Err(AgentWorkFailure::Contract);
         }
         Ok(Self {
             name: name
+                .map(SemanticActionText::try_new)
+                .transpose()
+                .map_err(|_| AgentWorkFailure::Contract)?,
+            prior_value: prior_value
                 .map(SemanticActionText::try_new)
                 .transpose()
                 .map_err(|_| AgentWorkFailure::Contract)?,
@@ -64,6 +87,8 @@ impl AgentWorkFormGoal {
         role && self.name.as_ref().is_none_or(|name| {
             node.name()
                 .is_some_and(|actual| actual.as_str() == name.as_str())
+        }) && self.prior_value.as_ref().is_none_or(|prior| {
+            exact_text_value(node, prior) || exact_text_value(node, &self.value)
         })
     }
 }
@@ -107,7 +132,7 @@ struct Baseline {
     invocation: SemanticInvocationId,
 }
 
-/// Production task predicate for explicit, non-submitted form preparation.
+/// Production task predicate for explicit bounded form-state transitions.
 /// The caller supplies trusted context, account, origin and goals, separately
 /// from the model objective and approved manifest. Neither page nor model
 /// content can create goals. This object grants no native or policy authority.
@@ -119,6 +144,7 @@ pub struct AgentWorkFormTask {
     origin: SemanticOrigin,
     account: AgentAccountScope,
     account_sample: std::cell::Cell<Option<AgentContextAccountBinding>>,
+    effect: SemanticEffectClass,
     phases: Vec<AgentWorkFormPhase>,
     phase: usize,
     baseline: Option<Baseline>,
@@ -126,9 +152,9 @@ pub struct AgentWorkFormTask {
     refused: bool,
 }
 impl AgentWorkFormTask {
-    /// Follow explicitly trusted local form preparation with a source-bound
-    /// result from the fresh completed page. This retains the same goals/account
-    /// and local-only effect contract; it does not admit submission or autosave.
+    /// Follow explicitly trusted form transitions with a source-bound result
+    /// from the fresh completed page. This retains the constructor-selected
+    /// goals, account and effect; it does not add submission or navigation.
     pub fn with_extraction(
         self,
         fields: Vec<SemanticExtractionFieldSchema>,
@@ -156,6 +182,42 @@ impl AgentWorkFormTask {
         account: AgentAccountScope,
         phases: Vec<AgentWorkFormPhase>,
     ) -> Result<Self, AgentWorkFailure> {
+        Self::try_new(
+            identity,
+            origin,
+            account,
+            SemanticEffectClass::LocalWrite,
+            phases,
+        )
+    }
+
+    /// Attests an exact remotely effective field update supplied by trusted
+    /// product state. The product and approved plan must independently know
+    /// that these precise transitions have `ExternalWrite` semantics. A page,
+    /// model, field role or origin allowlist can never select this constructor.
+    /// This remains fill/select only and grants no click, submit or navigation.
+    pub fn try_new_external_update(
+        identity: ContextIdentity,
+        origin: SemanticOrigin,
+        account: AgentAccountScope,
+        phases: Vec<AgentWorkFormPhase>,
+    ) -> Result<Self, AgentWorkFailure> {
+        Self::try_new(
+            identity,
+            origin,
+            account,
+            SemanticEffectClass::ExternalWrite,
+            phases,
+        )
+    }
+
+    fn try_new(
+        identity: ContextIdentity,
+        origin: SemanticOrigin,
+        account: AgentAccountScope,
+        effect: SemanticEffectClass,
+        phases: Vec<AgentWorkFormPhase>,
+    ) -> Result<Self, AgentWorkFailure> {
         if identity.kind() != ContextKind::Owned
             || phases.is_empty()
             || phases.len() > MAX_GOALS
@@ -169,6 +231,7 @@ impl AgentWorkFormTask {
             origin,
             account,
             account_sample: std::cell::Cell::new(None),
+            effect,
             phases,
             phase: 0,
             baseline: None,
@@ -233,16 +296,18 @@ impl AgentWorkFormTask {
                         if !target.operations().contains(SemanticOperationClass::Fill) {
                             return Err(AgentWorkFailure::Contract);
                         }
-                        let equal = match target.value() {
-                            Some(SemanticValueSummary::Text(value)) => {
-                                let preview = value.preview();
-                                !preview.truncated()
-                                    && preview.source_bytes() == goal.value.len()
-                                    && preview.text() == goal.value.as_str()
-                            }
-                            None => goal.value.is_empty(),
-                            _ => return Err(AgentWorkFailure::Contract),
-                        };
+                        if !matches!(target.value(), Some(SemanticValueSummary::Text(_)) | None) {
+                            return Err(AgentWorkFailure::Contract);
+                        }
+                        let equal = exact_text_value(target, &goal.value);
+                        if !equal
+                            && goal
+                                .prior_value
+                                .as_ref()
+                                .is_some_and(|prior| !exact_text_value(target, prior))
+                        {
+                            return Err(AgentWorkFailure::Contract);
+                        }
                         (equal, None)
                     }
                     SemanticActionKind::Select => {
@@ -311,8 +376,8 @@ impl AgentWorkFormTask {
     }
 }
 
-/// Explicit local-preparation goals followed by one current-page extraction.
-/// The constructor's trusted local-only assurance and policy approval remain
+/// Explicit trusted form goals followed by one current-page extraction. The
+/// constructor's local/external classification and policy approval remain
 /// mandatory. Arbitrary website fields must not be admitted through this task.
 pub struct AgentWorkFormExtractionTask {
     form: AgentWorkFormTask,
@@ -389,6 +454,19 @@ fn descendant(snapshot: &SemanticSnapshot, mut node: usize, ancestor: usize) -> 
     false
 }
 
+fn exact_text_value(node: &SemanticNode, expected: &SemanticActionText) -> bool {
+    match node.value() {
+        Some(SemanticValueSummary::Text(value)) => {
+            let preview = value.preview();
+            !preview.truncated()
+                && preview.source_bytes() == expected.len()
+                && preview.text() == expected.as_str()
+        }
+        None => expected.is_empty(),
+        _ => false,
+    }
+}
+
 impl AgentWorkTask for AgentWorkFormTask {
     fn allows_baseline_read(&self) -> bool {
         self.baseline_read
@@ -422,7 +500,7 @@ impl AgentWorkTask for AgentWorkFormTask {
             || action.source_observation_generation() != baseline.generation
             || action.frame() != &baseline.frame
             || action.bound_action().snapshot_generation() != baseline.snapshot
-            || action.effect() != SemanticEffectClass::LocalWrite
+            || action.effect() != self.effect
         {
             return Err(AgentWorkFailure::Contract);
         }
@@ -441,7 +519,7 @@ impl AgentWorkTask for AgentWorkFormTask {
         Ok(AgentEffectAssessment::new(
             action,
             self.origin.clone(),
-            SemanticEffectClass::LocalWrite,
+            self.effect,
         ))
     }
     fn attest_account(

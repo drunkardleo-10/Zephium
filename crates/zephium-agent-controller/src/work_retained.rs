@@ -473,72 +473,89 @@ impl WorkNative {
         if self.retained.is_none() {
             return self.next_event(worker, browser).await;
         }
-        self.next_retained_operation_event(worker, browser, false)
+        self.next_retained_operation_event(worker, browser, None)
             .await
     }
     pub(super) async fn next_action_event(
         &mut self,
         worker: &mut AgentRuntimeWorker,
         browser: &WorkBrowser<'_>,
+        deadline: SemanticActionExecutionInstant,
     ) -> Result<AgentRuntimeEvent, AgentWorkFailure> {
         if self.retained.is_none() {
             return self.next_event(worker, browser).await;
         }
-        self.next_retained_operation_event(worker, browser, true)
+        self.next_retained_operation_event(worker, browser, Some(deadline))
             .await
     }
     async fn next_retained_operation_event(
         &mut self,
         worker: &mut AgentRuntimeWorker,
         browser: &WorkBrowser<'_>,
-        action: bool,
+        action: Option<SemanticActionExecutionInstant>,
     ) -> Result<AgentRuntimeEvent, AgentWorkFailure> {
-        self.check_control(worker, browser)?;
+        if action.is_some() {
+            self.check_stop(worker, browser)?;
+        } else {
+            self.check_control(worker, browser)?;
+        }
         let clock = self
             .clock
             .as_ref()
             .ok_or(AgentWorkFailure::Contract)?
             .clone();
         let retained = self.retained.as_mut().ok_or(AgentWorkFailure::Contract)?;
-        let result =
-            tokio::time::timeout_at(tokio::time::Instant::from_std(self.deadline), async {
-                let event = worker.next_event();
-                tokio::pin!(event);
-                std::future::poll_fn(|cx| {
-                    // Control always wins continuation. Cleanup separately polls
-                    // the retained terminal even when the lease is already revoked.
-                    if let std::task::Poll::Ready(event) =
-                        std::future::Future::poll(event.as_mut(), cx)
-                    {
-                        return std::task::Poll::Ready(Err(event));
-                    }
-                    match clock
-                        .now()
-                        .map_err(|_| AgentWorkFailure::Contract)
-                        .and_then(|now| {
+        let deadline = if let Some(deadline) = action {
+            let now = clock.now().map_err(|_| AgentWorkFailure::Contract)?;
+            Instant::now()
+                .checked_add(Duration::from_millis(
+                    deadline.millis().saturating_sub(now.millis()),
+                ))
+                .ok_or(AgentWorkFailure::Contract)?
+                .min(self.deadline)
+        } else {
+            self.deadline
+        };
+        let result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
+            let event = worker.next_event();
+            tokio::pin!(event);
+            std::future::poll_fn(|cx| {
+                // Control wins even over an already available terminal.
+                if let std::task::Poll::Ready(event) = std::future::Future::poll(event.as_mut(), cx)
+                {
+                    return std::task::Poll::Ready(Err(event));
+                }
+                match clock
+                    .now()
+                    .map_err(|_| AgentWorkFailure::Contract)
+                    .and_then(|now| {
+                        if action.is_some() {
+                            // The original action is evidence debt, not a
+                            // new admission. Poll before observing health,
+                            // including when terminal publication wins the
+                            // race with the resource-health notification.
+                            retained.poll_action(now).map(|terminal| {
+                                terminal.map(AgentRuntimeEvent::SemanticActionTerminal)
+                            })
+                        } else {
                             retained.check_health(now)?;
-                            if action {
-                                retained.poll_action(now).map(|terminal| {
-                                    terminal.map(AgentRuntimeEvent::SemanticActionTerminal)
+                            retained.poll_navigation(now).map(|terminal| {
+                                terminal.map(|terminal| {
+                                    AgentRuntimeEvent::NativeTerminal(
+                                        ContextNativeEvent::NavigationSettled(terminal),
+                                    )
                                 })
-                            } else {
-                                retained.poll_navigation(now).map(|terminal| {
-                                    terminal.map(|terminal| {
-                                        AgentRuntimeEvent::NativeTerminal(
-                                            ContextNativeEvent::NavigationSettled(terminal),
-                                        )
-                                    })
-                                })
-                            }
-                        }) {
-                        Ok(None) => std::task::Poll::Pending,
-                        Ok(Some(terminal)) => std::task::Poll::Ready(Ok(Ok(terminal))),
-                        Err(error) => std::task::Poll::Ready(Ok(Err(error))),
-                    }
-                })
-                .await
+                            })
+                        }
+                    }) {
+                    Ok(None) => std::task::Poll::Pending,
+                    Ok(Some(terminal)) => std::task::Poll::Ready(Ok(Ok(terminal))),
+                    Err(error) => std::task::Poll::Ready(Ok(Err(error))),
+                }
             })
-            .await;
+            .await
+        })
+        .await;
         match result {
             Ok(Ok(Ok(terminal))) => Ok(terminal),
             Ok(Ok(Err(error))) => Err(error),

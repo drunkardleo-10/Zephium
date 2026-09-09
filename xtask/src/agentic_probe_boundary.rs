@@ -2490,6 +2490,42 @@ fn validate_owned_context_viewport_contract(
 
 fn validate_engine_semantic_runtime_boundary(source: &str) -> Result<(), String> {
     let source = compact(source);
+    if source.contains("program_probe") {
+        for required in [
+            "#[cfg(feature=\"native-agentic-semantic-probe\")]#[path=\"agentic_semantic_program_probe.rs\"]modprogram_probe;",
+            "#[cfg(any(not(feature=\"native-agentic-semantic-probe\"),test))]usezephium_agentic::SEMANTIC_RUNTIME_PROGRAM;",
+            "#[cfg(not(feature=\"native-agentic-semantic-probe\"))]letsource=NSString::from_str(SEMANTIC_RUNTIME_PROGRAM.source());",
+            "#[cfg(feature=\"native-agentic-semantic-probe\")]letsource=NSString::from_str(&program_probe::source());",
+            "#[cfg(not(feature=\"native-agentic-semantic-probe\"))]letsource_mismatch=source.to_string()!=SEMANTIC_RUNTIME_PROGRAM.source();",
+            "#[cfg(feature=\"native-agentic-semantic-probe\")]letsource_mismatch=source.to_string()!=program_probe::source();",
+            "#[cfg(feature=\"native-agentic-semantic-probe\")]letbytes=program_probe::normalize_diagnostic(bytes);",
+            "#[cfg(feature=\"native-agentic-semantic-probe\")]prepared_fill:Option<program_probe::PreparedFill>,",
+            "#[cfg(feature=\"native-agentic-semantic-probe\")]prepared_fill:None,",
+            "#[cfg(feature=\"native-agentic-semantic-probe\")]ifletSome(mutprepared)=self.prepared_fill.take(){ifletSome(reply)=prepared.stop(){actions.push_reply(reply);}}",
+            "#[cfg(feature=\"native-agentic-semantic-probe\")]ifbody==program_probe::PREPARE_MESSAGE&&program_probe::preparation_selected(){returnself.on_fill_preparation(reply);}",
+            "#[cfg(feature=\"native-agentic-semantic-probe\")]ifself.prepared_fill.as_ref().is_some_and(program_probe::PreparedFill::waiting){returnself.fail_transport(Some(reply));}",
+            "#[cfg(feature=\"native-agentic-semantic-probe\")]{self.prepared_fill=None;}",
+            "#[cfg(feature=\"native-agentic-semantic-probe\")]pub(crate)fnpoll_prepared_fill(&self){letactions=self.transition(SemanticRuntimeChannelState::poll_fill_preparation);self.execute(actions);}",
+            "#[cfg(feature=\"native-agentic-semantic-probe\")]ifletErr(AgentSemanticActionRuntimeFailure::Result(SemanticActionRuntimeResultError::Runtime(fault),))=&outcome{program_probe::record_fault(fault);}",
+        ] {
+            if !source.contains(required) {
+                return Err(format!("fixed semantic qualification source escaped its exact gate: {required}"));
+            }
+        }
+        if source.matches("program_probe::source()").count() != 2 {
+            return Err("fixed semantic qualification acquired another source call".to_owned());
+        }
+    }
+    let expected_probe_gates = if source.contains("program_probe") {
+        // Includes stopping the existing preparation reply on authority loss
+        // and the regression proving late preparation cannot reopen it.
+        17
+    } else {
+        0
+    };
+    if source.matches("native-agentic-semantic-probe").count() != expected_probe_gates {
+        return Err("semantic runtime acquired an unreviewed diagnostic gate".to_owned());
+    }
     for required in [
         "addScriptMessageHandlerWithReply_contentWorld_name",
         "WKUserScript::initWithSource_injectionTime_forMainFrameOnly_inContentWorld",
@@ -2506,17 +2542,10 @@ fn validate_engine_semantic_runtime_boundary(source: &str) -> Result<(), String>
         "MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES",
         "MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS",
         "SEMANTIC_RUNTIME_PROGRAM.source()",
-        "PAGE_WORLD_COMPATIBILITY_FILL_PROGRAM",
-        "Document.prototype.getElementById",
-        "getOwnDescriptor(inputPrototype,'labels')",
-        "getOwnDescriptor(textareaPrototype,'labels')",
-        "attr(target,'aria-labelledby')",
-        "credentialLike(target,isInput)!==false",
-        "WKContentWorld::pageWorld",
-        "scripts.count()!=2",
-        "scripts.objectAtIndex(1)",
-        "Retained::as_ptr(&active.page_relay_world)!=Retained::as_ptr(&actual_page_world)",
-        "source.to_string()!=PAGE_WORLD_COMPATIBILITY_FILL_PROGRAM",
+        "scripts.count()!=1",
+        "scripts.objectAtIndex(0)",
+        "Retained::as_ptr(&script)!=Retained::as_ptr(&active.script)",
+        "source.to_string()!=SEMANTIC_RUNTIME_PROGRAM.source()",
         "removeScriptMessageHandlerForName_contentWorld",
         "controller.removeAllScriptMessageHandlers()",
         "controller.removeAllUserScripts()",
@@ -2525,6 +2554,14 @@ fn validate_engine_semantic_runtime_boundary(source: &str) -> Result<(), String>
         "fndocument_committed",
         "fnrenderer_lost",
         "fncancel",
+        "fnrevoke_document_authority",
+        "fndraining_action",
+        "fnrevoked_settling_action",
+        "self.phase==DocumentPhase::AuthorityRevoked&&self.settling_action(attempt)",
+        "self.settling_action==Some(attempt)",
+        "super::semantic_action::map_runtime_fault(*fault)==zephium_agentic::SemanticActionNativeFailure::AppliedUnverified",
+        "DocumentPhase::AuthorityRevoked",
+        "self.awaiting_result&&matches!(self.pending,Some(PendingInvocation::Action{..}))",
         "fnretire",
         "fnadmission_failure(&mutself)->Option<AgentSemanticRuntimeDispatchError>",
         "DocumentPhase::Loading=>{returnSome(AgentSemanticRuntimeDispatchError::NotReady);}",
@@ -2542,9 +2579,11 @@ fn validate_engine_semantic_runtime_boundary(source: &str) -> Result<(), String>
         "evaluate_script",
         "with_ipc_handler",
         "std::env",
+        "PAGE_WORLD_COMPATIBILITY_FILL_PROGRAM",
+        "WKContentWorld::pageWorld",
+        "page_relay",
         "ZEPHIUM_PAGE_WORLD_FILL_RELAY_PROBE",
         "native-agentic-input-probe",
-        "native-agentic-semantic-probe",
         "unreachable!",
     ] {
         if source.contains(forbidden) {
@@ -2552,12 +2591,6 @@ fn validate_engine_semantic_runtime_boundary(source: &str) -> Result<(), String>
                 "production macOS semantic runtime acquired forbidden surface {forbidden}"
             ));
         }
-    }
-    if source.matches("WKContentWorld::pageWorld").count() != 2 {
-        return Err(
-            "production macOS semantic runtime must install and attest one exact page world"
-                .to_owned(),
-        );
     }
     Ok(())
 }
@@ -2646,8 +2679,11 @@ fn validate_macos_rendering_presented_probe(
             ));
         }
     }
-    if source.matches(".orderFrontRegardless()").count() != 1
-        || source.matches(".setHidden(false)").count() != 1
+    // The release-excluded module owns two fixed presentation cohorts: the
+    // rendering witness and the AX-only witness. Each may present once; event
+    // dispatch remains owned solely by the rendering witness.
+    if source.matches(".orderFrontRegardless()").count() != 2
+        || source.matches(".setHidden(false)").count() != 2
         || source
             .matches(".nextEventMatchingMask_untilDate_inMode_dequeue(")
             .count()
@@ -2700,7 +2736,7 @@ fn validate_macos_rendering_presented_probe(
         "letnative_guard=ProbeNativeState::Hidden(NativeStateGuard{",
         "Self::Hidden(guard)=>guard.sample()",
         "ifletProbeNativeState::Presented(guard)=self.native_guard{guard.pump_appkit_event();}",
-        "ifmatches!(&mode,ProbeMode::RenderingPresented(_)){rendering_presented::initialize_inactive(&app)?;}",
+        "ifmatches!(&mode,ProbeMode::RenderingPresented(_))||ax_fill_probe||responder_case.is_some()||trusted_case.is_some()||surface_case.is_some(){rendering_presented::initialize_inactive(&app)?;}",
         "Self::Presented(guard)=>guard.sample()",
         "rendering_presented::measure(&view,context,operation,&url,&runtime,&host.view)",
     ] {
@@ -3026,13 +3062,15 @@ fn validate_macos_semantic_probe(
         "profile=ephemeral",
         "viewport=1280x800-logical",
         "fixture=loopback-only",
-        "snapshots=10",
-        "snapshots=14",
+        "snapshots=18",
+        "snapshots=22",
         "world_epochs=4",
         "fixed_click=verified",
         "click_postcondition=expanded",
-        "page_world_compatibility_fill=verified",
-        "controls=text-input,search-input,textarea",
+        "isolated_fixed_fill=verified",
+        "controls=text-input,search-input,textarea,contenteditable,nested-leaf",
+        "nested_delegated_model=retained",
+        "nested_context_attacks=6-refused-nonretryable",
         "fill_postcondition=exact-value",
         "event_trust=untrusted",
         "user_activation=0",
@@ -3043,7 +3081,7 @@ fn validate_macos_semantic_probe(
         "epoch_rotation_fill=verified",
         "focus_theft=0",
         "retained_views=0",
-        "hostile_terminal_spoof=refused",
+        "hostile_terminal_spoof=ignored",
         "hostile_cross_node_terminal=refused",
         "hostile_reparent_type_repurpose=applied-unverified",
         "hostile_reparent_recovery=verified",
@@ -6344,7 +6382,7 @@ fn validate_semantic_locate_contract(
         "SemanticLocateQuery::try_new(value)",
         "pubfninto_locate_query(self)->SemanticLocateQuery",
         "pubfntry_into_locate_scope(self,)->Result<SemanticLocateScope,AgentBrowserToolContractError>",
-        "Self::SurroundingText{..}=>Err(AgentBrowserToolContractError::Scope)",
+        "Self::SurroundingText{..}|Self::TextSearch{..}=>{Err(AgentBrowserToolContractError::Scope)}",
     ] {
         if !provider_tool.contains(required) {
             return Err(format!(
@@ -6765,9 +6803,9 @@ fn validate_semantic_extraction_provider_contract(
         "pub(crate)fnprepare_provider_extraction_input(",
         "!input.delivery.matches(input.schema,input.read)",
         "matchinput.subtree_target",
-        "None=>{provider_read_taints(",
+        "None=>provider_extraction_read_taints(",
         "Some(target)=>provider_subtree_read_taints(",
-        "provider_read_taints(input.read,input.baseline,request.account(),&self.taints)?",
+        "provider_extraction_read_taints(input.read,input.baseline,request.account(),&self.taints,)?",
         "ModelInputKind::Extraction",
         "pubfncommit_extraction_input(",
     ] {
@@ -7027,9 +7065,12 @@ fn validate_semantic_execution_contract(
 
     let macos_action = compact(macos_action);
     for required in [
+        "dispatch_guarded(_view,semantic,request,admitted_at,None,completion);",
+        "pub(super)fndispatch_guarded(",
+        "authority:Option<Box<dynFn()->bool>>",
         "!matches!(request.kind(),SemanticActionKind::Click|SemanticActionKind::Fill|SemanticActionKind::Select)",
         "encode_semantic_action_runtime_invocation(&request)",
-        "semantic.dispatch_action(invocation,move|outcome|",
+        "semantic.dispatch_action_guarded(invocation,authority,move|outcome|",
         "Ok(evidence)=>complete_runtime_recipe(request,evidence,admitted_at)",
         "request.complete(evidence.backend(),evidence.readiness(),evidence.viewport(),evidence.geometry(),completed_at,completed_at,)",
     ] {
@@ -10051,7 +10092,7 @@ mod tests {
             locate_model,
             provider_root,
             &provider_tool.replace(
-                "Self::SurroundingText { .. } => Err(AgentBrowserToolContractError::Scope)",
+                "Self::SurroundingText { .. } | Self::TextSearch { .. } => {\n                Err(AgentBrowserToolContractError::Scope)\n            }",
                 "Self::SurroundingText { target, .. } => Ok(SemanticLocateScope::Subtree(target))",
             ),
             continuation,
@@ -10478,12 +10519,16 @@ mod tests {
             fn capture_semantic_screenshot(&self) {}
         "#;
         let macos_action = r#"
+            dispatch_guarded(_view, semantic, request, admitted_at, None, completion);
+            pub(super) fn dispatch_guarded(
+                authority: Option<Box<dyn Fn() -> bool>>,
+            ) {
             if !matches!(
                 request.kind(),
                 SemanticActionKind::Click | SemanticActionKind::Fill | SemanticActionKind::Select
             ) {}
             encode_semantic_action_runtime_invocation(&request);
-            semantic.dispatch_action(invocation, move |outcome| {
+            semantic.dispatch_action_guarded(invocation, authority, move |outcome| {
                 match outcome {
                     Ok(evidence) => complete_runtime_recipe(request, evidence, admitted_at),
                     Err(_) => unreachable!(),
@@ -10497,6 +10542,7 @@ mod tests {
                 completed_at,
                 completed_at,
             );
+            }
         "#;
         validate_semantic_execution_contract(
             root,
@@ -13209,7 +13255,7 @@ mod tests {
         let semantic_binary = r#"
             if arguments.as_slice() != ["--ci-hidden-fixed-dom"] {}
             run_macos_agentic_semantic_probe();
-            "profile=ephemeral viewport=1280x800-logical fixture=loopback-only snapshots=10 snapshots=14 world_epochs=4 fixed_click=verified click_postcondition=expanded page_world_compatibility_fill=verified controls=text-input,search-input,textarea fill_postcondition=exact-value event_trust=untrusted user_activation=0 popup_admitted=0 mutation_gate=host-released stale_anchor=refused mutation_recovery=verified epoch_rotation_fill=verified focus_theft=0 retained_views=0 hostile_terminal_spoof=refused hostile_cross_node_terminal=refused hostile_reparent_type_repurpose=applied-unverified hostile_reparent_recovery=verified hostile_credential_relabel=applied-unverified hostile_credential_recovery=verified";
+            "profile=ephemeral viewport=1280x800-logical fixture=loopback-only snapshots=18 snapshots=22 world_epochs=4 fixed_click=verified click_postcondition=expanded isolated_fixed_fill=verified controls=text-input,search-input,textarea,contenteditable,nested-leaf nested_delegated_model=retained nested_context_attacks=6-refused-nonretryable fill_postcondition=exact-value event_trust=untrusted user_activation=0 popup_admitted=0 mutation_gate=host-released stale_anchor=refused mutation_recovery=verified epoch_rotation_fill=verified focus_theft=0 retained_views=0 hostile_terminal_spoof=ignored hostile_cross_node_terminal=refused hostile_reparent_type_repurpose=applied-unverified hostile_reparent_recovery=verified hostile_credential_relabel=applied-unverified hostile_credential_recovery=verified";
         "#;
         let semantic_fixture = r#"
             TcpListener::bind((Ipv4Addr::LOCALHOST, 0));
@@ -13436,19 +13482,10 @@ mod tests {
             MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES;
             MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS;
             SEMANTIC_RUNTIME_PROGRAM.source();
-            PAGE_WORLD_COMPATIBILITY_FILL_PROGRAM;
-            Document.prototype.getElementById;
-            getOwnDescriptor(inputPrototype, 'labels');
-            getOwnDescriptor(textareaPrototype, 'labels');
-            attr(target, 'aria-labelledby');
-            credentialLike(target, isInput) !== false;
-            WKContentWorld::pageWorld();
-            if scripts.count() != 2 {}
-            scripts.objectAtIndex(1);
-            let actual_page_world = WKContentWorld::pageWorld();
-            Retained::as_ptr(&active.page_relay_world)
-                != Retained::as_ptr(&actual_page_world);
-            source.to_string() != PAGE_WORLD_COMPATIBILITY_FILL_PROGRAM;
+            if scripts.count() != 1 {}
+            let script = scripts.objectAtIndex(0);
+            Retained::as_ptr(&script) != Retained::as_ptr(&active.script);
+            source.to_string() != SEMANTIC_RUNTIME_PROGRAM.source();
             removeScriptMessageHandlerForName_contentWorld();
             controller.removeAllScriptMessageHandlers();
             controller.removeAllUserScripts();
@@ -13476,6 +13513,10 @@ mod tests {
             "{runtime}\nevaluateJavaScript();"
         ))
         .is_err());
+        assert!(validate_engine_semantic_runtime_boundary(&format!(
+            "{runtime}\nWKContentWorld::pageWorld();"
+        ))
+        .is_err());
         assert!(validate_engine_semantic_runtime_boundary(
             &runtime.replace("message.frameInfo();", "")
         )
@@ -13485,6 +13526,56 @@ mod tests {
             "unreachable!();",
         ))
         .is_err());
+    }
+
+    #[test]
+    fn isolated_command_program_cannot_escape_diagnostic_install_or_attestation_gate() {
+        let runtime =
+            include_str!("../../crates/zephium-engine/src/platform/macos/semantic_runtime.rs");
+        validate_engine_semantic_runtime_boundary(runtime).expect("closed diagnostic gate");
+        for call in [
+            "#[cfg(feature = \"native-agentic-semantic-probe\")]\n    let source =",
+            "#[cfg(feature = \"native-agentic-semantic-probe\")]\n        let source_mismatch =",
+            "#[cfg(feature = \"native-agentic-semantic-probe\")]\n#[path = \"agentic_semantic_program_probe.rs\"]",
+            "#[cfg(feature = \"native-agentic-semantic-probe\")]\n                let bytes = program_probe::normalize_diagnostic(bytes);",
+        ] {
+            assert!(runtime.contains(call), "gate witness drifted");
+            let unguarded = runtime.replace(call, &call.replace("#[cfg(feature = \"native-agentic-semantic-probe\")]", ""));
+            assert!(validate_engine_semantic_runtime_boundary(&unguarded).is_err());
+        }
+    }
+
+    #[test]
+    fn preparation_only_control_stops_after_revalidation_inside_diagnostic_gate() {
+        let candidate = include_str!(
+            "../../crates/zephium-engine/src/platform/macos/agentic_isolated_fill_candidate.js"
+        );
+        let probe = include_str!(
+            "../../crates/zephium-engine/src/platform/macos/agentic_semantic_program_probe.rs"
+        );
+        let shipping = include_str!("../../crates/zephium-agentic/assets/semantic-runtime-v1.js");
+        assert!(!shipping.contains("commandPreparationOnly"));
+        assert!(!shipping.contains("applied_unverified_preparation_only"));
+        let engine = include_str!("../../crates/zephium-engine/src/lib.rs");
+        assert!(engine.contains("#[cfg(all(feature = \"native-agentic-semantic-probe\", not(debug_assertions)))]\ncompile_error!(\"the native agentic semantic probe is forbidden in optimized builds\");"));
+        assert!(candidate.contains("return commandPreparationOnly ? \"unsupported_interaction\" : runSyntheticFill(target, descriptor, request);"));
+        let revalidation = candidate.find("if (!preparedCurrent()) return \"applied_unverified_beforeinput_revalidation\";\n      // The consumed").unwrap();
+        let stop = candidate
+            .find("if (commandPreparationOnly) return \"applied_unverified_preparation_only\";")
+            .unwrap();
+        let insertion = candidate
+            .find("apply(commandInsertText, document,")
+            .unwrap();
+        assert!(revalidation < stop && stop < insertion);
+        assert!(candidate.contains("const commandPreparationOnly = false;"));
+        assert!(probe.contains("|| preparation_only_selected()"));
+        assert!(probe.contains(
+            "preparation_only_selected() && bytes == b\"E2:applied_unverified_preparation_only\""
+        ));
+        assert!(probe
+            .contains("phase=revalidated command_entered=false result=uncertain content=redacted"));
+        assert!(probe.contains("return b\"E2:applied_unverified\";"));
+        assert!(probe.contains("source.replacen(\"const commandPreparationOnly = false;\", \"const commandPreparationOnly = true;\", 1)"));
     }
 
     #[test]

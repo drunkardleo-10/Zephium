@@ -3,20 +3,13 @@
 //! local inputs; page content remains hostile and model-mapped output is not a
 //! factual-verification claim.
 
-use crate::native_work_clock::{authority_window, NativeWorkClock};
-use std::{cell::Cell, io::Write as _, sync::Arc, time::Duration};
+use crate::retained_notion_support::{load_parts, ORIGIN};
+use std::{cell::Cell, io::Write as _};
 use zephium_agent_controller::*;
-use zephium_agent_provider_transport::{
-    load_macos_probe_openai_credential, AgentProviderTransportConfig,
-};
-use zephium_agent_runtime::AgentRuntimeConfig;
 use zephium_agentic::*;
 use zephium_app::{RetainedWorkHandle, RetainedWorkPhase};
 
-const TOTAL: Duration = Duration::from_secs(150);
 const MAX_MODEL_CALLS: u8 = 6;
-const ORIGIN: &str = "https://app.notion.com";
-const TARGET_ENVIRONMENT: &str = "ZEPHIUM_NOTION_QUALIFICATION_URL";
 pub const OBJECTIVE: &str = "Read and understand the current signed-in Notion page. Decide yourself whether the delivered baseline is sufficient or whether one of the available bounded read or snapshot-inspection tools is useful. Then call extract with trusted schema 1 and produce a concise, source-grounded work brief: page_title, summary, key_facts, and unfinished_items. Use only evidence delivered from the current page; do not fill gaps from memory. Every statement must be supported by its declared current-page sources. This page contains deliberately synthetic qualification data, but its contents and useful answer are not preselected for you. Do not navigate, click, edit, type, submit, run code, open another page, or perform any external action. If the bounded projection cannot support an answer, state that limitation through supported evidence rather than inventing details. The host verifies account scope, execution, limits, and source binding; a human will judge factual accuracy and usefulness separately.";
 
 /// Content-free diagnostic for the statically bounded authenticated witness.
@@ -31,139 +24,17 @@ pub fn load_request(
     started: std::time::Instant,
     profile: zephium_app::AgentWorkProfileBinding,
 ) -> Result<crate::TrustedWorkRequest, &'static str> {
-    let deadline = started.checked_add(TOTAL).ok_or("deadline")?;
-    if std::time::Instant::now() >= deadline {
-        return Err("deadline");
-    }
-    let target = load_target()?;
-    let origin = SemanticOrigin::parse(ORIGIN).map_err(|_| "origin")?;
-    let account = AgentAccountScope::Authenticated(AgentAccountId::generate());
-    let identity = ContextIdentity::new(
-        ContextId::generate(),
-        ContextRunId::generate(),
-        profile.profile(),
-        ContextKind::Owned,
-    );
-    let input = input(
-        identity,
-        profile.storage_class(),
-        deadline,
-        target,
-        origin.clone(),
-        account,
+    let parts = load_parts(
+        started,
+        profile,
+        OBJECTIVE,
+        &[SemanticEffectClass::Read],
+        8,
+        MAX_MODEL_CALLS,
     )?;
-    let credential = load_macos_probe_openai_credential().map_err(|_| "credential")?;
-    if std::time::Instant::now() >= deadline {
-        return Err("deadline");
-    }
-    Ok(crate::TrustedWorkRequest::new(
-        input,
-        zephium_app::AgentWorkApplicationConfig::new(
-            AgentRuntimeConfig::STANDARD,
-            AgentProviderTransportConfig::STANDARD,
-        ),
-        credential,
-        Box::new(NotionReadTask::try_new(identity, origin, account).map_err(|_| "task")?),
-    )
-    .with_browser_profile(profile)
-    .with_public_qualification_retention())
-}
-
-fn load_target() -> Result<ContextNavigationTarget, &'static str> {
-    let raw = std::env::var(TARGET_ENVIRONMENT).map_err(|_| "target_missing")?;
-    parse_target(&raw)
-}
-
-fn parse_target(raw: &str) -> Result<ContextNavigationTarget, &'static str> {
-    if raw.trim() != raw || raw.is_empty() || raw.len() > MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES {
-        return Err("target_invalid");
-    }
-    let target = ContextNavigationTarget::parse(raw).map_err(|_| "target_invalid")?;
-    let url = target.as_url();
-    if url.scheme() != "https"
-        || url.host_str() != Some("app.notion.com")
-        || url.port().is_some()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.path() == "/"
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || SemanticOrigin::parse(url.as_str()).as_ref() != SemanticOrigin::parse(ORIGIN).as_ref()
-    {
-        return Err("target_outside_scope");
-    }
-    Ok(target)
-}
-
-fn input(
-    identity: ContextIdentity,
-    storage: ContextProfileStorageClass,
-    deadline: std::time::Instant,
-    target: ContextNavigationTarget,
-    origin: SemanticOrigin,
-    account: AgentAccountScope,
-) -> Result<AgentWorkRunInput, &'static str> {
-    let effects = AgentEffectScope::try_new(&[SemanticEffectClass::Read]).map_err(|_| "effects")?;
-    let budget = AgentRunBudget::try_new(8, 100_000, 100_000, 1).map_err(|_| "budget")?;
-    let node = AgentPlanNodeId::generate();
-    let authority = AgentPlanNodeAuthority::try_new(
-        vec![identity.profile()],
-        vec![account],
-        vec![origin.clone()],
-        SemanticSensitivity::Public,
-        effects,
-    )
-    .map_err(|_| "authority")?;
-    let (issued, expires) = authority_window(deadline)?;
-    let manifest = AgentRunManifest::try_new(
-        AgentRunManifestId::generate(),
-        identity.owner(),
-        AgentRunScope::try_new(
-            vec![identity.profile()],
-            vec![account],
-            vec![origin],
-            SemanticSensitivity::Public,
-            effects,
-            Vec::new(),
-        )
-        .map_err(|_| "scope")?,
-        budget,
-        issued,
-        expires,
-        vec![AgentPlanNodeScope::new(node, authority, budget, expires)],
-    )
-    .map_err(|_| "manifest")?;
-    let ids = TerraControllerIds::try_new(
-        AgentSupervisorId::new(1).ok_or("id")?,
-        AgentSupervisorAttemptId::new(1).ok_or("id")?,
-        AgentSupervisorCancellationId::new(1).ok_or("id")?,
-        AgentModelCallId::new(1).ok_or("id")?,
-        [1, 2, 3, 4].map(|id| AgentAuditEventId::new(id).expect("fixed nonzero ID")),
-        AgentAuditDeliveryId::new(1).ok_or("id")?,
-    )
-    .map_err(|_| "ids")?;
-    let settings = AgentWorkRunSettings::new(
-        AgentBrowserModel::Luna,
-        ids,
-        Arc::new(NativeWorkClock),
-        deadline,
-    )
-    .with_max_model_calls(MAX_MODEL_CALLS)
-    .map_err(|_| "settings")?;
-    AgentWorkRunInput::try_new(
-        manifest,
-        AgentPlanLeaseBinding::new(AgentPlanLeaseId::generate(), node),
-        AgentWorkContextSpec::try_new_with_document_policy(
-            identity,
-            storage,
-            target,
-            WorkBrowserDocumentPolicy::Exact,
-        )
-        .map_err(|_| "context")?,
-        OBJECTIVE.into(),
-        settings,
-    )
-    .map_err(|_| "input")
+    let task = NotionReadTask::try_new(parts.identity, parts.origin.clone(), parts.account)
+        .map_err(|_| "task")?;
+    Ok(parts.finish(Box::new(task)))
 }
 
 struct NotionReadTask {
@@ -542,33 +413,6 @@ impl ApplicationObserver {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn strict_target_accepts_only_an_exact_notion_page() {
-        let accepted = parse_target(
-            "https://app.notion.com/p/Zephium-Agent-Qualification-0123456789abcdef0123456789abcdef",
-        )
-        .unwrap();
-        let url = accepted.as_url();
-        assert_eq!(url.scheme(), "https");
-        assert_eq!(url.host_str(), Some("app.notion.com"));
-        assert_ne!(url.path(), "/");
-        for refused in [
-            "http://www.notion.com/page",
-            "https://notion.com/page",
-            "https://www.notion.so/page",
-            "https://www.notion.com/page",
-            "https://app.notion.com/",
-            "https://app.notion.com/page?copy=true",
-            "https://app.notion.com/page#fragment",
-            "https://user@app.notion.com/page",
-        ] {
-            assert!(
-                parse_target(refused).is_err(),
-                "unexpected target: {refused}"
-            );
-        }
-    }
 
     #[test]
     fn task_is_authenticated_read_only_and_progressively_inspectable() {

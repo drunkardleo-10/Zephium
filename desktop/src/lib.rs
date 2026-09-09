@@ -19,7 +19,10 @@ compile_error!("the actual-application navigation witness is macOS debug-only");
 mod navigation_probe;
 #[cfg(all(
     feature = "macos-work-profile-enrollment",
-    feature = "macos-work-retained-notion-probe"
+    any(
+        feature = "macos-work-retained-notion-probe",
+        feature = "macos-work-retained-notion-write-probe"
+    )
 ))]
 compile_error!("profile enrollment and authenticated execution are separate application builds");
 

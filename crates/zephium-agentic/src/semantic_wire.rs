@@ -201,6 +201,46 @@ pub fn decode_semantic_snapshot(
         let operations = SemanticOperations::from_bits(raw_node.operations)
             .map_err(|_| SemanticDecodeError::NodeContract)?;
         validate_operations(role, states, operations)?;
+        let fill_support = raw_node.fill_support.map(decode_fill_support).transpose()?;
+        let editable_structure = raw_node
+            .editable_structure
+            .map(|(child_count, child_kinds, editable_parent)| {
+                if child_count > 129
+                    || child_kinds > 7
+                    || (child_count == 0) != (child_kinds == 0)
+                    || child_kinds.count_ones() > u32::from(child_count.min(128))
+                    || !matches!(role, SemanticRole::Textbox | SemanticRole::Searchbox)
+                {
+                    return Err(SemanticDecodeError::NodeContract);
+                }
+                use crate::SemanticFillSupport::*;
+                let consistent = match fill_support {
+                    Some(Supported) => child_count <= 128 && child_kinds & 6 == 0,
+                    Some(EditableAncestor) => editable_parent,
+                    Some(ChildLimit) => child_count == 129,
+                    Some(ElementChild) => child_kinds & 2 != 0,
+                    Some(OtherChild) => child_kinds & 4 != 0,
+                    Some(ReadOnly | Disabled) => true,
+                    _ => false,
+                };
+                if !consistent {
+                    return Err(SemanticDecodeError::NodeContract);
+                }
+                Ok(crate::SemanticEditableStructure {
+                    child_count,
+                    child_kinds,
+                    editable_parent,
+                })
+            })
+            .transpose()?;
+        if let Some(support) = fill_support {
+            if !matches!(role, SemanticRole::Textbox | SemanticRole::Searchbox)
+                || (support == crate::SemanticFillSupport::Supported)
+                    != operations.contains(SemanticOperationClass::Fill)
+            {
+                return Err(SemanticDecodeError::NodeContract);
+            }
+        }
 
         let mut raw_name =
             validate_optional_text(raw_node.name, MAX_SEMANTIC_NAME_BYTES, &mut wire_text_bytes)?;
@@ -315,6 +355,8 @@ pub fn decode_semantic_snapshot(
             value,
             states,
             operations,
+            fill_support,
+            editable_structure,
             sensitivity,
             trust: SemanticTrust::UntrustedPage,
             geometry,
@@ -614,10 +656,33 @@ struct RawNode {
     states: u8,
     #[serde(rename = "o", default)]
     operations: u8,
+    #[serde(rename = "fs", default)]
+    fill_support: Option<u8>,
+    #[serde(rename = "es", default)]
+    editable_structure: Option<(u16, u8, bool)>,
     #[serde(rename = "q", default)]
     sensitivity: RawSensitivity,
     #[serde(rename = "b", default)]
     rect: Option<RawRect>,
+}
+
+fn decode_fill_support(code: u8) -> Result<crate::SemanticFillSupport, SemanticDecodeError> {
+    use crate::SemanticFillSupport::*;
+    Ok(match code {
+        1 => Supported,
+        2 => MissingExplicitEditable,
+        3 => NativeNotEditable,
+        4 => UnsupportedTag,
+        5 => EditableAncestor,
+        6 => ChildLimit,
+        7 => ElementChild,
+        8 => OtherChild,
+        9 => NativeReadFailed,
+        10 => ReadOnly,
+        11 => Disabled,
+        12 => UnsupportedControl,
+        _ => return Err(SemanticDecodeError::NodeContract),
+    })
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -790,6 +855,82 @@ mod tests {
             "n": nodes,
         }))
         .expect("encode")
+    }
+
+    #[test]
+    fn editable_structure_is_bounded_closed_and_not_private_fill_authority() {
+        for (shape, support, operations) in [
+            (json!([1, 1, false]), 1, 2),
+            (json!([0, 0, false]), 1, 2),
+            (json!([1, 1, true]), 5, 0),
+            (json!([1, 1, true]), 1, 2),
+            (json!([1, 2, true]), 5, 0),
+            (json!([2, 3, true]), 5, 0),
+            (json!([129, 1, false]), 6, 0),
+        ] {
+            let snapshot = decode_semantic_snapshot(
+                decode_context(),
+                &payload(json!([{"k":1,"r":"textbox","fs":support,"o":operations,"es":shape}])),
+            )
+            .unwrap();
+            let structure = snapshot.nodes()[0].editable_structure().unwrap();
+            assert_eq!(structure.child_count(), shape[0].as_u64().unwrap() as u16);
+            assert_eq!(structure.editable_parent(), shape[2].as_bool().unwrap());
+            assert_eq!(structure.truncated(), structure.child_count() == 129);
+        }
+        for shape in [
+            json!([130, 1, true]),
+            json!([1, 8, true]),
+            json!([0, 1, true]),
+            json!([1, 3, true]),
+            json!([1, 0, true]),
+            json!([1, 1]),
+            json!([1, 1, true, "text"]),
+        ] {
+            assert!(decode_semantic_snapshot(
+                decode_context(),
+                &payload(json!([{"k":1,"r":"textbox","fs":5,"es":shape}]))
+            )
+            .is_err());
+        }
+        for shape in [
+            json!([1, 2, true]),
+            json!([1, 2, false]),
+            json!([1, 4, false]),
+            json!([129, 1, false]),
+        ] {
+            assert!(
+                decode_semantic_snapshot(
+                    decode_context(),
+                    &payload(json!([{"k":1,"r":"textbox","fs":1,"o":2,"es":shape}]))
+                )
+                .is_err(),
+                "structure cannot promote rich targets to Fill"
+            );
+        }
+    }
+
+    #[test]
+    fn fill_support_is_closed_consistent_and_not_action_authority() {
+        for code in 1..=12 {
+            let bytes =
+                payload(json!([{"k":1,"r":"textbox","fs":code,"o":if code == 1 {2} else {0}}]));
+            let snapshot = decode_semantic_snapshot(decode_context(), &bytes).unwrap();
+            assert_eq!(
+                snapshot.nodes()[0].fill_support(),
+                Some(decode_fill_support(code).unwrap())
+            );
+        }
+        for node in [
+            json!({"k":1,"r":"textbox","fs":0}),
+            json!({"k":1,"r":"textbox","fs":13}),
+            json!({"k":1,"r":"textbox","fs":"page-authored reason"}),
+            json!({"k":1,"r":"textbox","fs":1,"o":0}),
+            json!({"k":1,"r":"textbox","fs":7,"o":2}),
+            json!({"k":1,"r":"button","fs":7}),
+        ] {
+            assert!(decode_semantic_snapshot(decode_context(), &payload(json!([node]))).is_err());
+        }
     }
 
     #[test]

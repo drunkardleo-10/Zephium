@@ -1172,7 +1172,8 @@ fn admit_native_outcome(
                 ) => rect_intersects_viewport(applied.actual_geometry, applied.viewport),
                 (
                     SemanticActionKind::Fill,
-                    SemanticActionExecutionBackend::PageWorldCompatibilityFill,
+                    SemanticActionExecutionBackend::FixedSemanticRecipe
+                    | SemanticActionExecutionBackend::PageWorldCompatibilityFill,
                     SemanticActionNativeReadiness::ExactConnectedWritableFormTarget,
                 ) => true,
                 (
@@ -1995,7 +1996,7 @@ mod tests {
         assert!(!invocation_debug.contains("private replacement"));
         assert!(!invocation_debug.contains("Private title"));
         let fill_settlement = fill_native.complete(
-            SemanticActionExecutionBackend::PageWorldCompatibilityFill,
+            SemanticActionExecutionBackend::FixedSemanticRecipe,
             SemanticActionNativeReadiness::ExactConnectedWritableFormTarget,
             viewport(),
             rect(10, 50, 200, 30),
@@ -2005,7 +2006,7 @@ mod tests {
         assert!(matches!(
             fill_pending.settle(fill.frame(), fill_settlement).disposition(),
             SemanticActionExecutionDisposition::Applied(applied)
-                if applied.backend() == SemanticActionExecutionBackend::PageWorldCompatibilityFill
+                if applied.backend() == SemanticActionExecutionBackend::FixedSemanticRecipe
                     && applied.readiness()
                         == SemanticActionNativeReadiness::ExactConnectedWritableFormTarget
         ));

@@ -26,6 +26,17 @@ acknowledgement or partial transaction never implies a native mutation did not
 occur. Recovered facts cannot recreate refs, native contexts, provider state,
 task predicates or executable approvals.
 
+The retained-resource coordinator currently requires every claimed historical
+record to be terminal with zero debt before admitting any actor. An unrelated
+`Interrupted` record therefore blocks a fresh run as well. This refusal happens
+after Store has successfully claimed and fenced the inventory, before admission
+or model/native execution; its existing `Conflict` classification does not mean
+the new run's IDs collided or SQLite rejected a CAS. Explicit review preserves
+unknown debt, so reviewing that record alone does not reopen this coordinator.
+The release-excluded probe reports `stage=claim_inventory`, record ordering,
+nonterminal/debt counts and whether current execution exists, without identifiers
+or content. The original records and recovery obligations remain intact.
+
 Each fixed 96-byte record contains only version/disposition/debt bits, a checked
 monotonic revision, process identity, manifest/run identity and the existing
 content-free manifest guard. No objective, credential, page/provider content,

@@ -1,5 +1,17 @@
 //! Release-excluded live qualification for the production semantic adapter.
 
+#[path = "agentic_accessibility_fill_probe.rs"]
+mod accessibility_fill;
+
+#[path = "agentic_responder_fill_probe.rs"]
+mod responder_fill;
+
+#[path = "agentic_trusted_edit_probe.rs"]
+mod trusted_edit;
+
+#[path = "agentic_owned_surface_probe.rs"]
+mod owned_surface;
+
 #[path = "agentic_rendering_probe.rs"]
 mod rendering;
 pub use rendering::MacosAgenticRenderingProbeReport;
@@ -558,6 +570,34 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
             }
     );
     let page_relay_probe = full_probe && page_world_fill_relay_probe_enabled();
+    let ax_fill_probe = full_probe
+        && std::env::var_os(accessibility_fill::ENV).as_deref() == Some(std::ffi::OsStr::new("1"));
+    let responder_case = if full_probe {
+        responder_fill::case_from_env()?
+    } else {
+        None
+    };
+    let trusted_case = if full_probe {
+        trusted_edit::case_from_env()?
+    } else {
+        None
+    };
+    let surface_case = if full_probe {
+        owned_surface::case_from_env()?
+    } else {
+        None
+    };
+    if surface_case.is_some()
+        && (trusted_case.is_some() || responder_case.is_some() || ax_fill_probe || page_relay_probe)
+    {
+        return Err("surface_conflicting_probe");
+    }
+    if (responder_case.is_some() && (ax_fill_probe || page_relay_probe))
+        || (trusted_case.is_some()
+            && (ax_fill_probe || page_relay_probe || responder_case.is_some()))
+    {
+        return Err("responder_conflicting_probe");
+    }
     let hostile_relay_probe = full_probe && page_world_fill_relay_hostile_probe_enabled();
     if hostile_relay_probe && !page_relay_probe {
         return Err("relay_hostile_requires_page_relay");
@@ -571,7 +611,12 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
     if app.isActive() {
         return Err("focus_baseline");
     }
-    if matches!(&mode, ProbeMode::RenderingPresented(_)) {
+    if matches!(&mode, ProbeMode::RenderingPresented(_))
+        || ax_fill_probe
+        || responder_case.is_some()
+        || trusted_case.is_some()
+        || surface_case.is_some()
+    {
         rendering_presented::initialize_inactive(&app)?;
     } else {
         if !app.setActivationPolicy(NSApplicationActivationPolicy::Accessory) {
@@ -673,7 +718,7 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
         // A public page may autofocus within its own hidden, non-key window.
         // That internal responder state is not user focus theft; visibility,
         // key-window, main-window, and application activation remain strict.
-        allow_hidden_responder_change: public_fill_probe,
+        allow_hidden_responder_change: public_fill_probe || ax_fill_probe,
         failure: Cell::new(None),
     });
     native_guard.sample();
@@ -723,7 +768,7 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
             )?);
             return Ok(None);
         }
-        let first_url = if public_fill_probe {
+        let mut first_url = if public_fill_probe {
             PUBLIC_DISCOVERY_PROBE_URL.to_owned()
         } else {
             server.url(if page_relay_probe {
@@ -736,6 +781,26 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
                 FixtureRoute::SemanticRuntime
             })
         };
+        if ax_fill_probe {
+            first_url.push_str("#native-ax-fill");
+        }
+        if let Some(case) = surface_case {
+            // localhost is a valid local WebAuthn RP host; a numeric IP would
+            // reject before reaching its native capability path.
+            first_url = server
+                .url(FixtureRoute::OwnedSurfaceProbe)
+                .replace("127.0.0.1", "localhost");
+            first_url.push('#');
+            first_url.push_str(case);
+        }
+        if let Some(case) = responder_case {
+            first_url.push_str("#native-responder-");
+            first_url.push_str(case);
+        }
+        if let Some(case) = trusted_case {
+            first_url.push_str("#native-unit-");
+            first_url.push_str(case);
+        }
         let first = navigate(
             &mut view,
             &mut registry,
@@ -753,10 +818,85 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
             &mut successful_snapshots,
             &runtime,
         )?;
+        if let Some(case) = surface_case {
+            view.attest(profile, ContextProfileStorageClass::Ephemeral, Some(&store))
+                .map_err(|_| "surface_hidden_attestation")?;
+            rendering_presented::with_ax_fixture(&runtime, &host.view, |presented| {
+                owned_surface::run(
+                    &view,
+                    &window,
+                    &store,
+                    first_capture,
+                    &first_url,
+                    case,
+                    presented,
+                    &mut next_invocation,
+                    &mut successful_snapshots,
+                )
+            })?;
+            return Ok(None);
+        }
+        if let Some(case) = trusted_case {
+            view.attest(profile, ContextProfileStorageClass::Ephemeral, Some(&store))
+                .map_err(|_| "trusted_hidden_attestation")?;
+            rendering_presented::with_ax_fixture(&runtime, &host.view, |presented| {
+                trusted_edit::run(
+                    &view,
+                    &window,
+                    &store,
+                    first_capture,
+                    &first_url,
+                    case,
+                    presented,
+                    &mut next_invocation,
+                    &mut successful_snapshots,
+                )
+            })?;
+            return Ok(None);
+        }
+        if let Some(case) = responder_case {
+            rendering_presented::with_ax_fixture(&runtime, &host.view, |presented| {
+                responder_fill::run(
+                    &view,
+                    &window,
+                    first_capture,
+                    &first_url,
+                    case,
+                    presented,
+                    &mut next_invocation,
+                    &mut successful_snapshots,
+                )
+            })?;
+            return Ok(None);
+        }
+        if ax_fill_probe {
+            rendering_presented::with_ax_fixture(&runtime, &host.view, |presented| {
+                accessibility_fill::run(
+                    &view,
+                    &window,
+                    first_capture,
+                    &first_url,
+                    presented,
+                    &mut next_invocation,
+                    &mut successful_snapshots,
+                )
+            })?;
+            return Ok(None);
+        }
         if public_fill_probe {
             verify_public_discovery_snapshot(&first_capture.snapshot)?;
         } else {
             verify_first_snapshot(&first_capture.snapshot)?;
+        }
+        let page_origin_blocked = !hostile_relay_probe
+            || snapshot_contains(&first_capture.snapshot, "Semantic page-origin fill blocked");
+        if hostile_relay_probe
+            && !snapshot_contains(
+                &first_capture.snapshot,
+                "Semantic relay transport legacy command-gone reproduced",
+            )
+        {
+            return Err("relay_batching_filter_or_overflow");
         }
         let first_generation = first_capture.snapshot.generation();
         let first_observation = assemble_observation(first_capture)?;
@@ -1131,7 +1271,131 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
             verify_hostile_credential_recovery(&after_credential_recovery.snapshot)?;
             prior_capture = after_credential_recovery;
         }
-        drop(prior_capture);
+        let editable_generation = prior_capture.snapshot.generation();
+        let editable_observation = assemble_observation(prior_capture)?;
+        let editable_fill = execute_primary_fill(
+            &view,
+            &editable_observation,
+            &runtime,
+            "Semantic fill editable",
+            "  Zephium fixed editable\nline two  ",
+            10,
+            10,
+        )?;
+        wait_for_action_security_settle(&runtime, ACTION_SECURITY_SETTLE)?;
+        let after_editable = capture_snapshot(
+            &view,
+            first,
+            &first_url,
+            editable_generation.next().ok_or("action_identity")?,
+            &mut next_invocation,
+            &mut successful_snapshots,
+            &runtime,
+        )?;
+        verify_primary_fill_execution(editable_fill, &after_editable.snapshot)?;
+        if hostile_relay_probe
+            && !snapshot_contains(
+                &after_editable.snapshot,
+                "Semantic captured-payload retarget blocked",
+            )
+        {
+            return Err("captured_payload_retarget_unauthorized");
+        }
+        if !page_origin_blocked {
+            return Err("page_origin_fill_unauthorized");
+        }
+        if hostile_relay_probe
+            && !snapshot_contains(
+                &after_editable.snapshot,
+                "Semantic relay attribute interference avoided",
+            )
+        {
+            return Err("relay_editable_transport_interference");
+        }
+        verify_primary_fill(
+            &after_editable.snapshot,
+            "Semantic fill editable",
+            "  Zephium fixed editable\nline two  ",
+            SemanticRole::Textbox,
+            if hostile_relay_probe { 5 } else { 4 },
+        )?;
+        let mut nested_capture = after_editable;
+        for (index, desired) in [
+            "nested replacement",
+            "nested move",
+            "nested relabel",
+            "nested protected",
+            "nested credential",
+            "nested editability",
+            "nested rich",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let generation = nested_capture.snapshot.generation();
+            let observation = assemble_observation(nested_capture)?;
+            let pending = execute_primary_fill(
+                &view,
+                &observation,
+                &runtime,
+                "Fill support editable ancestor",
+                desired,
+                20 + index as u64,
+                20 + index as u64,
+            )?;
+            wait_for_action_security_settle(&runtime, ACTION_SECURITY_SETTLE)?;
+            nested_capture = capture_snapshot(
+                &view,
+                first,
+                &first_url,
+                generation.next().ok_or("action_identity")?,
+                &mut next_invocation,
+                &mut successful_snapshots,
+                &runtime,
+            )?;
+            if index == 0 {
+                verify_primary_fill_execution(pending, &nested_capture.snapshot)?;
+                if !snapshot_contains(
+                    &nested_capture.snapshot,
+                    "Nested editor delegated model retained",
+                ) {
+                    return Err("nested_editor_model_retention");
+                }
+            } else {
+                if pending.settlement.qualification_failure()
+                    != Some(zephium_agentic::SemanticActionNativeFailure::AppliedUnverified)
+                {
+                    return Err("nested_editor_refusal_not_indeterminate");
+                }
+                let elapsed = u64::try_from(pending.admitted_at.elapsed().as_millis())
+                    .map_err(|_| "nested_editor_clock")?;
+                let observed_at = SemanticSettleInstant::from_millis(10_000 + elapsed);
+                if !matches!(
+                    pending.execution.settle_and_verify(
+                        pending.settlement,
+                        &nested_capture.snapshot,
+                        observed_at
+                    ),
+                    Err(SemanticActionQualificationError::Settlement)
+                ) {
+                    return Err("nested_editor_retryable_terminal");
+                }
+                if !snapshot_contains(
+                    &nested_capture.snapshot,
+                    &format!("Nested editor refused {desired} intact"),
+                ) {
+                    return Err("nested_editor_context_security");
+                }
+            }
+            if !snapshot_value_is(
+                &nested_capture.snapshot,
+                "Fill support editable ancestor",
+                "nested replacement",
+            ) {
+                return Err("nested_editor_value");
+            }
+        }
+        drop(nested_capture);
         registry
             .acknowledge_observation(identity.id(), first)
             .map_err(|_| "first_observation")?;
@@ -1337,7 +1601,7 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
         if !server.is_healthy() {
             return Err("fixture_verification");
         }
-        let expected_snapshots = if hostile_relay_probe { 14 } else { 10 };
+        let expected_snapshots = if hostile_relay_probe { 22 } else { 18 };
         if successful_snapshots != expected_snapshots {
             return Err("snapshot_count_verification");
         }
@@ -1796,19 +2060,31 @@ fn execute_primary_fill(
     let admitted_at = Instant::now();
     let result = Rc::new(RefCell::new(None));
     let completion = Rc::clone(&result);
-    view.dispatch_semantic_action(request, admitted_at, move |settlement| {
-        if let Ok(mut slot) = completion.try_borrow_mut() {
-            if slot.is_none() {
-                *slot = Some(settlement);
-            }
-        }
-    });
     let deadline = Instant::now()
         .checked_add(SNAPSHOT_TIMEOUT)
         .ok_or("fill_timeout")?;
+    let preparation_authority = Rc::new(std::cell::Cell::new(true));
+    let checked_preparation = preparation_authority.clone();
+    view.dispatch_retained_semantic_action(
+        request,
+        admitted_at,
+        Box::new(move || checked_preparation.get() && Instant::now() < deadline),
+        move |settlement| {
+            if let Ok(mut slot) = completion.try_borrow_mut() {
+                if slot.is_none() {
+                    *slot = Some(settlement);
+                }
+            }
+        },
+    );
     while result.borrow().is_none() && !runtime.failed() && Instant::now() < deadline {
         runtime.pump();
+        preparation_authority.set(!runtime.failed() && Instant::now() < deadline);
+        if let Some(semantic) = view.semantic() {
+            semantic.poll_prepared_fill();
+        }
     }
+    preparation_authority.set(false);
     if runtime.failed() {
         return Err("fill_native_state");
     }
@@ -1920,7 +2196,7 @@ fn verify_primary_fill_execution(
             SemanticActionQualificationError::Settlement => "fill_verification_settlement",
             SemanticActionQualificationError::Verification => "fill_verification_effect",
         })?;
-    if applied.backend() != SemanticActionExecutionBackend::PageWorldCompatibilityFill
+    if applied.backend() != SemanticActionExecutionBackend::FixedSemanticRecipe
         || applied.readiness() != SemanticActionNativeReadiness::ExactConnectedWritableFormTarget
         || applied.completed_at() > SemanticActionExecutionInstant::from_millis(11_000)
     {
@@ -1955,7 +2231,7 @@ fn verify_hostile_fill_refusal(
     ) {
         return Err("hostile_fill_retryable_terminal");
     }
-    let expected = "Semantic hostile relay refused untrusted target unchanged recovery unchanged type restored target-marker clear recovery-marker forged popup denied activation during inactive sticky inactive settle inactive sticky inactive";
+    let expected = "Semantic hostile relay refused untrusted target unchanged recovery unchanged type restored target-marker clear recovery-marker missing popup denied activation during inactive sticky inactive settle inactive sticky inactive";
     if !snapshot_contains(snapshot, expected) {
         return Err("hostile_fill_security_evidence");
     }
@@ -2197,6 +2473,9 @@ fn dispatch_invocation(
         return Err("snapshot_completion_state");
     }
     if let Some(stage) = runtime.failure_stage() {
+        if let Some(Err(failure)) = result.borrow().as_ref() {
+            eprintln!("semantic-fixture-closed-failure: {failure:?}");
+        }
         return Err(stage);
     }
     let outcome = result
@@ -2276,6 +2555,81 @@ fn verify_first_snapshot(snapshot: &SemanticSnapshot) -> Result<(), &'static str
     if snapshot.completeness() != SemanticCompleteness::Complete {
         return Err("first_incomplete");
     }
+    use zephium_agentic::SemanticFillSupport;
+    for (label, support) in [
+        ("Semantic fill editable", SemanticFillSupport::Supported),
+        (
+            "Fill support missing attribute",
+            SemanticFillSupport::MissingExplicitEditable,
+        ),
+        (
+            "Fill support unsupported tag",
+            SemanticFillSupport::UnsupportedTag,
+        ),
+        (
+            "Fill support editable ancestor",
+            SemanticFillSupport::Supported,
+        ),
+        (
+            "Fill support rich editable ancestor",
+            SemanticFillSupport::EditableAncestor,
+        ),
+        (
+            "Fill support element child",
+            SemanticFillSupport::ElementChild,
+        ),
+        ("Fill support other child", SemanticFillSupport::OtherChild),
+        ("Fill support readonly", SemanticFillSupport::ReadOnly),
+        ("Fill support disabled", SemanticFillSupport::Disabled),
+        (
+            "Fill support unsupported control",
+            SemanticFillSupport::UnsupportedControl,
+        ),
+        ("Fill support child limit", SemanticFillSupport::ChildLimit),
+    ] {
+        let node = snapshot
+            .nodes()
+            .iter()
+            .find(|node| node.name().is_some_and(|name| name.as_str() == label))
+            .ok_or("fill_support_fixture_missing")?;
+        if node.fill_support() != Some(support)
+            || node.operations().contains(SemanticOperationClass::Fill)
+                != (support == SemanticFillSupport::Supported)
+        {
+            use std::io::Write as _;
+            writeln!(
+                std::io::stdout().lock(),
+                "fill-support-fixture: expected={support:?} actual={:?} fill={} content=redacted",
+                node.fill_support(),
+                node.operations().contains(SemanticOperationClass::Fill)
+            )
+            .map_err(|_| "fill_support_diagnostic")?;
+            return Err("fill_support_fixture_mismatch");
+        }
+        let expected_shape = match label {
+            "Semantic fill editable" | "Fill support readonly" | "Fill support disabled" => {
+                Some((1, 1, false))
+            }
+            "Fill support editable ancestor" => Some((1, 1, true)),
+            "Fill support rich editable ancestor" => Some((1, 2, true)),
+            "Fill support element child" => Some((1, 2, false)),
+            "Fill support other child" => Some((2, 5, false)),
+            "Fill support child limit" => Some((129, 1, false)),
+            _ => None,
+        };
+        let actual_shape = node.editable_structure().map(|shape| {
+            (
+                shape.child_count(),
+                u8::from(shape.has_text())
+                    | (u8::from(shape.has_elements()) << 1)
+                    | (u8::from(shape.has_other()) << 2),
+                shape.editable_parent(),
+            )
+        });
+        if actual_shape != expected_shape {
+            return Err("editable_structure_fixture_mismatch");
+        }
+    }
     for (needle, stage) in [
         ("First semantic epoch", "first_epoch_missing"),
         ("Page bridge absent", "first_bridge_absence_missing"),
@@ -2338,6 +2692,7 @@ fn verify_first_snapshot(snapshot: &SemanticSnapshot) -> Result<(), &'static str
         ("Semantic fill text", SemanticRole::Textbox),
         ("Semantic fill search", SemanticRole::Searchbox),
         ("Semantic fill textarea", SemanticRole::Textbox),
+        ("Semantic fill editable", SemanticRole::Textbox),
         ("Semantic hostile fill", SemanticRole::Textbox),
         ("Semantic hostile recovery", SemanticRole::Textbox),
         ("Semantic hostile credential fill", SemanticRole::Textbox),

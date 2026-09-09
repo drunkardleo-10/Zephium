@@ -352,3 +352,160 @@ fn retained_stop_preserves_dispatched_action_terminal_without_claiming_verified_
         owner.seal_resources().unwrap();
     }
 }
+
+#[test]
+fn retained_action_drains_original_terminal_after_health_loss_in_both_publication_orders() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for terminal_first in [false, true] {
+        let (owner, native, resource, browser) = setup();
+        native.form_actions.store(true, Ordering::Release);
+        native.hold_action.store(true, Ordering::Release);
+        let original = owner.shared.resource(&resource).unwrap();
+        let (controller, mut result, scope, server) =
+            prepare(browser, vec![act_stream("fixture value")], true);
+        let (_, lifecycle) = start(controller, scope);
+        wait_until(|| native.action.lock().unwrap().is_some());
+        let reporters = native.reporters.clone();
+        let context = resource.identity().context();
+        let invalidate = move || {
+            reporters
+                .lock()
+                .unwrap()
+                .get(&context)
+                .unwrap()
+                .invalidate()
+        };
+        if terminal_first {
+            // Callback entry precedes health loss, physical delivery follows it.
+            *native.before_action_return.lock().unwrap() = Some(Box::new(move || {
+                invalidate();
+            }));
+        } else {
+            invalidate();
+            // Let the worker observe the health wake before the original native
+            // terminal. It must keep waiting, without starting recovery/retry.
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(result.take_outcome().is_none());
+            assert_eq!(original.actions.load(Ordering::Acquire), 1);
+        }
+        let (request, callback) = native.action.lock().unwrap().take().unwrap();
+        action_result(&native, request, callback);
+        let mut events = Vec::new();
+        let mut outcome = None;
+        wait_until(|| {
+            while let Some(event) = result.take_event() {
+                events.push(event.kind());
+            }
+            outcome = result.take_outcome();
+            outcome.is_some()
+        });
+        assert!(matches!(
+            outcome,
+            Some(AgentWorkRetainedOutcome::Recovery(_))
+        ));
+        assert_eq!(
+            original.actions.load(Ordering::Acquire),
+            0,
+            "original callback must be accounted after quarantine"
+        );
+        assert_eq!(original.orphaned_actions.load(Ordering::Acquire), 0);
+        assert!(!events.contains(&AgentWorkEventKind::Verified));
+        assert_eq!(native.actions.load(Ordering::Acquire), 1);
+        assert_eq!(native.reads.load(Ordering::Acquire), 1);
+        let _ = lifecycle.drain_until(Instant::now() + Duration::from_secs(2));
+        native.join();
+        assert_eq!(server.join().unwrap(), 1);
+        let mut destroy = owner.destroy(&resource).unwrap();
+        assert!(destroy.poll(now()).unwrap().is_some());
+        owner.seal_resources().unwrap();
+    }
+}
+
+#[test]
+fn retained_missing_action_terminal_keeps_debt_until_original_deadline_without_retry() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (owner, native, resource, browser) = setup();
+    native.form_actions.store(true, Ordering::Release);
+    native.hold_action.store(true, Ordering::Release);
+    let original = owner.shared.resource(&resource).unwrap();
+    let (controller, mut result, scope, server) =
+        prepare(browser, vec![act_stream("fixture value")], true);
+    let (_, lifecycle) = start(controller, scope);
+    wait_until(|| native.action.lock().unwrap().is_some());
+    let started = Instant::now();
+    let original_budget = {
+        let action = native.action.lock().unwrap();
+        Duration::from_millis(
+            action.as_ref().unwrap().0.action().deadline().millis() - now().millis(),
+        )
+    };
+    native
+        .reporters
+        .lock()
+        .unwrap()
+        .get(&resource.identity().context())
+        .unwrap()
+        .invalidate();
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(result.take_outcome().is_none());
+    assert_eq!(original.actions.load(Ordering::Acquire), 1);
+    let outcome = finish(&mut result);
+    let AgentWorkRetainedOutcome::Recovery(recovery) = outcome else {
+        panic!("missing terminal must retain uncertainty");
+    };
+    assert_eq!(recovery.failure(), AgentWorkFailure::Deadline);
+    assert!(started.elapsed() + Duration::from_millis(100) >= original_budget);
+    assert_eq!(original.actions.load(Ordering::Acquire), 1);
+    assert_eq!(native.reads.load(Ordering::Acquire), 1);
+    assert_eq!(native.actions.load(Ordering::Acquire), 1);
+    let _ = lifecycle.drain_until(Instant::now() + Duration::from_secs(2));
+    // The late original callback still belongs to the application. Release it
+    // for bounded fixture cleanup; it cannot turn the outcome into success.
+    let (request, callback) = native.action.lock().unwrap().take().unwrap();
+    action_result(&native, request, callback);
+    native.join();
+    assert_eq!(server.join().unwrap(), 1);
+    drop(recovery);
+}
+
+#[test]
+fn retained_shutdown_wins_health_loss_and_available_original_action_terminal() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (owner, native, resource, browser) = setup();
+    native.form_actions.store(true, Ordering::Release);
+    native.hold_action.store(true, Ordering::Release);
+    let (controller, mut result, scope, server) =
+        prepare(browser, vec![act_stream("fixture value")], true);
+    let (handle, lifecycle) = start(controller, scope);
+    wait_until(|| native.action.lock().unwrap().is_some());
+    native
+        .reporters
+        .lock()
+        .unwrap()
+        .get(&resource.identity().context())
+        .unwrap()
+        .invalidate();
+    let shutdown =
+        std::thread::spawn(move || lifecycle.drain_until(Instant::now() + Duration::from_secs(2)));
+    wait_until(|| handle.status().cancelled());
+    let (request, callback) = native.action.lock().unwrap().take().unwrap();
+    action_result(&native, request, callback);
+    let AgentWorkRetainedOutcome::Recovery(recovery) = finish(&mut result) else {
+        panic!("shutdown must keep unverified effect in recovery");
+    };
+    assert_eq!(recovery.failure(), AgentWorkFailure::Shutdown);
+    assert_eq!(native.actions.load(Ordering::Acquire), 1);
+    assert_eq!(native.reads.load(Ordering::Acquire), 1);
+    let _ = shutdown.join().unwrap();
+    native.join();
+    assert_eq!(server.join().unwrap(), 1);
+    let mut destroy = owner.destroy(&resource).unwrap();
+    assert!(destroy.poll(now()).unwrap().is_some());
+    owner.seal_resources().unwrap();
+}

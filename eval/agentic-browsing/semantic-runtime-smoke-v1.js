@@ -21,12 +21,18 @@ class Event {
     this.composed = init.composed === true;
     this.defaultPrevented = false;
     this.isTrusted = false;
-    this.target = null;
+    this.node = null;
     this.currentTarget = null;
   }
   preventDefault() {
     if (this.cancelable) this.defaultPrevented = true;
   }
+  get target() { return this.node; }
+}
+
+class CustomEvent extends Event {
+  constructor(type, init = {}) { super(type, init); this.payload = init.detail; }
+  get detail() { if (this.node?._relayReadThrow) throw Error("native detail failure"); return this.payload; }
 }
 
 class InputEvent extends Event {
@@ -41,16 +47,40 @@ class InputEvent extends Event {
 class EventTarget {
   constructor() { this._listeners = new Map(); }
   addEventListener(type, listener) {
+    if (type === "zephium-fill-result-v1" && this._relaySetupThrow) throw Error("native listen failure");
     const listeners = this._listeners.get(type) || [];
     listeners.push(listener);
     this._listeners.set(type, listeners);
+    if (type === "zephium-fill-result-v1") terminalObservers.add(listener);
+  }
+  removeEventListener(type, listener) {
+    this._listeners.set(type, (this._listeners.get(type) || []).filter(value => value !== listener));
+    terminalObservers.delete(listener);
+    if (this._relayCleanupThrow) throw Error("native unlisten failure");
   }
   dispatchEvent(event) {
     if (this._nativeDispatchThrows) throw new Error("native dispatch failure");
-    event.target = this;
+    event.node = this;
     event.currentTarget = this;
     for (const listener of this._listeners.get(event.type) || []) listener.call(this, event);
     return !event.defaultPrevented;
+  }
+}
+
+const terminalObservers = new Set();
+class MutationObserver {
+  constructor(callback) { this.callback = callback; }
+  observe(target, options) {
+    if (target._relaySetupThrow) throw Error("native observe failure");
+    this.target = target; this.filter = options.attributeFilter; terminalObservers.add(this);
+  }
+  disconnect() { terminalObservers.delete(this); }
+}
+function notifyAttribute(target, name) {
+  for (const observer of terminalObservers) {
+    if (observer.target === target && observer.filter?.includes(name)) {
+      queueMicrotask(() => { if (terminalObservers.has(observer)) observer.callback(); });
+    }
   }
 }
 
@@ -65,8 +95,18 @@ class Node extends EventTarget {
   get nodeType() { return this._type; }
   get parentNode() { return this._parent; }
   get ownerDocument() { return this._owner; }
-  get isConnected() { return this === globalThis.document || this._owner === globalThis.document; }
+  get isConnected() {
+    if (this._postconditionThrows) throw Error("native postcondition getter failure");
+    return this === globalThis.document || this._owner === globalThis.document;
+  }
+  getRootNode() { return this._parent ? this._parent.getRootNode() : this; }
   get childNodes() { return this._children; }
+  get textContent() { return this._children.values.map(child => child instanceof CharacterData ? child.data : child.textContent).join(""); }
+  set textContent(value) {
+    for (const child of this._children.values) child._parent = null;
+    this._children = new NodeList();
+    if (value !== "") this.append(new CharacterData(value));
+  }
   contains(candidate) {
     const stack = [this];
     while (stack.length !== 0) {
@@ -111,17 +151,30 @@ class Element extends Node {
     return this._tag;
   }
   get shadowRoot() { return this._shadow; }
+  get isContentEditable() {
+    if (this._nativeEditableThrows) throw Error("native editable getter failure");
+    if (this._nativeEditableFalse) return false;
+    const mode = this.attributes.contenteditable;
+    return mode !== undefined ? ["", "true", "plaintext-only"].includes(mode) :
+      this._parent instanceof Element && this._parent.isContentEditable;
+  }
   getAttribute(name) {
+    if (this._relayReadThrow && name === relayTerminal) throw Error("native read failure");
     return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null;
   }
   hasAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attributes, name); }
   setAttribute(name, value) {
     this.attributes[name] = String(value);
+    if (this._relayPublicationThrow && name === relayCommand) throw Error("native publication failure");
+    notifyAttribute(this, name);
     if (typeof globalThis.__semanticRelayMutation === "function") {
       globalThis.__semanticRelayMutation(this, name);
     }
   }
-  removeAttribute(name) { delete this.attributes[name]; }
+  removeAttribute(name) {
+    if (this._relayCleanupThrow && name === relayCommand) throw Error("native cleanup failure");
+    delete this.attributes[name];
+  }
   getBoundingClientRect() { return this.rect; }
   click() { this._fixedClickCount = (this._fixedClickCount || 0) + 1; }
 }
@@ -214,6 +267,43 @@ class Document extends Node {
   elementFromPoint() { return this._hit; }
 }
 
+// Deterministic command model only; native trust/retarget semantics are proved
+// separately in the actual owned WKWebView qualification.
+class AbstractRange {
+  get startContainer() { return this.node; }
+  get endContainer() { return this.node; }
+  get startOffset() { return 0; }
+  get endOffset() { return this.node.childNodes.length; }
+}
+class Range extends AbstractRange {
+  selectNodeContents(node) { this.node = node; }
+}
+class Selection {
+  constructor() { this.ranges = []; }
+  get rangeCount() { return this.ranges.length; }
+  getRangeAt(index) { return this.ranges[index]; }
+  removeAllRanges() { this._removals=(this._removals||0)+1; this.ranges = []; }
+  addRange(range) { this.ranges.push(range); }
+}
+Document.prototype.createRange = function () { return new Range(); };
+Document.prototype.getSelection = function () { return this._selection ||= new Selection(); };
+const commandModelDispatch = EventTarget.prototype.dispatchEvent;
+Document.prototype.execCommand = function (command, ui, value) {
+  assert(command === 'insertText' && ui === false, 'nonfixed command');
+  this._commands = (this._commands || 0) + 1;
+  const target = this._selection.getRangeAt(0).node;
+  if (target._commandFalse) return false;
+  const before = new InputEvent('beforeinput', {cancelable:true,data:value});
+  if (!commandModelDispatch.call(target,before)) return true;
+  if (target._commandThrow) throw Error('engine exception after beforeinput');
+  if (target._commandReplace) return true;
+  target.textContent = value;
+  commandModelDispatch.call(target,new InputEvent('input', {data:value}));
+  return true;
+};
+Element.prototype.focus = function () { document._active = this; commandModelDispatch.call(this,new Event('focus')); };
+Element.prototype.blur = function () { document._active = null; };
+
 Object.assign(globalThis, {
   Event,
   InputEvent,
@@ -230,6 +320,11 @@ Object.assign(globalThis, {
   HTMLSelectElement,
   HTMLOptionElement,
   Document,
+  Range,
+  AbstractRange,
+  Selection,
+  MutationObserver,
+  CustomEvent,
   innerWidth: 1280,
   innerHeight: 720,
   getComputedStyle() {
@@ -268,6 +363,13 @@ const contentEditable = new Element("div", {
   role: "textbox",
   "aria-label": "Rich account notes"
 });
+contentEditable.append(new CharacterData("Original editable value"));
+const implicitEditable = new Element("div", { contenteditable: "plaintext-only", "aria-label": "Implicit editable" });
+implicitEditable.append(new CharacterData("  Implicit "));
+implicitEditable.append(new Element("span")).append(new CharacterData("editable"));
+implicitEditable.append(new CharacterData(" value\n"));
+const credentialEditable = new Element("div", { contenteditable: "true", role: "textbox", "aria-label": "API key" });
+credentialEditable.append(new CharacterData("never-cross-editable-bridge"));
 const password = new HTMLInputElement(
   { type: "password", "aria-label": "Password" },
   "never-cross-bridge"
@@ -340,18 +442,20 @@ const closedHost = new Element("div");
 closedHost._closedInternal = new Element("button", { "aria-label": "Closed shadow secret" });
 
 const fillEvents = new Map();
-for (const target of [textInput, searchInput, textarea]) {
+for (const target of [textInput, searchInput, textarea, contentEditable]) {
   const events = [];
   fillEvents.set(target, events);
   target.addEventListener("beforeinput", (event) => {
     events.push(event);
     if (target._cancelBeforeInput) event.preventDefault();
     if (target._repurposeAfterBeforeInput) target.attributes.type = "password";
+    if (target._markupAfterBeforeInput) target.append(target._markupAfterBeforeInput);
   });
   target.addEventListener("input", (event) => {
     events.push(event);
     if (target._rewriteAfterInput) target._value = "page rewrite";
     if (target._repurposeAfterInput) target.attributes["aria-label"] = "Password replacement";
+    if (target._throwAfterInput) target._postconditionThrows = true;
   });
   target.addEventListener("change", (event) => events.push(event));
 }
@@ -361,70 +465,20 @@ const relayCommand = "data-zephium-fill-relay-command-v1";
 const relayTerminal = "data-zephium-fill-relay-terminal-v1";
 let relayMode = "normal";
 html.attributes[relayReady] = "1";
-const relayDispatch = EventTarget.prototype.dispatchEvent;
-const relayInputValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
-const relayTextareaValue = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value");
-globalThis.__semanticRelayMutation = (target, name) => {
-  if (name !== relayCommand || relayMode === "absent") return;
-  const raw = target.getAttribute(relayCommand);
-  if (raw === null) return;
-  target.removeAttribute(relayCommand);
-  if (relayMode === "duplicate") {
-    target.setAttribute(relayTerminal, "1|0|duplicate");
-    return;
-  }
-  if (relayMode === "flood") return;
-  let command;
-  try { command = JSON.parse(raw); } catch (_) {
-    target.setAttribute(relayTerminal, "1|0|invalid");
-    return;
-  }
-  const input = Object.getPrototypeOf(target) === HTMLInputElement.prototype;
-  const textarea = Object.getPrototypeOf(target) === HTMLTextAreaElement.prototype;
-  if ((!input && !textarea) ||
-      (input && target.getAttribute("type") !== "text" && target.getAttribute("type") !== "search")) {
-    target.setAttribute(relayTerminal, `1|${command.a}|refused`);
-    return;
-  }
-  try {
-    const before = new InputEvent("beforeinput", {
-      bubbles: true, cancelable: true, composed: true, data: command.z,
-      inputType: "insertReplacementText", isComposing: false
-    });
-    if (!Reflect.apply(relayDispatch, target, [before])) {
-      target.setAttribute(relayTerminal, `1|${command.a}|indeterminate`);
-      return;
-    }
-    if (
-      Object.getPrototypeOf(target) !== (input ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype) ||
-      (input && target.getAttribute("type") !== "text" && target.getAttribute("type") !== "search") ||
-      target.hasAttribute("disabled") || target.hasAttribute("readonly")
-    ) {
-      target.setAttribute(relayTerminal, `1|${command.a}|indeterminate`);
-      return;
-    }
-    const valueDescriptor = input ? relayInputValue : relayTextareaValue;
-    Reflect.apply(valueDescriptor.set, target, [command.z]);
-    Reflect.apply(relayDispatch, target, [new InputEvent("input", {
-      bubbles: true, cancelable: false, composed: true, data: command.z,
-      inputType: "insertReplacementText", isComposing: false
-    })]);
-    target.setAttribute(
-      relayTerminal,
-      `1|${command.a}|${Reflect.apply(valueDescriptor.get, target, []) === command.z ? "ok" : "indeterminate"}`
-    );
-  } catch (_) {
-    target.setAttribute(relayTerminal, `1|${command.a}|indeterminate`);
-  }
-};
 
 const nativeTransportResults = [];
 let nativeTransportPulls = 0;
 let stopNativeTransport = null;
+let releasePreparedFill = null;
+let preparationRequests = 0;
 globalThis.webkit = {
   messageHandlers: {
     zephiumSemanticRuntimeV1: {
       postMessage(message) {
+        if(message==='ZEPHIUM_PREPARED_FILL_WAIT_V1') {
+          preparationRequests++;
+          return new Promise(resolve=>{releasePreparedFill=resolve;});
+        }
         if (message === "P1") {
           nativeTransportPulls += 1;
           if (nativeTransportPulls === 1) {
@@ -454,6 +508,9 @@ main.append(textInput);
 main.append(searchInput);
 main.append(textarea);
 main.append(contentEditable);
+main.append(implicitEditable);
+main.append(credentialEditable);
+main.append(new Element("div", { role: "textbox", "aria-label": "Noneditable ARIA textbox" }));
 main.append(password);
 main.append(lateSecretInput);
 main.append(oversizedValueInput);
@@ -483,8 +540,21 @@ const sourcePath = path.resolve(
   process.argv[2] || "crates/zephium-agentic/assets/semantic-runtime-v1.js"
 );
 const negativeControl = process.argv[3] === "--without-document-parent-brand";
-assert(process.argv.length <= 4 && (process.argv[3] === undefined || negativeControl), "unknown smoke mode");
+const commandCase = process.argv[3]?.startsWith('--isolated-command=') ? process.argv[3].slice('--isolated-command='.length) : null;
+const preparationOnly = process.env.ZEPHIUM_LOCAL_ISOLATED_FILL_PREPARATION_ONLY_PROBE === '1';
+assert(process.argv.length <= 4 && (process.argv[3] === undefined || negativeControl || commandCase), "unknown smoke mode");
 let source = fs.readFileSync(sourcePath, "utf8");
+if (commandCase) {
+  const anchor = '  function runFixedFill(target, descriptor, request) {';
+  const finishAnchor = 'const result = runFixedFill(target, descriptor, request);';
+  assert(source.split(anchor).length === 2 && source.split(finishAnchor).length === 2, 'candidate insertion anchors changed');
+  const candidate = fs.readFileSync('crates/zephium-engine/src/platform/macos/agentic_isolated_fill_candidate.js','utf8');
+  source = source.replace(anchor, candidate + '\n  function runSyntheticFill(target, descriptor, request) {')
+    .replace(finishAnchor, finishAnchor+'\n      if (typeof result !== "string") return apply(promiseThen, result, [finishFill, () => actionFault("applied_unverified_postcondition")]);');
+  if(preparationOnly) source=source.replace('const commandPreparationOnly = false;', 'const commandPreparationOnly = true;');
+  if(commandCase.startsWith('prepare-'))source=source.replace('  async function serveNativeInvocations(channel, post) {',
+    '  async function serveNativeInvocations(channel, post) {\n    commandPreparationBarrier = () => apply(post, channel, ["ZEPHIUM_PREPARED_FILL_WAIT_V1"]);');
+}
 if (negativeControl) {
   // Mutate only this process's program string. Exactly one known guard must
   // match; refactors fail visibly rather than silently skipping the control.
@@ -541,9 +611,18 @@ const initial = JSON.parse(initialWire);
 assert(initial.v === 1 && initial.i === 7 && initial.g === 1, "authority mismatch");
 assert(initial.c === "complete", `unexpected completeness ${initial.c}`);
 assert(!initialWire.includes("never-cross-bridge"), "password value crossed bridge");
+assert(!initialWire.includes("never-cross-editable-bridge"), "credential editable text crossed bridge");
 assert(!initialWire.includes("Closed shadow secret"), "closed shadow root was bypassed");
 assert(initial.n.some((node) => node.n === "Open shadow action"), "open shadow root missing");
 assert(initial.n.some((node) => node.n === "Save"), "captured element methods were poisoned");
+assert(initial.n.some(node => node.n === "Rich account notes" && node.r === "textbox" && node.v?.value === "Original editable value"),
+  "explicit textbox contenteditable lost its current value");
+assert(initial.n.some(node => node.n === "Implicit editable" && node.r === "textbox" && node.v?.value === "  Implicit editable value\n"),
+  "implicit contenteditable div was filtered before classification");
+assert(initial.n.some(node => node.n === "Noneditable ARIA textbox" && (node.o & 2) === 0),
+  "a textbox role alone advertised a nonexistent fill capability");
+assert(initial.n.some(node => node.n === "Implicit editable" && (node.o & 2) === 0),
+  "an editable host with inline markup advertised destructive plain-text fill");
 const languageNode = initial.n.find((node) => node.n === "Language");
 assert(languageNode && languageNode.r === "combobox", "visible native select missing");
 const languageNodeIndex = initial.n.indexOf(languageNode);
@@ -653,10 +732,169 @@ assert(!globalDescriptor.writable && !globalDescriptor.configurable && !globalDe
 assert(Object.isFrozen(runtime) && Object.isFrozen(runtime.invoke), "runtime mutable");
 assert(Object.keys(runtime).join(",") === "invoke", "unexpected runtime API");
 
-finish().catch((error) => {
+(commandCase ? finishCommandSmoke() : finish()).catch((error) => {
   process.stderr.write(`${error.stack || error}\n`);
   process.exitCode = 1;
 });
+
+async function finishCommandSmoke() {
+  const cases = ['normal','cancel','replace','adopt','retarget','protected','credential','readonly','rich','focus-repurpose','throw','reentrant','oversized','input','textarea','nested-ancestors','sibling-editability','inherited-ancestors','ancestor-change','ancestor-focus-change','ancestor-reparent','ancestor-invalid','sibling-tag-br','sibling-tag-wbr','sibling-tag-div','sibling-tag-p','sibling-tag-other','div-rich','div-nested','div-identity','div-editable','div-structure','div-sensitive'];
+  cases.push('post-root-identity','post-root-editability','post-root-writability','post-target-structure','command-false','microtask-revert');
+  cases.push('prepare-normal','prepare-selection','prepare-replace','prepare-credential','prepare-readonly','prepare-spine','prepare-occlusion','prepare-denied');
+  assert(cases.includes(commandCase), 'unknown command case');
+  main._children = new NodeList();
+  const root = main.append(new Element('div',{role:'group',contenteditable:'true'}));
+  const leaf = root.append(new Element('span',{role:'textbox',contenteditable:'true','aria-label':'Command field'}));
+  leaf.textContent='original';
+  if(commandCase==='command-false')leaf._commandFalse=true;
+  const sibling=root.append(new Element('div',{contenteditable:'false'}));sibling.textContent='Formatted sibling';
+  if(commandCase==='div-rich')sibling.append(new Element('b'));
+  if(commandCase==='div-nested')sibling.append(new Element('div',{contenteditable:'false'}));
+  const nestedCases=['nested-ancestors','inherited-ancestors','ancestor-change','ancestor-focus-change','ancestor-reparent','ancestor-invalid'];
+  if(nestedCases.includes(commandCase))main.attributes.contenteditable='true';
+  if(commandCase==='inherited-ancestors')delete root.attributes.contenteditable;
+  if(commandCase==='ancestor-invalid')main.attributes.contenteditable='unsupported';
+  if(commandCase==='sibling-editability')delete sibling.attributes.contenteditable;
+  if(commandCase.startsWith('sibling-tag-'))sibling._tag=commandCase==='sibling-tag-other'?'X-PRIVATE-MARKER':commandCase.slice('sibling-tag-'.length).toUpperCase();
+  const decoy=main.append(new HTMLInputElement({'aria-label':'Decoy'},'decoy original'));
+  let target=leaf;
+  if (commandCase==='input') target=main.append(new HTMLInputElement({'aria-label':'Command field',type:'text'},'original'));
+  if (commandCase==='textarea') target=main.append(new HTMLTextAreaElement({'aria-label':'Command field'},'original'));
+  if (commandCase==='input'||commandCase==='textarea') root.attributes['aria-hidden']='true';
+  document._active=target;document._hit=target;
+  const observed=JSON.parse(invoke(250,250,{k:'initial'}));
+  const node=observed.n.find(n=>n.n==='Command field');assert(node,'command leaf missing');
+  const request={v:1,o:'action_execute',a:250,i:250,g:250,t:node.k,r:node.r,k:'fill',e:node.b,p:0,z:'replacement',
+    f:{r:8,o:node.o||0,q:1,s:node.s||0,n:node.n,vk:1,vt:'original',vo:0,vb:false},of:null};
+  request.e={x:10,y:10,w:160,h:32};
+  let events=0,reentrant;
+  leaf.addEventListener('beforeinput',e=>{
+    events++;
+    if(commandCase==='cancel')e.preventDefault();
+    if(commandCase==='replace')leaf._commandReplace=true;
+    if(commandCase==='adopt'){root._children.values=root._children.values.filter(n=>n!==leaf);decoy.append(leaf);}
+    if(commandCase==='retarget')decoy.focus();
+    if(commandCase==='protected')sibling.textContent='changed by page';
+    if(commandCase==='div-identity'){
+      root._children.values=root._children.values.filter(n=>n!==sibling);sibling._parent=null;
+      const replacement=root.append(new Element('div',{contenteditable:'false'}));replacement.textContent='Formatted sibling';
+    }
+    if(commandCase==='div-editable')sibling.attributes.contenteditable='true';
+    if(commandCase==='div-structure')sibling.append(new Element('span'));
+    if(commandCase==='div-sensitive')sibling.attributes.autocomplete='email';
+    if(commandCase==='post-root-identity'){main._children.values=main._children.values.filter(n=>n!==root);root._parent=null;}
+    if(commandCase==='post-root-editability')root.attributes.contenteditable='false';
+    if(commandCase==='post-root-writability')root.attributes['aria-readonly']='true';
+    if(commandCase==='throw')leaf._commandThrow=true;
+    if(commandCase==='reentrant')reentrant=runtime.invoke(JSON.stringify(request));
+    if(commandCase==='ancestor-change')main.attributes.contenteditable='plaintext-only';
+    if(commandCase==='ancestor-reparent'){
+      const wrapper=new Element('div');main._children.values=main._children.values.filter(n=>n!==root);main.append(wrapper);wrapper.append(root);
+    }
+  });
+  leaf.addEventListener('input',()=>{
+    if(commandCase==='microtask-revert')queueMicrotask(()=>{leaf.textContent='original';});
+    if(commandCase==='post-target-structure')queueMicrotask(()=>leaf.append(new Element('b')));
+    if(['normal','retarget','reentrant','nested-ancestors','inherited-ancestors','sibling-tag-div'].includes(commandCase))queueMicrotask(()=>{
+      const fresh=new Element('span',{role:'textbox',contenteditable:'true','aria-label':'Command field'});fresh.textContent='replacement';
+      root._children=new NodeList();leaf._parent=null;leaf._owner=null;root.append(fresh);root.append(sibling);
+    });
+  });
+  if(commandCase==='credential')leaf.attributes['aria-label']='Password';
+  if(commandCase==='readonly')root.attributes['aria-readonly']='true';
+  if(commandCase==='rich')leaf.append(new Element('b'));
+  if(commandCase==='oversized')request.z='x'.repeat(4097);
+  if(commandCase==='focus-repurpose')leaf.addEventListener('focus',()=>{leaf.attributes['aria-label']='Repurposed';});
+  if(commandCase==='ancestor-focus-change')leaf.addEventListener('focus',()=>{main.attributes.contenteditable='plaintext-only';});
+  const pendingResult=runtime.invoke(JSON.stringify(request));
+  if(commandCase.startsWith('prepare-')){
+    assert(preparationRequests===1&&typeof releasePreparedFill==='function','private preparation join missing');
+    assert((document._commands||0)===0,'insertion before host release');
+    assert(runtime.invoke(JSON.stringify(request))==='E1:busy','preparation lost original in-flight owner');
+    await new Promise(resolve=>setImmediate(resolve));
+    if(commandCase==='prepare-selection'){const moved=new Range();moved.selectNodeContents(decoy);document._selection.ranges=[moved];}
+    if(commandCase==='prepare-replace'){root._children.values=root._children.values.filter(n=>n!==leaf);leaf._parent=null;}
+    if(commandCase==='prepare-credential')leaf.attributes.autocomplete='current-password';
+    if(commandCase==='prepare-readonly')root.attributes['aria-readonly']='true';
+    if(commandCase==='prepare-spine')root.attributes.contenteditable='plaintext-only';
+    if(commandCase==='prepare-occlusion')document._hit=decoy;
+    releasePreparedFill(commandCase==='prepare-denied'?'stop':'ZEPHIUM_PREPARED_FILL_CONTINUE_V1');
+  }
+  const rawResult=await pendingResult;
+  const preparationRefusal=commandCase.startsWith('prepare-')&&commandCase!=='prepare-normal';
+  const behavior=rawResult.match(/_command_(true|false|other)_immediate_(match|mismatch|guarded|exception)$/);
+  const result=behavior?rawResult.slice(0,behavior.index):rawResult;
+  if(behavior){
+    assert(behavior[1]===(commandCase==='command-false'?'false':'true'),'command return diagnostic');
+    const immediateMismatch=['cancel','replace','adopt','command-false'].includes(commandCase);
+    const immediateGuarded=['protected','ancestor-change','ancestor-reparent','div-identity','div-editable','div-structure','div-sensitive','post-root-identity','post-root-editability','post-root-writability'].includes(commandCase);
+    assert(behavior[2]===(immediateMismatch?'mismatch':immediateGuarded?'guarded':'match'),'immediate diagnostic '+commandCase+' '+rawResult);
+  }
+  const diagnostic={
+    'ancestor-invalid':'E2:unsupported_interaction_ancestor_declaration',
+    'sibling-editability':'E2:unsupported_interaction_sibling_editability',
+    'sibling-tag-br':'E2:unsupported_interaction_sibling_tag_br',
+    'sibling-tag-wbr':'E2:unsupported_interaction_sibling_tag_wbr',
+    'div-rich':'E2:unsupported_interaction_sibling_text',
+    'div-nested':'E2:unsupported_interaction_sibling_text',
+    'sibling-tag-p':'E2:unsupported_interaction_sibling_tag_p',
+    'sibling-tag-other':'E2:unsupported_interaction_sibling_tag_other'
+  }[commandCase];
+  const preflight=['credential','readonly','rich','oversized'].includes(commandCase)||diagnostic!==undefined;
+  const control=['input','textarea'].includes(commandCase);
+  if(preparationOnly && control) {
+    assert(result==='E2:unsupported_interaction' && target._value==='original','negative control used synthetic fallback');
+    assert((document._commands||0)===0 && preparationRequests===0,'fallback control entered preparation or command');
+    process.stdout.write(JSON.stringify({case:commandCase,result:rawResult,commands:0,events})+'\n');
+    return;
+  }
+  if(control){assert(JSON.parse(result).b==='fixed_semantic_recipe'&&target._value==='replacement','control setter changed');}
+  else if(diagnostic)assert(result===diagnostic,'exact preflight reason '+result);
+  else if(preflight)assert(['E2:credential_boundary','E2:target_changed','E2:unsupported_interaction','E1:invalid_request'].includes(result),'preflight refusal '+result);
+  else if(preparationOnly && commandCase==='prepare-normal')assert(result==='E2:applied_unverified_preparation_only','negative control terminal '+result);
+  else if(['normal','retarget','reentrant','nested-ancestors','inherited-ancestors','sibling-tag-div','prepare-normal'].includes(commandCase))assert(result==='E2:applied_unverified_logical_editor','fresh logical proof '+result);
+  else if(preparationRefusal||['focus-repurpose','ancestor-focus-change'].includes(commandCase))assert(result==='E2:applied_unverified_beforeinput_revalidation','focus mutation escaped revalidation '+result);
+  else if(commandCase==='throw')assert(result==='E2:applied_unverified_mutation','command exception classification '+result);
+  else {
+    const postcondition={
+      cancel:'value_mismatch',replace:'value_mismatch',adopt:'value_mismatch',
+      'command-false':'value_mismatch','microtask-revert':'value_mismatch',
+      protected:'protected_text','ancestor-change':'ancestor_declaration',
+      'ancestor-reparent':'root_context','div-identity':'editable_child_count',
+      'div-editable':'protected_editability','div-structure':'protected_structure',
+      'div-sensitive':'protected_sensitivity','post-root-identity':'root_identity',
+      'post-root-editability':'root_editability','post-root-writability':'root_writability',
+      'post-target-structure':'target_control'
+    }[commandCase];
+    assert(postcondition!==undefined&&result==='E2:applied_unverified_postcondition_'+postcondition,
+      'exact hostile postcondition '+commandCase+' '+result);
+  }
+  const focusRefusal=preparationRefusal||preparationOnly||['focus-repurpose','ancestor-focus-change'].includes(commandCase);
+  if(preparationOnly) {
+    assert(events===0 && (document._commands||0)===0,'negative control entered insertion');
+    assert(leaf.textContent==='original' && sibling.textContent==='Formatted sibling','negative control mutated content');
+    assert(document._selection._removals===1,'negative control skipped range preparation');
+  }
+  assert(Boolean(behavior)===(!preflight&&!control&&!focusRefusal&&commandCase!=='throw'),'command behavior diagnostic missing/unexpected');
+  if(!preflight&&!control&&!focusRefusal){
+    assert(document._selection._removals===1,'fresh-owned diagnostic restored the editor selection');
+    assert(document._active===(commandCase==='retarget'?decoy:target),'fresh-owned diagnostic restored focus');
+  }
+  assert((document._commands||0)===(preflight||control||focusRefusal?0:1),'command count');
+  if(commandCase==='reentrant')assert(reentrant==='E1:busy','reentrancy admitted');
+  if(!preflight&&!control){
+    // Even a new ref/generation cannot reacquire this document's spent command.
+    const fresh=JSON.parse(invoke(251,251,{k:'initial'}));const next=fresh.n.find(n=>n.n==='Command field');
+    if(next){document._hit=leaf._parent?leaf:root.childNodes.item(0);request.i=request.g=251;request.a=251;request.t=next.k;request.f.s=next.s||0;request.f.vt=next.v?.value||'';
+      const retry=await runtime.invoke(JSON.stringify(request));
+      const newlyIneligible=['post-root-writability','post-target-structure'].includes(commandCase);
+      if(preparationRefusal)assert(['E2:applied_unverified','E2:unsupported_interaction','E2:credential_boundary','E2:target_changed','E2:target_occluded'].includes(retry),'prepared retry admitted '+retry);
+      else assert(retry===(newlyIneligible?'E2:unsupported_interaction':'E2:applied_unverified'),'command opportunity regranted '+retry);}
+    assert((document._commands||0)===(focusRefusal?0:1),'retry entered command');
+  }
+  assert(decoy._value==='decoy original','command redirected to decoy');
+  process.stdout.write(JSON.stringify({case:commandCase,result:rawResult,commands:document._commands||0,events})+'\n');
+}
 
 async function finish() {
   await new Promise((resolve) => setImmediate(resolve));
@@ -840,7 +1078,7 @@ async function finish() {
   document._hit = textInput;
   const textFill = JSON.parse(await runtime.invoke(fillRequest(textNode, "Zephium fixed text", 8)));
   assert(
-    textFill.a === 8 && textFill.b === "page_world_compatibility_fill" && textFill.r === "form" &&
+    textFill.a === 8 && textFill.b === "fixed_semantic_recipe" && textFill.r === "form" &&
       textInput._value === "Zephium fixed text",
     "captured native text-input fill failed"
   );
@@ -849,7 +1087,7 @@ async function finish() {
   document._hit = searchInput;
   const searchFill = JSON.parse(await runtime.invoke(fillRequest(searchNode, "", 9)));
   assert(
-    searchFill.a === 9 && searchFill.b === "page_world_compatibility_fill" &&
+    searchFill.a === 9 && searchFill.b === "fixed_semantic_recipe" &&
       searchFill.r === "form" && searchInput._value === "",
     "empty search-input fill failed"
   );
@@ -859,18 +1097,29 @@ async function finish() {
   const textareaValue = "  Zephium  fixed textarea\nline two  ";
   const textareaFill = JSON.parse(await runtime.invoke(fillRequest(textareaNode, textareaValue, 10)));
   assert(
-    textareaFill.a === 10 && textareaFill.b === "page_world_compatibility_fill" &&
+    textareaFill.a === 10 && textareaFill.b === "fixed_semantic_recipe" &&
       textareaFill.r === "form" && textarea._value === textareaValue,
     "captured native textarea fill failed"
   );
   assertInputEvent(textarea, textareaValue);
 
   document._hit = contentEditable;
+  const editableValue = "  Replacement 🪐 editable\nvalue  ";
+  const editableFill = JSON.parse(await runtime.invoke(fillRequest(editableNode, editableValue, 11)));
   assert(
-    runtime.invoke(fillRequest(editableNode, "unsupported rich edit", 11)) ===
-      "E2:unsupported_interaction",
-    "contenteditable entered the fixed fill route"
+    editableFill.a === 11 && editableFill.b === "fixed_semantic_recipe" &&
+      contentEditable.textContent === editableValue,
+    "contenteditable did not pass exact-value fixed fill verification"
   );
+  assertInputEvent(contentEditable, editableValue);
+  contentEditable.textContent = "Original editable value";
+  const addedMarkup = new Element("span", { hidden: "" });
+  contentEditable._markupAfterBeforeInput = addedMarkup;
+  assert(await runtime.invoke(fillRequest(editableNode, "must not erase markup", 32)) ===
+    "E2:applied_unverified_beforeinput_revalidation", "beforeinput markup was overwritten");
+  assert(contentEditable._children.values.includes(addedMarkup), "unapproved child structure was erased");
+  contentEditable._markupAfterBeforeInput = null;
+  contentEditable.textContent = editableValue;
 
   textInput._value = "fixture text";
   fillEvents.get(textInput).length = 0;
@@ -900,7 +1149,7 @@ async function finish() {
 
   textInput._nativeDispatchThrows = true;
   assert(
-    await runtime.invoke(fillRequest(textNode, "dispatch refusal", 15)) === "E2:applied_unverified",
+    await runtime.invoke(fillRequest(textNode, "dispatch refusal", 15)) === "E2:applied_unverified_beforeinput_revalidation",
     "possibly page-observed dispatch exception remained retryable"
   );
   assert(textInput._value === "fixture text", "failed event dispatch did not restore native value");
@@ -908,7 +1157,7 @@ async function finish() {
 
   textInput._rewriteAfterInput = true;
   assert(
-    await runtime.invoke(fillRequest(textNode, "synchronous rewrite", 16)) === "E2:applied_unverified",
+    await runtime.invoke(fillRequest(textNode, "synchronous rewrite", 16)) === "E2:applied_unverified_postcondition",
     "synchronous page rewrite escaped the native getter check"
   );
   assert(textInput._value === "page rewrite", "rewrite fixture did not execute");
@@ -917,11 +1166,17 @@ async function finish() {
 
   textInput._repurposeAfterInput = true;
   assert(
-    await runtime.invoke(fillRequest(textNode, "semantic repurpose", 17)) === "E2:applied_unverified",
+    await runtime.invoke(fillRequest(textNode, "semantic repurpose", 17)) === "E2:applied_unverified_postcondition",
     "post-event credential repurposing was accepted"
   );
   textInput._repurposeAfterInput = false;
   textInput.attributes["aria-label"] = "Account name";
+  textInput._value = "fixture text";
+  textInput._throwAfterInput = true;
+  assert(await runtime.invoke(fillRequest(textNode, "postcondition exception", 31)) ===
+    "E2:applied_unverified_postcondition", "post-setter exception escaped as retryable transport failure");
+  assert(textInput._value === "postcondition exception", "postcondition exception did not follow mutation");
+  textInput._throwAfterInput = textInput._postconditionThrows = false;
   textInput._value = "fixture text";
 
   assert(
@@ -944,24 +1199,6 @@ async function finish() {
   textInput._value = "fixture text";
   fillEvents.get(textInput).length = 0;
   document._hit = textInput;
-  delete html.attributes[relayReady];
-  assert(
-    runtime.invoke(fillRequest(textNode, "relay absent", 22)) === "E2:page_relay_not_ready",
-    "fill proceeded without a READY page-world relay"
-  );
-  assert(textInput._value === "fixture text", "relay-absent refusal mutated target");
-  html.attributes[relayReady] = "1";
-  relayMode = "duplicate";
-  assert(
-    await runtime.invoke(fillRequest(textNode, "duplicate marker", 23)) === "E2:target_occluded",
-    "duplicate relay marker was accepted"
-  );
-  assert(textInput._value === "fixture text", "duplicate relay refusal mutated target");
-  assert(
-    !textInput.hasAttribute(relayCommand) && !textInput.hasAttribute(relayTerminal),
-    "duplicate relay refusal retained transport markers"
-  );
-  relayMode = "normal";
 
   textInput.setAttribute(relayTerminal, "1|24|ok");
   fillEvents.get(textInput).length = 0;
@@ -973,6 +1210,8 @@ async function finish() {
     "preexisting forged terminal substituted correlated relay evidence"
   );
   assertInputEvent(textInput, "forged terminal replaced");
+  assert(textInput.getAttribute(relayTerminal) === "1|24|ok", "transport modified unrelated legacy attribute");
+  delete textInput.attributes[relayTerminal];
   assert(
     !textInput.hasAttribute(relayCommand) && !textInput.hasAttribute(relayTerminal),
     "successful relay retained transport markers"
@@ -982,7 +1221,7 @@ async function finish() {
   fillEvents.get(textInput).length = 0;
   textInput._cancelBeforeInput = true;
   assert(
-    await runtime.invoke(fillRequest(textNode, "cancelled edit", 25)) === "E2:applied_unverified",
+    await runtime.invoke(fillRequest(textNode, "cancelled edit", 25)) === "E2:applied_unverified_beforeinput_cancelled",
     "page-observed beforeinput cancellation remained retryable"
   );
   assert(
@@ -999,7 +1238,7 @@ async function finish() {
   fillEvents.get(textInput).length = 0;
   textInput._repurposeAfterBeforeInput = true;
   assert(
-    await runtime.invoke(fillRequest(textNode, "repurposed edit", 26)) === "E2:applied_unverified",
+    await runtime.invoke(fillRequest(textNode, "repurposed edit", 26)) === "E2:applied_unverified_beforeinput_revalidation",
     "post-beforeinput target repurposing remained retryable"
   );
   assert(
@@ -1014,21 +1253,6 @@ async function finish() {
     "repurposed relay retained transport markers"
   );
 
-  fillEvents.get(textInput).length = 0;
-  relayMode = "flood";
-  assert(
-    await runtime.invoke(fillRequest(textNode, "flood refusal", 27)) === "E2:applied_unverified",
-    "missing terminal after bounded record refusal remained retryable"
-  );
-  assert(
-    textInput._value === "fixture text" && fillEvents.get(textInput).length === 0,
-    "bounded record refusal mutated target"
-  );
-  assert(
-    !textInput.hasAttribute(relayCommand) && !textInput.hasAttribute(relayTerminal),
-    "bounded record refusal retained transport markers"
-  );
-  relayMode = "normal";
 
   const carriageReturnFill = JSON.parse(fillRequest(textNode, "valid", 28));
   carriageReturnFill.z = "carriage\rreturn";
@@ -1557,7 +1781,89 @@ async function finish() {
   assert(!clippedWindow.n.some(node => node.t === "width supported"),
     "surrounding text stitched a quote across clipped child enumeration");
 
+  // Closed support diagnostics must explain the exact recipe boundary without
+  // granting Fill or collecting markup. These doubles cover native read errors
+  // as well as the cases independently exercised in real WKWebView.
+  main._children = new NodeList();
+  document._root = main; setOwner(main, document);
+  for (let reason = 1; reason <= 12; reason += 1) {
+    const host = new Element(reason === 4 ? "label" : reason === 12 ? "input" : "div", {
+      role: "textbox", "aria-label": "Fill diagnostic", contenteditable: "true"
+    });
+    host.append(new CharacterData("diagnostic"));
+    if (reason === 2) delete host.attributes.contenteditable;
+    if (reason === 3) host._nativeEditableFalse = true;
+    if (reason === 6) for (let i = 0; i < 128; i++) host.append(new CharacterData("x"));
+    if (reason === 7) host.append(new Element("span"));
+    if (reason === 8) host.append(new Node(8));
+    if (reason === 9) host._nativeEditableThrows = true;
+    if (reason === 10) host.attributes["aria-readonly"] = "true";
+    if (reason === 11) host.attributes["aria-disabled"] = "true";
+    if (reason === 12) host.attributes.type = "email";
+    main._children = new NodeList();
+    if (reason === 5) {
+      const parent = new Element("div", { role: "group", contenteditable: "true" });
+      parent.append(host); main.append(parent);
+    } else main.append(host);
+    const diagnostic = JSON.parse(invoke(162 + reason * 2, 162 + reason * 2, { k: "initial" }));
+    const projected = diagnostic.n.find(node => node.n === "Fill diagnostic");
+    assert(projected && projected.fs === (reason === 5 ? 1 : reason), `wrong fixed Fill support code: ${reason}/${projected && projected.fs}`);
+    assert(Boolean((projected.o || 0) & 2) === (reason === 1 || reason === 5), "diagnostic granted unsupported Fill");
+    if (reason === 5) {
+      assert(JSON.stringify(projected.es) === "[1,1,true]", "nested text-only shape was not independently observed");
+      host.append(new Element("span"));
+      const rich = JSON.parse(invoke(163 + reason * 2, 163 + reason * 2, { k: "initial" }));
+      const nested = rich.n.find(node => node.n === "Fill diagnostic");
+      assert(nested.fs === 5 && JSON.stringify(nested.es) === "[2,3,true]" && !(nested.o & 2),
+        "editable-parent refusal concealed rich child shape or granted Fill");
+    }
+    if (reason === 6) assert(JSON.stringify(projected.es) === "[129,1,false]", "child inspection was not capped");
+  }
+
+  // A nested leaf never inherits write authority over its editor. A fresh
+  // descriptor cannot silently rebind the private observed ancestor identities.
+  for (const phase of ["before-dispatch", "beforeinput", "input"]) {
+    for (const change of ["none", "move", "relabel", "protected", "credential", "editability", "rich"]) {
+      main._children = new NodeList();
+      const parent = main.append(new Element("div", {contenteditable: "true", role: "group"}));
+      const leaf = parent.append(new Element("div", {contenteditable: "true", role: "textbox", "aria-label": "Nested leaf"}));
+      leaf.append(new CharacterData("original"));
+      const sibling = parent.append(new Element("span", {contenteditable: "false"}));
+      sibling.append(new CharacterData("surrounding markup"));
+      const destination = main.append(new Element("div", {contenteditable: "true", role: "group"}));
+      const mutate = () => {
+        if (change === "move") { parent._children.values = parent._children.values.filter(node => node !== leaf); destination.append(leaf); }
+        if (change === "relabel") leaf.attributes["aria-label"] = "Repurposed leaf";
+        if (change === "protected") parent.attributes["aria-readonly"] = "true";
+        if (change === "credential") parent.attributes["aria-label"] = "Password";
+        if (change === "editability") parent.attributes.contenteditable = "false";
+        if (change === "rich") leaf.append(new Element("span"));
+      };
+      const generation = 200 + ["before-dispatch", "beforeinput", "input"].indexOf(phase) * 10 + ["none", "move", "relabel", "protected", "credential", "editability", "rich"].indexOf(change);
+      const observed = JSON.parse(invoke(generation, generation, {k: "initial"}));
+      const candidate = observed.n.find(node => node.n === "Nested leaf");
+      assert(!observed.n.some(node => node.r === "group" && node.v), "editable ancestor acquired a field value");
+      assert(candidate && candidate.fs === 1 && candidate.o & 2, "supported nested leaf missing");
+      const request = JSON.parse(fillRequest(candidate, "replacement", generation));
+      request.i = request.g = generation;
+      if (phase === "before-dispatch") mutate();
+      else leaf.addEventListener(phase, mutate);
+      document._hit = leaf;
+      const result = runtime.invoke(JSON.stringify(request));
+      if (change === "none") assert(JSON.parse(result).b === "fixed_semantic_recipe" && leaf.textContent === "replacement", `nested leaf fill failed: ${result}`);
+      else {
+        const allowed = phase === "before-dispatch" ? ["E2:target_changed", "E2:unsupported_interaction"] :
+          phase === "beforeinput" ? ["E2:applied_unverified_beforeinput_revalidation"] : ["E2:applied_unverified_postcondition"];
+        assert(allowed.includes(result), `nested ${phase}/${change}: ${result}`);
+        if (phase !== "input") assert(leaf.textContent === "original", "rejected nested fill mutated value");
+      }
+      assert(sibling.parentNode === parent && sibling.textContent === "surrounding markup", "nested fill changed sibling structure");
+    }
+  }
+
   process.stdout.write(`${JSON.stringify({
+    nested_leaf_context_authority: true,
+    closed_fill_support_reasons: true,
     bounded_visible_text_search: true,
     offscreen_anchor_wire_bytes: inventoryExtraBytes,
     parent_region_nodes: region.n.length,
@@ -1589,10 +1895,11 @@ async function finish() {
     select_rewrite_nonretryable: true,
     fill_native_primitives_captured: true,
     fill_input_event_contract: true,
-    fill_contenteditable_excluded: true,
+    fill_contenteditable_verified: true,
     fill_hostile_transitions_rejected: true,
     fill_observed_refusals_nonretryable: true,
-    fill_forged_and_flood_terminals_rejected: true,
+    fill_legacy_terminal_ignored: true,
+    fill_postcondition_exception_nonretryable: true,
     same_node_repurpose_rejected: true,
     unrelated_mutation_allowed: true,
     occlusion_rejected: true,

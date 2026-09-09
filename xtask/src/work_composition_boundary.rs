@@ -140,8 +140,8 @@ fn commerce_selection(desktop: &str, composition: &str, retained: &str) -> Resul
     require(retained, &[
         "#[cfg(feature = \"retained-commerce-qualification\")] #[path = \"retained_commerce_objective.rs\"] mod objective;",
         "#[cfg(not(feature = \"retained-commerce-qualification\"))] #[path = \"retained_svelte_objective.rs\"] mod objective;",
-        "use objective::{INITIAL, ORIGIN, PATH_PREFIX, TASK_NAME};",
-        "initial: INITIAL, origin: ORIGIN, task_name: TASK_NAME,",
+        "use objective::{DOCUMENT_POLICY, INITIAL, ORIGIN, PATH_PREFIX, TASK_NAME};",
+        "initial: INITIAL, document_policy: DOCUMENT_POLICY, origin: ORIGIN, task_name: TASK_NAME,",
         "ContextNavigationTarget::parse(INITIAL)",
         "PATH_PREFIX.into()",
     ])
@@ -191,7 +191,7 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
     )?;
     require(&read("desktop/src/lib.rs")?, &[
         "#[cfg(all(feature = \"macos-work-navigation-probe\", any(not(debug_assertions), not(target_os = \"macos\"))))] compile_error!",
-        "#[cfg(all(feature = \"macos-work-navigation-probe\", target_os = \"macos\"))] navigation_probe::install(app.handle())?;",
+        "#[cfg(all(feature = \"macos-work-navigation-probe\", not(feature = \"macos-work-profile-enrollment\"), target_os = \"macos\"))] navigation_probe::install(app.handle())?;",
     ])?;
     production(&native)?;
     require(
@@ -254,7 +254,7 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
         &[
             "default = []",
             "navigation-qualification = [\"macos-work\", \"dep:zephium-agentic\", \"dep:zephium-core\", \"dep:zephium-agent-runtime\"]",
-            "public-qualification = [\"macos-work\", \"zephium-app/work-execution-probe\"]",
+            "public-qualification = [\"macos-work\", \"zephium-app/work-execution-probe\", \"zephium-agent-provider-transport/probe-harness\",]",
             "retained-public-qualification = [\"retained-qualification\", \"zephium-engine/native-agentic-public-resource-probe\"]",
         ],
     )?;

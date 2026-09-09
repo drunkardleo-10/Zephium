@@ -20,6 +20,10 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use block2::RcBlock;
+
+#[cfg(feature = "native-agentic-semantic-probe")]
+#[path = "agentic_semantic_program_probe.rs"]
+mod program_probe;
 use objc2::{define_class, msg_send, rc::Retained, runtime::AnyObject, runtime::NSObject};
 use objc2::{DefinedClass as _, MainThreadOnly, Message as _};
 use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSString, NSUTF8StringEncoding};
@@ -27,6 +31,8 @@ use objc2_web_kit::{
     WKContentWorld, WKScriptMessage, WKScriptMessageHandlerWithReply, WKUserContentController,
     WKUserScript, WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration,
 };
+#[cfg(any(not(feature = "native-agentic-semantic-probe"), test))]
+use zephium_agentic::SEMANTIC_RUNTIME_PROGRAM;
 use zephium_agentic::{
     SemanticActionAttemptId, SemanticActionRuntimeEvidence, SemanticActionRuntimeInvocation,
     SemanticActionRuntimeResultError, SemanticRuntimeInvocation, SemanticRuntimeResultError,
@@ -34,477 +40,11 @@ use zephium_agentic::{
     MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS, SEMANTIC_RUNTIME_CHANNEL_ACK,
     SEMANTIC_RUNTIME_CHANNEL_EXHAUSTED, SEMANTIC_RUNTIME_CHANNEL_NAME,
     SEMANTIC_RUNTIME_CHANNEL_PULL, SEMANTIC_RUNTIME_CHANNEL_RESULT_PREFIX,
-    SEMANTIC_RUNTIME_CHANNEL_STOP, SEMANTIC_RUNTIME_PROGRAM,
+    SEMANTIC_RUNTIME_CHANNEL_STOP,
 };
 
 const SEMANTIC_RUNTIME_WORLD_NAME_PREFIX: &str = "zephium-semantic-runtime-v1-";
 const SEMANTIC_RUNTIME_FIXED_ERROR: &str = "zephium semantic channel refused";
-/// Immutable page-world compatibility shim installed only by the owned-agent
-/// view constructor. Its attributes are untrusted transport hints: they can
-/// never authorize success. The shim has no native bridge, selectors,
-/// arbitrary script input, activation route, or cross-document authority.
-/// Main-frame scope is provided and attested by native `forMainFrameOnly`.
-const PAGE_WORLD_COMPATIBILITY_FILL_PROGRAM: &str = r#"(() => {
-  'use strict';
-  const READY = 'data-zephium-fill-relay-ready-v1';
-  const COMMAND = 'data-zephium-fill-relay-command-v1';
-  const TERMINAL = 'data-zephium-fill-relay-terminal-v1';
-  const MAX_TEXT_BYTES = 4096;
-  const MAX_COMMAND_BYTES = 16384;
-  const MAX_ATTRIBUTE_BYTES = 512;
-  const MAX_METADATA_ID_BYTES = 1024;
-  const MAX_LABEL_NODES = 128;
-  const MAX_LABELS = 4;
-  const MAX_RECORDS = 64;
-  const MAX_BOOTSTRAP_RECORDS = 16;
-  const MAX_SAFE_INTEGER = 9007199254740991;
-  const mainGlobal = globalThis;
-  const mainDocument = document;
-  const apply = Reflect.apply;
-  const getOwnDescriptor = Object.getOwnPropertyDescriptor;
-  const getPrototypeOf = Object.getPrototypeOf;
-  const objectKeys = Object.keys;
-  const jsonParse = JSON.parse;
-  const numberIsSafeInteger = Number.isSafeInteger;
-  const stringCharCodeAt = String.prototype.charCodeAt;
-  const stringIncludes = String.prototype.includes;
-  const stringSplit = String.prototype.split;
-  const stringToLowerCase = String.prototype.toLowerCase;
-  const getAttribute = Element.prototype.getAttribute;
-  const setAttribute = Element.prototype.setAttribute;
-  const removeAttribute = Element.prototype.removeAttribute;
-  const addEventListener = EventTarget.prototype.addEventListener;
-  const removeEventListener = EventTarget.prototype.removeEventListener;
-  const dispatchEvent = EventTarget.prototype.dispatchEvent;
-  const NativeMutationObserver = MutationObserver;
-  const observerObserve = MutationObserver.prototype.observe;
-  const observerDisconnect = MutationObserver.prototype.disconnect;
-  const mutationRecordTargetGet = getOwnDescriptor(MutationRecord.prototype, 'target')?.get;
-  const mutationRecordAttributeNameGet = getOwnDescriptor(MutationRecord.prototype, 'attributeName')?.get;
-  const documentElementGet = getOwnDescriptor(Document.prototype, 'documentElement')?.get;
-  const documentDefaultViewGet = getOwnDescriptor(Document.prototype, 'defaultView')?.get;
-  const documentGetElementById = Document.prototype.getElementById;
-  // Main-frame scope is native authority: WebKit installs this fixed script
-  // with forMainFrameOnly=true and Rust attests its exact source/inventory.
-  // Window.prototype does not own frameElement in this measured WebKit realm,
-  // and a dynamic property read would be page-forgeable. Keep only the exact
-  // Document.defaultView identity check here.
-  const inputPrototype = HTMLInputElement.prototype;
-  const inputValueDescriptor = getOwnDescriptor(inputPrototype, 'value');
-  const inputTypeDescriptor = getOwnDescriptor(inputPrototype, 'type');
-  const inputDisabledDescriptor = getOwnDescriptor(inputPrototype, 'disabled');
-  const inputReadOnlyDescriptor = getOwnDescriptor(inputPrototype, 'readOnly');
-  const inputValueSet = inputValueDescriptor && inputValueDescriptor.set;
-  const inputTypeGet = inputTypeDescriptor && inputTypeDescriptor.get;
-  const inputDisabledGet = inputDisabledDescriptor && inputDisabledDescriptor.get;
-  const inputReadOnlyGet = inputReadOnlyDescriptor && inputReadOnlyDescriptor.get;
-  const inputLabelsGet = getOwnDescriptor(inputPrototype, 'labels')?.get;
-  const textareaPrototype = HTMLTextAreaElement.prototype;
-  const textareaValueDescriptor = getOwnDescriptor(textareaPrototype, 'value');
-  const textareaDisabledDescriptor = getOwnDescriptor(textareaPrototype, 'disabled');
-  const textareaReadOnlyDescriptor = getOwnDescriptor(textareaPrototype, 'readOnly');
-  const textareaValueSet = textareaValueDescriptor && textareaValueDescriptor.set;
-  const textareaDisabledGet = textareaDisabledDescriptor && textareaDisabledDescriptor.get;
-  const textareaReadOnlyGet = textareaReadOnlyDescriptor && textareaReadOnlyDescriptor.get;
-  const textareaLabelsGet = getOwnDescriptor(textareaPrototype, 'labels')?.get;
-  const nodeTypeGet = getOwnDescriptor(Node.prototype, 'nodeType')?.get;
-  const nodeOwnerDocumentGet = getOwnDescriptor(Node.prototype, 'ownerDocument')?.get;
-  const nodeChildNodesGet = getOwnDescriptor(Node.prototype, 'childNodes')?.get;
-  const nodeConnectedDescriptor = getOwnDescriptor(Node.prototype, 'isConnected');
-  const nodeRoot = Node.prototype.getRootNode;
-  const nodeConnectedGet = nodeConnectedDescriptor && nodeConnectedDescriptor.get;
-  const characterDataGet = getOwnDescriptor(CharacterData.prototype, 'data')?.get;
-  const nodeListLengthGet = getOwnDescriptor(NodeList.prototype, 'length')?.get;
-  const nodeListItem = NodeList.prototype.item;
-  const NativeInputEvent = InputEvent;
-
-  const read = (getter, receiver) => apply(getter, receiver, []);
-  const attr = (target, name) => apply(getAttribute, target, [name]);
-  const setAttr = (target, name, value) => apply(setAttribute, target, [name, value]);
-  const removeAttr = (target, name) => apply(removeAttribute, target, [name]);
-  const contains = (value, needle) => apply(stringIncludes, value, [needle]);
-  const lowerText = (value) => apply(stringToLowerCase, value, []);
-  const utf8Length = (value, ceiling) => {
-    let bytes = 0;
-    for (let index = 0; index < value.length; index += 1) {
-      const first = apply(stringCharCodeAt, value, [index]);
-      let point = first;
-      if (first >= 0xd800 && first <= 0xdbff) {
-        if (index + 1 >= value.length) return ceiling + 1;
-        const second = apply(stringCharCodeAt, value, [index + 1]);
-        if (second < 0xdc00 || second > 0xdfff) return ceiling + 1;
-        point = 0x10000 + ((first - 0xd800) << 10) + second - 0xdc00;
-        index += 1;
-      } else if (first >= 0xdc00 && first <= 0xdfff) {
-        return ceiling + 1;
-      }
-      bytes += point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
-      if (bytes > ceiling) return bytes;
-    }
-    return bytes;
-  };
-  const forbiddenPoint = (point) =>
-    point < 0x20 || (point >= 0x7f && point <= 0x9f) ||
-    point === 0xad || point === 0x61c || point === 0x180e ||
-    (point >= 0x200b && point <= 0x200f) ||
-    (point >= 0x202a && point <= 0x202e) ||
-    (point >= 0x2060 && point <= 0x2064) ||
-    (point >= 0x2066 && point <= 0x206f) || point === 0xfeff ||
-    (point >= 0xfff9 && point <= 0xfffb) || point === 0xe0001 ||
-    (point >= 0xe0020 && point <= 0xe007f);
-  const validText = (value, multiline) => {
-    if (typeof value !== 'string' || utf8Length(value, MAX_TEXT_BYTES + 1) > MAX_TEXT_BYTES) {
-      return false;
-    }
-    for (let index = 0; index < value.length; index += 1) {
-      const first = apply(stringCharCodeAt, value, [index]);
-      let point = first;
-      if (first >= 0xd800 && first <= 0xdbff) {
-        const second = apply(stringCharCodeAt, value, [index + 1]);
-        point = 0x10000 + ((first - 0xd800) << 10) + second - 0xdc00;
-        index += 1;
-      }
-      if (point === 0x0d || (!multiline && (point === 0x09 || point === 0x0a))) return false;
-      if (point !== 0x09 && point !== 0x0a && forbiddenPoint(point)) return false;
-    }
-    return true;
-  };
-  const boundedMetadata = (raw, limit) => {
-    if (typeof raw !== 'string' || utf8Length(raw, limit + 1) > limit) return null;
-    for (let index = 0; index < raw.length; index += 1) {
-      const first = apply(stringCharCodeAt, raw, [index]);
-      let point = first;
-      if (first >= 0xd800 && first <= 0xdbff) {
-        if (index + 1 >= raw.length) return null;
-        const second = apply(stringCharCodeAt, raw, [index + 1]);
-        if (second < 0xdc00 || second > 0xdfff) return null;
-        point = 0x10000 + ((first - 0xd800) << 10) + second - 0xdc00;
-        index += 1;
-      } else if (first >= 0xdc00 && first <= 0xdfff) {
-        return null;
-      }
-      if (
-        point === 0x0d ||
-        (point !== 0x09 && point !== 0x0a && forbiddenPoint(point))
-      ) return null;
-    }
-    return raw;
-  };
-  const listLength = (list) => {
-    const length = read(nodeListLengthGet, list);
-    return numberIsSafeInteger(length) && length >= 0 ? length : -1;
-  };
-  const listItem = (list, index) => apply(nodeListItem, list, [index]);
-  const boundedLabelText = (root) => {
-    const stack = [root];
-    let stackLength = 1;
-    let text = '';
-    let visited = 0;
-    while (stackLength !== 0) {
-      if (visited >= MAX_LABEL_NODES) return null;
-      visited += 1;
-      stackLength -= 1;
-      const current = stack[stackLength];
-      const type = read(nodeTypeGet, current);
-      if (type === 3) {
-        const raw = read(characterDataGet, current);
-        if (typeof raw !== 'string') return null;
-        const separator = text === '' || raw === '' ? '' : ' ';
-        const used = utf8Length(text, MAX_ATTRIBUTE_BYTES + 1);
-        if (used > MAX_ATTRIBUTE_BYTES || used + separator.length > MAX_ATTRIBUTE_BYTES) return null;
-        const bounded = boundedMetadata(raw, MAX_ATTRIBUTE_BYTES - used - separator.length);
-        if (bounded === null) return null;
-        if (bounded !== '') text += separator + bounded;
-        continue;
-      }
-      if (type !== 1 && type !== 9 && type !== 11) return null;
-      const children = read(nodeChildNodesGet, current);
-      const length = listLength(children);
-      if (length < 0 || length + stackLength + visited > MAX_LABEL_NODES) return null;
-      for (let index = length - 1; index >= 0; index -= 1) {
-        const child = listItem(children, index);
-        if (child === null) return null;
-        stack[stackLength] = child;
-        stackLength += 1;
-      }
-    }
-    return text;
-  };
-  const credentialLike = (target, isInput) => {
-    let joined = '';
-    const addMetadata = (raw, limit) => {
-      if (raw === null || raw === '') return true;
-      const bounded = boundedMetadata(raw, limit);
-      if (bounded === null) return false;
-      joined += ' ' + lowerText(bounded);
-      return true;
-    };
-    const names = ['autocomplete', 'name', 'id', 'aria-label', 'placeholder', 'title'];
-    const limits = [256, 256, 256, MAX_ATTRIBUTE_BYTES, MAX_ATTRIBUTE_BYTES, MAX_ATTRIBUTE_BYTES];
-    for (let index = 0; index < names.length; index += 1) {
-      let raw;
-      try { raw = attr(target, names[index]); } catch (_) { return null; }
-      if (raw !== null && typeof raw !== 'string') return null;
-      if (!addMetadata(raw, limits[index])) return null;
-    }
-    let labelledBy;
-    try { labelledBy = attr(target, 'aria-labelledby'); } catch (_) { return null; }
-    if (labelledBy !== null) {
-      if (!addMetadata(labelledBy, MAX_METADATA_ID_BYTES)) return null;
-      const identifiers = apply(stringSplit, labelledBy, [/\s+/]);
-      let identifierCount = 0;
-      for (let index = 0; index < identifiers.length; index += 1) {
-        const identifier = identifiers[index];
-        if (identifier === '') continue;
-        identifierCount += 1;
-        if (identifierCount > 8 || identifier.length > 128) return null;
-        const label = apply(documentGetElementById, mainDocument, [identifier]);
-        if (label !== null) {
-          const text = boundedLabelText(label);
-          if (text === null || !addMetadata(text, MAX_ATTRIBUTE_BYTES)) return null;
-        }
-      }
-    }
-    let labels;
-    try { labels = read(isInput ? inputLabelsGet : textareaLabelsGet, target); } catch (_) {
-      return null;
-    }
-    if (labels !== null && labels !== undefined) {
-      const length = listLength(labels);
-      if (length < 0 || length > MAX_LABELS) return null;
-      for (let index = 0; index < length; index += 1) {
-        const label = listItem(labels, index);
-        if (label === null) return null;
-        const text = boundedLabelText(label);
-        if (text === null || !addMetadata(text, MAX_ATTRIBUTE_BYTES)) return null;
-      }
-    }
-    return (
-      contains(joined, 'password') || contains(joined, 'passcode') ||
-      contains(joined, 'one-time-code') || contains(joined, 'verification code') ||
-      contains(joined, 'security code') || contains(joined, 'api key') ||
-      contains(joined, 'access token') || contains(joined, 'secret key') ||
-      contains(joined, 'private key') || contains(joined, 'cc-number') ||
-      contains(joined, 'cc-csc') || contains(joined, 'card number') ||
-      contains(joined, 'cvv') || contains(joined, 'cvc')
-    );
-  };
-  const terminal = (target, attempt, status) => {
-    removeAttr(target, COMMAND);
-    setAttr(target, TERMINAL, `1|${attempt}|${status}`);
-  };
-  const observer = new NativeMutationObserver((records) => {
-    if (!numberIsSafeInteger(records.length) || records.length < 1 || records.length > MAX_RECORDS) {
-      return;
-    }
-    let candidateTarget = null;
-    let candidateRaw = null;
-    let candidateCount = 0;
-    for (let index = 0; index < records.length; index += 1) {
-      const record = records[index];
-      let attributeName;
-      let target;
-      try {
-        attributeName = read(mutationRecordAttributeNameGet, record);
-        target = read(mutationRecordTargetGet, record);
-      } catch (_) {
-        return;
-      }
-      if (attributeName !== COMMAND || read(nodeTypeGet, target) !== 1) continue;
-      const raw = attr(target, COMMAND);
-      if (raw === null) continue;
-      candidateCount += 1;
-      if (candidateCount === 1) {
-        candidateTarget = target;
-        candidateRaw = raw;
-      }
-      if (candidateCount > 1) break;
-    }
-    if (candidateCount === 0) return;
-    if (candidateCount !== 1) {
-      terminal(candidateTarget, 0, 'duplicate');
-      return;
-    }
-    const target = candidateTarget;
-    const raw = candidateRaw;
-    removeAttr(target, COMMAND);
-    if (typeof raw !== 'string' || utf8Length(raw, MAX_COMMAND_BYTES + 1) > MAX_COMMAND_BYTES) {
-      terminal(target, 0, 'invalid');
-      return;
-    }
-    let command;
-    try { command = apply(jsonParse, JSON, [raw]); } catch (_) {
-      terminal(target, 0, 'invalid');
-      return;
-    }
-    const keys = command !== null && typeof command === 'object' ? apply(objectKeys, Object, [command]) : [];
-    const attempt = command !== null && typeof command === 'object' &&
-      numberIsSafeInteger(command.a) && command.a > 0 && command.a <= MAX_SAFE_INTEGER
-      ? command.a : 0;
-    if (
-      keys.length !== 3 || keys[0] !== 'v' || keys[1] !== 'a' || keys[2] !== 'z' ||
-      command.v !== 1 || attempt === 0 ||
-      typeof command.z !== 'string'
-    ) {
-      terminal(target, attempt, 'refused-command');
-      return;
-    }
-    const prototype = getPrototypeOf(target);
-    const isInput = prototype === inputPrototype;
-    const isTextarea = prototype === textareaPrototype;
-    if (
-      (!isInput && !isTextarea) ||
-      read(nodeOwnerDocumentGet, target) !== mainDocument ||
-      read(nodeConnectedGet, target) !== true || apply(nodeRoot, target, []) !== mainDocument
-    ) {
-      terminal(target, attempt, 'refused-identity');
-      return;
-    }
-    if (isInput && read(inputTypeGet, target) !== 'text' && read(inputTypeGet, target) !== 'search') {
-      terminal(target, attempt, 'refused-type');
-      return;
-    }
-    if (!validText(command.z, isTextarea)) {
-      terminal(target, attempt, 'refused-command');
-      return;
-    }
-    const disabledGet = isInput ? inputDisabledGet : textareaDisabledGet;
-    const readOnlyGet = isInput ? inputReadOnlyGet : textareaReadOnlyGet;
-    const valueSet = isInput ? inputValueSet : textareaValueSet;
-    let credential;
-    try { credential = credentialLike(target, isInput); } catch (_) { credential = null; }
-    if (read(disabledGet, target) === true || read(readOnlyGet, target) === true) {
-      terminal(target, attempt, 'refused-state');
-      return;
-    }
-    if (credential !== false) {
-      terminal(target, attempt, 'refused-credential');
-      return;
-    }
-    let beforeEvent;
-    let inputEvent;
-    try {
-      beforeEvent = new NativeInputEvent('beforeinput', {
-        bubbles: true, cancelable: true, composed: true, data: command.z,
-        inputType: 'insertReplacementText', isComposing: false
-      });
-      inputEvent = new NativeInputEvent('input', {
-        bubbles: true, cancelable: false, composed: true, data: command.z,
-        inputType: 'insertReplacementText', isComposing: false
-      });
-    } catch (_) {
-      terminal(target, attempt, 'refused-construct');
-      return;
-    }
-    try {
-      if (apply(dispatchEvent, target, [beforeEvent]) !== true) {
-        // The page observed `beforeinput` and may have produced effects even
-        // when it cancelled the edit. Native must never classify this as a
-        // clean retryable refusal.
-        terminal(target, attempt, 'indeterminate');
-        return;
-      }
-      if (
-        getPrototypeOf(target) !== prototype ||
-        read(nodeOwnerDocumentGet, target) !== mainDocument ||
-        read(nodeConnectedGet, target) !== true || apply(nodeRoot, target, []) !== mainDocument ||
-        (isInput && read(inputTypeGet, target) !== 'text' && read(inputTypeGet, target) !== 'search') ||
-        read(disabledGet, target) === true || read(readOnlyGet, target) === true ||
-        credentialLike(target, isInput) !== false || !validText(command.z, isTextarea)
-      ) {
-        terminal(target, attempt, 'indeterminate');
-        return;
-      }
-    } catch (_) {
-      terminal(target, attempt, 'indeterminate');
-      return;
-    }
-    // Once the setter is entered the page may have changed even if WebKit
-    // throws. Every subsequent failure is therefore indeterminate.
-    try {
-      apply(valueSet, target, [command.z]);
-      apply(dispatchEvent, target, [inputEvent]);
-      terminal(target, attempt, 'ok');
-    } catch (_) {
-      terminal(target, attempt, 'indeterminate');
-    }
-  });
-  if (
-    typeof mutationRecordTargetGet !== 'function' ||
-    typeof mutationRecordAttributeNameGet !== 'function' ||
-    typeof NativeMutationObserver !== 'function' || typeof observerObserve !== 'function' ||
-    typeof observerDisconnect !== 'function' ||
-    typeof documentElementGet !== 'function' ||
-    typeof documentDefaultViewGet !== 'function' ||
-    typeof documentGetElementById !== 'function' || typeof stringSplit !== 'function' ||
-    typeof nodeTypeGet !== 'function' || typeof nodeOwnerDocumentGet !== 'function' ||
-    typeof nodeChildNodesGet !== 'function' || typeof characterDataGet !== 'function' ||
-    typeof nodeListLengthGet !== 'function' || typeof nodeListItem !== 'function' ||
-    typeof nodeConnectedGet !== 'function' || typeof nodeRoot !== 'function' ||
-    typeof inputValueSet !== 'function' ||
-    typeof inputTypeGet !== 'function' || typeof inputDisabledGet !== 'function' ||
-    typeof inputReadOnlyGet !== 'function' || typeof inputLabelsGet !== 'function' ||
-    typeof NativeInputEvent !== 'function' ||
-    typeof textareaValueSet !== 'function' || typeof textareaDisabledGet !== 'function' ||
-    typeof textareaReadOnlyGet !== 'function' || typeof textareaLabelsGet !== 'function' ||
-    typeof addEventListener !== 'function' || typeof removeEventListener !== 'function' ||
-    read(documentDefaultViewGet, mainDocument) !== mainGlobal
-  ) return;
-  apply(observerObserve, observer, [mainDocument, {
-    attributes: true, subtree: true, attributeFilter: [COMMAND]
-  }]);
-  let bootstrapObserver = null;
-  let bootstrapListening = false;
-  let bootstrapStopped = false;
-  const stopBootstrap = () => {
-    if (bootstrapStopped) return;
-    bootstrapStopped = true;
-    const currentObserver = bootstrapObserver;
-    bootstrapObserver = null;
-    if (currentObserver !== null) {
-      try { apply(observerDisconnect, currentObserver, []); } catch (_) {}
-    }
-    if (bootstrapListening) {
-      bootstrapListening = false;
-      try {
-        apply(removeEventListener, mainDocument, ['readystatechange', markReady]);
-      } catch (_) {}
-    }
-  };
-  const markReady = () => {
-    if (bootstrapStopped) return;
-    let root;
-    try { root = read(documentElementGet, mainDocument); } catch (_) {
-      stopBootstrap();
-      return;
-    }
-    if (root === null) return;
-    try { setAttr(root, READY, '1'); } catch (_) {
-      stopBootstrap();
-      return;
-    }
-    stopBootstrap();
-  };
-  markReady();
-  if (!bootstrapStopped) {
-    bootstrapObserver = new NativeMutationObserver((records) => {
-      if (bootstrapStopped) return;
-      if (
-        !numberIsSafeInteger(records.length) ||
-        records.length < 1 || records.length > MAX_BOOTSTRAP_RECORDS
-      ) {
-        stopBootstrap();
-        return;
-      }
-      markReady();
-    });
-    apply(observerObserve, bootstrapObserver, [mainDocument, { childList: true }]);
-    bootstrapListening = true;
-    apply(addEventListener, mainDocument, ['readystatechange', markReady]);
-    // Close the gap between the first root read and observer registration.
-    markReady();
-  }
-})();"#;
 static NEXT_SEMANTIC_RUNTIME_WORLD: AtomicU64 = AtomicU64::new(1);
 
 type ReplyBlock = RcBlock<dyn Fn(*mut AnyObject, *mut NSString)>;
@@ -585,6 +125,9 @@ impl RuntimeChannelFailure {
 enum DocumentPhase {
     Loading,
     Ready,
+    // Admission is permanently closed. Only the exact handed-off action may
+    // return evidence; this phase never grants document authority.
+    AuthorityRevoked,
     RendererLost,
     ExhaustionNoticePending,
     Exhausted,
@@ -695,7 +238,12 @@ struct SemanticRuntimeChannelState {
     pull: Option<ReplyBlock>,
     pending: Option<PendingInvocation>,
     awaiting_result: bool,
+    // Lifetime evidence only: the exact page command returned an uncertain
+    // applied effect. No read/action admission consults this field.
+    settling_action: Option<SemanticActionAttemptId>,
     completed_invocations: u16,
+    #[cfg(feature = "native-agentic-semantic-probe")]
+    prepared_fill: Option<program_probe::PreparedFill>,
 }
 
 impl Default for SemanticRuntimeChannelState {
@@ -707,7 +255,10 @@ impl Default for SemanticRuntimeChannelState {
             pull: None,
             pending: None,
             awaiting_result: false,
+            settling_action: None,
             completed_invocations: 0,
+            #[cfg(feature = "native-agentic-semantic-probe")]
+            prepared_fill: None,
         }
     }
 }
@@ -745,6 +296,7 @@ impl SemanticRuntimeChannelState {
         if let Some(failure) = self.admission_failure() {
             return Err((failure, completion));
         }
+        self.settling_action = None;
         self.pending = Some(PendingInvocation::Observation {
             invocation,
             completion,
@@ -761,6 +313,7 @@ impl SemanticRuntimeChannelState {
         if let Some(failure) = self.admission_failure() {
             return Err((failure, completion));
         }
+        self.settling_action = None;
         self.pending = Some(PendingInvocation::Action {
             invocation,
             completion,
@@ -781,7 +334,10 @@ impl SemanticRuntimeChannelState {
             DocumentPhase::ExhaustionNoticePending | DocumentPhase::Exhausted => {
                 return Some(AgentSemanticRuntimeDispatchError::Exhausted);
             }
-            DocumentPhase::RendererLost | DocumentPhase::Failed | DocumentPhase::Retired => {
+            DocumentPhase::AuthorityRevoked
+            | DocumentPhase::RendererLost
+            | DocumentPhase::Failed
+            | DocumentPhase::Retired => {
                 return Some(AgentSemanticRuntimeDispatchError::Retired);
             }
         }
@@ -847,6 +403,57 @@ impl SemanticRuntimeChannelState {
         actions
     }
 
+    fn revoke_document_authority(&mut self) -> ChannelActions {
+        if !matches!(
+            self.phase,
+            DocumentPhase::Ready | DocumentPhase::AuthorityRevoked
+        ) {
+            return self.cancel();
+        }
+        let handed_off =
+            self.awaiting_result && matches!(self.pending, Some(PendingInvocation::Action { .. }));
+        let mut actions = if handed_off || self.settling_action.is_some() {
+            ChannelActions::default()
+        } else {
+            self.invalidate_current(RuntimeChannelFailure::DocumentReplaced)
+        };
+        // Even a preparation reply belonging to the original action cannot
+        // release more work after drift. Preserve only its eventual terminal.
+        #[cfg(feature = "native-agentic-semantic-probe")]
+        if let Some(mut prepared) = self.prepared_fill.take() {
+            if let Some(reply) = prepared.stop() {
+                actions.push_reply(reply);
+            }
+        }
+        if let Some(pull) = self.pull.take() {
+            actions.push_reply(ReplyAction::success(pull, SEMANTIC_RUNTIME_CHANNEL_STOP));
+        }
+        self.phase = DocumentPhase::AuthorityRevoked;
+        actions
+    }
+
+    fn draining_action(&self, attempt: SemanticActionAttemptId) -> bool {
+        self.phase == DocumentPhase::AuthorityRevoked
+            && self.awaiting_result
+            && self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.matches_action(attempt))
+    }
+
+    fn settling_action(&self, attempt: SemanticActionAttemptId) -> bool {
+        matches!(
+            self.phase,
+            DocumentPhase::Ready | DocumentPhase::AuthorityRevoked
+        ) && self.settling_action == Some(attempt)
+            && !self.awaiting_result
+            && self.pending.is_none()
+    }
+
+    fn revoked_settling_action(&self, attempt: SemanticActionAttemptId) -> bool {
+        self.phase == DocumentPhase::AuthorityRevoked && self.settling_action(attempt)
+    }
+
     fn timeout(
         &mut self,
         invocation: zephium_agentic::SemanticInvocationId,
@@ -898,7 +505,14 @@ impl SemanticRuntimeChannelState {
     }
 
     fn invalidate_current(&mut self, failure: RuntimeChannelFailure) -> ChannelActions {
+        self.settling_action = None;
         let mut actions = ChannelActions::default();
+        #[cfg(feature = "native-agentic-semantic-probe")]
+        if let Some(mut prepared) = self.prepared_fill.take() {
+            if let Some(reply) = prepared.stop() {
+                actions.push_reply(reply);
+            }
+        }
         if let Some(pull) = self.pull.take() {
             actions.push_reply(ReplyAction::success(pull, SEMANTIC_RUNTIME_CHANNEL_STOP));
         }
@@ -921,6 +535,10 @@ impl SemanticRuntimeChannelState {
     }
 
     fn on_message(&mut self, body: &str, reply: ReplyBlock) -> ChannelActions {
+        #[cfg(feature = "native-agentic-semantic-probe")]
+        if body == program_probe::PREPARE_MESSAGE && program_probe::preparation_selected() {
+            return self.on_fill_preparation(reply);
+        }
         if body == SEMANTIC_RUNTIME_CHANNEL_PULL {
             return self.on_pull(reply);
         }
@@ -936,7 +554,8 @@ impl SemanticRuntimeChannelState {
     fn on_pull(&mut self, reply: ReplyBlock) -> ChannelActions {
         if matches!(
             self.phase,
-            DocumentPhase::RendererLost
+            DocumentPhase::AuthorityRevoked
+                | DocumentPhase::RendererLost
                 | DocumentPhase::ExhaustionNoticePending
                 | DocumentPhase::Exhausted
                 | DocumentPhase::Failed
@@ -954,6 +573,14 @@ impl SemanticRuntimeChannelState {
     }
 
     fn on_result(&mut self, bytes: &[u8], reply: ReplyBlock) -> ChannelActions {
+        #[cfg(feature = "native-agentic-semantic-probe")]
+        if self
+            .prepared_fill
+            .as_ref()
+            .is_some_and(program_probe::PreparedFill::waiting)
+        {
+            return self.fail_transport(Some(reply));
+        }
         if !self.awaiting_result {
             return self.fail_transport(Some(reply));
         }
@@ -961,6 +588,10 @@ impl SemanticRuntimeChannelState {
             return self.fail_transport(Some(reply));
         };
         self.awaiting_result = false;
+        #[cfg(feature = "native-agentic-semantic-probe")]
+        {
+            self.prepared_fill = None;
+        }
         let Some(completed) = self.completed_invocations.checked_add(1) else {
             let mut actions = self.fail_transport(Some(reply));
             actions.completion = Some(match pending {
@@ -978,7 +609,9 @@ impl SemanticRuntimeChannelState {
             return actions;
         };
         self.completed_invocations = completed;
-        if completed == MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS {
+        if completed == MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS
+            && self.phase == DocumentPhase::Ready
+        {
             self.phase = DocumentPhase::ExhaustionNoticePending;
         }
 
@@ -1011,9 +644,28 @@ impl SemanticRuntimeChannelState {
                 completion,
                 ..
             } => {
+                #[cfg(feature = "native-agentic-semantic-probe")]
+                let bytes = program_probe::normalize_diagnostic(bytes);
                 let outcome = invocation
                     .decode_result(bytes)
                     .map_err(AgentSemanticActionRuntimeFailure::Result);
+                self.settling_action = matches!(
+                    &outcome,
+                    Err(AgentSemanticActionRuntimeFailure::Result(
+                        SemanticActionRuntimeResultError::Runtime(
+                            fault
+                        )
+                    )) if super::semantic_action::map_runtime_fault(*fault)
+                        == zephium_agentic::SemanticActionNativeFailure::AppliedUnverified
+                )
+                .then_some(invocation.attempt());
+                #[cfg(feature = "native-agentic-semantic-probe")]
+                if let Err(AgentSemanticActionRuntimeFailure::Result(
+                    SemanticActionRuntimeResultError::Runtime(fault),
+                )) = &outcome
+                {
+                    program_probe::record_fault(fault);
+                }
                 let recoverable = matches!(
                     &outcome,
                     Ok(_)
@@ -1033,7 +685,7 @@ impl SemanticRuntimeChannelState {
         let mut actions = ChannelActions::default();
         actions.push_reply(ReplyAction::success(
             reply,
-            if recoverable {
+            if recoverable && self.phase != DocumentPhase::AuthorityRevoked {
                 SEMANTIC_RUNTIME_CHANNEL_ACK
             } else {
                 SEMANTIC_RUNTIME_CHANNEL_STOP
@@ -1106,6 +758,34 @@ pub(crate) struct AgentSemanticRuntimeController {
 }
 
 impl AgentSemanticRuntimeController {
+    /// Close all future use while retaining only an action already handed to
+    /// this exact content world. Its original timeout/cancel owners still win.
+    pub(crate) fn revoke_document_authority(&self) {
+        let actions = self.transition(SemanticRuntimeChannelState::revoke_document_authority);
+        self.execute(actions);
+    }
+
+    pub(crate) fn draining_action(&self, attempt: SemanticActionAttemptId) -> bool {
+        self.state
+            .try_borrow()
+            .is_ok_and(|state| state.draining_action(attempt))
+    }
+    /// Passive rendering eligibility only, never document authority.
+    pub(crate) fn settling_action(&self, attempt: SemanticActionAttemptId) -> bool {
+        self.state
+            .try_borrow()
+            .is_ok_and(|state| state.settling_action(attempt))
+    }
+    pub(crate) fn revoked_settling_action(&self, attempt: SemanticActionAttemptId) -> bool {
+        self.state
+            .try_borrow()
+            .is_ok_and(|state| state.revoked_settling_action(attempt))
+    }
+    #[cfg(feature = "native-agentic-semantic-probe")]
+    pub(crate) fn poll_prepared_fill(&self) {
+        let actions = self.transition(SemanticRuntimeChannelState::poll_fill_preparation);
+        self.execute(actions);
+    }
     fn new(on_invariant_failure: Rc<dyn Fn()>, on_callback_panic: Rc<dyn Fn()>) -> Self {
         Self {
             state: Rc::new(RefCell::new(SemanticRuntimeChannelState::default())),
@@ -1256,6 +936,11 @@ impl AgentSemanticRuntimeController {
         };
         let valid = world_valid
             && state.completed_invocations <= MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS
+            && (state.phase != DocumentPhase::AuthorityRevoked
+                || (state.pull.is_none()
+                    && (!pending
+                        || (state.awaiting_result
+                            && matches!(state.pending, Some(PendingInvocation::Action { .. }))))))
             && (!state.awaiting_result || (pending && state.pull.is_none()))
             && (state.pull.is_none() || (!state.awaiting_result && !pending))
             && (!matches!(
@@ -1519,8 +1204,6 @@ define_class!(
 struct SemanticRuntimeEpochRegistration {
     world: Retained<WKContentWorld>,
     script: Retained<WKUserScript>,
-    page_relay_world: Retained<WKContentWorld>,
-    page_relay_script: Retained<WKUserScript>,
     handler: Retained<SemanticMessageHandler>,
 }
 
@@ -1609,7 +1292,10 @@ fn install_semantic_runtime_epoch(
         return Err(());
     }
 
+    #[cfg(not(feature = "native-agentic-semantic-probe"))]
     let source = NSString::from_str(SEMANTIC_RUNTIME_PROGRAM.source());
+    #[cfg(feature = "native-agentic-semantic-probe")]
+    let source = NSString::from_str(&program_probe::source());
     // SAFETY: `mtm` proves main-thread allocation; source and content world are
     // live retained values, and the fixed enum/bool arguments match WebKit's
     // initializer contract. Objective-C exceptions are contained.
@@ -1638,36 +1324,6 @@ fn install_semantic_runtime_epoch(
         let _ = clear_semantic_runtime_controller(controller, handler_name, Some(&world));
         return Err(());
     }
-    // This registration is reachable only from the owned-agent-view
-    // constructor. Installing the page-world compatibility shim is part of
-    // that type's construction invariant, never an environment-selected
-    // capability. Browse and borrowed tab configurations do not use this
-    // registration at all.
-    // SAFETY: `mtm` proves main-thread access; WebKit's page-world singleton,
-    // fixed source, initializer arguments, and controller are live native
-    // values. The controller retains the script, and Objective-C exceptions
-    // are contained and fail the complete paired installation.
-    let (page_relay_world, page_relay_script) =
-        match objc2::exception::catch(AssertUnwindSafe(|| unsafe {
-            let relay_world = WKContentWorld::pageWorld(mtm);
-            let relay_source = NSString::from_str(PAGE_WORLD_COMPATIBILITY_FILL_PROGRAM);
-            let relay_script =
-                WKUserScript::initWithSource_injectionTime_forMainFrameOnly_inContentWorld(
-                    WKUserScript::alloc(mtm),
-                    &relay_source,
-                    WKUserScriptInjectionTime::AtDocumentStart,
-                    true,
-                    &relay_world,
-                );
-            controller.addUserScript(&relay_script);
-            (relay_world, relay_script)
-        })) {
-            Ok(installed) => installed,
-            Err(_) => {
-                let _ = clear_semantic_runtime_controller(controller, handler_name, Some(&world));
-                return Err(());
-            }
-        };
     if channel.bind_world(&world).is_err() {
         let _ = clear_semantic_runtime_controller(controller, handler_name, Some(&world));
         return Err(());
@@ -1675,8 +1331,6 @@ fn install_semantic_runtime_epoch(
     Ok(SemanticRuntimeEpochRegistration {
         world,
         script,
-        page_relay_world,
-        page_relay_script,
         handler,
     })
 }
@@ -1812,7 +1466,7 @@ impl AgentSemanticRuntimeRegistration {
         // SAFETY: the marker above proves main-thread access; the retained
         // controller remains live and objc2 retains its script inventory.
         let scripts = unsafe { self.controller.userScripts() };
-        if scripts.count() != 2 {
+        if scripts.count() != 1 {
             return Err(());
         }
         let script = scripts.objectAtIndex(0);
@@ -1825,29 +1479,12 @@ impl AgentSemanticRuntimeRegistration {
                 script.isForMainFrameOnly(),
             )
         };
+        #[cfg(not(feature = "native-agentic-semantic-probe"))]
+        let source_mismatch = source.to_string() != SEMANTIC_RUNTIME_PROGRAM.source();
+        #[cfg(feature = "native-agentic-semantic-probe")]
+        let source_mismatch = source.to_string() != program_probe::source();
         if Retained::as_ptr(&script) != Retained::as_ptr(&active.script)
-            || source.to_string() != SEMANTIC_RUNTIME_PROGRAM.source()
-            || injection_time != WKUserScriptInjectionTime::AtDocumentStart
-            || !main_frame_only
-        {
-            return Err(());
-        }
-        let relay = scripts.objectAtIndex(1);
-        // SAFETY: the exact inventory count proves index one exists.
-        let (source, injection_time, main_frame_only) = unsafe {
-            (
-                relay.source(),
-                relay.injectionTime(),
-                relay.isForMainFrameOnly(),
-            )
-        };
-        // SAFETY: this stays on the main thread and returns WebKit's retained
-        // public page-world singleton for exact world identity checking.
-        let actual_page_world =
-            unsafe { WKContentWorld::pageWorld(MainThreadMarker::new().ok_or(())?) };
-        if Retained::as_ptr(&relay) != Retained::as_ptr(&active.page_relay_script)
-            || Retained::as_ptr(&active.page_relay_world) != Retained::as_ptr(&actual_page_world)
-            || source.to_string() != PAGE_WORLD_COMPATIBILITY_FILL_PROGRAM
+            || source_mismatch
             || injection_time != WKUserScriptInjectionTime::AtDocumentStart
             || !main_frame_only
         {
@@ -1895,6 +1532,260 @@ mod tests {
         SemanticObservationBudget, SemanticObservationId, SemanticObservationRequest,
         SemanticOrigin, SemanticRuntimeBudget, SemanticRuntimeFault, SemanticSnapshotGeneration,
     };
+
+    fn pending_action(handed_off: bool) -> (SemanticRuntimeChannelState, SemanticActionAttemptId) {
+        let native = crate::agent_context_port::WorkActionTask::native_for_test();
+        let invocation = encode_semantic_action_runtime_invocation_for_test(&native);
+        let attempt = invocation.attempt();
+        let mut state = SemanticRuntimeChannelState {
+            phase: DocumentPhase::Ready,
+            expected_view: Some(7),
+            active_world: Some(8),
+            ..SemanticRuntimeChannelState::default()
+        };
+        state
+            .dispatch_action(invocation, Box::new(|_| {}), Some(Box::new(|| true)))
+            .unwrap_or_else(|_| panic!("fixture admission"));
+        if handed_off {
+            state.on_pull(reply());
+        }
+        (state, attempt)
+    }
+
+    fn encode_semantic_action_runtime_invocation_for_test(
+        native: &zephium_agentic::SemanticActionNativeRequest,
+    ) -> SemanticActionRuntimeInvocation {
+        zephium_agentic::encode_semantic_action_runtime_invocation(native).unwrap()
+    }
+
+    #[cfg(feature = "native-agentic-semantic-probe")]
+    #[test]
+    fn url_drift_stops_existing_and_late_preparation_replies_but_keeps_original_terminal() {
+        for preparation_first in [false, true] {
+            let (mut state, attempt) = pending_action(true);
+            if preparation_first {
+                let actions = state.on_fill_preparation(reply());
+                assert!(actions.first_reply.is_none());
+                assert!(state.prepared_fill.is_some());
+            }
+            let actions = state.revoke_document_authority();
+            assert_eq!(actions.first_reply.is_some(), preparation_first);
+            assert!(actions.completion.is_none());
+            assert!(state.prepared_fill.is_none());
+            let late = state.on_fill_preparation(reply());
+            assert!(matches!(late.first_reply.unwrap().value, ReplyValue::Error));
+            assert!(late.completion.is_none());
+            assert!(state.poll_fill_preparation().first_reply.is_none());
+            assert!(state.draining_action(attempt));
+            assert!(matches!(
+                state
+                    .on_result(b"E2:applied_unverified", reply())
+                    .completion,
+                Some(CompletionAction::Action {
+                    outcome: Err(AgentSemanticActionRuntimeFailure::Result(_)),
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn url_drift_revokes_admission_but_drains_only_the_original_handed_off_action() {
+        for handed_off in [false, true] {
+            let (mut state, attempt) = pending_action(handed_off);
+            let actions = state.revoke_document_authority();
+            assert_eq!(state.phase, DocumentPhase::AuthorityRevoked);
+            assert_eq!(state.draining_action(attempt), handed_off);
+            assert_eq!(actions.completion.is_some(), !handed_off);
+            assert_eq!(
+                state.admission_failure(),
+                Some(AgentSemanticRuntimeDispatchError::Retired)
+            );
+            assert_eq!(
+                &*success_value(state.on_pull(reply()).first_reply.unwrap()),
+                SEMANTIC_RUNTIME_CHANNEL_STOP
+            );
+            if handed_off {
+                assert!(state.revoke_document_authority().completion.is_none());
+                let mut actions = state.on_result(b"E2:applied_unverified", reply());
+                assert!(matches!(
+                    actions.completion.take(),
+                    Some(CompletionAction::Action {
+                        outcome: Err(AgentSemanticActionRuntimeFailure::Result(
+                            SemanticActionRuntimeResultError::Runtime(
+                                zephium_agentic::SemanticActionRuntimeFault::AppliedUnverified
+                            )
+                        )),
+                        ..
+                    })
+                ));
+                assert_eq!(
+                    &*success_value(actions.first_reply.unwrap()),
+                    SEMANTIC_RUNTIME_CHANNEL_STOP
+                );
+                assert!(!state.draining_action(attempt));
+                assert_eq!(state.phase, DocumentPhase::AuthorityRevoked);
+                assert!(state.pending.is_none());
+                assert_eq!(
+                    state.admission_failure(),
+                    Some(AgentSemanticRuntimeDispatchError::Retired)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn uncertain_terminal_retains_only_exact_passive_lifetime_across_url_drift() {
+        for terminal in [
+            b"E2:applied_unverified".as_slice(),
+            b"E2:applied_unverified_logical_editor",
+            b"E2:applied_unverified_postcondition",
+        ] {
+            for drift_first in [false, true] {
+                let (mut state, attempt) = pending_action(true);
+                if drift_first {
+                    state.revoke_document_authority();
+                    assert!(!state.settling_action(attempt));
+                }
+                let result = state.on_result(terminal, reply());
+                assert!(result.completion.is_some());
+                assert!(state.settling_action(attempt));
+                assert!(!state
+                    .settling_action(SemanticActionAttemptId::new(attempt.get() + 1).unwrap()));
+                for _ in 0..2 {
+                    let revoked = state.revoke_document_authority();
+                    assert!(revoked.completion.is_none());
+                    assert!(state.revoked_settling_action(attempt));
+                    assert!(!state.draining_action(attempt));
+                    assert_eq!(
+                        state.admission_failure(),
+                        Some(AgentSemanticRuntimeDispatchError::Retired)
+                    );
+                    assert_eq!(
+                        &*success_value(state.on_pull(reply()).first_reply.unwrap()),
+                        SEMANTIC_RUNTIME_CHANNEL_STOP
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn passive_lifetime_dies_with_document_controls_or_malformed_terminal() {
+        for edge in 0..5 {
+            let (mut state, attempt) = pending_action(true);
+            state.on_result(b"E2:applied_unverified", reply());
+            state.revoke_document_authority();
+            assert!(state.revoked_settling_action(attempt));
+            let result = match edge {
+                0 => state.cancel(),
+                1 => state.begin_document_load(),
+                2 => state.renderer_lost(),
+                3 => state.retire(),
+                _ => state.on_result(b"E2:applied_unverified", reply()),
+            };
+            assert!(
+                result.completion.is_none(),
+                "terminal must never be delivered twice"
+            );
+            assert!(!state.settling_action(attempt));
+            assert!(!state.revoked_settling_action(attempt));
+            assert!(state.settling_action.is_none());
+        }
+        let (mut state, attempt) = pending_action(true);
+        state.revoke_document_authority();
+        state.on_result(b"malformed", reply());
+        assert!(!state.settling_action(attempt));
+    }
+
+    #[test]
+    fn revoked_action_missing_terminal_times_out_exactly_and_stronger_edges_consume_it_once() {
+        for edge in 0..5 {
+            let (mut state, attempt) = pending_action(true);
+            state.revoke_document_authority();
+            let (unmatched, matched) =
+                state.timeout_action(SemanticActionAttemptId::new(attempt.get() + 1).unwrap());
+            assert!(!matched);
+            assert!(unmatched.completion.is_none());
+            assert!(state.draining_action(attempt));
+            let actions = match edge {
+                0 => {
+                    let (actions, matched) = state.timeout_action(attempt);
+                    assert!(matched);
+                    actions
+                }
+                1 => state.cancel(),
+                2 => state.begin_document_load(),
+                3 => state.renderer_lost(),
+                _ => state.retire(),
+            };
+            let Some(CompletionAction::Action {
+                outcome: Err(failure),
+                ..
+            }) = actions.completion
+            else {
+                panic!("original failure");
+            };
+            assert!(matches!(
+                (edge, failure),
+                (0, AgentSemanticActionRuntimeFailure::TimedOut)
+                    | (1, AgentSemanticActionRuntimeFailure::Cancelled)
+                    | (2, AgentSemanticActionRuntimeFailure::DocumentReplaced)
+                    | (3, AgentSemanticActionRuntimeFailure::RendererLost)
+                    | (4, AgentSemanticActionRuntimeFailure::Retired)
+            ));
+            assert!(!state.draining_action(attempt));
+            assert!(state
+                .on_result(b"E2:applied_unverified", reply())
+                .completion
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn url_drift_consumes_inflight_observation_and_never_reopens_on_action_success() {
+        let (mut state, _) = pending_action(true);
+        let Some(PendingInvocation::Action {
+            invocation: action, ..
+        }) = &state.pending
+        else {
+            panic!("action");
+        };
+        let wire = serde_json::json!({"v":1,"a":action.attempt().get(),"i":action.checkpoint_invocation().get(),"g":action.checkpoint_snapshot().get(),"r":"form","x":10,"y":20,"w":80,"h":30,"vw":800,"vh":600,"px":50,"py":35,"d":0,"b":"fixed_semantic_recipe"}).to_string();
+        state.revoke_document_authority();
+        let actions = state.on_result(wire.as_bytes(), reply());
+        assert!(matches!(
+            actions.completion,
+            Some(CompletionAction::Action { outcome: Ok(_), .. })
+        ));
+        assert_eq!(state.phase, DocumentPhase::AuthorityRevoked);
+        assert_eq!(
+            state.admission_failure(),
+            Some(AgentSemanticRuntimeDispatchError::Retired)
+        );
+
+        let mut state = SemanticRuntimeChannelState {
+            phase: DocumentPhase::Ready,
+            expected_view: Some(7),
+            active_world: Some(8),
+            ..SemanticRuntimeChannelState::default()
+        };
+        state
+            .dispatch_observation(
+                invocation(1, SemanticSnapshotGeneration::INITIAL),
+                Box::new(|_| {}),
+            )
+            .unwrap_or_else(|_| panic!("observation"));
+        state.on_pull(reply());
+        assert!(matches!(
+            state.revoke_document_authority().completion,
+            Some(CompletionAction::Observation {
+                outcome: Err(AgentSemanticRuntimeFailure::DocumentReplaced),
+                ..
+            })
+        ));
+        assert!(state.pending.is_none());
+    }
 
     #[test]
     fn retained_action_rechecks_authority_at_page_pull_before_releasing_recipe() {
@@ -1944,61 +1835,26 @@ mod tests {
     }
 
     #[test]
-    fn owned_view_fill_shim_is_fixed_bounded_and_has_no_native_authority() {
-        let source = PAGE_WORLD_COMPATIBILITY_FILL_PROGRAM;
-        assert!(source.len() <= 32 * 1024);
-        assert!(source.contains("HTMLInputElement.prototype"));
-        assert!(source.contains("HTMLTextAreaElement.prototype"));
-        assert!(source.contains("MutationRecord.prototype"));
-        assert!(source.contains("read(mutationRecordTargetGet, record)"));
-        assert!(source.contains("Document.prototype.getElementById"));
-        assert!(source.contains("getOwnDescriptor(inputPrototype, 'labels')"));
-        assert!(source.contains("getOwnDescriptor(textareaPrototype, 'labels')"));
-        assert!(source.contains("'aria-label', 'placeholder', 'title'"));
-        assert!(source.contains("[256, 256, 256, MAX_ATTRIBUTE_BYTES"));
-        assert!(source.contains("attr(target, 'aria-labelledby')"));
-        assert!(source.contains("contains(joined, 'verification code')"));
-        assert!(source.contains("contains(joined, 'access token')"));
-        assert!(source.contains("contains(joined, 'card number')"));
-        assert!(source.contains("credentialLike(target, isInput) !== false"));
-        assert_eq!(source.matches("credentialLike(target, isInput)").count(), 2);
-        assert!(source.contains("MAX_METADATA_ID_BYTES = 1024"));
-        assert!(source.contains("MAX_LABEL_NODES = 128"));
-        assert!(source.contains("MAX_LABELS = 4"));
-        assert!(source.contains("beforeinput"));
-        assert!(source.contains("insertReplacementText"));
+    fn owned_view_fill_is_private_isolated_recipe_without_page_entry_point() {
+        let source = SEMANTIC_RUNTIME_PROGRAM.source();
+        assert!(source.contains("function runFixedFill(target, descriptor, request)"));
+        assert!(source.contains("resolveKeyAtGeneration(request.t, request.g) !== target"));
+        assert!(
+            source.contains("descriptorMatches(request.f, runtimeDescriptor(target, request.g))")
+        );
+        assert!(source.contains("const fixedDispatchEvent = EventTarget.prototype.dispatchEvent"));
         for forbidden in [
+            "CustomEvent",
+            "addEventListener",
+            "PAGE_RELAY",
             "querySelector",
             "eval(",
-            "new Function",
-            "webkit.messageHandlers",
-            "fetch(",
-            "XMLHttpRequest",
-            "WebSocket",
-            "localStorage",
-            "sessionStorage",
-            ".click(",
-            ".focus(",
         ] {
             assert!(
                 !source.contains(forbidden),
-                "forbidden fill shim surface: {forbidden}"
+                "forbidden isolated fill surface: {forbidden}"
             );
         }
-        assert_eq!(
-            source.matches("data-zephium-fill-relay-command-v1").count(),
-            1
-        );
-        assert_eq!(
-            source
-                .matches("data-zephium-fill-relay-terminal-v1")
-                .count(),
-            1
-        );
-        assert_eq!(
-            source.matches("data-zephium-fill-relay-ready-v1").count(),
-            1
-        );
     }
     use zephium_core::ids::ProfileId;
 

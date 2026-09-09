@@ -44,6 +44,7 @@ impl WorkResourceGuard {
             return Err(ContextPortFailure::ResourceExhausted);
         }
         state.action = Some(native.attempt());
+        state.action_drain_closed = false;
         state.observed = None;
         Ok(())
     }
@@ -58,6 +59,27 @@ impl WorkResourceGuard {
             && self.state.lock().is_ok_and(|state| {
                 !state.uncertain
                     && state.phase == Phase::Leased
+                    && state.retirement_delivery.is_none()
+                    && state.lease.as_ref() == Some(lease)
+                    && state.action == Some(attempt)
+                    && state.reads == 0
+                    && state.callbacks == 0
+                    && state.navigation.is_none()
+                    && now < lease.deadline()
+            })
+    }
+    /// Ownership of the original callback only, including after quarantine.
+    /// This must never be used for action, read, or preparation admission.
+    pub(crate) fn action_drain_current(
+        &self,
+        lease: &WorkBrowserExecutionLease,
+        attempt: SemanticActionAttemptId,
+        now: AgentPolicyInstant,
+    ) -> bool {
+        self.port_open()
+            && self.state.lock().is_ok_and(|state| {
+                matches!(state.phase, Phase::Leased | Phase::Quarantined)
+                    && !state.action_drain_closed
                     && state.retirement_delivery.is_none()
                     && state.lease.as_ref() == Some(lease)
                     && state.action == Some(attempt)

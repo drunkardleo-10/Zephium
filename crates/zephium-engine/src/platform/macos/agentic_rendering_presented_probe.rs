@@ -379,6 +379,94 @@ impl Drop for PresentedScope<'_> {
     }
 }
 
+/// Fixed local AX experiment only; reuses the same no-key/no-input presentation
+/// proof and restoration scope as the rendering experiment, never production UI.
+pub(super) fn with_ax_fixture(
+    runtime: &ProbeRuntime<'_, '_>,
+    host: &NSView,
+    body: impl FnOnce(&ProbeRuntime<'_, '_>) -> Result<(), &'static str>,
+) -> Result<(), &'static str> {
+    let ProbeNativeState::Hidden(original) = runtime.native_guard else {
+        return Err("ax_original_guard");
+    };
+    original.sample();
+    if runtime.failed()
+        || original.window.canBecomeKeyWindow()
+        || original.window.canBecomeMainWindow()
+    {
+        return Err("ax_presented_admission");
+    }
+    let mtm = MainThreadMarker::new().ok_or("ax_main_thread")?;
+    let screen = NSScreen::mainScreen(mtm).ok_or("ax_screen")?.visibleFrame();
+    let frame = centered_frame(screen)?;
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(10))
+        .ok_or("ax_deadline")?;
+    let scope = PresentedScope {
+        window: original.window,
+        page: original.page,
+        host,
+        original_window_frame: original.window.frame(),
+        original_host_frame: host.frame(),
+        original_page_frame: original.page.frame(),
+        original_ignores_mouse: original.window.ignoresMouseEvents(),
+        original_opaque: original.window.isOpaque(),
+    };
+    let outcome = (|| {
+        scope.window.setIgnoresMouseEvents(true);
+        scope.window.setOpaque(true);
+        scope.window.setFrame_display(frame, false);
+        scope
+            .host
+            .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), frame.size));
+        scope.page.setFrame(viewport_frame());
+        scope.page.setHidden(false);
+        scope.window.orderFrontRegardless();
+        let presented = ProbeNativeState::Presented(PresentedStateGuard {
+            app: original.app,
+            window: original.window,
+            page: original.page,
+            first_responder: original.first_responder,
+            expected_window_frame: admit_actual_frame(scope.window.frame(), screen)?,
+            deadline,
+            require_visible_pixels: Cell::new(false),
+            exact_page_responder_observed: Cell::new(false),
+            appkit_events_dispatched: Cell::new(0),
+            failure: Cell::new(None),
+        });
+        let active = ProbeRuntime {
+            callbacks: runtime.callbacks,
+            run_loop: runtime.run_loop,
+            native_guard: &presented,
+        };
+        let ProbeNativeState::Presented(guard) = &presented else {
+            return Err("ax_presented_guard");
+        };
+        presented.sample();
+        while !active.failed() && !guard.has_visible_pixels() && Instant::now() < deadline {
+            active.pump();
+        }
+        guard.require_visible_pixels.set(true);
+        presented.sample();
+        if active.failed() {
+            return Err(active.failure_stage().unwrap_or("ax_presented_unavailable"));
+        }
+        let result = body(&active);
+        presented.sample();
+        if active.failed() {
+            return Err(active.failure_stage().unwrap_or("ax_presented_failed"));
+        }
+        result
+    })();
+    let restoration = scope.hide();
+    original.sample();
+    restoration?;
+    if runtime.failed() {
+        return Err(runtime.failure_stage().unwrap_or("ax_hidden_restore"));
+    }
+    outcome
+}
+
 fn centered_frame(visible: NSRect) -> Result<NSRect, &'static str> {
     if !visible.origin.x.is_finite()
         || !visible.origin.y.is_finite()

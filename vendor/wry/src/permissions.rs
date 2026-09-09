@@ -35,6 +35,12 @@ pub enum PermissionKind {
   /// - **macOS / Linux / Android / iOS**: Not yet supported by platform backends.
   ClipboardRead,
   /// Display capture permission (for getDisplayMedia).
+  ///
+  /// ## Platform-specific
+  ///
+  /// - **macOS / iOS**: Not routed by this backend. WebKit's public camera and
+  ///   microphone delegate does not govern display capture. Returning `Deny`
+  ///   from a permission handler does not prevent the system display picker.
   DisplayCapture,
   /// Midi access permission.
   ///

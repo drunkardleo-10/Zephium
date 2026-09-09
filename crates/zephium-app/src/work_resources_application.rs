@@ -415,6 +415,8 @@ impl RetainedWork {
                     // Recovery inventory needs the existing explicit recovery
                     // workflow, not a new resource coordinator clearing debt.
                     self.inventory = records;
+                    #[cfg(feature = "work-execution-probe")]
+                    self.public_claim_refusal_diagnostic();
                     return Err(AgentWorkJournalError::Conflict);
                 }
                 self.incarnation = Some(owner);
