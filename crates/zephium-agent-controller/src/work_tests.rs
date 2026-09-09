@@ -448,7 +448,15 @@ fn progressive_extraction_requires_baseline_read_but_not_navigation_authority() 
         Arc::new(Audit(Fault::None)),
         Box::new(task),
     );
-    assert!(admitted.is_ok());
+    let (controller, _) = admitted.expect("progressive extraction is admitted");
+    assert!(
+        controller
+            .state
+            .as_ref()
+            .expect("admitted controller owns work state")
+            .requires_decision_budget(),
+        "progressive extraction must receive the same bounded decision guidance as navigation"
+    );
 }
 
 #[test]

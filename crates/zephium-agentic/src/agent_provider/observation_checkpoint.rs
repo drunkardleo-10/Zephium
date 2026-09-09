@@ -14,7 +14,6 @@ pub struct AgentProviderObservationCheckpoint {
     config: AgentProviderCallConfig,
     baseline: SemanticObservationAcknowledgement,
     scope: AgentBrowserScopeProposal,
-    navigation_progress: bool,
     inspections: Option<AgentInspectionProgress>,
 }
 
@@ -36,9 +35,9 @@ impl AgentProviderContinuation {
             || observation.frames().len() != 1
             || self
                 .transcript
-                .navigation_checkpoint
+                .inspection_checkpoint
                 .as_ref()
-                .and_then(|checkpoint| checkpoint.inspections.as_ref())
+                .map(|checkpoint| &checkpoint.progress)
                 .is_some_and(|progress| !progress.matches(observation))
         {
             return Err(AgentProviderContinuationError::Baseline);
@@ -48,6 +47,16 @@ impl AgentProviderContinuation {
             .snapshot_scope
             .as_ref()
             .ok_or(AgentProviderContinuationError::Scope)?;
+        if self
+            .transcript
+            .inspection_checkpoint
+            .as_ref()
+            .is_some_and(|checkpoint| checkpoint.progress.repeats(observation, scope))
+        {
+            return Ok(AgentProviderObservationResolution::Refused(Box::new(
+                AgentProviderObservationRefusal(self),
+            )));
+        }
         let expansion = match scope.clone() {
             AgentBrowserScopeProposal::Initial => None,
             AgentBrowserScopeProposal::Region(target) => {
@@ -86,6 +95,7 @@ impl AgentProviderContinuation {
                 Ok(_) => {}
                 Err(
                     crate::SemanticObservationError::ScopeIncompatible
+                    | crate::SemanticObservationError::RepeatedScope
                     | crate::SemanticObservationError::Reference(
                         crate::SemanticReferenceError::Unknown,
                     ),
@@ -98,15 +108,17 @@ impl AgentProviderContinuation {
             }
         }
         let scope = scope.clone();
-        let navigation = self.transcript.navigation_checkpoint;
+        let inspections = self
+            .transcript
+            .inspection_checkpoint
+            .map(|checkpoint| checkpoint.progress);
         Ok(AgentProviderObservationResolution::Capture(Box::new(
             AgentProviderObservationCheckpoint {
                 prior_call: self.prior_call,
                 config: self.config,
                 baseline: self.baseline,
                 scope,
-                navigation_progress: navigation.is_some(),
-                inspections: navigation.and_then(|checkpoint| checkpoint.inspections),
+                inspections,
             },
         )))
     }
@@ -168,10 +180,11 @@ impl AgentProviderObservationRefusal {
         // unnecessary for reporting a rejected operation and may contain refs
         // from previous captures. The failed proposal retains its exact ID and
         // provider-authored replay. Model-call budgets are never reset here.
-        let transcript = AgentProviderTranscript::try_initial_with_navigation_checkpoint(
+        let transcript = AgentProviderTranscript::try_initial_with_checkpoints(
             transcript.objective,
             payload,
             transcript.navigation_checkpoint,
+            transcript.inspection_checkpoint,
         )
         .ok_or(AgentProviderContinuationError::TranscriptLimit)?;
         Ok((call, transcript.try_bind(correlation, result)?))
@@ -206,12 +219,13 @@ impl AgentProviderObservationCheckpoint {
             return Err(crate::AgentPolicyError::Authority.into());
         }
         let inspections = self.inspections.take();
-        let navigation_progress = self.navigation_progress;
         self.validate_successor(previous, current, request, &config)
             .map_err(|_| crate::AgentPolicyError::Authority)?;
-        let inspections = navigation_progress
-            .then(|| AgentInspectionProgress::record(inspections, previous, current))
-            .transpose()?;
+        let inspections = Some(AgentInspectionProgress::record(
+            inspections,
+            previous,
+            current,
+        )?);
         crate::AgentPreparedObservationRequest::try_for_config_with_inspections(
             policy,
             request,
@@ -426,6 +440,27 @@ impl AgentInspectionProgress {
             && self.captures.last().is_some_and(|capture| {
                 capture.snapshot == observation.frames()[0].generation().get()
             })
+    }
+
+    fn repeats(
+        &self,
+        observation: &SemanticObservation,
+        proposal: &AgentBrowserScopeProposal,
+    ) -> bool {
+        let AgentBrowserScopeProposal::Subtree(target) = proposal else {
+            return false;
+        };
+        let Some(key) = observation.frames()[0]
+            .nodes()
+            .iter()
+            .find(|node| node.reference() == *target)
+            .map(|node| node.key())
+        else {
+            return false;
+        };
+        self.captures
+            .iter()
+            .any(|capture| capture.scope == "subtree" && capture.key == Some(key))
     }
 
     pub(super) fn record(

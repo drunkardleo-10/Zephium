@@ -845,17 +845,16 @@ impl AgentProviderCallConfig {
         self
     }
 
-    /// Freezes the host's total model-call allowance for one discovery run.
+    /// Freezes the host's total model-call allowance for one bounded workflow.
     /// Call identities advance once per attempt; the last call is reserved for
     /// terminal mapping. This only narrows decisions, never policy budgets or
-    /// the task's independent extraction/navigation preconditions.
-    pub fn with_discovery_decision_budget(
+    /// the task's independent extraction, action, or navigation preconditions.
+    pub fn with_decision_budget(
         mut self,
         first_call: AgentModelCallId,
         max_calls: u8,
     ) -> Result<Self, AgentProviderContractError> {
-        if self.tools != BrowserToolProfile::NavigationExtraction
-            || self.provider() != AgentProviderKind::OpenAiResponses
+        if self.provider() != AgentProviderKind::OpenAiResponses
             || self.input_accounting
                 != AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation
         {

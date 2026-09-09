@@ -78,6 +78,8 @@ pub(super) const MAX_AGENT_PROVIDER_NAVIGATION_CHECKPOINT_BYTES: usize =
         + crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS
             * crate::semantic::MAX_SEMANTIC_LINK_DESTINATION_BYTES
         + 2048;
+/// Maximum content-free same-document capture history supplied to a model.
+pub(super) const MAX_AGENT_PROVIDER_INSPECTION_CHECKPOINT_BYTES: usize = 4 * 1024;
 
 const _: () = {
     assert!(MAX_AGENT_PROVIDER_REQUEST_BYTES <= u32::MAX as usize);
@@ -1596,9 +1598,10 @@ impl AgentPreparedObservationRequest {
         })
     }
 
-    /// Existing structured discovery accounting is the sole currently qualified
-    /// host-progress delivery path. Other provider adapters keep their explicit
-    /// navigation refusal instead of silently dropping or undercounting history.
+    /// Provider-exact OpenAI accounting is the qualified host-progress delivery
+    /// path for both routed navigation and same-document inspection. Other
+    /// provider/accounting adapters refuse instead of silently dropping or
+    /// undercounting capture history.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn try_for_config_with_inspections(
         policy: &mut AgentRunPolicy,
@@ -1742,20 +1745,19 @@ impl AgentPreparedObservationRequest {
         config: AgentProviderCallConfig,
         inspections: Option<super::continuation::AgentInspectionProgress>,
     ) -> Result<Self, AgentProviderRequestError> {
-        let mut navigation_checkpoint = policy
+        let navigation_checkpoint = policy
             .provider_navigation_checkpoint(call_request, observation)?
             .map(encode_navigation_checkpoint)
             .transpose()?;
-        if let Some(inspections) = inspections {
-            let checkpoint = navigation_checkpoint
-                .as_mut()
-                .ok_or(AgentProviderRequestError::Encoding)?;
-            checkpoint.text.push_str(&inspections.encode(observation)?);
-            if checkpoint.text.len() > MAX_AGENT_PROVIDER_NAVIGATION_CHECKPOINT_BYTES {
-                return Err(AgentProviderRequestError::Encoding);
-            }
-            checkpoint.inspections = Some(inspections);
-        }
+        let inspection_checkpoint = inspections
+            .map(|progress| {
+                let text = progress.encode(observation)?;
+                if text.len() > MAX_AGENT_PROVIDER_INSPECTION_CHECKPOINT_BYTES {
+                    return Err(AgentProviderRequestError::Encoding);
+                }
+                Ok(AgentProviderInspectionContext { text, progress })
+            })
+            .transpose()?;
         let semantic_payload_tokens =
             AgentProviderInputTokenCount::from_measurement(payload.token_measurement());
         let body = encode_openai_observation_body(
@@ -1763,6 +1765,9 @@ impl AgentPreparedObservationRequest {
             objective.as_str(),
             payload.as_str(),
             navigation_checkpoint
+                .as_ref()
+                .map(|checkpoint| checkpoint.text.as_str()),
+            inspection_checkpoint
                 .as_ref()
                 .map(|checkpoint| checkpoint.text.as_str()),
         )?;
@@ -1787,12 +1792,12 @@ impl AgentPreparedObservationRequest {
         )?;
         let call = AgentProviderCallIdentity::from_admission(&admission);
         let (semantic_content, semantic_stats, delivery) = payload.into_provider_parts();
-        let continuation_transcript =
-            AgentProviderTranscript::try_initial_with_navigation_checkpoint(
-                objective.shared_content(),
-                semantic_content,
-                navigation_checkpoint,
-            );
+        let continuation_transcript = AgentProviderTranscript::try_initial_with_checkpoints(
+            objective.shared_content(),
+            semantic_content,
+            navigation_checkpoint,
+            inspection_checkpoint,
+        );
         let request = AgentProviderRequest {
             call,
             config,
@@ -3755,7 +3760,11 @@ const NAVIGATION_CHECKPOINT_INSTRUCTIONS: &str = concat!(
 pub(super) struct AgentProviderNavigationContext {
     pub(super) binding: crate::agent_policy::AgentNavigationCheckpointBinding,
     pub(super) text: String,
-    pub(super) inspections: Option<super::continuation::AgentInspectionProgress>,
+}
+
+pub(super) struct AgentProviderInspectionContext {
+    pub(super) text: String,
+    pub(super) progress: super::continuation::AgentInspectionProgress,
 }
 
 fn encode_navigation_checkpoint(
@@ -3832,7 +3841,6 @@ fn encode_navigation_checkpoint(
     Ok(AgentProviderNavigationContext {
         binding: checkpoint.binding(),
         text: encoded,
-        inspections: None,
     })
 }
 
@@ -3851,7 +3859,7 @@ fn encode_openai_body(
     objective: &str,
     semantic: &str,
 ) -> Result<Vec<u8>, AgentProviderRequestError> {
-    encode_openai_observation_body(config, objective, semantic, None)
+    encode_openai_observation_body(config, objective, semantic, None, None)
 }
 
 /// Replace no evidence and retain no stale budget replay. Derive the current
@@ -3910,6 +3918,7 @@ fn encode_openai_observation_body(
     objective: &str,
     semantic: &str,
     navigation_checkpoint: Option<&str>,
+    inspection_checkpoint: Option<&str>,
 ) -> Result<Vec<u8>, AgentProviderRequestError> {
     if config.provider() != AgentProviderKind::OpenAiResponses {
         return Err(AgentProviderContractError::ProviderKind.into());
@@ -3938,6 +3947,9 @@ fn encode_openai_observation_body(
     if let Some(checkpoint) = navigation_checkpoint {
         input.push(openai_text_message("developer", checkpoint));
     }
+    if let Some(checkpoint) = inspection_checkpoint {
+        input.push(openai_text_message("developer", checkpoint));
+    }
     let wire = OpenAiRequestWire {
         model: config.model().as_str(),
         instructions: AGENT_BROWSER_INSTRUCTIONS_V1,
@@ -3959,7 +3971,7 @@ fn encode_openai_observation_body(
     encode_bounded_provider_body(&wire)
 }
 
-fn encode_openai_continuation_body(
+pub(in crate::agent_provider) fn encode_openai_continuation_body(
     config: &AgentProviderCallConfig,
     transcript: &AgentProviderBoundTranscript,
 ) -> Result<Vec<u8>, AgentProviderRequestError> {
@@ -3967,7 +3979,8 @@ fn encode_openai_continuation_body(
         return Err(AgentProviderContractError::ProviderKind.into());
     }
     let input_items = transcript.turns().try_fold(
-        2 + usize::from(transcript.navigation_checkpoint().is_some()),
+        2 + usize::from(transcript.navigation_checkpoint().is_some())
+            + usize::from(transcript.inspection_checkpoint().is_some()),
         |total, turn| {
             total
                 .checked_add(openai_turn_input_items(turn.correlation())?)
@@ -3997,6 +4010,12 @@ fn encode_openai_continuation_body(
         },
     ));
     if let Some(checkpoint) = transcript.navigation_checkpoint() {
+        input.push(OpenAiContinuationInputWire::Message(openai_text_message(
+            "developer",
+            checkpoint,
+        )));
+    }
+    if let Some(checkpoint) = transcript.inspection_checkpoint() {
         input.push(OpenAiContinuationInputWire::Message(openai_text_message(
             "developer",
             checkpoint,
@@ -4063,7 +4082,8 @@ fn encode_openai_extraction_body(
         return Err(AgentProviderRequestError::Encoding);
     }
     let input_items = transcript.turns().try_fold(
-        2 + usize::from(transcript.navigation_checkpoint().is_some()),
+        2 + usize::from(transcript.navigation_checkpoint().is_some())
+            + usize::from(transcript.inspection_checkpoint().is_some()),
         |total, turn| {
             total
                 .checked_add(openai_turn_input_items(turn.correlation())?)
@@ -4093,6 +4113,12 @@ fn encode_openai_extraction_body(
         },
     ));
     if let Some(checkpoint) = transcript.navigation_checkpoint() {
+        input.push(OpenAiContinuationInputWire::Message(openai_text_message(
+            "developer",
+            checkpoint,
+        )));
+    }
+    if let Some(checkpoint) = transcript.inspection_checkpoint() {
         input.push(OpenAiContinuationInputWire::Message(openai_text_message(
             "developer",
             checkpoint,
@@ -4147,11 +4173,14 @@ fn encode_openai_screenshot_continuation_body(
     if transcript.navigation_checkpoint().is_some() {
         return Err(AgentProviderRequestError::Encoding);
     }
-    let prior_input_items = transcript.turns().iter().try_fold(2_usize, |total, turn| {
-        total
-            .checked_add(openai_turn_input_items(turn.correlation())?)
-            .ok_or(AgentProviderRequestError::Encoding)
-    })?;
+    let prior_input_items = transcript.turns().iter().try_fold(
+        2 + usize::from(transcript.inspection_checkpoint().is_some()),
+        |total, turn| {
+            total
+                .checked_add(openai_turn_input_items(turn.correlation())?)
+                .ok_or(AgentProviderRequestError::Encoding)
+        },
+    )?;
     let input_items = prior_input_items
         .checked_add(openai_turn_input_items(continuation.correlation())?)
         .ok_or(AgentProviderRequestError::Encoding)?;
@@ -4177,6 +4206,12 @@ fn encode_openai_screenshot_continuation_body(
             }],
         },
     ));
+    if let Some(checkpoint) = transcript.inspection_checkpoint() {
+        input.push(OpenAiContinuationInputWire::Message(openai_text_message(
+            "developer",
+            checkpoint,
+        )));
+    }
     for turn in transcript.turns() {
         let correlation = turn.correlation();
         push_openai_replay_items(&mut input, correlation)?;
@@ -5692,35 +5727,26 @@ mod tests {
     }
 
     #[test]
-    fn discovery_decision_budget_is_current_bounded_and_reserves_mapping() {
+    fn decision_budget_is_current_bounded_and_reserves_mapping() {
         let first = crate::AgentModelCallId::new(41).unwrap();
         let mut base = openai_config(128)
             .restrict_to_navigation_and_extraction()
             .with_baseline_read()
             .with_progressive_observation();
-        assert!(base
-            .clone()
-            .with_discovery_decision_budget(first, 5)
-            .is_err());
+        assert!(base.clone().with_decision_budget(first, 5).is_err());
         base.input_accounting = super::super::AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation;
+        assert!(base.clone().with_decision_budget(first, 1).is_err());
         assert!(base
             .clone()
-            .with_discovery_decision_budget(first, 1)
+            .with_decision_budget(crate::AgentModelCallId::new(u64::MAX).unwrap(), 2)
             .is_err());
+        let config = base.clone().with_decision_budget(first, 5).unwrap();
         assert!(base
             .clone()
-            .with_discovery_decision_budget(crate::AgentModelCallId::new(u64::MAX).unwrap(), 2)
-            .is_err());
-        let config = base
-            .clone()
-            .with_discovery_decision_budget(first, 5)
-            .unwrap();
-        assert_ne!(
-            config,
-            base.clone()
-                .with_discovery_decision_budget(first, 4)
-                .unwrap()
-        );
+            .restrict_to_extraction()
+            .with_decision_budget(first, 5)
+            .is_ok());
+        assert_ne!(config, base.clone().with_decision_budget(first, 4).unwrap());
         for (id, remaining) in [(41, 4), (42, 3), (43, 2), (44, 1)] {
             let body = encode_openai_body(&config, "objective", "current evidence").unwrap();
             let original: Value = serde_json::from_slice(&body).unwrap();
@@ -6236,7 +6262,7 @@ mod tests {
         let default = encode_openai_body(&config, objective, semantic).unwrap();
         assert_eq!(
             default,
-            encode_openai_observation_body(&config, objective, semantic, None).unwrap()
+            encode_openai_observation_body(&config, objective, semantic, None, None).unwrap()
         );
         let mut digests = Vec::new();
         for context in [
@@ -6248,7 +6274,7 @@ mod tests {
                 call: provider_call_identity(),
                 config: config.clone(),
                 endpoint: AgentProviderEndpoint::OpenAiResponses,
-                body: encode_openai_observation_body(&config, objective, semantic, context)
+                body: encode_openai_observation_body(&config, objective, semantic, context, None)
                     .unwrap(),
             };
             let body: Value = serde_json::from_slice(request.body()).unwrap();

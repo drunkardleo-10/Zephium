@@ -70,6 +70,7 @@ pub(super) struct AgentProviderTranscript {
     objective: Arc<str>,
     initial_observation: String,
     navigation_checkpoint: Option<super::request::AgentProviderNavigationContext>,
+    inspection_checkpoint: Option<super::request::AgentProviderInspectionContext>,
     turns: Vec<AgentProviderTranscriptTurn>,
     retained_bytes: usize,
 }
@@ -93,19 +94,24 @@ pub(super) struct AgentProviderBoundTranscript {
 
 impl AgentProviderTranscript {
     pub(super) fn try_initial(objective: Arc<str>, initial_observation: String) -> Option<Self> {
-        Self::try_initial_with_navigation_checkpoint(objective, initial_observation, None)
+        Self::try_initial_with_checkpoints(objective, initial_observation, None, None)
     }
 
-    pub(super) fn try_initial_with_navigation_checkpoint(
+    pub(super) fn try_initial_with_checkpoints(
         objective: Arc<str>,
         initial_observation: String,
         navigation_checkpoint: Option<super::request::AgentProviderNavigationContext>,
+        inspection_checkpoint: Option<super::request::AgentProviderInspectionContext>,
     ) -> Option<Self> {
         if objective.len() > super::MAX_AGENT_PROVIDER_OBJECTIVE_BYTES
             || initial_observation.len() > MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES
             || navigation_checkpoint.as_ref().is_some_and(|checkpoint| {
                 checkpoint.text.len()
                     > super::request::MAX_AGENT_PROVIDER_NAVIGATION_CHECKPOINT_BYTES
+            })
+            || inspection_checkpoint.as_ref().is_some_and(|checkpoint| {
+                checkpoint.text.len()
+                    > super::request::MAX_AGENT_PROVIDER_INSPECTION_CHECKPOINT_BYTES
             })
         {
             return None;
@@ -117,6 +123,11 @@ impl AgentProviderTranscript {
                 navigation_checkpoint
                     .as_ref()
                     .map_or(0, |checkpoint| checkpoint.text.len()),
+            )?
+            .checked_add(
+                inspection_checkpoint
+                    .as_ref()
+                    .map_or(0, |checkpoint| checkpoint.text.len()),
             )?;
         if retained_bytes > MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES {
             return None;
@@ -125,6 +136,7 @@ impl AgentProviderTranscript {
             objective,
             initial_observation,
             navigation_checkpoint,
+            inspection_checkpoint,
             turns: Vec::new(),
             retained_bytes,
         })
@@ -188,6 +200,12 @@ impl AgentProviderTranscript {
             .map(|checkpoint| checkpoint.text.as_str())
     }
 
+    pub(super) fn inspection_checkpoint(&self) -> Option<&str> {
+        self.inspection_checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.text.as_str())
+    }
+
     pub(super) fn validate_navigation_checkpoint(
         &self,
         policy: &crate::AgentRunPolicy,
@@ -221,6 +239,10 @@ impl AgentProviderBoundTranscript {
 
     pub(super) fn navigation_checkpoint(&self) -> Option<&str> {
         self.prior.navigation_checkpoint()
+    }
+
+    pub(super) fn inspection_checkpoint(&self) -> Option<&str> {
+        self.prior.inspection_checkpoint()
     }
 
     pub(super) fn turns(&self) -> impl Iterator<Item = &AgentProviderTranscriptTurn> {
@@ -1962,6 +1984,264 @@ mod tests {
         }
         .join_terminal_tool(completion(prior, 2), correlation)
         .expect("screenshot terminal join")
+    }
+
+    fn snapshot_scope_continuation(
+        provider: AgentProviderKind,
+        baseline: SemanticObservationAcknowledgement,
+        config: AgentProviderCallConfig,
+        scope: serde_json::Value,
+    ) -> AgentProviderContinuation {
+        snapshot_scope_continuation_with_transcript(provider, baseline, config, scope, transcript())
+    }
+
+    fn snapshot_scope_continuation_with_transcript(
+        provider: AgentProviderKind,
+        baseline: SemanticObservationAcknowledgement,
+        config: AgentProviderCallConfig,
+        scope: serde_json::Value,
+        transcript: AgentProviderTranscript,
+    ) -> AgentProviderContinuation {
+        let prior = call(1);
+        let arguments = json!({"scope": scope}).to_string();
+        let tool = match provider {
+            AgentProviderKind::OpenAiResponses => {
+                super::super::AgentBrowserToolCall::decode_openai(
+                    prior,
+                    "fc_snapshot_private_1".to_owned(),
+                    "call_snapshot_private_1".to_owned(),
+                    "snapshot",
+                    arguments.clone(),
+                )
+            }
+            AgentProviderKind::AnthropicMessages => super::super::AgentBrowserToolCall::decode(
+                prior,
+                "toolu_snapshot_private_1".to_owned(),
+                "snapshot",
+                arguments.clone(),
+            ),
+        }
+        .expect("snapshot tool");
+        AgentProviderContinuationSeed {
+            call: prior,
+            config,
+            baseline,
+            transcript,
+        }
+        .join_terminal_tool(
+            completion(
+                prior,
+                u32::try_from(arguments.len()).expect("argument bytes"),
+            ),
+            tool.into_continuation_parts().0,
+        )
+        .expect("snapshot terminal join")
+    }
+
+    #[test]
+    fn repeated_current_subtree_is_a_model_visible_refusal_without_native_capture() {
+        for provider in [
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderKind::AnthropicMessages,
+        ] {
+            let initial = observation(context(), 1, 1, 1, "current content");
+            let config = config(provider)
+                .restrict_to_navigation_and_extraction()
+                .with_baseline_read()
+                .with_progressive_observation();
+            let initial_ack = SemanticObservationAcknowledgement::from_fingerprint(
+                SemanticObservationFingerprint::from_observation(&initial),
+            );
+            let first = snapshot_scope_continuation(
+                provider,
+                initial_ack,
+                config.clone(),
+                json!({"kind":"subtree","target":"@a1"}),
+            );
+            let checkpoint = match first.resolve_observation(&initial, &config).unwrap() {
+                AgentProviderObservationResolution::Capture(checkpoint) => checkpoint,
+                AgentProviderObservationResolution::Refused(_) => {
+                    panic!("first subtree must be capturable")
+                }
+            };
+            let request = checkpoint
+                .request(&initial, SemanticObservationId::new(2).unwrap())
+                .unwrap();
+            let snapshot = decode_semantic_snapshot(
+                SemanticDecodeContext::new(
+                    SemanticInvocationId::new(2).unwrap(),
+                    initial.frames()[0].frame().clone(),
+                    SemanticSnapshotGeneration::new(2).unwrap(),
+                ),
+                &serde_json::to_vec(&json!({
+                    "v": SEMANTIC_WIRE_VERSION,
+                    "i": 2,
+                    "g": 2,
+                    "c": "complete",
+                    "n": [
+                        {"k": 1, "r": "document", "o": 16},
+                        {"k": 2, "p": 0, "r": "status", "n": "current content"}
+                    ]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let subtree = SemanticObservationAssembler::new(request, snapshot)
+                .unwrap()
+                .finish()
+                .unwrap();
+            let subtree_ack = SemanticObservationAcknowledgement::from_fingerprint(
+                SemanticObservationFingerprint::from_observation(&subtree),
+            );
+            let repeated = snapshot_scope_continuation(
+                provider,
+                subtree_ack,
+                config.clone(),
+                json!({"kind":"subtree","target":"@a1"}),
+            );
+            let refusal = match repeated.resolve_observation(&subtree, &config).unwrap() {
+                AgentProviderObservationResolution::Refused(refusal) => refusal,
+                AgentProviderObservationResolution::Capture(_) => {
+                    panic!("same logical subtree must not dispatch another capture")
+                }
+            };
+            let (_, transcript) = refusal
+                .bind(&subtree, &config, "current observation".into())
+                .unwrap();
+            let result: serde_json::Value =
+                serde_json::from_str(transcript.latest().tool_result()).unwrap();
+            assert_eq!(result["code"], "invalid_snapshot_scope");
+            assert_eq!(result["executed"], false);
+            assert_eq!(result["observation_unchanged"], true);
+        }
+    }
+
+    #[test]
+    fn prior_subtree_is_refused_after_initial_refresh_remaps_its_reference() {
+        let context = context();
+        let initial = observation(context, 1, 1, 1, "current content");
+        let initial_request = initial
+            .begin_expansion(
+                SemanticObservationId::new(2).unwrap(),
+                initial.frames()[0].nodes()[0].reference(),
+                initial.frames()[0].frame(),
+                crate::SemanticExpansionKind::Subtree,
+                SemanticObservationBudget::INITIAL_FILTERED,
+            )
+            .unwrap();
+        let make = |request: SemanticObservationRequest, generation, nodes: serde_json::Value| {
+            let snapshot = decode_semantic_snapshot(
+                SemanticDecodeContext::new(
+                    SemanticInvocationId::new(generation).unwrap(),
+                    initial.frames()[0].frame().clone(),
+                    SemanticSnapshotGeneration::new(generation).unwrap(),
+                ),
+                &serde_json::to_vec(&json!({
+                    "v": SEMANTIC_WIRE_VERSION,
+                    "i": generation,
+                    "g": generation,
+                    "c": "complete",
+                    "n": nodes,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            SemanticObservationAssembler::new(request, snapshot)
+                .unwrap()
+                .finish()
+                .unwrap()
+        };
+        let subtree = make(
+            initial_request,
+            2,
+            json!([
+                {"k":1,"r":"document","o":16},
+                {"k":2,"p":0,"r":"status","n":"current content"}
+            ]),
+        );
+        let history = AgentInspectionProgress::record(None, &initial, &subtree).unwrap();
+        let restored = make(
+            SemanticObservationRequest::initial(
+                SemanticObservationId::new(3).unwrap(),
+                context,
+                SemanticObservationBudget::INITIAL_FILTERED,
+            ),
+            3,
+            json!([
+                {"k":9,"r":"paragraph","t":"current prefix"},
+                {"k":1,"r":"document","o":16},
+                {"k":2,"p":1,"r":"status","n":"current content"}
+            ]),
+        );
+        let history = AgentInspectionProgress::record(Some(history), &subtree, &restored).unwrap();
+        let text = history.encode(&restored).unwrap();
+        let transcript = AgentProviderTranscript::try_initial_with_checkpoints(
+            Arc::from("inspect once"),
+            "current observation".into(),
+            None,
+            Some(super::super::request::AgentProviderInspectionContext {
+                text,
+                progress: history,
+            }),
+        )
+        .unwrap();
+        let config = config(AgentProviderKind::OpenAiResponses)
+            .restrict_to_navigation_and_extraction()
+            .with_baseline_read()
+            .with_progressive_observation();
+        let acknowledgement = SemanticObservationAcknowledgement::from_fingerprint(
+            SemanticObservationFingerprint::from_observation(&restored),
+        );
+        let repeated = snapshot_scope_continuation_with_transcript(
+            AgentProviderKind::OpenAiResponses,
+            acknowledgement.clone(),
+            config.clone(),
+            json!({"kind":"subtree","target":"@a2"}),
+            transcript,
+        );
+        let refusal = match repeated.resolve_observation(&restored, &config).unwrap() {
+            AgentProviderObservationResolution::Refused(refusal) => refusal,
+            AgentProviderObservationResolution::Capture(_) => {
+                panic!("stable subtree identity must survive ref remapping")
+            }
+        };
+        let (_, rebound) = refusal
+            .bind(&restored, &config, "current observation".into())
+            .unwrap();
+        assert!(rebound
+            .inspection_checkpoint()
+            .unwrap()
+            .contains("ZEPHIUM_HOST_INSPECTION_PROGRESS_V1"));
+        let body = super::super::request::encode_openai_continuation_body(&config, &rebound)
+            .expect("non-navigation inspection history is encodable");
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains("ZEPHIUM_HOST_INSPECTION_PROGRESS_V1"));
+        assert!(!body.contains("ZEPHIUM_HOST_NAVIGATION_CHECKPOINT_V1"));
+
+        let history = AgentInspectionProgress::record(None, &initial, &subtree).unwrap();
+        let history = AgentInspectionProgress::record(Some(history), &subtree, &restored).unwrap();
+        let text = history.encode(&restored).unwrap();
+        let transcript = AgentProviderTranscript::try_initial_with_checkpoints(
+            Arc::from("inspect once"),
+            "current observation".into(),
+            None,
+            Some(super::super::request::AgentProviderInspectionContext {
+                text,
+                progress: history,
+            }),
+        )
+        .unwrap();
+        let different = snapshot_scope_continuation_with_transcript(
+            AgentProviderKind::OpenAiResponses,
+            acknowledgement,
+            config.clone(),
+            json!({"kind":"subtree","target":"@a3"}),
+            transcript,
+        );
+        assert!(matches!(
+            different.resolve_observation(&restored, &config).unwrap(),
+            AgentProviderObservationResolution::Capture(_)
+        ));
     }
 
     #[test]

@@ -993,6 +993,14 @@ impl WorkState {
             || self.navigation_discovery.is_some()
     }
 
+    fn requires_decision_budget(&self) -> bool {
+        self.has_navigation()
+            || self.baseline_read
+            || self.progressive_observation
+            || self.actions_before_extraction
+            || self.subtree_extraction
+    }
+
     fn navigation_complete(&self) -> bool {
         self.navigation_hops == self.navigation_length()
     }
@@ -1626,6 +1634,7 @@ impl AgentWorkController {
             deadline: input.settings.deadline,
             max_model_calls: input.settings.max_model_calls,
         };
+        let decision_budget = state.requires_decision_budget();
         let mut session = AgentBrowserSession::try_new_with_transport(
             run,
             state.transport.take().ok_or(AgentWorkFailure::Contract)?,
@@ -1660,10 +1669,10 @@ impl AgentWorkController {
         if state.progressive_observation {
             session.config = session.config.with_progressive_observation();
         }
-        if state.navigation_discovery.is_some() {
+        if decision_budget {
             session.config = session
                 .config
-                .with_discovery_decision_budget(
+                .with_decision_budget(
                     AgentModelCallId::new(session.next_call).ok_or(AgentWorkFailure::Contract)?,
                     session.max_model_calls,
                 )
@@ -1895,37 +1904,11 @@ impl AgentWorkController {
             .collect::<Vec<_>>();
         loop {
             state.check_task_contract()?;
-            if state.progressive_observation
-                && turn.turn.proposal().kind() == AgentBrowserToolKind::Snapshot
-            {
-                if let Some(schema) = &state.extraction_schema {
-                    let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
-                    let acknowledgement = turn.turn.continuation().baseline();
-                    let read = read_selected_semantic_observation(
-                        &observation,
-                        SemanticReadAuthority::Acknowledged(acknowledgement),
-                        captured_at,
-                        SemanticReadSensitivityLimit::PublicOnly,
-                        SemanticReadBudget::STANDARD,
-                        schema.source_roles(),
-                    )
-                    .map_err(|error| {
-                        AgentWorkFailure::Browser(AgentBrowserProviderError::Read(error))
-                    })?;
-                    session.check_live().map_err(AgentWorkFailure::Browser)?;
-                    state
-                        .retained_read_evidence
-                        .retain(&read, acknowledgement)
-                        .map_err(|error| {
-                            AgentWorkFailure::Browser(AgentBrowserProviderError::Read(error))
-                        })?;
-                }
-            }
             // The last decision was advertised as Extract-only. Independently
             // enforce that narrowing before any native capture, navigation or
             // local inspection can consume the reserved mapping call.
             let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
-            if state.navigation_discovery.is_some()
+            if state.requires_decision_budget()
                 && (session.turns.saturating_add(1) >= session.max_model_calls
                     || session
                         .policy
@@ -1963,7 +1946,34 @@ impl AgentWorkController {
                         AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation)
                     })?;
                 let checkpoint = match resolution {
-                    AgentProviderObservationResolution::Capture(checkpoint) => *checkpoint,
+                    AgentProviderObservationResolution::Capture(checkpoint) => {
+                        let checkpoint = *checkpoint;
+                        if let Some(schema) = &state.extraction_schema {
+                            let session =
+                                state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+                            session.check_live().map_err(AgentWorkFailure::Browser)?;
+                            let read = read_selected_semantic_observation(
+                                &observation,
+                                SemanticReadAuthority::Acknowledged(checkpoint.baseline()),
+                                captured_at,
+                                SemanticReadSensitivityLimit::PublicOnly,
+                                SemanticReadBudget::STANDARD,
+                                schema.source_roles(),
+                            )
+                            .map_err(|error| {
+                                AgentWorkFailure::Browser(AgentBrowserProviderError::Read(error))
+                            })?;
+                            state
+                                .retained_read_evidence
+                                .retain(&read, checkpoint.baseline())
+                                .map_err(|error| {
+                                    AgentWorkFailure::Browser(AgentBrowserProviderError::Read(
+                                        error,
+                                    ))
+                                })?;
+                        }
+                        checkpoint
+                    }
                     AgentProviderObservationResolution::Refused(refusal) => {
                         state.native.check_control(worker, browser)?;
                         state.refresh_account(worker, browser)?;

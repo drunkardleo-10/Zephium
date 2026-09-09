@@ -1017,6 +1017,15 @@ impl SemanticObservation {
             .resolve_node(reference, current_frame, frame.generation())
             .map_err(SemanticObservationError::Reference)?;
         validate_expansion_role(node.role(), &kind)?;
+        if matches!(&kind, SemanticExpansionKind::Subtree)
+            && matches!(
+                self.request.scope(),
+                SemanticScope::Subtree(anchor)
+                    if anchor.capability().node_key() == node.key()
+            )
+        {
+            return Err(SemanticObservationError::RepeatedScope);
+        }
         if kind == SemanticExpansionKind::Frame {
             let boundary = self
                 .boundaries
@@ -1193,6 +1202,9 @@ pub enum SemanticObservationError {
     /// Expansion class is incompatible with the referenced semantic role.
     #[error("semantic observation scope is incompatible")]
     ScopeIncompatible,
+    /// A subtree request selected the root of the subtree already being observed.
+    #[error("semantic observation scope would not make progress")]
+    RepeatedScope,
     /// Result omitted the exact frame containing its progressive-scope anchor.
     #[error("semantic observation scope frame is missing")]
     ScopeFrameMissing,
@@ -1363,6 +1375,75 @@ mod tests {
             SemanticTextWindow::try_new(MAX_SEMANTIC_SURROUNDING_TEXT_BYTES, 1),
             Err(SemanticObservationError::Budget)
         );
+    }
+
+    #[test]
+    fn subtree_of_the_current_subtree_root_is_refused_without_blocking_deeper_scope() {
+        let context = context(40);
+        let initial_request = SemanticObservationRequest::initial(
+            SemanticObservationId::new(1).expect("id"),
+            context,
+            budget(1),
+        );
+        let initial_snapshot = snapshot(
+            context,
+            1,
+            "https://main.test/",
+            SemanticFrameTrust::SameOrigin,
+            1,
+            json!([
+                {"k": 7, "r": "group", "o": 16},
+                {"k": 8, "p": 0, "r": "paragraph", "t": "current content"}
+            ]),
+        );
+        let initial = SemanticObservationAssembler::new(initial_request, initial_snapshot)
+            .expect("assembler")
+            .finish()
+            .expect("initial observation");
+        let subtree_request = initial
+            .begin_expansion(
+                SemanticObservationId::new(2).expect("id"),
+                initial.frames()[0].nodes()[0].reference(),
+                initial.frames()[0].frame(),
+                SemanticExpansionKind::Subtree,
+                budget(1),
+            )
+            .expect("first subtree");
+        let subtree_snapshot = snapshot(
+            context,
+            1,
+            "https://main.test/",
+            SemanticFrameTrust::SameOrigin,
+            2,
+            json!([
+                {"k": 7, "r": "group", "o": 16},
+                {"k": 8, "p": 0, "r": "paragraph", "t": "current content"}
+            ]),
+        );
+        let subtree = SemanticObservationAssembler::new(subtree_request, subtree_snapshot)
+            .expect("assembler")
+            .finish()
+            .expect("subtree observation");
+
+        assert_eq!(
+            subtree.begin_expansion(
+                SemanticObservationId::new(3).expect("id"),
+                subtree.frames()[0].nodes()[0].reference(),
+                subtree.frames()[0].frame(),
+                SemanticExpansionKind::Subtree,
+                budget(1),
+            ),
+            Err(SemanticObservationError::RepeatedScope)
+        );
+        assert!(subtree
+            .begin_expansion(
+                SemanticObservationId::new(3).expect("id"),
+                subtree.frames()[0].nodes()[1].reference(),
+                subtree.frames()[0].frame(),
+                SemanticExpansionKind::Subtree,
+                budget(1),
+            )
+            .is_ok());
     }
 
     #[test]

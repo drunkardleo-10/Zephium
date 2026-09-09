@@ -404,6 +404,8 @@ pub struct ApplicationReport {
     pub reads: u64,
     /// Fresh, reference-anchored same-document observations.
     pub progressive_observations: u64,
+    /// Snapshot proposals refused before native capture because their scope was invalid.
+    pub inspection_refusals: u64,
     /// Whether the terminal result retained exact current-page sources.
     pub source_mapping_verified: bool,
     /// Whether the ordinary product record closed successfully without debt.
@@ -521,6 +523,11 @@ impl ApplicationObserver {
                     self.report.progressive_observations.saturating_add(1);
                 self.failed |= self.report.progressive_observations > 4;
             }
+            AgentWorkEventKind::InspectionRefused => {
+                self.report.progressive_observations =
+                    self.report.progressive_observations.saturating_sub(1);
+                self.report.inspection_refusals = self.report.inspection_refusals.saturating_add(1);
+            }
             AgentWorkEventKind::ToolProposed(AgentBrowserToolKind::Extract) => {}
             AgentWorkEventKind::ToolProposed(_)
             | AgentWorkEventKind::ActionActive
@@ -607,5 +614,24 @@ mod tests {
             assert!(!observer.healthy());
             assert!(!observer.report().accepted);
         }
+    }
+
+    #[test]
+    fn observer_distinguishes_refused_snapshot_proposals_from_native_captures() {
+        let mut observer = ApplicationObserver::default();
+        observer.observe_kind(AgentWorkEventKind::ToolProposed(
+            AgentBrowserToolKind::Snapshot,
+        ));
+        observer.observe_kind(AgentWorkEventKind::InspectionRefused);
+        assert!(observer.healthy());
+        assert_eq!(observer.report().progressive_observations, 0);
+        assert_eq!(observer.report().inspection_refusals, 1);
+
+        observer.observe_kind(AgentWorkEventKind::ToolProposed(
+            AgentBrowserToolKind::Snapshot,
+        ));
+        observer.observe_kind(AgentWorkEventKind::Observing);
+        assert_eq!(observer.report().progressive_observations, 1);
+        assert_eq!(observer.report().inspection_refusals, 1);
     }
 }
