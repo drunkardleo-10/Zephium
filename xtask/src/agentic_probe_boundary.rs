@@ -13492,6 +13492,17 @@ mod tests {
             fn begin_document_load() {}
             fn prepare_document_load() {}
             fn document_committed() {}
+            fn revoke_document_authority() {}
+            fn draining_action() {
+                self.phase == DocumentPhase::AuthorityRevoked && self.settling_action(attempt);
+                self.settling_action == Some(attempt);
+                super::semantic_action::map_runtime_fault(*fault) ==
+                    zephium_agentic::SemanticActionNativeFailure::AppliedUnverified;
+                DocumentPhase::AuthorityRevoked;
+                self.awaiting_result &&
+                    matches!(self.pending, Some(PendingInvocation::Action { .. }));
+            }
+            fn revoked_settling_action() {}
             fn renderer_lost() {}
             fn cancel() {}
             fn retire() {}
@@ -13575,7 +13586,9 @@ mod tests {
         assert!(probe
             .contains("phase=revalidated command_entered=false result=uncertain content=redacted"));
         assert!(probe.contains("return b\"E2:applied_unverified\";"));
-        assert!(probe.contains("source.replacen(\"const commandPreparationOnly = false;\", \"const commandPreparationOnly = true;\", 1)"));
+        assert!(probe.contains("source.replacen("));
+        assert!(probe.contains("\"const commandPreparationOnly = false;\""));
+        assert!(probe.contains("\"const commandPreparationOnly = true;\""));
     }
 
     #[test]

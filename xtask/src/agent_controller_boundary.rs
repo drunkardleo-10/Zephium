@@ -10,6 +10,7 @@ const ROOT: &str = "crates/zephium-agent-controller/src/lib.rs";
 const PROBE: &str = "crates/zephium-agent-controller/src/probe.rs";
 const TERRA: &str = "crates/zephium-agent-controller/src/terra.rs";
 const ACTION: &str = "crates/zephium-agent-controller/src/action.rs";
+const REINSPECTION: &str = "crates/zephium-agent-controller/src/work_reinspection.rs";
 const WORK: &str = "crates/zephium-agent-controller/src/work.rs";
 const INSPECTION: &str = "crates/zephium-agent-controller/src/work_inspection.rs";
 const OBSERVATION_CHECKPOINT: &str =
@@ -61,6 +62,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_probe(&probe)?;
     validate_terra(&terra)?;
     validate_action(&action)?;
+    validate_reinspection(&read(repository.join(REINSPECTION))?)?;
     validate_work(&read(repository.join(WORK))?)?;
     validate_progressive_observation(
         &read(repository.join(INSPECTION))?,
@@ -100,6 +102,48 @@ fn read(path: impl AsRef<Path>) -> Result<String, String> {
         .map_err(|error| format!("cannot read {}: {error}", path.display()))
 }
 
+fn validate_reinspection(source: &str) -> Result<(), String> {
+    for required in [
+        "current.identity().profile() != source.identity().profile()",
+        "current.identity().owner() != source.identity().owner()",
+        "current.identity().id() == source.identity().id()",
+        "binding.frame().origin() != action.frame().origin()",
+        "binding.document() != &target.document",
+        "current.current_requested_document() != &self.target.document",
+        "account.account() != self.source_account.account()",
+        "account.attestation() == self.source_account.attestation()",
+        "account.observed_at() < self.issued_at",
+        "snapshot.completeness() != SemanticCompleteness::Complete",
+        "matches.next().is_some()",
+        "node.sensitivity() == SemanticSensitivity::Secret",
+        "value.truncated()",
+        "completion.matches(self.binding.lease(), &self.correlation)",
+        "unmatched: Some((Box::new(self), Box::new(completion)))",
+        ".observe_initial(lease, now)",
+        ".settle_observation(completion, now)",
+    ] {
+        if !source.contains(required) {
+            return Err(format!("effect reinspection lost boundary: {required}"));
+        }
+    }
+    for forbidden in [
+        "dispatch_semantic_effect",
+        "authorize_semantic_effect",
+        "AgentVerifiedSemanticEffect",
+        "continue_after_verified_action",
+        "tokio::",
+        "std::thread",
+        "evaluateJavaScript",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "effect reinspection acquired execution authority: {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_form(source: &str) -> Result<(), String> {
     for required in [
         "impl AgentWorkTask for AgentWorkFormTask",
@@ -111,7 +155,7 @@ fn validate_form(source: &str) -> Result<(), String> {
         "snapshot.generation() <= last.snapshot",
         "matches.next().is_some()",
         "descendant(snapshot, option_index, target_index)",
-        "preview.source_bytes() == goal.value.len()",
+        "preview.source_bytes() == expected.len()",
         "action.source_observation() != baseline.observation",
         "action.source_observation_generation() != baseline.generation",
         "action.frame() != &baseline.frame",
@@ -122,6 +166,7 @@ fn validate_form(source: &str) -> Result<(), String> {
         "self.refused = true;",
         "self.account_sample.get()",
         "sample.context() == context",
+        "impl AgentWorkTask for AgentWorkFormExtractionTask",
     ] {
         if !source.contains(required) {
             return Err(format!("trusted form contract lost boundary: {required}"));
@@ -141,8 +186,6 @@ fn validate_form(source: &str) -> Result<(), String> {
         "AgentProviderTransport",
         "tokio::",
         "std::thread",
-        "fn accept_extraction",
-        "fn allows_actions_before_extraction",
         "fn allows_subtree_extraction",
     ] {
         if source.contains(forbidden) {
@@ -194,7 +237,7 @@ fn validate_account_refresh(terra: &str, work: &str, policy: &str) -> Result<(),
         || work
             .matches("state.refresh_account(worker, browser)?")
             .count()
-            != 5
+            != 8
         || !policy.contains("MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS: u64 = 30_000;")
     {
         return Err("Work lost per-admission sampling, control or original expiry boundary".into());
@@ -318,7 +361,7 @@ fn validate_navigation_progress(
     if request
         .matches(".validate_navigation_checkpoint(policy, call_request)?;")
         .count()
-        != 8
+        != 9
         || request
             .matches("policy.reject_unstructured_navigation_input(call_request)?;")
             .count()
@@ -341,10 +384,10 @@ fn validate_navigation_progress(
         .find("encode_openai_observation_body(")
         .ok_or("missing checkpoint encoding")?;
     let inspection = initial
-        .find("checkpoint.text.push_str(&inspections.encode(observation)?);")
+        .find("let text = progress.encode(observation)?;")
         .ok_or("missing bounded inspection projection")?;
     let bound = initial
-        .find("checkpoint.text.len() > MAX_AGENT_PROVIDER_NAVIGATION_CHECKPOINT_BYTES")
+        .find("text.len() > MAX_AGENT_PROVIDER_INSPECTION_CHECKPOINT_BYTES")
         .ok_or("missing inspection checkpoint size bound")?;
     let measurement = initial
         .find("conservative_request_measurement(&config, &body)?")
@@ -427,7 +470,7 @@ fn validate_navigation(actor: &str, policy: &str, continuation: &str) -> Result<
                 "operation.kind() != ContextOperationKind::Navigate",
                 "!is_document_successor(",
                 "terminal.operation() != active.operation",
-                "target != &active.row.target",
+                ".admits_final_document(&active.row.target, target)",
                 "self.navigation_attempts += 1;",
                 ".get_mut(active.row.hop)",
                 "*slot = Some(receipt)",
@@ -528,10 +571,24 @@ fn validate_manifest(source: &str) -> Result<(), String> {
     {
         return Err("controller package identity or build policy drifted".to_owned());
     }
-    for forbidden in ["dev-dependencies", "build-dependencies", "target"] {
+    for forbidden in ["build-dependencies", "target"] {
         if manifest.get(forbidden).is_some() {
             return Err(format!("controller may not declare {forbidden}"));
         }
+    }
+    let development = manifest
+        .get("dev-dependencies")
+        .and_then(Value::as_table)
+        .ok_or("controller test dependency inventory missing")?;
+    let json = development
+        .get("serde_json")
+        .and_then(Value::as_table)
+        .ok_or("controller tests require only workspace serde_json")?;
+    if development.len() != 1
+        || json.len() != 1
+        || json.get("workspace").and_then(Value::as_bool) != Some(true)
+    {
+        return Err("controller test dependencies must remain serde_json workspace-only".into());
     }
     let dependencies = manifest
         .get("dependencies")
@@ -646,7 +703,7 @@ fn validate_terra(source: &str) -> Result<(), String> {
         .ok_or("controller lost bounded read driver")?;
     for required in [
         "self.check_live()?",
-        "self.turns >= MAX_BROWSER_MODEL_TURNS",
+        "self.turns >= self.max_model_calls",
         "!self.config.permits_baseline_read()",
         "AgentBrowserScopeProposal::Initial",
         "read_semantic_observation",
@@ -793,6 +850,8 @@ fn validate_inventory(crate_root: &Path) -> Result<(), String> {
             "terra.rs".to_owned(),
             "work.rs".to_owned(),
             "work_retained.rs".to_owned(),
+            "work_reinspection.rs".to_owned(),
+            "work_reinspection_tests.rs".to_owned(),
             "work_tests.rs".to_owned(),
             "work_combined_tests.rs".to_owned(),
             "work_scoped_tests.rs".to_owned(),
@@ -907,7 +966,7 @@ fn validate_action(source: &str) -> Result<(), String> {
 fn validate_progressive_observation(inspection: &str, checkpoint: &str) -> Result<(), String> {
     for required in [
         "state.check_task_contract()?",
-        ".retire_for_observation(previous, &session.config)",
+        ".continue_after_observation(checkpoint, previous, &current)",
         "checkpoint.baseline()",
         ".observe_retained_scope(worker, expansion)",
         "state.refresh_account(worker, browser)?",
@@ -929,7 +988,7 @@ fn validate_progressive_observation(inspection: &str, checkpoint: &str) -> Resul
         "self.validate_successor(previous, current, request, &config)",
         "AgentPreparedObservationRequest::try_for_config_with_inspections(",
         "previous.frames()[0].generation().next()",
-        "node.parent().is_none()",
+        "node.parent().is_some()",
         "self.context == observation.request().context()",
         "capture.snapshot == observation.frames()[0].generation().get()",
         "progress.captures.len() >= MAX_AGENT_PROVIDER_CONTINUATION_TURNS",
@@ -1005,8 +1064,8 @@ fn validate_work(source: &str) -> Result<(), String> {
         "progress == AgentWorkTaskProgress::ReadyForExtraction",
         "session.config.restrict_to_actions_and_extraction()",
         "captured_at = SemanticCaptureInstant::from_millis(now.millis());",
-        "session.extract_from(",
-        "if session.turns >= super::MAX_BROWSER_MODEL_TURNS",
+        "session.extract_from_with_evidence(",
+        "if session.turns >= session.max_model_calls",
         "state.task.accept_extraction(&result)? != AgentWorkTaskProgress::Complete",
         "state.native.revoke(browser)",
         ".begin_action_settlement(",
@@ -1098,7 +1157,7 @@ fn validate_work_actor_qualifier(source: &str) -> Result<(), String> {
 mod tests {
     use super::{
         validate_account_refresh, validate_navigation, validate_navigation_progress,
-        validate_navigation_route_contract, validate_scoped_extraction,
+        validate_navigation_route_contract, validate_reinspection, validate_scoped_extraction,
     };
     use super::{
         validate_action, validate_form, validate_manifest, validate_probe, validate_root,
@@ -1136,7 +1195,7 @@ mod tests {
         );
         super::validate_progressive_observation(inspection, checkpoint).unwrap();
         for boundary in [
-            ".retire_for_observation(previous, &session.config)",
+            ".continue_after_observation(checkpoint, previous, &current)",
             ".prepare_successor(",
             "state.refresh_account(worker, browser)?",
         ] {
@@ -1149,7 +1208,7 @@ mod tests {
         for boundary in [
             "request.lease() != self.prior_call.lease()",
             "previous.frames()[0].generation().next()",
-            "node.parent().is_none()",
+            "node.parent().is_some()",
             "self.context == observation.request().context()",
             "capture.snapshot == observation.frames()[0].generation().get()",
             "progress.captures.len() >= MAX_AGENT_PROVIDER_CONTINUATION_TURNS",
@@ -1180,14 +1239,14 @@ mod tests {
             "policy.reject_unstructured_navigation_input(call_request)?;",
             "openai_text_message(\"developer\", checkpoint)",
             "target.is_some_and(looks_like_secret_value)",
-            "checkpoint.text.push_str(&inspections.encode(observation)?);",
-            "checkpoint.text.len() > MAX_AGENT_PROVIDER_NAVIGATION_CHECKPOINT_BYTES",
+            "let text = progress.encode(observation)?;",
+            "text.len() > MAX_AGENT_PROVIDER_INSPECTION_CHECKPOINT_BYTES",
             "conservative_request_measurement(&config, &body)?",
         ] {
             assert!(validate_navigation_progress(
                 NAVIGATION_POLICY,
                 CONTINUATION,
-                &PROVIDER_REQUEST.replacen(boundary, "removed", 1)
+                &PROVIDER_REQUEST.replace(boundary, "removed")
             )
             .is_err());
         }
@@ -1251,7 +1310,7 @@ mod tests {
             .is_err());
         }
         for removed in [
-            "target != &active.row.target",
+            ".admits_final_document(&active.row.target, target)",
             "!is_document_successor(",
             "*slot = Some(receipt)",
             "hop != self.navigation_receipts.iter().flatten().count()",
@@ -1507,8 +1566,8 @@ mod tests {
             "progress == AgentWorkTaskProgress::ReadyForExtraction",
             "session.config.restrict_to_actions_and_extraction()",
             "captured_at = SemanticCaptureInstant::from_millis(now.millis());",
-            "session.extract_from(",
-            "if session.turns >= super::MAX_BROWSER_MODEL_TURNS",
+            "session.extract_from_with_evidence(",
+            "if session.turns >= session.max_model_calls",
             "state.task.accept_extraction(&result)? != AgentWorkTaskProgress::Complete",
         ] {
             assert!(validate_work(&WORK.replace(boundary, "removed_boundary")).is_err());
@@ -1551,5 +1610,24 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn reinspection_cannot_restore_execution_or_relax_independent_evidence() {
+        let source = include_str!("../../crates/zephium-agent-controller/src/work_reinspection.rs");
+        validate_reinspection(source).unwrap();
+        for guard in [
+            "binding.document() != &target.document",
+            "account.account() != self.source_account.account()",
+            "account.attestation() == self.source_account.attestation()",
+            "matches.next().is_some()",
+            "value.truncated()",
+            "unmatched: Some((Box::new(self), Box::new(completion)))",
+        ] {
+            assert!(validate_reinspection(&source.replace(guard, "removed")).is_err());
+        }
+        assert!(
+            validate_reinspection(&format!("{source}\ncontinue_after_verified_action")).is_err()
+        );
     }
 }

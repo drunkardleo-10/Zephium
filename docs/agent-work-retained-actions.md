@@ -7,6 +7,42 @@ observation and verification loop. Retained discovery remains read-only: its
 task assessor refuses effects, and discovery admission refuses action-capable
 tasks. A separate trusted task must supply the actual effect contract.
 
+## Independent reinspection after uncertain application
+
+An exactly accounted `AppliedUnverified` write can now retain one explicit
+independent reinspection owner. This is a production controller seam, not yet
+wired into automatic recovery or the native app qualification. It deliberately
+does not convert the failed receipt into successful causal execution.
+
+The trusted application separately authorizes an exact new document and logical
+field identity, constructs a different resource/context in the original private
+registry and Work/profile/run, and acquires its ordinary native read lease. The
+old quarantined resource, references and sealed controller remain unavailable.
+The same-origin check is an additional restriction, never a redirect allowance;
+requested and effective document identity must both equal the new explicit target.
+
+The single ordinary semantic read must settle through its exact original
+completion. Foreign callbacks return both move-only owners unchanged. Exact
+callbacks clear their debt even if their evidence is stale or refused. The read
+requires a fresh account attestation for the new exact context and the original
+account, bounded time, a complete snapshot, and exactly one non-secret control
+identified by original action role and optional trusted accessible name *before*
+comparing its full, untruncated value with the original authorized fill input.
+Unsupported write kinds, ambiguous controls and truncated/redacted values refuse.
+
+The result is a content-free, move-only current-state record attached by private
+allocation identity to the original failed action. It says either the expected
+value is observed or a different value is observed. Neither means remote-save
+proof, original-action success, permission to replay, refreshed URL authority or
+permission to continue. Account/profile caches and independent human changes
+are among the reasons current state must remain distinct from causal success.
+
+The next integration boundary remains explicit native resource admission plus
+fresh plan/policy/run-session authorization. A future continuation must consume
+that new authority and fresh observations; it cannot resume the old sealed
+session or derive write permission merely from this record. This slice adds no
+provider call, background worker, timer, GUI behavior or automatic write retry.
+
 ## Authority and lifecycle
 
 Native retained admission and controller effect timestamps use the engine's one

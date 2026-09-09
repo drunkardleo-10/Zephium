@@ -110,6 +110,17 @@ pub struct WorkBrowserObservationCompletion {
     outcome: Result<SemanticSnapshot, SemanticRuntimePortFailure>,
 }
 impl WorkBrowserObservationCompletion {
+    /// Checks the original read correlation without consuming its callback.
+    /// This grants no observation authority and permits lossless routing before
+    /// the registry accounts the exact completion.
+    pub fn matches(
+        &self,
+        lease: &WorkBrowserExecutionLease,
+        correlation: &SemanticRuntimeCorrelation,
+    ) -> bool {
+        &self.join.lease == lease && &self.join.correlation == correlation
+    }
+
     /// Bind one result; cross-request snapshots become a typed native refusal.
     pub fn settle(mut self, outcome: Result<SemanticSnapshot, SemanticRuntimePortFailure>) -> Self {
         self.outcome = SemanticRuntimeSettlement::try_new(self.join.correlation.clone(), outcome)

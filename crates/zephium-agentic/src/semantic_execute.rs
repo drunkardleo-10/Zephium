@@ -598,6 +598,19 @@ impl fmt::Debug for SemanticActionNativeSettlement {
 }
 
 impl SemanticActionNativeSettlement {
+    /// Whether this original native terminal reports an effect whose application
+    /// could not be independently verified. This is neither success nor replay
+    /// permission; the terminal must still rejoin its exact execution owner.
+    pub const fn is_applied_unverified(&self) -> bool {
+        matches!(
+            self.outcome,
+            NativeOutcome::Failed {
+                failure: SemanticActionNativeFailure::AppliedUnverified,
+                ..
+            }
+        )
+    }
+
     pub(crate) const fn coordinator_key(&self) -> SemanticActionCoordinatorKey {
         self.correlation.coordinator_key()
     }

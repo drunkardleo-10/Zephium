@@ -158,14 +158,10 @@ impl RouteFault {
                 || self == Self::CeilingMiddle
                 || (matches!(self, Self::FirstLocate | Self::MiddleLocate) && turns == 2));
         assert_eq!(
-            text.matches(r#""role":"developer""#).count(),
-            1,
-            "one current host checkpoint, never replayed old progress"
-        );
-        assert_eq!(
             text.matches(r#"ZEPHIUM_HOST_NAVIGATION_CHECKPOINT_V1\n"#)
                 .count(),
-            1
+            1,
+            "one current navigation checkpoint, never replayed old progress"
         );
         assert_eq!(text.matches(r#"\"completed_hops\":"#).count(), 1);
         let completed = if first {

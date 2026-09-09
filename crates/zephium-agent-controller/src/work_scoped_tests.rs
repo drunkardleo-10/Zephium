@@ -55,7 +55,7 @@ impl ScopedFault {
                 || (!count && self == Self::CancelMapStream))
     }
     pub(super) fn stream(self, turns: u8) -> String {
-        if self == Self::Ceiling && turns < 8 {
+        if self == Self::Ceiling && turns < 7 {
             return tool_stream(turns, false);
         }
         if self == Self::UnexpectedAction {
@@ -64,7 +64,7 @@ impl ScopedFault {
         if self == Self::Combined && turns == 1 {
             return tool_stream(turns, true);
         }
-        if self == Self::Ceiling || turns == 1 + u8::from(self == Self::Combined) {
+        if (self == Self::Ceiling && turns == 7) || turns == 1 + u8::from(self == Self::Combined) {
             let arguments = match self {
                 Self::UnknownRef => {
                     r#"{\"scope\":{\"kind\":\"subtree\",\"target\":\"@a99\"},\"schema_id\":1}"#
@@ -325,7 +325,6 @@ pub(super) fn assert_outcome(
         fault,
         ScopedFault::ModeMutation
             | ScopedFault::RoleMutation
-            | ScopedFault::Ceiling
             | ScopedFault::UnexpectedAction
             | ScopedFault::NoGrant
             | ScopedFault::UnknownRef
@@ -348,10 +347,17 @@ pub(super) fn assert_outcome(
                     | ScopedFault::ParagraphSelection
                     | ScopedFault::Combined
                     | ScopedFault::EmbeddedFrame
+                    | ScopedFault::Ceiling
             ));
             assert_eq!(
                 success.closure().model_calls(),
-                if fault == ScopedFault::Combined { 3 } else { 2 }
+                if fault == ScopedFault::Ceiling {
+                    8
+                } else if fault == ScopedFault::Combined {
+                    3
+                } else {
+                    2
+                }
             );
             assert_eq!(
                 success.closure().effects(),
@@ -375,6 +381,7 @@ pub(super) fn assert_outcome(
                     ScopedFault::LostCapture
                         | ScopedFault::AuditLost
                         | ScopedFault::RendererCapture
+                        | ScopedFault::Ceiling
                 ),
                 "{fault:?}: {:?}",
                 recovery.failure()
@@ -429,10 +436,6 @@ pub(super) fn assert_outcome(
                     AgentWorkFailure::Browser(AgentBrowserProviderError::Read(
                         SemanticReadError::ExpansionMismatch
                     ))
-                ),
-                ScopedFault::Ceiling => assert_eq!(
-                    closed.failure(),
-                    AgentWorkFailure::Browser(AgentBrowserProviderError::TurnLimit)
                 ),
                 ScopedFault::UnexpectedAction => {
                     assert_eq!(closed.failure(), AgentWorkFailure::Contract)

@@ -23,6 +23,15 @@ mod terra;
 mod action;
 
 #[cfg(feature = "provider-transport")]
+mod work_reinspection;
+#[cfg(feature = "provider-transport")]
+pub use work_reinspection::{
+    AgentWorkEffectObservedState, AgentWorkEffectReadTarget, AgentWorkEffectReinspection,
+    AgentWorkEffectReinspectionError, AgentWorkEffectReinspectionRefusal,
+    AgentWorkEffectReobservation,
+};
+
+#[cfg(feature = "provider-transport")]
 mod work_form;
 #[cfg(feature = "provider-transport")]
 pub use work_form::{

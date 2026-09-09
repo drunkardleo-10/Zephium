@@ -1034,11 +1034,12 @@ impl WorkState {
     }
 
     fn requires_decision_budget(&self) -> bool {
-        self.has_navigation()
-            || self.baseline_read
-            || self.progressive_observation
-            || self.actions_before_extraction
-            || self.subtree_extraction
+        self.extraction_schema.is_some()
+            && (self.has_navigation()
+                || self.baseline_read
+                || self.progressive_observation
+                || self.actions_before_extraction
+                || self.subtree_extraction)
     }
 
     fn navigation_complete(&self) -> bool {

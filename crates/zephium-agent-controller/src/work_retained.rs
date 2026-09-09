@@ -132,6 +132,86 @@ pub enum AgentWorkRetainedOutcome {
 #[must_use]
 pub struct AgentWorkRetainedRecovery(pub(super) AgentWorkRecovery);
 impl AgentWorkRetainedRecovery {
+    /// Prepares one explicit read of a separately constructed, freshly admitted
+    /// resource in the same run/profile. The trusted application must authorize
+    /// that exact document/read/account independently. This neither reuses the
+    /// quarantined page nor resumes this sealed controller or its model context.
+    pub fn prepare_effect_reinspection(
+        &mut self,
+        resources: &mut WorkBrowserResources,
+        lease: &WorkBrowserExecutionLease,
+        target: crate::AgentWorkEffectReadTarget,
+        now: AgentPolicyInstant,
+    ) -> Result<
+        (
+            crate::AgentWorkEffectReinspection,
+            WorkBrowserObservationRequest,
+        ),
+        crate::AgentWorkEffectReinspectionError,
+    > {
+        use crate::AgentWorkEffectReinspectionError as Error;
+        if self.0.state.native.action_pending || self.0.state.native_terminal.is_some() {
+            return Err(Error::Unavailable);
+        }
+        let source = self
+            .0
+            .state
+            .native
+            .retained
+            .as_ref()
+            .ok_or(Error::Unavailable)?
+            .binding()
+            .lease()
+            .resource();
+        // Stable Work IDs are not registry authority. The original private
+        // resource allocation must still belong to this exact registry.
+        resources.phase(source).map_err(Error::Resource)?;
+        let source = source.identity();
+        if lease.resource().identity().work() != source.work()
+            || lease.resource().identity().resource() == source.resource()
+        {
+            return Err(Error::Binding);
+        }
+        let session = self.0.state.session.as_mut().ok_or(Error::Unavailable)?;
+        let account = session.account;
+        session
+            .action
+            .as_mut()
+            .ok_or(Error::Unavailable)?
+            .prepare_reinspection(account, resources, lease, target, now)
+    }
+
+    /// Attaches one exact current-state record while retaining all original
+    /// failed effect, policy, audit and resource owners. Foreign records return
+    /// unchanged. No successful effect receipt or continuation is minted.
+    pub fn record_effect_reobservation(
+        &mut self,
+        result: crate::AgentWorkEffectReobservation,
+    ) -> Result<(), Box<crate::AgentWorkEffectReobservation>> {
+        let Some(action) = self
+            .0
+            .state
+            .session
+            .as_mut()
+            .and_then(|session| session.action.as_mut())
+        else {
+            return Err(Box::new(result));
+        };
+        action.record_reinspection(result)
+    }
+
+    /// Original independently observed state record, still requiring explicit
+    /// reconciliation and fresh authorization before any further execution.
+    pub fn effect_reobservation(&self) -> Option<&crate::AgentWorkEffectReobservation> {
+        self.0
+            .state
+            .session
+            .as_ref()?
+            .action
+            .as_ref()?
+            .reinspection_result()
+    }
+
     /// Content-free cause; original unresolved run owners remain retained.
     pub const fn failure(&self) -> AgentWorkFailure {
         self.0.failure

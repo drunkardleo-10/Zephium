@@ -1651,6 +1651,13 @@ fn provider_fixture(fault: ProviderFault) {
 
 #[cfg(feature = "probe-harness")]
 #[test]
+fn independent_uncertain_effect_reinspection_preserves_original_failure() {
+    let _guard = lock(&SERIAL);
+    provider_fixture(ProviderFault::Native(Fault::ActionCallback));
+}
+
+#[cfg(feature = "probe-harness")]
+#[test]
 fn production_form_task_keeps_actor_refusal_and_callback_owners() {
     let _serial = lock(&SERIAL);
     for fault in [
@@ -1859,16 +1866,20 @@ fn provider_fixture_with_account(
                     } else if let ProviderFault::Scoped(fault) = fault {
                         fault.stream(turns)
                     } else if let ProviderFault::Combined(fault) = fault {
-                        if fault == CombinedFault::Ceiling && turns < 7 {
+                        if fault == CombinedFault::Ceiling && turns == 1 {
+                            tool_stream(turns, true)
+                        } else if fault == CombinedFault::Ceiling && turns < 7 {
                             tool_stream(turns, false)
                         } else if fault == CombinedFault::Ceiling && turns == 7 {
-                            tool_stream(turns, true)
-                        } else if fault == CombinedFault::Ceiling {
                             named_tool_stream(
                                 turns,
                                 "extract",
                                 r#"{\"scope\":{\"kind\":\"initial\"},\"schema_id\":1}"#,
                             )
+                        } else if fault == CombinedFault::Ceiling {
+                            extraction_stream(ExtractionFault::None)
+                                .replace("resp_2", &format!("resp_{turns}"))
+                                .replace("msg_2", &format!("msg_{turns}"))
                         } else if turns == 1 && fault != CombinedFault::Premature {
                             tool_stream(turns, true)
                         } else if turns <= 2 {
@@ -1968,6 +1979,22 @@ fn provider_fixture_with_account(
                 }
                 _ => 24,
             },
+        )
+    } else if matches!(
+        fault,
+        ProviderFault::Ceiling
+            | ProviderFault::Read(ReadFault::Ceiling | ReadFault::LocateMissCeiling)
+            | ProviderFault::Scoped(ScopedFault::Ceiling)
+            | ProviderFault::Combined(CombinedFault::Ceiling)
+    ) {
+        // These cases isolate the provider-call ceiling. Leave enough operation
+        // authority for every admitted model call and semantic tool operation so
+        // the independent manifest budget cannot become the earlier stop reason.
+        input_with_navigation_budget(
+            &[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite],
+            None,
+            None,
+            64,
         )
     } else if let ProviderFault::Navigation(NavigationFault::Route(_)) = fault {
         input_with_route(
@@ -2428,7 +2455,7 @@ fn provider_fixture_with_account(
         assert_eq!(server.join().expect("fixture server"), requests / 2);
         return;
     }
-    let AgentWorkOutcome::Recovery(recovery) = outcome else {
+    let AgentWorkOutcome::Recovery(mut recovery) = outcome else {
         panic!("native debt cannot close: {fault:?}: {outcome:?}");
     };
     if fault == ProviderFault::Ceiling {
@@ -2515,6 +2542,14 @@ fn provider_fixture_with_account(
             1
         }
     );
+    if fault == ProviderFault::Native(Fault::ActionCallback) {
+        let session = recovery.state.session.as_mut().unwrap();
+        crate::work_reinspection::tests::exercise(
+            session.action.as_mut().unwrap(),
+            session.account,
+        );
+        assert_eq!(session.policy.pending_effects(), 0);
+    }
     assert_eq!(server.join().expect("fixture server"), requests / 2);
 }
 

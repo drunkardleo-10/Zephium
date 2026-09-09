@@ -134,16 +134,25 @@ pub(super) fn assert_outcome(
         calls.iter().filter(|call| **call == 7).count(),
         effects as usize
     );
-    if fault == CombinedFault::None {
+    if matches!(fault, CombinedFault::None | CombinedFault::Ceiling) {
         let AgentWorkOutcome::Succeeded(mut success) = outcome else {
             panic!("{outcome:?}");
         };
         assert_eq!(success.closure().effects(), 1);
-        assert_eq!(success.closure().model_calls(), 3);
+        assert_eq!(
+            success.closure().model_calls(),
+            if fault == CombinedFault::Ceiling {
+                8
+            } else {
+                3
+            }
+        );
         let result = success.take_extraction().unwrap();
         assert_ne!(result.observation(), SemanticObservationId::new(1).unwrap());
         assert!(success.take_extraction().is_none());
-        assert_eq!(calls, [1, 2, 3, 7, 3, 4, 5, 6]);
+        if fault == CombinedFault::None {
+            assert_eq!(calls, [1, 2, 3, 7, 3, 4, 5, 6]);
+        }
         assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
     } else if matches!(fault, CombinedFault::AuditLost | CombinedFault::ActionLost) {
         let AgentWorkOutcome::Recovery(recovery) = outcome else {
@@ -207,13 +216,6 @@ pub(super) fn assert_outcome(
             | CombinedFault::CompleteWithoutResult
             | CombinedFault::ResultRefused => {
                 assert_eq!(closed.failure(), AgentWorkFailure::Contract)
-            }
-            CombinedFault::Ceiling => {
-                assert_eq!(closed.policy_settlement().closure().model_calls(), 8);
-                assert_eq!(
-                    closed.failure(),
-                    AgentWorkFailure::Browser(AgentBrowserProviderError::TurnLimit)
-                );
             }
             CombinedFault::CancelMapCount | CombinedFault::CancelMapStream => {
                 assert_eq!(closed.failure(), AgentWorkFailure::HumanTakeover)

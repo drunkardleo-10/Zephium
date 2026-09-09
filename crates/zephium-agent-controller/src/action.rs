@@ -194,6 +194,9 @@ impl AgentBrowserActionProposal {
             receipt: None,
             failed: None,
             journal_failed,
+            native_unverified: false,
+            reinspection_owner: None,
+            reinspection_result: None,
         })
     }
 }
@@ -210,6 +213,9 @@ impl fmt::Debug for AgentBrowserActionProposal {
 /// cannot turn dropped or malformed native work into successful continuation.
 #[must_use]
 pub struct AgentBrowserAction {
+    native_unverified: bool,
+    reinspection_owner: Option<std::sync::Arc<()>>,
+    reinspection_result: Option<crate::AgentWorkEffectReobservation>,
     journal_failed: bool,
     proposal: AgentBrowserActionProposal,
     reservation: SemanticActionExecutionReservation,
@@ -222,9 +228,85 @@ pub struct AgentBrowserAction {
 }
 
 impl AgentBrowserAction {
+    pub(crate) fn prepare_reinspection(
+        &mut self,
+        account: AgentContextAccountBinding,
+        resources: &mut WorkBrowserResources,
+        lease: &WorkBrowserExecutionLease,
+        target: crate::AgentWorkEffectReadTarget,
+        now: AgentPolicyInstant,
+    ) -> Result<
+        (
+            crate::AgentWorkEffectReinspection,
+            WorkBrowserObservationRequest,
+        ),
+        crate::AgentWorkEffectReinspectionError,
+    > {
+        use crate::AgentWorkEffectReinspectionError as Error;
+        if !self.native_unverified
+            || !self.finished
+            || self.native.is_some()
+            || self.pending.is_some()
+            || self.terminal.is_some()
+            || self.journal_failed
+        {
+            return Err(Error::Unavailable);
+        }
+        let failed = self
+            .failed
+            .as_ref()
+            .filter(|failed| {
+                failed.failure() == SemanticActionFailure::NeedsHuman
+                    && self.receipt == Some(failed.receipt())
+            })
+            .ok_or(Error::Unavailable)?;
+        if self.reinspection_owner.is_some() {
+            return Err(Error::AlreadyIssued);
+        }
+        let owner = std::sync::Arc::new(());
+        let prepared = crate::work_reinspection::AgentWorkEffectReinspection::prepare(
+            owner.clone(),
+            failed.receipt(),
+            &self.proposal.action,
+            account,
+            resources,
+            lease,
+            target,
+            now,
+        )?;
+        self.reinspection_owner = Some(owner);
+        Ok(prepared)
+    }
+
+    pub(crate) fn record_reinspection(
+        &mut self,
+        result: crate::AgentWorkEffectReobservation,
+    ) -> Result<(), Box<crate::AgentWorkEffectReobservation>> {
+        if self.reinspection_result.is_some()
+            || self
+                .reinspection_owner
+                .as_ref()
+                .is_none_or(|owner| !std::sync::Arc::ptr_eq(owner, &result.owner))
+            || self.receipt != Some(result.original_effect())
+        {
+            return Err(Box::new(result));
+        }
+        self.reinspection_result = Some(result);
+        Ok(())
+    }
+
+    pub(crate) fn reinspection_result(&self) -> Option<&crate::AgentWorkEffectReobservation> {
+        self.reinspection_result.as_ref()
+    }
+
     #[cfg(all(test, feature = "probe-harness"))]
     pub(crate) fn retained_failure(&self) -> Option<&AgentFailedSemanticEffect> {
         self.failed.as_ref()
+    }
+
+    #[cfg(all(test, feature = "probe-harness"))]
+    pub(crate) fn reinspection_test_action(&self) -> &SemanticPreparedAction {
+        &self.proposal.action
     }
 
     pub(crate) fn account_dispatch(
@@ -357,9 +439,11 @@ impl AgentBrowserAction {
         {
             return Err(AgentBrowserActionError::State);
         }
+        let native_unverified = native.is_applied_unverified();
         let outcome = execution
             .settle(self.proposal.action.frame(), native)
             .map_err(AgentBrowserActionError::Native)?;
+        self.native_unverified = native_unverified;
         let start = match begin_semantic_action_settlement(outcome, &self.proposal.action) {
             Ok(start) => start,
             Err(refusal) => {
