@@ -54,6 +54,83 @@ pub struct PublicReadWorkSettings {
     pub deadline: Instant,
 }
 
+/// Move-only product invocation, consumed once. Credentials and account
+/// sources remain on the trusted host and never enter observation handles.
+#[must_use]
+pub struct PublicReadWorkInvocation {
+    objective: PublicReadWorkObjective,
+    settings: PublicReadWorkSettings,
+    config: AgentWorkApplicationConfig,
+    credential: AgentProviderCredential,
+    persist_result: bool,
+    #[cfg(feature = "public-qualification")]
+    inspectable_public: bool,
+}
+
+impl PublicReadWorkInvocation {
+    pub fn new(
+        objective: PublicReadWorkObjective,
+        settings: PublicReadWorkSettings,
+        config: AgentWorkApplicationConfig,
+        credential: AgentProviderCredential,
+    ) -> Self {
+        Self {
+            objective,
+            settings,
+            config,
+            credential,
+            persist_result: false,
+            #[cfg(feature = "public-qualification")]
+            inspectable_public: false,
+        }
+    }
+
+    /// Explicitly publishes the accepted result in the selected durable
+    /// profile. Ephemeral profiles refuse this request. This local publication
+    /// choice is independent of provider-side request retention.
+    pub fn with_persistent_result(mut self) -> Self {
+        self.persist_result = true;
+        self
+    }
+
+    /// Explicit development consent to provider retention of this Public-only
+    /// run. The feature is forbidden in optimized builds. Only retention changes;
+    /// objective, scope, account, tools and execution remain identical.
+    #[cfg(feature = "public-qualification")]
+    pub fn with_inspectable_public_retention(mut self) -> Self {
+        self.inspectable_public = true;
+        self
+    }
+
+    /// Binds the original actor-selected session and original absolute deadline.
+    pub fn into_request(
+        self,
+        profile: AgentWorkProfileBinding,
+    ) -> Result<TrustedWorkRequest, AgentWorkFailure> {
+        let mut request = TrustedWorkRequest::public_read_objective(
+            profile,
+            self.objective,
+            self.settings,
+            self.config,
+            self.credential,
+        )?;
+        if self.persist_result {
+            request.input = request.input.persist_extraction_result()?;
+        }
+        #[cfg(feature = "public-qualification")]
+        if self.inspectable_public {
+            return Ok(request.with_public_qualification_retention());
+        }
+        Ok(request)
+    }
+}
+
+impl std::fmt::Debug for PublicReadWorkInvocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PublicReadWorkInvocation([owned, redacted])")
+    }
+}
+
 impl TrustedWorkRequest {
     /// Consumes approved product operands into the ordinary retained Work path.
     /// The request carries no diagnostic retention or qualification authority.

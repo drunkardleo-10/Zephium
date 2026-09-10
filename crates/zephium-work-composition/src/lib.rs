@@ -43,7 +43,10 @@ mod open_objective;
 #[cfg(feature = "macos-work")]
 pub use native::{MacosWorkComposition, TrustedWorkRequest};
 #[cfg(feature = "macos-work")]
-pub use open_objective::{PublicReadWorkAccount, PublicReadWorkObjective, PublicReadWorkSettings};
+pub use open_objective::{
+    PublicReadWorkAccount, PublicReadWorkInvocation, PublicReadWorkObjective,
+    PublicReadWorkSettings,
+};
 #[cfg(feature = "macos-work")]
 pub use zephium_agent_controller::AgentWorkFailure;
 #[cfg(feature = "public-qualification")]

@@ -5,6 +5,33 @@ use tauri::Manager;
 use zephium_app::{AgentWorkApplicationHandle, PreparedAgentWork};
 use zephium_work_composition::{MacosWorkComposition, TrustedWorkRequest};
 
+/// Nonblocking selected-session query for an ordinary Work invocation. Wait for
+/// Ready before passing that exact binding to launch. Selecting a browser
+/// profile does not identify an authenticated service account.
+pub fn selected_work_profile(
+    app: &tauri::AppHandle,
+) -> Result<zephium_app::AgentWorkProfileRequest, WorkAdmissionFailure> {
+    let shell = app
+        .try_state::<zephium_app::Handle>()
+        .ok_or(WorkAdmissionFailure::Unavailable)?;
+    Ok(shell.work_profile_binding())
+}
+
+/// Launches a product-approved natural-language objective through the retained
+/// browser runtime. Drain `take_event` for live progress, inspect `snapshot`,
+/// and move the source-bound terminal result with `take_extraction`. Draining
+/// events releases bounded runtime backpressure. Queue admission is not success.
+pub fn launch_public_read_work(
+    app: &tauri::AppHandle,
+    profile: zephium_app::AgentWorkProfileBinding,
+    invocation: zephium_work_composition::PublicReadWorkInvocation,
+) -> Result<zephium_app::RetainedWorkHandle, WorkAdmissionFailure> {
+    let request = invocation
+        .into_request(profile)
+        .map_err(WorkAdmissionFailure::Contract)?;
+    admit_retained_trusted_work(app, request)
+}
+
 pub(crate) struct WorkCompositionState(Mutex<CompositionAdmission>);
 
 struct CompositionAdmission {

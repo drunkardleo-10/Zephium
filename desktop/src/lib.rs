@@ -27,13 +27,18 @@ mod navigation_probe;
 compile_error!("profile enrollment and authenticated execution are separate application builds");
 
 #[cfg(feature = "macos-work")]
-pub use zephium_work_composition::{MacosWorkComposition, TrustedWorkRequest};
+pub use zephium_work_composition::{
+    MacosWorkComposition, PublicReadWorkAccount, PublicReadWorkInvocation, PublicReadWorkObjective,
+    PublicReadWorkSettings, TrustedWorkRequest,
+};
 #[cfg(feature = "macos-work")]
 mod work;
+#[cfg(feature = "macos-work-public-inspection")]
+mod work_development;
 #[cfg(feature = "macos-work")]
 pub use work::{
     admit_retained_trusted_work, admit_successor_trusted_work, admit_trusted_work,
-    WorkAdmissionFailure,
+    launch_public_read_work, selected_work_profile, WorkAdmissionFailure,
 };
 
 #[cfg(zephium_internal_repository_e2e)]
@@ -3820,6 +3825,8 @@ fn build_profile_menu(
 }
 
 fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
+    #[cfg(feature = "macos-work-public-inspection")]
+    work_development::on_run_event(app, &event);
     #[cfg(all(
         feature = "macos-work-navigation-probe",
         not(feature = "macos-work-profile-enrollment"),
@@ -4578,6 +4585,8 @@ pub fn run() {
                 target_os = "macos"
             ))]
             navigation_probe::install(app.handle())?;
+            #[cfg(feature = "macos-work-public-inspection")]
+            work_development::install(app.handle())?;
             #[cfg(feature = "curated-extension-distribution")]
             if let Some(extension_distribution) =
                 extension_distribution::launch(shell.callback_handle())?
