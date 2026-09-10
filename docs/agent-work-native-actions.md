@@ -22,10 +22,13 @@ tab/context lookup is used.
 
 The original native execution deadline includes queueing and presentation time.
 It is never rebased when a task reaches the main thread. Each action owns a
-temporary presentation with the same captured main-window and responder fence
-used by retained observations. Presentation does not activate the app or receive
-pointer input. The fixed semantic recipe still revalidates its target at the
-point of effect.
+temporary presentation with the same captured app/key/main-window ownership
+used by retained observations. Initial presentation also checks the original
+responder; subsequent responder changes in the human window are allowed while
+the retained page stays attached to its exact non-key, non-main, ignores-mouse
+surface. The human window must never route its responder into that page's native
+subtree. Presentation does not activate the app or receive pointer input. The
+fixed semantic recipe still revalidates its target at the point of effect.
 
 A runtime request may wait for a page pull. Retained actions therefore carry a
 native-only predicate checked immediately before handing the recipe to that

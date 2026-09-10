@@ -144,6 +144,7 @@ impl WorkObservationPresentation {
             &app,
             &main,
             &responder,
+            true,
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             failure_diagnostic.as_ref(),
         ) {
@@ -233,7 +234,16 @@ impl WorkObservationPresentation {
             self.state = PresentationState::Failed;
             return self.state;
         }
-        if !self.human_current() {
+        // Bind the exact responder before this owner changes the hierarchy.
+        // Later responder churn does not transfer this noninteractive page.
+        if !foreground(
+            &self.app,
+            &self.main,
+            &self.responder,
+            true,
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            self.failure_diagnostic.as_ref(),
+        ) {
             self.state = PresentationState::Unavailable;
             return self.state;
         }
@@ -422,13 +432,28 @@ impl WorkObservationPresentation {
             || !self.page.isHidden()
     }
     pub(crate) fn human_current(&self) -> bool {
-        foreground(
+        let foreground = foreground(
             &self.app,
             &self.main,
             &self.responder,
+            self.state == PresentationState::Prepared,
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             self.failure_diagnostic.as_ref(),
-        )
+        );
+        foreground
+            && match self.state {
+                PresentationState::Prepared
+                | PresentationState::Retiring
+                | PresentationState::Retired => true,
+                PresentationState::Acquiring | PresentationState::Ready => {
+                    self.surface.as_ref().is_some_and(|surface| {
+                        retained_surface_current(&self.page, surface, &self.main)
+                    })
+                }
+                PresentationState::Unavailable
+                | PresentationState::Expired
+                | PresentationState::Failed => false,
+            }
     }
 
     /// Fixed native ownership fence retained until the runtime hands the action
@@ -437,6 +462,10 @@ impl WorkObservationPresentation {
         let app = self.app.clone();
         let main = self.main.clone();
         let responder = self.responder.clone();
+        // A fence observes these owners; it must not prolong their native
+        // retirement while the semantic channel drains its original callback.
+        let page = Weak::from_retained(&self.page);
+        let surface = self.surface.as_ref().map(Weak::from_retained);
         #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
         let failure_diagnostic = self.failure_diagnostic.clone();
         Box::new(move || {
@@ -444,9 +473,14 @@ impl WorkObservationPresentation {
                 &app,
                 &main,
                 &responder,
+                false,
                 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
                 failure_diagnostic.as_ref(),
-            )
+            ) && surface
+                .as_ref()
+                .and_then(Weak::load)
+                .zip(page.load())
+                .is_some_and(|(surface, page)| retained_surface_current(&page, &surface, &main))
         })
     }
 }
@@ -511,6 +545,7 @@ fn foreground(
     app: &NSApplication,
     main: &NSWindow,
     responder: &NSResponder,
+    require_original_responder: bool,
     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")] diagnostic: &dyn Fn(
         PresentationFailure,
     ),
@@ -527,7 +562,7 @@ fn foreground(
             .is_some_and(|current| std::ptr::eq(&*current, responder)),
     ];
     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
-    if !foreground_facts(facts) {
+    if !foreground_facts(facts, require_original_responder) {
         invoke_failure_diagnostic(
             diagnostic,
             PresentationFailure::HumanOwnership {
@@ -540,9 +575,35 @@ fn foreground(
             },
         );
     }
-    foreground_facts(facts)
+    foreground_facts(facts, require_original_responder)
 }
-fn foreground_facts(facts: [bool; 6]) -> bool {
+fn foreground_facts(facts: [bool; 6], require_original_responder: bool) -> bool {
+    facts[..5].iter().all(|fact| *fact) && (!require_original_responder || facts[5])
+}
+
+// The page's exact native attachment and input exclusion remain independent
+// fences alongside controller lease/document revocation. No focus is acquired.
+fn retained_surface_current(page: &WKWebView, surface: &NSWindow, main: &NSWindow) -> bool {
+    retained_surface_facts([
+        surface.isVisible(),
+        !surface.isKeyWindow(),
+        !surface.isMainWindow(),
+        !surface.canBecomeKeyWindow(),
+        !surface.canBecomeMainWindow(),
+        surface.ignoresMouseEvents(),
+        page.window()
+            .is_some_and(|window| std::ptr::eq(&*window, surface)),
+        // Tolerate a changed human responder, never routing the human window's
+        // keyboard responder into the retained page or one of its native views.
+        main.firstResponder().is_none_or(|responder| {
+            Retained::as_ptr(&responder).addr() != std::ptr::from_ref(page).addr()
+                && !responder
+                    .downcast::<NSView>()
+                    .is_ok_and(|view| view.isDescendantOf(page))
+        }),
+    ])
+}
+fn retained_surface_facts(facts: [bool; 8]) -> bool {
     facts.into_iter().all(|fact| fact)
 }
 #[derive(Eq, PartialEq)]
@@ -640,12 +701,12 @@ mod tests {
         .is_none());
     }
     #[test]
-    fn every_human_foreground_fact_is_required_without_repairing_focus() {
-        assert!(foreground_facts([true; 6]));
+    fn initial_admission_requires_exact_responder_without_repairing_focus() {
+        assert!(foreground_facts([true; 6], true));
         for index in 0..6 {
             let mut facts = [true; 6];
             facts[index] = false;
-            assert!(!foreground_facts(facts));
+            assert!(!foreground_facts(facts, true));
         }
         let source = include_str!("work_observation_presentation.rs")
             .split("\n#[cfg(test)]")
@@ -670,5 +731,27 @@ mod tests {
         assert!(source.contains("surface.load().is_none()"));
         assert!(source.contains("self.cleanup_failed |="));
         assert!(source.contains("human_owners(&self.app) != before"));
+    }
+
+    #[test]
+    fn responder_churn_does_not_grant_application_or_window_takeover() {
+        // Observed Notion Search transition: only the firstResponder changes.
+        let mut churn = [true; 6];
+        churn[5] = false;
+        assert!(foreground_facts(churn, false));
+        assert!(!foreground_facts(churn, true));
+        for lost_owner in 0..5 {
+            let mut facts = churn;
+            facts[lost_owner] = false;
+            assert!(!foreground_facts(facts, false));
+        }
+        // Promotion, reparenting, or an input-capable surface independently
+        // closes native presentation authority even when the app stays active.
+        assert!(retained_surface_facts([true; 8]));
+        for promoted_or_changed in 0..8 {
+            let mut surface = [true; 8];
+            surface[promoted_or_changed] = false;
+            assert!(!retained_surface_facts(surface));
+        }
     }
 }

@@ -286,10 +286,13 @@ committed document epoch/native navigation stamp and current native URL are
 rechecked through completion. Only one such presentation is admitted at a time.
 The fixed 1280×800 viewport must fit on-screen without scaling or clipping. The
 window cannot become key/main and ignores mouse input. The application's current
-key/main window and responder must remain the captured human owners. Zephium
-never activates the application, injects input, selects a responder or restores
-focus after a human changes it. Missing foreground/geometry yields an explicit
-read refusal, not a fabricated observation.
+key/main windows must remain the captured human owners. The original responder
+is required at admission; later responder churn does not transfer the retained
+page. Execution still requires its exact noninteractive surface attachment and
+excludes routing the human window's responder into the retained page subtree.
+Zephium never activates the application, injects input, selects a responder or
+restores focus after a human changes it. Missing foreground/geometry yields an
+explicit read refusal, not a fabricated observation.
 
 The episode has one five-second absolute deadline intersected with the original
 execution lease. Once visibly presented, a 100 ms normal-event-loop opportunity
