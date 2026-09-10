@@ -59,6 +59,92 @@ pub const MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES: usize = 256 * 1024;
 /// results do not authorize retaining a larger page or a larger transcript.
 pub const MAX_AGENT_PROVIDER_CONTINUATION_TURNS: usize = 64;
 
+/// Host-projected action vocabulary for one exact semantic observation.
+///
+/// This value contains only opaque references, operation bits, and a baseline
+/// fingerprint. It retains no page text, labels, action operands, or effect
+/// authority. Provider schemas use it only to avoid advertising model actions
+/// that the host's independently approved task contract cannot accept; native
+/// binding and effect assessment remain mandatory.
+pub struct AgentProviderActionAuthority {
+    observation: SemanticObservationId,
+    generation: SemanticObservationGeneration,
+    guard: [u8; 32],
+    entries: Vec<AgentProviderActionTarget>,
+}
+
+impl AgentProviderActionAuthority {
+    /// Binds an independently selected ref/operation subset to `observation`.
+    ///
+    /// Every entry must name a unique observed ref and may contain only
+    /// operations advertised by that node. Empty authority is valid and removes
+    /// Act from the request-local provider tool set.
+    pub fn try_new(
+        observation: &SemanticObservation,
+        entries: &[(SemanticReferenceId, SemanticOperations)],
+    ) -> Option<Self> {
+        let mut retained = Vec::new();
+        retained.try_reserve_exact(entries.len()).ok()?;
+        for (reference, operations) in entries {
+            if operations.is_empty()
+                || retained
+                    .iter()
+                    .any(|entry: &AgentProviderActionTarget| entry.reference == *reference)
+            {
+                return None;
+            }
+            let frame = observation.reference_frame(*reference).ok()?;
+            let node = observation.resolve_node(*reference, frame).ok()?;
+            for operation in [
+                crate::SemanticOperationClass::Click,
+                crate::SemanticOperationClass::Fill,
+                crate::SemanticOperationClass::Select,
+                crate::SemanticOperationClass::Press,
+                crate::SemanticOperationClass::Scroll,
+            ] {
+                if operations.contains(operation) && !node.operations().contains(operation) {
+                    return None;
+                }
+            }
+            retained.push(AgentProviderActionTarget {
+                reference: *reference,
+                operations: *operations,
+            });
+        }
+        retained.sort_unstable_by_key(|entry| entry.reference);
+        Some(Self {
+            observation: observation.request().id(),
+            generation: observation.request().generation(),
+            guard: crate::semantic_diff::SemanticObservationFingerprint::from_observation(
+                observation,
+            )
+            .digest(),
+            entries: retained,
+        })
+    }
+
+    fn matches(&self, observation: &SemanticObservation) -> bool {
+        self.observation == observation.request().id()
+            && self.generation == observation.request().generation()
+            && self.guard
+                == crate::semantic_diff::SemanticObservationFingerprint::from_observation(
+                    observation,
+                )
+                .digest()
+    }
+}
+
+impl std::fmt::Debug for AgentProviderActionAuthority {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentProviderActionAuthority")
+            .field("observation", &self.observation)
+            .field("generation", &self.generation)
+            .field("entry_count", &self.entries.len())
+            .finish()
+    }
+}
+
 /// Content-free action vocabulary for one exact observation generation.
 ///
 /// This is prompt narrowing, not authority: native action binding remains the
@@ -71,6 +157,7 @@ pub(super) struct AgentProviderActionTargets {
     guard: [u8; 32],
     entries: Vec<AgentProviderActionTarget>,
     exclusions: Vec<AgentProviderActionExclusion>,
+    host_projected: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -111,6 +198,21 @@ impl AgentProviderActionTargets {
             guard,
             entries,
             exclusions: Vec::new(),
+            host_projected: false,
+        })
+    }
+
+    pub(super) fn try_from_authority(
+        observation: &SemanticObservation,
+        authority: &AgentProviderActionAuthority,
+    ) -> Option<Self> {
+        authority.matches(observation).then(|| Self {
+            observation: authority.observation,
+            generation: authority.generation,
+            guard: authority.guard,
+            entries: authority.entries.clone(),
+            exclusions: Vec::new(),
+            host_projected: true,
         })
     }
 
@@ -125,7 +227,8 @@ impl AgentProviderActionTargets {
     }
 
     pub(super) fn try_from_diff(previous: &Self, diff: &SemanticDiff) -> Option<Self> {
-        if previous.observation != diff.previous_observation()
+        if previous.host_projected
+            || previous.observation != diff.previous_observation()
             || previous.generation != diff.previous_generation()
             || previous.guard != diff.baseline_guard()
         {
@@ -193,6 +296,7 @@ impl AgentProviderActionTargets {
             guard: diff.current_guard(),
             entries,
             exclusions: Vec::new(),
+            host_projected: false,
         })
     }
 
@@ -208,6 +312,20 @@ impl AgentProviderActionTargets {
                     .any(|exclusion| exclusion.kind == kind && exclusion.target == entry.reference))
             .then_some(entry.reference)
         })
+    }
+
+    pub(super) fn permitted_operations(
+        &self,
+        reference: SemanticReferenceId,
+    ) -> SemanticOperations {
+        self.entries
+            .iter()
+            .find(|entry| entry.reference == reference)
+            .map_or(SemanticOperations::NONE, |entry| entry.operations)
+    }
+
+    pub(super) const fn is_host_projected(&self) -> bool {
+        self.host_projected
     }
 
     pub(super) fn excluded_error(
@@ -272,6 +390,7 @@ impl AgentProviderActionTargets {
                 })
                 .collect(),
             exclusions: Vec::new(),
+            host_projected: false,
         }
     }
 
@@ -726,6 +845,7 @@ pub struct AgentProviderNavigationCheckpoint {
     config: AgentProviderCallConfig,
     baseline: SemanticObservationAcknowledgement,
     target: crate::ContextNavigationTarget,
+    host_projected_actions: bool,
 }
 
 impl AgentProviderNavigationCheckpoint {
@@ -743,6 +863,24 @@ impl AgentProviderNavigationCheckpoint {
         request: AgentModelCallRequest,
         config: &AgentProviderCallConfig,
     ) -> Result<(), AgentProviderContinuationError> {
+        self.validate_successor_with_action_authority(receipt, observation, request, config, None)
+    }
+
+    /// Validates a navigation successor together with the fresh host-projected
+    /// action vocabulary required when the predecessor was also projected.
+    pub fn validate_successor_with_action_authority(
+        self,
+        receipt: crate::AgentNavigationReceipt,
+        observation: &crate::SemanticObservation,
+        request: AgentModelCallRequest,
+        config: &AgentProviderCallConfig,
+        action_authority: Option<&AgentProviderActionAuthority>,
+    ) -> Result<(), AgentProviderContinuationError> {
+        if self.host_projected_actions && action_authority.is_none()
+            || action_authority.is_some_and(|authority| !authority.matches(observation))
+        {
+            return Err(AgentProviderContinuationError::Baseline);
+        }
         if config != &self.config {
             return Err(AgentProviderContinuationError::Config);
         }
@@ -809,6 +947,10 @@ impl AgentProviderContinuation {
             config: self.config,
             baseline: self.baseline,
             target: target.clone(),
+            host_projected_actions: self
+                .transcript
+                .action_targets()
+                .is_some_and(AgentProviderActionTargets::is_host_projected),
         })
     }
     /// Exact completed provider call that produced the pending tool result.
@@ -849,6 +991,7 @@ impl AgentProviderContinuation {
     /// Bind an independently verified action whose next state cannot be safely
     /// expressed as a delta. This consumes the original tool call without
     /// recapture, replay, or acknowledgement of the replacement observation.
+    #[cfg(test)]
     pub(super) fn bind_action_observation(
         self,
         result: &crate::SemanticActionResult,
@@ -859,6 +1002,28 @@ impl AgentProviderContinuation {
         (AgentProviderCallIdentity, AgentProviderBoundTranscript),
         AgentProviderContinuationError,
     > {
+        self.bind_action_observation_with_authority(result, request, config, payload, None)
+    }
+
+    pub(super) fn bind_action_observation_with_authority(
+        self,
+        result: &crate::SemanticActionResult,
+        request: AgentModelCallRequest,
+        config: &AgentProviderCallConfig,
+        payload: &crate::SemanticModelPayload,
+        action_authority: Option<&AgentProviderActionAuthority>,
+    ) -> Result<
+        (AgentProviderCallIdentity, AgentProviderBoundTranscript),
+        AgentProviderContinuationError,
+    > {
+        if action_authority.is_none()
+            && self
+                .transcript
+                .action_targets()
+                .is_some_and(AgentProviderActionTargets::is_host_projected)
+        {
+            return Err(AgentProviderContinuationError::Baseline);
+        }
         if config != &self.config {
             return Err(AgentProviderContinuationError::Config);
         }
@@ -903,8 +1068,12 @@ impl AgentProviderContinuation {
             None,
         ).ok_or(AgentProviderContinuationError::TranscriptLimit)?;
         transcript.set_action_targets(
-            AgentProviderActionTargets::try_from_observation(current)
-                .ok_or(AgentProviderContinuationError::TranscriptLimit)?,
+            action_authority
+                .map_or_else(
+                    || AgentProviderActionTargets::try_from_observation(current),
+                    |authority| AgentProviderActionTargets::try_from_authority(current, authority),
+                )
+                .ok_or(AgentProviderContinuationError::Baseline)?,
         );
         Ok((prior, transcript.try_bind(correlation, output)?))
     }
@@ -921,6 +1090,19 @@ impl AgentProviderContinuation {
         diff: &SemanticDiff,
         payload: SemanticDiffModelPayload,
     ) -> Result<AgentProviderBoundDiffContinuation, AgentProviderContinuationError> {
+        self.bind_diff_request_with_action_authority(request, next_config, diff, payload, None)
+    }
+
+    /// Binds a verified action diff while replacing semantic affordances with
+    /// the host-projected authority for the exact current observation.
+    pub fn bind_diff_request_with_action_authority(
+        self,
+        request: AgentModelCallRequest,
+        next_config: &AgentProviderCallConfig,
+        diff: &SemanticDiff,
+        payload: SemanticDiffModelPayload,
+        action_authority: Option<&AgentProviderActionAuthority>,
+    ) -> Result<AgentProviderBoundDiffContinuation, AgentProviderContinuationError> {
         let next_call = AgentProviderCallIdentity {
             manifest: self.prior_call.manifest(),
             manifest_guard: self.prior_call.manifest_guard_for_continuation(),
@@ -928,7 +1110,13 @@ impl AgentProviderContinuation {
             lease: request.lease(),
             node: self.prior_call.node(),
         };
-        self.bind_diff(next_call, next_config, diff, payload)
+        self.bind_diff_with_action_authority(
+            next_call,
+            next_config,
+            diff,
+            payload,
+            action_authority,
+        )
     }
 
     /// Consumes this prior turn and binds it to one exact admitted diff turn.
@@ -943,15 +1131,44 @@ impl AgentProviderContinuation {
         diff: &SemanticDiff,
         payload: SemanticDiffModelPayload,
     ) -> Result<AgentProviderBoundDiffContinuation, AgentProviderContinuationError> {
+        self.bind_diff_with_action_authority(next_call, next_config, diff, payload, None)
+    }
+
+    fn bind_diff_with_action_authority(
+        self,
+        next_call: AgentProviderCallIdentity,
+        next_config: &AgentProviderCallConfig,
+        diff: &SemanticDiff,
+        payload: SemanticDiffModelPayload,
+        action_authority: Option<&AgentProviderActionAuthority>,
+    ) -> Result<AgentProviderBoundDiffContinuation, AgentProviderContinuationError> {
         self.validate_diff_turn(next_call, next_config, diff, &payload)?;
-        let refreshed_targets = self
-            .transcript
-            .action_targets()
-            .map(|targets| {
-                AgentProviderActionTargets::try_from_diff(targets, diff)
-                    .ok_or(AgentProviderContinuationError::Baseline)
-            })
-            .transpose()?;
+        let refreshed_targets = match action_authority {
+            Some(authority) => {
+                if authority.observation != diff.current_observation()
+                    || authority.generation != diff.current_generation()
+                    || authority.guard != diff.current_guard()
+                {
+                    return Err(AgentProviderContinuationError::Baseline);
+                }
+                Some(AgentProviderActionTargets {
+                    observation: authority.observation,
+                    generation: authority.generation,
+                    guard: authority.guard,
+                    entries: authority.entries.clone(),
+                    exclusions: Vec::new(),
+                    host_projected: true,
+                })
+            }
+            None => self
+                .transcript
+                .action_targets()
+                .map(|targets| {
+                    AgentProviderActionTargets::try_from_diff(targets, diff)
+                        .ok_or(AgentProviderContinuationError::Baseline)
+                })
+                .transpose()?,
+        };
         let (prior_call, config, baseline, correlation, mut transcript) = self.into_parts();
         if let Some(targets) = refreshed_targets {
             transcript.set_action_targets(targets);
@@ -2525,6 +2742,16 @@ mod tests {
         config: AgentProviderCallConfig,
         target: &str,
     ) -> super::super::AgentProviderSettledToolTurn {
+        let targets = AgentProviderActionTargets::try_from_observation(observation).unwrap();
+        action_refusal_turn_with_targets(observation, config, target, targets)
+    }
+
+    fn action_refusal_turn_with_targets(
+        observation: &SemanticObservation,
+        config: AgentProviderCallConfig,
+        target: &str,
+        targets: AgentProviderActionTargets,
+    ) -> super::super::AgentProviderSettledToolTurn {
         let prior = call(1);
         let arguments = json!({"actions":[{
             "kind":"fill", "target":target, "value":"new value", "effect":"local_write",
@@ -2542,9 +2769,7 @@ mod tests {
         .unwrap();
         let (correlation, proposal) = tool.into_continuation_parts();
         let mut transcript = transcript();
-        transcript.set_action_targets(
-            AgentProviderActionTargets::try_from_observation(observation).unwrap(),
-        );
+        transcript.set_action_targets(targets);
         let continuation = AgentProviderContinuationSeed {
             call: prior,
             config,
@@ -2556,6 +2781,151 @@ mod tests {
         .join_terminal_tool(completion(prior, arguments.len() as u32), correlation)
         .unwrap();
         super::super::AgentProviderSettledToolTurn::for_test(proposal, continuation)
+    }
+
+    #[test]
+    fn host_projection_refuses_semantically_fillable_unapproved_target_and_keeps_alternative_live()
+    {
+        use crate::{
+            SemanticActionBatchId, SemanticActionBindingError, SemanticOperationClass,
+            SemanticOperations, SemanticReferenceError, SemanticReferenceId,
+        };
+        let context = context();
+        let observed = observation_with_nodes(
+            context,
+            1,
+            1,
+            1,
+            json!([
+                {"k":1,"r":"document","o":16},
+                {"k":2,"p":0,"r":"button","n":"Search","o":1},
+                {"k":3,"p":0,"r":"textbox","s":64,"o":3,"v":{"k":"text","value":""}},
+                {"k":4,"p":0,"r":"textbox","n":"Page editor","s":64,"o":3,"v":{"k":"text","value":""}}
+            ]),
+        );
+        let authority = AgentProviderActionAuthority::try_new(
+            &observed,
+            &[(
+                SemanticReferenceId::new(2).unwrap(),
+                SemanticOperations::try_new(&[SemanticOperationClass::Click]).unwrap(),
+            )],
+        )
+        .unwrap();
+        assert!(AgentProviderActionAuthority::try_new(
+            &observed,
+            &[(
+                SemanticReferenceId::new(2).unwrap(),
+                SemanticOperations::try_new(&[SemanticOperationClass::Fill]).unwrap(),
+            )]
+        )
+        .is_none());
+        let changed = observation_with_nodes(
+            context,
+            2,
+            2,
+            2,
+            json!([
+                {"k":1,"r":"document","o":16},
+                {"k":2,"p":0,"r":"button","n":"Search","o":1}
+            ]),
+        );
+        assert!(AgentProviderActionTargets::try_from_authority(&changed, &authority).is_none());
+        let targets =
+            AgentProviderActionTargets::try_from_authority(&observed, &authority).unwrap();
+        let config = config(AgentProviderKind::OpenAiResponses);
+        let frames = [observed.frames()[0].frame().clone()];
+        let resolution =
+            action_refusal_turn_with_targets(&observed, config.clone(), "@a3", targets)
+                .resolve_action(
+                    SemanticActionBatchId::new(1).unwrap(),
+                    &observed,
+                    &frames,
+                    &config,
+                )
+                .unwrap();
+        let AgentProviderActionResolution::Refused(refusal) = resolution else {
+            panic!("host-unapproved target must not bind")
+        };
+        assert_eq!(
+            refusal.reason(),
+            SemanticActionBindingError::Reference(SemanticReferenceError::OperationDenied)
+        );
+        let (_, bound) = refusal
+            .bind(&observed, &config, "same complete observation".into())
+            .unwrap();
+        let result: serde_json::Value = serde_json::from_str(bound.latest().tool_result()).unwrap();
+        assert_eq!(result["executed"], false);
+        assert_eq!(result["rejected"]["target"], "@a3");
+        assert_eq!(result["rejected"]["advertised_ops"], json!([]));
+        let targets = bound.action_targets().unwrap();
+        assert_eq!(
+            targets
+                .permitted_references(crate::SemanticActionKind::Click)
+                .map(SemanticReferenceId::get)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert_eq!(
+            targets
+                .permitted_references(crate::SemanticActionKind::Fill)
+                .count(),
+            0
+        );
+
+        let arguments = json!({"actions":[
+            {
+                "kind":"click", "target":"@a2", "effect":"local_write",
+                "wait":{"kind":"immediate"},
+                "verification":{"kind":"target_state","state":"focused","present":true},
+                "settle_millis":2000
+            },
+            {
+                "kind":"fill", "target":"@a3", "value":"new value",
+                "effect":"local_write", "wait":{"kind":"immediate"},
+                "verification":{"kind":"target_value_matches_input"},
+                "settle_millis":2000
+            }
+        ]})
+        .to_string();
+        let prior = call(1);
+        let tool = super::super::AgentBrowserToolCall::decode_openai(
+            prior,
+            "fc_action_mixed".into(),
+            "call_action_mixed".into(),
+            "act",
+            arguments.clone(),
+        )
+        .unwrap();
+        let (correlation, proposal) = tool.into_continuation_parts();
+        let mut transcript = transcript();
+        transcript.set_action_targets(
+            AgentProviderActionTargets::try_from_authority(&observed, &authority).unwrap(),
+        );
+        let continuation = AgentProviderContinuationSeed {
+            call: prior,
+            config: config.clone(),
+            baseline: SemanticObservationAcknowledgement::from_fingerprint(
+                SemanticObservationFingerprint::from_observation(&observed),
+            ),
+            transcript,
+        }
+        .join_terminal_tool(completion(prior, arguments.len() as u32), correlation)
+        .unwrap();
+        let mixed = super::super::AgentProviderSettledToolTurn::for_test(proposal, continuation)
+            .resolve_action(
+                SemanticActionBatchId::new(2).unwrap(),
+                &observed,
+                &frames,
+                &config,
+            )
+            .unwrap();
+        let AgentProviderActionResolution::Refused(mixed) = mixed else {
+            panic!("one unapproved action must refuse the whole batch")
+        };
+        assert_eq!(
+            mixed.reason(),
+            SemanticActionBindingError::Reference(SemanticReferenceError::OperationDenied)
+        );
     }
 
     #[test]
@@ -2764,6 +3134,22 @@ mod tests {
             })
             .unwrap();
         assert_eq!(targets.exclusion_count(), 1);
+
+        let projected = AgentProviderActionAuthority::try_new(
+            &previous,
+            &[(
+                crate::SemanticReferenceId::new(3).unwrap(),
+                crate::SemanticOperations::try_new(&[crate::SemanticOperationClass::Click])
+                    .unwrap(),
+            )],
+        )
+        .unwrap();
+        let projected =
+            AgentProviderActionTargets::try_from_authority(&previous, &projected).unwrap();
+        assert!(
+            AgentProviderActionTargets::try_from_diff(&projected, &diff).is_none(),
+            "a fresh semantic diff cannot silently widen host-projected authority"
+        );
 
         let refreshed = AgentProviderActionTargets::try_from_diff(&targets, &diff).unwrap();
         assert!(refreshed.matches(&current));

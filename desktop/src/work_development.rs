@@ -302,6 +302,51 @@ struct DevelopmentLocalActionPolicy {
 /// public local interaction with a frozen postcondition and never grants a
 /// remote write.
 impl AgentWorkLocalActionPolicy for DevelopmentLocalActionPolicy {
+    fn model_action_operations(
+        &self,
+        node: &SemanticNode,
+        observation: &SemanticObservation,
+    ) -> Result<SemanticOperations, AgentWorkFailure> {
+        if node.sensitivity() != SemanticSensitivity::Public {
+            return Ok(SemanticOperations::NONE);
+        }
+        let Some(name) = node.name().map(SemanticText::as_str) else {
+            return Ok(SemanticOperations::NONE);
+        };
+        let mut approved = Vec::with_capacity(2);
+        for (operation, permitted) in [
+            (
+                SemanticOperationClass::Click,
+                self.clicks.iter().any(|click| click.target_name == name),
+            ),
+            (
+                SemanticOperationClass::Fill,
+                self.fills.iter().any(|fill| fill.target_name == name),
+            ),
+        ] {
+            if !permitted || !node.operations().contains(operation) {
+                continue;
+            }
+            let exact_matches = observation
+                .frames()
+                .iter()
+                .flat_map(|snapshot| snapshot.nodes())
+                .filter(|candidate| {
+                    candidate.sensitivity() == SemanticSensitivity::Public
+                        && candidate.operations().contains(operation)
+                        && candidate
+                            .name()
+                            .is_some_and(|candidate| candidate.as_str() == name)
+                })
+                .take(2)
+                .count();
+            if exact_matches == 1 {
+                approved.push(operation);
+            }
+        }
+        SemanticOperations::try_new(&approved).map_err(|_| AgentWorkFailure::Contract)
+    }
+
     fn assess(
         &self,
         action: &SemanticPreparedAction,
@@ -896,6 +941,66 @@ fn emit(value: serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn action_observation(dialog_open: bool) -> SemanticObservation {
+        let identity = ContextIdentity::new(
+            ContextId::from_raw(41),
+            ContextRunId::from_raw(42),
+            ProfileId::from(43),
+            ContextKind::Owned,
+        );
+        let mut registry = ContextRegistry::new();
+        registry
+            .reserve(
+                identity,
+                ContextCapabilities::try_new(
+                    ContextKind::Owned,
+                    &[ContextCapability::Observe, ContextCapability::Act],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let operation = registry
+            .begin_context(identity.id(), ContextOperationId::new(1).unwrap())
+            .unwrap();
+        registry
+            .settle_construction(identity.id(), operation, ContextSettlement::Applied)
+            .unwrap();
+        let context = registry.join(identity.id()).unwrap();
+        let frame = SemanticFrameJoin::try_new(
+            context,
+            FrameId::MAIN,
+            context.frame_generation(),
+            SemanticOrigin::parse("https://app.notion.com").unwrap(),
+            SemanticFrameTrust::SameOrigin,
+        )
+        .unwrap();
+        let wire: &[u8] = if dialog_open {
+            br#"{"v":1,"i":1,"g":1,"c":"complete","n":[{"k":1,"r":"document","o":16},{"k":2,"p":0,"r":"textbox","s":64,"o":3,"v":{"k":"text","value":""}},{"k":3,"p":0,"r":"textbox","n":"Page editor","s":64,"o":3,"v":{"k":"text","value":""}},{"k":4,"p":0,"r":"searchbox","n":"Search","s":64,"o":3,"v":{"k":"text","value":""}}]}"#
+        } else {
+            br#"{"v":1,"i":1,"g":1,"c":"complete","n":[{"k":1,"r":"document","o":16},{"k":2,"p":0,"r":"button","n":"Search","o":1},{"k":3,"p":0,"r":"textbox","s":64,"o":3,"v":{"k":"text","value":""}},{"k":4,"p":0,"r":"textbox","n":"Page editor","s":64,"o":3,"v":{"k":"text","value":""}}]}"#
+        };
+        let snapshot = decode_semantic_snapshot(
+            SemanticDecodeContext::new(
+                SemanticInvocationId::new(1).unwrap(),
+                frame,
+                SemanticSnapshotGeneration::new(1).unwrap(),
+            ),
+            wire,
+        )
+        .unwrap();
+        SemanticObservationAssembler::new(
+            SemanticObservationRequest::initial(
+                SemanticObservationId::new(1).unwrap(),
+                context,
+                SemanticObservationBudget::INITIAL_FILTERED,
+            ),
+            snapshot,
+        )
+        .unwrap()
+        .finish()
+        .unwrap()
+    }
     #[test]
     fn dynamic_input_rejects_routes_or_answer_oracles() {
         let mut input = json!({"objective":"Find relevant guidance and explain it", "account":"anonymous_public", "start_url":"https://example.test/", "path_prefix":"/", "max_hops":2, "output_fields":[{"name":"answer","max_bytes":2048}], "model":"luna", "max_model_calls":24, "operations":64, "model_tokens":200000, "cost_micro_usd":500000, "deadline_seconds":300, "inspectable_public":true,"persist_result":true});
@@ -998,6 +1103,60 @@ mod tests {
             }
         )
         .is_err());
+    }
+
+    #[test]
+    fn local_action_projection_hides_unapproved_fillable_page_editors() {
+        let (policy, _) = prepare_local_actions(
+            SemanticOrigin::parse("https://app.notion.com").unwrap(),
+            LocalActionApproval {
+                max_actions: 2,
+                clicks: vec![ClickApproval {
+                    target_name: "Search".into(),
+                    effect: ClickEffect::Read,
+                    verification: ClickVerification::PageDialogOpened {},
+                }],
+                fills: vec![FillApproval {
+                    target_name: "Search".into(),
+                    value: "Zephium Agent Qualification".into(),
+                }],
+            },
+        )
+        .unwrap();
+        let observation = action_observation(false);
+        let nodes = observation.frames()[0].nodes();
+        assert_eq!(
+            policy
+                .model_action_operations(&nodes[1], &observation)
+                .unwrap(),
+            SemanticOperations::try_new(&[SemanticOperationClass::Click]).unwrap()
+        );
+        for node in [&nodes[2], &nodes[3]] {
+            assert_eq!(
+                policy.model_action_operations(node, &observation).unwrap(),
+                SemanticOperations::NONE,
+                "semantically fillable but unapproved page content must stay readable only"
+            );
+        }
+        let observation = action_observation(true);
+        let nodes = observation.frames()[0].nodes();
+        for node in [&nodes[1], &nodes[2]] {
+            assert_eq!(
+                policy.model_action_operations(node, &observation).unwrap(),
+                SemanticOperations::NONE,
+                "semantically fillable but unapproved page content must stay readable only"
+            );
+        }
+        assert_eq!(
+            policy
+                .model_action_operations(&nodes[3], &observation)
+                .unwrap(),
+            SemanticOperations::try_new(&[
+                SemanticOperationClass::Click,
+                SemanticOperationClass::Fill,
+            ])
+            .unwrap()
+        );
     }
 
     #[test]

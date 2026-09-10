@@ -20,6 +20,7 @@ pub struct AgentProviderObservationCheckpoint {
     scope: AgentBrowserScopeProposal,
     inspections: Option<AgentInspectionProgress>,
     anchor_lost: bool,
+    host_projected_actions: bool,
 }
 
 impl AgentProviderContinuation {
@@ -113,6 +114,10 @@ impl AgentProviderContinuation {
             }
         }
         let scope = scope.clone();
+        let host_projected_actions = self
+            .transcript
+            .action_targets()
+            .is_some_and(AgentProviderActionTargets::is_host_projected);
         let inspections = self
             .transcript
             .inspection_checkpoint
@@ -125,6 +130,7 @@ impl AgentProviderContinuation {
                 scope,
                 inspections,
                 anchor_lost: false,
+                host_projected_actions,
             },
         )))
     }
@@ -227,7 +233,7 @@ impl AgentProviderObservationCheckpoint {
     /// serialization precede a new original-policy model reservation.
     #[allow(clippy::too_many_arguments)]
     pub fn prepare_successor(
-        mut self,
+        self,
         policy: &mut crate::AgentRunPolicy,
         previous: &SemanticObservation,
         current: &SemanticObservation,
@@ -236,6 +242,28 @@ impl AgentProviderObservationCheckpoint {
         payload: crate::SemanticModelPayload,
         objective: &crate::AgentProviderObjective,
     ) -> Result<crate::AgentPreparedObservationRequest, crate::AgentProviderRequestError> {
+        self.prepare_successor_with_action_authority(
+            policy, previous, current, request, config, payload, objective, None,
+        )
+    }
+
+    /// Rejoins a fresh inspection while narrowing Act to the host-projected
+    /// authority for that exact successor observation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_successor_with_action_authority(
+        mut self,
+        policy: &mut crate::AgentRunPolicy,
+        previous: &SemanticObservation,
+        current: &SemanticObservation,
+        request: AgentModelCallRequest,
+        config: AgentProviderCallConfig,
+        payload: crate::SemanticModelPayload,
+        objective: &crate::AgentProviderObjective,
+        action_authority: Option<&crate::AgentProviderActionAuthority>,
+    ) -> Result<crate::AgentPreparedObservationRequest, crate::AgentProviderRequestError> {
+        if self.host_projected_actions && action_authority.is_none() {
+            return Err(crate::AgentPolicyError::Authority.into());
+        }
         if !self
             .prior_call
             .matches_manifest_revision(policy.manifest().id(), policy.manifest().guard())
@@ -251,7 +279,7 @@ impl AgentProviderObservationCheckpoint {
         } else {
             AgentInspectionProgress::record(inspections, previous, current)?
         });
-        crate::AgentPreparedObservationRequest::try_for_config_with_inspections(
+        crate::AgentPreparedObservationRequest::try_for_config_with_inspections_and_action_authority(
             policy,
             request,
             current,
@@ -259,6 +287,7 @@ impl AgentProviderObservationCheckpoint {
             objective,
             config,
             inspections,
+            action_authority,
         )
     }
 

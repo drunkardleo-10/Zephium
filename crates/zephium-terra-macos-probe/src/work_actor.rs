@@ -36,6 +36,17 @@ impl AgentWorkTask for PublicPreparedResultTask {
     fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
         self.extraction.extraction_schema()
     }
+    fn model_action_operations(
+        &self,
+        node: &SemanticNode,
+        observation: &SemanticObservation,
+    ) -> Result<SemanticOperations, AgentWorkFailure> {
+        if self.ready.is_some() {
+            Ok(SemanticOperations::NONE)
+        } else {
+            self.actions.model_action_operations(node, observation)
+        }
+    }
     fn evaluate(
         &mut self,
         observation: &SemanticObservation,

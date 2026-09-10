@@ -190,6 +190,17 @@ pub trait AgentWorkTask: Send {
     fn allows_actions_before_extraction(&self) -> bool {
         false
     }
+    /// Returns the task-approved operation subset for one node in the exact
+    /// freshly evaluated observation. The controller intersects this with the
+    /// node's semantic operations before constructing provider-visible action
+    /// affordances. The default denies every action.
+    fn model_action_operations(
+        &self,
+        _: &SemanticNode,
+        _: &SemanticObservation,
+    ) -> Result<SemanticOperations, AgentWorkFailure> {
+        Ok(SemanticOperations::NONE)
+    }
     /// Optional single trusted extraction schema. Identity 1 is run-local;
     /// model/page content cannot register or replace it. Default is no extraction.
     fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
@@ -1184,6 +1195,42 @@ impl WorkState {
         Ok(progress)
     }
 
+    fn action_authority(
+        &self,
+        observation: &SemanticObservation,
+    ) -> Result<AgentProviderActionAuthority, AgentWorkFailure> {
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(usize::from(observation.node_count()))
+            .map_err(|_| AgentWorkFailure::Contract)?;
+        for node in observation
+            .frames()
+            .iter()
+            .flat_map(SemanticSnapshot::nodes)
+        {
+            let approved = self.task.model_action_operations(node, observation)?;
+            let operations = [
+                SemanticOperationClass::Click,
+                SemanticOperationClass::Fill,
+                SemanticOperationClass::Select,
+                SemanticOperationClass::Press,
+                SemanticOperationClass::Scroll,
+            ]
+            .into_iter()
+            .filter(|operation| {
+                node.operations().contains(*operation) && approved.contains(*operation)
+            })
+            .collect::<Vec<_>>();
+            let operations =
+                SemanticOperations::try_new(&operations).map_err(|_| AgentWorkFailure::Contract)?;
+            if !operations.is_empty() {
+                entries.push((node.reference(), operations));
+            }
+        }
+        AgentProviderActionAuthority::try_new(observation, &entries)
+            .ok_or(AgentWorkFailure::Contract)
+    }
+
     fn check_task_contract(&self) -> Result<(), AgentWorkFailure> {
         if self.task.extraction_schema() != self.extraction_schema.as_ref()
             || self.task.navigation_target() != self.navigation_target.as_ref()
@@ -2076,13 +2123,21 @@ impl AgentWorkController {
             return Ok(());
         }
         state.refresh_account(worker, browser)?;
+        let action_authority = state
+            .session
+            .as_ref()
+            .ok_or(AgentWorkFailure::Contract)?
+            .config
+            .permits_tool(AgentBrowserToolKind::Act)
+            .then(|| state.action_authority(&observation))
+            .transpose()?;
         let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
         let mut turn: AgentBrowserProviderTurn = Self::provider(
             &mut state.native,
             worker,
             browser,
             session.cancellation.clone(),
-            session.start_initial(&observation),
+            session.start_initial_with_action_authority(&observation, action_authority.as_ref()),
         )
         .await?;
         if state.extraction_schema.is_some()
@@ -2473,6 +2528,7 @@ impl AgentWorkController {
                 state.observation = Some(observation);
                 return Ok(());
             }
+            let action_authority = state.action_authority(&observation)?;
             // Reads/locates retain this exact frame cohort. Reuse its bounded
             // storage; only an independently captured observation replaces it.
             frames.clear();
@@ -2495,7 +2551,10 @@ impl AgentWorkController {
                 worker,
                 browser,
                 session.cancellation.clone(),
-                session.continue_after_verified_action(transition),
+                session.continue_after_verified_action_with_authority(
+                    transition,
+                    Some(&action_authority),
+                ),
             )
             .await?;
         }

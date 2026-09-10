@@ -2189,6 +2189,15 @@ impl AgentBrowserSession {
         &mut self,
         observation: &zephium_agentic::SemanticObservation,
     ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
+        self.start_initial_with_action_authority(observation, None)
+            .await
+    }
+
+    pub(super) async fn start_initial_with_action_authority(
+        &mut self,
+        observation: &zephium_agentic::SemanticObservation,
+        action_authority: Option<&zephium_agentic::AgentProviderActionAuthority>,
+    ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
         self.check_live()?;
         if self.turns != 0 || self.objective.is_none() {
             return Err(AgentBrowserProviderError::Continuation);
@@ -2204,14 +2213,25 @@ impl AgentBrowserSession {
             .objective
             .as_ref()
             .ok_or(AgentBrowserProviderError::Continuation)?;
-        let prepared = AgentPreparedObservationRequest::try_openai_for_provider_exact_count(
-            &mut self.policy,
-            call,
-            observation,
-            payload,
-            objective,
-            self.config.clone(),
-        )
+        let prepared = match action_authority {
+            Some(authority) => AgentPreparedObservationRequest::try_openai_for_provider_exact_count_with_action_authority(
+                &mut self.policy,
+                call,
+                observation,
+                payload,
+                objective,
+                self.config.clone(),
+                authority,
+            ),
+            None => AgentPreparedObservationRequest::try_openai_for_provider_exact_count(
+                &mut self.policy,
+                call,
+                observation,
+                payload,
+                objective,
+                self.config.clone(),
+            ),
+        }
         .map_err(|_| AgentBrowserProviderError::Authority)?;
         self.drive(prepared.into_transport_input()).await
     }
@@ -2220,6 +2240,15 @@ impl AgentBrowserSession {
     pub async fn continue_after_verified_action(
         &mut self,
         transition: AgentBrowserVerifiedTransition,
+    ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
+        self.continue_after_verified_action_with_authority(transition, None)
+            .await
+    }
+
+    pub(super) async fn continue_after_verified_action_with_authority(
+        &mut self,
+        transition: AgentBrowserVerifiedTransition,
+        action_authority: Option<&zephium_agentic::AgentProviderActionAuthority>,
     ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
         self.check_live()?;
         if self.turns >= self.max_model_calls {
@@ -2245,15 +2274,15 @@ impl AgentBrowserSession {
             )
             .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
             .map_err(AgentBrowserProviderError::InitialEncoding)?;
-            let prepared =
-                AgentPreparedObservationRequest::try_verified_action_for_provider_exact_count(
-                    &mut self.policy,
-                    request,
-                    result,
-                    payload,
-                    self.config.clone(),
-                    continuation,
-                )
+            let prepared = AgentPreparedObservationRequest::try_verified_action_for_provider_exact_count_with_action_authority(
+                &mut self.policy,
+                request,
+                result,
+                payload,
+                self.config.clone(),
+                continuation,
+                action_authority,
+            )
                 .map_err(|_| AgentBrowserProviderError::Authority)?;
             return self.drive(prepared.into_transport_input()).await;
         };
@@ -2264,7 +2293,13 @@ impl AgentBrowserSession {
         .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
         .map_err(AgentBrowserProviderError::DiffEncoding)?;
         let bound = continuation
-            .bind_diff_request(request, &self.config, diff, payload)
+            .bind_diff_request_with_action_authority(
+                request,
+                &self.config,
+                diff,
+                payload,
+                action_authority,
+            )
             .map_err(|_| AgentBrowserProviderError::Continuation)?;
         let draft = AgentProviderDiffRequestDraft::try_new(bound)
             .map_err(|_| AgentBrowserProviderError::Continuation)?;

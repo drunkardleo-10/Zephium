@@ -203,6 +203,14 @@ fn assembled_scope_and_task_pass_ordinary_controller_admission() {
 
 struct RefuseLocalActions;
 impl AgentWorkLocalActionPolicy for RefuseLocalActions {
+    fn model_action_operations(
+        &self,
+        _: &SemanticNode,
+        _: &SemanticObservation,
+    ) -> Result<SemanticOperations, AgentWorkFailure> {
+        Ok(SemanticOperations::NONE)
+    }
+
     fn assess(
         &self,
         _: &SemanticPreparedAction,

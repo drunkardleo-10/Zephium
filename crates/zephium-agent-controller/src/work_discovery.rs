@@ -25,6 +25,15 @@ pub trait AgentWorkAccountSource: Send {
 /// must refuse. Calls must be bounded and nonblocking. No native work belongs
 /// here; the controller separately admits, executes and verifies each action.
 pub trait AgentWorkLocalActionPolicy: Send {
+    /// Returns the independently approved operation subset for this exact
+    /// observed node. This is model-affordance projection only; `assess`
+    /// remains the final host classification after semantic action binding.
+    fn model_action_operations(
+        &self,
+        node: &SemanticNode,
+        observation: &SemanticObservation,
+    ) -> Result<SemanticOperations, AgentWorkFailure>;
+
     /// Resolves the model-selected proposal against fresh semantic evidence and
     /// independently returns its actual destination and effect, or refuses.
     fn assess(
@@ -112,6 +121,16 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
     }
     fn allows_actions_before_extraction(&self) -> bool {
         self.local_actions.is_some()
+    }
+    fn model_action_operations(
+        &self,
+        node: &SemanticNode,
+        observation: &SemanticObservation,
+    ) -> Result<SemanticOperations, AgentWorkFailure> {
+        self.local_actions
+            .as_ref()
+            .ok_or(AgentWorkFailure::Contract)?
+            .model_action_operations(node, observation)
     }
     fn evaluate(
         &mut self,
@@ -260,6 +279,22 @@ mod tests {
         destination: SemanticOrigin,
     }
     impl AgentWorkLocalActionPolicy for LocalPolicy {
+        fn model_action_operations(
+            &self,
+            node: &SemanticNode,
+            _: &SemanticObservation,
+        ) -> Result<SemanticOperations, AgentWorkFailure> {
+            if node.name().is_some_and(|name| name.as_str() == "Search") {
+                SemanticOperations::try_new(&[
+                    SemanticOperationClass::Click,
+                    SemanticOperationClass::Fill,
+                ])
+                .map_err(|_| AgentWorkFailure::Contract)
+            } else {
+                Ok(SemanticOperations::NONE)
+            }
+        }
+
         fn assess(
             &self,
             action: &SemanticPreparedAction,

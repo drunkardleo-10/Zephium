@@ -33,11 +33,12 @@ use openai::OpenAiResponsesStreamDecoder;
 
 pub(crate) use continuation::AgentProviderContinuationSeed;
 pub use continuation::{
-    AgentProviderActionRefusal, AgentProviderActionRefusalKey, AgentProviderActionResolution,
-    AgentProviderActionResolutionError, AgentProviderBoundDiffContinuation,
-    AgentProviderBoundExtractionContinuation, AgentProviderBoundLocateContinuation,
-    AgentProviderBoundReadContinuation, AgentProviderBoundScreenshotContinuation,
-    AgentProviderContinuation, AgentProviderContinuationError, AgentProviderNavigationCheckpoint,
+    AgentProviderActionAuthority, AgentProviderActionRefusal, AgentProviderActionRefusalKey,
+    AgentProviderActionResolution, AgentProviderActionResolutionError,
+    AgentProviderBoundDiffContinuation, AgentProviderBoundExtractionContinuation,
+    AgentProviderBoundLocateContinuation, AgentProviderBoundReadContinuation,
+    AgentProviderBoundScreenshotContinuation, AgentProviderContinuation,
+    AgentProviderContinuationError, AgentProviderNavigationCheckpoint,
     AgentProviderObservationCheckpoint, AgentProviderObservationRefusal,
     AgentProviderObservationResolution, MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES,
     MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES, MAX_AGENT_PROVIDER_CONTINUATION_TURNS,
@@ -944,7 +945,8 @@ impl AgentProviderCallConfig {
         )
     }
 
-    pub(super) fn permits_tool(&self, kind: AgentBrowserToolKind) -> bool {
+    /// Reports whether this immutable request profile advertises a tool kind.
+    pub fn permits_tool(&self, kind: AgentBrowserToolKind) -> bool {
         if self.baseline_read && kind == AgentBrowserToolKind::Read {
             return true;
         }

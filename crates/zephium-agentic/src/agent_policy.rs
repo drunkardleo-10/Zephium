@@ -3040,10 +3040,10 @@ mod tests {
         read_semantic_observation, AgentAccountAttestationId, AgentAccountId, AgentDataFlowRule,
         AgentDelegationSpec, AgentDelegationTopology, AgentEffectScope, AgentPlanNodeAuthority,
         AgentPlanNodeScope, AgentPreparedObservationRequest, AgentPreparedReadRequest,
-        AgentProviderCallConfig, AgentProviderContractError, AgentProviderDiffRequestDraft,
-        AgentProviderEndpoint, AgentProviderExtractionRequestDraft, AgentProviderInputEvidence,
-        AgentProviderInputKind, AgentProviderInputOutcome, AgentProviderKind,
-        AgentProviderLocalInputTokenCounter, AgentProviderLocateRequestDraft,
+        AgentProviderActionAuthority, AgentProviderCallConfig, AgentProviderContractError,
+        AgentProviderDiffRequestDraft, AgentProviderEndpoint, AgentProviderExtractionRequestDraft,
+        AgentProviderInputEvidence, AgentProviderInputKind, AgentProviderInputOutcome,
+        AgentProviderKind, AgentProviderLocalInputTokenCounter, AgentProviderLocateRequestDraft,
         AgentProviderModelRevision, AgentProviderObjective,
         AgentProviderReadContinuationRequestDraft, AgentProviderReasoningEffort,
         AgentProviderRequestSettlement, AgentProviderScreenshotRequestDraft,
@@ -3060,8 +3060,9 @@ mod tests {
         SemanticLocateBudget, SemanticLocateId, SemanticLocateQuery, SemanticLocateRequest,
         SemanticLocateScope, SemanticModelDeliverySettlement, SemanticModelEncodingBudget,
         SemanticObservationAssembler, SemanticObservationBudget, SemanticObservationId,
-        SemanticObservationRequest, SemanticPreparedAction, SemanticReadAuthority,
-        SemanticReadBudget, SemanticReadSensitivityLimit, SemanticSettleBudget,
+        SemanticObservationRequest, SemanticOperationClass, SemanticOperations,
+        SemanticPreparedAction, SemanticReadAuthority, SemanticReadBudget,
+        SemanticReadSensitivityLimit, SemanticReferenceId, SemanticSettleBudget,
         SemanticSettleInstant, SemanticSnapshot, SemanticSnapshotGeneration, SemanticState,
         SemanticTokenCountQuality, SemanticTokenCountRequirement, SemanticTokenCounter,
         SemanticTokenCounterError, SemanticTokenMeasurement, SemanticTokenizerRevision,
@@ -4726,9 +4727,19 @@ mod tests {
             1,
             vec![
                 json!({"k": 1, "r": "document", "o": 16}),
-                json!({"k": 2, "p": 0, "r": "paragraph", "t": "private provider-exact marker"}),
+                json!({"k": 2, "p": 0, "r": "button", "n": "Approved action", "o": 1}),
+                json!({"k": 3, "p": 0, "r": "paragraph", "t": "private provider-exact marker"}),
             ],
         );
+        let action_authority = AgentProviderActionAuthority::try_new(
+            &observation,
+            &[(
+                SemanticReferenceId::new(2).expect("action reference"),
+                SemanticOperations::try_new(&[SemanticOperationClass::Click])
+                    .expect("click operation"),
+            )],
+        )
+        .expect("action authority");
         let selected = tokenizer();
         let payload = encode_semantic_observation(
             &observation,
@@ -4775,6 +4786,29 @@ mod tests {
             ))
         ));
         assert_eq!(fixture.policy.pending_model_calls(), 0);
+
+        for fixed_envelope in [
+            provider_config(selected.clone(), 10, 128),
+            anthropic_provider_config(selected.clone(), 10, 128),
+        ] {
+            let payload = observation_payload(&observation, 50);
+            assert!(matches!(
+                AgentPreparedObservationRequest::try_for_config_with_action_authority(
+                    &mut fixture.policy,
+                    request,
+                    &observation,
+                    payload,
+                    &objective,
+                    fixed_envelope,
+                    &action_authority,
+                ),
+                Err(crate::AgentProviderRequestError::Encoding)
+            ));
+            assert_eq!(fixture.policy.pending_model_calls(), 0);
+            assert_eq!(fixture.policy.accounting().reserved_operations(), 0);
+            assert_eq!(fixture.policy.accounting().reserved_model_tokens(), 0);
+            assert_eq!(fixture.policy.accounting().reserved_cost_micro_usd(), 0);
+        }
 
         for exact_provider in [
             provider_config(selected.clone(), 10, 128),
@@ -4823,17 +4857,32 @@ mod tests {
         .expect("encode again")
         .admit_conservative_utf8(&selected)
         .expect("conservative payload");
-        let prepared = AgentPreparedObservationRequest::try_openai_for_provider_exact_count(
+        let prepared = AgentPreparedObservationRequest::try_for_config_with_action_authority(
             &mut fixture.policy,
             request,
             &observation,
             payload,
             &objective,
             config,
+            &action_authority,
         )
         .expect("provider-exact prepared request");
         let body_bytes = u32::try_from(prepared.request().byte_len()).expect("bounded body");
         assert!(body_bytes > 0);
+        let wire: Value =
+            serde_json::from_slice(prepared.request().body()).expect("projected request JSON");
+        let act = wire["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .find(|tool| tool["name"] == "act")
+            .expect("projected Act tool");
+        let actions = act["parameters"]["properties"]["actions"]["items"]["anyOf"]
+            .as_array()
+            .expect("action variants");
+        assert_eq!(actions.len(), 1, "only approved operation is advertised");
+        assert_eq!(actions[0]["properties"]["kind"]["enum"], json!(["click"]));
+        assert_eq!(actions[0]["properties"]["target"]["enum"], json!(["@a2"]));
         assert_eq!(
             fixture.policy.accounting().reserved_model_tokens(),
             u64::from(body_bytes) + 128

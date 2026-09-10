@@ -157,6 +157,13 @@ impl AgentWorkTask for ReadTask {
     fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
         self.inner.extraction_schema()
     }
+    fn model_action_operations(
+        &self,
+        node: &SemanticNode,
+        observation: &SemanticObservation,
+    ) -> Result<SemanticOperations, AgentWorkFailure> {
+        self.inner.model_action_operations(node, observation)
+    }
     fn accept_extraction(
         &mut self,
         result: &SemanticExtractionResult<'_>,

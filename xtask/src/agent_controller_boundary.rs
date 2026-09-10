@@ -10,6 +10,7 @@ const ROOT: &str = "crates/zephium-agent-controller/src/lib.rs";
 const PROBE: &str = "crates/zephium-agent-controller/src/probe.rs";
 const TERRA: &str = "crates/zephium-agent-controller/src/terra.rs";
 const ACTION: &str = "crates/zephium-agent-controller/src/action.rs";
+const ACTION_REFUSAL: &str = "crates/zephium-agentic/src/agent_provider/action_refusal.rs";
 const REINSPECTION: &str = "crates/zephium-agent-controller/src/work_reinspection.rs";
 const WORK: &str = "crates/zephium-agent-controller/src/work.rs";
 const INSPECTION: &str = "crates/zephium-agent-controller/src/work_inspection.rs";
@@ -61,7 +62,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_root(&root)?;
     validate_probe(&probe)?;
     validate_terra(&terra)?;
-    validate_action(&action)?;
+    validate_action(&action, &read(repository.join(ACTION_REFUSAL))?)?;
     validate_reinspection(&read(repository.join(REINSPECTION))?)?;
     validate_work(&read(repository.join(WORK))?)?;
     validate_progressive_observation(
@@ -237,7 +238,7 @@ fn validate_account_refresh(terra: &str, work: &str, policy: &str) -> Result<(),
         || work
             .matches("state.refresh_account(worker, browser)?")
             .count()
-            != 8
+            != 9
         || !policy.contains("MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS: u64 = 30_000;")
     {
         return Err("Work lost per-admission sampling, control or original expiry boundary".into());
@@ -381,7 +382,7 @@ fn validate_navigation_progress(
         .find(".provider_navigation_checkpoint(call_request, observation)?")
         .ok_or("missing policy projection")?;
     let encoding = initial
-        .find("encode_openai_observation_body(")
+        .find("encode_openai_observation_body_with_action_targets(")
         .ok_or("missing checkpoint encoding")?;
     let inspection = initial
         .find("let text = progress.encode(observation)?;")
@@ -440,7 +441,7 @@ fn validate_navigation(actor: &str, policy: &str, continuation: &str) -> Result<
                 "account.attestation() == self.account.attestation()",
                 "self.validate_account_update(account, receipt.operation().context())?",
                 "SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE",
-                ".validate_successor(receipt, observation, request, &self.config)",
+                ".validate_successor_with_action_authority(",
                 "self.drive(prepared.into_transport_input()).await",
             ][..],
         ),
@@ -780,8 +781,8 @@ fn validate_terra(source: &str) -> Result<(), String> {
         "self.drive_terminal(input, Some(output)).await?",
         "SemanticReadSensitivityLimit::PublicOnly",
         "self.extraction_output.take()",
-        ".bind_diff_request(request, &self.config, &diff, payload)",
-        ".try_prepare_for_provider_exact_count(&mut self.policy, request, &diff)",
+        ".bind_diff_request_with_action_authority(",
+        ".try_prepare_for_provider_exact_count(&mut self.policy, request, diff)",
         ".try_prove_shutdown()",
     ] {
         if !source.contains(required) {
@@ -911,7 +912,7 @@ fn validate_workflow_qualifier(source: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_action(source: &str) -> Result<(), String> {
+fn validate_action(source: &str, refusal: &str) -> Result<(), String> {
     let refusal_branch = source
         .split("AgentEffectAuthorization::NeedsHuman(transition) =>")
         .nth(1)
@@ -924,7 +925,7 @@ fn validate_action(source: &str) -> Result<(), String> {
         return Err("controller review classification escaped exact unissued policy branch".into());
     }
     for required in [
-        "SemanticActionBatch::bind",
+        "turn.resolve_action",
         "authorize_semantic_effect",
         "dispatch_semantic_effect",
         "execution: &mut SemanticActionExecutionCoordinator",
@@ -950,6 +951,20 @@ fn validate_action(source: &str) -> Result<(), String> {
             return Err(format!("controller action lost boundary: {required}"));
         }
     }
+    for required in [
+        "config != &continuation.config",
+        "!continuation.baseline.matches(observation)",
+        "actions.actions().iter().find_map",
+        "targets.permitted_operations(context.target)",
+        "SemanticReferenceError::OperationDenied",
+        "SemanticActionBatch::bind",
+    ] {
+        if !refusal.contains(required) {
+            return Err(format!(
+                "provider action resolution lost grounding boundary: {required}"
+            ));
+        }
+    }
     for forbidden in FORBIDDEN_TERRA_TOKENS.into_iter().chain([
         "SemanticModelActionQualificationExecution",
         "for_execution_qualification",
@@ -966,12 +981,12 @@ fn validate_action(source: &str) -> Result<(), String> {
 fn validate_progressive_observation(inspection: &str, checkpoint: &str) -> Result<(), String> {
     for required in [
         "state.check_task_contract()?",
-        ".continue_after_observation(checkpoint, previous, &current)",
+        "session.continue_after_observation(",
         "checkpoint.baseline()",
         ".observe_retained_scope(worker, expansion)",
         "state.refresh_account(worker, browser)?",
         "Self::provider(",
-        ".prepare_successor(",
+        ".prepare_successor_with_action_authority(",
         "self.drive(prepared.into_transport_input())",
     ] {
         if !inspection.contains(required) {
@@ -986,8 +1001,9 @@ fn validate_progressive_observation(inspection: &str, checkpoint: &str) -> Resul
         ".matches_manifest_revision(policy.manifest().id(), policy.manifest().guard())",
         "request.lease() != self.prior_call.lease()",
         "self.validate_successor(previous, current, request, &config)",
-        "AgentPreparedObservationRequest::try_for_config_with_inspections(",
-        "previous.frames()[0].generation().next()",
+        "AgentPreparedObservationRequest::try_for_config_with_inspections_and_action_authority(",
+        "Some(current.frames()[0].generation())",
+        "if self.anchor_lost",
         "node.parent().is_some()",
         "self.context == observation.request().context()",
         "capture.snapshot == observation.frames()[0].generation().get()",
@@ -1169,6 +1185,8 @@ mod tests {
     const PROBE: &str = include_str!("../../crates/zephium-agent-controller/src/probe.rs");
     const TERRA: &str = include_str!("../../crates/zephium-agent-controller/src/terra.rs");
     const ACTION: &str = include_str!("../../crates/zephium-agent-controller/src/action.rs");
+    const ACTION_REFUSAL: &str =
+        include_str!("../../crates/zephium-agentic/src/agent_provider/action_refusal.rs");
     const WORK: &str = include_str!("../../crates/zephium-agent-controller/src/work.rs");
     const READ: &str = include_str!("../../crates/zephium-agentic/src/semantic_read.rs");
     const CONTINUATION: &str =
@@ -1195,8 +1213,8 @@ mod tests {
         );
         super::validate_progressive_observation(inspection, checkpoint).unwrap();
         for boundary in [
-            ".continue_after_observation(checkpoint, previous, &current)",
-            ".prepare_successor(",
+            "session.continue_after_observation(",
+            ".prepare_successor_with_action_authority(",
             "state.refresh_account(worker, browser)?",
         ] {
             assert!(super::validate_progressive_observation(
@@ -1207,7 +1225,8 @@ mod tests {
         }
         for boundary in [
             "request.lease() != self.prior_call.lease()",
-            "previous.frames()[0].generation().next()",
+            "Some(current.frames()[0].generation())",
+            "if self.anchor_lost",
             "node.parent().is_some()",
             "self.context == observation.request().context()",
             "capture.snapshot == observation.frames()[0].generation().get()",
@@ -1258,7 +1277,7 @@ mod tests {
         validate_root(ROOT).expect("controller root");
         validate_probe(PROBE).expect("controller probe");
         validate_terra(TERRA).expect("controller Terra path");
-        validate_action(ACTION).expect("controller native action path");
+        validate_action(ACTION, ACTION_REFUSAL).expect("controller native action path");
         validate_work(WORK).expect("production Work actor");
         validate_account_refresh(TERRA, WORK, POLICY).expect("trusted account sampling");
         validate_form(FORM).expect("production trusted form contract");
@@ -1585,14 +1604,36 @@ mod tests {
             "self.pending = Some",
         ] {
             assert!(
-                validate_action(&ACTION.replace(boundary, "removed_boundary")).is_err(),
+                validate_action(
+                    &ACTION.replace(boundary, "removed_boundary"),
+                    ACTION_REFUSAL
+                )
+                .is_err(),
                 "{boundary}"
             );
         }
-        assert!(validate_action(&format!(
-            "{ACTION}\nSemanticModelActionQualificationExecution"
-        ))
+        assert!(validate_action(
+            &format!("{ACTION}\nSemanticModelActionQualificationExecution"),
+            ACTION_REFUSAL
+        )
         .is_err());
+        for boundary in [
+            "config != &continuation.config",
+            "!continuation.baseline.matches(observation)",
+            "actions.actions().iter().find_map",
+            "targets.permitted_operations(context.target)",
+            "SemanticReferenceError::OperationDenied",
+            "SemanticActionBatch::bind",
+        ] {
+            assert!(
+                validate_action(
+                    ACTION,
+                    &ACTION_REFUSAL.replace(boundary, "removed_boundary")
+                )
+                .is_err(),
+                "{boundary}"
+            );
+        }
     }
 
     #[test]

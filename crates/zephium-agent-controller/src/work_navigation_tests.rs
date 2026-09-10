@@ -28,6 +28,19 @@ fn discovered_link_workflow_uses_original_controller_and_refuses_unobserved_urls
 
 pub(super) struct LocalActionPolicy;
 impl crate::AgentWorkLocalActionPolicy for LocalActionPolicy {
+    fn model_action_operations(
+        &self,
+        node: &SemanticNode,
+        _: &SemanticObservation,
+    ) -> Result<SemanticOperations, AgentWorkFailure> {
+        if node.name().is_some_and(|name| name.as_str() == "Field") {
+            SemanticOperations::try_new(&[SemanticOperationClass::Fill])
+                .map_err(|_| AgentWorkFailure::Contract)
+        } else {
+            Ok(SemanticOperations::NONE)
+        }
+    }
+
     fn assess(
         &self,
         action: &SemanticPreparedAction,

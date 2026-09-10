@@ -108,13 +108,42 @@ impl super::super::AgentProviderSettledToolTurn {
         } else {
             None
         };
-        if let Some((context, error)) = refusal_context.and_then(|context| {
-            continuation
-                .transcript
-                .action_targets()
-                .and_then(|targets| targets.excluded_error(context.kind, context.target))
-                .map(|error| (context, error))
-        }) {
+        let projected_refusal = continuation
+            .transcript
+            .action_targets()
+            .and_then(|targets| {
+                actions.actions().iter().find_map(|action| {
+                    let target = action.intent().target();
+                    let expected = observation.reference_frame(target).ok()?;
+                    let current = frames
+                        .iter()
+                        .find(|current| current.frame() == expected.frame())?;
+                    let node = observation.resolve_node(target, current).ok()?;
+                    let mut context = AgentProviderActionRefusalContext {
+                        observation: observation.request().id(),
+                        generation: observation.request().generation(),
+                        kind: action.intent().kind(),
+                        target,
+                        role: node.role(),
+                        operations: node.operations(),
+                    };
+                    let permitted = targets.permitted_operations(context.target);
+                    context.operations = permitted;
+                    if !permitted.contains(context.kind.operation()) {
+                        Some((
+                            context,
+                            SemanticActionBindingError::Reference(
+                                SemanticReferenceError::OperationDenied,
+                            ),
+                        ))
+                    } else {
+                        targets
+                            .excluded_error(context.kind, context.target)
+                            .map(|error| (context, error))
+                    }
+                })
+            });
+        if let Some((context, error)) = projected_refusal {
             return Ok(AgentProviderActionResolution::Refused(
                 AgentProviderActionRefusal {
                     continuation,

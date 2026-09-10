@@ -401,6 +401,16 @@ impl AgentWorkTask for AgentWorkFormExtractionTask {
     fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
         self.extraction.extraction_schema()
     }
+    fn model_action_operations(
+        &self,
+        node: &SemanticNode,
+        observation: &SemanticObservation,
+    ) -> Result<SemanticOperations, AgentWorkFailure> {
+        if self.ready.is_some() || self.complete {
+            return Ok(SemanticOperations::NONE);
+        }
+        self.form.model_action_operations(node, observation)
+    }
     fn evaluate(
         &mut self,
         observation: &SemanticObservation,
@@ -491,6 +501,37 @@ impl AgentWorkTask for AgentWorkFormTask {
             self.refused = true;
         }
         result
+    }
+    fn model_action_operations(
+        &self,
+        node: &SemanticNode,
+        observation: &SemanticObservation,
+    ) -> Result<SemanticOperations, AgentWorkFailure> {
+        let baseline = self.baseline.as_ref().ok_or(AgentWorkFailure::Contract)?;
+        if self.refused
+            || observation.request().id() != baseline.observation
+            || observation.request().generation() != baseline.generation
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
+        let Some(binding) = self
+            .bindings
+            .iter()
+            .find(|binding| binding.target == node.reference())
+        else {
+            return Ok(SemanticOperations::NONE);
+        };
+        let goal = self
+            .phases
+            .get(self.phase)
+            .and_then(|phase| phase.goals.get(binding.goal))
+            .ok_or(AgentWorkFailure::Contract)?;
+        let operation = match goal.kind {
+            SemanticActionKind::Fill => SemanticOperationClass::Fill,
+            SemanticActionKind::Select => SemanticOperationClass::Select,
+            _ => return Err(AgentWorkFailure::Contract),
+        };
+        SemanticOperations::try_new(&[operation]).map_err(|_| AgentWorkFailure::Contract)
     }
     fn assess(
         &self,

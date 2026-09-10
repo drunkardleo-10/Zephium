@@ -148,6 +148,21 @@ impl AgentWorkTask for ScopedTask {
             self.extraction.extraction_schema()
         }
     }
+    fn model_action_operations(
+        &self,
+        node: &SemanticNode,
+        _: &SemanticObservation,
+    ) -> Result<SemanticOperations, AgentWorkFailure> {
+        if self.fault == ScopedFault::Combined
+            && node.name().is_some_and(|name| name.as_str() == "Field")
+            && node.operations().contains(SemanticOperationClass::Fill)
+        {
+            SemanticOperations::try_new(&[SemanticOperationClass::Fill])
+                .map_err(|_| AgentWorkFailure::Contract)
+        } else {
+            Ok(SemanticOperations::NONE)
+        }
+    }
     fn evaluate(
         &mut self,
         observation: &SemanticObservation,

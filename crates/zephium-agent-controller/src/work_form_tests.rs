@@ -220,6 +220,11 @@ fn phased_form_is_variable_order_and_exact_not_action_count() {
             task.evaluate(&initial).unwrap(),
             AgentWorkTaskProgress::Continue
         );
+        assert_eq!(
+            task.model_action_operations(&initial.frames()[0].nodes()[1], &initial)
+                .unwrap(),
+            SemanticOperations::try_new(&[SemanticOperationClass::Fill]).unwrap()
+        );
         assert!(task.assess(&fill(&initial, "first")).is_ok());
         assert!(task.assess(&select(&initial, 4)).is_ok());
         assert!(task.assess(&fill(&initial, "final")).is_err());
@@ -234,6 +239,15 @@ fn phased_form_is_variable_order_and_exact_not_action_count() {
         assert_eq!(
             task.evaluate(&mid).unwrap(),
             AgentWorkTaskProgress::Continue
+        );
+        assert_eq!(
+            task.model_action_operations(&mid.frames()[0].nodes()[1], &mid)
+                .unwrap(),
+            if language_first {
+                SemanticOperations::try_new(&[SemanticOperationClass::Fill]).unwrap()
+            } else {
+                SemanticOperations::NONE
+            }
         );
         assert!(
             task.assess(&fill(&initial, "first")).is_err(),

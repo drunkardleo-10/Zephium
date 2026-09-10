@@ -56,6 +56,13 @@ impl AgentWorkTask for AccountTask {
     fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
         self.task.extraction_schema()
     }
+    fn model_action_operations(
+        &self,
+        node: &SemanticNode,
+        observation: &SemanticObservation,
+    ) -> Result<SemanticOperations, AgentWorkFailure> {
+        self.task.model_action_operations(node, observation)
+    }
     fn evaluate(
         &mut self,
         observation: &SemanticObservation,

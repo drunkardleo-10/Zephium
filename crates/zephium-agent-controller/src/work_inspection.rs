@@ -84,13 +84,26 @@ impl AgentWorkController {
         );
         let progress = state.task_progress(&current)?;
         state.refresh_account(worker, browser)?;
+        let action_authority = state
+            .session
+            .as_ref()
+            .ok_or(AgentWorkFailure::Contract)?
+            .config
+            .permits_tool(AgentBrowserToolKind::Act)
+            .then(|| state.action_authority(&current))
+            .transpose()?;
         let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
         let next = Self::provider(
             &mut state.native,
             worker,
             browser,
             session.cancellation.clone(),
-            session.continue_after_observation(checkpoint, previous, &current),
+            session.continue_after_observation(
+                checkpoint,
+                previous,
+                &current,
+                action_authority.as_ref(),
+            ),
         )
         .await?;
         Ok((current, captured_at, progress, next))
@@ -154,6 +167,7 @@ impl AgentBrowserSession {
         checkpoint: AgentProviderObservationCheckpoint,
         previous: &SemanticObservation,
         observation: &SemanticObservation,
+        action_authority: Option<&AgentProviderActionAuthority>,
     ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
         self.check_live()?;
         let request = self.next_model_call_request()?;
@@ -168,7 +182,7 @@ impl AgentBrowserSession {
             .as_ref()
             .ok_or(AgentBrowserProviderError::Continuation)?;
         let prepared = checkpoint
-            .prepare_successor(
+            .prepare_successor_with_action_authority(
                 &mut self.policy,
                 previous,
                 observation,
@@ -176,6 +190,7 @@ impl AgentBrowserSession {
                 self.config.clone(),
                 payload,
                 objective,
+                action_authority,
             )
             .map_err(|_| AgentBrowserProviderError::Authority)?;
         self.drive(prepared.into_transport_input()).await

@@ -344,6 +344,14 @@ impl AgentWorkController {
                 .millis(),
         );
         let progress = state.task_progress(&fresh)?;
+        let action_authority = state
+            .session
+            .as_ref()
+            .ok_or(AgentWorkFailure::Contract)?
+            .config
+            .permits_tool(AgentBrowserToolKind::Act)
+            .then(|| state.action_authority(&fresh))
+            .transpose()?;
         let now = state
             .session
             .as_mut()
@@ -360,7 +368,13 @@ impl AgentWorkController {
             worker,
             browser,
             session.cancellation.clone(),
-            session.continue_after_navigation(checkpoint, receipt, &fresh, account),
+            session.continue_after_navigation(
+                checkpoint,
+                receipt,
+                &fresh,
+                account,
+                action_authority.as_ref(),
+            ),
         )
         .await?;
         Ok((fresh, captured_at, progress, turn))
@@ -437,6 +451,7 @@ impl AgentBrowserSession {
         receipt: AgentNavigationReceipt,
         observation: &SemanticObservation,
         account: AgentContextAccountBinding,
+        action_authority: Option<&AgentProviderActionAuthority>,
     ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
         self.check_live()?;
         if self.turns >= self.max_model_calls {
@@ -460,7 +475,13 @@ impl AgentBrowserSession {
             provisional.now(),
         );
         checkpoint
-            .validate_successor(receipt, observation, request, &self.config)
+            .validate_successor_with_action_authority(
+                receipt,
+                observation,
+                request,
+                &self.config,
+                action_authority,
+            )
             .map_err(|_| AgentBrowserProviderError::Continuation)?;
         let payload = encode_semantic_observation(
             observation,
@@ -472,14 +493,25 @@ impl AgentBrowserSession {
             .objective
             .as_ref()
             .ok_or(AgentBrowserProviderError::Continuation)?;
-        let prepared = AgentPreparedObservationRequest::try_openai_for_provider_exact_count(
-            &mut self.policy,
-            request,
-            observation,
-            payload,
-            objective,
-            self.config.clone(),
-        )
+        let prepared = match action_authority {
+            Some(authority) => AgentPreparedObservationRequest::try_openai_for_provider_exact_count_with_action_authority(
+                &mut self.policy,
+                request,
+                observation,
+                payload,
+                objective,
+                self.config.clone(),
+                authority,
+            ),
+            None => AgentPreparedObservationRequest::try_openai_for_provider_exact_count(
+                &mut self.policy,
+                request,
+                observation,
+                payload,
+                objective,
+                self.config.clone(),
+            ),
+        }
         .map_err(|_| AgentBrowserProviderError::Authority)?;
         self.account_attestations.push(account.attestation());
         self.account = account;

@@ -44,7 +44,8 @@ use crate::{
 };
 
 use super::continuation::{
-    AgentProviderActionTargets, AgentProviderBoundTranscript, AgentProviderTranscript,
+    AgentProviderActionAuthority, AgentProviderActionTargets, AgentProviderBoundTranscript,
+    AgentProviderTranscript,
 };
 use super::tool::{AgentBrowserToolKind, OpenAiResponseReplayItem};
 #[cfg(any(test, feature = "provider-transport"))]
@@ -1559,9 +1560,37 @@ impl AgentPreparedObservationRequest {
         config: AgentProviderCallConfig,
         continuation: super::AgentProviderContinuation,
     ) -> Result<Self, AgentProviderRequestError> {
+        Self::try_verified_action_for_provider_exact_count_with_action_authority(
+            policy,
+            call_request,
+            result,
+            payload,
+            config,
+            continuation,
+            None,
+        )
+    }
+
+    /// Delivers a verified post-action replacement observation while narrowing
+    /// Act to the host-projected authority for that exact fresh state.
+    pub fn try_verified_action_for_provider_exact_count_with_action_authority(
+        policy: &mut AgentRunPolicy,
+        call_request: AgentModelCallRequest,
+        result: &crate::SemanticActionResult,
+        payload: SemanticModelPayload,
+        config: AgentProviderCallConfig,
+        continuation: super::AgentProviderContinuation,
+        action_authority: Option<&AgentProviderActionAuthority>,
+    ) -> Result<Self, AgentProviderRequestError> {
         let observation = result.fresh_snapshot().ok_or(AgentPolicyError::Authority)?;
         let (prior, transcript) = continuation
-            .bind_action_observation(result, call_request, &config, &payload)
+            .bind_action_observation_with_authority(
+                result,
+                call_request,
+                &config,
+                &payload,
+                action_authority,
+            )
             .map_err(|_| AgentPolicyError::Authority)?;
         Self::try_bound_observation_for_provider_exact_count(
             policy,
@@ -1694,7 +1723,7 @@ impl AgentPreparedObservationRequest {
     /// provider/accounting adapters refuse instead of silently dropping or
     /// undercounting capture history.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn try_for_config_with_inspections(
+    pub(super) fn try_for_config_with_inspections_and_action_authority(
         policy: &mut AgentRunPolicy,
         request: AgentModelCallRequest,
         observation: &SemanticObservation,
@@ -1702,6 +1731,7 @@ impl AgentPreparedObservationRequest {
         objective: &AgentProviderObjective,
         config: AgentProviderCallConfig,
         inspections: Option<super::continuation::AgentInspectionProgress>,
+        action_authority: Option<&AgentProviderActionAuthority>,
     ) -> Result<Self, AgentProviderRequestError> {
         if let Some(inspections) = inspections {
             if config.provider() != AgentProviderKind::OpenAiResponses
@@ -1716,9 +1746,21 @@ impl AgentPreparedObservationRequest {
                 objective,
                 config,
                 Some(inspections),
+                action_authority,
             );
         }
-        Self::try_for_config(policy, request, observation, payload, objective, config)
+        match action_authority {
+            Some(authority) => Self::try_for_config_with_action_authority(
+                policy,
+                request,
+                observation,
+                payload,
+                objective,
+                config,
+                authority,
+            ),
+            None => Self::try_for_config(policy, request, observation, payload, objective, config),
+        }
     }
     /// Selects the existing provider/accounting-specific observation adapter.
     /// Unsupported combinations retain their original explicit refusal; this
@@ -1752,6 +1794,46 @@ impl AgentPreparedObservationRequest {
             }
         }
     }
+
+    /// Selects the provider/accounting adapter while narrowing Act to one
+    /// independently projected, exact-observation authority.
+    pub fn try_for_config_with_action_authority(
+        policy: &mut AgentRunPolicy,
+        request: AgentModelCallRequest,
+        observation: &SemanticObservation,
+        payload: SemanticModelPayload,
+        objective: &AgentProviderObjective,
+        config: AgentProviderCallConfig,
+        action_authority: &AgentProviderActionAuthority,
+    ) -> Result<Self, AgentProviderRequestError> {
+        match (config.provider(), config.input_accounting) {
+            (
+                AgentProviderKind::OpenAiResponses,
+                super::AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation,
+            ) => Self::try_openai_for_provider_exact_count_with_action_authority(
+                policy,
+                request,
+                observation,
+                payload,
+                objective,
+                config,
+                action_authority,
+            ),
+            (
+                AgentProviderKind::OpenAiResponses,
+                super::AgentProviderInputAccountingMode::ExactLocal { .. },
+            )
+            | (AgentProviderKind::AnthropicMessages, _) => {
+                // Fixed-envelope accounting admits only the immutable cached
+                // tool schema. A per-observation Act projection changes the
+                // complete provider body, so accepting it here would either
+                // expose generic targets or charge the wrong request. Refuse
+                // before policy reservation until this adapter can count the
+                // complete projected body authoritatively.
+                Err(AgentProviderRequestError::Encoding)
+            }
+        }
+    }
     /// Atomically admits and builds one fixed OpenAI observation request.
     ///
     /// Every fallible provider validation/serialization step runs before policy
@@ -1774,7 +1856,6 @@ impl AgentPreparedObservationRequest {
             payload.token_measurement(),
             objective.token_measurement(),
         )?;
-        let action_targets = action_targets_for_observation(&config, observation)?;
         let semantic_payload_tokens =
             AgentProviderInputTokenCount::from_measurement(payload.token_measurement());
         let body = encode_locally_accounted_observation_body(
@@ -1785,13 +1866,8 @@ impl AgentPreparedObservationRequest {
         let admission = policy.prepare_observation_input(call_request, observation, &payload)?;
         let call = AgentProviderCallIdentity::from_admission(&admission);
         let (semantic_content, semantic_stats, delivery) = payload.into_provider_parts();
-        let mut continuation_transcript =
+        let continuation_transcript =
             AgentProviderTranscript::try_initial(objective.shared_content(), semantic_content);
-        if let (Some(transcript), Some(targets)) =
-            (continuation_transcript.as_mut(), action_targets)
-        {
-            transcript.set_action_targets(targets);
-        }
         let request = AgentProviderRequest {
             call,
             config,
@@ -1833,6 +1909,30 @@ impl AgentPreparedObservationRequest {
             objective,
             config,
             None,
+            None,
+        )
+    }
+
+    /// Builds a provider-exact OpenAI observation whose request-local Act
+    /// schema is narrowed to independently approved refs and operations.
+    pub fn try_openai_for_provider_exact_count_with_action_authority(
+        policy: &mut AgentRunPolicy,
+        call_request: AgentModelCallRequest,
+        observation: &SemanticObservation,
+        payload: SemanticModelPayload,
+        objective: &AgentProviderObjective,
+        config: AgentProviderCallConfig,
+        action_authority: &AgentProviderActionAuthority,
+    ) -> Result<Self, AgentProviderRequestError> {
+        Self::try_openai_with_inspections(
+            policy,
+            call_request,
+            observation,
+            payload,
+            objective,
+            config,
+            None,
+            Some(action_authority),
         )
     }
 
@@ -1845,6 +1945,7 @@ impl AgentPreparedObservationRequest {
         objective: &AgentProviderObjective,
         config: AgentProviderCallConfig,
         inspections: Option<super::continuation::AgentInspectionProgress>,
+        action_authority: Option<&AgentProviderActionAuthority>,
     ) -> Result<Self, AgentProviderRequestError> {
         let navigation_checkpoint = policy
             .provider_navigation_checkpoint(call_request, observation)?
@@ -1859,7 +1960,8 @@ impl AgentPreparedObservationRequest {
                 Ok(AgentProviderInspectionContext { text, progress })
             })
             .transpose()?;
-        let action_targets = action_targets_for_observation(&config, observation)?;
+        let action_targets =
+            action_targets_for_observation(&config, observation, action_authority)?;
         let semantic_payload_tokens =
             AgentProviderInputTokenCount::from_measurement(payload.token_measurement());
         let body = encode_openai_observation_body_with_action_targets(
@@ -1947,7 +2049,6 @@ impl AgentPreparedObservationRequest {
             payload.token_measurement(),
             objective.token_measurement(),
         )?;
-        let action_targets = action_targets_for_observation(&config, observation)?;
         let semantic_payload_tokens =
             AgentProviderInputTokenCount::from_measurement(payload.token_measurement());
         let body = encode_locally_accounted_observation_body(
@@ -1958,13 +2059,8 @@ impl AgentPreparedObservationRequest {
         let admission = policy.prepare_observation_input(call_request, observation, &payload)?;
         let call = AgentProviderCallIdentity::from_admission(&admission);
         let (semantic_content, semantic_stats, delivery) = payload.into_provider_parts();
-        let mut continuation_transcript =
+        let continuation_transcript =
             AgentProviderTranscript::try_initial(objective.shared_content(), semantic_content);
-        if let (Some(transcript), Some(targets)) =
-            (continuation_transcript.as_mut(), action_targets)
-        {
-            transcript.set_action_targets(targets);
-        }
         let request = AgentProviderRequest {
             call,
             config,
@@ -5327,11 +5423,18 @@ fn constrained_browser_tool_definitions(
 fn action_targets_for_observation(
     config: &AgentProviderCallConfig,
     observation: &SemanticObservation,
+    authority: Option<&AgentProviderActionAuthority>,
 ) -> Result<Option<AgentProviderActionTargets>, AgentProviderRequestError> {
     config
         .permits_tool(AgentBrowserToolKind::Act)
         .then(|| {
-            AgentProviderActionTargets::try_from_observation(observation)
+            authority
+                .map_or_else(
+                    || AgentProviderActionTargets::try_from_observation(observation),
+                    |authority| {
+                        AgentProviderActionTargets::try_from_authority(observation, authority)
+                    },
+                )
                 .ok_or(AgentProviderRequestError::Encoding)
         })
         .transpose()
