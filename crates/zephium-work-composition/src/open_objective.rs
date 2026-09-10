@@ -1,0 +1,184 @@
+//! Product admission for one objective and bounded observed-link exploration.
+
+use std::{sync::Arc, time::Instant};
+use zephium_agent_controller::{
+    AgentBrowserModel, AgentWorkAccountSource, AgentWorkContextSpec, AgentWorkDiscoveryTask,
+    AgentWorkFailure, AgentWorkRunInput, AgentWorkRunSettings, AgentWorkTask, TerraControllerIds,
+};
+use zephium_agent_provider_transport::AgentProviderCredential;
+use zephium_agentic::*;
+use zephium_app::{AgentWorkApplicationConfig, AgentWorkProfileBinding};
+
+use crate::{
+    native_work_clock::{authority_window, NativeWorkClock},
+    TrustedWorkRequest,
+};
+
+/// Product-approved intent, exploration scope and result shape. The model
+/// chooses its route from observed links; no destination list or answer oracle
+/// participates in admission. This API permits Public semantic disclosure only,
+/// including when the selected service account is authenticated. Authentication
+/// never declassifies personal, confidential or secret page content.
+pub struct PublicReadWorkObjective {
+    pub objective: String,
+    /// Contains the explicit starting target, same-origin path scope and hop cap.
+    pub navigation: AgentNavigationDiscovery,
+    pub output_fields: Vec<SemanticExtractionFieldSchema>,
+}
+
+/// Independently approved account scope. A browser profile selects storage and
+/// cookies; it does not identify a service account.
+pub enum PublicReadWorkAccount {
+    /// The caller has established anonymous use of the selected service scope.
+    Anonymous,
+    /// A host source independently identifies the account for each current
+    /// document. Missing, changed or stale samples prevent execution. The ID
+    /// must name that identified account, never a generated stand-in inferred
+    /// from profile selection. Sampling must preserve original collection times.
+    Identified {
+        account: AgentAccountId,
+        source: Box<dyn AgentWorkAccountSource>,
+    },
+}
+
+/// Trusted limits for one worker. These values grant no write capability.
+pub struct PublicReadWorkSettings {
+    pub account: PublicReadWorkAccount,
+    pub model: AgentBrowserModel,
+    /// Exactly one context; model tokens, cost and operations remain separately
+    /// enforced by the shared run ledger.
+    pub budget: AgentRunBudget,
+    /// Includes final result mapping and remains independent of context size.
+    pub max_model_calls: u8,
+    /// Original absolute deadline, including any time spent loading credentials.
+    pub deadline: Instant,
+}
+
+impl TrustedWorkRequest {
+    /// Consumes approved product operands into the ordinary retained Work path.
+    /// The request carries no diagnostic retention or qualification authority.
+    /// Admission is dormant: native/browser/provider work starts only when the
+    /// Shell admits `MacosWorkComposition::launch_retained`.
+    pub fn public_read_objective(
+        profile: AgentWorkProfileBinding,
+        objective: PublicReadWorkObjective,
+        settings: PublicReadWorkSettings,
+        config: AgentWorkApplicationConfig,
+        credential: AgentProviderCredential,
+    ) -> Result<Self, AgentWorkFailure> {
+        let identity = ContextIdentity::new(
+            ContextId::generate(),
+            ContextRunId::generate(),
+            profile.profile(),
+            ContextKind::Owned,
+        );
+        let (input, task) = assemble(identity, profile.storage_class(), objective, settings)?;
+        Ok(Self::new(input, config, credential, task).with_browser_profile(profile))
+    }
+}
+
+fn assemble(
+    identity: ContextIdentity,
+    storage: ContextProfileStorageClass,
+    objective: PublicReadWorkObjective,
+    settings: PublicReadWorkSettings,
+) -> Result<(AgentWorkRunInput, Box<dyn AgentWorkTask>), AgentWorkFailure> {
+    let fail = |_| AgentWorkFailure::Contract;
+    if settings.budget.contexts() != 1 || objective.objective.trim().is_empty() {
+        return Err(AgentWorkFailure::Contract);
+    }
+    let effects = AgentEffectScope::try_new(&[SemanticEffectClass::Read]).map_err(fail)?;
+    let account = match &settings.account {
+        PublicReadWorkAccount::Anonymous => AgentAccountScope::Anonymous,
+        PublicReadWorkAccount::Identified { account, .. } => {
+            AgentAccountScope::Authenticated(*account)
+        }
+    };
+    let node = AgentPlanNodeId::generate();
+    let origin = objective.navigation.origin().clone();
+    let authority = AgentPlanNodeAuthority::try_new(
+        vec![identity.profile()],
+        vec![account],
+        vec![origin.clone()],
+        SemanticSensitivity::Public,
+        effects,
+    )
+    .map_err(fail)?
+    .with_navigation_discovery(objective.navigation.clone())
+    .map_err(fail)?;
+    let (issued, expires) =
+        authority_window(settings.deadline).map_err(|_| AgentWorkFailure::Deadline)?;
+    let manifest = AgentRunManifest::try_new(
+        AgentRunManifestId::generate(),
+        identity.owner(),
+        AgentRunScope::try_new(
+            vec![identity.profile()],
+            vec![account],
+            vec![origin],
+            SemanticSensitivity::Public,
+            effects,
+            Vec::new(),
+        )
+        .map_err(fail)?,
+        settings.budget,
+        issued,
+        expires,
+        vec![AgentPlanNodeScope::new(
+            node,
+            authority,
+            settings.budget,
+            expires,
+        )],
+    )
+    .map_err(fail)?;
+    // These counters belong to the fresh run; generated run/context/lease identities
+    // distinguish concurrent admissions. No caller can supply colliding runs.
+    let ids = TerraControllerIds::try_new(
+        AgentSupervisorId::new(1).ok_or(AgentWorkFailure::Contract)?,
+        AgentSupervisorAttemptId::new(1).ok_or(AgentWorkFailure::Contract)?,
+        AgentSupervisorCancellationId::new(1).ok_or(AgentWorkFailure::Contract)?,
+        AgentModelCallId::new(1).ok_or(AgentWorkFailure::Contract)?,
+        [1, 2, 3, 4].map(|id| AgentAuditEventId::new(id).expect("nonzero run-local ID")),
+        AgentAuditDeliveryId::new(1).ok_or(AgentWorkFailure::Contract)?,
+    )
+    .map_err(|_| AgentWorkFailure::Contract)?;
+    let input = AgentWorkRunInput::try_new(
+        manifest,
+        AgentPlanLeaseBinding::new(AgentPlanLeaseId::generate(), node),
+        AgentWorkContextSpec::try_new_with_document_policy(
+            identity,
+            storage,
+            objective.navigation.departure().clone(),
+            objective.navigation.document_policy(),
+        )?,
+        objective.objective,
+        AgentWorkRunSettings::new(
+            settings.model,
+            ids,
+            Arc::new(NativeWorkClock),
+            settings.deadline,
+        )
+        .with_max_model_calls(settings.max_model_calls)?
+        .with_max_actions(0)?,
+    )?;
+    let task = match settings.account {
+        PublicReadWorkAccount::Anonymous => AgentWorkDiscoveryTask::try_new(
+            identity,
+            objective.navigation,
+            objective.output_fields,
+        )?,
+        PublicReadWorkAccount::Identified { source, .. } => {
+            AgentWorkDiscoveryTask::try_new_with_account_source(
+                identity,
+                objective.navigation,
+                objective.output_fields,
+                account,
+                source,
+            )?
+        }
+    };
+    Ok((input, Box::new(task)))
+}
+
+#[cfg(test)]
+mod tests;

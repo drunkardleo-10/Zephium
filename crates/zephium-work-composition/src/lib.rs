@@ -36,13 +36,14 @@ compile_error!("select the authenticated Notion write qualification without anot
 
 #[cfg(feature = "macos-work")]
 mod native;
-#[cfg(any(
-    feature = "navigation-qualification",
-    feature = "retained-qualification"
-))]
+#[cfg(feature = "macos-work")]
 mod native_work_clock;
 #[cfg(feature = "macos-work")]
+mod open_objective;
+#[cfg(feature = "macos-work")]
 pub use native::{MacosWorkComposition, TrustedWorkRequest};
+#[cfg(feature = "macos-work")]
+pub use open_objective::{PublicReadWorkAccount, PublicReadWorkObjective, PublicReadWorkSettings};
 #[cfg(feature = "macos-work")]
 pub use zephium_agent_controller::AgentWorkFailure;
 #[cfg(feature = "public-qualification")]
