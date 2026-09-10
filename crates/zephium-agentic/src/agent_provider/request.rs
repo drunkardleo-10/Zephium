@@ -5067,11 +5067,22 @@ static NAVIGATION_ACTIONS_EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolD
             .as_array_mut()
             .expect("fixed action schema")
         {
-            variant["properties"]["effect"] = string_enum(&["read", "local_write"]);
+            // Editing a value or selection changes local control state, even
+            // for a search-only objective. The host must still independently
+            // assess the actual effect: an auto-saving control may exceed this
+            // profile's authority despite the model's declaration.
+            variant["properties"]["effect"] = match variant["properties"]["kind"]["enum"][0]
+                .as_str()
+                .expect("fixed action kind")
+            {
+                "click" => string_enum(&["read", "local_write"]),
+                "fill" | "select" => string_enum(&["local_write"]),
+                _ => unreachable!("fixed snapshot action kinds"),
+            };
         }
         tools.push(BrowserToolDefinition {
             kind: AgentBrowserToolKind::Act,
-            description: "Propose one current-ref Click, Fill or Select with verification of its intended outcome. Only Read/LocalWrite effects are available, subject to trusted host assessment. Use immediate or mutation_quiet settlement with at least 2000 milliseconds. Opening a page dialog requires page_dialog_opened, followed by fresh inspection of its contents. Native dialogs, navigation, keyboard and scroll effects are unavailable through act. Navigate through the separate navigate tool when authorized.",
+            description: "Propose one current-ref Click, Fill or Select with verification of its intended outcome. Fill and Select require local_write, including editing a search field. Click uses read for exploration or opening a dialog, local_write for reversible local changes. Only these effects are available; autosaved external changes are outside this profile. Trusted host assessment still decides permission. Use immediate or mutation_quiet settlement with at least 2000 milliseconds. Opening a page dialog requires page_dialog_opened, followed by fresh inspection of its contents. Native dialogs, navigation, keyboard and scroll effects are unavailable through act. Navigate through the separate navigate tool when authorized.",
             parameters: action,
         });
         tools.push(BrowserToolDefinition {
@@ -5372,7 +5383,7 @@ fn tool_description(kind: AgentBrowserToolKind) -> &'static str {
         AgentBrowserToolKind::Locate => {
             "Search current retained semantics only. No matches is recoverable, not page-wide absence: simplify the query or snapshot a different/narrower scope. Use current refs, never selectors or guessed refs."
         }
-        AgentBrowserToolKind::Act => "Propose one bounded, homogeneous semantic action batch.",
+        AgentBrowserToolKind::Act => "Propose one bounded, homogeneous semantic action batch. Classify the action's effect, not the objective: read explores without changing form values; local_write changes reversible local page/form state, including search input and selection. Edits saved to a service require external_write; sending, buying and deleting require their corresponding stronger effects. The host independently assesses effects and permission.",
         AgentBrowserToolKind::Wait => "Wait for one typed observable condition.",
         AgentBrowserToolKind::Read => "Request bounded readable semantic content.",
         AgentBrowserToolKind::Extract => "Apply one shell-registered extraction schema.",
@@ -6133,7 +6144,12 @@ mod tests {
             );
             for variant in variants {
                 let properties = &variant["properties"];
-                assert_eq!(properties["effect"]["enum"], json!(["read", "local_write"]));
+                let expected_effects = match properties["kind"]["enum"][0].as_str().unwrap() {
+                    "click" => json!(["read", "local_write"]),
+                    "fill" | "select" => json!(["local_write"]),
+                    _ => unreachable!("checked action kinds"),
+                };
+                assert_eq!(properties["effect"]["enum"], expected_effects);
                 if provider == AgentProviderKind::OpenAiResponses {
                     assert_eq!(
                         properties["settle_millis"]["minimum"],
@@ -7061,7 +7077,7 @@ mod tests {
                 (AgentBrowserToolKind::Reload, 201),
                 (AgentBrowserToolKind::Snapshot, 1_513),
                 (AgentBrowserToolKind::Locate, 2_357),
-                (AgentBrowserToolKind::Act, 10_273),
+                (AgentBrowserToolKind::Act, 10_638),
                 (AgentBrowserToolKind::Wait, 2_152),
                 (AgentBrowserToolKind::Read, 1_510),
                 (AgentBrowserToolKind::Extract, 1_602),
@@ -7070,7 +7086,7 @@ mod tests {
                 (AgentBrowserToolKind::ResumeAfterHuman, 204),
             ]
         );
-        assert_eq!(sizes.iter().map(|(_, bytes)| bytes).sum::<usize>(), 21_040);
+        assert_eq!(sizes.iter().map(|(_, bytes)| bytes).sum::<usize>(), 21_405);
     }
 
     #[test]
