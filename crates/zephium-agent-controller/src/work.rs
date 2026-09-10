@@ -2785,13 +2785,16 @@ impl AgentWorkController {
             turn.turn.continuation().baseline(),
         )
         .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Authority))?;
+        let mut backoff = SemanticStandaloneWaitBackoff::new();
         let result = loop {
             let now = Instant::now();
             if now >= wait_deadline {
                 break wait.time_out();
             }
             let wake = now
-                .checked_add(Duration::from_millis(50))
+                .checked_add(Duration::from_millis(u64::from(
+                    backoff.next_delay_millis(),
+                )))
                 .map_or(wait_deadline, |wake| wake.min(wait_deadline));
             tokio::select! {
                 biased;

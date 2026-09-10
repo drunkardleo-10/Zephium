@@ -17,6 +17,54 @@ use crate::{
     SemanticState,
 };
 
+/// First delay before a standalone wait samples fresh semantic state.
+pub const SEMANTIC_STANDALONE_WAIT_INITIAL_POLL_MILLIS: u32 = 50;
+/// Maximum delay between standalone-wait semantic samples.
+pub const SEMANTIC_STANDALONE_WAIT_MAX_POLL_MILLIS: u32 = 1_000;
+
+/// Content-free bounded polling schedule for one standalone wait.
+///
+/// It owns no asynchronous timer. The controller creates and drops each
+/// individual sleep around a cancellation-prioritized select, so closure
+/// cannot retain timer debt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SemanticStandaloneWaitBackoff {
+    next_millis: u32,
+    samples: u16,
+}
+
+impl SemanticStandaloneWaitBackoff {
+    /// Starts at the fixed low-latency initial sampling interval.
+    pub const fn new() -> Self {
+        Self {
+            next_millis: SEMANTIC_STANDALONE_WAIT_INITIAL_POLL_MILLIS,
+            samples: 0,
+        }
+    }
+
+    /// Returns this sample's delay and advances exponentially to the fixed cap.
+    pub fn next_delay_millis(&mut self) -> u32 {
+        let delay = self.next_millis;
+        self.next_millis = self
+            .next_millis
+            .saturating_mul(2)
+            .min(SEMANTIC_STANDALONE_WAIT_MAX_POLL_MILLIS);
+        self.samples = self.samples.saturating_add(1);
+        delay
+    }
+
+    /// Number of delays issued by this bounded schedule.
+    pub const fn samples(self) -> u16 {
+        self.samples
+    }
+}
+
+impl Default for SemanticStandaloneWaitBackoff {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Terminal result of one bounded standalone wait.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SemanticStandaloneWaitOutcome {
@@ -425,5 +473,33 @@ mod tests {
             wait.advance(skipped),
             Err(SemanticStandaloneWaitError::Observation)
         ));
+    }
+
+    #[test]
+    fn polling_backoff_bounds_full_captures_over_maximum_wait() {
+        let mut backoff = SemanticStandaloneWaitBackoff::new();
+        assert_eq!(
+            (0..6)
+                .map(|_| backoff.next_delay_millis())
+                .collect::<Vec<_>>(),
+            vec![50, 100, 200, 400, 800, 1_000]
+        );
+        let mut backoff = SemanticStandaloneWaitBackoff::new();
+        let mut elapsed = 0_u32;
+        let mut captures = 0_u16;
+        loop {
+            let delay = backoff.next_delay_millis();
+            let Some(next) = elapsed.checked_add(delay) else {
+                panic!("bounded schedule overflowed");
+            };
+            if next > crate::MAX_SEMANTIC_ACTION_SETTLE_MILLIS {
+                break;
+            }
+            elapsed = next;
+            captures += 1;
+        }
+        assert_eq!(captures, 33);
+        assert_eq!(backoff.samples(), 34);
+        assert!(elapsed <= crate::MAX_SEMANTIC_ACTION_SETTLE_MILLIS);
     }
 }

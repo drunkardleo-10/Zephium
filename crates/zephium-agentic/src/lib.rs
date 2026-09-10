@@ -315,8 +315,10 @@ pub use provider_transport::{
     MAX_AGENT_PROVIDER_TRANSPORT_SHUTDOWN_PROOF_BYTES, MAX_OPENAI_INPUT_TOKEN_RESPONSE_BYTES,
 };
 pub use semantic_wait::{
-    SemanticStandaloneWait, SemanticStandaloneWaitError, SemanticStandaloneWaitOutcome,
-    SemanticStandaloneWaitResult, SemanticStandaloneWaitStep,
+    SemanticStandaloneWait, SemanticStandaloneWaitBackoff, SemanticStandaloneWaitError,
+    SemanticStandaloneWaitOutcome, SemanticStandaloneWaitResult, SemanticStandaloneWaitStep,
+    SEMANTIC_STANDALONE_WAIT_INITIAL_POLL_MILLIS,
+    SEMANTIC_STANDALONE_WAIT_MAX_POLL_MILLIS,
 };
 
 pub use semantic_locate::{
