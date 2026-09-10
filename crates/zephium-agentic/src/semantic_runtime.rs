@@ -82,8 +82,8 @@ pub const MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES: usize =
 
 const SEMANTIC_RUNTIME_SOURCE: &str = include_str!("../assets/semantic-runtime-v1.js");
 const SEMANTIC_RUNTIME_SOURCE_SHA256: [u8; 32] = [
-    0x3a, 0x4d, 0x7a, 0xb4, 0xd5, 0x6f, 0xbf, 0xe4, 0x38, 0x2d, 0xa1, 0xed, 0x4d, 0xb7, 0xe6, 0x5c,
-    0x04, 0x40, 0xe3, 0x2f, 0xec, 0x9f, 0xf3, 0x18, 0x2c, 0x2e, 0xe3, 0x09, 0x49, 0x94, 0x3b, 0xbc,
+    0xaa, 0x38, 0x90, 0x6c, 0x71, 0xc6, 0x5f, 0x50, 0x68, 0x78, 0xdf, 0x42, 0x3c, 0x7e, 0x4c, 0xae,
+    0xa1, 0x6f, 0xcf, 0x69, 0xb5, 0x76, 0x3c, 0x12, 0xa7, 0x0e, 0x67, 0x2c, 0x0e, 0x6a, 0xe6, 0xf8,
 ];
 
 /// Immutable production program passed only to a trusted isolated-world adapter.
@@ -153,6 +153,7 @@ pub struct SemanticRuntimeBudget {
     max_wire_bytes: u32,
     max_visited_nodes: u32,
     include_geometry: bool,
+    include_link_url_state: bool,
 }
 
 impl SemanticRuntimeBudget {
@@ -163,6 +164,7 @@ impl SemanticRuntimeBudget {
         max_wire_bytes: 64 * 1024,
         max_visited_nodes: 16 * 1024,
         include_geometry: true,
+        include_link_url_state: false,
     };
 
     /// Validates hard per-frame resource ceilings.
@@ -190,6 +192,7 @@ impl SemanticRuntimeBudget {
             max_wire_bytes,
             max_visited_nodes,
             include_geometry,
+            include_link_url_state: false,
         })
     }
 
@@ -216,6 +219,19 @@ impl SemanticRuntimeBudget {
     /// Whether quantized geometry may be returned for action planning.
     pub const fn include_geometry(self) -> bool {
         self.include_geometry
+    }
+
+    /// Enables exact query/fragment bytes for public links in this invocation.
+    /// The default remains off; only a frozen production navigation profile may
+    /// select this immutable host-side capability.
+    pub const fn with_link_url_state(mut self) -> Self {
+        self.include_link_url_state = true;
+        self
+    }
+
+    /// Whether the host explicitly authorized public-link URL state projection.
+    pub const fn includes_link_url_state(self) -> bool {
+        self.include_link_url_state
     }
 }
 
@@ -582,6 +598,7 @@ pub fn encode_semantic_runtime_invocation(
             max_wire_bytes: budget.max_wire_bytes,
             max_visited_nodes: budget.max_visited_nodes,
             include_geometry: budget.include_geometry,
+            include_link_url_state: budget.include_link_url_state,
         },
     };
     let encoded =
@@ -1183,6 +1200,8 @@ struct RuntimeBudgetWire {
     max_visited_nodes: u32,
     #[serde(rename = "geo")]
     include_geometry: bool,
+    #[serde(rename = "lu", skip_serializing_if = "std::ops::Not::not")]
+    include_link_url_state: bool,
 }
 
 #[derive(Serialize)]
@@ -1643,6 +1662,20 @@ mod tests {
         assert!(!debug.contains("runtime-private"));
         assert!(!debug.contains(r#""i":7"#));
         assert!(debug.contains("[redacted]"));
+
+        let url_state = encode_semantic_runtime_invocation(
+            &request,
+            frame(context),
+            SemanticInvocationId::new(8).expect("invocation"),
+            SemanticSnapshotGeneration::new(10).expect("generation"),
+            SemanticRuntimeBudget::INITIAL_FILTERED.with_link_url_state(),
+        )
+        .expect("authorized link URL state");
+        assert!(url_state.budget().includes_link_url_state());
+        assert_eq!(
+            url_state.as_str(),
+            r#"{"v":1,"i":8,"g":10,"s":{"k":"initial"},"b":{"n":128,"t":16384,"w":65536,"x":16384,"geo":true,"lu":true}}"#
+        );
     }
 
     #[test]

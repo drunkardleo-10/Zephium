@@ -625,7 +625,8 @@ const invoke = (invocation, generation, scope, budget = {}) => runtime.invoke(JS
     t: budget.t || 16384,
     w: budget.w || 65536,
     x: budget.x || 16384,
-    geo: budget.geo !== false
+    geo: budget.geo !== false,
+    ...(budget.lu === true ? { lu: true } : {})
   }
 }));
 
@@ -1406,6 +1407,8 @@ async function finish() {
   productLink.append(new Element("span", { hidden: "" })).append(new CharacterData("hidden-catalog-secret"));
   const explicitLink = catalog.append(new Element("a", { href: "https://example.test/exact", "aria-label": "Explicit product" }));
   explicitLink.append(new Element("h3")).append(new CharacterData("Unselected child label"));
+  const queryLink = catalog.append(new HTMLAnchorElement({ href: "https://example.test/search?q=fixture#result" }));
+  queryLink.append(new CharacterData("Search result"));
   const privateLink = catalog.append(new Element("a", { href: "https://example.test/private" }));
   privateLink.append(new Element("div", { contenteditable: "true", "aria-label": "Private key" }))
     .append(new Element("p")).append(new CharacterData("nested-credential-never-name"));
@@ -1422,6 +1425,11 @@ async function finish() {
   const catalogLink = catalogSnapshot.n.find((node) => node.r === "link" && node.n === "Fixture Cup $15.00 USD");
   assert(catalogLink && (catalogLink.o & 1) === 1, "nested product text lost actionable link identity");
   assert(catalogLink.u === "https://example.test/product", "link destination did not use the captured exact native getter");
+  assert(!catalogSnapshot.n.some((node) => node.n === "Search result" && node.u !== undefined),
+    "default semantic projection disclosed query or fragment URL state");
+  const catalogUrlState = JSON.parse(invoke(106, 106, { k: "initial" }, { lu: true }));
+  assert(catalogUrlState.n.some((node) => node.n === "Search result" && node.u === "https://example.test/search?q=fixture#result"),
+    "host-authorized semantic projection dropped exact query or fragment URL state");
   assert(catalogSnapshot.n.some((node) => node.r === "heading" && node.n === "Fixture Cup"), "nested heading was discarded");
   assert(catalogSnapshot.n.some((node) => node.r === "paragraph" && node.t === "$15.00 USD"), "nested price was discarded");
   assert(catalogSnapshot.n.some((node) => node.r === "link" && node.n === "Explicit product"), "explicit accessible name was overwritten");

@@ -308,21 +308,8 @@ pub fn decode_semantic_snapshot(
             })
             .and_then(|value| {
                 let target = crate::ContextNavigationTarget::parse(value.as_str()).ok()?;
-                (matches!(target.as_url().scheme(), "http" | "https")
-                    && target.as_url().as_str() == value.as_str()
-                    && target.as_url().username().is_empty()
-                    && target.as_url().password().is_none()
-                    && !target.as_url().query_pairs().any(|(key, value)| {
-                        is_sensitive_url_parameter_name(key.as_ref())
-                            || has_credential_label(key.as_ref())
-                            || looks_like_secret_value(key.as_ref())
-                            || looks_like_secret_value(value.as_ref())
-                    })
-                    && !target
-                        .as_url()
-                        .fragment()
-                        .is_some_and(fragment_contains_sensitive_data))
-                .then_some(target)
+                (target.as_url().as_str() == value.as_str() && model_safe_public_url(&target))
+                    .then_some(target)
             });
         retained_text_bytes = retained_text_bytes
             .checked_add(
@@ -595,14 +582,80 @@ fn is_sensitive_url_parameter_name(value: &str) -> bool {
 }
 
 fn fragment_contains_sensitive_data(value: &str) -> bool {
-    if has_credential_label(value) || looks_like_secret_value(value) {
+    let Some(decoded) = percent_decode_url_component(value) else {
+        return true;
+    };
+    if decoded.contains('%') || has_credential_label(&decoded) || looks_like_secret_value(&decoded)
+    {
         return true;
     }
+    contains_sensitive_embedded_url_state(&decoded)
+}
+
+fn contains_sensitive_embedded_url_state(value: &str) -> bool {
+    value.split(['?', '&', ';']).any(|component| {
+        component.split_once('=').is_some_and(|(key, value)| {
+            is_sensitive_url_parameter_name(key)
+                || has_credential_label(key)
+                || looks_like_secret_value(key)
+                || looks_like_secret_value(value)
+        })
+    })
+}
+
+/// Shared final disclosure boundary for page-derived or trusted-checkpoint URLs.
+pub(crate) fn model_safe_public_url(target: &crate::ContextNavigationTarget) -> bool {
+    let url = target.as_url();
+    matches!(url.scheme(), "http" | "https")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && !looks_like_secret_value(url.as_str())
+        && !url.query().is_some_and(contains_encoded_percent)
+        && !url.query_pairs().any(|(key, value)| {
+            is_sensitive_url_parameter_name(key.as_ref())
+                || has_credential_label(key.as_ref())
+                || looks_like_secret_value(key.as_ref())
+                || looks_like_secret_value(value.as_ref())
+                || value.contains('%')
+                || contains_sensitive_embedded_url_state(value.as_ref())
+        })
+        && !url.fragment().is_some_and(fragment_contains_sensitive_data)
+}
+
+fn contains_encoded_percent(value: &str) -> bool {
     value
-        .split(['?', '&', ';'])
-        .filter_map(|component| component.split_once('=').map(|(key, _)| key))
-        .flat_map(|key| url::form_urlencoded::parse(key.as_bytes()))
-        .any(|(key, _)| is_sensitive_url_parameter_name(key.as_ref()))
+        .as_bytes()
+        .windows(3)
+        .any(|window| window[0] == b'%' && window[1] == b'2' && matches!(window[2], b'5'))
+}
+
+fn percent_decode_url_component(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let pair = bytes.get(index + 1..index + 3)?;
+            let byte = hex_digit(pair[0])?
+                .checked_mul(16)?
+                .checked_add(hex_digit(pair[1])?)?;
+            decoded.push(byte);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+const fn hex_digit(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
 }
 
 pub(crate) fn looks_like_secret_value(value: &str) -> bool {
@@ -1175,10 +1228,12 @@ mod tests {
         let good = "https://example.test/docs/next";
         let query = "https://example.test/docs?q=public";
         let fragment = "https://example.test/docs#section";
+        let public_fragment_state = "https://example.test/docs#q=public&section=1";
         for (destination, sensitivity, retained) in [
             (good, "public", true),
             (query, "public", true),
             (fragment, "public", true),
+            (public_fragment_state, "public", true),
             (good, "sensitive", false),
             (good, "secret", false),
             ("https://example.test/docs?token=secret", "public", false),
@@ -1204,6 +1259,31 @@ mod tests {
             ),
             (
                 "https://example.test/docs#access%5Ftoken=short",
+                "public",
+                false,
+            ),
+            (
+                "https://example.test/docs#q=ghp%5Fabcdefghijklmnop",
+                "public",
+                false,
+            ),
+            (
+                "https://example.test/docs#access_token%3Dshortsecret",
+                "public",
+                false,
+            ),
+            (
+                "https://example.test/docs#q=public&access_token=shortsecret",
+                "public",
+                false,
+            ),
+            (
+                "https://example.test/docs?q=public%26access_token%3Dshortsecret",
+                "public",
+                false,
+            ),
+            (
+                "https://example.test/docs?q%253Daccess_token%253Dshortsecret",
                 "public",
                 false,
             ),

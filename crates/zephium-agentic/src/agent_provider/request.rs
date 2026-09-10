@@ -4033,31 +4033,26 @@ fn encode_navigation_checkpoint(
     }
     let target = checkpoint
         .next_target()
-        .map(|target| target.as_url().as_str());
-    if target.is_some_and(looks_like_secret_value) {
-        return Err(AgentProviderRequestError::Encoding);
-    }
+        .map(provider_navigation_url)
+        .transpose()?;
     let current = checkpoint
         .current_document()
-        .map(|target| target.as_url().as_str());
-    let prior = checkpoint.is_discovery().then(|| {
-        checkpoint
-            .prior_documents()
-            .map(|target| target.as_url().as_str())
-            .collect::<Vec<_>>()
-    });
+        .map(provider_navigation_url)
+        .transpose()?;
+    let prior = checkpoint
+        .is_discovery()
+        .then(|| {
+            checkpoint
+                .prior_documents()
+                .map(provider_navigation_url)
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
     let requested = checkpoint
         .current_requested_document()
-        .map(|target| target.as_url().as_str())
+        .map(provider_navigation_url)
+        .transpose()?
         .filter(|requested| Some(*requested) != current);
-    if current.is_some_and(looks_like_secret_value)
-        || requested.is_some_and(looks_like_secret_value)
-        || prior
-            .as_ref()
-            .is_some_and(|prior| prior.iter().any(|target| looks_like_secret_value(target)))
-    {
-        return Err(AgentProviderRequestError::Encoding);
-    }
     let wire = Wire {
         completed_hops: checkpoint.completed_hops(),
         total_hops: checkpoint.total_hops(),
@@ -4106,6 +4101,14 @@ fn encode_navigation_checkpoint(
         binding: checkpoint.binding(),
         text: encoded,
     })
+}
+
+fn provider_navigation_url(
+    target: &crate::ContextNavigationTarget,
+) -> Result<&str, AgentProviderRequestError> {
+    crate::semantic_wire::model_safe_public_url(target)
+        .then(|| target.as_url().as_str())
+        .ok_or(AgentProviderRequestError::Encoding)
 }
 
 fn openai_text_message<'a>(role: &'static str, text: &'a str) -> OpenAiInputMessageWire<'a> {
@@ -7569,6 +7572,34 @@ mod tests {
             assert_ne!(
                 pair[0].1, pair[1].1,
                 "checkpoint substitution changes the counted projection digest"
+            );
+        }
+    }
+
+    #[test]
+    fn navigation_checkpoint_urls_share_the_semantic_disclosure_boundary() {
+        for safe in [
+            "https://example.test/search?q=public&page=2#results",
+            "https://example.test/docs/a%20b?sort=recent",
+        ] {
+            let target = crate::ContextNavigationTarget::parse(safe).unwrap();
+            assert_eq!(provider_navigation_url(&target).unwrap(), safe);
+        }
+        for sensitive in [
+            "https://example.test/search?token=shortsecret",
+            "https://example.test/search?access%5Ftoken=shortsecret",
+            "https://example.test/callback?code=Qm9VT3F2cW1ROGxobTVoQ2c",
+            "https://example.test/callback?state=c2lnbmVkLW9hdXRoLXN0YXRl",
+            "https://example.test/docs#q=ghp%5Fabcdefghijklmnop",
+            "https://example.test/docs#access_token%3Dshortsecret",
+        ] {
+            let target = crate::ContextNavigationTarget::parse(sensitive).unwrap();
+            assert!(
+                matches!(
+                    provider_navigation_url(&target),
+                    Err(AgentProviderRequestError::Encoding)
+                ),
+                "{sensitive}"
             );
         }
     }

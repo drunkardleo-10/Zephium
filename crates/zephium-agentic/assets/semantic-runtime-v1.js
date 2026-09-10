@@ -211,7 +211,7 @@
     }
 
     const budget = request.b;
-    if (!hasExactKeys(budget, ["n", "t", "w", "x", "geo"])) return null;
+    if (!hasExactKeys(budget, budget.lu === true ? ["n", "t", "w", "x", "geo", "lu"] : ["n", "t", "w", "x", "geo"])) return null;
     if (
       !numberIsSafeInteger(budget.n) ||
       budget.n < 1 ||
@@ -225,7 +225,8 @@
       !numberIsSafeInteger(budget.x) ||
       budget.x < budget.n ||
       budget.x > MAX_VISITED_NODES ||
-      typeof budget.geo !== "boolean"
+      typeof budget.geo !== "boolean" ||
+      (budget.lu !== undefined && budget.lu !== true)
     ) {
       return null;
     }
@@ -1543,7 +1544,8 @@
         if (typeof destination === "string" && destination !== "" &&
             utf8Length(destination, 2049) <= 2048 &&
             (apply(stringStartsWith, destination, ["https://"]) || apply(stringStartsWith, destination, ["http://"])) &&
-            !apply(stringIncludes, destination, ["?"]) && !apply(stringIncludes, destination, ["#"]) &&
+            (state.request.b.lu === true ||
+              (!apply(stringIncludes, destination, ["?"]) && !apply(stringIncludes, destination, ["#"]))) &&
             !apply(stringIncludes, destination, ["@"])) {
           const field = consumeField(destination, 2048, state);
           if (!field.secret && field.value === destination) wire.u = destination;

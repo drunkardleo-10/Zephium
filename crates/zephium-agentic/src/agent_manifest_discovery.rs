@@ -159,6 +159,7 @@ impl AgentNavigationDiscovery {
             || max_visits_per_destination == 0
             || max_visits_per_destination > MAX_AGENT_NAVIGATION_DESTINATION_VISITS
             || departure.as_url().as_str().len() > crate::MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES
+            || !crate::semantic_wire::model_safe_public_url(&departure)
             || !rules.iter().any(|rule| rule.admits(&departure))
         {
             return Err(AgentManifestContractError::NavigationRoute);
@@ -225,6 +226,7 @@ impl AgentNavigationDiscovery {
     pub fn admits(&self, target: &crate::ContextNavigationTarget) -> bool {
         target.as_url().as_str().len() <= crate::MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES
             && self.rules.iter().any(|rule| rule.admits(target))
+            && (self.is_production() || !target.as_url().path().contains('%'))
             && (self.is_production() || target != &self.departure)
     }
 }
@@ -319,6 +321,8 @@ mod tests {
             "https://other.test/docs/topic",
             "https://example.test/docs/topic?q=1",
             "https://example.test/docs/topic#part",
+            "https://example.test/docs/topic%20name",
+            "https://example.test/docs/%61",
             "https://example.test/docs/%2e%2e/private",
         ] {
             assert!(!scope.admits(&target(denied)), "{denied}");
@@ -379,5 +383,23 @@ mod tests {
             1
         )
         .is_err());
+        for sensitive in [
+            "https://example.test/app/start?token=shortsecret",
+            "https://example.test/app/start?access%5Ftoken=shortsecret",
+            "https://example.test/app/start?code=Qm9VT3F2cW1ROGxobTVoQ2c",
+            "https://example.test/app/start#q=ghp%5Fabcdefghijklmnop",
+            "https://example.test/app/start#access_token%3Dshortsecret",
+        ] {
+            assert!(
+                AgentNavigationDiscovery::try_new_production(
+                    target(sensitive),
+                    vec![rule("https://example.test", "/app/", true, true)],
+                    2,
+                    1,
+                )
+                .is_err(),
+                "{sensitive}"
+            );
+        }
     }
 }

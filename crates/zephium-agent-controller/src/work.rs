@@ -2098,12 +2098,21 @@ impl AgentWorkController {
                 SemanticSnapshotGeneration::next,
             )
             .ok_or(AgentWorkFailure::Contract)?;
+        let runtime_budget = if state
+            .navigation_discovery
+            .as_ref()
+            .is_some_and(AgentNavigationDiscovery::is_production)
+        {
+            SemanticRuntimeBudget::INITIAL_FILTERED.with_link_url_state()
+        } else {
+            SemanticRuntimeBudget::INITIAL_FILTERED
+        };
         let invocation = encode_semantic_runtime_invocation(
             &request,
             frame,
             SemanticInvocationId::new(next).ok_or(AgentWorkFailure::Contract)?,
             generation,
-            SemanticRuntimeBudget::INITIAL_FILTERED,
+            runtime_budget,
         )
         .map_err(|_| AgentWorkFailure::Context)?;
         let correlation = invocation.correlation();
