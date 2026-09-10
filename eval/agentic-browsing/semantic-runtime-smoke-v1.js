@@ -176,7 +176,7 @@ class Element extends Node {
     delete this.attributes[name];
   }
   getBoundingClientRect() { return this.rect; }
-  click() { this._fixedClickCount = (this._fixedClickCount || 0) + 1; }
+  click() { this._fixedClickCount = (this._fixedClickCount || 0) + 1; if (this._onClick) this._onClick(); }
 }
 
 class ShadowRoot extends Node {
@@ -1861,7 +1861,52 @@ async function finish() {
     }
   }
 
+  // A page-dialog proof is independent of projection scope and opener state.
+  // An ordinary click never pays the extra scan or publishes private evidence.
+  for (const mode of ["appears", "already-visible", "focus-only", "unrelated", "overflow", "stale-capture"]) {
+    const root = new Element("main");
+    const opener = root.append(new Element("button", {"aria-label": "Open panel"}));
+    const dialog = new Element("div", {role: "dialog"});
+    root.append(dialog);
+    dialog.rect = mode === "already-visible" ? {x: 10,y: 10,width: 160,height: 32} : {x: 0,y: 0,width: 0,height: 0};
+    document._root = root; setOwner(root, document); document._hit = opener; document._active = null;
+    // Multi-point fixture hit testing models the independent dialog sample.
+    if (mode === "already-visible") {
+      dialog.append(opener);
+    }
+    const generation = 400 + ["appears", "already-visible", "focus-only", "unrelated", "overflow", "stale-capture"].indexOf(mode) * 3;
+    const before = JSON.parse(invoke(generation, generation, {k: "initial"}));
+    const target = before.n.find(node => node.n === "Open panel");
+    const click = JSON.parse(actionRequest(generation));
+    Object.assign(click, {i: generation,g: generation,a: generation,t: target.k,u: true,
+      f: {r:7,o:9,q:1,s:0,n:"Open panel",vk:0,vt:null,vo:0,vb:false}});
+    opener._onClick = () => {
+      document._active = opener;
+      if (mode === "appears" || mode === "already-visible" || mode === "stale-capture") {
+        dialog.rect = {x:10,y:10,width:160,height:32}; document._hit = dialog;
+      }
+      if (mode === "unrelated") root.append(new Element("p")).append(new CharacterData("updated"));
+    };
+    if (mode === "overflow") for (let n = 0; n < 16400; n++) root.append(new Element("span"));
+    const result = runtime.invoke(JSON.stringify(click));
+    if (mode === "overflow") {
+      assert(result === "E2:unsupported_interaction" && !opener._fixedClickCount, "incomplete dialog baseline dispatched click");
+      continue;
+    }
+    assert(JSON.parse(result).b === "fixed_semantic_recipe", `page dialog click failed: ${result}`);
+    const next = generation + (mode === "stale-capture" ? 2 : 1);
+    const after = JSON.parse(invoke(next, next, {k: "initial"}));
+    if (mode === "stale-capture") assert(!after.u, "dialog proof survived skipped capture");
+    else {
+      assert(after.u && after.u.a === generation && after.u.i === generation && after.u.g === generation, "dialog proof correlation lost");
+      const appeared = after.u.after.some(key => !after.u.before.includes(key));
+      assert(appeared === (mode === "appears"), `false dialog appearance: ${mode}`);
+      assert(!JSON.parse(invoke(next+1,next+1,{k:"initial"})).u, "dialog witness replayed");
+    }
+  }
+
   process.stdout.write(`${JSON.stringify({
+    independent_page_dialog_samples: true,
     nested_leaf_context_authority: true,
     closed_fill_support_reasons: true,
     bounded_visible_text_search: true,

@@ -55,11 +55,11 @@ pub const MAX_SEMANTIC_RUNTIME_VISITED_NODES: u32 = 32 * 1024;
 pub const MAX_SEMANTIC_RUNTIME_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 /// Maximum immutable production runtime source bytes installed per document.
 ///
-/// The fixed 111 KiB ceiling covers the digest-pinned semantic runtime including
+/// The fixed 113 KiB ceiling covers the digest-pinned semantic runtime including
 /// production Fill, native-select, public links and bounded source-coalesced
-/// windows, keyword discovery and bounded asynchronous fill diagnostics with an
+/// windows, keyword discovery, independent page-dialog samples and bounded fill diagnostics with an
 /// explicit installation bound per platform.
-pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 111 * 1024;
+pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 113 * 1024;
 /// Sole fixed isolated-world global installed by the production runtime.
 pub const SEMANTIC_RUNTIME_GLOBAL_NAME: &str = "__zephiumSemanticRuntimeV1";
 /// Sole fixed native message handler visible in the production isolated world.
@@ -82,8 +82,8 @@ pub const MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES: usize =
 
 const SEMANTIC_RUNTIME_SOURCE: &str = include_str!("../assets/semantic-runtime-v1.js");
 const SEMANTIC_RUNTIME_SOURCE_SHA256: [u8; 32] = [
-    0xb9, 0x52, 0xb1, 0x8e, 0x01, 0x66, 0xe6, 0x7e, 0x56, 0xd4, 0x02, 0x1c, 0x46, 0x8c, 0xa5, 0xfc,
-    0xc0, 0x5d, 0x35, 0xe9, 0xbf, 0x4d, 0x86, 0x26, 0x7c, 0xe4, 0x3a, 0xc7, 0x6c, 0x2a, 0xca, 0xe2,
+    0xc3, 0x90, 0xdb, 0x4c, 0x1a, 0xbb, 0x6a, 0x91, 0x79, 0x58, 0xd6, 0xee, 0xe5, 0x59, 0x99, 0x3d,
+    0x6e, 0x56, 0x2b, 0x5f, 0xb4, 0x30, 0x0e, 0x66, 0x5c, 0x8e, 0x29, 0x47, 0x32, 0x48, 0x2f, 0x69,
 ];
 
 /// Immutable production program passed only to a trusted isolated-world adapter.
@@ -663,6 +663,7 @@ pub fn encode_semantic_action_runtime_invocation(
         fill_text,
         target_descriptor: request.target_runtime_descriptor(),
         option_descriptor,
+        page_dialog_opened: request.page_dialog_opened(),
     };
     let encoded =
         serde_json::to_string(&wire).map_err(|_| SemanticActionRuntimeInvocationError::Encoding)?;
@@ -1180,6 +1181,8 @@ struct RuntimeBudgetWire {
 
 #[derive(Serialize)]
 struct SemanticActionRuntimeInvocationWire<'a> {
+    #[serde(rename = "u", skip_serializing_if = "std::ops::Not::not")]
+    page_dialog_opened: bool,
     #[serde(rename = "v")]
     version: u16,
     #[serde(rename = "o")]
@@ -1946,6 +1949,7 @@ mod tests {
             fill_text: Some(&replacement),
             target_descriptor: &descriptor,
             option_descriptor: None,
+            page_dialog_opened: false,
         };
         let encoded = serde_json::to_string(&wire).expect("maximum legal fill wire");
         assert_eq!(encoded.len(), 17_701);
@@ -1992,6 +1996,7 @@ mod tests {
                         fill_text: Some(&replacement),
                         target_descriptor: &descriptor,
                         option_descriptor: None,
+                        page_dialog_opened: false,
                     };
                     let encoded = serde_json::to_string(&wire).expect("legal fill variant");
                     assert!(encoded.len() <= MAX_SEMANTIC_ACTION_RUNTIME_REQUEST_BYTES);

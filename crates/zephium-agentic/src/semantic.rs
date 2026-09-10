@@ -1112,6 +1112,7 @@ pub(crate) struct SemanticNodeInput {
 /// One exact bounded semantic frame snapshot.
 #[derive(Clone, Eq, PartialEq)]
 pub struct SemanticSnapshot {
+    pub(crate) page_dialog_sample: Option<crate::semantic_wire::PageDialogSample>,
     invocation: SemanticInvocationId,
     frame: SemanticFrameJoin,
     generation: SemanticSnapshotGeneration,
@@ -1295,6 +1296,7 @@ impl SemanticSnapshot {
             frame,
             generation,
             completeness,
+            page_dialog_sample: None,
             nodes,
             references,
             total_text_bytes: u32::try_from(total_text_bytes)

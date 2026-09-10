@@ -416,6 +416,10 @@ pub enum SemanticWaitCondition {
 /// Independent effect proof required after the settle condition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SemanticVerification {
+    /// A previously absent visible DOM dialog appeared in the action frame.
+    /// Requires bounded independent whole-frame samples before dispatch and
+    /// after settlement; target focus or a scoped projection diff is not proof.
+    PageDialogOpened,
     /// Primary target gained or lost one allowlisted state.
     TargetState {
         /// Allowlisted state.
@@ -479,6 +483,11 @@ impl SemanticActionProposal {
     ) -> Result<Self, SemanticActionContractError> {
         if !verification_matches(intent.kind(), verification)
             || !wait_matches(wait, verification)
+            || (verification == SemanticVerification::PageDialogOpened
+                && !matches!(
+                    effect,
+                    SemanticEffectClass::Read | SemanticEffectClass::LocalWrite
+                ))
             || matches!(
                 wait,
                 SemanticWaitCondition::MutationQuiet(quiet)
@@ -526,7 +535,8 @@ fn verification_matches(kind: SemanticActionKind, verification: SemanticVerifica
     match kind {
         SemanticActionKind::Click => matches!(
             verification,
-            SemanticVerification::TargetState { .. }
+            SemanticVerification::PageDialogOpened
+                | SemanticVerification::TargetState { .. }
                 | SemanticVerification::NavigationCommitted
                 | SemanticVerification::Dialog(_)
         ),
@@ -548,6 +558,10 @@ fn verification_matches(kind: SemanticActionKind, verification: SemanticVerifica
 
 fn wait_matches(wait: SemanticWaitCondition, verification: SemanticVerification) -> bool {
     match verification {
+        SemanticVerification::PageDialogOpened => matches!(
+            wait,
+            SemanticWaitCondition::Immediate | SemanticWaitCondition::MutationQuiet(_)
+        ),
         SemanticVerification::NavigationCommitted => matches!(
             wait,
             SemanticWaitCondition::NavigationCommitted
@@ -1417,7 +1431,8 @@ fn validate_verification_baseline(
             }
             _ => false,
         },
-        SemanticVerification::TargetValueChanged
+        SemanticVerification::PageDialogOpened
+        | SemanticVerification::TargetValueChanged
         | SemanticVerification::TargetSelectionChanged
         | SemanticVerification::NavigationCommitted
         | SemanticVerification::Dialog(_)
@@ -1446,7 +1461,8 @@ fn validate_prepared_baseline(
         SemanticVerification::TargetSelectionMatchesOption => {
             option_states.is_some_and(|states| states.contains(SemanticState::Selected))
         }
-        SemanticVerification::TargetValueChanged
+        SemanticVerification::PageDialogOpened
+        | SemanticVerification::TargetValueChanged
         | SemanticVerification::TargetSelectionChanged
         | SemanticVerification::NavigationCommitted
         | SemanticVerification::Dialog(_)
@@ -1902,6 +1918,7 @@ fn hash_wait(hasher: &mut Sha256, wait: SemanticWaitCondition) {
 
 fn hash_verification(hasher: &mut Sha256, verification: SemanticVerification) {
     match verification {
+        SemanticVerification::PageDialogOpened => hasher.update([9]),
         SemanticVerification::TargetState { state, present } => {
             hasher.update([1, state_code(state), u8::from(present)]);
         }

@@ -324,6 +324,7 @@ impl fmt::Debug for SemanticActionExecutionPending {
 /// Non-cloneable closed recipe for one trusted native adapter.
 #[must_use]
 pub struct SemanticActionNativeRequest {
+    page_dialog_opened: bool,
     correlation: NativeCorrelation,
     role: SemanticRole,
     expected_geometry: SemanticRect,
@@ -333,6 +334,9 @@ pub struct SemanticActionNativeRequest {
 }
 
 impl SemanticActionNativeRequest {
+    pub(crate) const fn page_dialog_opened(&self) -> bool {
+        self.page_dialog_opened
+    }
     pub(crate) fn correlation(&self) -> SemanticActionNativeCorrelation {
         SemanticActionNativeCorrelation(self.correlation.clone())
     }
@@ -1103,6 +1107,8 @@ pub(crate) fn prepare_semantic_action_execution(
             active,
         },
         SemanticActionNativeRequest {
+            page_dialog_opened: action.verification()
+                == crate::SemanticVerification::PageDialogOpened,
             correlation,
             role: action.bound_action().target_role(),
             expected_geometry,
@@ -1977,6 +1983,40 @@ mod tests {
         )
         .expect("click");
         assert_eq!(click_native.kind(), SemanticActionKind::Click);
+        let ordinary_wire: serde_json::Value = serde_json::from_str(
+            crate::encode_semantic_action_runtime_invocation(&click_native)
+                .unwrap()
+                .as_str(),
+        )
+        .unwrap();
+        assert!(
+            ordinary_wire.get("u").is_none(),
+            "ordinary actions must not request global samples"
+        );
+        let dialog = prepared(
+            &observation,
+            86,
+            proposal(
+                SemanticActionIntent::Click {
+                    target: SemanticReferenceId::new(2).unwrap(),
+                },
+                SemanticEffectClass::Read,
+                SemanticVerification::PageDialogOpened,
+            ),
+        );
+        let (_, native) = prepare_semantic_action_execution(
+            active(&dialog, 66),
+            &dialog,
+            SemanticActionExecutionInstant::from_millis(1),
+        )
+        .unwrap();
+        let wire: serde_json::Value = serde_json::from_str(
+            crate::encode_semantic_action_runtime_invocation(&native)
+                .unwrap()
+                .as_str(),
+        )
+        .unwrap();
+        assert_eq!(wire["u"], true);
 
         let (fill_pending, fill_native) = prepare_semantic_action_execution(
             active(&fill, 62),

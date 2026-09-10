@@ -104,8 +104,26 @@ struct ClickApproval {
     target_name: String,
     #[serde(default)]
     effect: ClickEffect,
-    state: ClickState,
-    present: bool,
+    verification: ClickVerification,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum ClickVerification {
+    TargetState { state: ClickState, present: bool },
+    PageDialogOpened {},
+}
+
+impl From<ClickVerification> for SemanticVerification {
+    fn from(value: ClickVerification) -> Self {
+        match value {
+            ClickVerification::TargetState { state, present } => Self::TargetState {
+                state: state.into(),
+                present,
+            },
+            ClickVerification::PageDialogOpened {} => Self::PageDialogOpened,
+        }
+    }
 }
 
 /// Trusted fixture classification, never inferred from the model or page.
@@ -210,8 +228,7 @@ struct ApprovedFill {
 struct ApprovedClick {
     target_name: String,
     effect: SemanticEffectClass,
-    state: SemanticState,
-    present: bool,
+    verification: SemanticVerification,
 }
 
 struct DevelopmentLocalActionPolicy {
@@ -247,20 +264,13 @@ impl AgentWorkLocalActionPolicy for DevelopmentLocalActionPolicy {
             return Err(AgentWorkFailure::Contract);
         };
         let actual_effect = match action.kind() {
-            SemanticActionKind::Click => {
-                let SemanticVerification::TargetState { state, present } = action.verification()
-                else {
-                    return Err(AgentWorkFailure::Contract);
-                };
-                self.clicks
-                    .iter()
-                    .find(|approved| {
-                        approved.target_name == name
-                            && approved.state == state
-                            && approved.present == present
-                    })
-                    .map(|approved| approved.effect)
-            }
+            SemanticActionKind::Click => self
+                .clicks
+                .iter()
+                .find(|approved| {
+                    approved.target_name == name && approved.verification == action.verification()
+                })
+                .map(|approved| approved.effect),
             SemanticActionKind::Fill => {
                 if action.verification() != SemanticVerification::TargetValueMatchesInput {
                     return Err(AgentWorkFailure::Contract);
@@ -519,11 +529,9 @@ fn prepare_local_actions(
     let mut clicks = Vec::with_capacity(approval.clicks.len());
     for click in approval.clicks {
         validate_target_name(&click.target_name)?;
-        let state = click.state.into();
+        let verification = click.verification.into();
         if clicks.iter().any(|existing: &ApprovedClick| {
-            existing.target_name == click.target_name
-                && existing.state == state
-                && existing.present == click.present
+            existing.target_name == click.target_name && existing.verification == verification
         }) {
             // One intent cannot carry conflicting classifications, even when
             // the caller supplies different effects for otherwise equal clicks.
@@ -532,8 +540,7 @@ fn prepare_local_actions(
         clicks.push(ApprovedClick {
             target_name: click.target_name,
             effect: click.effect.into(),
-            state,
-            present: click.present,
+            verification,
         });
     }
     let mut fills = Vec::with_capacity(approval.fills.len());
@@ -818,8 +825,7 @@ mod tests {
                 clicks: vec![ClickApproval {
                     target_name: "Search".into(),
                     effect: ClickEffect::Read,
-                    state: ClickState::Expanded,
-                    present: true,
+                    verification: ClickVerification::PageDialogOpened {},
                 }],
                 fills: vec![FillApproval {
                     target_name: "Search".into(),
@@ -832,6 +838,10 @@ mod tests {
         assert_eq!(policy.origin, origin);
         assert_eq!(policy.clicks.len(), 1);
         assert_eq!(policy.clicks[0].effect, SemanticEffectClass::Read);
+        assert_eq!(
+            policy.clicks[0].verification,
+            SemanticVerification::PageDialogOpened
+        );
         assert_eq!(policy.fills.len(), 1);
         assert!(prepare_local_actions(
             SemanticOrigin::parse("https://app.notion.com").unwrap(),
@@ -841,14 +851,12 @@ mod tests {
                     ClickApproval {
                         target_name: "Search".into(),
                         effect: ClickEffect::Read,
-                        state: ClickState::Expanded,
-                        present: true,
+                        verification: ClickVerification::PageDialogOpened {},
                     },
                     ClickApproval {
                         target_name: "Search".into(),
                         effect: ClickEffect::LocalWrite,
-                        state: ClickState::Expanded,
-                        present: true,
+                        verification: ClickVerification::PageDialogOpened {},
                     },
                 ],
                 fills: Vec::new(),
@@ -877,8 +885,23 @@ mod tests {
 
     #[test]
     fn click_fixture_effect_is_explicit_and_cannot_grant_remote_writes() {
+        let dialog: ClickApproval = serde_json::from_str(
+            r#"{"target_name":"Search","effect":"read","verification":{"kind":"page_dialog_opened"}}"#).unwrap();
+        assert_eq!(
+            SemanticVerification::from(dialog.verification),
+            SemanticVerification::PageDialogOpened
+        );
+        for verification in [
+            json!({"kind":"page_dialog_opened","state":"focused","present":true}),
+            json!({"kind":"dialog","state":"present"}),
+        ] {
+            assert!(serde_json::from_value::<ClickApproval>(
+                json!({"target_name":"Search", "effect":"read", "verification":verification})
+            )
+            .is_err());
+        }
         let legacy: ClickApproval =
-            serde_json::from_str(r#"{"target_name":"Search","state":"expanded","present":true}"#)
+            serde_json::from_str(r#"{"target_name":"Search","verification":{"kind":"target_state","state":"expanded","present":true}}"#)
                 .unwrap();
         assert_eq!(
             SemanticEffectClass::from(legacy.effect),
@@ -893,7 +916,7 @@ mod tests {
         ] {
             let approval = json!({
                 "target_name": "Search", "effect": effect,
-                "state": "expanded", "present": true
+                "verification": {"kind":"target_state", "state": "expanded", "present": true}
             });
             assert!(serde_json::from_value::<ClickApproval>(approval).is_err());
         }

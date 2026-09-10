@@ -592,6 +592,9 @@ impl SemanticModelActionQualificationExecution {
             return Err(SemanticActionQualificationError::Contract);
         }
         let expected_proof = match proposal.verification() {
+            crate::SemanticVerification::PageDialogOpened => {
+                crate::SemanticEffectProofKind::PageDialogOpened
+            }
             crate::SemanticVerification::TargetState { .. } => {
                 crate::SemanticEffectProofKind::TargetState
             }

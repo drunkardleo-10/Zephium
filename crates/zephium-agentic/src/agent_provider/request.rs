@@ -5013,7 +5013,7 @@ static NAVIGATION_ACTIONS_EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolD
         }
         tools.push(BrowserToolDefinition {
             kind: AgentBrowserToolKind::Act,
-            description: "Propose one current-ref Click, Fill or Select with an independently snapshot-verifiable postcondition. Only Read/LocalWrite effects are available, subject to trusted host assessment. Use immediate or mutation_quiet settlement with at least 2000 milliseconds. Dialog, navigation, keyboard and scroll effects are unavailable through act. A target_state verification proves only that target state; it does not prove a dialog opened or navigation completed. Navigate through the separate navigate tool when authorized.",
+            description: "Propose one current-ref Click, Fill or Select with an independently verified postcondition. Only Read/LocalWrite effects are available, subject to trusted host assessment. Use immediate or mutation_quiet settlement with at least 2000 milliseconds. To open a page dialog use page_dialog_opened: the runtime independently samples visible DOM dialogs before and after the click. This proves only a dialog appeared; inspect fresh state to identify its contents. Native dialogs, navigation, keyboard and scroll effects are unavailable through act. A target_state verification proves only that target state; focus does not prove a dialog opened. Navigate through the separate navigate tool when authorized.",
             parameters: action,
         });
         tools.push(BrowserToolDefinition {
@@ -5619,7 +5619,12 @@ fn verification_schema(action: SemanticActionKind, snapshot_only: bool) -> Value
     };
     if snapshot_only {
         match action {
-            SemanticActionKind::Click => return target_state(),
+            SemanticActionKind::Click => {
+                return any_of(vec![
+                    target_state(),
+                    tagged_object("page_dialog_opened", Vec::new()),
+                ])
+            }
             SemanticActionKind::Press => {
                 return any_of(vec![
                     target_state(),
@@ -5633,6 +5638,7 @@ fn verification_schema(action: SemanticActionKind, snapshot_only: bool) -> Value
     match action {
         SemanticActionKind::Click => any_of(vec![
             target_state(),
+            tagged_object("page_dialog_opened", Vec::new()),
             tagged_object("navigation_committed", Vec::new()),
             tagged_object("dialog", vec![("state", dialog_schema())]),
         ]),
@@ -6062,7 +6068,18 @@ mod tests {
                     BTreeSet::from(["immediate", "mutation_quiet"])
                 );
                 let expected_verification = match properties["kind"]["enum"][0].as_str().unwrap() {
-                    "click" => "target_state",
+                    "click" => {
+                        assert_eq!(
+                            properties["verification"]["anyOf"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .map(|v| v["properties"]["kind"]["enum"][0].as_str().unwrap())
+                                .collect::<BTreeSet<_>>(),
+                            BTreeSet::from(["target_state", "page_dialog_opened"])
+                        );
+                        continue;
+                    }
                     "fill" => "target_value_matches_input",
                     "select" => "target_selection_matches_option",
                     _ => unreachable!("asserted retained action vocabulary"),
@@ -6912,7 +6929,7 @@ mod tests {
                 (AgentBrowserToolKind::Reload, 201),
                 (AgentBrowserToolKind::Snapshot, 1_513),
                 (AgentBrowserToolKind::Locate, 2_357),
-                (AgentBrowserToolKind::Act, 9_698),
+                (AgentBrowserToolKind::Act, 9_835),
                 (AgentBrowserToolKind::Wait, 2_152),
                 (AgentBrowserToolKind::Read, 1_510),
                 (AgentBrowserToolKind::Extract, 1_602),
@@ -6921,7 +6938,7 @@ mod tests {
                 (AgentBrowserToolKind::ResumeAfterHuman, 204),
             ]
         );
-        assert_eq!(sizes.iter().map(|(_, bytes)| bytes).sum::<usize>(), 20_465);
+        assert_eq!(sizes.iter().map(|(_, bytes)| bytes).sum::<usize>(), 20_602);
     }
 
     #[test]

@@ -1057,6 +1057,7 @@ const fn effect_code(effect: SemanticEffectClass) -> u8 {
 
 const fn proof_code(proof: SemanticEffectProofKind) -> u8 {
     match proof {
+        SemanticEffectProofKind::PageDialogOpened => 9,
         SemanticEffectProofKind::TargetState => 1,
         SemanticEffectProofKind::ExactTargetValue => 2,
         SemanticEffectProofKind::TargetValueChanged => 3,

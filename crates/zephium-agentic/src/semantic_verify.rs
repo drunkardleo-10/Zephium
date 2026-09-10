@@ -238,8 +238,9 @@ impl fmt::Debug for SemanticEffectEvidence<'_> {
 /// deliberately different: its verifier needs the exact adjacent before/after
 /// values, but those values must never become public runtime data. This helper
 /// selects and borrows them inside the agentic core, returning only the opaque
-/// evidence envelope. Navigation, dialog, and scroll postconditions require
-/// separately sampled non-snapshot evidence and therefore fail closed here.
+/// evidence envelope. Page-dialog opening consumes independent bounded samples
+/// carried privately by the adjacent snapshot. Native navigation/dialog/scroll
+/// postconditions require other evidence and therefore fail closed here.
 pub fn prepare_semantic_action_snapshot_evidence<'a>(
     action: &'a SemanticPreparedAction,
     attempt: SemanticActionAttemptId,
@@ -247,6 +248,11 @@ pub fn prepare_semantic_action_snapshot_evidence<'a>(
     snapshot: &'a SemanticSnapshot,
 ) -> Result<SemanticEffectEvidence<'a>, SemanticSnapshotEvidenceError> {
     match action.verification() {
+        SemanticVerification::PageDialogOpened => Ok(SemanticEffectEvidence::snapshot(
+            attempt,
+            observed_at,
+            snapshot,
+        )),
         SemanticVerification::TargetValueMatchesInput => {
             let (before, after) = action.verification_fill_values(snapshot)?;
             Ok(SemanticEffectEvidence::exact_target_value(
@@ -279,6 +285,8 @@ pub fn prepare_semantic_action_snapshot_evidence<'a>(
 /// Closed class of independently established effect proof.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SemanticEffectProofKind {
+    /// An independently sampled DOM dialog became visible in the same frame.
+    PageDialogOpened,
     /// Exact allowlisted target state transitioned in the adjacent snapshot.
     TargetState,
     /// Exact safe fill value matched the requested bounded input.
@@ -614,6 +622,35 @@ pub(crate) fn verify_semantic_action(
 
     let (proof, current_context, current_invocation, current_snapshot) =
         match (action.verification(), evidence.kind) {
+            (
+                SemanticVerification::PageDialogOpened,
+                SemanticEffectEvidenceKind::Snapshot(snapshot),
+            ) => {
+                let sample = snapshot
+                    .page_dialog_sample
+                    .as_ref()
+                    .ok_or(SemanticVerificationError::OutcomeNotObserved)?;
+                if snapshot.frame() != action.frame()
+                    || action.checkpoint_snapshot().get().checked_add(1)
+                        != Some(snapshot.generation().get())
+                    || action.checkpoint_invocation().get().checked_add(1)
+                        != Some(snapshot.invocation().get())
+                    || sample.a != evidence.attempt.get()
+                    || sample.i != action.checkpoint_invocation().get()
+                    || sample.g != action.checkpoint_snapshot().get()
+                {
+                    return Err(SemanticVerificationError::StaleEvidence);
+                }
+                if !sample.after.iter().any(|key| !sample.before.contains(key)) {
+                    return Err(SemanticVerificationError::OutcomeNotObserved);
+                }
+                (
+                    SemanticEffectProofKind::PageDialogOpened,
+                    snapshot.frame().context(),
+                    Some(snapshot.invocation()),
+                    Some(snapshot.generation()),
+                )
+            }
             (
                 SemanticVerification::TargetState { state, present },
                 SemanticEffectEvidenceKind::Snapshot(snapshot),
@@ -1498,6 +1535,100 @@ mod tests {
             .prepare(&other_observation.frames()[0])
             .expect("prepare");
         assert!(!proof.matches_action(&other_prepared));
+    }
+
+    #[test]
+    fn page_dialog_requires_independent_correlated_adjacent_samples() {
+        let (observation, _) = observation();
+        let batch = bind(
+            &observation,
+            SemanticActionIntent::Click {
+                target: SemanticReferenceId::new(2).unwrap(),
+            },
+            SemanticWaitCondition::Immediate,
+            SemanticVerification::PageDialogOpened,
+        )
+        .unwrap();
+        let action = batch.actions()[0]
+            .prepare(&observation.frames()[0])
+            .unwrap();
+        let tracker = immediate(&action, 2);
+        let sample = crate::semantic_wire::PageDialogSample {
+            a: 2,
+            i: 1,
+            g: 1,
+            before: vec![8],
+            after: vec![8, 9],
+        };
+        // An overlay can occlude/remove the opener; the independent frame sample
+        // remains the proof, not target state or completeness of scoped nodes.
+        let mut snapshot = snapshot_for_frame(
+            observation.frames()[0].frame().clone(),
+            2,
+            2,
+            "node_limit",
+            json!([{"k": 40, "r": "dialog"}]),
+        );
+        snapshot.page_dialog_sample = Some(sample.clone());
+        let verify = |snapshot: &SemanticSnapshot| {
+            verify_semantic_action(
+                &tracker,
+                &action,
+                prepare_semantic_action_snapshot_evidence(
+                    &action,
+                    SemanticActionAttemptId::new(2).unwrap(),
+                    SemanticSettleInstant::from_millis(101),
+                    snapshot,
+                )
+                .unwrap(),
+            )
+        };
+        assert_eq!(
+            verify(&snapshot).unwrap().proof(),
+            SemanticEffectProofKind::PageDialogOpened
+        );
+        for field in [
+            "attempt",
+            "invocation",
+            "generation",
+            "existing",
+            "missing",
+            "skipped",
+            "origin",
+        ] {
+            let mut invalid = snapshot.clone();
+            match field {
+                "attempt" => invalid.page_dialog_sample.as_mut().unwrap().a += 1,
+                "invocation" => invalid.page_dialog_sample.as_mut().unwrap().i += 1,
+                "generation" => invalid.page_dialog_sample.as_mut().unwrap().g += 1,
+                "existing" => invalid.page_dialog_sample.as_mut().unwrap().before = vec![8, 9],
+                "missing" => invalid.page_dialog_sample = None,
+                "skipped" => {
+                    invalid = snapshot_for_frame(
+                        observation.frames()[0].frame().clone(),
+                        3,
+                        3,
+                        "complete",
+                        json!([{"k": 40, "r": "dialog"}]),
+                    );
+                    invalid.page_dialog_sample = Some(sample.clone());
+                }
+                "origin" => {
+                    let frame = SemanticFrameJoin::try_new(
+                        observation.request().context(),
+                        FrameId::MAIN,
+                        FrameGeneration::INITIAL,
+                        SemanticOrigin::parse("https://another.example.test/").unwrap(),
+                        SemanticFrameTrust::SameOrigin,
+                    )
+                    .unwrap();
+                    invalid = snapshot_for_frame(frame, 2, 2, "complete", json!([]));
+                    invalid.page_dialog_sample = Some(sample.clone());
+                }
+                _ => unreachable!(),
+            }
+            assert!(verify(&invalid).is_err(), "accepted {field}");
+        }
     }
 
     #[test]

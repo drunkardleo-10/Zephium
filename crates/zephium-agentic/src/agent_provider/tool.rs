@@ -1148,6 +1148,7 @@ fn decode_verification(
             state: state.into(),
             present,
         },
+        VerificationWire::PageDialogOpened {} => SemanticVerification::PageDialogOpened,
         VerificationWire::TargetValueMatchesInput => SemanticVerification::TargetValueMatchesInput,
         VerificationWire::TargetValueChanged => SemanticVerification::TargetValueChanged,
         VerificationWire::TargetSelectionMatchesOption => {
@@ -1374,6 +1375,7 @@ enum StandaloneWaitWire {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum VerificationWire {
+    PageDialogOpened {},
     TargetState { state: StateWire, present: bool },
     TargetValueMatchesInput,
     TargetValueChanged,

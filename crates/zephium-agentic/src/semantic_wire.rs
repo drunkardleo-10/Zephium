@@ -363,7 +363,11 @@ pub fn decode_semantic_snapshot(
         });
     }
 
-    SemanticSnapshot::try_new(
+    let page_dialog_sample = raw.page_dialog_sample;
+    if let Some(sample) = &page_dialog_sample {
+        sample.validate()?;
+    }
+    let mut snapshot = SemanticSnapshot::try_new(
         context.invocation,
         context.frame,
         context.generation,
@@ -371,7 +375,9 @@ pub fn decode_semantic_snapshot(
         nodes,
         retained_text_bytes,
     )
-    .map_err(|_| SemanticDecodeError::Contract)
+    .map_err(|_| SemanticDecodeError::Contract)?;
+    snapshot.page_dialog_sample = page_dialog_sample;
+    Ok(snapshot)
 }
 
 fn validate_optional_text(
@@ -587,6 +593,8 @@ fn looks_like_secret_token(token: &str) -> bool {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSnapshot {
+    #[serde(rename = "u", default)]
+    page_dialog_sample: Option<PageDialogSample>,
     #[serde(rename = "v")]
     version: u16,
     #[serde(rename = "i")]
@@ -597,6 +605,71 @@ struct RawSnapshot {
     completeness: RawCompleteness,
     #[serde(rename = "n")]
     nodes: Vec<RawNode>,
+}
+
+/// Content-free independently sampled dialog identities, never model context.
+#[derive(Clone, Eq, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PageDialogSample {
+    pub a: u64,
+    pub i: u64,
+    pub g: u64,
+    pub before: Vec<u64>,
+    pub after: Vec<u64>,
+}
+impl PageDialogSample {
+    fn validate(&self) -> Result<(), SemanticDecodeError> {
+        if self.a == 0 || self.i == 0 || self.g == 0 {
+            return Err(SemanticDecodeError::NodeIdentity);
+        }
+        for keys in [&self.before, &self.after] {
+            if keys.len() > 16
+                || keys.iter().any(|key| *key == 0)
+                || keys.iter().copied().collect::<BTreeSet<_>>().len() != keys.len()
+            {
+                return Err(SemanticDecodeError::NodeIdentity);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod page_dialog_sample_tests {
+    use super::*;
+    #[test]
+    fn samples_reject_ambiguous_or_unbounded_identities() {
+        for (before, after) in [
+            (vec![0], vec![1]),
+            (vec![1, 1], vec![2]),
+            (vec![1], vec![2, 2]),
+            ((1..=17).collect(), vec![]),
+            (vec![], (1..=17).collect()),
+        ] {
+            assert!(PageDialogSample {
+                a: 1,
+                i: 1,
+                g: 1,
+                before,
+                after
+            }
+            .validate()
+            .is_err());
+        }
+        assert!(PageDialogSample {
+            a: 1,
+            i: 1,
+            g: 1,
+            before: vec![],
+            after: vec![1]
+        }
+        .validate()
+        .is_ok());
+        assert!(serde_json::from_str::<PageDialogSample>(
+            r#"{"a":1,"i":1,"g":1,"before":[],"after":[1],"success":true}"#
+        )
+        .is_err());
+    }
 }
 
 #[derive(Deserialize)]

@@ -155,6 +155,11 @@
   let busy = false;
   let lastObservationInvocation = 0;
   let lastObservationGeneration = 0;
+  // Only a requested UI-transition action pays for these bounded samples.
+  // Weak identities do not retain DOM nodes or enter the model projection.
+  const dialogKeys = new WeakMap();
+  let nextDialogKey = 1;
+  let pendingDialogSample = null;
 
   const IDENTITY_EXHAUSTED = objectFreeze({});
 
@@ -262,7 +267,10 @@
   }
 
   function parseActionRequest(request) {
-    if (!hasExactKeys(request, ["v", "o", "a", "i", "g", "t", "r", "k", "e", "p", "z", "f", "of"])) {
+    const actionKeys = ["v", "o", "a", "i", "g", "t", "r", "k", "e", "p", "z", "f", "of"];
+    if (objectHasOwn(request, "u")) actionKeys.push("u");
+    if (!hasExactKeys(request, actionKeys) ||
+        (objectHasOwn(request, "u") && (request.u !== true || request.k !== "click"))) {
       return null;
     }
     if (
@@ -2101,11 +2109,18 @@
   }
 
   function encodeSnapshot(request, records, completeness) {
+    let dialogSample = "";
+    const pending = pendingDialogSample;
+    pendingDialogSample = null;
+    if (pending !== null && request.i === pending.i + 1 && request.g === pending.g + 1) {
+      const after = sampleVisiblePageDialogs();
+      if (after !== null) dialogSample = `,"u":${apply(jsonStringify, JSON, [{...pending, after}])}`;
+    }
     const encodedNodes = [];
     for (const record of records) encodedNodes.push(apply(jsonStringify, JSON, [record.wire]));
 
     const compose = (status) => {
-      const header = `{"v":${WIRE_VERSION},"i":${request.i},"g":${request.g},"c":"${status}","n":[`;
+      const header = `{"v":${WIRE_VERSION},"i":${request.i},"g":${request.g},"c":"${status}"${dialogSample},"n":[`;
       const parts = [];
       let bytes = utf8Length(header, request.b.w + 1) + 2;
       let truncated = false;
@@ -2130,6 +2145,41 @@
 
   function actionFault(code) {
     return `E2:${code}`;
+  }
+
+  function sampleVisiblePageDialogs() {
+    const state = { request: { b: { x: 16384 } }, visited: 0, stopped: false, completeness: "complete" };
+    const root = read(documentElementGetter, document);
+    if (root === null || root === undefined) return null;
+    const stack = [{node: root, depth: 0, hidden: false}];
+    const result = [];
+    const viewport = boundedViewport();
+    if (viewport === null) return null;
+    while (stack.length > 0 && !state.stopped) {
+      const item = stack.pop();
+      if (++state.visited > 16384 || item.depth > MAX_TREE_DEPTH) return null;
+      const element = nodeType(item.node) === 1;
+      const hidden = item.hidden || (element && shouldSkipSubtree(item.node));
+      if (element && !hidden) {
+        const tag = lower(read(elementTagGetter, item.node) || "");
+        const role = lower(attribute(item.node, "role", 32) || "");
+        if (tag === "dialog" || role === "dialog" || role === "alertdialog") {
+          const rect = styleIsVisible(item.node) ? elementRect(item.node) : null;
+          if (rect !== null && actionPoint(item.node, rect, viewport) !== null) {
+            if (result.length === 16) return null;
+            let key = apply(weakMapGet, dialogKeys, [item.node]);
+            if (key === undefined) {
+              if (!isPositiveSafeInteger(nextDialogKey)) return null;
+              key = nextDialogKey++;
+              apply(weakMapSet, dialogKeys, [item.node, key]);
+            }
+            result.push(key);
+          }
+        }
+      }
+      if (!hidden) pushChildren(stack, item.node, {depth: item.depth + 1, hidden}, state);
+    }
+    return state.stopped ? null : result;
   }
 
   function actionOperationBit(kind) {
@@ -2533,6 +2583,7 @@
   }
 
   function runAction(request) {
+    pendingDialogSample = null;
     let readyState;
     try {
       readyState = read(documentReadyStateGetter, document);
@@ -2616,9 +2667,15 @@
     const geometry = wireRect(rect);
     if (request.k === "click") {
       if (typeof htmlElementClick !== "function") return actionFault("unsupported_interaction");
+      if (request.u === true) {
+        const before = sampleVisiblePageDialogs();
+        if (before === null) return actionFault("unsupported_interaction");
+        pendingDialogSample = {a: request.a, i: request.i, g: request.g, before};
+      }
       try {
         apply(htmlElementClick, target, []);
       } catch (_) {
+        pendingDialogSample = null;
         return actionFault("unsupported_interaction");
       }
       return encodeActionEvidence(request, "fixed_semantic_recipe", readiness, geometry, viewport, point, delta);
