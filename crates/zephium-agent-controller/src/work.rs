@@ -3663,9 +3663,17 @@ impl AgentWorkController {
             &journal.inputs,
         )
         .map_err(|_| AgentWorkFailure::Accounting)?;
-        let class = if worker.shutdown_deadline().is_some() {
+        // A clean success is claimed only as the ordinary terminal it proved.
+        // If control arrived after its intent was frozen but before the claim,
+        // the runtime must refuse that claim and retain recovery ownership;
+        // accepting it as a cancelled terminal would publish `Accepted` from a
+        // cancelled run. Waiting/unsuccessful intents already closed through
+        // the unsuccessful accounting lane and may truthfully settle under the
+        // matching control class without being relabelled.
+        let controlled = !matches!(terminal_intent, WorkTerminalIntent::Succeeded);
+        let class = if controlled && worker.shutdown_deadline().is_some() {
             AgentRuntimeControllerTerminalClass::Shutdown
-        } else if worker.stop_reason().is_some() {
+        } else if controlled && worker.stop_reason().is_some() {
             AgentRuntimeControllerTerminalClass::Cancelled
         } else {
             AgentRuntimeControllerTerminalClass::Ordinary
