@@ -82,8 +82,8 @@ pub const MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES: usize =
 
 const SEMANTIC_RUNTIME_SOURCE: &str = include_str!("../assets/semantic-runtime-v1.js");
 const SEMANTIC_RUNTIME_SOURCE_SHA256: [u8; 32] = [
-    0xc3, 0x90, 0xdb, 0x4c, 0x1a, 0xbb, 0x6a, 0x91, 0x79, 0x58, 0xd6, 0xee, 0xe5, 0x59, 0x99, 0x3d,
-    0x6e, 0x56, 0x2b, 0x5f, 0xb4, 0x30, 0x0e, 0x66, 0x5c, 0x8e, 0x29, 0x47, 0x32, 0x48, 0x2f, 0x69,
+    0xb4, 0x15, 0x6c, 0xca, 0xd5, 0xaa, 0x4c, 0x19, 0xaa, 0x6b, 0xb9, 0xb5, 0x08, 0x6d, 0x44, 0xd6,
+    0x40, 0x35, 0x68, 0x87, 0x3b, 0x2c, 0x70, 0x17, 0xcd, 0x25, 0xb9, 0x1b, 0x2c, 0x90, 0x53, 0x2c,
 ];
 
 /// Immutable production program passed only to a trusted isolated-world adapter.
@@ -764,6 +764,10 @@ pub enum SemanticActionRuntimeFault {
     TargetOccluded,
     /// The exact action cannot use the fixed native route.
     UnsupportedInteraction,
+    /// The pre-dispatch dialog census exceeded its node or dialog ceiling.
+    PageDialogSampleLimit,
+    /// A complete pre-dispatch dialog census had no live document or viewport.
+    PageDialogSampleUnavailable,
     /// The page may have observed or applied the action, but exact proof failed.
     AppliedUnverified,
     /// The page cancelled the compatibility beforeinput event.
@@ -823,6 +827,8 @@ impl SemanticActionRuntimeFault {
             "credential_boundary" => Some(Self::CredentialBoundary),
             "target_occluded" => Some(Self::TargetOccluded),
             "unsupported_interaction" => Some(Self::UnsupportedInteraction),
+            "page_dialog_sample_limit" => Some(Self::PageDialogSampleLimit),
+            "page_dialog_sample_unavailable" => Some(Self::PageDialogSampleUnavailable),
             "applied_unverified" => Some(Self::AppliedUnverified),
             "applied_unverified_beforeinput_cancelled" => {
                 Some(Self::AppliedUnverifiedBeforeInputCancelled)
@@ -1476,6 +1482,26 @@ mod tests {
             (
                 "applied_unverified_logical_editor",
                 SemanticActionRuntimeFault::AppliedUnverifiedLogicalEditor,
+            ),
+        ] {
+            assert_eq!(SemanticActionRuntimeFault::parse(code), Some(expected));
+            assert_eq!(
+                SemanticActionRuntimeFault::parse(&format!("{code}:page-detail")),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn dialog_sample_faults_are_closed_and_content_free() {
+        for (code, expected) in [
+            (
+                "page_dialog_sample_limit",
+                SemanticActionRuntimeFault::PageDialogSampleLimit,
+            ),
+            (
+                "page_dialog_sample_unavailable",
+                SemanticActionRuntimeFault::PageDialogSampleUnavailable,
             ),
         ] {
             assert_eq!(SemanticActionRuntimeFault::parse(code), Some(expected));

@@ -1863,18 +1863,29 @@ async function finish() {
 
   // A page-dialog proof is independent of projection scope and opener state.
   // An ordinary click never pays the extra scan or publishes private evidence.
-  for (const mode of ["appears", "already-visible", "focus-only", "unrelated", "overflow", "stale-capture"]) {
+  const dialogModes = ["appears", "already-visible", "focus-only", "unrelated", "overflow", "stale-capture",
+    "deep-appears", "deep-already-visible", "deep-noop", "shadow-appears", "after-overflow", "deep-overflow"];
+  for (const [modeIndex, mode] of dialogModes.entries()) {
     const root = new Element("main");
     const opener = root.append(new Element("button", {"aria-label": "Open panel"}));
     const dialog = new Element("div", {role: "dialog"});
-    root.append(dialog);
-    dialog.rect = mode === "already-visible" ? {x: 10,y: 10,width: 160,height: 32} : {x: 0,y: 0,width: 0,height: 0};
+    let container = root;
+    if (mode.startsWith("deep-") || mode === "shadow-appears") {
+      for (let n = 0; n < 96; n++) container = container.append(new Element("div"));
+      if (mode === "shadow-appears") {
+        container._shadow = new ShadowRoot();
+        container = container._shadow;
+      }
+    }
+    container.append(dialog);
+    const alreadyVisible = mode === "already-visible" || mode === "deep-already-visible";
+    dialog.rect = alreadyVisible ? {x: 10,y: 10,width: 160,height: 32} : {x: 0,y: 0,width: 0,height: 0};
     document._root = root; setOwner(root, document); document._hit = opener; document._active = null;
     // Multi-point fixture hit testing models the independent dialog sample.
-    if (mode === "already-visible") {
+    if (alreadyVisible) {
       dialog.append(opener);
     }
-    const generation = 400 + ["appears", "already-visible", "focus-only", "unrelated", "overflow", "stale-capture"].indexOf(mode) * 3;
+    const generation = 400 + modeIndex * 3;
     const before = JSON.parse(invoke(generation, generation, {k: "initial"}));
     const target = before.n.find(node => node.n === "Open panel");
     const click = JSON.parse(actionRequest(generation));
@@ -1882,25 +1893,31 @@ async function finish() {
       f: {r:7,o:9,q:1,s:0,n:"Open panel",vk:0,vt:null,vo:0,vb:false}});
     opener._onClick = () => {
       document._active = opener;
-      if (mode === "appears" || mode === "already-visible" || mode === "stale-capture") {
+      if (mode.endsWith("appears") || alreadyVisible || mode === "stale-capture" || mode === "after-overflow") {
         dialog.rect = {x:10,y:10,width:160,height:32}; document._hit = dialog;
       }
+      if (mode === "after-overflow") for (let n = 0; n < 16400; n++) root.append(new Element("span"));
       if (mode === "unrelated") root.append(new Element("p")).append(new CharacterData("updated"));
     };
     if (mode === "overflow") for (let n = 0; n < 16400; n++) root.append(new Element("span"));
+    if (mode === "deep-overflow") {
+      let tail = root;
+      for (let n = 0; n < 16400; n++) tail = tail.append(new Element("span"));
+    }
     const result = runtime.invoke(JSON.stringify(click));
-    if (mode === "overflow") {
-      assert(result === "E2:unsupported_interaction" && !opener._fixedClickCount, "incomplete dialog baseline dispatched click");
+    if (mode === "overflow" || mode === "deep-overflow") {
+      assert(result === "E2:page_dialog_sample_limit" && !opener._fixedClickCount, "incomplete dialog baseline dispatched click");
       continue;
     }
-    assert(JSON.parse(result).b === "fixed_semantic_recipe", `page dialog click failed: ${result}`);
+    assert(!result.startsWith("E2:"), `page dialog ${mode} click failed: ${result}`);
+    assert(JSON.parse(result).b === "fixed_semantic_recipe", `page dialog ${mode} click evidence failed`);
     const next = generation + (mode === "stale-capture" ? 2 : 1);
     const after = JSON.parse(invoke(next, next, {k: "initial"}));
-    if (mode === "stale-capture") assert(!after.u, "dialog proof survived skipped capture");
+    if (mode === "stale-capture" || mode === "after-overflow") assert(!after.u, "dialog proof survived skipped or incomplete capture");
     else {
       assert(after.u && after.u.a === generation && after.u.i === generation && after.u.g === generation, "dialog proof correlation lost");
       const appeared = after.u.after.some(key => !after.u.before.includes(key));
-      assert(appeared === (mode === "appears"), `false dialog appearance: ${mode}`);
+      assert(appeared === mode.endsWith("appears"), `false dialog appearance: ${mode}`);
       assert(!JSON.parse(invoke(next+1,next+1,{k:"initial"})).u, "dialog witness replayed");
     }
   }

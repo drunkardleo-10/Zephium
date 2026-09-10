@@ -218,8 +218,11 @@ pub(super) const fn map_runtime_fault(
         | SemanticActionRuntimeFault::AppliedUnverifiedLogicalEditor => {
             SemanticActionNativeFailure::AppliedUnverified
         }
-        SemanticActionRuntimeFault::Busy => SemanticActionNativeFailure::ResourceExhausted,
+        SemanticActionRuntimeFault::Busy | SemanticActionRuntimeFault::PageDialogSampleLimit => {
+            SemanticActionNativeFailure::ResourceExhausted
+        }
         SemanticActionRuntimeFault::DocumentLoading
+        | SemanticActionRuntimeFault::PageDialogSampleUnavailable
         | SemanticActionRuntimeFault::PageRelayNotReady => {
             SemanticActionNativeFailure::TargetChanged
         }
@@ -232,6 +235,18 @@ pub(super) const fn map_runtime_fault(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incomplete_dialog_baselines_preserve_predispatch_failure_class() {
+        assert_eq!(
+            map_runtime_fault(SemanticActionRuntimeFault::PageDialogSampleLimit),
+            SemanticActionNativeFailure::ResourceExhausted
+        );
+        assert_eq!(
+            map_runtime_fault(SemanticActionRuntimeFault::PageDialogSampleUnavailable),
+            SemanticActionNativeFailure::TargetChanged
+        );
+    }
 
     #[test]
     fn content_free_fill_diagnostics_never_make_an_observed_action_retryable() {

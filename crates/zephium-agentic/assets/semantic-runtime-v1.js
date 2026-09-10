@@ -23,6 +23,8 @@
   const MAX_ACTION_DESCRIPTOR_WIRE_BYTES = 16384;
   const MAX_ACTION_DESCRIPTOR_VISITED_NODES = 2048;
   const MAX_ACTION_TEXT_BYTES = 4096;
+  const MAX_DIALOG_SAMPLE_NODES = 16384;
+  const MAX_DIALOG_SAMPLE_DIALOGS = 16;
   const CHANNEL_PULL = "P1";
   const CHANNEL_RESULT_PREFIX = "R1:";
   const CHANNEL_ACK = "A1";
@@ -2114,7 +2116,7 @@
     pendingDialogSample = null;
     if (pending !== null && request.i === pending.i + 1 && request.g === pending.g + 1) {
       const after = sampleVisiblePageDialogs();
-      if (after !== null) dialogSample = `,"u":${apply(jsonStringify, JSON, [{...pending, after}])}`;
+      if (arrayIsArray(after)) dialogSample = `,"u":${apply(jsonStringify, JSON, [{...pending, after}])}`;
     }
     const encodedNodes = [];
     for (const record of records) encodedNodes.push(apply(jsonStringify, JSON, [record.wire]));
@@ -2148,28 +2150,33 @@
   }
 
   function sampleVisiblePageDialogs() {
-    const state = { request: { b: { x: 16384 } }, visited: 0, stopped: false, completeness: "complete" };
+    const state = { request: { b: { x: MAX_DIALOG_SAMPLE_NODES } }, visited: 0, stopped: false, completeness: "complete" };
     const root = read(documentElementGetter, document);
-    if (root === null || root === undefined) return null;
-    const stack = [{node: root, depth: 0, hidden: false}];
+    if (root === null || root === undefined) return "page_dialog_sample_unavailable";
+    const stack = [{node: root}];
     const result = [];
     const viewport = boundedViewport();
-    if (viewport === null) return null;
+    if (viewport === null) return "page_dialog_sample_unavailable";
+    // This is a complete DOM census, not a semantic projection: framework
+    // wrappers must not consume the semantic tree's depth budget. The visited
+    // and queued node ceiling bounds both traversal work and stack memory,
+    // including deep trees. Incomplete samples never prove an
+    // absent dialog and never authorize dispatch.
     while (stack.length > 0 && !state.stopped) {
       const item = stack.pop();
-      if (++state.visited > 16384 || item.depth > MAX_TREE_DEPTH) return null;
+      if (++state.visited > MAX_DIALOG_SAMPLE_NODES) return "page_dialog_sample_limit";
       const element = nodeType(item.node) === 1;
-      const hidden = item.hidden || (element && shouldSkipSubtree(item.node));
+      const hidden = element && shouldSkipSubtree(item.node);
       if (element && !hidden) {
         const tag = lower(read(elementTagGetter, item.node) || "");
         const role = lower(attribute(item.node, "role", 32) || "");
         if (tag === "dialog" || role === "dialog" || role === "alertdialog") {
           const rect = styleIsVisible(item.node) ? elementRect(item.node) : null;
           if (rect !== null && actionPoint(item.node, rect, viewport) !== null) {
-            if (result.length === 16) return null;
+            if (result.length === MAX_DIALOG_SAMPLE_DIALOGS) return "page_dialog_sample_limit";
             let key = apply(weakMapGet, dialogKeys, [item.node]);
             if (key === undefined) {
-              if (!isPositiveSafeInteger(nextDialogKey)) return null;
+              if (!isPositiveSafeInteger(nextDialogKey)) return "page_dialog_sample_limit";
               key = nextDialogKey++;
               apply(weakMapSet, dialogKeys, [item.node, key]);
             }
@@ -2177,9 +2184,9 @@
           }
         }
       }
-      if (!hidden) pushChildren(stack, item.node, {depth: item.depth + 1, hidden}, state);
+      if (!hidden) pushChildren(stack, item.node, {}, state);
     }
-    return state.stopped ? null : result;
+    return state.stopped ? "page_dialog_sample_limit" : result;
   }
 
   function actionOperationBit(kind) {
@@ -2669,7 +2676,7 @@
       if (typeof htmlElementClick !== "function") return actionFault("unsupported_interaction");
       if (request.u === true) {
         const before = sampleVisiblePageDialogs();
-        if (before === null) return actionFault("unsupported_interaction");
+        if (!arrayIsArray(before)) return actionFault(before);
         pendingDialogSample = {a: request.a, i: request.i, g: request.g, before};
       }
       try {
