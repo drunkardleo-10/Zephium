@@ -150,6 +150,10 @@ pub struct RetainedWorkSnapshot {
     pub record: Option<AgentWorkRecord>,
     pub failure: Option<AgentWorkFailure>,
     pub persistence_failure: Option<AgentWorkJournalError>,
+    /// Atomic durable result identity, present only after publication ACK.
+    pub artifact: Option<AgentWorkArtifactDescriptor>,
+    /// Explicit archived-result read status. Content is retrieved separately.
+    pub artifact_read: Option<Result<bool, AgentWorkJournalError>>,
 }
 struct Projection {
     #[cfg(feature = "work-execution-probe")]
@@ -157,6 +161,10 @@ struct Projection {
     snapshot: RetainedWorkSnapshot,
     events: VecDeque<AgentWorkEvent>,
     extraction: Option<Box<SemanticOwnedExtractionResult>>,
+    archived: Option<AgentWorkArchivedExtraction>,
+    records: Vec<AgentWorkRecord>,
+    read_requested: Option<AgentWorkRecord>,
+    read_active: bool,
 }
 struct ProductSignal {
     projection: Mutex<Projection>,
@@ -191,9 +199,46 @@ impl RetainedWorkHandle {
         event
     }
     /// Moves source-bound ModelMapped content only after original scoped drain
-    /// and durable Succeeded ACK. This does not persist a result artifact.
+    /// and durable Succeeded ACK. When requested at admission, this additionally
+    /// requires atomic artifact publication; the archived result remains in Store.
     pub fn take_extraction(&self) -> Option<Box<SemanticOwnedExtractionResult>> {
         self.signal.projection.lock().ok()?.extraction.take()
+    }
+    /// Bounded durable inventory, including terminal records from prior launches.
+    /// These facts never grant native or model execution authority.
+    pub fn records(&self) -> Vec<AgentWorkRecord> {
+        self.signal
+            .projection
+            .lock()
+            .map(|value| value.records.clone())
+            .unwrap_or_default()
+    }
+    /// Requests a stored result in the original selected profile. One pending
+    /// read and one returned body are retained; consume before rereading.
+    pub fn read_artifact(&self, record: AgentWorkRecord) -> bool {
+        let Ok(mut projection) = self.signal.projection.lock() else {
+            return false;
+        };
+        if projection.read_requested.is_some()
+            || projection.read_active
+            || projection.archived.is_some()
+            || !matches!(
+                projection.snapshot.phase,
+                RetainedWorkPhase::Ready | RetainedWorkPhase::Terminal
+            )
+            || !projection.records.contains(&record)
+            || record.disposition() != AgentWorkDisposition::Succeeded
+        {
+            return false;
+        }
+        projection.read_requested = Some(record);
+        projection.snapshot.artifact_read = None;
+        drop(projection);
+        self.callback.dispatch(Command::WorkWake)
+    }
+    /// Moves archived ModelMapped data. It cannot resume an old run.
+    pub fn take_archived_extraction(&self) -> Option<AgentWorkArchivedExtraction> {
+        self.signal.projection.lock().ok()?.archived.take()
     }
     /// Requests actor cancellation; true acknowledges queue admission only.
     pub fn stop(&self) -> bool {
@@ -231,9 +276,15 @@ impl CallbackHandle {
                     record: None,
                     failure: None,
                     persistence_failure: None,
+                    artifact: None,
+                    artifact_read: None,
                 },
                 events: VecDeque::with_capacity(MAX_AGENT_WORK_EVENTS),
                 extraction: None,
+                archived: None,
+                records: Vec::new(),
+                read_requested: None,
+                read_active: false,
             }),
             stop: AtomicBool::new(false),
             reconcile: AtomicBool::new(false),
@@ -388,6 +439,14 @@ impl ProductWork {
             work.reconcile();
         }
         work.poll(now);
+        if let Ok(mut projection) = self.signal.projection.lock() {
+            if let Some(record) = projection.read_requested {
+                if projection.archived.is_none() && work.read_artifact(record) {
+                    projection.read_requested = None;
+                    projection.read_active = true;
+                }
+            }
+        }
         if work.ready() {
             if let Some(request) = self.request.take() {
                 if let Err(request) = work.submit(request, now) {
@@ -423,6 +482,18 @@ impl ProductWork {
             AdmissionPhase::Uncertain => RetainedWorkPhase::Uncertain,
         };
         projection.snapshot.record = work.record();
+        projection.snapshot.artifact = work.artifact();
+        projection.snapshot.artifact_read = work.artifact_read();
+        if projection.snapshot.artifact_read.is_some() {
+            projection.read_active = false;
+        }
+        if projection.records.as_slice() != work.records() {
+            projection.records.clear();
+            projection.records.extend_from_slice(work.records());
+        }
+        if projection.archived.is_none() {
+            projection.archived = work.take_archived_extraction();
+        }
         (
             projection.snapshot.failure,
             projection.snapshot.persistence_failure,

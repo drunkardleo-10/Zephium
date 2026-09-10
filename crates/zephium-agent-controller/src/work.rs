@@ -294,9 +294,6 @@ impl AgentWorkRunInput {
     pub fn retained_resource_spec(
         &self,
     ) -> Result<AgentWorkRetainedResourceSpec, AgentWorkFailure> {
-        if self.durable_result {
-            return Err(AgentWorkFailure::Contract);
-        }
         Ok(AgentWorkRetainedResourceSpec {
             identity: self.context.identity,
             storage: self.context.storage,
@@ -882,8 +879,7 @@ impl AgentWorkController {
             return Err(AgentWorkFailure::Contract);
         }
         if retained.is_some()
-            && (input.durable_result
-                || extraction_schema.is_none()
+            && (extraction_schema.is_none()
                 || (actions_before_extraction
                     && !retained
                         .as_ref()

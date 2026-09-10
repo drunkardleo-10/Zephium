@@ -6,10 +6,16 @@ type Held = (
     Result<AgentWorkJournalReply, AgentWorkJournalError>,
     AgentWorkJournalCompletion,
 );
+type HeldArtifact = (
+    Result<AgentWorkArtifactReply, AgentWorkJournalError>,
+    AgentWorkArtifactCompletion,
+);
 struct GatedStore {
     store: Arc<zephium_store::SqliteStore>,
     hold: Arc<AtomicU8>,
     pending: Arc<Mutex<Option<Held>>>,
+    pending_artifact: Arc<Mutex<Option<HeldArtifact>>>,
+    refuse_artifact_read: AtomicBool,
     wakes: Arc<AtomicUsize>,
     held_signal: Arc<Mutex<Option<mpsc::SyncSender<()>>>>,
 }
@@ -23,6 +29,34 @@ impl AgentAuditPort for GatedStore {
     }
 }
 impl AgentWorkJournalPort for GatedStore {
+    fn artifact(
+        &self,
+        request: AgentWorkArtifactRequest,
+        completion: AgentWorkArtifactCompletion,
+    ) -> Result<(), AgentWorkJournalError> {
+        if matches!(request, AgentWorkArtifactRequest::Read { .. })
+            && self.refuse_artifact_read.load(Ordering::Acquire)
+        {
+            return Err(AgentWorkJournalError::Unavailable);
+        }
+        let held = matches!(request, AgentWorkArtifactRequest::Publish(_))
+            && self.hold.load(Ordering::Acquire) == AgentWorkDisposition::Succeeded as u8;
+        let pending = self.pending_artifact.clone();
+        self.store.artifact(
+            request,
+            Box::new(move |reply| {
+                if held {
+                    assert!(pending
+                        .lock()
+                        .unwrap()
+                        .replace((reply, completion))
+                        .is_none());
+                } else {
+                    completion(reply);
+                }
+            }),
+        )
+    }
     fn dispatch(
         &self,
         request: AgentWorkJournalRequest,
@@ -91,16 +125,26 @@ fn coordinator_with_wake(
     directory: &std::path::Path,
     wake: WakeApplication,
 ) -> (RetainedWork, Arc<Native>, Arc<GatedStore>) {
+    coordinator_with_storage(directory, wake, ContextProfileStorageClass::Ephemeral)
+}
+
+fn coordinator_with_storage(
+    directory: &std::path::Path,
+    wake: WakeApplication,
+    storage: ContextProfileStorageClass,
+) -> (RetainedWork, Arc<Native>, Arc<GatedStore>) {
     let store = Arc::new(GatedStore {
         store: Arc::new(zephium_store::SqliteStore::open(directory).unwrap()),
         hold: Arc::new(AtomicU8::new(0)),
         pending: Arc::new(Mutex::new(None)),
+        pending_artifact: Arc::new(Mutex::new(None)),
+        refuse_artifact_read: AtomicBool::new(false),
         wakes: Arc::new(AtomicUsize::new(0)),
         held_signal: Arc::new(Mutex::new(None)),
     });
     let wakes = store.wakes.clone();
     let (owner, native, resource) = construct_fixture_with_wake(
-        ContextProfileStorageClass::Ephemeral,
+        storage,
         WorkBrowserDocumentPolicy::Exact,
         None,
         Arc::new(move || {
@@ -109,6 +153,33 @@ fn coordinator_with_wake(
         }),
     );
     native.allow_global_shutdown.store(true, Ordering::Release);
+    if storage == ContextProfileStorageClass::Durable {
+        use zephium_core::{
+            ports::store::Store,
+            profiles::ProfileKind,
+            session::{PersistedProfile, PersistedSpace, SessionState},
+        };
+        let profile = resource.identity().profile();
+        let space = zephium_core::ids::SpaceId::generate();
+        store.store.save_session(SessionState {
+            profiles: vec![PersistedProfile {
+                id: profile,
+                name: "Fixture".into(),
+                kind: ProfileKind::Default,
+            }],
+            spaces: vec![PersistedSpace {
+                id: space,
+                profile,
+                name: "Fixture".into(),
+            }],
+            items: vec![],
+            active_space: Some(space),
+            active_item: None,
+            splits: None,
+            recently_closed: vec![],
+        });
+        assert!(store.store.flush());
+    }
     let work = RetainedWork::new(owner, resource, store.clone(), store.clone())
         .unwrap_or_else(|_| panic!("original owner and Store join"));
     (work, native, store)
@@ -367,12 +438,108 @@ fn worker_exit_wake(blocking_shutdown: bool, post_completion: bool) {
 }
 
 type Servers = Arc<Mutex<Vec<std::thread::JoinHandle<usize>>>>;
+
+#[test]
+fn retained_result_requires_atomic_ack_and_remains_readable_after_handoff() {
+    if child("retained_result_requires_atomic_ack_and_remains_readable_after_handoff") {
+        return;
+    }
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let directory = tempfile::tempdir().unwrap();
+    let (mut work, native, store) = coordinator_with_storage(
+        directory.path(),
+        Arc::new(|| true),
+        ContextProfileStorageClass::Durable,
+    );
+    let servers = Servers::default();
+    poll_until(&mut work, RetainedWork::ready);
+    store
+        .hold
+        .store(AgentWorkDisposition::Succeeded as u8, Ordering::Release);
+    assert!(work
+        .submit(
+            request_with_result(
+                ContextRunId::generate(),
+                vec![response_stream(1), response_stream(2)],
+                servers.clone(),
+                true
+            ),
+            now()
+        )
+        .is_ok());
+    poll_until(&mut work, |_| {
+        store.pending_artifact.lock().unwrap().is_some()
+    });
+    assert_eq!(work.phase(), AdmissionPhase::Closing);
+    assert!(work.take_extraction().is_none());
+    assert!(work.artifact().is_none());
+    let (reply, completion) = store.pending_artifact.lock().unwrap().take().unwrap();
+    let AgentWorkArtifactReply::Published { record, descriptor } = reply.unwrap() else {
+        panic!("atomic publication");
+    };
+    completion(Ok(AgentWorkArtifactReply::Published { record, descriptor }));
+    poll_until(&mut work, |work| work.phase() == AdmissionPhase::Terminal);
+    assert_eq!(work.artifact(), Some(descriptor));
+    assert!(work.take_extraction().is_some());
+    assert!(work.take_extraction().is_none());
+    assert!(work.read_artifact(record));
+    assert!(!work.read_artifact(record), "one archived read at a time");
+    poll_until(&mut work, |work| work.artifact_read().is_some());
+    let archived = work.take_archived_extraction().unwrap();
+    assert_eq!(archived.descriptor(), descriptor);
+    assert_eq!(archived.trust(), SemanticExtractionTrust::ModelMapped);
+    assert_eq!(archived.fields()[0].name(), "label");
+    assert_eq!(work.record(), Some(record));
+    store.refuse_artifact_read.store(true, Ordering::Release);
+    assert!(work.read_artifact(record));
+    poll_until(&mut work, |work| work.artifact_read().is_some());
+    assert_eq!(
+        work.artifact_read(),
+        Some(Err(AgentWorkJournalError::Unavailable))
+    );
+    assert_eq!(work.phase(), AdmissionPhase::Terminal);
+    assert_eq!(
+        work.record(),
+        Some(record),
+        "a failed archive read cannot rewrite a completed run"
+    );
+    assert_eq!(
+        native.reads.load(Ordering::Acquire),
+        1,
+        "archive read never dispatches a browser read"
+    );
+    for server in servers.lock().unwrap().drain(..) {
+        assert_eq!(server.join().unwrap(), 2);
+    }
+    native.join();
+    assert!(work.shutdown_until(
+        &Clock(AtomicU64::new(2)),
+        Instant::now() + Duration::from_secs(2)
+    ));
+}
+
 fn request(run: ContextRunId, responses: Vec<String>, servers: Servers) -> ActorRequest {
+    request_with_result(run, responses, servers, false)
+}
+
+fn request_with_result(
+    run: ContextRunId,
+    responses: Vec<String>,
+    servers: Servers,
+    persist: bool,
+) -> ActorRequest {
     ActorRequest {
         run,
         deadline: AgentPolicyInstant::from_millis(600_002),
         prepare: Box::new(move |browser, audit| {
             let input = input(browser.binding(), Arc::new(Clock(AtomicU64::new(2))));
+            let input = if persist {
+                input.persist_extraction_result().unwrap()
+            } else {
+                input
+            };
             let (transport, server) = fixture_provider_responses(responses);
             servers.lock().unwrap().push(server);
             StagedActor::for_probe(

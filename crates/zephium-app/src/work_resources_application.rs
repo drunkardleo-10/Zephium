@@ -133,12 +133,22 @@ pub(super) enum AdmissionPhase {
 /// Original request and callback slot stay owned even after timeout/refusal.
 /// There is no read-back shortcut, automatic retry or decoded-record admission.
 struct JournalFlight {
-    request: AgentWorkJournalRequest,
-    result: Arc<Mutex<Option<Result<AgentWorkJournalReply, AgentWorkJournalError>>>>,
+    request: DurableRequest,
+    result: Arc<Mutex<Option<Result<DurableReply, AgentWorkJournalError>>>>,
     deadline: Instant,
     phase: AdmissionPhase,
     uncertain: bool,
     reconciliations: u8,
+}
+
+#[derive(Clone)]
+enum DurableRequest {
+    Journal(AgentWorkJournalRequest),
+    Artifact(AgentWorkArtifactRequest),
+}
+enum DurableReply {
+    Journal(AgentWorkJournalReply),
+    Artifact(AgentWorkArtifactReply),
 }
 
 pub(super) struct RetainedWork {
@@ -160,6 +170,10 @@ pub(super) struct RetainedWork {
     active: Option<ActiveActor>,
     flight: Option<JournalFlight>,
     record: Option<AgentWorkRecord>,
+    result_profile: Option<zephium_core::ids::ProfileId>,
+    artifact: Option<AgentWorkArtifactDescriptor>,
+    archived: Option<AgentWorkArchivedExtraction>,
+    artifact_read: Option<Result<bool, AgentWorkJournalError>>,
     events: VecDeque<AgentWorkEvent>,
     stopping: bool,
     destruction: Option<PendingLifecycle>,
@@ -233,6 +247,10 @@ impl RetainedWork {
             active: None,
             flight: None,
             record: None,
+            result_profile: None,
+            artifact: None,
+            archived: None,
+            artifact_read: None,
             events: VecDeque::with_capacity(MAX_AGENT_WORK_EVENTS),
             stopping: false,
             destruction: None,
@@ -331,6 +349,8 @@ impl RetainedWork {
         // Only this exact durable/scoped join retires the previous actor owner.
         self.active.take();
         self.record = None;
+        self.result_profile = None;
+        self.artifact = None;
         self.acquisition = Some(acquisition);
         self.request = Some(request);
         self.phase = AdmissionPhase::Acquiring;
@@ -338,12 +358,12 @@ impl RetainedWork {
     }
 
     fn dispatch(&mut self, request: AgentWorkJournalRequest) {
-        self.dispatch_attempt(request, self.phase, 0);
+        self.dispatch_attempt(DurableRequest::Journal(request), self.phase, 0);
     }
 
     fn dispatch_attempt(
         &mut self,
-        request: AgentWorkJournalRequest,
+        request: DurableRequest,
         phase: AdmissionPhase,
         reconciliations: u8,
     ) {
@@ -352,23 +372,31 @@ impl RetainedWork {
         let sink = result.clone();
         let wake = self.waker.clone();
         self.flight = Some(JournalFlight {
-            request,
+            request: request.clone(),
             result: result.clone(),
             deadline: Instant::now() + Duration::from_secs(2),
             phase,
             uncertain: false,
             reconciliations,
         });
-        if let Err(error) = self.journal.dispatch(
-            request,
-            Box::new(move |reply| {
-                match sink.lock() {
-                    Ok(mut slot) => *slot = Some(reply),
-                    Err(_) => return,
-                }
-                wake.wake();
-            }),
-        ) {
+        let completion = move |reply| {
+            match sink.lock() {
+                Ok(mut slot) => *slot = Some(reply),
+                Err(_) => return,
+            }
+            wake.wake();
+        };
+        let dispatched = match request {
+            DurableRequest::Journal(request) => self.journal.dispatch(
+                request,
+                Box::new(move |reply| completion(reply.map(DurableReply::Journal))),
+            ),
+            DurableRequest::Artifact(request) => self.journal.artifact(
+                request,
+                Box::new(move |reply| completion(reply.map(DurableReply::Artifact))),
+            ),
+        };
+        if let Err(error) = dispatched {
             if let Ok(mut slot) = result.lock() {
                 *slot = Some(Err(error));
             }
@@ -445,6 +473,7 @@ impl RetainedWork {
                 self.record = Some(record);
                 match (phase, record.disposition()) {
                     (AdmissionPhase::Admitting, AgentWorkDisposition::Admitted) => {
+                        self.result_profile = mutation.result_profile();
                         self.phase = if self.stopping {
                             AdmissionPhase::Closing
                         } else {
@@ -581,7 +610,45 @@ impl RetainedWork {
                 .map_err(|_| ());
             let mut retain = false;
             let result = match reply {
-                Ok(Some(Ok(reply))) => self.acknowledge(&flight.request, reply, flight.phase),
+                Ok(Some(Ok(reply))) => match (&flight.request, reply) {
+                    (DurableRequest::Journal(request), DurableReply::Journal(reply)) => {
+                        self.acknowledge(request, reply, flight.phase)
+                    }
+                    (
+                        DurableRequest::Artifact(AgentWorkArtifactRequest::Publish(publication)),
+                        DurableReply::Artifact(AgentWorkArtifactReply::Published {
+                            record,
+                            descriptor,
+                        }),
+                    ) if record == publication.mutation().next()
+                        && descriptor == publication.descriptor()
+                        && self.result_profile == Some(descriptor.profile()) =>
+                    {
+                        self.acknowledge(
+                            &AgentWorkJournalRequest::CompareAndSet(publication.mutation()),
+                            AgentWorkJournalReply::Record(Some(record)),
+                            flight.phase,
+                        )
+                        .map(|()| self.artifact = Some(descriptor))
+                    }
+                    (
+                        DurableRequest::Artifact(AgentWorkArtifactRequest::Read {
+                            record,
+                            profile,
+                            ..
+                        }),
+                        DurableReply::Artifact(AgentWorkArtifactReply::Read(archived)),
+                    ) if archived.as_ref().is_none_or(|value| {
+                        value.descriptor().key() == record.key()
+                            && value.descriptor().profile() == *profile
+                    }) =>
+                    {
+                        self.artifact_read = Some(Ok(archived.is_some()));
+                        self.archived = archived;
+                        Ok(())
+                    }
+                    _ => Err(AgentWorkJournalError::Conflict),
+                },
                 Ok(Some(Err(error))) => Err(error),
                 Err(_) => Err(AgentWorkJournalError::Uncertain),
                 _ if !flight.uncertain && Instant::now() >= flight.deadline => {
@@ -593,11 +660,21 @@ impl RetainedWork {
                 }
             };
             if let Err(error) = result {
-                self.persistence_failure.get_or_insert(error);
-                self.fail(AgentWorkFailure::Contract);
-                flight.uncertain = true;
-                // Retain the exact unsettled request even after a malformed ACK.
-                retain = true;
+                if matches!(
+                    flight.request,
+                    DurableRequest::Artifact(AgentWorkArtifactRequest::Read { .. })
+                ) {
+                    // An archived read has no mutation or execution authority.
+                    // Its failure must not relabel an already committed run.
+                    self.artifact_read = Some(Err(error));
+                    retain = false;
+                } else {
+                    self.persistence_failure.get_or_insert(error);
+                    self.fail(AgentWorkFailure::Contract);
+                    flight.uncertain = true;
+                    // Retain the exact unsettled request even after a malformed ACK.
+                    retain = true;
+                }
             }
             if retain {
                 self.flight = Some(flight);
@@ -715,7 +792,36 @@ impl RetainedWork {
                     match terminal {
                         Ok(terminal) => {
                             self.phase = AdmissionPhase::Closing;
-                            self.dispatch(AgentWorkJournalRequest::CompareAndSet(terminal));
+                            if terminal.next().disposition() == AgentWorkDisposition::Succeeded
+                                && self.result_profile.is_some()
+                            {
+                                let publication = self
+                                    .result_profile
+                                    .zip(active.extraction.as_deref())
+                                    .ok_or(AgentWorkJournalError::Transition)
+                                    .and_then(|(profile, result)| {
+                                        AgentWorkArtifactPublication::prepare(
+                                            terminal, profile, result,
+                                        )
+                                    });
+                                match publication {
+                                    Ok(publication) => self.dispatch_attempt(
+                                        DurableRequest::Artifact(
+                                            AgentWorkArtifactRequest::Publish(Arc::new(
+                                                publication,
+                                            )),
+                                        ),
+                                        self.phase,
+                                        0,
+                                    ),
+                                    Err(error) => {
+                                        self.persistence_failure = Some(error);
+                                        self.fail(AgentWorkFailure::Contract);
+                                    }
+                                }
+                            } else {
+                                self.dispatch(AgentWorkJournalRequest::CompareAndSet(terminal));
+                            }
                         }
                         Err(_) => self.fail(AgentWorkFailure::Contract),
                     }
@@ -833,11 +939,53 @@ impl RetainedWork {
         self.record
     }
 
+    pub(super) fn artifact(&self) -> Option<AgentWorkArtifactDescriptor> {
+        self.artifact
+    }
+
+    pub(super) fn records(&self) -> &[AgentWorkRecord] {
+        &self.inventory
+    }
+
+    pub(super) fn read_artifact(&mut self, record: AgentWorkRecord) -> bool {
+        if self.flight.is_some()
+            || !matches!(self.phase, AdmissionPhase::Ready | AdmissionPhase::Terminal)
+            || !self.inventory.contains(&record)
+            || record.disposition() != AgentWorkDisposition::Succeeded
+            || self.archived.is_some()
+        {
+            return false;
+        }
+        let Some(owner) = self.incarnation else {
+            return false;
+        };
+        self.artifact_read = None;
+        self.dispatch_attempt(
+            DurableRequest::Artifact(AgentWorkArtifactRequest::Read {
+                owner,
+                record,
+                profile: self.resource.identity().profile(),
+            }),
+            self.phase,
+            0,
+        );
+        true
+    }
+
+    pub(super) fn artifact_read(&self) -> Option<Result<bool, AgentWorkJournalError>> {
+        self.artifact_read
+    }
+
+    pub(super) fn take_archived_extraction(&mut self) -> Option<AgentWorkArchivedExtraction> {
+        self.archived.take()
+    }
+
     pub(super) fn take_extraction(&mut self) -> Option<Box<SemanticOwnedExtractionResult>> {
         if self.phase != AdmissionPhase::Terminal
             || self.failure.is_some()
             || self.persistence_failure.is_some()
             || self.record?.disposition() != AgentWorkDisposition::Succeeded
+            || (self.result_profile.is_some() && self.artifact.is_none())
         {
             return None;
         }

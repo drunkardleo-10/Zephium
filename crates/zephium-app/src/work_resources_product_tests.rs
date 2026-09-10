@@ -298,7 +298,9 @@ fn shipping_preparation_checks_profile_storage_original_audit_and_result_contrac
                 Box::new(|_| panic!("dormant preparation must not take native factory")),
             ),
         );
-        assert_eq!(result.is_ok(), mode == 0);
+        // Durable result intent is supported without relaxing the selected
+        // profile/storage or original audit-port admission checks.
+        assert_eq!(result.is_ok(), matches!(mode, 0 | 4));
     }
 }
 
