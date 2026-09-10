@@ -38,14 +38,17 @@ use std::time::{Duration, Instant};
 
 use objc2::{
     rc::{Retained, Weak},
+    runtime::AnyObject,
     MainThreadOnly as _,
 };
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSView, NSWindow,
     NSWindowStyleMask,
 };
-use objc2_foundation::{MainThreadMarker, NSDate, NSPoint, NSRect, NSRunLoop, NSSize};
-use objc2_web_kit::{WKWebView, WKWebsiteDataStore};
+use objc2_foundation::{
+    MainThreadMarker, NSDate, NSError, NSPoint, NSRect, NSRunLoop, NSSize, NSString,
+};
+use objc2_web_kit::{WKBackForwardListItem, WKWebView, WKWebsiteDataStore};
 use raw_window_handle::{
     AppKitWindowHandle, HandleError, HasWindowHandle, RawWindowHandle, WindowHandle,
 };
@@ -321,6 +324,7 @@ enum ProbeMode<'a> {
         opportunity: RenderingOpportunity,
         report: &'a mut Option<MacosAgenticRenderingOpportunityReport>,
     },
+    HistoryRuntime(&'a mut Option<MacosAgenticHistoryRuntimeProbeReport>),
     ModelClick(&'a mut ModelInitialCallback<'a>),
     ModelPublicFill(&'a mut ModelInitialCallback<'a>),
     ModelWorkflow {
@@ -333,6 +337,20 @@ enum ProbeMode<'a> {
         prepare_continuation: &'a mut ModelContinuationCallback<'a>,
         finish: &'a mut ModelFinishCallback<'a>,
     },
+}
+
+/// Release-excluded evidence for exact native history identity and restoration
+/// lifecycle. It contains no page text or URL.
+#[derive(Debug)]
+pub struct MacosAgenticHistoryRuntimeProbeReport {
+    /// The immediate predecessor was the exact retained native item.
+    pub exact_item_identity: bool,
+    /// WebKit restored the original JavaScript document rather than cold-loading it.
+    pub bfcache_restored: bool,
+    /// A trusted pageshow notification ran after the exact history traversal.
+    pub pageshow_observed: bool,
+    /// The pageshow event identified a BFCache restoration.
+    pub pageshow_persisted: bool,
 }
 
 /// Fixed run authority bound to one live release-excluded semantic context.
@@ -423,6 +441,15 @@ pub(crate) fn run() -> Result<(), &'static str> {
     let pending = objc2::rc::autoreleasepool(|_| begin(ProbeMode::Full))?;
     match finish(pending)? {
         None => Ok(()),
+        Some(_) => Err("unexpected_model_terminal"),
+    }
+}
+
+pub(crate) fn run_history_runtime() -> Result<MacosAgenticHistoryRuntimeProbeReport, &'static str> {
+    let mut report = None;
+    let pending = objc2::rc::autoreleasepool(|_| begin(ProbeMode::HistoryRuntime(&mut report)))?;
+    match finish(pending)? {
+        None => report.ok_or("history_probe_report"),
         Some(_) => Err("unexpected_model_terminal"),
     }
 }
@@ -559,6 +586,7 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
         ProbeMode::Rendering(_)
             | ProbeMode::RenderingOpportunity { .. }
             | ProbeMode::RenderingPresented(_)
+            | ProbeMode::HistoryRuntime(_)
     );
     let public_fill_probe = matches!(
         &mode,
@@ -731,6 +759,65 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
     let mut next_invocation = 1_u64;
     let mut successful_snapshots = 0_u8;
     let execution = (|| {
+        if let ProbeMode::HistoryRuntime(report) = &mut mode {
+            let version = objc2_foundation::NSProcessInfo::processInfo().operatingSystemVersion();
+            if version.majorVersion < 26 {
+                return Err("history_probe_requires_macos_26");
+            }
+            let first_url = server.url(FixtureRoute::SemanticRuntime);
+            let second_url = server.url(FixtureRoute::SemanticRuntimeReplacement);
+            let (_first_context, _) = navigate_with_receipt(
+                &mut view,
+                &mut registry,
+                identity.id(),
+                2,
+                &first_url,
+                &runtime,
+            )?;
+            install_history_lifecycle_witness(&page, &runtime)?;
+            let first_item = native_current_history_item(&page)?;
+            if native_item_url(&first_item).as_deref() != Some(first_url.as_str()) {
+                return Err("history_probe_first_item");
+            }
+            let (_second_context, _) = navigate_with_receipt(
+                &mut view,
+                &mut registry,
+                identity.id(),
+                3,
+                &second_url,
+                &runtime,
+            )?;
+            let list = unsafe { page.backForwardList() };
+            let current = unsafe { list.currentItem() }.ok_or("history_probe_current_item")?;
+            let predecessor = unsafe { list.backItem() }.ok_or("history_probe_back_item")?;
+            let exact_item_identity = Retained::as_ptr(&predecessor)
+                == Retained::as_ptr(&first_item)
+                && native_item_url(&current).as_deref() == Some(second_url.as_str());
+            if !exact_item_identity {
+                return Err("history_probe_item_identity");
+            }
+            history_back_with_receipt(
+                &mut view,
+                &mut registry,
+                identity.id(),
+                4,
+                &first_url,
+                &first_item,
+                &runtime,
+            )?;
+            let restored = native_current_history_item(&page)?;
+            if Retained::as_ptr(&restored) != Retained::as_ptr(&first_item) {
+                return Err("history_probe_restored_item");
+            }
+            let lifecycle = read_history_lifecycle_witness(&page, &runtime)?;
+            **report = Some(MacosAgenticHistoryRuntimeProbeReport {
+                exact_item_identity,
+                bfcache_restored: lifecycle[0],
+                pageshow_observed: lifecycle[1],
+                pageshow_persisted: lifecycle[2],
+            });
+            return Ok(None);
+        }
         if let ProbeMode::RenderingPresented(report) = &mut mode {
             let url = server.url(FixtureRoute::SemanticRendering);
             let (context, operation) =
@@ -969,7 +1056,8 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
             ProbeMode::ModelWorkflow { .. }
             | ProbeMode::Rendering(_)
             | ProbeMode::RenderingPresented(_)
-            | ProbeMode::RenderingOpportunity { .. } => return Err("workflow_state"),
+            | ProbeMode::RenderingOpportunity { .. }
+            | ProbeMode::HistoryRuntime(_) => return Err("workflow_state"),
             ProbeMode::Full => PendingInitialClick::Fixed(Box::new(execute_primary_click(
                 &view,
                 &first_observation,
@@ -1113,7 +1201,8 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
                     | ProbeMode::ModelWorkflow { .. }
                     | ProbeMode::Rendering(_)
                     | ProbeMode::RenderingPresented(_)
-                    | ProbeMode::RenderingOpportunity { .. } => return Err("model_mode_state"),
+                    | ProbeMode::RenderingOpportunity { .. }
+                    | ProbeMode::HistoryRuntime(_) => return Err("model_mode_state"),
                 }
             }
         }
@@ -1795,6 +1884,179 @@ fn navigate_with_receipt(
         .join(id)
         .map(|context| (context, operation))
         .map_err(|_| "navigation_settle")
+}
+
+fn history_back_with_receipt(
+    view: &mut AgentOwnedView,
+    registry: &mut ContextRegistry,
+    id: ContextId,
+    operation_id: u64,
+    expected_url: &str,
+    item: &WKBackForwardListItem,
+    runtime: &ProbeRuntime<'_, '_>,
+) -> Result<zephium_agentic::ContextJoin, &'static str> {
+    if runtime.failed() || runtime.callbacks.navigation.borrow().is_some() {
+        return Err("history_probe_navigation_state");
+    }
+    let page = super::native_webview(view.view());
+    let current =
+        unsafe { page.backForwardList().currentItem() }.ok_or("history_probe_current_item")?;
+    let back = unsafe { page.backForwardList().backItem() }.ok_or("history_probe_back_item")?;
+    if std::ptr::eq(&*current, item) || !std::ptr::eq(&*back, item) {
+        return Err("history_probe_pre_dispatch_identity");
+    }
+    let operation = registry
+        .begin_navigation(
+            id,
+            ContextOperationId::new(operation_id).ok_or("history_probe_navigation_state")?,
+        )
+        .map_err(|_| "history_probe_navigation_state")?;
+    let target = ContextNavigationTarget::parse(expected_url)
+        .map_err(|_| "history_probe_navigation_target")?;
+    if view.prepare_semantic_document_load().is_err() {
+        let _ = registry.settle_navigation(id, operation, ContextSettlement::Refused);
+        return Err("history_probe_semantic_epoch");
+    }
+    let terminal_claimed = Arc::new(AtomicBool::new(false));
+    if view
+        .navigation()
+        .arm(operation, target.clone(), Arc::clone(&terminal_claimed))
+        .is_err()
+    {
+        let _ = registry.settle_navigation(id, operation, ContextSettlement::Refused);
+        return Err("history_probe_navigation_arm");
+    }
+    // SAFETY: the retained item was sampled from this exact page's immediate
+    // back slot immediately before dispatch on the WebKit main thread.
+    if unsafe { page.goToBackForwardListItem(item) }.is_none() {
+        let _ = view.navigation().disarm(operation);
+        let _ = registry.settle_navigation(id, operation, ContextSettlement::Refused);
+        return Err("history_probe_native_dispatch");
+    }
+    let deadline = Instant::now()
+        .checked_add(NAVIGATION_TIMEOUT)
+        .ok_or("history_probe_navigation_timeout")?;
+    while !runtime.failed()
+        && runtime.callbacks.navigation.borrow().is_none()
+        && Instant::now() < deadline
+    {
+        runtime.pump();
+    }
+    let terminal = runtime
+        .callbacks
+        .navigation
+        .try_borrow_mut()
+        .map_err(|_| "history_probe_navigation_state")?
+        .take();
+    let disarmed = view.navigation().disarm(operation);
+    let applied = terminal.is_some_and(|terminal| {
+        terminal.operation() == operation
+            && matches!(
+                terminal.into_outcome(),
+                Ok(AgentNavigationCommit::Web(committed)) if committed == target
+            )
+    });
+    registry
+        .settle_navigation(
+            id,
+            operation,
+            if applied {
+                ContextSettlement::Applied
+            } else {
+                ContextSettlement::Refused
+            },
+        )
+        .map_err(|_| "history_probe_navigation_settle")?;
+    if !applied || !disarmed || runtime.failed() || !terminal_claimed.load(Ordering::Acquire) {
+        return Err("history_probe_navigation_terminal");
+    }
+    registry
+        .join(id)
+        .map_err(|_| "history_probe_navigation_settle")
+}
+
+fn native_current_history_item(
+    page: &WKWebView,
+) -> Result<Retained<WKBackForwardListItem>, &'static str> {
+    unsafe { page.backForwardList().currentItem() }.ok_or("history_probe_current_item")
+}
+
+fn native_item_url(item: &WKBackForwardListItem) -> Option<String> {
+    let url = unsafe { item.URL() };
+    url.absoluteString().map(|value| value.to_string())
+}
+
+fn evaluate_history_probe(
+    page: &WKWebView,
+    source: &str,
+    runtime: &ProbeRuntime<'_, '_>,
+) -> Result<String, &'static str> {
+    let result = Rc::new(RefCell::new(None));
+    let callback_result = Rc::clone(&result);
+    let completion: block2::RcBlock<dyn Fn(*mut AnyObject, *mut NSError)> =
+        block2::RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
+            let value = if error.is_null() {
+                unsafe { value.as_ref() }
+                    .and_then(AnyObject::downcast_ref::<NSString>)
+                    .map(ToString::to_string)
+            } else {
+                None
+            };
+            callback_result.replace(Some(value));
+        });
+    let source = NSString::from_str(source);
+    unsafe { page.evaluateJavaScript_completionHandler(&source, Some(&completion)) };
+    let deadline = Instant::now()
+        .checked_add(SNAPSHOT_TIMEOUT)
+        .ok_or("history_probe_evaluation_timeout")?;
+    while result.borrow().is_none() && !runtime.failed() && Instant::now() < deadline {
+        runtime.pump();
+    }
+    if runtime.failed() || Instant::now() >= deadline {
+        return Err("history_probe_evaluation_timeout");
+    }
+    let value = result
+        .borrow_mut()
+        .take()
+        .flatten()
+        .ok_or("history_probe_evaluation");
+    value
+}
+
+fn install_history_lifecycle_witness(
+    page: &WKWebView,
+    runtime: &ProbeRuntime<'_, '_>,
+) -> Result<(), &'static str> {
+    let result = evaluate_history_probe(
+        page,
+        "(()=>{const s={pageshow:0,persisted:false};Object.defineProperty(globalThis,'__zephiumHistoryWitness',{value:s,configurable:false});addEventListener('pageshow',e=>{s.pageshow+=1;s.persisted=Boolean(e.persisted);},{capture:true});return 'armed';})()",
+        runtime,
+    )?;
+    (result == "armed")
+        .then_some(())
+        .ok_or("history_probe_witness_install")
+}
+
+fn read_history_lifecycle_witness(
+    page: &WKWebView,
+    runtime: &ProbeRuntime<'_, '_>,
+) -> Result<[bool; 3], &'static str> {
+    let encoded = evaluate_history_probe(
+        page,
+        "(()=>{const s=globalThis.__zephiumHistoryWitness;return JSON.stringify({resident:Boolean(s),pageshow:s?.pageshow||0,persisted:Boolean(s?.persisted)});})()",
+        runtime,
+    )?;
+    let value: serde_json::Value =
+        serde_json::from_str(&encoded).map_err(|_| "history_probe_witness_decode")?;
+    Ok([
+        value.get("resident").and_then(serde_json::Value::as_bool) == Some(true),
+        value
+            .get("pageshow")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+            > 0,
+        value.get("persisted").and_then(serde_json::Value::as_bool) == Some(true),
+    ])
 }
 
 fn assemble_observation(

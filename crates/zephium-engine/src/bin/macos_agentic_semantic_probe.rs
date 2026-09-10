@@ -9,6 +9,18 @@ fn main() {
 #[cfg(target_os = "macos")]
 fn main() {
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if arguments.as_slice() == ["--ci-history-runtime"] {
+        match zephium_engine::run_macos_agentic_history_runtime_probe() {
+            Ok(report) => eprintln!(
+                "macos-agentic-history-runtime-probe: {report:?}; release_excluded=1; fixture=loopback-only; provider=absent; exact_native_item=required; product_authority=false"
+            ),
+            Err(stage) => {
+                eprintln!("macos-agentic-history-runtime-probe: failed; stage={stage}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if arguments.as_slice() == ["--ci-presented-rendering-readiness"] {
         match zephium_engine::run_macos_agentic_presented_rendering_probe() {
             Ok(report) => eprintln!("macos-agentic-presented-rendering-probe: {report:?}; fixture=loopback-only; provider=absent; profile=ephemeral; presentation=explicitly-onscreen; input=ignored; key_authority=absent; main_authority=absent; scheduling=throttle; hidden_restore=verified; original_native_teardown=verified"),

@@ -77,6 +77,8 @@ pub(crate) use agentic_input_probe::run as run_agentic_input_matrix;
 #[cfg(feature = "native-agentic-semantic-probe")]
 pub(crate) use agentic_semantic_probe::run as run_agentic_semantic_probe;
 #[cfg(feature = "native-agentic-semantic-probe")]
+pub(crate) use agentic_semantic_probe::run_history_runtime as run_agentic_history_runtime_probe;
+#[cfg(feature = "native-agentic-semantic-probe")]
 pub(crate) use agentic_semantic_probe::run_model_click as run_agentic_semantic_model_click_probe;
 #[cfg(feature = "native-agentic-semantic-probe")]
 pub(crate) use agentic_semantic_probe::run_model_public_fill as run_agentic_semantic_model_public_fill_probe;
@@ -94,6 +96,8 @@ pub(crate) use agentic_semantic_probe::run_rendering_presented as run_agentic_re
 pub(crate) use agentic_semantic_probe::run_work_actor as run_agentic_work_actor_probe;
 #[cfg(feature = "native-agentic-semantic-probe")]
 pub(crate) use agentic_semantic_probe::run_work_application as run_agentic_work_application_probe;
+#[cfg(feature = "native-agentic-semantic-probe")]
+pub use agentic_semantic_probe::MacosAgenticHistoryRuntimeProbeReport;
 #[cfg(feature = "native-agentic-semantic-probe")]
 pub use agentic_semantic_probe::MacosAgenticRenderingProbeReport;
 #[cfg(feature = "native-agentic-semantic-probe")]

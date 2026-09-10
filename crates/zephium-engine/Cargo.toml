@@ -203,6 +203,8 @@ objc2-security = { version = "0.3", default-features = false, features = [
 objc2-web-kit = { version = "0.3", default-features = false, features = [
     "block2",
     "objc2-app-kit",
+    "WKBackForwardList",
+    "WKBackForwardListItem",
     "WKContentWorld",
     "WKContentRuleList",
     "WKContentRuleListStore",

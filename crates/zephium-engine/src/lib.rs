@@ -122,6 +122,18 @@ pub fn run_macos_agentic_semantic_probe() -> Result<(), &'static str> {
     platform::macos::run_agentic_semantic_probe()
 }
 
+/// Release-excluded macOS 26 native history/runtime lifecycle witness.
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[doc(hidden)]
+pub fn run_macos_agentic_history_runtime_probe(
+) -> Result<MacosAgenticHistoryRuntimeProbeReport, &'static str> {
+    platform::macos::run_agentic_history_runtime_probe()
+}
+
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[doc(hidden)]
+pub use platform::macos::MacosAgenticHistoryRuntimeProbeReport;
+
 /// Provider-free fixed loopback diagnostic under the unchanged hidden,
 /// throttled owned-view policy. Returns content-free observations only after
 /// original native teardown, never success/failure of a public Work task.
