@@ -482,6 +482,7 @@ impl AgentRunPolicy {
             total_hops,
             next_target: route.and_then(|route| route.destinations().get(completed)),
             discovery: discovery.is_some(),
+            production_discovery: discovery.is_some_and(|scope| scope.is_production()),
             departure: discovery.map(|scope| scope.departure()),
             initial_effective: self
                 .initial_navigation_document
@@ -538,10 +539,12 @@ impl AgentRunPolicy {
         if let Some(scope) = discovery {
             if !scope.admits(target)
                 || self
-                    .navigation_receipts
+                    .navigation_destinations
                     .iter()
                     .flatten()
-                    .any(|receipt| receipt.target_guard == target_guard(target))
+                    .filter(|destination| *destination == target)
+                    .count()
+                    >= scope.max_visits_per_destination()
                 || !observation
                     .frames()
                     .iter()
@@ -585,15 +588,34 @@ impl AgentRunPolicy {
             || !baseline.matches(observation)
             || source.frame() != FrameId::MAIN
             || observation.frames().len() != 1
-            || target.as_url().fragment().is_some()
+            || (discovery.is_none() && target.as_url().fragment().is_some())
             || target.as_url().as_str().len() > crate::MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES
         {
             return Err(AgentPolicyError::Navigation);
         }
-        let origin = SemanticOrigin::parse(target.as_url().as_str())
+        let target_origin = SemanticOrigin::parse(target.as_url().as_str())
             .map_err(|_| AgentPolicyError::Navigation)?;
-        if observation.frames()[0].frame().origin() != &origin {
+        let source_origin = observation.frames()[0].frame().origin();
+        if discovery.is_some_and(|scope| {
+            !scope.admits_origin(source_origin) || !scope.admits_origin(&target_origin)
+        }) || discovery.is_none() && source_origin != &target_origin
+        {
             return Err(AgentPolicyError::Navigation);
+        }
+        if let Some(scope) = discovery {
+            let current = if hop == 0 {
+                self.initial_navigation_document
+                    .as_ref()
+                    .map(|(_, target)| target)
+                    .unwrap_or_else(|| scope.departure())
+            } else {
+                self.navigation_effective_destinations[hop - 1]
+                    .as_ref()
+                    .ok_or(AgentPolicyError::Navigation)?
+            };
+            if current == target {
+                return Err(AgentPolicyError::Navigation);
+            }
         }
         let candidates = observation_taints(observation, request.account)?;
         validate_context_scope(&self.manifest, node, source, request.account, &candidates)?;
@@ -601,7 +623,7 @@ impl AgentRunPolicy {
             taint.context == source
                 && taint.source_guard == fingerprint.digest()
                 && taint.account == request.account.account()
-                && taint.origin == origin
+                && &taint.origin == source_origin
         }) {
             return Err(AgentPolicyError::ModelSourceMissing);
         }
@@ -813,6 +835,7 @@ pub(crate) struct AgentNavigationCheckpoint<'a> {
     total_hops: usize,
     next_target: Option<&'a ContextNavigationTarget>,
     discovery: bool,
+    production_discovery: bool,
     departure: Option<&'a ContextNavigationTarget>,
     initial_effective: Option<&'a ContextNavigationTarget>,
     destinations: &'a [Option<ContextNavigationTarget>],
@@ -834,6 +857,9 @@ impl AgentNavigationCheckpoint<'_> {
     }
     pub(crate) const fn is_discovery(&self) -> bool {
         self.discovery
+    }
+    pub(crate) const fn is_production_discovery(&self) -> bool {
+        self.production_discovery
     }
     pub(crate) const fn current_document_epoch(&self) -> u64 {
         self.binding.context.navigation_epoch().get()
@@ -878,7 +904,7 @@ pub(crate) struct AgentNavigationCheckpointBinding {
     node: AgentPlanNodeId,
     context: ContextJoin,
     account: AgentAccountScope,
-    terminals: [Option<AgentNavigationProgressId>; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS],
+    terminals: [Option<AgentNavigationProgressId>; crate::MAX_AGENT_NAVIGATION_DISCOVERY_HOPS],
 }
 
 pub(crate) fn is_document_successor(prior: ContextJoin, next: ContextJoin) -> bool {

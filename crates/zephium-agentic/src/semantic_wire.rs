@@ -310,8 +310,18 @@ pub fn decode_semantic_snapshot(
                 let target = crate::ContextNavigationTarget::parse(value.as_str()).ok()?;
                 (matches!(target.as_url().scheme(), "http" | "https")
                     && target.as_url().as_str() == value.as_str()
-                    && target.as_url().query().is_none()
-                    && target.as_url().fragment().is_none())
+                    && target.as_url().username().is_empty()
+                    && target.as_url().password().is_none()
+                    && !target.as_url().query_pairs().any(|(key, value)| {
+                        is_sensitive_url_parameter_name(key.as_ref())
+                            || has_credential_label(key.as_ref())
+                            || looks_like_secret_value(key.as_ref())
+                            || looks_like_secret_value(value.as_ref())
+                    })
+                    && !target
+                        .as_url()
+                        .fragment()
+                        .is_some_and(fragment_contains_sensitive_data))
                 .then_some(target)
             });
         retained_text_bytes = retained_text_bytes
@@ -541,6 +551,58 @@ fn has_credential_label(value: &str) -> bool {
     CREDENTIAL_LABELS
         .iter()
         .any(|label| normalized.contains(label))
+}
+
+fn is_sensitive_url_parameter_name(value: &str) -> bool {
+    let normalized: String = value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    matches!(
+        normalized.as_str(),
+        "token"
+            | "accesstoken"
+            | "refreshtoken"
+            | "idtoken"
+            | "authtoken"
+            | "auth"
+            | "authorization"
+            | "authcode"
+            | "oauthcode"
+            | "code"
+            | "state"
+            | "apikey"
+            | "key"
+            | "secret"
+            | "secretkey"
+            | "clientsecret"
+            | "signature"
+            | "sig"
+            | "session"
+            | "sessionid"
+            | "sessiontoken"
+            | "jwt"
+            | "assertion"
+            | "credential"
+            | "credentials"
+            | "password"
+            | "passcode"
+            | "onetimecode"
+            | "verificationcode"
+            | "ticket"
+    )
+}
+
+fn fragment_contains_sensitive_data(value: &str) -> bool {
+    if has_credential_label(value) || looks_like_secret_value(value) {
+        return true;
+    }
+    value
+        .split(['?', '&', ';'])
+        .filter_map(|component| component.split_once('=').map(|(key, _)| key))
+        .flat_map(|key| url::form_urlencoded::parse(key.as_bytes()))
+        .any(|(key, _)| is_sensitive_url_parameter_name(key.as_ref()))
 }
 
 pub(crate) fn looks_like_secret_value(value: &str) -> bool {
@@ -1111,12 +1173,40 @@ mod tests {
     #[test]
     fn link_destinations_are_exact_public_bounded_data_not_arbitrary_urls() {
         let good = "https://example.test/docs/next";
+        let query = "https://example.test/docs?q=public";
+        let fragment = "https://example.test/docs#section";
         for (destination, sensitivity, retained) in [
             (good, "public", true),
+            (query, "public", true),
+            (fragment, "public", true),
             (good, "sensitive", false),
             (good, "secret", false),
             ("https://example.test/docs?token=secret", "public", false),
-            ("https://example.test/docs#section", "public", false),
+            (
+                "https://example.test/docs?access%5Ftoken=short",
+                "public",
+                false,
+            ),
+            (
+                "https://example.test/docs?code=Qm9VT3F2cW1ROGxobTVoQ2c",
+                "public",
+                false,
+            ),
+            (
+                "https://example.test/docs?state=c2lnbmVkLW9hdXRoLXN0YXRl",
+                "public",
+                false,
+            ),
+            (
+                "https://example.test/docs?q=sk%2Dlive%2Dcredentialvalue",
+                "public",
+                false,
+            ),
+            (
+                "https://example.test/docs#access%5Ftoken=short",
+                "public",
+                false,
+            ),
             ("https://user:secret@example.test/docs", "public", false),
             ("javascript:alert(1)", "public", false),
             ("about:blank", "public", false),
@@ -1138,7 +1228,11 @@ mod tests {
             );
             assert_eq!(
                 snapshot.total_text_bytes(),
-                if retained { good.len() as u32 } else { 0 }
+                if retained {
+                    destination.len() as u32
+                } else {
+                    0
+                }
             );
             assert!(!format!("{snapshot:?}").contains("example.test"));
         }

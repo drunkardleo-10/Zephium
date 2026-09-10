@@ -131,6 +131,180 @@ fn navigation_fixture_with_document_policy(
     (PolicyFixture { policy, lease }, registry, observation)
 }
 
+fn production_navigation_fixture() -> (PolicyFixture, ContextRegistry, SemanticObservation) {
+    let (mut registry, context) = make_context_registry(911, 912, 913);
+    registry
+        .acknowledge_observation(context.identity().id(), context)
+        .unwrap();
+    let source = origin("source");
+    let docs = origin("docs");
+    let destination =
+        ContextNavigationTarget::parse("https://docs.example.test/guide/result?q=rust#details")
+            .unwrap();
+    let observation = observation(
+        context,
+        source.clone(),
+        1,
+        vec![json!({"k":1,"r":"link","n":"Result","u":destination.as_url().as_str()})],
+    );
+    let budget = run_budget(16, 100_000, 10_000);
+    let effects = effects(&[SemanticEffectClass::Read]);
+    let discovery = crate::AgentNavigationDiscovery::try_new_production(
+        ContextNavigationTarget::parse("https://source.example.test/start?q=one#top").unwrap(),
+        vec![
+            crate::AgentNavigationOriginRule::try_new(source.clone(), "/".into(), true, true)
+                .unwrap(),
+            crate::AgentNavigationOriginRule::try_new(docs.clone(), "/guide/".into(), true, true)
+                .unwrap(),
+        ],
+        6,
+        2,
+    )
+    .unwrap();
+    let authority = AgentPlanNodeAuthority::try_new(
+        vec![profile(912)],
+        vec![AgentAccountScope::Anonymous],
+        vec![docs.clone(), source.clone()],
+        SemanticSensitivity::Public,
+        effects,
+    )
+    .unwrap()
+    .with_navigation_discovery(discovery)
+    .unwrap();
+    let manifest = AgentRunManifest::try_new(
+        AgentRunManifestId::from_raw(11),
+        ContextRunId::from_raw(911),
+        AgentRunScope::try_new(
+            vec![profile(912)],
+            vec![AgentAccountScope::Anonymous],
+            vec![docs, source],
+            SemanticSensitivity::Public,
+            effects,
+            vec![],
+        )
+        .unwrap(),
+        budget,
+        AgentPolicyInstant::from_millis(ISSUED_AT),
+        AgentPolicyInstant::from_millis(EXPIRES_AT),
+        vec![AgentPlanNodeScope::new(
+            AgentPlanNodeId::from_raw(1),
+            authority,
+            budget,
+            AgentPolicyInstant::from_millis(EXPIRES_AT - 1),
+        )],
+    )
+    .unwrap();
+    let lease = AgentPlanLeaseId::from_raw(1);
+    let mut policy = AgentRunPolicy::try_new(
+        manifest,
+        vec![AgentPlanLeaseBinding::new(
+            lease,
+            AgentPlanNodeId::from_raw(1),
+        )],
+    )
+    .unwrap();
+    commit_observation_to_model(
+        &mut policy,
+        lease,
+        1,
+        account(context, NOW - 1),
+        &observation,
+    );
+    (PolicyFixture { policy, lease }, registry, observation)
+}
+
+#[test]
+fn production_navigation_admits_scoped_cross_origin_queries_fragments_and_departure_revisit() {
+    let (mut fixture, mut registry, source) = production_navigation_fixture();
+    let destination =
+        ContextNavigationTarget::parse("https://docs.example.test/guide/result?q=rust#details")
+            .unwrap();
+    let source_target =
+        ContextNavigationTarget::parse("https://source.example.test/start?q=one#top").unwrap();
+
+    let request = route_request(
+        &fixture,
+        &registry,
+        &source,
+        account(source.request().context(), NOW - 1),
+    );
+    let permit = fixture
+        .policy
+        .authorize_navigation(request, &source, &baseline(&source), &destination)
+        .unwrap();
+    let operation = registry
+        .begin_navigation(
+            source.request().context().identity().id(),
+            ContextOperationId::new(2).unwrap(),
+        )
+        .unwrap();
+    let active = fixture
+        .policy
+        .dispatch_navigation(permit, operation, AgentPolicyInstant::from_millis(NOW))
+        .unwrap();
+    let receipt = fixture
+        .policy
+        .settle_navigation(
+            &active,
+            &ContextNavigationSettlement::try_new(operation, Ok(destination.clone())).unwrap(),
+            AgentPolicyInstant::from_millis(NOW),
+        )
+        .unwrap();
+    assert_eq!(receipt.hop(), 0);
+    registry
+        .settle_navigation(
+            operation.context().identity().id(),
+            operation,
+            ContextSettlement::Applied,
+        )
+        .unwrap();
+    registry
+        .acknowledge_observation(operation.context().identity().id(), operation.context())
+        .unwrap();
+    let docs = observation(
+        operation.context(),
+        origin("docs"),
+        2,
+        vec![json!({"k":1,"r":"link","n":"Back","u":source_target.as_url().as_str()})],
+    );
+    let binding = account(operation.context(), NOW);
+    commit_observation_to_model(&mut fixture.policy, fixture.lease, 2, binding, &docs);
+
+    let request = route_request(&fixture, &registry, &docs, binding);
+    assert!(
+        fixture
+            .policy
+            .authorize_navigation(request, &docs, &baseline(&docs), &destination)
+            .is_err(),
+        "current-document no-op must remain denied"
+    );
+    let permit = fixture
+        .policy
+        .authorize_navigation(request, &docs, &baseline(&docs), &source_target)
+        .unwrap();
+    let back = registry
+        .begin_navigation(
+            operation.context().identity().id(),
+            ContextOperationId::new(3).unwrap(),
+        )
+        .unwrap();
+    let active = fixture
+        .policy
+        .dispatch_navigation(permit, back, AgentPolicyInstant::from_millis(NOW))
+        .unwrap();
+    let receipt = fixture
+        .policy
+        .settle_navigation(
+            &active,
+            &ContextNavigationSettlement::try_new(back, Ok(source_target)).unwrap(),
+            AgentPolicyInstant::from_millis(NOW),
+        )
+        .unwrap();
+    assert_eq!(receipt.hop(), 1);
+    assert_eq!(fixture.policy.navigation_destinations[0], Some(destination));
+    assert_eq!(fixture.policy.accounting().consumed_operations(), 4);
+}
+
 fn final_target() -> ContextNavigationTarget {
     ContextNavigationTarget::parse("https://source.example.test/final").unwrap()
 }
@@ -1321,12 +1495,15 @@ fn finite_navigation_route_metrics_require_two_distinct_ordered_exact_terminals(
             );
             assert_eq!(progress.snapshot().navigation().unwrap().samples(), 2);
             assert_eq!(
-                progress.snapshot().navigation_terminals(),
+                &progress.snapshot().navigation_terminals()[..2],
                 &[
                     Some((terminals[0].1.progress_id(), terminals[0].1.settlement())),
                     Some((terminals[1].1.progress_id(), terminals[1].1.settlement()))
                 ]
             );
+            assert!(progress.snapshot().navigation_terminals()[2..]
+                .iter()
+                .all(Option::is_none));
         }
     }
 }
@@ -1464,7 +1641,10 @@ fn finite_navigation_route_requires_each_exact_prior_checkpoint_and_retains_orig
         if fault != 0 {
             assert!(result.is_err(), "second checkpoint fault {fault}");
             assert_eq!(f.policy.pending_navigations(), 0);
-            assert_eq!(f.policy.navigation_receipts, [Some(receipt), None]);
+            assert_eq!(&f.policy.navigation_receipts[..2], &[Some(receipt), None]);
+            assert!(f.policy.navigation_receipts[2..]
+                .iter()
+                .all(Option::is_none));
             continue;
         }
         let permit = result.unwrap();
@@ -1498,9 +1678,12 @@ fn finite_navigation_route_requires_each_exact_prior_checkpoint_and_retains_orig
         assert_ne!(receipt.progress_id(), second_receipt.progress_id());
         assert_eq!(second_receipt.source(), receipt.operation().context());
         assert_eq!(
-            f.policy.navigation_receipts,
+            &f.policy.navigation_receipts[..2],
             [Some(receipt), Some(second_receipt)]
         );
+        assert!(f.policy.navigation_receipts[2..]
+            .iter()
+            .all(Option::is_none));
         assert_eq!(f.policy.accounting().consumed_operations(), 4);
         assert_eq!(
             f.policy

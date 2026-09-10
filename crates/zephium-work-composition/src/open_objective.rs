@@ -280,6 +280,12 @@ fn assemble_with_actions(
         &[SemanticEffectClass::Read]
     })
     .map_err(fail)?;
+    let mut origins = objective.navigation.origins().cloned().collect::<Vec<_>>();
+    origins.sort();
+    origins.dedup();
+    if origins.is_empty() || origins.len() > MAX_AGENT_NAVIGATION_DISCOVERY_RULES {
+        return Err(AgentWorkFailure::Contract);
+    }
     let account = match &settings.account {
         PublicReadWorkAccount::Anonymous => AgentAccountScope::Anonymous,
         PublicReadWorkAccount::Enrolled(source) => {
@@ -287,6 +293,7 @@ fn assemble_with_actions(
             if enrollment.profile().profile() != identity.profile()
                 || enrollment.profile().storage_class() != storage
                 || enrollment.origin() != objective.navigation.origin()
+                || origins.len() != 1
             {
                 return Err(AgentWorkFailure::Contract);
             }
@@ -297,11 +304,10 @@ fn assemble_with_actions(
         }
     };
     let node = AgentPlanNodeId::generate();
-    let origin = objective.navigation.origin().clone();
     let authority = AgentPlanNodeAuthority::try_new(
         vec![identity.profile()],
         vec![account],
-        vec![origin.clone()],
+        origins.clone(),
         SemanticSensitivity::Public,
         effects,
     )
@@ -316,7 +322,7 @@ fn assemble_with_actions(
         AgentRunScope::try_new(
             vec![identity.profile()],
             vec![account],
-            vec![origin],
+            origins,
             SemanticSensitivity::Public,
             effects,
             Vec::new(),

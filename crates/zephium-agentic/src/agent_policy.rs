@@ -1076,12 +1076,13 @@ pub struct AgentRunPolicy {
     effects: Vec<AgentEffectRow>,
     navigation: Option<AgentNavigationRow>,
     initial_navigation_document: Option<(ContextJoin, crate::ContextNavigationTarget)>,
-    navigation_receipts: [Option<AgentNavigationReceipt>; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS],
+    navigation_receipts:
+        [Option<AgentNavigationReceipt>; crate::MAX_AGENT_NAVIGATION_DISCOVERY_HOPS],
     // Bounded public discovery progress only. Receipt/audit types stay content-free.
     navigation_destinations:
-        [Option<crate::ContextNavigationTarget>; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS],
+        [Option<crate::ContextNavigationTarget>; crate::MAX_AGENT_NAVIGATION_DISCOVERY_HOPS],
     navigation_effective_destinations:
-        [Option<crate::ContextNavigationTarget>; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS],
+        [Option<crate::ContextNavigationTarget>; crate::MAX_AGENT_NAVIGATION_DISCOVERY_HOPS],
     navigation_attempts: usize,
     last_call: Option<AgentModelCallId>,
     last_effect: Option<AgentEffectId>,
@@ -1132,7 +1133,7 @@ impl AgentRunPolicy {
             calls: Vec::with_capacity(MAX_AGENT_PENDING_MODEL_CALLS),
             effects: Vec::with_capacity(MAX_AGENT_PENDING_EFFECTS),
             navigation: None,
-            navigation_receipts: [None; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS],
+            navigation_receipts: [None; crate::MAX_AGENT_NAVIGATION_DISCOVERY_HOPS],
             navigation_destinations: std::array::from_fn(|_| None),
             initial_navigation_document: None,
             navigation_effective_destinations: std::array::from_fn(|_| None),

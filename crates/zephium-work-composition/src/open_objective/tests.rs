@@ -26,6 +26,27 @@ fn objective() -> PublicReadWorkObjective {
     }
 }
 
+fn production_objective() -> PublicReadWorkObjective {
+    let source = SemanticOrigin::parse("https://example.test").unwrap();
+    let docs = SemanticOrigin::parse("https://docs.example.test").unwrap();
+    PublicReadWorkObjective {
+        objective: "Investigate the linked evidence and return a cited result.".into(),
+        navigation: AgentNavigationDiscovery::try_new_production(
+            ContextNavigationTarget::parse("https://example.test/project?q=open#today").unwrap(),
+            vec![
+                AgentNavigationOriginRule::try_new(source, "/project/".into(), true, true).unwrap(),
+                AgentNavigationOriginRule::try_new(docs, "/guide/".into(), true, false).unwrap(),
+            ],
+            8,
+            2,
+        )
+        .unwrap(),
+        output_fields: vec![
+            SemanticExtractionFieldSchema::try_text("answer".into(), true, 2048).unwrap(),
+        ],
+    }
+}
+
 fn settings(account: PublicReadWorkAccount) -> PublicReadWorkSettings {
     PublicReadWorkSettings {
         account,
@@ -82,6 +103,27 @@ fn ordinary_admission_preserves_scope_storage_and_absolute_clock_without_a_route
             AgentAccountScope::Anonymous
         );
     }
+}
+
+#[test]
+fn production_admission_freezes_every_origin_and_enables_bounded_visual_wait_tools() {
+    let identity = identity();
+    let definition = production_objective();
+    let expected = definition.navigation.clone();
+    let (input, task) = assemble(
+        identity,
+        ContextProfileStorageClass::Durable,
+        definition,
+        settings(PublicReadWorkAccount::Anonymous),
+    )
+    .unwrap();
+    let node = input.manifest.plan_node(input.lease.node()).unwrap();
+    assert_eq!(node.origins().len(), 2);
+    assert_eq!(input.manifest.scope().origins().len(), 2);
+    assert_eq!(task.navigation_discovery(), Some(&expected));
+    assert!(task.allows_standalone_wait());
+    assert!(task.allows_viewport_screenshot());
+    assert!(task.allows_human_request());
 }
 
 struct Samples(Arc<Mutex<Option<AgentContextAccountBinding>>>);

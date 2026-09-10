@@ -131,6 +131,15 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
     fn allows_progressive_observation(&self) -> bool {
         true
     }
+    fn allows_standalone_wait(&self) -> bool {
+        self.discovery.is_production()
+    }
+    fn allows_viewport_screenshot(&self) -> bool {
+        self.discovery.is_production()
+    }
+    fn allows_human_request(&self) -> bool {
+        self.discovery.is_production()
+    }
     fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
         self.extraction.extraction_schema()
     }
@@ -181,7 +190,9 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
                             SemanticFrameUnsupported::PolicyBlocked,
                         )
             })
-            || observation.frames()[0].frame().origin() != self.discovery.origin()
+            || !self
+                .discovery
+                .admits_origin(observation.frames()[0].frame().origin())
         {
             return Err(AgentWorkFailure::Contract);
         }
@@ -226,7 +237,10 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
         let assessment = policy.assess(action, observation)?;
         if !assessment.matches_action(action)
             || assessment.actual_effect() != action.effect()
-            || assessment.destination_origin() != self.discovery.origin()
+            || assessment.destination_origin() != snapshot.frame().origin()
+            || !self
+                .discovery
+                .admits_origin(assessment.destination_origin())
         {
             return Err(AgentWorkFailure::Contract);
         }

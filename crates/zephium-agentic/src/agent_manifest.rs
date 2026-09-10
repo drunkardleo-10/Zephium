@@ -18,7 +18,7 @@ use crate::{ContextJoin, ContextRunId, SemanticEffectClass, SemanticOrigin, Sema
 
 #[path = "agent_manifest_discovery.rs"]
 mod discovery;
-pub use discovery::AgentNavigationDiscovery;
+pub use discovery::{AgentNavigationDiscovery, AgentNavigationOriginRule};
 
 /// Maximum browser profiles named by one approved run.
 pub const MAX_AGENT_RUN_PROFILES: usize = 4;
@@ -32,6 +32,12 @@ pub const MAX_AGENT_DATA_FLOW_RULES: usize = 64;
 pub const MAX_AGENT_PLAN_NODES: usize = 64;
 /// Maximum exact hops in one explicitly approved finite navigation route.
 pub const MAX_AGENT_NAVIGATION_ROUTE_HOPS: usize = 2;
+/// Maximum committed document transitions retained by one production discovery run.
+pub const MAX_AGENT_NAVIGATION_DISCOVERY_HOPS: usize = 16;
+/// Maximum canonical origin/path rules in one production discovery scope.
+pub const MAX_AGENT_NAVIGATION_DISCOVERY_RULES: usize = 8;
+/// Maximum visits to one exact destination in a production discovery run.
+pub const MAX_AGENT_NAVIGATION_DESTINATION_VISITS: usize = 4;
 /// Hard operation ceiling for one run or plan node.
 pub const MAX_AGENT_RUN_OPERATIONS: u32 = 4_096;
 /// Hard model-token ceiling for one run or plan node.
@@ -704,7 +710,9 @@ impl AgentPlanNodeAuthority {
     ) -> Result<Self, AgentManifestContractError> {
         if self.navigation_route.is_some()
             || self.navigation_discovery.is_some()
-            || self.origins.binary_search(discovery.origin()).is_err()
+            || discovery
+                .origins()
+                .any(|origin| self.origins.binary_search(origin).is_err())
             || self.accounts.len() != 1
             || self.max_sensitivity != SemanticSensitivity::Public
             || (self.effects != AgentEffectScope::try_new(&[SemanticEffectClass::Read])?
@@ -1206,6 +1214,20 @@ fn manifest_guard(
                 ] {
                     hasher.update((value.len() as u64).to_be_bytes());
                     hasher.update(value.as_bytes());
+                }
+                if discovery.is_production() {
+                    hasher.update(b"ZEPHIUM-AGENT-PRODUCTION-NAVIGATION-1\0");
+                    hasher.update((discovery.max_visits_per_destination() as u64).to_be_bytes());
+                    hasher.update((discovery.rules().len() as u64).to_be_bytes());
+                    for rule in discovery.rules() {
+                        hash_origin(&mut hasher, rule.origin());
+                        hasher.update((rule.path_prefix().len() as u64).to_be_bytes());
+                        hasher.update(rule.path_prefix().as_bytes());
+                        hasher.update([
+                            u8::from(rule.allows_query()),
+                            u8::from(rule.allows_fragment()),
+                        ]);
+                    }
                 }
             }
         }

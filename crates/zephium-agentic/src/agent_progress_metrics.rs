@@ -146,7 +146,7 @@ pub struct AgentRunProgressSnapshot {
     navigation_terminal: [Option<(
         crate::AgentNavigationProgressId,
         crate::AgentNavigationSettlement,
-    )>; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS],
+    )>; crate::MAX_AGENT_NAVIGATION_DISCOVERY_HOPS],
     human_wait: AgentDurationMetrics,
     outcome: Option<AgentRunProgressOutcome>,
     total_elapsed_millis: Option<u64>,
@@ -212,7 +212,7 @@ impl AgentRunProgressSnapshot {
     ) -> &[Option<(
         crate::AgentNavigationProgressId,
         crate::AgentNavigationSettlement,
-    )>; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS] {
+    )>; crate::MAX_AGENT_NAVIGATION_DISCOVERY_HOPS] {
         &self.navigation_terminal
     }
 
@@ -304,7 +304,7 @@ pub struct AgentRunProgressMetrics {
     navigation_terminal: [Option<(
         crate::AgentNavigationProgressId,
         crate::AgentNavigationSettlement,
-    )>; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS],
+    )>; crate::MAX_AGENT_NAVIGATION_DISCOVERY_HOPS],
     navigation_owner: Option<AgentPlanNodeId>,
     takeover_cancellations: Vec<AgentSupervisorCancellationId>,
     last_event: Option<AgentAuditEventId>,
@@ -378,7 +378,7 @@ impl AgentRunProgressMetrics {
             active_models: Vec::new(),
             active_effects: Vec::new(),
             active_navigation: None,
-            navigation_terminal: [None; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS],
+            navigation_terminal: [None; crate::MAX_AGENT_NAVIGATION_DISCOVERY_HOPS],
             navigation_owner: None,
             takeover_cancellations: Vec::new(),
             last_event: None,

@@ -553,7 +553,7 @@ pub struct AgentRunAccountingSnapshot {
     operations: u32,
     model: AgentModelAccountingMetrics,
     effects: AgentEffectAccountingMetrics,
-    navigation: [Option<crate::AgentNavigationReceipt>; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS],
+    navigation: [Option<crate::AgentNavigationReceipt>; crate::MAX_AGENT_NAVIGATION_DISCOVERY_HOPS],
 }
 
 impl AgentRunAccountingSnapshot {
@@ -594,7 +594,7 @@ impl AgentRunAccountingSnapshot {
     /// Exact ordered fixed-capacity terminals; absent entries are unobserved.
     pub const fn navigation_receipts(
         &self,
-    ) -> &[Option<crate::AgentNavigationReceipt>; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS] {
+    ) -> &[Option<crate::AgentNavigationReceipt>; crate::MAX_AGENT_NAVIGATION_DISCOVERY_HOPS] {
         &self.navigation
     }
 
@@ -645,7 +645,7 @@ pub struct AgentRunAccountingMetrics {
     operations: u32,
     model: AgentModelAccountingMetrics,
     effects: AgentEffectAccountingMetrics,
-    navigation: [Option<crate::AgentNavigationReceipt>; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS],
+    navigation: [Option<crate::AgentNavigationReceipt>; crate::MAX_AGENT_NAVIGATION_DISCOVERY_HOPS],
     nodes: Vec<AgentNodeAccountingRow>,
     model_receipts: Vec<AgentModelCallId>,
     effect_receipts: Vec<AgentEffectId>,
@@ -710,7 +710,7 @@ impl AgentRunAccountingMetrics {
             operations: 0,
             model: AgentModelAccountingMetrics::default(),
             effects: AgentEffectAccountingMetrics::default(),
-            navigation: [None; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS],
+            navigation: [None; crate::MAX_AGENT_NAVIGATION_DISCOVERY_HOPS],
             nodes,
             model_receipts: Vec::new(),
             effect_receipts: Vec::new(),
