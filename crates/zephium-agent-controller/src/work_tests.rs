@@ -851,6 +851,8 @@ enum Fault {
     Scoped(ScopedFault),
     None,
     Hydration,
+    SkeletonHydration,
+    SkeletonPersistent,
     EmbeddedFrame,
     ConstructDispatch,
     ConstructCallback,
@@ -1054,7 +1056,10 @@ impl AgentBrowserPort for Port {
         let correlation = invocation.correlation();
         assert_eq!(
             correlation.snapshot_generation().get(),
-            if self.fault == Fault::Hydration {
+            if matches!(
+                self.fault,
+                Fault::Hydration | Fault::SkeletonHydration | Fault::SkeletonPersistent
+            ) {
                 lock(&self.calls).iter().filter(|call| **call == 3).count() as u64
             } else if lock(&self.calls).contains(&7) {
                 2
@@ -1065,6 +1070,21 @@ impl AgentBrowserPort for Port {
         let wire = format!("{{\"v\":1,\"i\":{},\"g\":{},\"c\":\"complete\",\"n\":[{{\"k\":1,\"r\":\"document\",\"o\":16}},{{\"k\":2,\"p\":0,\"r\":\"textbox\",\"n\":\"Field\",\"s\":64,\"o\":2,\"v\":{{\"k\":\"text\",\"value\":\"\"}},\"b\":{{\"x\":10,\"y\":20,\"w\":120,\"h\":30}}}}]}}", correlation.invocation().get(), correlation.snapshot_generation().get());
         let wire = if self.fault == Fault::EmbeddedFrame {
             wire.replace("]}", ",{\"k\":3,\"p\":0,\"r\":\"frame_boundary\"}]}")
+        } else {
+            wire
+        };
+        let wire = if self.fault == Fault::SkeletonPersistent
+            || (self.fault == Fault::SkeletonHydration
+                && correlation.snapshot_generation().get() == 1)
+        {
+            let placeholders = (3..7)
+                .map(|key| {
+                    format!(
+                        r#",{{"k":{key},"p":0,"r":"progress","v":{{"k":"ordinal","value":0}}}}"#
+                    )
+                })
+                .collect::<String>();
+            wire.replace("]}", &format!("{placeholders}]}}"))
         } else {
             wire
         };
@@ -1447,6 +1467,197 @@ fn explicit_readiness_preserves_snapshot_generation_and_stop_reasons_are_first_w
         assert_eq!(calls.iter().filter(|call| **call == 4).count(), 1);
         assert_eq!(calls.iter().filter(|call| **call == 5).count(), 1);
     }
+}
+
+#[test]
+fn startup_loading_signal_distinguishes_skeletons_from_usable_progress_pages() {
+    struct Cases;
+    impl AgentWorkTask for Cases {
+        fn evaluate(
+            &mut self,
+            source: &SemanticObservation,
+        ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+            let progress = serde_json::json!({"r":"progress", "v":{"k":"ordinal","value":0}});
+            let named = serde_json::json!({"r":"progress", "n":"Upload progress", "v":{"k":"ordinal","value":0}});
+            let advanced = serde_json::json!({"r":"progress", "v":{"k":"ordinal","value":30}});
+            let text = serde_json::json!({"r":"progress", "t":"Task completion", "v":{"k":"ordinal","value":0}});
+            let control = serde_json::json!({"r":"button", "n":"Open", "o":1});
+            let disabled = serde_json::json!({"r":"button", "n":"Open", "s":8});
+            for (mut children, expected) in [
+                (vec![], false),
+                (vec![progress.clone()], false),
+                (vec![named; 12], false),
+                (vec![advanced; 12], false),
+                (vec![text; 12], false),
+                (vec![progress.clone(); 12], true),
+                (vec![serde_json::json!({"r":"progress"}); 4], true),
+                (
+                    [vec![progress.clone(); 3], vec![control; 3]].concat(),
+                    false,
+                ),
+                ([vec![progress; 3], vec![disabled; 3]].concat(), true),
+            ] {
+                let mut nodes = vec![serde_json::json!({"k":1,"r":"document","o":16})];
+                for (index, node) in children.iter_mut().enumerate() {
+                    node["k"] = (index + 2).into();
+                    node["p"] = 0.into();
+                }
+                nodes.extend(children);
+                let frame = &source.frames()[0];
+                let wire = serde_json::to_vec(&serde_json::json!({
+                    "v":1,"i":frame.invocation().get(),"g":frame.generation().get(),"c":"complete","n":nodes
+                })).unwrap();
+                let snapshot = decode_semantic_snapshot(
+                    SemanticDecodeContext::new(
+                        frame.invocation(),
+                        frame.frame().clone(),
+                        frame.generation(),
+                    ),
+                    &wire,
+                )
+                .unwrap();
+                let candidate =
+                    SemanticObservationAssembler::new(source.request().clone(), snapshot)
+                        .unwrap()
+                        .finish()
+                        .unwrap();
+                assert_eq!(has_dominant_loading_placeholders(&candidate), expected);
+            }
+            Ok(AgentWorkTaskProgress::Complete)
+        }
+        fn assess(
+            &self,
+            _: &SemanticPreparedAction,
+        ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+            panic!("no actions")
+        }
+        fn attest_account(
+            &self,
+            context: ContextJoin,
+            now: AgentPolicyInstant,
+        ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
+            Task.attest_account(context, now)
+        }
+    }
+    let _guard = lock(&SERIAL);
+    let (controller, handle) = AgentWorkController::try_new(
+        input(),
+        AgentProviderTransportConfig::STANDARD,
+        AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "fixture-not-a-secret".into(),
+        )
+        .unwrap(),
+        Arc::new(Audit(Fault::None)),
+        Box::new(Cases),
+    )
+    .unwrap();
+    let (outcome, shutdown, calls, _) = drive(controller, handle, Fault::None);
+    assert!(
+        matches!(outcome, AgentWorkOutcome::Succeeded(_)),
+        "{outcome:?}"
+    );
+    assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+    assert_eq!(calls.iter().filter(|call| **call == 3).count(), 1);
+}
+
+#[test]
+fn generic_initial_loading_gate_precedes_default_task_evaluation_without_vetoing_it() {
+    let _guard = lock(&SERIAL);
+    for fault in [Fault::SkeletonHydration, Fault::SkeletonPersistent] {
+        let (mut controller, handle) = AgentWorkController::try_new(
+            input(),
+            AgentProviderTransportConfig::STANDARD,
+            AgentProviderCredential::try_new(
+                AgentProviderKind::OpenAiResponses,
+                "fixture-not-a-secret".into(),
+            )
+            .unwrap(),
+            Arc::new(Audit(fault)),
+            Box::new(Task), // No task-specific readiness predicate.
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_millis(1200);
+        let state = controller.state.as_mut().unwrap();
+        state.input.as_mut().unwrap().settings.deadline = deadline;
+        state.native.deadline = deadline;
+        let (outcome, shutdown, calls, events) = drive(controller, handle, fault);
+        let reads = calls.iter().filter(|call| **call == 3).count();
+        assert!(
+            matches!(outcome, AgentWorkOutcome::Succeeded(_)),
+            "{outcome:?}"
+        );
+        if fault == Fault::SkeletonHydration {
+            assert_eq!(reads, 2);
+        } else {
+            assert!((2..=3).contains(&reads));
+        }
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        assert!(!calls.contains(&7));
+        assert!(!events.iter().any(|event| matches!(
+            event.kind(),
+            AgentWorkEventKind::ModelActive | AgentWorkEventKind::ActionActive
+        )));
+    }
+
+    struct Pending;
+    impl AgentWorkTask for Pending {
+        fn initial_readiness(
+            &self,
+            _: &SemanticObservation,
+        ) -> Result<AgentWorkInitialReadiness, AgentWorkFailure> {
+            Ok(AgentWorkInitialReadiness::Pending)
+        }
+        fn evaluate(
+            &mut self,
+            source: &SemanticObservation,
+        ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+            Task.evaluate(source)
+        }
+        fn assess(
+            &self,
+            action: &SemanticPreparedAction,
+        ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+            Task.assess(action)
+        }
+        fn attest_account(
+            &self,
+            context: ContextJoin,
+            now: AgentPolicyInstant,
+        ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
+            Task.attest_account(context, now)
+        }
+    }
+    let (mut controller, handle) = AgentWorkController::try_new(
+        input(),
+        AgentProviderTransportConfig::STANDARD,
+        AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "fixture-not-a-secret".into(),
+        )
+        .unwrap(),
+        Arc::new(Audit(Fault::SkeletonPersistent)),
+        Box::new(Pending),
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_millis(1200);
+    let state = controller.state.as_mut().unwrap();
+    state.input.as_mut().unwrap().settings.deadline = deadline;
+    state.native.deadline = deadline;
+    let (outcome, shutdown, calls, events) = drive(controller, handle, Fault::SkeletonPersistent);
+    let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+        panic!("trusted pending readiness must remain fail-closed: {outcome:?}");
+    };
+    assert_eq!(
+        closed.failure(),
+        AgentWorkFailure::Observation(SemanticRuntimePortFailure::NotReady)
+    );
+    assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+    assert!(!calls.contains(&7));
+    assert!(!events.iter().any(|event| matches!(
+        event.kind(),
+        AgentWorkEventKind::ModelActive | AgentWorkEventKind::ActionActive
+    )));
 }
 
 #[test]

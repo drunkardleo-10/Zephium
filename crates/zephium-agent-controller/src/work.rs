@@ -61,6 +61,60 @@ pub enum AgentWorkInitialReadiness {
     Pending,
 }
 
+/// A document can finish navigating while its initial application shell still
+/// consists of loading placeholders. This is scheduling evidence only: neither
+/// its presence nor absence grants action authority or proves task readiness.
+///
+/// A cohort must dominate the usable controls before it delays startup. Named
+/// meters, nonzero progress, and an isolated spinner are normal page content;
+/// treating every progress role as a loading document would block dashboards.
+fn has_dominant_loading_placeholders(observation: &SemanticObservation) -> bool {
+    let mut placeholders = 0usize;
+    let mut controls = 0usize;
+    for node in observation
+        .frames()
+        .iter()
+        .flat_map(SemanticSnapshot::nodes)
+    {
+        let anonymous = node.name().is_none_or(SemanticText::is_empty)
+            && node.text().is_none_or(SemanticText::is_empty);
+        if node.role() == SemanticRole::Progress
+            && anonymous
+            && matches!(node.value(), None | Some(SemanticValueSummary::Ordinal(0)))
+        {
+            placeholders += 1;
+        } else if !anonymous
+            && !node.states().contains(SemanticState::Disabled)
+            && [
+                SemanticOperationClass::Click,
+                SemanticOperationClass::Fill,
+                SemanticOperationClass::Select,
+                SemanticOperationClass::Press,
+            ]
+            .into_iter()
+            .any(|operation| node.operations().contains(operation))
+        {
+            controls += 1;
+        }
+    }
+    placeholders >= 3 && placeholders > controls
+}
+
+fn finish_initial_readiness_wait(
+    observation: SemanticObservation,
+    readiness: AgentWorkInitialReadiness,
+) -> Result<SemanticObservation, AgentWorkFailure> {
+    match readiness {
+        // Loading placeholders are page-controlled scheduling evidence. They
+        // may buy the application bounded hydration time, but they must never
+        // let a page veto a task that its trusted predicate considers ready.
+        AgentWorkInitialReadiness::Ready => Ok(observation),
+        AgentWorkInitialReadiness::Pending => Err(AgentWorkFailure::Observation(
+            SemanticRuntimePortFailure::NotReady,
+        )),
+    }
+}
+
 fn validate_initial_readiness_successor(
     prior: &SemanticObservation,
     next: &SemanticObservation,
@@ -88,7 +142,8 @@ pub trait AgentWorkTask: Send {
     /// Read-only startup gate, called only before the first task evaluation or
     /// provider request. Pending grants no effect/ref authority or progress.
     /// Implementations must reject changed/ambiguous task identity rather than
-    /// treating arbitrary missing content as hydration. Ready is the default.
+    /// treating arbitrary missing content as hydration. Ready is the default;
+    /// the controller's generic loading-placeholder gate still applies.
     fn initial_readiness(
         &self,
         _: &SemanticObservation,
@@ -1955,7 +2010,9 @@ impl AgentWorkController {
             let readiness = state.task.initial_readiness(&observation)?;
             state.check_task_contract()?;
             state.native.check_control(worker, browser)?;
-            if readiness == AgentWorkInitialReadiness::Ready {
+            if readiness == AgentWorkInitialReadiness::Ready
+                && !has_dominant_loading_placeholders(&observation)
+            {
                 return Ok(observation);
             }
             state.refresh_account(worker, browser)?;
@@ -1965,20 +2022,16 @@ impl AgentWorkController {
                 .as_ref()
                 .is_some_and(|b| !b.allows_readiness_retry())
             {
-                return Err(AgentWorkFailure::Observation(
-                    SemanticRuntimePortFailure::NotReady,
-                ));
+                return finish_initial_readiness_wait(observation, readiness);
             }
-            let delay = delays.next().ok_or(AgentWorkFailure::Observation(
-                SemanticRuntimePortFailure::NotReady,
-            ))?;
+            let Some(delay) = delays.next() else {
+                return finish_initial_readiness_wait(observation, readiness);
+            };
             let wake = Instant::now()
                 .checked_add(Duration::from_millis(delay))
                 .ok_or(AgentWorkFailure::Deadline)?;
             if wake >= deadline {
-                return Err(AgentWorkFailure::Observation(
-                    SemanticRuntimePortFailure::NotReady,
-                ));
+                return finish_initial_readiness_wait(observation, readiness);
             }
             tokio::select! {
                 biased;
@@ -1992,9 +2045,11 @@ impl AgentWorkController {
             let next = Self::observe(state, worker, browser).await?;
             validate_initial_readiness_successor(&observation, &next)?;
             if Instant::now() >= deadline {
-                return Err(AgentWorkFailure::Observation(
-                    SemanticRuntimePortFailure::NotReady,
-                ));
+                state.check_task_contract()?;
+                let readiness = state.task.initial_readiness(&next)?;
+                state.check_task_contract()?;
+                state.native.check_control(worker, browser)?;
+                return finish_initial_readiness_wait(next, readiness);
             }
             observation = next;
         }
