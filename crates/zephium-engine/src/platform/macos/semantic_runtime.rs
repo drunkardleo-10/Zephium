@@ -1130,6 +1130,7 @@ impl AgentSemanticRuntimeController {
     }
 
     fn execute(&self, mut actions: ChannelActions) {
+        let mut park_completion = actions.park_completion.take();
         let mut reply_failed = false;
         for reply in [actions.first_reply.take(), actions.second_reply.take()]
             .into_iter()
@@ -1157,11 +1158,22 @@ impl AgentSemanticRuntimeController {
             if let Some(completion) = failure.completion.take() {
                 invoke_completion(completion, self.on_callback_panic.as_ref());
             }
+            let (merged, duplicate) = reconcile_failed_reply_park_completion(
+                park_completion.take(),
+                failure.park_completion.take(),
+            );
+            park_completion = merged;
+            if duplicate {
+                invoke_unit_callback(
+                    self.on_invariant_failure.as_ref(),
+                    self.on_callback_panic.as_ref(),
+                );
+            }
         }
         if let Some(completion) = actions.completion.take() {
             invoke_completion(completion, self.on_callback_panic.as_ref());
         }
-        if let Some((completion, parked)) = actions.park_completion.take() {
+        if let Some((completion, parked)) = park_completion {
             if std::panic::catch_unwind(AssertUnwindSafe(|| completion(parked))).is_err() {
                 invoke_unit_callback(
                     self.on_invariant_failure.as_ref(),
@@ -1169,6 +1181,19 @@ impl AgentSemanticRuntimeController {
                 );
             }
         }
+    }
+}
+
+fn reconcile_failed_reply_park_completion(
+    primary: Option<(SemanticParkCompletion, bool)>,
+    failure: Option<(SemanticParkCompletion, bool)>,
+) -> (Option<(SemanticParkCompletion, bool)>, bool) {
+    match (primary, failure) {
+        (Some((completion, _)), None) | (None, Some((completion, _))) => {
+            (Some((completion, false)), false)
+        }
+        (Some((completion, _)), Some(_)) => (Some((completion, false)), true),
+        (None, None) => (None, false),
     }
 }
 
@@ -1561,6 +1586,19 @@ impl AgentSemanticRuntimeRegistration {
         Ok(())
     }
 
+    pub(crate) fn reset_history_authority(&mut self) -> Result<(), ()> {
+        if self.retired || self.channel.pending_for_audit() != Some(false) {
+            return Err(());
+        }
+        let mut epochs = self.epochs.try_borrow_mut().map_err(|_| ())?;
+        if epochs.active.is_none() {
+            return Err(());
+        }
+        epochs.active_runtime = None;
+        epochs.parked.clear();
+        Ok(())
+    }
+
     pub(crate) fn active_parked(&self) -> bool {
         if self.retired || !self.channel.parked_for_history() {
             return false;
@@ -1815,6 +1853,7 @@ impl Drop for AgentSemanticRuntimeRegistration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use zephium_agentic::{
         encode_semantic_runtime_invocation, ContextCapabilities, ContextCapability, ContextId,
         ContextIdentity, ContextKind, ContextOperationId, ContextRegistry, ContextRunId,
@@ -2330,6 +2369,25 @@ mod tests {
         assert_eq!(busy.phase, DocumentPhase::RendererLost);
         let actions = busy.renderer_lost();
         assert!(actions.park_completion.is_none());
+    }
+
+    #[test]
+    fn failed_park_reply_delivers_one_false_completion() {
+        let calls = Rc::new(Cell::new(0_u8));
+        let value = Rc::new(Cell::new(true));
+        let callback_calls = calls.clone();
+        let callback_value = value.clone();
+        let primary: SemanticParkCompletion = Box::new(move |parked| {
+            callback_calls.set(callback_calls.get() + 1);
+            callback_value.set(parked);
+        });
+        let (completion, duplicate) =
+            reconcile_failed_reply_park_completion(Some((primary, true)), None);
+        assert!(!duplicate);
+        let (completion, parked) = completion.expect("completion");
+        completion(parked);
+        assert_eq!(calls.get(), 1);
+        assert!(!value.get());
     }
 
     #[test]

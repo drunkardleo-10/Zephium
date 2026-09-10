@@ -180,6 +180,18 @@ impl AgentOwnedView {
         Ok(())
     }
 
+    pub(crate) fn begin_history_lease(
+        &mut self,
+        target: zephium_agentic::ContextNavigationTarget,
+    ) -> Result<(), ()> {
+        self.history.clear();
+        self.semantic
+            .as_mut()
+            .ok_or(())?
+            .reset_history_authority()?;
+        self.enroll_current_work_history_get(target)
+    }
+
     pub(crate) fn park_semantic_runtime(
         &mut self,
         completion: impl FnOnce(bool) + 'static,

@@ -552,13 +552,25 @@ impl EngineHost {
         };
         match operation {
             Operation::Acquire => {
-                let accepted = request.lease().is_some_and(|lease| {
+                let mut accepted = request.lease().is_some_and(|lease| {
                     work_browser_monotonic_now()
                         .is_some_and(|now| guard.acquisition_current(lease, now))
                 }) && !self.erasure_tombstones.contains(&resource.profile())
                     && execution_count <= MAX_EXECUTING_CONTEXTS
                     && resource.ready()
                     && !resource.pending();
+                #[cfg(target_os = "macos")]
+                if accepted {
+                    accepted = resource
+                        .view
+                        .as_mut()
+                        .and_then(|view| {
+                            view.work_navigation()
+                                .and_then(|gate| gate.ready_target())
+                                .map(|target| (view, target))
+                        })
+                        .is_some_and(|(view, target)| view.begin_history_lease(target).is_ok());
+                }
                 task.complete(if accepted {
                     Outcome::Acquired
                 } else {
@@ -967,14 +979,6 @@ impl EngineHost {
                         DocumentFinalizationProgress::Ready(effective)
                             if guard.construction_current() =>
                         {
-                            #[cfg(target_os = "macos")]
-                            if resource.view.as_mut().is_none_or(|view| {
-                                view.enroll_current_work_history_get(effective.clone())
-                                    .is_err()
-                            }) {
-                                guard.fail();
-                                return;
-                            }
                             resource.watchdog = None;
                             resource.lifecycle_deadline = None;
                             if let Some(task) = resource.construction.take() {
@@ -1027,20 +1031,6 @@ impl EngineHost {
                     .as_ref()
                     .is_some_and(|view| view.semantic_pending_for_audit() == Some(false))
             {
-                #[cfg(target_os = "macos")]
-                {
-                    let Some(document) = guard.document() else {
-                        guard.fail();
-                        return;
-                    };
-                    if resource.view.as_mut().is_none_or(|view| {
-                        view.enroll_current_work_history_get(document.clone())
-                            .is_err()
-                    }) {
-                        guard.fail();
-                        return;
-                    }
-                }
                 resource.watchdog = None;
                 resource.lifecycle_deadline = None;
                 if let Some(task) = resource.construction.take() {
