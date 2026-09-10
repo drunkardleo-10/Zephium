@@ -1379,7 +1379,9 @@
 
   function addValue(record, raw, state) {
     const field = consumeValueField(raw, state);
-    if (field.value !== "") record.wire.v = { k: field.secret ? "redacted" : "text", value: field.value };
+    // Preserve proven public emptiness, never infer it from missing/clipped data.
+    const observedEmpty = raw === "" && record.sensitivity === "public" && (record.wire.o & 2) !== 0;
+    if (field.value !== "" || observedEmpty) record.wire.v = { k: field.secret ? "redacted" : "text", value: field.value };
     if (field.secret) {
       record.wire.v = { k: "redacted" };
       setSensitivity(record, "secret");
@@ -1579,7 +1581,7 @@
           } catch (_) {
             value = null;
           }
-          if (typeof value === "string" && value !== "") addValue(record, value, state);
+          if (typeof value === "string") addValue(record, value, state);
         }
       }
     }
@@ -2383,9 +2385,11 @@
 
   function descriptorMatchesFilledValue(expected, actual, value) {
     if (!validRuntimeDescriptor(expected) || !validRuntimeDescriptor(actual)) return false;
-    const valueMatches = value === ""
-      ? actual.vk === 0 && actual.vt === null && actual.vo === 0 && !actual.vb
-      : actual.vk === 1 && actual.vt === value && actual.vo === 0 && !actual.vb;
+    const valueMatches = actual.vo === 0 && !actual.vb && (
+      (actual.vk === 1 && actual.vt === value) ||
+      // Empty editable hosts still have no value text node to project.
+      (value === "" && actual.vk === 0 && actual.vt === null)
+    );
     return (
       expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
       expected.s === actual.s && expected.n === actual.n && valueMatches

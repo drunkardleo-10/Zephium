@@ -1497,6 +1497,18 @@ mod tests {
     }
 
     #[test]
+    fn initial_snapshot_preserves_explicit_empty_native_value() {
+        let encoded = encode_semantic_observation(
+            &observation_with_text_value(""),
+            budget(8192, 1000, SemanticTokenCountRequirement::Exact),
+        )
+        .expect("encode empty value");
+        assert!(encoded
+            .content
+            .contains("name=\"Long value\" value=\"\" source_bytes=0 truncated=false\n"));
+    }
+
+    #[test]
     fn initial_snapshot_projects_only_the_shared_bounded_value_preview() {
         let value = "x".repeat(crate::MAX_SEMANTIC_VALUE_BYTES);
         let observation = observation_with_text_value(&value);

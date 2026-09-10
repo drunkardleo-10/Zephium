@@ -358,6 +358,12 @@ const editableCombobox = new HTMLInputElement(
   { type: "text", role: "combobox", "aria-label": "Editable suggestions" },
   ""
 );
+const emptyNativeFields = [
+  new HTMLInputElement({ type: "text", "aria-label": "Empty native text" }, ""),
+  new HTMLInputElement({ type: "search", "aria-label": "Empty native search" }, ""),
+  new HTMLTextAreaElement({ "aria-label": "Empty native notes" }, ""),
+  new HTMLInputElement({ type: "text", "aria-label": "Empty password credential", autocomplete: "current-password" }, "")
+];
 const readonlyCombobox = new HTMLInputElement(
   { type: "search", role: "combobox", readonly: "", "aria-label": "Readonly suggestions" },
   "read only query"
@@ -526,6 +532,7 @@ main.append(heading);
 main.append(button);
 main.append(textInput);
 main.append(searchInput);
+for (const field of emptyNativeFields) main.append(field);
 for (const combo of [editableCombobox, readonlyCombobox, roleOnlyCombobox,
   unsupportedCombobox, credentialCombobox, editableComboboxHost]) main.append(combo);
 main.append(textarea);
@@ -654,9 +661,18 @@ for (const [name, value] of [["Editable suggestions", ""],
   ["Editable suggestion host", "host query"]]) {
   const combo = initial.n.find(node => node.n === name);
   assert(combo?.r === "combobox" && combo.o === 11 && combo.fs === 1 &&
-    (value === "" ? combo.v === undefined : combo.v?.k === "text" && combo.v.value === value),
+    combo.v?.k === "text" && combo.v.value === value,
     "proven editable combobox lost its text value or fill authority");
 }
+for (const name of ["Empty native text", "Empty native search", "Empty native notes"]) {
+  const field = initial.n.find(node => node.n === name);
+  assert(field?.v?.k === "text" && field.v.value === "" && (field.o & 2) !== 0,
+    "successful empty native value read was confused with an unknown value");
+}
+assert(initial.n.find(node => node.n === "Empty password credential")?.v?.k === "redacted",
+  "empty credential presence crossed the semantic boundary");
+assert(initial.n.find(node => node.n === "Popup trigger")?.v === undefined,
+  "a role without a native value getter was reported as empty");
 for (const name of ["Readonly suggestions", "Popup trigger", "Number suggestions"]) {
   const combo = initial.n.find(node => node.n === name);
   assert(combo?.r === "combobox" && combo.o === 9 && combo.fs !== 1,
