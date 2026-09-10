@@ -144,7 +144,10 @@ pub fn admit_retained_trusted_work(
     Ok(handle)
 }
 
-#[cfg(feature = "macos-work-retained-product-probe")]
+#[cfg(any(
+    feature = "macos-work-retained-product-probe",
+    feature = "macos-work-lifetime-diagnostic"
+))]
 pub(crate) fn retained_resource_failure_cause(
     app: &tauri::AppHandle,
     view: &zephium_app::RetainedWorkHandle,

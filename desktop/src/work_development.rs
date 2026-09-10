@@ -252,6 +252,8 @@ struct Run {
     input_tokens: u64,
     output_tokens: u64,
     cost_micro_usd: u64,
+    #[cfg(feature = "macos-work-lifetime-diagnostic")]
+    resource_failure_cause: Option<zephium_engine::WorkResourceFailureCause>,
 }
 
 enum PreparedInvocation {
@@ -440,6 +442,8 @@ pub(super) fn install(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::
         input_tokens: 0,
         output_tokens: 0,
         cost_micro_usd: 0,
+        #[cfg(feature = "macos-work-lifetime-diagnostic")]
+        resource_failure_cause: None,
     }))) {
         return Err(std::io::Error::other("Work developer adapter already installed").into());
     }
@@ -778,6 +782,12 @@ impl Run {
             );
         }
         let snapshot = view.snapshot();
+        #[cfg(feature = "macos-work-lifetime-diagnostic")]
+        if self.resource_failure_cause.is_none() {
+            // Capture from the exact original resource while it is retained.
+            // Shutdown may remove the native owner before the terminal report.
+            self.resource_failure_cause = super::work::retained_resource_failure_cause(app, view);
+        }
         if snapshot.phase == RetainedWorkPhase::NeedsReview {
             let records = view.records();
             if records != self.announced_review {
@@ -824,6 +834,12 @@ impl Run {
             RetainedWorkPhase::Terminal | RetainedWorkPhase::Refused | RetainedWorkPhase::Uncertain
         ) && drained < zephium_agent_controller::MAX_AGENT_WORK_EVENTS
         {
+            #[cfg(feature = "macos-work-lifetime-diagnostic")]
+            emit(json!({
+                "work_development":"resource_failure",
+                "cause":format!("{:?}", self.resource_failure_cause),
+                "content":"redacted"
+            }));
             emit(
                 json!({"work_development":"terminal", "phase":format!("{:?}", snapshot.phase), "failure":format!("{:?}", snapshot.failure), "record":format!("{:?}", snapshot.record), "artifact":format!("{:?}", snapshot.artifact), "usage_basis":"settled_model_events", "model_calls":self.calls, "input_tokens":self.input_tokens, "output_tokens":self.output_tokens, "cost_micro_usd":self.cost_micro_usd, "elapsed_ms":self.started.elapsed().as_millis()}),
             );

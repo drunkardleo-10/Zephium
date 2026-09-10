@@ -64,6 +64,12 @@ macos-work-public-inspection = [
     "dep:zephium-agent-runtime",
     "dep:zephium-agent-provider-transport",
 ]
+# Optional content-free first native failure for the dynamic development runner.
+# Includes its debug-only qualification guard, without selecting a fixed task.
+macos-work-lifetime-diagnostic = [
+    "macos-work-public-inspection",
+    "zephium-work-composition/retained-lifetime-diagnostic",
+]
 # Explicit release-gate forwarding only. Default product builds remain
 # deny-only until the packaged WKWebView/TCC gate is recorded as passing.
 macos-page-permission-prompts = ["zephium-app/macos-page-permission-prompts"]

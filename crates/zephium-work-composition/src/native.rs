@@ -77,7 +77,7 @@ enum NativeLifetimeOwner {
 }
 
 impl MacosWorkComposition {
-    #[cfg(feature = "retained-product-qualification")]
+    #[cfg(feature = "retained-lifetime-diagnostic")]
     pub fn retained_resource_failure_cause(
         &self,
         view: &zephium_app::RetainedWorkHandle,
