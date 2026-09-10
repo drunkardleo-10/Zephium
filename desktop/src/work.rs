@@ -32,6 +32,20 @@ pub fn launch_public_read_work(
     admit_retained_trusted_work(app, request)
 }
 
+/// Launches a product-approved public objective with independently assessed,
+/// reversible local actions. The trusted Rust invocation owns the action policy;
+/// neither the UI nor this adapter can manufacture refs or widen its effects.
+pub fn launch_public_local_action_work(
+    app: &tauri::AppHandle,
+    profile: zephium_app::AgentWorkProfileBinding,
+    invocation: zephium_work_composition::PublicLocalActionWorkInvocation,
+) -> Result<zephium_app::RetainedWorkHandle, WorkAdmissionFailure> {
+    let request = invocation
+        .into_request(profile)
+        .map_err(WorkAdmissionFailure::Contract)?;
+    admit_retained_trusted_work(app, request)
+}
+
 pub(crate) struct WorkCompositionState(Mutex<CompositionAdmission>);
 
 struct CompositionAdmission {

@@ -18,7 +18,10 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::Manager;
-use zephium_agent_controller::{AgentBrowserModel, AgentWorkEventKind};
+use zephium_agent_controller::{
+    AgentBrowserModel, AgentWorkAccountSource, AgentWorkEventKind, AgentWorkFailure,
+    AgentWorkLocalActionPolicy,
+};
 use zephium_agent_provider_transport::{
     load_macos_development_openai_credential, AgentProviderTransportConfig,
 };
@@ -29,8 +32,8 @@ use zephium_app::{
     AgentWorkProfileRequest, RetainedWorkHandle, RetainedWorkPhase,
 };
 use zephium_work_composition::{
-    PublicReadWorkAccount, PublicReadWorkInvocation, PublicReadWorkObjective,
-    PublicReadWorkSettings,
+    PublicLocalActionWorkInvocation, PublicReadWorkAccount, PublicReadWorkInvocation,
+    PublicReadWorkObjective, PublicReadWorkSettings,
 };
 
 const CONFIG_BYTES: u64 = 32 * 1024;
@@ -43,6 +46,8 @@ const FOREGROUND_GRACE: Duration = Duration::from_secs(10);
 struct Request {
     objective: String,
     account: Account,
+    #[serde(default)]
+    account_id: Option<String>,
     start_url: String,
     path_prefix: String,
     max_hops: usize,
@@ -55,6 +60,8 @@ struct Request {
     deadline_seconds: u64,
     inspectable_public: bool,
     persist_result: bool,
+    #[serde(default)]
+    local_actions: Option<LocalActionApproval>,
 }
 
 #[derive(Deserialize)]
@@ -71,19 +78,34 @@ enum Model {
     Terra,
 }
 
-/// Explicit caller assertion for public pages that do not rely on an account.
-/// Authenticated tasks need a real host account source and are not admitted by
-/// this developer adapter merely because their browser profile has cookies.
+/// Explicit development assurance. Anonymous is product-equivalent. The actor
+/// attestation exists only for a disposable qualification profile and is
+/// intentionally weaker than production per-document identity evidence.
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Account {
     AnonymousPublic,
+    ActorAttestedDevelopment,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalActionApproval {
+    max_actions: u64,
+    fills: Vec<FillApproval>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FillApproval {
+    target_name: String,
+    value: String,
 }
 
 struct State(Mutex<Run>);
 struct Run {
-    preparation: Option<mpsc::Receiver<Result<PublicReadWorkInvocation, &'static str>>>,
-    invocation: Option<PublicReadWorkInvocation>,
+    preparation: Option<mpsc::Receiver<Result<PreparedInvocation, &'static str>>>,
+    invocation: Option<PreparedInvocation>,
     profile_request: Option<AgentWorkProfileRequest>,
     next_profile_poll: Instant,
     stop_observer: Option<mpsc::SyncSender<()>>,
@@ -96,6 +118,106 @@ struct Run {
     input_tokens: u64,
     output_tokens: u64,
     cost_micro_usd: u64,
+}
+
+enum PreparedInvocation {
+    Read(PublicReadWorkInvocation),
+    LocalAction(PublicLocalActionWorkInvocation),
+}
+
+/// Release-excluded actor assertion for exercising an authenticated disposable
+/// profile. It is not a production identity detector; production enrollment
+/// requires an independent per-document `AgentWorkAccountCollector`.
+struct DevelopmentAccountSource {
+    account: AgentAccountId,
+}
+
+impl AgentWorkAccountSource for DevelopmentAccountSource {
+    fn sample(&self, context: ContextJoin) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
+        let observed_at =
+            zephium_engine::work_browser_monotonic_now().ok_or(AgentWorkFailure::Contract)?;
+        Ok(AgentContextAccountBinding::new(
+            AgentAccountAttestationId::generate(),
+            context,
+            AgentAccountScope::Authenticated(self.account),
+            observed_at,
+        ))
+    }
+}
+
+struct ApprovedFill {
+    target_name: String,
+    value: SemanticActionText,
+}
+
+struct DevelopmentLocalActionPolicy {
+    origin: SemanticOrigin,
+    fills: Vec<ApprovedFill>,
+}
+
+/// Release-excluded exact intent fixture. It approves only one unambiguous,
+/// public fill target/value pair and never grants a remote write.
+impl AgentWorkLocalActionPolicy for DevelopmentLocalActionPolicy {
+    fn assess(
+        &self,
+        action: &SemanticPreparedAction,
+        observation: &SemanticObservation,
+    ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+        if action.kind() != SemanticActionKind::Fill
+            || action.effect() != SemanticEffectClass::LocalWrite
+            || action.verification() != SemanticVerification::TargetValueMatchesInput
+            || action.target_sensitivity() != SemanticSensitivity::Public
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
+        let frame = observation
+            .reference_frame(action.target_reference())
+            .map_err(|_| AgentWorkFailure::Contract)?;
+        let node = observation
+            .resolve(
+                action.target_reference(),
+                frame,
+                SemanticOperationClass::Fill,
+            )
+            .map_err(|_| AgentWorkFailure::Contract)?;
+        let Some(name) = node.name().map(SemanticText::as_str) else {
+            return Err(AgentWorkFailure::Contract);
+        };
+        let Some(value) = action.fill_text() else {
+            return Err(AgentWorkFailure::Contract);
+        };
+        let approved = self
+            .fills
+            .iter()
+            .any(|approved| approved.target_name == name && approved.value == *value);
+        let matching_targets = observation
+            .frames()
+            .iter()
+            .flat_map(|snapshot| snapshot.nodes())
+            .filter(|candidate| {
+                candidate
+                    .name()
+                    .is_some_and(|candidate| candidate.as_str() == name)
+                    && matches!(
+                        candidate.role(),
+                        SemanticRole::Textbox | SemanticRole::Searchbox
+                    )
+                    && candidate
+                        .operations()
+                        .contains(SemanticOperationClass::Fill)
+                    && candidate.sensitivity() == SemanticSensitivity::Public
+            })
+            .take(2)
+            .count();
+        if !approved || matching_targets != 1 {
+            return Err(AgentWorkFailure::Contract);
+        }
+        Ok(AgentEffectAssessment::new(
+            action,
+            self.origin.clone(),
+            SemanticEffectClass::LocalWrite,
+        ))
+    }
 }
 
 /// No file means no runner. All request data comes from the caller's bounded
@@ -184,67 +306,158 @@ fn parse(bytes: &[u8]) -> Result<Request, &'static str> {
     Ok(request)
 }
 
-fn prepare(request: Request, deadline: Instant) -> Result<PublicReadWorkInvocation, &'static str> {
+fn prepare(request: Request, deadline: Instant) -> Result<PreparedInvocation, &'static str> {
+    let Request {
+        objective,
+        account,
+        account_id,
+        start_url,
+        path_prefix,
+        max_hops,
+        output_fields,
+        model,
+        max_model_calls,
+        operations,
+        model_tokens,
+        cost_micro_usd,
+        deadline_seconds: _,
+        inspectable_public,
+        persist_result,
+        local_actions,
+    } = request;
     let navigation = AgentNavigationDiscovery::try_new(
-        ContextNavigationTarget::parse(&request.start_url).map_err(|_| "invalid starting URL")?,
-        request.path_prefix,
-        request.max_hops,
+        ContextNavigationTarget::parse(&start_url).map_err(|_| "invalid starting URL")?,
+        path_prefix,
+        max_hops,
     )
     .map_err(|_| "invalid navigation scope")?;
-    let fields = request
-        .output_fields
+    let origin = navigation.origin().clone();
+    let fields = output_fields
         .into_iter()
         .map(|field| {
             SemanticExtractionFieldSchema::try_text(field.name, true, field.max_bytes)
                 .map_err(|_| "invalid result field")
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let budget = AgentRunBudget::try_new(
-        request.operations,
-        request.model_tokens,
-        request.cost_micro_usd,
-        1,
-    )
-    .map_err(|_| "invalid Work budget")?;
+    let budget = AgentRunBudget::try_new(operations, model_tokens, cost_micro_usd, 1)
+        .map_err(|_| "invalid Work budget")?;
+    let account = prepare_account(account, account_id)?;
+    let local_actions = local_actions
+        .map(|actions| prepare_local_actions(origin, actions))
+        .transpose()?;
     let credential = load_macos_development_openai_credential()
         .map_err(|_| "development Keychain credential unavailable")?;
     if Instant::now() >= deadline {
         return Err("Work deadline elapsed during preparation");
     }
-    let invocation = PublicReadWorkInvocation::new(
-        PublicReadWorkObjective {
-            objective: request.objective,
-            navigation,
-            output_fields: fields,
-        },
-        PublicReadWorkSettings {
-            account: match request.account {
-                Account::AnonymousPublic => PublicReadWorkAccount::Anonymous,
-            },
-            model: match request.model {
-                Model::Luna => AgentBrowserModel::Luna,
-                Model::Terra => AgentBrowserModel::Terra,
-            },
-            budget,
-            max_model_calls: request.max_model_calls,
-            deadline,
-        },
-        AgentWorkApplicationConfig::new(
-            AgentRuntimeConfig::STANDARD,
-            AgentProviderTransportConfig::STANDARD,
-        ),
-        credential,
-    );
-    let invocation = if request.persist_result {
-        invocation.with_persistent_result()
-    } else {
-        invocation
+    let objective = PublicReadWorkObjective {
+        objective,
+        navigation,
+        output_fields: fields,
     };
-    Ok(if request.inspectable_public {
-        invocation.with_inspectable_public_retention()
+    let settings = PublicReadWorkSettings {
+        account,
+        model: match model {
+            Model::Luna => AgentBrowserModel::Luna,
+            Model::Terra => AgentBrowserModel::Terra,
+        },
+        budget,
+        max_model_calls,
+        deadline,
+    };
+    let config = AgentWorkApplicationConfig::new(
+        AgentRuntimeConfig::STANDARD,
+        AgentProviderTransportConfig::STANDARD,
+    );
+    let mut prepared = if let Some((policy, max_actions)) = local_actions {
+        PreparedInvocation::LocalAction(
+            PublicLocalActionWorkInvocation::try_new(
+                objective,
+                settings,
+                config,
+                credential,
+                Box::new(policy),
+                max_actions,
+            )
+            .map_err(|_| "invalid local-action Work invocation")?,
+        )
     } else {
-        invocation
+        PreparedInvocation::Read(PublicReadWorkInvocation::new(
+            objective, settings, config, credential,
+        ))
+    };
+    if persist_result {
+        prepared = match prepared {
+            PreparedInvocation::Read(invocation) => {
+                PreparedInvocation::Read(invocation.with_persistent_result())
+            }
+            PreparedInvocation::LocalAction(invocation) => {
+                PreparedInvocation::LocalAction(invocation.with_persistent_result())
+            }
+        };
+    }
+    if inspectable_public {
+        prepared = match prepared {
+            PreparedInvocation::Read(invocation) => {
+                PreparedInvocation::Read(invocation.with_inspectable_public_retention())
+            }
+            PreparedInvocation::LocalAction(invocation) => {
+                PreparedInvocation::LocalAction(invocation.with_inspectable_public_retention())
+            }
+        };
+    }
+    Ok(prepared)
+}
+
+fn prepare_account(
+    account: Account,
+    account_id: Option<String>,
+) -> Result<PublicReadWorkAccount, &'static str> {
+    Ok(match (account, account_id) {
+        (Account::AnonymousPublic, None) => PublicReadWorkAccount::Anonymous,
+        (Account::ActorAttestedDevelopment, Some(account)) => {
+            let account =
+                AgentAccountId::parse(&account).ok_or("invalid development account identity")?;
+            PublicReadWorkAccount::Identified {
+                account,
+                source: Box::new(DevelopmentAccountSource { account }),
+            }
+        }
+        _ => return Err("account identity does not match account mode"),
     })
+}
+
+fn prepare_local_actions(
+    origin: SemanticOrigin,
+    approval: LocalActionApproval,
+) -> Result<(DevelopmentLocalActionPolicy, u64), &'static str> {
+    if approval.fills.is_empty() || approval.fills.len() > 16 {
+        return Err("invalid local fill approval count");
+    }
+    let mut fills = Vec::with_capacity(approval.fills.len());
+    for fill in approval.fills {
+        if fill.target_name.trim().is_empty()
+            || fill.target_name.len() > 256
+            || fill.target_name.chars().any(char::is_control)
+        {
+            return Err("invalid local fill target name");
+        }
+        let value =
+            SemanticActionText::try_new(fill.value).map_err(|_| "invalid local fill value")?;
+        if fills.iter().any(|existing: &ApprovedFill| {
+            existing.target_name == fill.target_name && existing.value == value
+        }) {
+            return Err("duplicate local fill approval");
+        }
+        fills.push(ApprovedFill {
+            target_name: fill.target_name,
+            value,
+        });
+    }
+    Ok((
+        DevelopmentLocalActionPolicy { origin, fills },
+        approval.max_actions,
+    ))
 }
 
 pub(super) fn on_run_event(app: &tauri::AppHandle, event: &tauri::RunEvent) {
@@ -351,8 +564,15 @@ impl Run {
             }
             let invocation = self.invocation.take().ok_or("missing invocation")?;
             self.view = Some(
-                super::work::launch_public_read_work(app, binding, invocation)
-                    .map_err(|_| "Work admission refused")?,
+                match invocation {
+                    PreparedInvocation::Read(invocation) => {
+                        super::work::launch_public_read_work(app, binding, invocation)
+                    }
+                    PreparedInvocation::LocalAction(invocation) => {
+                        super::work::launch_public_local_action_work(app, binding, invocation)
+                    }
+                }
+                .map_err(|_| "Work admission refused")?,
             );
             emit(json!({"work_development":"queued", "content":"redacted"}));
         }
@@ -451,6 +671,69 @@ mod tests {
         input["expected_answer"] = json!("known answer");
         assert!(parse(&serde_json::to_vec(&input).unwrap()).is_err());
         assert!(parse(&vec![b' '; CONFIG_BYTES as usize + 1]).is_err());
+    }
+
+    #[test]
+    fn development_account_assurance_is_explicit_and_cross_field_exact() {
+        assert!(matches!(
+            prepare_account(Account::AnonymousPublic, None).unwrap(),
+            PublicReadWorkAccount::Anonymous
+        ));
+        assert!(prepare_account(
+            Account::AnonymousPublic,
+            Some("00000000000000000000000033".into())
+        )
+        .is_err());
+        assert!(prepare_account(Account::ActorAttestedDevelopment, None).is_err());
+        assert!(prepare_account(
+            Account::ActorAttestedDevelopment,
+            Some("not-an-account-id".into())
+        )
+        .is_err());
+        assert!(matches!(
+            prepare_account(
+                Account::ActorAttestedDevelopment,
+                Some("00000000000000000000000033".into())
+            )
+            .unwrap(),
+            PublicReadWorkAccount::Identified { .. }
+        ));
+    }
+
+    #[test]
+    fn local_action_fixture_freezes_bounded_unique_fill_intent() {
+        let origin = SemanticOrigin::parse("https://app.notion.com").unwrap();
+        let (policy, maximum) = prepare_local_actions(
+            origin.clone(),
+            LocalActionApproval {
+                max_actions: 2,
+                fills: vec![FillApproval {
+                    target_name: "Search".into(),
+                    value: "Zephium Agent Qualification".into(),
+                }],
+            },
+        )
+        .unwrap();
+        assert_eq!(maximum, 2);
+        assert_eq!(policy.origin, origin);
+        assert_eq!(policy.fills.len(), 1);
+        assert!(prepare_local_actions(
+            SemanticOrigin::parse("https://app.notion.com").unwrap(),
+            LocalActionApproval {
+                max_actions: 2,
+                fills: vec![
+                    FillApproval {
+                        target_name: "Search".into(),
+                        value: "same".into(),
+                    },
+                    FillApproval {
+                        target_name: "Search".into(),
+                        value: "same".into(),
+                    },
+                ],
+            }
+        )
+        .is_err());
     }
 
     #[test]

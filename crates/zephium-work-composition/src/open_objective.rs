@@ -181,6 +181,13 @@ impl PublicLocalActionWorkInvocation {
         self
     }
 
+    /// Retains provider input for an explicitly inspectable public development
+    /// or qualification run. This never changes effect, account or page scope.
+    pub fn with_inspectable_public_retention(mut self) -> Self {
+        self.read = self.read.with_inspectable_public_retention();
+        self
+    }
+
     /// Binds the original actor-selected profile and absolute run deadline.
     pub fn into_request(
         self,
