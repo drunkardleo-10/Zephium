@@ -158,6 +158,17 @@ pub trait AgentWorkTask: Send {
         &self,
         action: &SemanticPreparedAction,
     ) -> Result<AgentEffectAssessment, AgentWorkFailure>;
+    /// Assesses a proposal against the controller's exact current observation.
+    /// Open objectives use this port to resolve model-selected targets without
+    /// accepting caller-provided refs. Existing frozen task assessors retain
+    /// their own independently bound baseline through the default implementation.
+    fn assess_observed(
+        &self,
+        action: &SemanticPreparedAction,
+        _: &SemanticObservation,
+    ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+        self.assess(action)
+    }
     /// Supplies independently sourced current account facts for this exact
     /// context. Called at startup and before each provider/effect admission,
     /// including nonterminal inspection and extraction mapping. It must be
@@ -920,7 +931,6 @@ impl AgentWorkController {
                     || scope.departure() != &input.context.target
                     || scope.origin() != &input.context.origin
                     || extraction_schema.is_none()
-                    || actions_before_extraction
                     || subtree_extraction
             })
         {
@@ -1724,7 +1734,13 @@ impl AgentWorkController {
             };
         }
         if state.has_navigation() {
-            session.config = session.config.restrict_to_navigation_and_extraction();
+            session.config = if state.actions_before_extraction {
+                session
+                    .config
+                    .restrict_to_navigation_actions_and_extraction()
+            } else {
+                session.config.restrict_to_navigation_and_extraction()
+            };
         }
         if state.baseline_read {
             session.config = session.config.with_baseline_read();
@@ -2210,6 +2226,7 @@ impl AgentWorkController {
                         });
                     }
                     if state.actions_before_extraction
+                        && state.navigation_discovery.is_none()
                         && progress != AgentWorkTaskProgress::ReadyForExtraction
                     {
                         return Err(AgentWorkFailure::TaskPhase {
@@ -2223,6 +2240,21 @@ impl AgentWorkController {
                     return Ok(());
                 }
                 AgentBrowserToolKind::Act => {
+                    // Reserve the effect, the next decision and terminal mapping
+                    // before starting a mutation in an open objective.
+                    if state.navigation_discovery.is_some()
+                        && session
+                            .policy
+                            .remaining_operations(session.lease.lease())
+                            .map_err(|_| {
+                                AgentWorkFailure::Browser(AgentBrowserProviderError::Authority)
+                            })?
+                            < 3
+                    {
+                        return Err(AgentWorkFailure::Browser(
+                            AgentBrowserProviderError::TurnLimit,
+                        ));
+                    }
                     if state.extraction_schema.is_some() && !state.actions_before_extraction {
                         return Err(AgentWorkFailure::Contract);
                     }
@@ -2242,7 +2274,9 @@ impl AgentWorkController {
                     ))
                 }
             };
-            let assessment = state.task.assess(proposal.action())?;
+            let assessment = state
+                .task
+                .assess_observed(proposal.action(), &observation)?;
             state.refresh_account(worker, browser)?;
             let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
             let id = state.native.identity.id();

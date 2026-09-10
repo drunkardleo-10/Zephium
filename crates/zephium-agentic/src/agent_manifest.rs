@@ -693,9 +693,11 @@ impl AgentPlanNodeAuthority {
         self.navigation_route.as_ref()
     }
 
-    /// Freezes read-only discovered-link authority for one approved account,
+    /// Freezes discovered-link authority for one approved account,
     /// excluding fixed routes. Public semantic sensitivity is still required;
     /// an authenticated session does not grant sensitive data disclosure.
+    /// The node may separately approve reversible local effects; discovery
+    /// itself grants no action authority or externally committed effects.
     pub fn with_navigation_discovery(
         mut self,
         discovery: AgentNavigationDiscovery,
@@ -705,7 +707,12 @@ impl AgentPlanNodeAuthority {
             || self.origins.binary_search(discovery.origin()).is_err()
             || self.accounts.len() != 1
             || self.max_sensitivity != SemanticSensitivity::Public
-            || self.effects != AgentEffectScope::try_new(&[SemanticEffectClass::Read])?
+            || (self.effects != AgentEffectScope::try_new(&[SemanticEffectClass::Read])?
+                && self.effects
+                    != AgentEffectScope::try_new(&[
+                        SemanticEffectClass::Read,
+                        SemanticEffectClass::LocalWrite,
+                    ])?)
         {
             return Err(AgentManifestContractError::NavigationRoute);
         }
@@ -1644,6 +1651,31 @@ mod tests {
                     )
                     .is_ok(),
                 sensitivity == SemanticSensitivity::Public
+            );
+        }
+        for effect in [
+            SemanticEffectClass::LocalWrite,
+            SemanticEffectClass::ExternalWrite,
+            SemanticEffectClass::Communication,
+            SemanticEffectClass::Purchase,
+            SemanticEffectClass::Destructive,
+            SemanticEffectClass::CapabilityBoundary,
+        ] {
+            let authority = authority(
+                vec![profile(1)],
+                vec![account(1)],
+                vec![origin("sink")],
+                SemanticSensitivity::Public,
+                effects(&[SemanticEffectClass::Read, effect]),
+            );
+            assert_eq!(
+                authority
+                    .with_navigation_discovery(
+                        AgentNavigationDiscovery::try_new(target("start"), "/".into(), 1).unwrap()
+                    )
+                    .is_ok(),
+                effect == SemanticEffectClass::LocalWrite,
+                "discovery admits independently scoped reversible local effects only"
             );
         }
         let multiple_accounts = authority(

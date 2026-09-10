@@ -744,6 +744,7 @@ enum BrowserToolProfile {
     ScopedExtraction,
     LocateActScopedExtraction,
     NavigationExtraction,
+    NavigationActionsExtraction,
 }
 
 impl AgentProviderCallConfig {
@@ -845,6 +846,14 @@ impl AgentProviderCallConfig {
         self
     }
 
+    /// Enables model-selected navigation, bounded actions and terminal mapping
+    /// inside one frozen lineage. Trusted host assessment, exact current refs,
+    /// policy admission and independent verification remain mandatory per effect.
+    pub fn restrict_to_navigation_actions_and_extraction(mut self) -> Self {
+        self.tools = BrowserToolProfile::NavigationActionsExtraction;
+        self
+    }
+
     /// Freezes the host's total model-call allowance for one bounded workflow.
     /// Call identities advance once per attempt; the last call is reserved for
     /// terminal mapping. This only narrows decisions, never policy budgets or
@@ -937,6 +946,13 @@ impl AgentProviderCallConfig {
                 kind,
                 AgentBrowserToolKind::Locate
                     | AgentBrowserToolKind::Navigate
+                    | AgentBrowserToolKind::Extract
+            ),
+            BrowserToolProfile::NavigationActionsExtraction => matches!(
+                kind,
+                AgentBrowserToolKind::Locate
+                    | AgentBrowserToolKind::Navigate
+                    | AgentBrowserToolKind::Act
                     | AgentBrowserToolKind::Extract
             ),
             BrowserToolProfile::ScopedExtraction => matches!(

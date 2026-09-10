@@ -16,6 +16,24 @@ pub trait AgentWorkAccountSource: Send {
     fn sample(&self, context: ContextJoin) -> Result<AgentContextAccountBinding, AgentWorkFailure>;
 }
 
+/// Host-owned approval and independent effect classifier for local reversible
+/// actions during an open objective. The host freezes the approved intent in
+/// this object before admission. Implementations must establish that the exact
+/// target and operands are within that intent and have only local effects.
+/// Roles, names, page claims and the model-declared effect do not establish
+/// this: autosaving inputs, submits, remote writes and capability boundaries
+/// must refuse. Calls must be bounded and nonblocking. No native work belongs
+/// here; the controller separately admits, executes and verifies each action.
+pub trait AgentWorkLocalActionPolicy: Send {
+    /// Resolves the model-selected proposal against fresh semantic evidence and
+    /// independently returns its actual destination and effect, or refuses.
+    fn assess(
+        &self,
+        action: &SemanticPreparedAction,
+        observation: &SemanticObservation,
+    ) -> Result<AgentEffectAssessment, AgentWorkFailure>;
+}
+
 /// Bounded observed-link exploration followed by one current-document mapping.
 /// Completion proves source-backed shape, not the usefulness or truth of an answer.
 pub struct AgentWorkDiscoveryTask {
@@ -27,6 +45,7 @@ pub struct AgentWorkDiscoveryTask {
     account_source: Option<Box<dyn AgentWorkAccountSource>>,
     current: Option<(ContextJoin, SemanticObservationId)>,
     complete: bool,
+    local_actions: Option<Box<dyn AgentWorkLocalActionPolicy>>,
 }
 
 impl AgentWorkDiscoveryTask {
@@ -49,6 +68,7 @@ impl AgentWorkDiscoveryTask {
             account_source: None,
             current: None,
             complete: false,
+            local_actions: None,
         })
     }
 
@@ -67,6 +87,14 @@ impl AgentWorkDiscoveryTask {
         task.account_source = Some(source);
         Ok(task)
     }
+
+    /// Freezes an independently approved local-action contract. This neither
+    /// grants manifest effects nor increases the run's operation/action budget.
+    /// Targets and the route remain model-selected from current observations.
+    pub fn with_local_actions(mut self, policy: Box<dyn AgentWorkLocalActionPolicy>) -> Self {
+        self.local_actions = Some(policy);
+        self
+    }
 }
 
 impl AgentWorkTask for AgentWorkDiscoveryTask {
@@ -82,10 +110,14 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
     fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
         self.extraction.extraction_schema()
     }
+    fn allows_actions_before_extraction(&self) -> bool {
+        self.local_actions.is_some()
+    }
     fn evaluate(
         &mut self,
         observation: &SemanticObservation,
     ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+        self.current = None;
         let context = observation.request().context();
         if self.complete
             || context.identity() != self.identity
@@ -112,6 +144,41 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
         _: &SemanticPreparedAction,
     ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
         Err(AgentWorkFailure::Contract)
+    }
+    fn assess_observed(
+        &self,
+        action: &SemanticPreparedAction,
+        observation: &SemanticObservation,
+    ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+        let policy = self
+            .local_actions
+            .as_ref()
+            .ok_or(AgentWorkFailure::Contract)?;
+        let request = observation.request();
+        let snapshot = observation
+            .frames()
+            .first()
+            .ok_or(AgentWorkFailure::Contract)?;
+        if self.complete
+            || self.current != Some((request.context(), request.id()))
+            || action.source_observation() != request.id()
+            || action.source_observation_generation() != request.generation()
+            || action.frame() != snapshot.frame()
+            || action.bound_action().snapshot_generation() != snapshot.generation()
+            || action.checkpoint_snapshot() != snapshot.generation()
+            || action.checkpoint_invocation() != snapshot.invocation()
+            || action.effect() != SemanticEffectClass::LocalWrite
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
+        let assessment = policy.assess(action, observation)?;
+        if !assessment.matches_action(action)
+            || assessment.actual_effect() != SemanticEffectClass::LocalWrite
+            || assessment.destination_origin() != self.discovery.origin()
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
+        Ok(assessment)
     }
     fn attest_account(
         &self,
@@ -184,6 +251,155 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    struct LocalPolicy {
+        effect: SemanticEffectClass,
+        destination: SemanticOrigin,
+    }
+    impl AgentWorkLocalActionPolicy for LocalPolicy {
+        fn assess(
+            &self,
+            action: &SemanticPreparedAction,
+            _: &SemanticObservation,
+        ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+            if action.fill_text().map(SemanticActionText::as_str) != Some("approved") {
+                return Err(AgentWorkFailure::Contract);
+            }
+            Ok(AgentEffectAssessment::new(
+                action,
+                self.destination.clone(),
+                self.effect,
+            ))
+        }
+    }
+
+    fn local_observation(context: ContextJoin, generation: u64) -> SemanticObservation {
+        let frame = SemanticFrameJoin::try_new(
+            context,
+            FrameId::MAIN,
+            context.frame_generation(),
+            SemanticOrigin::parse("https://example.test/").unwrap(),
+            SemanticFrameTrust::SameOrigin,
+        )
+        .unwrap();
+        let wire = format!(
+            r#"{{"v":1,"i":{generation},"g":{generation},"c":"complete","n":[{{"k":1,"r":"document","o":16}},{{"k":2,"p":0,"r":"textbox","n":"Search","s":64,"o":3,"v":{{"k":"text","value":""}},"b":{{"x":1,"y":2,"w":100,"h":30}}}}]}}"#
+        );
+        let snapshot = decode_semantic_snapshot(
+            SemanticDecodeContext::new(
+                SemanticInvocationId::new(generation).unwrap(),
+                frame,
+                SemanticSnapshotGeneration::new(generation).unwrap(),
+            ),
+            wire.as_bytes(),
+        )
+        .unwrap();
+        SemanticObservationAssembler::new(
+            SemanticObservationRequest::initial(
+                SemanticObservationId::new(generation).unwrap(),
+                context,
+                SemanticObservationBudget::INITIAL_FILTERED,
+            ),
+            snapshot,
+        )
+        .unwrap()
+        .finish()
+        .unwrap()
+    }
+
+    fn local_action(
+        observation: &SemanticObservation,
+        value: &str,
+        effect: SemanticEffectClass,
+    ) -> SemanticPreparedAction {
+        let proposal = SemanticActionProposal::try_new(
+            SemanticActionIntent::Fill {
+                target: SemanticReferenceId::new(2).unwrap(),
+                value: SemanticActionText::try_new(value.into()).unwrap(),
+            },
+            effect,
+            SemanticWaitCondition::Immediate,
+            SemanticVerification::TargetValueMatchesInput,
+            SemanticSettleBudget::try_new(2000).unwrap(),
+        )
+        .unwrap();
+        let snapshot = &observation.frames()[0];
+        let batch = SemanticActionBatch::bind(
+            SemanticActionBatchId::new(1).unwrap(),
+            observation,
+            &[snapshot.frame().clone()],
+            vec![proposal],
+        )
+        .unwrap();
+        batch.actions()[0].prepare(snapshot).unwrap()
+    }
+
+    #[test]
+    fn local_action_approval_is_current_exact_and_independent_of_model_effect() {
+        let context = context();
+        let old = local_observation(context, 1);
+        let fresh = local_observation(context, 2);
+        let old_action = local_action(&old, "approved", SemanticEffectClass::LocalWrite);
+        let action = local_action(&fresh, "approved", SemanticEffectClass::LocalWrite);
+        let origin = SemanticOrigin::parse("https://example.test/").unwrap();
+        for (effect, destination, accepted) in [
+            (SemanticEffectClass::LocalWrite, origin.clone(), true),
+            (SemanticEffectClass::ExternalWrite, origin.clone(), false),
+            (SemanticEffectClass::Read, origin.clone(), false),
+            (
+                SemanticEffectClass::LocalWrite,
+                SemanticOrigin::parse("https://foreign.test/").unwrap(),
+                false,
+            ),
+        ] {
+            let mut task = AgentWorkDiscoveryTask::try_new(
+                context.identity(),
+                AgentNavigationDiscovery::try_new(
+                    ContextNavigationTarget::parse("https://example.test/start").unwrap(),
+                    "/".into(),
+                    2,
+                )
+                .unwrap(),
+                vec![SemanticExtractionFieldSchema::try_text("answer".into(), true, 64).unwrap()],
+            )
+            .unwrap();
+            task.evaluate(&fresh).unwrap();
+            assert!(
+                task.assess_observed(&action, &fresh).is_err(),
+                "read-only task has no action grant"
+            );
+            let mut task = task.with_local_actions(Box::new(LocalPolicy {
+                effect,
+                destination,
+            }));
+            assert_eq!(task.assess_observed(&action, &fresh).is_ok(), accepted);
+            assert!(
+                task.assess(&action).is_err(),
+                "current evidence is mandatory"
+            );
+            assert!(task.assess_observed(&old_action, &old).is_err());
+            assert!(task.assess_observed(&old_action, &fresh).is_err());
+            assert!(task
+                .assess_observed(
+                    &local_action(&fresh, "unapproved", SemanticEffectClass::LocalWrite),
+                    &fresh
+                )
+                .is_err());
+            assert!(task
+                .assess_observed(
+                    &local_action(&fresh, "approved", SemanticEffectClass::ExternalWrite),
+                    &fresh
+                )
+                .is_err());
+            assert!(task
+                .evaluate(&local_observation(self::context(), 3))
+                .is_err());
+            assert!(
+                task.assess_observed(&action, &fresh).is_err(),
+                "failed refresh revokes prior task bindings"
+            );
+        }
+    }
 
     struct Source(Arc<Mutex<Option<AgentContextAccountBinding>>>);
     impl AgentWorkAccountSource for Source {

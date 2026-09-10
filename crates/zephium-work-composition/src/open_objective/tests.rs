@@ -200,3 +200,60 @@ fn assembled_scope_and_task_pass_ordinary_controller_admission() {
         assert!(result.is_ok());
     }
 }
+
+struct RefuseLocalActions;
+impl AgentWorkLocalActionPolicy for RefuseLocalActions {
+    fn assess(
+        &self,
+        _: &SemanticPreparedAction,
+        _: &SemanticObservation,
+    ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+        Err(AgentWorkFailure::Contract)
+    }
+}
+
+#[test]
+fn ordinary_local_action_objective_keeps_discovery_account_and_result_contract() {
+    let identity = identity();
+    let (input, task) = assemble_with_actions(
+        identity,
+        ContextProfileStorageClass::Durable,
+        objective(),
+        settings(PublicReadWorkAccount::Anonymous),
+        Some(LocalActions {
+            policy: Box::new(RefuseLocalActions),
+            max_actions: 3,
+        }),
+    )
+    .unwrap();
+    assert!(task.allows_actions_before_extraction());
+    assert!(task.navigation_discovery().is_some());
+    assert!(task.navigation_route().is_none());
+    assert!(task.allows_progressive_observation());
+    let input = input.persist_extraction_result().unwrap();
+    assert!(zephium_agent_controller::AgentWorkController::try_new(
+        input,
+        zephium_agent_provider_transport::AgentProviderTransportConfig::STANDARD,
+        AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "unused-test-credential".into()
+        )
+        .unwrap(),
+        Arc::new(DormantAudit),
+        task
+    )
+    .is_ok());
+    for max_actions in [0, 65, u64::MAX] {
+        assert!(assemble_with_actions(
+            identity,
+            ContextProfileStorageClass::Durable,
+            objective(),
+            settings(PublicReadWorkAccount::Anonymous),
+            Some(LocalActions {
+                policy: Box::new(RefuseLocalActions),
+                max_actions
+            })
+        )
+        .is_err());
+    }
+}

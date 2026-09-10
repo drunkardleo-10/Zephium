@@ -1226,6 +1226,7 @@ impl AgentBrowserPort for Port {
             Fault::ActionCallback => {}
             Fault::ActionVerification
             | Fault::ActionApplied
+            | Fault::Navigation(NavigationFault::DiscoveryAction(_))
             | Fault::Scoped(ScopedFault::Combined) => {
                 let now = request.requested_at();
                 let geometry = request.expected_geometry();
@@ -1994,6 +1995,7 @@ fn provider_fixture_with_discovery_account(
         fault,
         ProviderFault::Navigation(
             NavigationFault::Discovery
+                | NavigationFault::DiscoveryAction(_)
                 | NavigationFault::DiscoveryEvidence(_)
                 | NavigationFault::DiscoveryScopeRefusal(_)
                 | NavigationFault::DiscoveryBudget(..)
@@ -2003,7 +2005,14 @@ fn provider_fixture_with_discovery_account(
         )
     ) {
         input_with_navigation_account(
-            &[SemanticEffectClass::Read],
+            if matches!(
+                fault,
+                ProviderFault::Navigation(NavigationFault::DiscoveryAction(_))
+            ) {
+                &[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite]
+            } else {
+                &[SemanticEffectClass::Read]
+            },
             None,
             Some(navigation_tests::discovery_scope()),
             match fault {
@@ -2079,6 +2088,7 @@ fn provider_fixture_with_discovery_account(
         if matches!(
             fault,
             NavigationFault::Discovery
+                | NavigationFault::DiscoveryAction(_)
                 | NavigationFault::DiscoveryEvidence(_)
                 | NavigationFault::DiscoveryScopeRefusal(_)
                 | NavigationFault::DiscoveryBudget(..)
@@ -2088,7 +2098,7 @@ fn provider_fixture_with_discovery_account(
         ) {
             let fields =
                 vec![SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap()];
-            Box::new(if let Some(account) = discovery_account {
+            let task = if let Some(account) = discovery_account {
                 struct Source {
                     account: AgentAccountScope,
                     clock: Arc<dyn TerraControllerClock>,
@@ -2125,6 +2135,11 @@ fn provider_fixture_with_discovery_account(
                     fields,
                 )
                 .unwrap()
+            };
+            Box::new(if matches!(fault, NavigationFault::DiscoveryAction(_)) {
+                task.with_local_actions(Box::new(navigation_tests::LocalActionPolicy))
+            } else {
+                task
             })
         } else if let NavigationFault::Route(fault) = fault {
             Box::new(navigation_tests::route_tests::RouteTask::new(

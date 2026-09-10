@@ -40,7 +40,9 @@ pub use work_form::{
 #[cfg(feature = "provider-transport")]
 mod work_discovery;
 #[cfg(feature = "provider-transport")]
-pub use work_discovery::{AgentWorkAccountSource, AgentWorkDiscoveryTask};
+pub use work_discovery::{
+    AgentWorkAccountSource, AgentWorkDiscoveryTask, AgentWorkLocalActionPolicy,
+};
 
 #[cfg(feature = "provider-transport")]
 pub use action::{

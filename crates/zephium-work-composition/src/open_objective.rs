@@ -3,7 +3,8 @@
 use std::{sync::Arc, time::Instant};
 use zephium_agent_controller::{
     AgentBrowserModel, AgentWorkAccountSource, AgentWorkContextSpec, AgentWorkDiscoveryTask,
-    AgentWorkFailure, AgentWorkRunInput, AgentWorkRunSettings, AgentWorkTask, TerraControllerIds,
+    AgentWorkFailure, AgentWorkLocalActionPolicy, AgentWorkRunInput, AgentWorkRunSettings,
+    AgentWorkTask, TerraControllerIds,
 };
 use zephium_agent_provider_transport::AgentProviderCredential;
 use zephium_agentic::*;
@@ -31,6 +32,10 @@ pub struct PublicReadWorkObjective {
 pub enum PublicReadWorkAccount {
     /// The caller has established anonymous use of the selected service scope.
     Anonymous,
+    /// Explicit actor enrollment paired with an independent host collector.
+    /// Admission checks the enrolled profile and service origin as well as the
+    /// account; enrollment alone supplies no current-document evidence.
+    Enrolled(zephium_app::AgentWorkEnrolledAccount),
     /// A host source independently identifies the account for each current
     /// document. Missing, changed or stale samples prevent execution. The ID
     /// must name that identified account, never a generated stand-in inferred
@@ -131,6 +136,85 @@ impl std::fmt::Debug for PublicReadWorkInvocation {
     }
 }
 
+/// One ordinary public objective with explicitly approved reversible local
+/// effects. The host policy is independent of objective/page/model text and
+/// must prove the intent and actual effect of each model-selected proposal.
+/// It grants no remote write, submit, communication or capability authority.
+#[must_use]
+pub struct PublicLocalActionWorkInvocation {
+    read: PublicReadWorkInvocation,
+    actions: LocalActions,
+}
+
+struct LocalActions {
+    policy: Box<dyn AgentWorkLocalActionPolicy>,
+    max_actions: u64,
+}
+
+impl PublicLocalActionWorkInvocation {
+    /// Consumes the same objective, account, profile settings and credential as
+    /// public reading, plus trusted local effect approval and an independent
+    /// action ceiling. Admission is dormant; no page or provider work runs here.
+    pub fn try_new(
+        objective: PublicReadWorkObjective,
+        settings: PublicReadWorkSettings,
+        config: AgentWorkApplicationConfig,
+        credential: AgentProviderCredential,
+        policy: Box<dyn AgentWorkLocalActionPolicy>,
+        max_actions: u64,
+    ) -> Result<Self, AgentWorkFailure> {
+        if max_actions == 0 || max_actions > 64 {
+            return Err(AgentWorkFailure::Contract);
+        }
+        Ok(Self {
+            read: PublicReadWorkInvocation::new(objective, settings, config, credential),
+            actions: LocalActions {
+                policy,
+                max_actions,
+            },
+        })
+    }
+
+    /// Publishes the accepted source-bound result in the selected durable profile.
+    pub fn with_persistent_result(mut self) -> Self {
+        self.read = self.read.with_persistent_result();
+        self
+    }
+
+    /// Binds the original actor-selected profile and absolute run deadline.
+    pub fn into_request(
+        self,
+        profile: AgentWorkProfileBinding,
+    ) -> Result<TrustedWorkRequest, AgentWorkFailure> {
+        let identity = ContextIdentity::new(
+            ContextId::generate(),
+            ContextRunId::generate(),
+            profile.profile(),
+            ContextKind::Owned,
+        );
+        let (mut input, task) = assemble_with_actions(
+            identity,
+            profile.storage_class(),
+            self.read.objective,
+            self.read.settings,
+            Some(self.actions),
+        )?;
+        if self.read.persist_result {
+            input = input.persist_extraction_result()?;
+        }
+        Ok(
+            TrustedWorkRequest::new(input, self.read.config, self.read.credential, task)
+                .with_browser_profile(profile),
+        )
+    }
+}
+
+impl std::fmt::Debug for PublicLocalActionWorkInvocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PublicLocalActionWorkInvocation([owned, redacted])")
+    }
+}
+
 impl TrustedWorkRequest {
     /// Consumes approved product operands into the ordinary retained Work path.
     /// The request carries no diagnostic retention or qualification authority.
@@ -160,13 +244,44 @@ fn assemble(
     objective: PublicReadWorkObjective,
     settings: PublicReadWorkSettings,
 ) -> Result<(AgentWorkRunInput, Box<dyn AgentWorkTask>), AgentWorkFailure> {
+    assemble_with_actions(identity, storage, objective, settings, None)
+}
+
+fn assemble_with_actions(
+    identity: ContextIdentity,
+    storage: ContextProfileStorageClass,
+    objective: PublicReadWorkObjective,
+    settings: PublicReadWorkSettings,
+    actions: Option<LocalActions>,
+) -> Result<(AgentWorkRunInput, Box<dyn AgentWorkTask>), AgentWorkFailure> {
     let fail = |_| AgentWorkFailure::Contract;
     if settings.budget.contexts() != 1 || objective.objective.trim().is_empty() {
         return Err(AgentWorkFailure::Contract);
     }
-    let effects = AgentEffectScope::try_new(&[SemanticEffectClass::Read]).map_err(fail)?;
+    if actions
+        .as_ref()
+        .is_some_and(|actions| actions.max_actions == 0 || actions.max_actions > 64)
+    {
+        return Err(AgentWorkFailure::Contract);
+    }
+    let effects = AgentEffectScope::try_new(if actions.is_some() {
+        &[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite]
+    } else {
+        &[SemanticEffectClass::Read]
+    })
+    .map_err(fail)?;
     let account = match &settings.account {
         PublicReadWorkAccount::Anonymous => AgentAccountScope::Anonymous,
+        PublicReadWorkAccount::Enrolled(source) => {
+            let enrollment = source.enrollment();
+            if enrollment.profile().profile() != identity.profile()
+                || enrollment.profile().storage_class() != storage
+                || enrollment.origin() != objective.navigation.origin()
+            {
+                return Err(AgentWorkFailure::Contract);
+            }
+            AgentAccountScope::Authenticated(enrollment.account())
+        }
         PublicReadWorkAccount::Identified { account, .. } => {
             AgentAccountScope::Authenticated(*account)
         }
@@ -236,7 +351,7 @@ fn assemble(
             settings.deadline,
         )
         .with_max_model_calls(settings.max_model_calls)?
-        .with_max_actions(0)?,
+        .with_max_actions(actions.as_ref().map_or(0, |actions| actions.max_actions))?,
     )?;
     let task = match settings.account {
         PublicReadWorkAccount::Anonymous => AgentWorkDiscoveryTask::try_new(
@@ -253,6 +368,20 @@ fn assemble(
                 source,
             )?
         }
+        PublicReadWorkAccount::Enrolled(source) => {
+            AgentWorkDiscoveryTask::try_new_with_account_source(
+                identity,
+                objective.navigation,
+                objective.output_fields,
+                account,
+                Box::new(source),
+            )?
+        }
+    };
+    let task = if let Some(actions) = actions {
+        task.with_local_actions(actions.policy)
+    } else {
+        task
     };
     Ok((input, Box::new(task)))
 }
