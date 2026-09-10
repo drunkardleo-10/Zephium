@@ -120,6 +120,8 @@ struct ActiveActor {
 pub(super) enum AdmissionPhase {
     Constructing,
     Loading,
+    NeedsReview,
+    Reviewing,
     Ready,
     Acquiring,
     Admitting,
@@ -174,6 +176,7 @@ pub(super) struct RetainedWork {
     artifact: Option<AgentWorkArtifactDescriptor>,
     archived: Option<AgentWorkArchivedExtraction>,
     artifact_read: Option<Result<bool, AgentWorkJournalError>>,
+    last_review: Option<Result<AgentWorkRecord, AgentWorkJournalError>>,
     events: VecDeque<AgentWorkEvent>,
     stopping: bool,
     destruction: Option<PendingLifecycle>,
@@ -251,6 +254,7 @@ impl RetainedWork {
             artifact: None,
             archived: None,
             artifact_read: None,
+            last_review: None,
             events: VecDeque::with_capacity(MAX_AGENT_WORK_EVENTS),
             stopping: false,
             destruction: None,
@@ -437,11 +441,12 @@ impl RetainedWork {
                         .windows(2)
                         .any(|pair| pair[0].key() >= pair[1].key())
                     || records.iter().any(|record| {
-                        !record.disposition().is_terminal() || record.debt() != AgentWorkDebt::NONE
+                        !historical_record_admissible(*record)
+                            && !(record.disposition() == AgentWorkDisposition::Interrupted
+                                && record.incarnation() == owner)
                     })
                 {
-                    // Recovery inventory needs the existing explicit recovery
-                    // workflow, not a new resource coordinator clearing debt.
+                    // Malformed or unreviewable recovery facts cannot admit work.
                     self.inventory = records;
                     #[cfg(feature = "work-execution-probe")]
                     self.public_claim_refusal_diagnostic();
@@ -451,6 +456,12 @@ impl RetainedWork {
                 self.inventory = records;
                 self.phase = if self.stopping {
                     AdmissionPhase::Uncertain
+                } else if self
+                    .inventory
+                    .iter()
+                    .any(|record| !historical_record_admissible(*record))
+                {
+                    AdmissionPhase::NeedsReview
                 } else {
                     AdmissionPhase::Ready
                 };
@@ -469,6 +480,28 @@ impl RetainedWork {
                     self.inventory.push(record);
                 } else {
                     return Err(AgentWorkJournalError::Capacity);
+                }
+                if phase == AdmissionPhase::Reviewing {
+                    if !matches!(
+                        record.disposition(),
+                        AgentWorkDisposition::FreshAdmissionRequired
+                            | AgentWorkDisposition::Rejected
+                    ) {
+                        return Err(AgentWorkJournalError::Transition);
+                    }
+                    self.last_review = Some(Ok(record));
+                    self.phase = if self.stopping {
+                        AdmissionPhase::Uncertain
+                    } else if self
+                        .inventory
+                        .iter()
+                        .all(|record| historical_record_admissible(*record))
+                    {
+                        AdmissionPhase::Ready
+                    } else {
+                        AdmissionPhase::NeedsReview
+                    };
+                    return Ok(());
                 }
                 self.record = Some(record);
                 match (phase, record.disposition()) {
@@ -669,6 +702,9 @@ impl RetainedWork {
                     self.artifact_read = Some(Err(error));
                     retain = false;
                 } else {
+                    if flight.phase == AdmissionPhase::Reviewing {
+                        self.last_review = Some(Err(error));
+                    }
                     self.persistence_failure.get_or_insert(error);
                     self.fail(AgentWorkFailure::Contract);
                     flight.uncertain = true;
@@ -945,6 +981,52 @@ impl RetainedWork {
 
     pub(super) fn records(&self) -> &[AgentWorkRecord] {
         &self.inventory
+    }
+
+    /// Exact human classification of a prior-process interruption. The original
+    /// debt remains historical uncertainty; this never settles or replays it.
+    pub(super) fn review(
+        &mut self,
+        record: AgentWorkRecord,
+        decision: crate::AgentWorkReviewDecision,
+    ) {
+        let result = if self.phase != AdmissionPhase::NeedsReview
+            || self.flight.is_some()
+            || self.stopping
+        {
+            Err(AgentWorkJournalError::Unavailable)
+        } else if !self.inventory.contains(&record)
+            || Some(record.incarnation()) != self.incarnation
+            || record.disposition() != AgentWorkDisposition::Interrupted
+            || self.record.is_some()
+            || self.active.is_some()
+            || self.acquisition.is_some()
+            || self.staged.is_some()
+        {
+            Err(AgentWorkJournalError::Conflict)
+        } else {
+            AgentWorkJournalMutation::transition(
+                record,
+                match decision {
+                    crate::AgentWorkReviewDecision::AcceptFreshAdmission => {
+                        AgentWorkDisposition::FreshAdmissionRequired
+                    }
+                    crate::AgentWorkReviewDecision::Reject => AgentWorkDisposition::Rejected,
+                },
+            )
+        };
+        match result {
+            Ok(mutation) => {
+                self.last_review = None;
+                self.phase = AdmissionPhase::Reviewing;
+                self.dispatch(AgentWorkJournalRequest::CompareAndSet(mutation));
+            }
+            Err(error) => self.last_review = Some(Err(error)),
+        }
+    }
+
+    pub(super) fn last_review(&self) -> Option<Result<AgentWorkRecord, AgentWorkJournalError>> {
+        self.last_review
     }
 
     pub(super) fn read_artifact(&mut self, record: AgentWorkRecord) -> bool {
@@ -1224,4 +1306,15 @@ impl RetainedWork {
             )
             .min()
     }
+}
+
+/// A fresh native resource may coexist with explicitly reviewed historical
+/// uncertainty. This predicate never permits reuse of an active execution owner.
+fn historical_record_admissible(record: AgentWorkRecord) -> bool {
+    record.disposition().is_terminal()
+        && (record.debt() == AgentWorkDebt::NONE
+            || matches!(
+                record.disposition(),
+                AgentWorkDisposition::FreshAdmissionRequired | AgentWorkDisposition::Rejected
+            ))
 }

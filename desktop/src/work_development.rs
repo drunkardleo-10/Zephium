@@ -40,6 +40,61 @@ const CONFIG_BYTES: u64 = 32 * 1024;
 const OUTPUT_BYTES: usize = 64 * 1024;
 const CONFIG_ENV: &str = "ZEPHIUM_WORK_REQUEST";
 const FOREGROUND_GRACE: Duration = Duration::from_secs(10);
+const REVIEW_ENV: &str = "ZEPHIUM_WORK_REVIEW";
+const REVIEW_BYTES: u64 = 1024;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewRequest {
+    record: String,
+    decision: ReviewDecision,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ReviewDecision {
+    AcceptFreshAdmission,
+    Reject,
+}
+
+fn parse_review(
+    bytes: &[u8],
+) -> Result<(AgentWorkRecord, zephium_app::AgentWorkReviewDecision), &'static str> {
+    if bytes.len() as u64 > REVIEW_BYTES {
+        return Err("review exceeds byte limit");
+    }
+    let request: ReviewRequest =
+        serde_json::from_slice(bytes).map_err(|_| "invalid review JSON")?;
+    if request.record.len() != AGENT_WORK_RECORD_BYTES * 2 || !request.record.is_ascii() {
+        return Err("review requires exact record bytes");
+    }
+    let mut record = [0; AGENT_WORK_RECORD_BYTES];
+    for (index, byte) in record.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&request.record[index * 2..index * 2 + 2], 16)
+            .map_err(|_| "invalid record encoding")?;
+    }
+    let record = AgentWorkRecord::decode(record)
+        .filter(|record| record.disposition() == AgentWorkDisposition::Interrupted)
+        .ok_or("review requires an interrupted record")?;
+    Ok((
+        record,
+        match request.decision {
+            ReviewDecision::AcceptFreshAdmission => {
+                zephium_app::AgentWorkReviewDecision::AcceptFreshAdmission
+            }
+            ReviewDecision::Reject => zephium_app::AgentWorkReviewDecision::Reject,
+        },
+    ))
+}
+
+fn record_hex(record: AgentWorkRecord) -> String {
+    use std::fmt::Write as _;
+    let mut encoded = String::with_capacity(AGENT_WORK_RECORD_BYTES * 2);
+    for byte in record.as_bytes() {
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -179,6 +234,10 @@ struct FillApproval {
 
 struct State(Mutex<Run>);
 struct Run {
+    review_path: Option<std::path::PathBuf>,
+    next_review_poll: Instant,
+    reviewed_input: Vec<u8>,
+    announced_review: Vec<AgentWorkRecord>,
     preparation: Option<mpsc::Receiver<Result<PreparedInvocation, &'static str>>>,
     invocation: Option<PreparedInvocation>,
     profile_request: Option<AgentWorkProfileRequest>,
@@ -363,6 +422,10 @@ pub(super) fn install(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::
             }
         })?;
     if !app.manage(State(Mutex::new(Run {
+        review_path: std::env::var_os(REVIEW_ENV).map(Into::into),
+        next_review_poll: started,
+        reviewed_input: Vec::new(),
+        announced_review: Vec::new(),
         preparation: Some(receiver),
         invocation: None,
         profile_request: None,
@@ -715,6 +778,44 @@ impl Run {
             );
         }
         let snapshot = view.snapshot();
+        if snapshot.phase == RetainedWorkPhase::NeedsReview {
+            let records = view.records();
+            if records != self.announced_review {
+                for record in records
+                    .iter()
+                    .filter(|record| record.disposition() == AgentWorkDisposition::Interrupted)
+                {
+                    emit(
+                        json!({"work_development":"historical_review_required", "record":record_hex(*record), "debt":record.debt().bits(), "review_file_configured":self.review_path.is_some(), "execution_started":false}),
+                    );
+                }
+                self.announced_review = records;
+            }
+            if Instant::now() >= self.next_review_poll {
+                self.next_review_poll = Instant::now() + Duration::from_secs(1);
+                if let Some(path) = &self.review_path {
+                    match std::fs::File::open(path) {
+                        Ok(file) => {
+                            let mut bytes = Vec::new();
+                            if file.take(REVIEW_BYTES + 1).read_to_end(&mut bytes).is_ok()
+                                && bytes != self.reviewed_input
+                            {
+                                let accepted = parse_review(&bytes)
+                                    .is_ok_and(|(record, decision)| view.review(record, decision));
+                                emit(
+                                    json!({"work_development":"historical_review_submitted", "queued":accepted, "debt_cleared":false}),
+                                );
+                                self.reviewed_input = bytes;
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(_) => {
+                            emit(json!({"work_development":"historical_review_file_unavailable"}))
+                        }
+                    }
+                }
+            }
+        }
         if let Some(result) = view.take_extraction() {
             emit_result(&result)?;
         }
@@ -927,5 +1028,38 @@ mod tests {
         let text = "界".repeat(200);
         assert_eq!(preview(&text).len(), 510);
         assert_eq!(preview("short evidence"), "short evidence");
+    }
+
+    #[test]
+    fn recovery_review_requires_exact_interrupted_record_and_explicit_decision() {
+        let mut bytes = [0; AGENT_WORK_RECORD_BYTES];
+        bytes[0] = 1;
+        bytes[1] = AgentWorkDisposition::Interrupted as u8;
+        bytes[2] = AgentWorkDebt::UNKNOWN.bits();
+        bytes[15] = 1;
+        bytes[16] = 1;
+        let record = AgentWorkRecord::decode(bytes).unwrap();
+        let encoded = record_hex(record);
+        for decision in ["accept_fresh_admission", "reject"] {
+            let request =
+                serde_json::to_vec(&json!({"record":encoded, "decision":decision})).unwrap();
+            assert_eq!(parse_review(&request).unwrap().0, record);
+        }
+        for invalid in [
+            json!({"record":encoded}),
+            json!({"record":encoded,"decision":"resume"}),
+            json!({"record":encoded,"decision":"reject","clear_debt":true}),
+            json!({"record":"ff","decision":"reject"}),
+            json!({"record":"界".repeat(64),"decision":"reject"}),
+        ] {
+            assert!(parse_review(&serde_json::to_vec(&invalid).unwrap()).is_err());
+        }
+        bytes[1] = AgentWorkDisposition::RecoveryRequired as u8;
+        let live = AgentWorkRecord::decode(bytes).unwrap();
+        assert!(parse_review(
+            &serde_json::to_vec(&json!({"record":record_hex(live),"decision":"reject"})).unwrap()
+        )
+        .is_err());
+        assert!(parse_review(&vec![b' '; REVIEW_BYTES as usize + 1]).is_err());
     }
 }

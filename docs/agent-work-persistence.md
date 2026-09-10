@@ -26,16 +26,23 @@ acknowledgement or partial transaction never implies a native mutation did not
 occur. Recovered facts cannot recreate refs, native contexts, provider state,
 task predicates or executable approvals.
 
-The retained-resource coordinator currently requires every claimed historical
-record to be terminal with zero debt before admitting any actor. An unrelated
-`Interrupted` record therefore blocks a fresh run as well. This refusal happens
-after Store has successfully claimed and fenced the inventory, before admission
-or model/native execution; its existing `Conflict` classification does not mean
-the new run's IDs collided or SQLite rejected a CAS. Explicit review preserves
-unknown debt, so reviewing that record alone does not reopen this coordinator.
-The release-excluded probe reports `stage=claim_inventory`, record ordering,
-nonterminal/debt counts and whether current execution exists, without identifiers
-or content. The original records and recovery obligations remain intact.
+The retained-resource coordinator pauses in `NeedsReview` when claimed history
+contains an `Interrupted` record under the new process fence. Its bounded handle
+accepts an explicit review of those exact bytes; only the original Store CAS ACK
+can classify that record as `FreshAdmissionRequired` or `Rejected`. Both retain
+all historical debt. After every interrupted record is reviewed, a separately
+prepared objective may acquire the newly constructed native resource and pass
+ordinary fresh admission. Historical classification never settles old effects,
+reconstructs authority, or reuses an old execution owner. Unreviewed records,
+foreign nonterminal fences and unknown-debt `FailedClosed` history still block.
+Cancellation, malformed ACKs and uncertain persistence keep admission closed.
+
+For the release-excluded developer runner, set `ZEPHIUM_WORK_REVIEW` to a review
+sidecar path. The runner reports exact content-free interrupted record hex while
+waiting. An explicit JSON decision `{ "record": "<reported hex>", "decision":
+"accept_fresh_admission" }` (or `"reject"`) submits that one review. No file means
+no review; stale process/revision bytes cannot match. This is development input
+to the same handle, not a model tool or an alternate persistence path.
 
 Each fixed 96-byte record contains only version/disposition/debt bits, a checked
 monotonic revision, process identity, manifest/run identity and the existing

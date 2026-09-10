@@ -130,6 +130,8 @@ pub enum RetainedWorkPhase {
     Attaching,
     Constructing,
     Loading,
+    NeedsReview,
+    Reviewing,
     Ready,
     Acquiring,
     Admitting,
@@ -154,6 +156,8 @@ pub struct RetainedWorkSnapshot {
     pub artifact: Option<AgentWorkArtifactDescriptor>,
     /// Explicit archived-result read status. Content is retrieved separately.
     pub artifact_read: Option<Result<bool, AgentWorkJournalError>>,
+    /// Exact historical review acknowledgement; its debt is never cleared.
+    pub last_review: Option<Result<AgentWorkRecord, AgentWorkJournalError>>,
 }
 struct Projection {
     #[cfg(feature = "work-execution-probe")]
@@ -165,6 +169,8 @@ struct Projection {
     records: Vec<AgentWorkRecord>,
     read_requested: Option<AgentWorkRecord>,
     read_active: bool,
+    review_requested: Option<(AgentWorkRecord, crate::AgentWorkReviewDecision)>,
+    review_active: bool,
 }
 struct ProductSignal {
     projection: Mutex<Projection>,
@@ -212,6 +218,29 @@ impl RetainedWorkHandle {
             .lock()
             .map(|value| value.records.clone())
             .unwrap_or_default()
+    }
+    /// Explicit human review of the exact claimed historical interruption.
+    /// Queue acceptance is not a Store acknowledgement or resumed execution.
+    pub fn review(
+        &self,
+        record: AgentWorkRecord,
+        decision: crate::AgentWorkReviewDecision,
+    ) -> bool {
+        let Ok(mut projection) = self.signal.projection.lock() else {
+            return false;
+        };
+        if projection.snapshot.phase != RetainedWorkPhase::NeedsReview
+            || projection.review_requested.is_some()
+            || projection.review_active
+            || !projection.records.contains(&record)
+            || record.disposition() != AgentWorkDisposition::Interrupted
+        {
+            return false;
+        }
+        projection.review_requested = Some((record, decision));
+        projection.snapshot.last_review = None;
+        drop(projection);
+        self.callback.dispatch(Command::WorkWake)
     }
     /// Requests a stored result in the original selected profile. One pending
     /// read and one returned body are retained; consume before rereading.
@@ -278,6 +307,7 @@ impl CallbackHandle {
                     persistence_failure: None,
                     artifact: None,
                     artifact_read: None,
+                    last_review: None,
                 },
                 events: VecDeque::with_capacity(MAX_AGENT_WORK_EVENTS),
                 extraction: None,
@@ -285,6 +315,8 @@ impl CallbackHandle {
                 records: Vec::new(),
                 read_requested: None,
                 read_active: false,
+                review_requested: None,
+                review_active: false,
             }),
             stop: AtomicBool::new(false),
             reconcile: AtomicBool::new(false),
@@ -440,6 +472,10 @@ impl ProductWork {
         }
         work.poll(now);
         if let Ok(mut projection) = self.signal.projection.lock() {
+            if let Some((record, decision)) = projection.review_requested.take() {
+                work.review(record, decision);
+                projection.review_active = true;
+            }
             if let Some(record) = projection.read_requested {
                 if projection.archived.is_none() && work.read_artifact(record) {
                     projection.read_requested = None;
@@ -472,6 +508,8 @@ impl ProductWork {
         projection.snapshot.phase = match work.phase() {
             AdmissionPhase::Constructing => RetainedWorkPhase::Constructing,
             AdmissionPhase::Loading => RetainedWorkPhase::Loading,
+            AdmissionPhase::NeedsReview => RetainedWorkPhase::NeedsReview,
+            AdmissionPhase::Reviewing => RetainedWorkPhase::Reviewing,
             AdmissionPhase::Ready => RetainedWorkPhase::Ready,
             AdmissionPhase::Acquiring => RetainedWorkPhase::Acquiring,
             AdmissionPhase::Admitting => RetainedWorkPhase::Admitting,
@@ -484,6 +522,10 @@ impl ProductWork {
         projection.snapshot.record = work.record();
         projection.snapshot.artifact = work.artifact();
         projection.snapshot.artifact_read = work.artifact_read();
+        projection.snapshot.last_review = work.last_review();
+        if projection.snapshot.last_review.is_some() {
+            projection.review_active = false;
+        }
         if projection.snapshot.artifact_read.is_some() {
             projection.read_active = false;
         }

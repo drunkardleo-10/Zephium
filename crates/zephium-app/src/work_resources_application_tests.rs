@@ -1,6 +1,175 @@
 //! Real Store acknowledgements held independently of committed durable facts.
 use super::*;
 use crate::work_resources::application::*;
+use std::collections::VecDeque;
+
+#[derive(Default)]
+struct ReviewJournal(Mutex<VecDeque<(AgentWorkJournalRequest, AgentWorkJournalCompletion)>>);
+impl AgentAuditPort for ReviewJournal {
+    fn append(&self, _: AgentAuditDelivery, _: AgentAuditCompletion) -> AgentAuditDispatch {
+        panic!("historical review must not dispatch an audit or execute")
+    }
+}
+impl AgentWorkJournalPort for ReviewJournal {
+    fn dispatch(
+        &self,
+        request: AgentWorkJournalRequest,
+        completion: AgentWorkJournalCompletion,
+    ) -> Result<(), AgentWorkJournalError> {
+        self.0.lock().unwrap().push_back((request, completion));
+        Ok(())
+    }
+}
+fn interrupted_record(owner: AgentWorkIncarnation, index: u8) -> AgentWorkRecord {
+    let mut bytes = [0; AGENT_WORK_RECORD_BYTES];
+    bytes[0] = 1;
+    bytes[1] = AgentWorkDisposition::Interrupted as u8;
+    bytes[2] = AgentWorkDebt::UNKNOWN.bits();
+    bytes[15] = 3;
+    bytes[16..32].copy_from_slice(&owner.bytes());
+    bytes[47] = index;
+    AgentWorkRecord::decode(bytes).unwrap()
+}
+fn review_coordinator(
+    records: Vec<AgentWorkRecord>,
+    incarnation: AgentWorkIncarnation,
+) -> (RetainedWork, Arc<Native>, Arc<ReviewJournal>) {
+    let (owner, native, resource) = construct_fixture(
+        ContextProfileStorageClass::Ephemeral,
+        WorkBrowserDocumentPolicy::Exact,
+        None,
+    );
+    native.allow_global_shutdown.store(true, Ordering::Release);
+    let journal = Arc::new(ReviewJournal::default());
+    let mut work = RetainedWork::new(owner, resource, journal.clone(), journal.clone())
+        .unwrap_or_else(|_| panic!("fixture construction"));
+    let (request, completion) = journal.0.lock().unwrap().pop_front().unwrap();
+    assert!(matches!(request, AgentWorkJournalRequest::Claim));
+    completion(Ok(AgentWorkJournalReply::Claimed {
+        owner: incarnation,
+        records,
+    }));
+    work.poll(now());
+    (work, native, journal)
+}
+
+#[test]
+fn historical_review_requires_each_exact_ack_and_never_settles_debt_or_executes() {
+    let incarnation = AgentWorkIncarnation::generate();
+    let first = interrupted_record(incarnation, 1);
+    let second = interrupted_record(incarnation, 2);
+    let (mut work, native, journal) = review_coordinator(vec![first, second], incarnation);
+    assert_eq!(work.phase(), AdmissionPhase::NeedsReview);
+    assert!(!work.ready());
+    let foreign = interrupted_record(AgentWorkIncarnation::generate(), 1);
+    work.review(foreign, crate::AgentWorkReviewDecision::Reject);
+    assert_eq!(
+        work.last_review(),
+        Some(Err(AgentWorkJournalError::Conflict))
+    );
+    assert!(journal.0.lock().unwrap().is_empty());
+    for (record, decision, remaining) in [
+        (
+            first,
+            crate::AgentWorkReviewDecision::AcceptFreshAdmission,
+            true,
+        ),
+        (second, crate::AgentWorkReviewDecision::Reject, false),
+    ] {
+        work.review(record, decision);
+        assert_eq!(work.phase(), AdmissionPhase::Reviewing);
+        assert!(!work.ready());
+        work.review(record, decision);
+        assert_eq!(journal.0.lock().unwrap().len(), 1);
+        let (request, completion) = journal.0.lock().unwrap().pop_front().unwrap();
+        let AgentWorkJournalRequest::CompareAndSet(mutation) = request else {
+            panic!("review CAS");
+        };
+        assert_eq!(mutation.expected(), Some(record));
+        let next = mutation.next();
+        assert_eq!(next.debt(), AgentWorkDebt::UNKNOWN);
+        assert_eq!(next.revision(), record.revision() + 1);
+        assert!(
+            work.records().contains(&record),
+            "a committed write without ACK is not admission"
+        );
+        completion(Ok(AgentWorkJournalReply::Record(Some(next))));
+        work.poll(now());
+        assert_eq!(work.last_review(), Some(Ok(next)));
+        assert_eq!(work.ready(), !remaining);
+        work.review(record, decision);
+        assert!(
+            work.last_review().unwrap().is_err(),
+            "stale review cannot replay"
+        );
+        assert!(journal.0.lock().unwrap().is_empty());
+    }
+    assert!(
+        work.record().is_none(),
+        "review does not become the new actor record"
+    );
+    assert_eq!(native.acquisitions.load(Ordering::Acquire), 0);
+    assert_eq!(native.reads.load(Ordering::Acquire), 0);
+    assert_eq!(native.actions.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn reviewed_history_allows_fresh_resources_but_unreviewed_or_foreign_history_does_not() {
+    let prior = AgentWorkIncarnation::generate();
+    let current = AgentWorkIncarnation::generate();
+    let interrupted = interrupted_record(prior, 1);
+    for disposition in [
+        AgentWorkDisposition::FreshAdmissionRequired,
+        AgentWorkDisposition::Rejected,
+    ] {
+        let reviewed = interrupted.transition(disposition).unwrap();
+        let (work, native, _) = review_coordinator(vec![reviewed], current);
+        assert!(work.ready());
+        assert_eq!(work.records(), &[reviewed]);
+        assert_eq!(reviewed.debt(), AgentWorkDebt::UNKNOWN);
+        assert_eq!(native.acquisitions.load(Ordering::Acquire), 0);
+    }
+    for disposition in [
+        AgentWorkDisposition::Interrupted,
+        AgentWorkDisposition::RecoveryRequired,
+        AgentWorkDisposition::FailedClosed,
+        AgentWorkDisposition::NeedsApproval,
+    ] {
+        let mut bytes = *interrupted.as_bytes();
+        bytes[1] = disposition as u8;
+        let record = AgentWorkRecord::decode(bytes).unwrap();
+        let (work, native, _) = review_coordinator(vec![record], current);
+        assert!(!work.ready());
+        assert_eq!(work.phase(), AdmissionPhase::Uncertain);
+        assert_eq!(native.acquisitions.load(Ordering::Acquire), 0);
+    }
+}
+
+#[test]
+fn historical_review_bad_ack_and_stop_cannot_reopen_admission() {
+    for stop in [false, true] {
+        let incarnation = AgentWorkIncarnation::generate();
+        let record = interrupted_record(incarnation, 1);
+        let (mut work, native, journal) = review_coordinator(vec![record], incarnation);
+        work.review(record, crate::AgentWorkReviewDecision::AcceptFreshAdmission);
+        let (request, completion) = journal.0.lock().unwrap().pop_front().unwrap();
+        let AgentWorkJournalRequest::CompareAndSet(mutation) = request else {
+            panic!("review CAS");
+        };
+        if stop {
+            work.cancel();
+        }
+        completion(Ok(AgentWorkJournalReply::Record(Some(if stop {
+            mutation.next()
+        } else {
+            record
+        }))));
+        work.poll(now());
+        assert_eq!(work.phase(), AdmissionPhase::Uncertain);
+        assert!(!work.ready());
+        assert_eq!(native.acquisitions.load(Ordering::Acquire), 0);
+    }
+}
 
 type Held = (
     Result<AgentWorkJournalReply, AgentWorkJournalError>,
