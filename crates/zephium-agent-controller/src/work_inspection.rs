@@ -98,6 +98,32 @@ impl AgentWorkController {
 }
 
 impl AgentBrowserSession {
+    pub(super) async fn continue_after_action_refusal(
+        &mut self,
+        refusal: AgentProviderActionRefusal,
+        observation: &SemanticObservation,
+    ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
+        self.check_live()?;
+        let request = self.next_model_call_request()?;
+        let payload = encode_semantic_observation(
+            observation,
+            SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
+        .map_err(AgentBrowserProviderError::InitialEncoding)?;
+        let prepared =
+            AgentPreparedObservationRequest::try_action_refusal_for_provider_exact_count(
+                &mut self.policy,
+                request,
+                observation,
+                payload,
+                self.config.clone(),
+                refusal,
+            )
+            .map_err(|_| AgentBrowserProviderError::Authority)?;
+        self.drive(prepared.into_transport_input()).await
+    }
+
     pub(super) async fn continue_after_scope_refusal(
         &mut self,
         refusal: AgentProviderObservationRefusal,

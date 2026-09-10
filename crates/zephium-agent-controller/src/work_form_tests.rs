@@ -199,7 +199,7 @@ fn form_goal_accepts_editable_combobox_without_granting_role_only_fill() {
             &frame,
             1,
             &format!(
-                r#"{{"v":1,"i":1,"g":1,"c":"complete","n":[{{"k":1,"r":"document","o":16}},{{"k":2,"p":0,"r":"combobox","n":"Query","o":{operations},"b":{{"x":10,"y":20,"w":120,"h":30}}}}]}}"#
+                r#"{{"v":1,"i":1,"g":1,"c":"complete","n":[{{"k":1,"r":"document","o":16}},{{"k":2,"p":0,"r":"combobox","n":"Query","o":{operations},"v":{{"k":"text","value":""}},"b":{{"x":10,"y":20,"w":120,"h":30}}}}]}}"#
             ),
         );
         assert_eq!(task.evaluate(&initial).is_ok(), accepts);
@@ -522,7 +522,7 @@ fn unique_unnamed_fields_clear_exactly_but_foreign_named_targets_cannot_write() 
         2,
         "",
         false,
-        r#",{"k":6,"p":0,"r":"textbox","n":"Other","o":2,"b":{"x":10,"y":100,"w":120,"h":30}}"#,
+        r#",{"k":6,"p":0,"r":"textbox","n":"Other","o":2,"v":{"k":"text","value":""},"b":{"x":10,"y":100,"w":120,"h":30}}"#,
     );
     assert!(unnamed.evaluate(&other).is_err());
     let mut named = task(&frame, vec![phase("wanted", false)]);

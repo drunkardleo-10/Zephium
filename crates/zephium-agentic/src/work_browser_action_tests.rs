@@ -64,6 +64,7 @@ impl Fixture {
             "n": [
                 {"k": 1, "r": "document"},
                 {"k": 2, "p": 0, "r": "textbox", "n": "Draft", "o": 2,
+                    "v": {"k": "text", "value": ""},
                     "b": {"x": 10, "y": 20, "w": 100, "h": 30}}
             ]
         }))

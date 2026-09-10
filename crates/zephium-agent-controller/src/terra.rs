@@ -2883,7 +2883,14 @@ impl AgentBrowserSession {
         let turn = self
             .next_step(turn, observation, current_frames, None, false, record)
             .await?;
-        self.bind_action_turn(turn, observation, current_frames)
+        match self.bind_action_turn(turn, observation, current_frames)? {
+            crate::action::AgentBrowserActionBinding::Prepared(proposal) => Ok(proposal),
+            crate::action::AgentBrowserActionBinding::Refused(refusal) => {
+                Err(AgentBrowserProviderError::Action(
+                    crate::AgentBrowserActionError::Binding(refusal.reason()),
+                ))
+            }
+        }
     }
 
     // Shares exact locate/action ownership with the public action driver.
@@ -2970,7 +2977,7 @@ impl AgentBrowserSession {
         turn: AgentBrowserProviderTurn,
         observation: &zephium_agentic::SemanticObservation,
         current_frames: &[zephium_agentic::SemanticFrameJoin],
-    ) -> Result<crate::AgentBrowserActionProposal, AgentBrowserProviderError> {
+    ) -> Result<crate::action::AgentBrowserActionBinding, AgentBrowserProviderError> {
         self.check_live()?;
         if self.next_action > self.max_actions {
             return Err(AgentBrowserProviderError::ActionLimit);
@@ -2988,8 +2995,14 @@ impl AgentBrowserSession {
         }
         let batch = zephium_agentic::SemanticActionBatchId::new(self.next_action)
             .ok_or(AgentBrowserProviderError::Authority)?;
-        crate::AgentBrowserActionProposal::bind(tool, observation, current_frames, batch)
-            .map_err(AgentBrowserProviderError::Action)
+        crate::AgentBrowserActionProposal::bind(
+            tool,
+            observation,
+            current_frames,
+            batch,
+            &self.config,
+        )
+        .map_err(AgentBrowserProviderError::Action)
     }
 
     /// Applies real policy to an independently assessed action and retains its debt.

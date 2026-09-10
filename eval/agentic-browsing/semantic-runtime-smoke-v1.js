@@ -2059,7 +2059,50 @@ async function finish() {
   assert(frameScope.c === "scope_boundary" && frameScope.n.some(node => node.fc === false),
     "frame scope omission was masked by local accessible-name clipping");
 
+  // Exercise real production-runtime wires across empty -> filled -> cleared,
+  // including the descriptor reused by Rust's fixed native action contract.
+  const editableRoot = new Element("main");
+  document._root = editableRoot; editableRoot._parent = document; setOwner(editableRoot, document);
+  let emptyGeneration = 500;
+  for (const mode of ["no-children", "empty-text", "combobox", "private", "credential", "markup", "over-limit", "partial"]) {
+    editableRoot._children = new NodeList();
+    const host = editableRoot.append(new Element("div", {
+      contenteditable: "plaintext-only", role: mode === "combobox" ? "combobox" : "textbox",
+      "aria-label": mode === "credential" ? "API key" : "Editable sample",
+      ...(mode === "private" ? { autocomplete: "email" } : {})
+    }));
+    if (mode === "empty-text") host.append(new CharacterData(""));
+    if (mode === "markup") host.append(new Element("span"));
+    if (mode === "over-limit") for (let count = 0; count < 129; count++) host.append(new CharacterData(""));
+    if (mode === "partial") { host.append(new CharacterData("")); host.append(new CharacterData("unvisited nonempty value")); }
+    const capture = () => JSON.parse(invoke(++emptyGeneration, emptyGeneration, { k: "initial" }, mode === "partial" ? { n: 3, x: 3 } : {}));
+    let observed = capture();
+    let node = observed.n.find(node => node.k !== observed.n[0].k && node.n === host.attributes["aria-label"]);
+    const supported = ["no-children", "empty-text", "combobox"].includes(mode);
+    if (!supported) {
+      assert(node && (mode === "credential" ? node.v?.k === "redacted" : node.v === undefined),
+        `unproven/private empty host became observed empty: ${mode}`);
+      if (["markup", "over-limit"].includes(mode)) assert(!(node.o & 2), "unsupported host gained Fill");
+      if (mode === "partial") assert(observed.c !== "complete", "partial value traversal claimed complete evidence");
+      continue;
+    }
+    assert(node?.v?.k === "text" && node.v.value === "" && (node.o & 2),
+      `proven empty editable host lost exact value: ${mode}`);
+    document._hit = host;
+    for (const value of ["Editable workflow value", ""]) {
+      const request = JSON.parse(fillRequest(node, value, emptyGeneration));
+      request.i = observed.i; request.g = observed.g;
+      const result = JSON.parse(await runtime.invoke(JSON.stringify(request)));
+      assert(result.r === "form" && result.b === "fixed_semantic_recipe" && host.textContent === value,
+        "empty editable fill/clear failed fixed descriptor verification");
+      observed = capture(); node = observed.n.find(node => node.n === "Editable sample");
+      assert(node?.v?.k === "text" && node.v.value === value,
+        "post-action production wire lost exact editable value");
+    }
+  }
+
   process.stdout.write(`${JSON.stringify({
+    empty_contenteditable_roundtrip: true,
     independent_page_dialog_samples: true,
     nested_leaf_context_authority: true,
     closed_fill_support_reasons: true,

@@ -83,6 +83,11 @@ pub struct AgentBrowserActionProposal {
     batch: SemanticActionBatchExecution,
 }
 
+pub(crate) enum AgentBrowserActionBinding {
+    Prepared(AgentBrowserActionProposal),
+    Refused(AgentProviderActionRefusal),
+}
+
 /// Original refused proposal, including its non-replayable continuation. Only
 /// the exact policy branch before permit/dispatch can mark it unissued.
 pub(crate) struct AgentBrowserActionProposalRefusal {
@@ -107,16 +112,26 @@ impl AgentBrowserActionProposal {
         observation: &SemanticObservation,
         frames: &[SemanticFrameJoin],
         batch: SemanticActionBatchId,
-    ) -> Result<Self, AgentBrowserActionError> {
-        let (proposal, continuation) = turn.into_parts();
-        let AgentBrowserToolProposal::Act(actions) = proposal else {
+        config: &AgentProviderCallConfig,
+    ) -> Result<AgentBrowserActionBinding, AgentBrowserActionError> {
+        let AgentBrowserToolProposal::Act(actions) = turn.proposal() else {
             return Err(AgentBrowserActionError::Tool);
         };
         if actions.actions().len() != 1 {
             return Err(AgentBrowserActionError::ActionCount);
         }
-        let batch = SemanticActionBatch::bind(batch, observation, frames, actions.into_actions())
-            .map_err(AgentBrowserActionError::Binding)?;
+        let (batch, continuation) = match turn.resolve_action(batch, observation, frames, config) {
+            Ok(AgentProviderActionResolution::Bound(batch, continuation)) => (batch, continuation),
+            Ok(AgentProviderActionResolution::Refused(refusal)) => {
+                return Ok(AgentBrowserActionBinding::Refused(refusal));
+            }
+            Err(AgentProviderActionResolutionError::Binding(error)) => {
+                return Err(AgentBrowserActionError::Binding(error));
+            }
+            Err(AgentProviderActionResolutionError::Continuation(_)) => {
+                return Err(AgentBrowserActionError::State);
+            }
+        };
         let bound = batch
             .actions()
             .first()
@@ -155,11 +170,11 @@ impl AgentBrowserActionProposal {
         if action.settle_budget().millis() < MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS {
             return Err(AgentBrowserActionError::SettleBudget);
         }
-        Ok(Self {
+        Ok(AgentBrowserActionBinding::Prepared(Self {
             action,
             continuation,
             batch,
-        })
+        }))
     }
 
     /// The exact prepared action for a trusted effect classifier.

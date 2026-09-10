@@ -893,6 +893,12 @@ impl SemanticBoundAction {
             _ => None,
         };
         validate_prepared_baseline(self, target.value(), target.states(), option_states)?;
+        // Exact Fill verification needs an observed starting value. Refuse
+        // unknown state here, before policy authorization or native mutation.
+        if self.verification() == SemanticVerification::TargetValueMatchesInput {
+            exact_fill_value(target.value())
+                .map_err(SemanticActionPreparationError::Revalidation)?;
+        }
 
         let target_value = target.value().cloned();
         let target_states = target.states();
@@ -1139,10 +1145,8 @@ impl SemanticPreparedAction {
 
     /// Returns the exact private form value before and after one fill.
     ///
-    /// Absence is interpreted as the empty string only after both the prepared
-    /// action and the adjacent target have been proven to be eligible fill
-    /// controls. This keeps the wire's compact empty-value representation from
-    /// becoming a generic value coercion.
+    /// Both values must be explicitly observed text. Missing values are unknown,
+    /// including on eligible fill controls, and cannot prove a value transition.
     pub(crate) fn verification_fill_values<'action, 'snapshot>(
         &'action self,
         current: &'snapshot SemanticSnapshot,
@@ -1197,7 +1201,7 @@ fn exact_fill_value(
 ) -> Result<&str, SemanticActionRevalidationError> {
     match value {
         Some(SemanticValueSummary::Text(value)) => Ok(value.as_str()),
-        None => Ok(""),
+        None => Err(SemanticActionRevalidationError::TargetChanged),
         Some(SemanticValueSummary::Redacted) => {
             Err(SemanticActionRevalidationError::CredentialBoundary)
         }
@@ -1423,17 +1427,9 @@ fn validate_verification_baseline(
             intent.target().states.contains(state) == present
         }
         SemanticVerification::TargetValueMatchesInput => match intent {
-            BoundActionIntent::Fill { target, value } => match target.value.as_ref() {
-                Some(crate::SemanticValueSummary::Text(current)) => {
-                    current.as_str() == value.as_str()
-                }
-                None => value.is_empty(),
-                Some(
-                    crate::SemanticValueSummary::Redacted
-                    | crate::SemanticValueSummary::Boolean(_)
-                    | crate::SemanticValueSummary::Ordinal(_),
-                ) => false,
-            },
+            BoundActionIntent::Fill { target, value } => {
+                projected_value_matches(target.value.as_ref(), value)
+            }
             _ => false,
         },
         SemanticVerification::TargetSelectionMatchesOption => match intent {
@@ -1492,8 +1488,8 @@ fn projected_value_matches(
 ) -> bool {
     match current {
         Some(SemanticValueSummary::Text(current)) => current.as_str() == expected.as_str(),
-        None => expected.is_empty(),
-        Some(
+        None
+        | Some(
             SemanticValueSummary::Redacted
             | SemanticValueSummary::Boolean(_)
             | SemanticValueSummary::Ordinal(_),
@@ -2465,6 +2461,81 @@ mod tests {
 
         assert_eq!(batch.actions()[0].kind(), SemanticActionKind::Fill);
         assert_eq!(batch.actions()[0].target_role(), SemanticRole::Spinbutton);
+    }
+
+    #[test]
+    fn absent_fill_value_never_proves_an_already_satisfied_empty_input() {
+        let template = observation();
+        let nodes = |value: Option<&str>| {
+            let mut field = json!({"k": 3,"p":0,"r":"textbox","n":"Title","o":11,
+                "b":{"x":10,"y":50,"w":200,"h":30}});
+            if let Some(value) = value {
+                field["v"] = json!({"k":"text","value":value});
+            }
+            json!([{"k":1,"r":"document","o":16},field])
+        };
+        let make_observation = |value| {
+            SemanticObservationAssembler::new(
+                crate::SemanticObservationRequest::initial(
+                    SemanticObservationId::new(2).unwrap(),
+                    template.request().context(),
+                    SemanticObservationBudget::INITIAL_FILTERED,
+                ),
+                current_snapshot(&template, 8, 10, nodes(value)),
+            )
+            .unwrap()
+            .finish()
+            .unwrap()
+        };
+        let unknown = make_observation(None);
+        let empty = make_observation(Some(""));
+        let bind_value = |observation: &SemanticObservation, value: &str| {
+            SemanticActionBatch::bind(
+                SemanticActionBatchId::new(1).unwrap(),
+                observation,
+                &frames(observation),
+                vec![proposal(
+                    SemanticActionIntent::Fill {
+                        target: SemanticReferenceId::new(2).unwrap(),
+                        value: SemanticActionText::try_new(value.to_owned()).unwrap(),
+                    },
+                    SemanticEffectClass::LocalWrite,
+                    SemanticVerification::TargetValueMatchesInput,
+                )],
+            )
+        };
+        let batch = bind_value(&unknown, "").expect("missing value is unknown, not already empty");
+        assert_eq!(
+            batch.actions()[0].prepare(&unknown.frames()[0]),
+            Err(SemanticActionPreparationError::Revalidation(
+                SemanticActionRevalidationError::TargetChanged
+            )),
+            "unknown starting value refuses before native mutation, without claiming it is empty"
+        );
+        assert_eq!(
+            bind_value(&empty, "").unwrap_err(),
+            SemanticActionBindingError::OutcomeAlreadySatisfied
+        );
+        let observed_empty = current_snapshot(&unknown, 9, 11, nodes(Some("")));
+        assert_eq!(
+            batch.actions()[0].prepare(&observed_empty),
+            Err(SemanticActionPreparationError::OutcomeAlreadySatisfied)
+        );
+        let from_unknown = bind_value(&unknown, "replacement").unwrap();
+        assert!(matches!(
+            from_unknown.actions()[0].prepare(&unknown.frames()[0]),
+            Err(SemanticActionPreparationError::Revalidation(
+                SemanticActionRevalidationError::TargetChanged
+            ))
+        ));
+        let from_empty = bind_value(&empty, "replacement").unwrap();
+        let prepared = from_empty.actions()[0].prepare(&empty.frames()[0]).unwrap();
+        let filled = current_snapshot(&empty, 9, 11, nodes(Some("replacement")));
+        assert_eq!(
+            prepared.verification_fill_values(&filled).unwrap(),
+            ("", "replacement"),
+            "explicitly observed empty values must support exact fill transitions"
+        );
     }
 
     #[test]

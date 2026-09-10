@@ -2264,9 +2264,30 @@ impl AgentWorkController {
                             proposed: AgentBrowserToolKind::Act,
                         });
                     }
-                    session
+                    match session
                         .bind_action_turn(step, &observation, &frames)
                         .map_err(AgentWorkFailure::Browser)?
+                    {
+                        crate::action::AgentBrowserActionBinding::Prepared(proposal) => proposal,
+                        crate::action::AgentBrowserActionBinding::Refused(refusal) => {
+                            state.native.check_control(worker, browser)?;
+                            state.refresh_account(worker, browser)?;
+                            state.journal_mut()?.emit(
+                                AgentWorkEventKind::ActionProposalRefused(refusal.reason()),
+                            )?;
+                            let session =
+                                state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+                            turn = Self::provider(
+                                &mut state.native,
+                                worker,
+                                browser,
+                                session.cancellation.clone(),
+                                session.continue_after_action_refusal(refusal, &observation),
+                            )
+                            .await?;
+                            continue;
+                        }
+                    }
                 }
                 kind => {
                     return Err(AgentWorkFailure::Browser(
@@ -3394,6 +3415,9 @@ pub enum AgentWorkEventKind {
     /// Snapshot scope was incompatible with the delivered baseline. No native
     /// capture ran; one budgeted provider turn can select a different operation.
     InspectionRefused,
+    /// A model action failed binding before preparation, policy, or dispatch.
+    /// Correcting the proposal consumes another ordinary budgeted model call.
+    ActionProposalRefused(SemanticActionBindingError),
     /// An exact native scoped capture lost its anchor. A separate initial
     /// capture may restore current refs under the original run authority.
     InspectionAnchorLost,

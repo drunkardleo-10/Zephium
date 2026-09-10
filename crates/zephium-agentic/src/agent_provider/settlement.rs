@@ -316,6 +316,17 @@ pub struct AgentProviderSettledToolTurn {
 }
 
 impl AgentProviderSettledToolTurn {
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        proposal: AgentBrowserToolProposal,
+        continuation: AgentProviderContinuation,
+    ) -> Self {
+        Self {
+            proposal,
+            continuation,
+        }
+    }
+
     /// Closed browser proposal. It still grants no effect authority.
     pub const fn proposal(&self) -> &AgentBrowserToolProposal {
         &self.proposal

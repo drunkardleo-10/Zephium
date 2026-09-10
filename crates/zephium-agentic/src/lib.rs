@@ -209,6 +209,7 @@ pub use agent_provider::{
     AgentCommittedProviderInput, AgentPreparedDiffRequest, AgentPreparedExtractionRequest,
     AgentPreparedLocateRequest, AgentPreparedObservationRequest,
     AgentPreparedReadContinuationRequest, AgentPreparedReadRequest, AgentPreparedScreenshotRequest,
+    AgentProviderActionRefusal, AgentProviderActionResolution, AgentProviderActionResolutionError,
     AgentProviderBillingClass, AgentProviderBoundDiffContinuation,
     AgentProviderBoundExtractionContinuation, AgentProviderBoundLocateContinuation,
     AgentProviderBoundReadContinuation, AgentProviderBoundScreenshotContinuation,

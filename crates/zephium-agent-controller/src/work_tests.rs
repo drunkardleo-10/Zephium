@@ -1239,7 +1239,9 @@ impl AgentBrowserPort for Port {
             Fault::ActionVerification
             | Fault::ActionApplied
             | Fault::ActionAppliedBoundary
-            | Fault::Navigation(NavigationFault::DiscoveryAction(_))
+            | Fault::Navigation(
+                NavigationFault::DiscoveryAction(_) | NavigationFault::DiscoveryActionRefusal(_),
+            )
             | Fault::Scoped(ScopedFault::Combined) => {
                 let now = request.requested_at();
                 let geometry = request.expected_geometry();
@@ -2030,6 +2032,7 @@ fn provider_fixture_with_discovery_account(
         ProviderFault::Navigation(
             NavigationFault::Discovery
                 | NavigationFault::DiscoveryAction(_)
+                | NavigationFault::DiscoveryActionRefusal(_)
                 | NavigationFault::DiscoveryEvidence(_)
                 | NavigationFault::DiscoveryScopeRefusal(_)
                 | NavigationFault::DiscoveryBudget(..)
@@ -2041,7 +2044,10 @@ fn provider_fixture_with_discovery_account(
         input_with_navigation_account(
             if matches!(
                 fault,
-                ProviderFault::Navigation(NavigationFault::DiscoveryAction(_))
+                ProviderFault::Navigation(
+                    NavigationFault::DiscoveryAction(_)
+                        | NavigationFault::DiscoveryActionRefusal(_)
+                )
             ) {
                 &[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite]
             } else {
@@ -2085,7 +2091,9 @@ fn provider_fixture_with_discovery_account(
         input()
     };
     let navigation_schedule = if let ProviderFault::Navigation(fault) = fault {
-        if matches!(fault, NavigationFault::DiscoveryScopeRefusal(case) if case != 3) {
+        if matches!(fault, NavigationFault::DiscoveryScopeRefusal(case) if case != 3)
+            || matches!(fault, NavigationFault::DiscoveryActionRefusal(_))
+        {
             approved.settings = approved.settings.with_max_model_calls(6).unwrap();
         }
         if let NavigationFault::DiscoveryBudget(limit, _, _) = fault {
@@ -2123,6 +2131,7 @@ fn provider_fixture_with_discovery_account(
             fault,
             NavigationFault::Discovery
                 | NavigationFault::DiscoveryAction(_)
+                | NavigationFault::DiscoveryActionRefusal(_)
                 | NavigationFault::DiscoveryEvidence(_)
                 | NavigationFault::DiscoveryScopeRefusal(_)
                 | NavigationFault::DiscoveryBudget(..)
@@ -2170,11 +2179,17 @@ fn provider_fixture_with_discovery_account(
                 )
                 .unwrap()
             };
-            Box::new(if matches!(fault, NavigationFault::DiscoveryAction(_)) {
-                task.with_local_actions(Box::new(navigation_tests::LocalActionPolicy))
-            } else {
-                task
-            })
+            Box::new(
+                if matches!(
+                    fault,
+                    NavigationFault::DiscoveryAction(_)
+                        | NavigationFault::DiscoveryActionRefusal(_)
+                ) {
+                    task.with_local_actions(Box::new(navigation_tests::LocalActionPolicy))
+                } else {
+                    task
+                },
+            )
         } else if let NavigationFault::Route(fault) = fault {
             Box::new(navigation_tests::route_tests::RouteTask::new(
                 fault,

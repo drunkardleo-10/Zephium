@@ -1567,6 +1567,63 @@ mod tests {
     }
 
     #[test]
+    fn clearing_requires_an_explicit_observed_empty_value() {
+        let (observation, _) = observation();
+        let batch = bind(
+            &observation,
+            SemanticActionIntent::Fill {
+                target: SemanticReferenceId::new(3).unwrap(),
+                value: SemanticActionText::try_new(String::new()).unwrap(),
+            },
+            SemanticWaitCondition::Immediate,
+            SemanticVerification::TargetValueMatchesInput,
+        )
+        .unwrap();
+        let action = batch.actions()[0]
+            .prepare(&observation.frames()[0])
+            .unwrap();
+        let attempt = SemanticActionAttemptId::new(1).unwrap();
+        let tracker = immediate(&action, 1);
+        for explicit_empty in [false, true] {
+            let mut field = json!({"k":3,"p":0,"r":"textbox","n":"Private title","o":10});
+            if explicit_empty {
+                field["v"] = json!({"k":"text","value":""});
+            }
+            let snapshot = current(&observation, json!([{"k":1,"r":"document","o":16},field]));
+            let evidence = prepare_semantic_action_snapshot_evidence(
+                &action,
+                attempt,
+                SemanticSettleInstant::from_millis(101),
+                &snapshot,
+            );
+            if explicit_empty {
+                let proof = verify_semantic_action(&tracker, &action, evidence.unwrap()).unwrap();
+                assert_eq!(proof.proof(), SemanticEffectProofKind::ExactTargetValue);
+            } else {
+                assert!(
+                    evidence.is_err(),
+                    "missing fresh value cannot prove successful clear"
+                );
+                assert_eq!(
+                    verify_semantic_action(
+                        &tracker,
+                        &action,
+                        SemanticEffectEvidence::exact_target_value(
+                            attempt,
+                            SemanticSettleInstant::from_millis(101),
+                            &snapshot,
+                            "old",
+                            "",
+                        )
+                    ),
+                    Err(SemanticVerificationError::TargetChanged),
+                    "caller-supplied empty evidence cannot replace missing observation"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn exact_fill_uses_transient_unmodified_value_and_adjacent_metadata() {
         let (observation, _) = observation();
         let batch = bind(

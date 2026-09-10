@@ -762,16 +762,16 @@
     const editable = editableAttribute !== null &&
       ["", "true", "plaintext-only"].includes(lower(editableAttribute));
     const editableStructure = editable ? [] : null;
-    const editableWitness = editable ? { context: null } : null;
+    const editableWitness = editable ? { context: null, empty: true } : null;
     const editableSupport = editable ? editableHostSupport(node, editableStructure, editableWitness) : 2;
     const plainTextEditable = editableSupport === 1;
     const explicit = explicitRole(node);
     if (explicit !== null) {
       if (explicit.suppressed === true) return null;
-      return { role: explicit.role, tag, inputType, contentEditable: editable, plainTextEditable, editableSupport, editableStructure, editingContext: editableWitness && editableWitness.context };
+      return { role: explicit.role, tag, inputType, contentEditable: editable, plainTextEditable, editableSupport, editableStructure, editableEmpty: editableWitness && editableWitness.empty, editingContext: editableWitness && editableWitness.context };
     }
 
-    if (editable) return { role: "textbox", tag, inputType, contentEditable: true, plainTextEditable, editableSupport, editableStructure, editingContext: editableWitness.context };
+    if (editable) return { role: "textbox", tag, inputType, contentEditable: true, plainTextEditable, editableSupport, editableStructure, editableEmpty: editableWitness.empty, editingContext: editableWitness.context };
 
     if (tag === "html" || tag === "body" || tag === "div" || tag === "fieldset" || tag === "details") {
       return tag === "fieldset" || tag === "details"
@@ -1573,6 +1573,8 @@
         if (credentialField(element, descriptor, wire.n || "")) {
           wire.v = { k: "redacted" };
           setSensitivity(record, "secret");
+        } else if (descriptor.plainTextEditable && descriptor.editableEmpty) {
+          addValue(record, "", state);
         } else if (descriptor.contentEditable !== true) {
           let value = null;
           try {
@@ -1664,13 +1666,9 @@
           const visibleStyle = styleIsVisible(item.node);
           const rect = visibleStyle ? elementRect(item.node) : null;
           const optionInExpansion = descriptor.role === "option" && anchored;
-          // Native <option> elements do not have independent page geometry in
-          // WebKit while their owning <select> is closed. Retain them only when
-          // their nearest retained semantic parent is an already-admitted native
-          // select. This exposes bounded, ref-addressable choices without making
-          // arbitrary non-rendered DOM actionable or treating offscreen selects
-          // as visible. A filtered select can leave the Document as its option's
-          // nearest retained parent; brand-check before using an Element getter.
+          // Closed native options lack geometry. Admit only under a retained
+          // select, never an offscreen/filtered select. Brand-check the parent:
+          // filtering can leave Document here, which rejects Element getters.
           const optionOfAdmittedSelect =
             descriptor.role === "option" &&
             descriptor.tag === "option" &&
@@ -2385,11 +2383,7 @@
 
   function descriptorMatchesFilledValue(expected, actual, value) {
     if (!validRuntimeDescriptor(expected) || !validRuntimeDescriptor(actual)) return false;
-    const valueMatches = actual.vo === 0 && !actual.vb && (
-      (actual.vk === 1 && actual.vt === value) ||
-      // Empty editable hosts still have no value text node to project.
-      (value === "" && actual.vk === 0 && actual.vt === null)
-    );
+    const valueMatches = actual.vo === 0 && !actual.vb && actual.vk === 1 && actual.vt === value;
     return (
       expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
       expected.s === actual.s && expected.n === actual.n && valueMatches
@@ -2458,6 +2452,7 @@
       let firstUnsupported = 0;
       for (let index = 0; index < mathMin(length, 128); index += 1) {
         const kind = nodeType(listItem(children, index));
+        if (kind !== 3 || read(characterDataGetter, listItem(children, index)) !== "") witness.empty = false;
         kinds |= kind === 3 ? 1 : kind === 1 ? 2 : 4;
         if (kind !== 3 && firstUnsupported === 0) firstUnsupported = kind === 1 ? 7 : 8;
       }

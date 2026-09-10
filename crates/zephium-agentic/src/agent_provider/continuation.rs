@@ -30,10 +30,15 @@ use super::{
     AgentProviderCallIdentity, AgentProviderCompletion, AgentProviderKind, AgentProviderStopReason,
     AgentProviderToolCallCorrelation,
 };
+#[path = "action_refusal.rs"]
+mod action_refusal;
 #[path = "observation_checkpoint.rs"]
 mod observation_checkpoint;
 #[cfg(any(test, feature = "provider-transport"))]
 use super::{AgentCommittedProviderInput, AgentProviderInputEvidence};
+pub use action_refusal::{
+    AgentProviderActionRefusal, AgentProviderActionResolution, AgentProviderActionResolutionError,
+};
 pub(super) use observation_checkpoint::AgentInspectionProgress;
 pub use observation_checkpoint::{
     AgentProviderObservationCheckpoint, AgentProviderObservationRefusal,
@@ -2228,6 +2233,161 @@ mod tests {
             tool.into_continuation_parts().0,
         )
         .expect("snapshot terminal join")
+    }
+
+    fn action_refusal_turn(
+        observation: &SemanticObservation,
+        config: AgentProviderCallConfig,
+        target: &str,
+    ) -> super::super::AgentProviderSettledToolTurn {
+        let prior = call(1);
+        let arguments = json!({"actions":[{
+            "kind":"fill", "target":target, "value":"new value", "effect":"local_write",
+            "wait":{"kind":"immediate"}, "verification":{"kind":"target_value_matches_input"},
+            "settle_millis":2000
+        }]})
+        .to_string();
+        let tool = super::super::AgentBrowserToolCall::decode_openai(
+            prior,
+            "fc_action_private_1".into(),
+            "call_action_private_1".into(),
+            "act",
+            arguments.clone(),
+        )
+        .unwrap();
+        let (correlation, proposal) = tool.into_continuation_parts();
+        let continuation = AgentProviderContinuationSeed {
+            call: prior,
+            config,
+            baseline: SemanticObservationAcknowledgement::from_fingerprint(
+                SemanticObservationFingerprint::from_observation(observation),
+            ),
+            transcript: transcript(),
+        }
+        .join_terminal_tool(completion(prior, arguments.len() as u32), correlation)
+        .unwrap();
+        super::super::AgentProviderSettledToolTurn::for_test(proposal, continuation)
+    }
+
+    #[test]
+    fn action_refusal_preserves_correlation_and_rejects_changed_authority() {
+        use crate::{SemanticActionBatchId, SemanticActionBindingError, SemanticReferenceError};
+        let initial = observation(context(), 1, 1, 1, "current content");
+        let config = config(AgentProviderKind::OpenAiResponses);
+        let frames = [initial.frames()[0].frame().clone()];
+        let batch = SemanticActionBatchId::new(1).unwrap();
+        let make = || action_refusal_turn(&initial, config.clone(), "@a1");
+        let refusal = match make()
+            .resolve_action(batch, &initial, &frames, &config)
+            .unwrap()
+        {
+            AgentProviderActionResolution::Refused(refusal) => refusal,
+            _ => panic!("document cannot be filled"),
+        };
+        assert_eq!(
+            refusal.reason(),
+            SemanticActionBindingError::Reference(SemanticReferenceError::OperationDenied)
+        );
+        let (_, bound) = refusal
+            .bind(&initial, &config, "exact current observation".into())
+            .unwrap();
+        let result: serde_json::Value = serde_json::from_str(bound.latest().tool_result()).unwrap();
+        assert_eq!(result["code"], "operation_not_supported");
+        assert_eq!(result["executed"], false);
+        assert_eq!(result["observation_unchanged"], true);
+        // No false native failure or action settlement is supplied to the model.
+        assert!(!result.to_string().contains("new value"));
+
+        let changed = observation(context(), 2, 2, 2, "new current content");
+        assert!(matches!(
+            make().resolve_action(batch, &changed, &frames, &config),
+            Err(AgentProviderActionResolutionError::Continuation(
+                AgentProviderContinuationError::Baseline
+            ))
+        ));
+        assert!(matches!(
+            make().resolve_action(batch, &initial, &[], &config),
+            Err(AgentProviderActionResolutionError::Binding(
+                SemanticActionBindingError::CurrentFrameCohort
+            ))
+        ));
+        assert!(matches!(
+            action_refusal_turn(&initial, config.clone(), "@a99")
+                .resolve_action(batch, &initial, &frames, &config),
+            Err(AgentProviderActionResolutionError::Binding(
+                SemanticActionBindingError::Reference(SemanticReferenceError::Unknown)
+            ))
+        ));
+        let changed_config = config.clone().restrict_to_navigation_and_extraction();
+        assert!(matches!(
+            make().resolve_action(batch, &initial, &frames, &changed_config),
+            Err(AgentProviderActionResolutionError::Continuation(
+                AgentProviderContinuationError::Config
+            ))
+        ));
+        let AgentProviderActionResolution::Refused(refusal) = make()
+            .resolve_action(batch, &initial, &frames, &config)
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert!(matches!(
+            refusal.bind(&changed, &config, "changed".into()),
+            Err(AgentProviderContinuationError::Baseline)
+        ));
+    }
+
+    #[test]
+    fn already_satisfied_action_is_refused_but_changed_value_binds_normally() {
+        use crate::SemanticActionBatchId;
+        let initial = observation(context(), 1, 1, 1, "current content");
+        let config = config(AgentProviderKind::OpenAiResponses);
+        let frames = [initial.frames()[0].frame().clone()];
+        for value in ["new value", "old value"] {
+            let snapshot = decode_semantic_snapshot(
+                SemanticDecodeContext::new(SemanticInvocationId::new(1).unwrap(), frames[0].clone(), SemanticSnapshotGeneration::new(1).unwrap()),
+                &serde_json::to_vec(&json!({"v":SEMANTIC_WIRE_VERSION,"i":1,"g":1,"c":"complete","n":[
+                    {"k":1,"r":"document","o":16},
+                    {"k":2,"p":0,"r":"textbox","n":"Field","s":64,"o":3,"v":{"k":"text","value":value}}
+                ]})).unwrap(),
+            ).unwrap();
+            let observed = SemanticObservationAssembler::new(
+                SemanticObservationRequest::initial(
+                    SemanticObservationId::new(1).unwrap(),
+                    initial.request().context(),
+                    SemanticObservationBudget::INITIAL_FILTERED,
+                ),
+                snapshot,
+            )
+            .unwrap()
+            .finish()
+            .unwrap();
+            let resolution = action_refusal_turn(&observed, config.clone(), "@a2")
+                .resolve_action(
+                    SemanticActionBatchId::new(1).unwrap(),
+                    &observed,
+                    &frames,
+                    &config,
+                )
+                .unwrap();
+            if value == "new value" {
+                let AgentProviderActionResolution::Refused(refusal) = resolution else {
+                    panic!("no change")
+                };
+                let (_, transcript) = refusal
+                    .bind(&observed, &config, "current state".into())
+                    .unwrap();
+                let result: serde_json::Value =
+                    serde_json::from_str(transcript.latest().tool_result()).unwrap();
+                assert_eq!(result["code"], "outcome_already_satisfied");
+                assert_eq!(result["executed"], false);
+            } else {
+                assert!(matches!(
+                    resolution,
+                    AgentProviderActionResolution::Bound(..)
+                ));
+            }
+        }
     }
 
     #[test]

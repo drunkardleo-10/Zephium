@@ -33,6 +33,7 @@ use openai::OpenAiResponsesStreamDecoder;
 
 pub(crate) use continuation::AgentProviderContinuationSeed;
 pub use continuation::{
+    AgentProviderActionRefusal, AgentProviderActionResolution, AgentProviderActionResolutionError,
     AgentProviderBoundDiffContinuation, AgentProviderBoundExtractionContinuation,
     AgentProviderBoundLocateContinuation, AgentProviderBoundReadContinuation,
     AgentProviderBoundScreenshotContinuation, AgentProviderContinuation,

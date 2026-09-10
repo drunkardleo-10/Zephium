@@ -1598,6 +1598,31 @@ impl AgentPreparedObservationRequest {
         )
     }
 
+    /// Continue after an exact pre-dispatch action-binding refusal. The original
+    /// observation and tool correlation are retained; the next call consumes
+    /// the existing model, token, cost, and operation budgets.
+    pub fn try_action_refusal_for_provider_exact_count(
+        policy: &mut AgentRunPolicy,
+        call_request: AgentModelCallRequest,
+        observation: &SemanticObservation,
+        payload: SemanticModelPayload,
+        config: AgentProviderCallConfig,
+        refusal: super::AgentProviderActionRefusal,
+    ) -> Result<Self, AgentProviderRequestError> {
+        let (prior, transcript) = refusal
+            .bind(observation, &config, payload.as_str().to_owned())
+            .map_err(|_| AgentPolicyError::Authority)?;
+        Self::try_bound_observation_for_provider_exact_count(
+            policy,
+            call_request,
+            observation,
+            payload,
+            config,
+            prior,
+            transcript,
+        )
+    }
+
     fn try_bound_observation_for_provider_exact_count(
         policy: &mut AgentRunPolicy,
         call_request: AgentModelCallRequest,
