@@ -13,11 +13,11 @@ use crate::{
 /// model-authored fill text nor page-authored labels.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AgentProviderActionRefusalKey {
-    observation: SemanticObservationId,
-    generation: SemanticObservationGeneration,
-    kind: SemanticActionKind,
-    target: SemanticReferenceId,
-    error: SemanticActionBindingError,
+    pub(super) observation: SemanticObservationId,
+    pub(super) generation: SemanticObservationGeneration,
+    pub(super) kind: SemanticActionKind,
+    pub(super) target: SemanticReferenceId,
+    pub(super) error: SemanticActionBindingError,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,6 +108,21 @@ impl super::super::AgentProviderSettledToolTurn {
         } else {
             None
         };
+        if let Some((context, error)) = refusal_context.and_then(|context| {
+            continuation
+                .transcript
+                .action_targets()
+                .and_then(|targets| targets.excluded_error(context.kind, context.target))
+                .map(|error| (context, error))
+        }) {
+            return Ok(AgentProviderActionResolution::Refused(
+                AgentProviderActionRefusal {
+                    continuation,
+                    error,
+                    context: Some(context),
+                },
+            ));
+        }
         match SemanticActionBatch::bind(id, observation, frames, actions.into_actions()) {
             Ok(batch) => Ok(AgentProviderActionResolution::Bound(batch, continuation)),
             Err(
@@ -166,11 +181,11 @@ impl AgentProviderActionRefusal {
         let (code, guidance) = match self.error {
             SemanticActionBindingError::Reference(SemanticReferenceError::OperationDenied) => (
                 "operation_not_supported",
-                "The requested operation is not in the target ref's advertised ops. The rejected metadata identifies the exact operation, target, role and observed capabilities without echoing action content. Choose a supplied tool operation advertised for an observed ref, or inspect to reveal a suitable control. Do not repeat the rejected operation on that target.",
+                "The requested operation is not in the target ref's advertised ops. The rejected metadata identifies the exact operation, target, role and observed capabilities without echoing action content. This operation/target pair is unavailable while the observation is unchanged; other eligible refs remain available. Choose an advertised operation on another supplied ref, inspect to reveal a suitable control, or request a genuinely fresh observation before reconsidering changed state. Do not repeat the rejected pair.",
             ),
             SemanticActionBindingError::OutcomeAlreadySatisfied => (
                 "outcome_already_satisfied",
-                "The proposed postcondition already holds in the supplied observation. Choose the next useful operation with a verifiable change, or extract the result if the objective is complete. Do not repeat this proposal.",
+                "The proposed postcondition already holds in the supplied observation. Choose a meaningfully different operation or input with a verifiable change, request a genuinely fresh observation if state may have changed, or extract the result if the objective is complete. Do not repeat this exact proposal.",
             ),
             _ => return Err(AgentProviderContinuationError::ToolKind),
         };
@@ -187,14 +202,34 @@ impl AgentProviderActionRefusal {
             });
         }
         let result = result.to_string();
-        let (call, _, _, correlation, transcript) = self.continuation.into_parts();
-        let transcript = AgentProviderTranscript::try_initial_with_checkpoints(
+        // OperationDenied is structural for this exact observation. An
+        // already-satisfied outcome is parameter-specific (for example Fill
+        // with one value) and must not suppress a different proposal using the
+        // same operation/ref; Work's exact refusal key still stops repetition.
+        let exclusion = matches!(
+            self.error,
+            SemanticActionBindingError::Reference(SemanticReferenceError::OperationDenied)
+        )
+        .then(|| self.context.map(|context| context.key(self.error)))
+        .flatten();
+        let (call, _, _, correlation, mut transcript) = self.continuation.into_parts();
+        let action_targets = transcript.take_action_targets();
+        let mut transcript = AgentProviderTranscript::try_initial_with_checkpoints(
             transcript.objective,
             payload,
             transcript.navigation_checkpoint,
             transcript.inspection_checkpoint,
         )
         .ok_or(AgentProviderContinuationError::TranscriptLimit)?;
+        if let Some(mut targets) = action_targets {
+            if !targets.matches(observation) {
+                return Err(AgentProviderContinuationError::Baseline);
+            }
+            if let Some(exclusion) = exclusion {
+                targets.try_exclude(exclusion)?;
+            }
+            transcript.set_action_targets(targets);
+        }
         Ok((call, transcript.try_bind(correlation, result)?))
     }
 }

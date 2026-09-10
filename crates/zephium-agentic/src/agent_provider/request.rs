@@ -43,7 +43,9 @@ use crate::{
     MAX_SEMANTIC_SURROUNDING_TEXT_BYTES,
 };
 
-use super::continuation::{AgentProviderBoundTranscript, AgentProviderTranscript};
+use super::continuation::{
+    AgentProviderActionTargets, AgentProviderBoundTranscript, AgentProviderTranscript,
+};
 use super::tool::{AgentBrowserToolKind, OpenAiResponseReplayItem};
 #[cfg(any(test, feature = "provider-transport"))]
 use super::AgentProviderContinuationSeed;
@@ -1772,14 +1774,24 @@ impl AgentPreparedObservationRequest {
             payload.token_measurement(),
             objective.token_measurement(),
         )?;
+        let action_targets = action_targets_for_observation(&config, observation)?;
         let semantic_payload_tokens =
             AgentProviderInputTokenCount::from_measurement(payload.token_measurement());
-        let body = encode_openai_body(&config, objective.as_str(), payload.as_str())?;
+        let body = encode_locally_accounted_observation_body(
+            &config,
+            objective.as_str(),
+            payload.as_str(),
+        )?;
         let admission = policy.prepare_observation_input(call_request, observation, &payload)?;
         let call = AgentProviderCallIdentity::from_admission(&admission);
         let (semantic_content, semantic_stats, delivery) = payload.into_provider_parts();
-        let continuation_transcript =
+        let mut continuation_transcript =
             AgentProviderTranscript::try_initial(objective.shared_content(), semantic_content);
+        if let (Some(transcript), Some(targets)) =
+            (continuation_transcript.as_mut(), action_targets)
+        {
+            transcript.set_action_targets(targets);
+        }
         let request = AgentProviderRequest {
             call,
             config,
@@ -1847,9 +1859,10 @@ impl AgentPreparedObservationRequest {
                 Ok(AgentProviderInspectionContext { text, progress })
             })
             .transpose()?;
+        let action_targets = action_targets_for_observation(&config, observation)?;
         let semantic_payload_tokens =
             AgentProviderInputTokenCount::from_measurement(payload.token_measurement());
-        let body = encode_openai_observation_body(
+        let body = encode_openai_observation_body_with_action_targets(
             &config,
             objective.as_str(),
             payload.as_str(),
@@ -1859,6 +1872,7 @@ impl AgentPreparedObservationRequest {
             inspection_checkpoint
                 .as_ref()
                 .map(|checkpoint| checkpoint.text.as_str()),
+            action_targets.as_ref(),
         )?;
         let body = encode_decision_budget(
             body,
@@ -1881,12 +1895,17 @@ impl AgentPreparedObservationRequest {
         )?;
         let call = AgentProviderCallIdentity::from_admission(&admission);
         let (semantic_content, semantic_stats, delivery) = payload.into_provider_parts();
-        let continuation_transcript = AgentProviderTranscript::try_initial_with_checkpoints(
+        let mut continuation_transcript = AgentProviderTranscript::try_initial_with_checkpoints(
             objective.shared_content(),
             semantic_content,
             navigation_checkpoint,
             inspection_checkpoint,
         );
+        if let (Some(transcript), Some(targets)) =
+            (continuation_transcript.as_mut(), action_targets)
+        {
+            transcript.set_action_targets(targets);
+        }
         let request = AgentProviderRequest {
             call,
             config,
@@ -1928,14 +1947,24 @@ impl AgentPreparedObservationRequest {
             payload.token_measurement(),
             objective.token_measurement(),
         )?;
+        let action_targets = action_targets_for_observation(&config, observation)?;
         let semantic_payload_tokens =
             AgentProviderInputTokenCount::from_measurement(payload.token_measurement());
-        let body = encode_anthropic_body(&config, objective.as_str(), payload.as_str())?;
+        let body = encode_locally_accounted_observation_body(
+            &config,
+            objective.as_str(),
+            payload.as_str(),
+        )?;
         let admission = policy.prepare_observation_input(call_request, observation, &payload)?;
         let call = AgentProviderCallIdentity::from_admission(&admission);
         let (semantic_content, semantic_stats, delivery) = payload.into_provider_parts();
-        let continuation_transcript =
+        let mut continuation_transcript =
             AgentProviderTranscript::try_initial(objective.shared_content(), semantic_content);
+        if let (Some(transcript), Some(targets)) =
+            (continuation_transcript.as_mut(), action_targets)
+        {
+            transcript.set_action_targets(targets);
+        }
         let request = AgentProviderRequest {
             call,
             config,
@@ -3496,7 +3525,7 @@ struct OpenAiRequestWire<'a> {
     model: &'a str,
     instructions: &'static str,
     input: Vec<OpenAiInputMessageWire<'a>>,
-    tools: Vec<OpenAiToolWire<'static>>,
+    tools: Vec<OpenAiToolWire<'a>>,
     tool_choice: &'static str,
     parallel_tool_calls: bool,
     max_output_tokens: u32,
@@ -3515,7 +3544,7 @@ struct OpenAiContinuationRequestWire<'a> {
     model: &'a str,
     instructions: &'static str,
     input: Vec<OpenAiContinuationInputWire<'a>>,
-    tools: Vec<OpenAiToolWire<'static>>,
+    tools: Vec<OpenAiToolWire<'a>>,
     tool_choice: &'static str,
     parallel_tool_calls: bool,
     max_output_tokens: u32,
@@ -3657,7 +3686,7 @@ struct AnthropicRequestWire<'a> {
     max_tokens: u32,
     system: &'static str,
     messages: [AnthropicMessageWire<'a>; 1],
-    tools: Vec<AnthropicToolWire<'static>>,
+    tools: Vec<AnthropicToolWire<'a>>,
     tool_choice: AnthropicToolChoiceWire,
     service_tier: &'static str,
     inference_geo: &'static str,
@@ -3670,7 +3699,7 @@ struct AnthropicContinuationRequestWire<'a> {
     max_tokens: u32,
     system: &'static str,
     messages: Vec<AnthropicContinuationMessageWire<'a>>,
-    tools: Vec<AnthropicToolWire<'static>>,
+    tools: Vec<AnthropicToolWire<'a>>,
     tool_choice: AnthropicToolChoiceWire,
     service_tier: &'static str,
     inference_geo: &'static str,
@@ -3958,6 +3987,27 @@ fn encode_openai_body(
     encode_openai_observation_body(config, objective, semantic, None, None)
 }
 
+/// Initial requests admitted through a configured fixed-input allowance must
+/// retain the cached fixed tool schema. Observation-specific enums are legal
+/// only after the complete serialized body enters exact/conservative whole-
+/// request accounting; silently varying this body would undercount authority.
+fn encode_locally_accounted_observation_body(
+    config: &AgentProviderCallConfig,
+    objective: &str,
+    semantic: &str,
+) -> Result<Vec<u8>, AgentProviderRequestError> {
+    if !matches!(
+        config.input_accounting_mode(),
+        super::AgentProviderInputAccountingMode::ExactLocal { .. }
+    ) {
+        return Err(AgentProviderContractError::InputAccountingMode.into());
+    }
+    match config.provider() {
+        AgentProviderKind::OpenAiResponses => encode_openai_body(config, objective, semantic),
+        AgentProviderKind::AnthropicMessages => encode_anthropic_body(config, objective, semantic),
+    }
+}
+
 /// Replace no evidence and retain no stale budget replay. Derive the current
 /// allowance from the immutable run config and exact call identity, before
 /// whole-input measurement and reservation on every decision path.
@@ -4016,10 +4066,32 @@ fn encode_openai_observation_body(
     navigation_checkpoint: Option<&str>,
     inspection_checkpoint: Option<&str>,
 ) -> Result<Vec<u8>, AgentProviderRequestError> {
+    encode_openai_observation_body_with_action_targets(
+        config,
+        objective,
+        semantic,
+        navigation_checkpoint,
+        inspection_checkpoint,
+        None,
+    )
+}
+
+fn encode_openai_observation_body_with_action_targets(
+    config: &AgentProviderCallConfig,
+    objective: &str,
+    semantic: &str,
+    navigation_checkpoint: Option<&str>,
+    inspection_checkpoint: Option<&str>,
+    action_targets: Option<&AgentProviderActionTargets>,
+) -> Result<Vec<u8>, AgentProviderRequestError> {
     if config.provider() != AgentProviderKind::OpenAiResponses {
         return Err(AgentProviderContractError::ProviderKind.into());
     }
-    let tools = browser_tool_definitions_for(config)
+    let constrained = constrained_browser_tool_definitions(config, action_targets)?;
+    let definitions = constrained
+        .as_deref()
+        .unwrap_or_else(|| browser_tool_definitions_for(config));
+    let tools = definitions
         .iter()
         .chain(config.adds_baseline_read().then(|| &*BASELINE_READ_TOOL))
         .chain(
@@ -4129,7 +4201,11 @@ pub(in crate::agent_provider) fn encode_openai_continuation_body(
         ));
     }
     debug_assert_eq!(input.len(), input_items);
-    let tools = browser_tool_definitions_for(config)
+    let constrained = constrained_browser_tool_definitions(config, transcript.action_targets())?;
+    let definitions = constrained
+        .as_deref()
+        .unwrap_or_else(|| browser_tool_definitions_for(config));
+    let tools = definitions
         .iter()
         .chain(config.adds_baseline_read().then(|| &*BASELINE_READ_TOOL))
         .chain(
@@ -4334,7 +4410,11 @@ fn encode_openai_screenshot_continuation_body(
         },
     ));
     debug_assert_eq!(input.len(), input_items);
-    let tools = browser_tool_definitions_for(config)
+    let constrained = constrained_browser_tool_definitions(config, transcript.action_targets())?;
+    let definitions = constrained
+        .as_deref()
+        .unwrap_or_else(|| browser_tool_definitions_for(config));
+    let tools = definitions
         .iter()
         .chain(config.adds_baseline_read().then(|| &*BASELINE_READ_TOOL))
         .chain(
@@ -4380,10 +4460,25 @@ fn encode_anthropic_body(
     objective: &str,
     semantic: &str,
 ) -> Result<Vec<u8>, AgentProviderRequestError> {
+    encode_anthropic_body_with_action_targets(config, objective, semantic, None)
+}
+
+fn encode_anthropic_body_with_action_targets(
+    config: &AgentProviderCallConfig,
+    objective: &str,
+    semantic: &str,
+    action_targets: Option<&AgentProviderActionTargets>,
+) -> Result<Vec<u8>, AgentProviderRequestError> {
     if config.provider() != AgentProviderKind::AnthropicMessages {
         return Err(AgentProviderContractError::ProviderKind.into());
     }
-    let definitions = anthropic_browser_tool_definitions(config);
+    let constrained = constrained_browser_tool_definitions(config, action_targets)?;
+    let projected = constrained
+        .as_deref()
+        .map(constrained_anthropic_tool_definitions);
+    let definitions = projected
+        .as_deref()
+        .unwrap_or_else(|| anthropic_browser_tool_definitions(config));
     validate_anthropic_tool_definitions(
         definitions,
         config.adds_baseline_read(),
@@ -4451,7 +4546,13 @@ fn encode_anthropic_continuation_body(
     if config.provider() != AgentProviderKind::AnthropicMessages {
         return Err(AgentProviderContractError::ProviderKind.into());
     }
-    let definitions = anthropic_browser_tool_definitions(config);
+    let constrained = constrained_browser_tool_definitions(config, transcript.action_targets())?;
+    let projected = constrained
+        .as_deref()
+        .map(constrained_anthropic_tool_definitions);
+    let definitions = projected
+        .as_deref()
+        .unwrap_or_else(|| anthropic_browser_tool_definitions(config));
     validate_anthropic_tool_definitions(
         definitions,
         config.adds_baseline_read(),
@@ -4655,13 +4756,19 @@ fn encode_anthropic_screenshot_continuation_body(
     if config.provider() != AgentProviderKind::AnthropicMessages {
         return Err(AgentProviderContractError::ProviderKind.into());
     }
-    let definitions = anthropic_browser_tool_definitions(config);
+    let transcript = continuation.transcript();
+    let constrained = constrained_browser_tool_definitions(config, transcript.action_targets())?;
+    let projected = constrained
+        .as_deref()
+        .map(constrained_anthropic_tool_definitions);
+    let definitions = projected
+        .as_deref()
+        .unwrap_or_else(|| anthropic_browser_tool_definitions(config));
     validate_anthropic_tool_definitions(
         definitions,
         config.adds_baseline_read(),
         config.adds_progressive_observation(),
     )?;
-    let transcript = continuation.transcript();
     if transcript.navigation_checkpoint().is_some() {
         return Err(AgentProviderRequestError::Encoding);
     }
@@ -4873,12 +4980,14 @@ fn encode_bounded_provider_body(
     Ok(body)
 }
 
+#[derive(Clone)]
 pub(super) struct BrowserToolDefinition {
     pub(super) kind: AgentBrowserToolKind,
     pub(super) description: &'static str,
     pub(super) parameters: Value,
 }
 
+#[derive(Clone)]
 struct AnthropicBrowserToolDefinition {
     kind: AgentBrowserToolKind,
     description: &'static str,
@@ -5158,6 +5267,87 @@ fn browser_tool_definitions_for(
         }
         super::BrowserToolProfile::Full => browser_tool_definitions(),
     }
+}
+
+/// Builds the request-local action schema when an action tool is enabled.
+/// Static definitions remain immutable and cacheable; only the `act` clone is
+/// narrowed to refs that advertise each operation in the exact baseline.
+fn constrained_browser_tool_definitions(
+    config: &AgentProviderCallConfig,
+    targets: Option<&AgentProviderActionTargets>,
+) -> Result<Option<Vec<BrowserToolDefinition>>, AgentProviderRequestError> {
+    if !config.permits_tool(AgentBrowserToolKind::Act) {
+        return Ok(None);
+    }
+    let Some(targets) = targets else {
+        return Ok(None);
+    };
+    let mut definitions = browser_tool_definitions_for(config).to_vec();
+    let Some(index) = definitions
+        .iter()
+        .position(|tool| tool.kind == AgentBrowserToolKind::Act)
+    else {
+        return Err(AgentProviderRequestError::Encoding);
+    };
+    let variants = definitions[index].parameters["properties"]["actions"]["items"]["anyOf"]
+        .as_array_mut()
+        .ok_or(AgentProviderRequestError::Encoding)?;
+    variants.retain_mut(|variant| {
+        let Some(label) = variant["properties"]["kind"]["enum"]
+            .as_array()
+            .and_then(|values| values.first())
+            .and_then(Value::as_str)
+        else {
+            return false;
+        };
+        let kind = match label {
+            "click" => SemanticActionKind::Click,
+            "fill" => SemanticActionKind::Fill,
+            "select" => SemanticActionKind::Select,
+            "press" => SemanticActionKind::Press,
+            "scroll" => SemanticActionKind::Scroll,
+            _ => return false,
+        };
+        let references: Vec<_> = targets
+            .permitted_references(kind)
+            .map(|reference| Value::String(reference.model_token()))
+            .collect();
+        if references.is_empty() {
+            return false;
+        }
+        variant["properties"]["target"] = json!({"type":"string", "enum":references});
+        true
+    });
+    if variants.is_empty() {
+        definitions.remove(index);
+    }
+    Ok(Some(definitions))
+}
+
+fn action_targets_for_observation(
+    config: &AgentProviderCallConfig,
+    observation: &SemanticObservation,
+) -> Result<Option<AgentProviderActionTargets>, AgentProviderRequestError> {
+    config
+        .permits_tool(AgentBrowserToolKind::Act)
+        .then(|| {
+            AgentProviderActionTargets::try_from_observation(observation)
+                .ok_or(AgentProviderRequestError::Encoding)
+        })
+        .transpose()
+}
+
+fn constrained_anthropic_tool_definitions(
+    definitions: &[BrowserToolDefinition],
+) -> Vec<AnthropicBrowserToolDefinition> {
+    definitions
+        .iter()
+        .map(|tool| AnthropicBrowserToolDefinition {
+            kind: tool.kind,
+            description: tool.description,
+            input_schema: project_anthropic_schema(&tool.parameters),
+        })
+        .collect()
 }
 
 fn anthropic_browser_tool_definitions(
@@ -6539,6 +6729,185 @@ mod tests {
             if provider == AgentProviderKind::OpenAiResponses {
                 assert_eq!(wire["store"], false);
             }
+        }
+    }
+
+    #[test]
+    fn action_targets_are_operation_specific_provider_neutral_and_exactly_excluded() {
+        use crate::SemanticOperationClass::{Click, Fill};
+
+        let mut targets = AgentProviderActionTargets::for_test(
+            7,
+            9,
+            &[(1, &[Click]), (2, &[Click, Fill]), (3, &[Click, Fill])],
+        );
+        targets.exclude_for_test(
+            SemanticActionKind::Click,
+            2,
+            crate::SemanticActionBindingError::OutcomeAlreadySatisfied,
+        );
+
+        for provider in [
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderKind::AnthropicMessages,
+        ] {
+            let config = AgentProviderCallConfig::try_for_test(
+                provider,
+                super::super::AgentProviderModelRevision::try_new("fixture-model".to_owned())
+                    .unwrap(),
+                super::super::AgentProviderReasoningEffort::None,
+                revision("fixture:v1"),
+                super::super::AgentProviderPricingProfile::try_new(
+                    super::super::AgentProviderPricingRevision::new(1).unwrap(),
+                    16_384,
+                )
+                .unwrap(),
+                512,
+                1024,
+                super::super::AgentProviderStreamBudget::STANDARD,
+            )
+            .unwrap()
+            .restrict_to_locate_and_act();
+            let generic = match provider {
+                AgentProviderKind::OpenAiResponses => {
+                    encode_openai_body(&config, "objective", "observation")
+                }
+                AgentProviderKind::AnthropicMessages => {
+                    encode_anthropic_body(&config, "objective", "observation")
+                }
+            }
+            .unwrap();
+            let body = match provider {
+                AgentProviderKind::OpenAiResponses => {
+                    encode_openai_observation_body_with_action_targets(
+                        &config,
+                        "objective",
+                        "observation",
+                        None,
+                        None,
+                        Some(&targets),
+                    )
+                }
+                AgentProviderKind::AnthropicMessages => encode_anthropic_body_with_action_targets(
+                    &config,
+                    "objective",
+                    "observation",
+                    Some(&targets),
+                ),
+            }
+            .unwrap();
+            assert!(body.len() < generic.len());
+            let wire: Value = serde_json::from_slice(&body).unwrap();
+            let act = wire["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tool| tool["name"] == "act")
+                .unwrap();
+            assert_eq!(act["strict"], true);
+            let schema = if provider == AgentProviderKind::OpenAiResponses {
+                &act["parameters"]
+            } else {
+                &act["input_schema"]
+            };
+            let variants = schema["properties"]["actions"]["items"]["anyOf"]
+                .as_array()
+                .unwrap();
+            let refs = |kind: &str| {
+                variants
+                    .iter()
+                    .find(|variant| variant["properties"]["kind"]["enum"][0] == kind)
+                    .unwrap()["properties"]["target"]["enum"]
+                    .as_array()
+                    .unwrap()
+                    .clone()
+            };
+            assert_eq!(refs("click"), vec![json!("@a1"), json!("@a3")]);
+            assert_eq!(refs("fill"), vec![json!("@a2"), json!("@a3")]);
+            assert_eq!(variants.len(), 2, "unadvertised action kinds are absent");
+
+            let empty = AgentProviderActionTargets::for_test(7, 9, &[]);
+            let body = match provider {
+                AgentProviderKind::OpenAiResponses => {
+                    encode_openai_observation_body_with_action_targets(
+                        &config,
+                        "objective",
+                        "observation",
+                        None,
+                        None,
+                        Some(&empty),
+                    )
+                }
+                AgentProviderKind::AnthropicMessages => encode_anthropic_body_with_action_targets(
+                    &config,
+                    "objective",
+                    "observation",
+                    Some(&empty),
+                ),
+            }
+            .unwrap();
+            let wire: Value = serde_json::from_slice(&body).unwrap();
+            assert!(wire["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|tool| tool["name"] != "act"));
+        }
+    }
+
+    #[test]
+    fn fixed_input_initial_requests_keep_the_cached_schema_for_exact_accounting() {
+        for provider in [
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderKind::AnthropicMessages,
+        ] {
+            let config = AgentProviderCallConfig::try_for_test(
+                provider,
+                super::super::AgentProviderModelRevision::try_new("fixture-model".to_owned())
+                    .unwrap(),
+                super::super::AgentProviderReasoningEffort::None,
+                revision("fixture:v1"),
+                super::super::AgentProviderPricingProfile::try_new(
+                    super::super::AgentProviderPricingRevision::new(1).unwrap(),
+                    16_384,
+                )
+                .unwrap(),
+                512,
+                1024,
+                super::super::AgentProviderStreamBudget::STANDARD,
+            )
+            .unwrap()
+            .restrict_to_locate_and_act();
+            let body =
+                encode_locally_accounted_observation_body(&config, "objective", "observation")
+                    .unwrap();
+            let expected = match provider {
+                AgentProviderKind::OpenAiResponses => {
+                    encode_openai_body(&config, "objective", "observation")
+                }
+                AgentProviderKind::AnthropicMessages => {
+                    encode_anthropic_body(&config, "objective", "observation")
+                }
+            }
+            .unwrap();
+            assert_eq!(body, expected, "fixed input allowance requires fixed bytes");
+            let wire: Value = serde_json::from_slice(&body).unwrap();
+            let act = wire["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tool| tool["name"] == "act")
+                .unwrap();
+            let schema = if provider == AgentProviderKind::OpenAiResponses {
+                &act["parameters"]
+            } else {
+                &act["input_schema"]
+            };
+            assert_eq!(
+                schema["properties"]["actions"]["items"]["anyOf"][0]["properties"]["target"]
+                    ["$ref"],
+                "#/$defs/action_ref"
+            );
         }
     }
 

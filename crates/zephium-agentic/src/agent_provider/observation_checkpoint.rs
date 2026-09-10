@@ -180,19 +180,26 @@ impl AgentProviderObservationRefusal {
             "guidance": "No capture occurred; this observation and its refs remain current. text_search and region require a current document/landmark/group/dialog ref. A heading is only eligible for surrounding_text or subtree; its subtree excludes following prose. If no eligible search boundary exists here, snapshot(initial) can restore current viewport anchors. You may extract retained evidence instead. Choose another operation within the remaining budget; do not repeat the rejected scope.",
             "observation_unchanged": true,
         }).to_string();
-        let (call, _, _, correlation, transcript) = self.0.into_parts();
+        let (call, _, _, correlation, mut transcript) = self.0.into_parts();
+        let action_targets = transcript.take_action_targets();
         // Match progressive capture checkpointing: keep current refs exactly
         // once, approved intent and policy-bound progress. Old tool replay is
         // unnecessary for reporting a rejected operation and may contain refs
         // from previous captures. The failed proposal retains its exact ID and
         // provider-authored replay. Model-call budgets are never reset here.
-        let transcript = AgentProviderTranscript::try_initial_with_checkpoints(
+        let mut transcript = AgentProviderTranscript::try_initial_with_checkpoints(
             transcript.objective,
             payload,
             transcript.navigation_checkpoint,
             transcript.inspection_checkpoint,
         )
         .ok_or(AgentProviderContinuationError::TranscriptLimit)?;
+        if let Some(targets) = action_targets {
+            if !targets.matches(observation) {
+                return Err(AgentProviderContinuationError::Baseline);
+            }
+            transcript.set_action_targets(targets);
+        }
         Ok((call, transcript.try_bind(correlation, result)?))
     }
 }

@@ -17,12 +17,13 @@ use crate::semantic_locate_model::SemanticLocateDeliveryAuthority;
 use crate::semantic_read_model::SemanticReadDeliveryAuthority;
 use crate::semantic_screenshot::SemanticScreenshotDeliveryAuthority;
 use crate::{
-    AgentModelCallRequest, SemanticDiff, SemanticDiffEncodingStats, SemanticDiffModelPayload,
-    SemanticExtractionEncodingStats, SemanticExtractionModelPayload, SemanticExtractionSchema,
-    SemanticLocateEncodingStats, SemanticLocateModelPayload, SemanticLocateResult,
+    AgentModelCallRequest, SemanticActionBindingError, SemanticActionKind, SemanticDiff,
+    SemanticDiffEncodingStats, SemanticDiffModelPayload, SemanticExtractionEncodingStats,
+    SemanticExtractionModelPayload, SemanticExtractionSchema, SemanticLocateEncodingStats,
+    SemanticLocateModelPayload, SemanticLocateResult, SemanticObservation,
     SemanticObservationAcknowledgement, SemanticObservationGeneration, SemanticObservationId,
-    SemanticReadEncodingStats, SemanticReadModelPayload, SemanticReadResult, SemanticScreenshot,
-    SemanticScreenshotStats,
+    SemanticOperations, SemanticReadEncodingStats, SemanticReadModelPayload, SemanticReadResult,
+    SemanticReferenceId, SemanticScreenshot, SemanticScreenshotStats,
 };
 
 use super::{
@@ -58,6 +59,237 @@ pub const MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES: usize = 256 * 1024;
 /// results do not authorize retaining a larger page or a larger transcript.
 pub const MAX_AGENT_PROVIDER_CONTINUATION_TURNS: usize = 64;
 
+/// Content-free action vocabulary for one exact observation generation.
+///
+/// This is prompt narrowing, not authority: native action binding remains the
+/// final operation/ref check. Exact rejected pairs are retained only while the
+/// observation is unchanged, so a correction can use the same operation on a
+/// different eligible ref without reopening the refused pair.
+pub(super) struct AgentProviderActionTargets {
+    observation: SemanticObservationId,
+    generation: SemanticObservationGeneration,
+    guard: [u8; 32],
+    entries: Vec<AgentProviderActionTarget>,
+    exclusions: Vec<AgentProviderActionExclusion>,
+}
+
+#[derive(Clone, Copy)]
+struct AgentProviderActionTarget {
+    reference: SemanticReferenceId,
+    operations: SemanticOperations,
+}
+
+#[derive(Clone, Copy)]
+struct AgentProviderActionExclusion {
+    kind: SemanticActionKind,
+    target: SemanticReferenceId,
+    error: SemanticActionBindingError,
+}
+
+impl AgentProviderActionTargets {
+    pub(super) fn try_from_observation(observation: &SemanticObservation) -> Option<Self> {
+        let guard =
+            crate::semantic_diff::SemanticObservationFingerprint::from_observation(observation)
+                .digest();
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(observation.node_count().into())
+            .ok()?;
+        for frame in observation.frames() {
+            for node in frame.nodes() {
+                if !node.operations().is_empty() {
+                    entries.push(AgentProviderActionTarget {
+                        reference: node.reference(),
+                        operations: node.operations(),
+                    });
+                }
+            }
+        }
+        Some(Self {
+            observation: observation.request().id(),
+            generation: observation.request().generation(),
+            guard,
+            entries,
+            exclusions: Vec::new(),
+        })
+    }
+
+    pub(super) fn matches(&self, observation: &SemanticObservation) -> bool {
+        self.observation == observation.request().id()
+            && self.generation == observation.request().generation()
+            && self.guard
+                == crate::semantic_diff::SemanticObservationFingerprint::from_observation(
+                    observation,
+                )
+                .digest()
+    }
+
+    pub(super) fn try_from_diff(previous: &Self, diff: &SemanticDiff) -> Option<Self> {
+        if previous.observation != diff.previous_observation()
+            || previous.generation != diff.previous_generation()
+            || previous.guard != diff.baseline_guard()
+        {
+            return None;
+        }
+        let mut rebases: Vec<_> = diff
+            .reference_rebases()
+            .iter()
+            .map(|rebase| {
+                (
+                    rebase.previous_reference().reference(),
+                    rebase.current_reference(),
+                )
+            })
+            .collect();
+        rebases.sort_unstable_by_key(|(previous, _)| *previous);
+        let mut replaced: Vec<_> = diff
+            .entries()
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .previous_reference()
+                    .map(|reference| reference.reference())
+            })
+            .collect();
+        replaced.sort_unstable();
+
+        let capacity = previous.entries.len().checked_add(diff.entries().len())?;
+        let mut entries = Vec::new();
+        entries.try_reserve(capacity).ok()?;
+        for entry in &previous.entries {
+            if replaced.binary_search(&entry.reference).is_ok() {
+                continue;
+            }
+            let reference = rebases
+                .binary_search_by_key(&entry.reference, |(reference, _)| *reference)
+                .ok()
+                .map_or(entry.reference, |index| rebases[index].1);
+            entries.push(AgentProviderActionTarget {
+                reference,
+                operations: entry.operations,
+            });
+        }
+        for entry in diff.entries() {
+            let Some(node) = entry.current_node() else {
+                continue;
+            };
+            if !node.operations().is_empty() {
+                entries.push(AgentProviderActionTarget {
+                    reference: node.reference(),
+                    operations: node.operations(),
+                });
+            }
+        }
+        entries.sort_unstable_by_key(|entry| entry.reference);
+        if entries
+            .windows(2)
+            .any(|pair| pair[0].reference == pair[1].reference)
+        {
+            return None;
+        }
+        Some(Self {
+            observation: diff.current_observation(),
+            generation: diff.current_generation(),
+            guard: diff.current_guard(),
+            entries,
+            exclusions: Vec::new(),
+        })
+    }
+
+    pub(super) fn permitted_references(
+        &self,
+        kind: SemanticActionKind,
+    ) -> impl Iterator<Item = SemanticReferenceId> + '_ {
+        self.entries.iter().filter_map(move |entry| {
+            (entry.operations.contains(kind.operation())
+                && !self
+                    .exclusions
+                    .iter()
+                    .any(|exclusion| exclusion.kind == kind && exclusion.target == entry.reference))
+            .then_some(entry.reference)
+        })
+    }
+
+    pub(super) fn excluded_error(
+        &self,
+        kind: SemanticActionKind,
+        target: SemanticReferenceId,
+    ) -> Option<SemanticActionBindingError> {
+        self.exclusions
+            .iter()
+            .find(|exclusion| exclusion.kind == kind && exclusion.target == target)
+            .map(|exclusion| exclusion.error)
+    }
+
+    pub(super) fn try_exclude(
+        &mut self,
+        key: AgentProviderActionRefusalKey,
+    ) -> Result<(), AgentProviderContinuationError> {
+        if self.observation != key.observation || self.generation != key.generation {
+            return Err(AgentProviderContinuationError::Baseline);
+        }
+        if self
+            .exclusions
+            .iter()
+            .any(|entry| entry.kind == key.kind && entry.target == key.target)
+        {
+            return Ok(());
+        }
+        if self.exclusions.len() >= MAX_AGENT_PROVIDER_CONTINUATION_TURNS {
+            return Err(AgentProviderContinuationError::TranscriptLimit);
+        }
+        self.exclusions
+            .try_reserve(1)
+            .map_err(|_| AgentProviderContinuationError::TranscriptLimit)?;
+        self.exclusions.push(AgentProviderActionExclusion {
+            kind: key.kind,
+            target: key.target,
+            error: key.error,
+        });
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn exclusion_count(&self) -> usize {
+        self.exclusions.len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_test(
+        observation: u64,
+        generation: u64,
+        entries: &[(u16, &[crate::SemanticOperationClass])],
+    ) -> Self {
+        Self {
+            observation: SemanticObservationId::new(observation).expect("observation"),
+            generation: SemanticObservationGeneration::new(generation).expect("generation"),
+            guard: [0; 32],
+            entries: entries
+                .iter()
+                .map(|(reference, operations)| AgentProviderActionTarget {
+                    reference: SemanticReferenceId::new(*reference).expect("reference"),
+                    operations: SemanticOperations::try_new(operations).expect("operations"),
+                })
+                .collect(),
+            exclusions: Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn exclude_for_test(
+        &mut self,
+        kind: SemanticActionKind,
+        target: u16,
+        error: SemanticActionBindingError,
+    ) {
+        self.exclusions.push(AgentProviderActionExclusion {
+            kind,
+            target: SemanticReferenceId::new(target).expect("reference"),
+            error,
+        });
+    }
+}
+
 const _: () = {
     assert!(
         MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES
@@ -79,6 +311,7 @@ pub(super) struct AgentProviderTranscript {
     initial_observation: String,
     navigation_checkpoint: Option<super::request::AgentProviderNavigationContext>,
     inspection_checkpoint: Option<super::request::AgentProviderInspectionContext>,
+    action_targets: Option<AgentProviderActionTargets>,
     turns: Vec<AgentProviderTranscriptTurn>,
     retained_bytes: usize,
 }
@@ -145,6 +378,7 @@ impl AgentProviderTranscript {
             initial_observation,
             navigation_checkpoint,
             inspection_checkpoint,
+            action_targets: None,
             turns: Vec::new(),
             retained_bytes,
         })
@@ -230,6 +464,18 @@ impl AgentProviderTranscript {
     pub(super) fn turns(&self) -> &[AgentProviderTranscriptTurn] {
         &self.turns
     }
+
+    pub(super) fn set_action_targets(&mut self, targets: AgentProviderActionTargets) {
+        self.action_targets = Some(targets);
+    }
+
+    pub(super) fn action_targets(&self) -> Option<&AgentProviderActionTargets> {
+        self.action_targets.as_ref()
+    }
+
+    pub(super) fn take_action_targets(&mut self) -> Option<AgentProviderActionTargets> {
+        self.action_targets.take()
+    }
 }
 
 impl AgentProviderBoundTranscript {
@@ -251,6 +497,10 @@ impl AgentProviderBoundTranscript {
 
     pub(super) fn inspection_checkpoint(&self) -> Option<&str> {
         self.prior.inspection_checkpoint()
+    }
+
+    pub(super) fn action_targets(&self) -> Option<&AgentProviderActionTargets> {
+        self.prior.action_targets()
     }
 
     pub(super) fn turns(&self) -> impl Iterator<Item = &AgentProviderTranscriptTurn> {
@@ -646,12 +896,16 @@ impl AgentProviderContinuation {
         // Effects invalidate inspection anchors and old page replay. Keep the
         // objective and exact navigation policy binding; original run budgets
         // still bound all subsequent captures, actions, and model calls.
-        let transcript = AgentProviderTranscript::try_initial_with_checkpoints(
+        let mut transcript = AgentProviderTranscript::try_initial_with_checkpoints(
             transcript.objective,
             "Prior page observations and their refs are retired. Current browser state follows in the verified action tool result.".into(),
             transcript.navigation_checkpoint,
             None,
         ).ok_or(AgentProviderContinuationError::TranscriptLimit)?;
+        transcript.set_action_targets(
+            AgentProviderActionTargets::try_from_observation(current)
+                .ok_or(AgentProviderContinuationError::TranscriptLimit)?,
+        );
         Ok((prior, transcript.try_bind(correlation, output)?))
     }
 
@@ -690,7 +944,18 @@ impl AgentProviderContinuation {
         payload: SemanticDiffModelPayload,
     ) -> Result<AgentProviderBoundDiffContinuation, AgentProviderContinuationError> {
         self.validate_diff_turn(next_call, next_config, diff, &payload)?;
-        let (prior_call, config, baseline, correlation, transcript) = self.into_parts();
+        let refreshed_targets = self
+            .transcript
+            .action_targets()
+            .map(|targets| {
+                AgentProviderActionTargets::try_from_diff(targets, diff)
+                    .ok_or(AgentProviderContinuationError::Baseline)
+            })
+            .transpose()?;
+        let (prior_call, config, baseline, correlation, mut transcript) = self.into_parts();
+        if let Some(targets) = refreshed_targets {
+            transcript.set_action_targets(targets);
+        }
         let (tool_result, semantic_stats, delivery) = payload.into_provider_parts();
         let transcript = transcript.try_bind(correlation, tool_result)?;
         Ok(AgentProviderBoundDiffContinuation {
@@ -1777,6 +2042,25 @@ mod tests {
         snapshot: u64,
         status: &str,
     ) -> SemanticObservation {
+        observation_with_nodes(
+            context,
+            observation,
+            invocation,
+            snapshot,
+            json!([
+                {"k": 1, "r": "document", "o": 16},
+                {"k": 2, "p": 0, "r": "status", "n": status}
+            ]),
+        )
+    }
+
+    fn observation_with_nodes(
+        context: crate::ContextJoin,
+        observation: u64,
+        invocation: u64,
+        snapshot: u64,
+        nodes: serde_json::Value,
+    ) -> SemanticObservation {
         let frame = SemanticFrameJoin::try_new(
             context,
             FrameId::MAIN,
@@ -1790,10 +2074,7 @@ mod tests {
             "i": invocation,
             "g": snapshot,
             "c": "complete",
-            "n": [
-                {"k": 1, "r": "document", "o": 16},
-                {"k": 2, "p": 0, "r": "status", "n": status}
-            ]
+            "n": nodes
         }))
         .expect("wire");
         let snapshot = decode_semantic_snapshot(
@@ -2075,6 +2356,9 @@ mod tests {
             .contains("private initial observation"));
         assert_eq!(bound.turn_count(), 1);
         assert!(bound.inspection_checkpoint().is_none());
+        let targets = bound.action_targets().expect("fresh action targets");
+        assert!(targets.matches(current));
+        assert_eq!(targets.exclusion_count(), 0);
 
         let error = |outcome: Result<
             (AgentProviderCallIdentity, AgentProviderBoundTranscript),
@@ -2257,13 +2541,17 @@ mod tests {
         )
         .unwrap();
         let (correlation, proposal) = tool.into_continuation_parts();
+        let mut transcript = transcript();
+        transcript.set_action_targets(
+            AgentProviderActionTargets::try_from_observation(observation).unwrap(),
+        );
         let continuation = AgentProviderContinuationSeed {
             call: prior,
             config,
             baseline: SemanticObservationAcknowledgement::from_fingerprint(
                 SemanticObservationFingerprint::from_observation(observation),
             ),
-            transcript: transcript(),
+            transcript,
         }
         .join_terminal_tool(completion(prior, arguments.len() as u32), correlation)
         .unwrap();
@@ -2292,6 +2580,7 @@ mod tests {
         let (_, bound) = refusal
             .bind(&initial, &config, "exact current observation".into())
             .unwrap();
+        assert_eq!(bound.action_targets().unwrap().exclusion_count(), 1);
         let result: serde_json::Value = serde_json::from_str(bound.latest().tool_result()).unwrap();
         assert_eq!(result["code"], "operation_not_supported");
         assert_eq!(result["executed"], false);
@@ -2302,6 +2591,49 @@ mod tests {
         assert_eq!(result["rejected"]["advertised_ops"], json!(["scroll"]));
         // No false native failure or action settlement is supplied to the model.
         assert!(!result.to_string().contains("new value"));
+
+        // A provider that violates the narrowed next-turn schema still cannot
+        // reopen this exact operation/ref pair locally or reach native binding.
+        let transcript = bound.into_transcript();
+        let repeated_arguments = json!({"actions":[{
+            "kind":"fill", "target":"@a1", "value":"new value", "effect":"local_write",
+            "wait":{"kind":"immediate"}, "verification":{"kind":"target_value_matches_input"},
+            "settle_millis":2000
+        }]})
+        .to_string();
+        let repeated_call = call(2);
+        let tool = super::super::AgentBrowserToolCall::decode_openai(
+            repeated_call,
+            "fc_action_private_2".into(),
+            "call_action_private_2".into(),
+            "act",
+            repeated_arguments.clone(),
+        )
+        .unwrap();
+        let (correlation, proposal) = tool.into_continuation_parts();
+        let continuation = AgentProviderContinuationSeed {
+            call: repeated_call,
+            config: config.clone(),
+            baseline: SemanticObservationAcknowledgement::from_fingerprint(
+                SemanticObservationFingerprint::from_observation(&initial),
+            ),
+            transcript,
+        }
+        .join_terminal_tool(
+            completion(repeated_call, repeated_arguments.len() as u32),
+            correlation,
+        )
+        .unwrap();
+        let repeated = super::super::AgentProviderSettledToolTurn::for_test(proposal, continuation)
+            .resolve_action(batch, &initial, &frames, &config)
+            .unwrap();
+        let AgentProviderActionResolution::Refused(repeated) = repeated else {
+            panic!("excluded proposal must remain refused")
+        };
+        assert_eq!(
+            repeated.reason(),
+            SemanticActionBindingError::Reference(SemanticReferenceError::OperationDenied)
+        );
 
         let changed = observation(context(), 2, 2, 2, "new current content");
         assert!(matches!(
@@ -2340,6 +2672,130 @@ mod tests {
             refusal.bind(&changed, &config, "changed".into()),
             Err(AgentProviderContinuationError::Baseline)
         ));
+    }
+
+    #[test]
+    fn complete_diff_rebases_full_action_inventory_and_resets_stale_exclusions() {
+        let context = context();
+        let previous = observation_with_nodes(
+            context,
+            1,
+            1,
+            1,
+            json!([
+                {"k": 1, "r": "document", "o": 16},
+                {"k": 2, "p": 0, "r": "button", "n": "Removed", "o": 1},
+                {"k": 3, "p": 0, "r": "button", "n": "Rebased", "o": 1},
+                {"k": 4, "p": 0, "r": "textbox", "n": "Changed", "o": 2}
+            ]),
+        );
+        let current = observation_with_nodes(
+            context,
+            2,
+            2,
+            2,
+            json!([
+                {"k": 1, "r": "document", "o": 16},
+                {"k": 3, "p": 0, "r": "button", "n": "Rebased", "o": 1},
+                {"k": 4, "p": 0, "r": "textbox", "n": "Changed", "o": 3},
+                {"k": 5, "p": 0, "r": "button", "n": "Added", "o": 1}
+            ]),
+        );
+        let acknowledgement = SemanticObservationAcknowledgement::from_fingerprint(
+            SemanticObservationFingerprint::from_observation(&previous),
+        );
+        let crate::SemanticDiffOutcome::Diff(diff) = crate::compute_semantic_diff(
+            &previous,
+            &acknowledgement,
+            &current,
+            crate::SemanticDiffBudget::ACTION,
+        ) else {
+            panic!("complete same-document observations must diff")
+        };
+        assert_eq!(diff.reference_rebases().len(), 1);
+        assert_eq!(
+            diff.reference_rebases()[0]
+                .previous_reference()
+                .model_token(),
+            "old:@a3"
+        );
+        assert_eq!(
+            diff.reference_rebases()[0]
+                .current_reference()
+                .model_token(),
+            "@a2"
+        );
+        assert!(diff.entries().iter().any(|entry| {
+            entry.kind() == crate::SemanticDiffEntryKind::Removed
+                && entry
+                    .previous_reference()
+                    .is_some_and(|reference| reference.model_token() == "old:@a2")
+                && entry.current_reference().is_none()
+        }));
+        assert!(diff.entries().iter().any(|entry| {
+            entry.kind() == crate::SemanticDiffEntryKind::Changed
+                && entry
+                    .previous_reference()
+                    .is_some_and(|reference| reference.model_token() == "old:@a4")
+                && entry
+                    .current_reference()
+                    .is_some_and(|reference| reference.model_token() == "@a3")
+                && entry
+                    .changes()
+                    .contains(crate::SemanticNodeChange::Operations)
+        }));
+        assert!(diff.entries().iter().any(|entry| {
+            entry.kind() == crate::SemanticDiffEntryKind::Added
+                && entry.previous_reference().is_none()
+                && entry
+                    .current_reference()
+                    .is_some_and(|reference| reference.model_token() == "@a4")
+        }));
+        let mut targets = AgentProviderActionTargets::try_from_observation(&previous).unwrap();
+        targets
+            .try_exclude(AgentProviderActionRefusalKey {
+                observation: previous.request().id(),
+                generation: previous.request().generation(),
+                kind: crate::SemanticActionKind::Fill,
+                target: crate::SemanticReferenceId::new(3).unwrap(),
+                error: crate::SemanticActionBindingError::Reference(
+                    crate::SemanticReferenceError::OperationDenied,
+                ),
+            })
+            .unwrap();
+        assert_eq!(targets.exclusion_count(), 1);
+
+        let refreshed = AgentProviderActionTargets::try_from_diff(&targets, &diff).unwrap();
+        assert!(refreshed.matches(&current));
+        assert_eq!(refreshed.exclusion_count(), 0);
+        assert_eq!(
+            refreshed
+                .permitted_references(crate::SemanticActionKind::Scroll)
+                .collect::<Vec<_>>(),
+            vec![crate::SemanticReferenceId::new(1).unwrap()]
+        );
+        assert_eq!(
+            refreshed
+                .permitted_references(crate::SemanticActionKind::Click)
+                .map(crate::SemanticReferenceId::get)
+                .collect::<Vec<_>>(),
+            vec![2, 3, 4]
+        );
+        assert_eq!(
+            refreshed
+                .permitted_references(crate::SemanticActionKind::Fill)
+                .map(crate::SemanticReferenceId::get)
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
+        assert_eq!(
+            refreshed
+                .entries
+                .iter()
+                .map(|entry| entry.reference.get())
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
     }
 
     #[test]
@@ -2386,6 +2842,47 @@ mod tests {
                     serde_json::from_str(transcript.latest().tool_result()).unwrap();
                 assert_eq!(result["code"], "outcome_already_satisfied");
                 assert_eq!(result["executed"], false);
+                assert_eq!(transcript.action_targets().unwrap().exclusion_count(), 0);
+
+                // OutcomeAlreadySatisfied is input-specific: a changed Fill
+                // on the same ref remains live in the same continuation.
+                let arguments = json!({"actions":[{
+                    "kind":"fill", "target":"@a2", "value":"old value", "effect":"local_write",
+                    "wait":{"kind":"immediate"}, "verification":{"kind":"target_value_matches_input"},
+                    "settle_millis":2000
+                }]})
+                .to_string();
+                let next_call = call(2);
+                let tool = super::super::AgentBrowserToolCall::decode_openai(
+                    next_call,
+                    "fc_action_changed".into(),
+                    "call_action_changed".into(),
+                    "act",
+                    arguments.clone(),
+                )
+                .unwrap();
+                let (correlation, proposal) = tool.into_continuation_parts();
+                let continuation = AgentProviderContinuationSeed {
+                    call: next_call,
+                    config: config.clone(),
+                    baseline: SemanticObservationAcknowledgement::from_fingerprint(
+                        SemanticObservationFingerprint::from_observation(&observed),
+                    ),
+                    transcript: transcript.into_transcript(),
+                }
+                .join_terminal_tool(completion(next_call, arguments.len() as u32), correlation)
+                .unwrap();
+                assert!(matches!(
+                    super::super::AgentProviderSettledToolTurn::for_test(proposal, continuation)
+                        .resolve_action(
+                            SemanticActionBatchId::new(2).unwrap(),
+                            &observed,
+                            &frames,
+                            &config
+                        )
+                        .unwrap(),
+                    AgentProviderActionResolution::Bound(..)
+                ));
             } else {
                 assert!(matches!(
                     resolution,
