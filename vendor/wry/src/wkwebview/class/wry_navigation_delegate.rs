@@ -33,7 +33,7 @@ use crate::{
       AppleNavigationEventState,
     },
   },
-  NavigationEvent, PageLoadEvent, WryWebView,
+  AppleNavigationAction, NavigationEvent, PageLoadEvent, WryWebView,
 };
 
 use super::wry_download_delegate::WryDownloadDelegate;
@@ -41,7 +41,7 @@ use super::wry_download_delegate::WryDownloadDelegate;
 pub struct WryNavigationDelegateIvars {
   pub pending_scripts: Arc<Mutex<Option<Vec<String>>>>,
   pub has_download_handler: bool,
-  pub navigation_policy_function: Box<dyn Fn(String) -> bool>,
+  pub navigation_policy_function: Box<dyn Fn(String, AppleNavigationAction) -> bool>,
   pub download_delegate: Option<Retained<WryDownloadDelegate>>,
   pub on_page_load_handler: Option<Box<dyn Fn(PageLoadEvent)>>,
   pub navigation_event_handler: Option<Box<dyn Fn(NavigationEvent)>>,
@@ -211,6 +211,8 @@ impl WryNavigationDelegate {
     pending_scripts: Arc<Mutex<Option<Vec<String>>>>,
     has_download_handler: bool,
     navigation_handler: Option<Box<dyn Fn(String) -> bool>>,
+    apple_navigation_action_handler:
+      Option<Box<dyn Fn(String, AppleNavigationAction) -> bool>>,
     download_delegate: Option<Retained<WryDownloadDelegate>>,
     on_page_load_handler: Option<Box<dyn Fn(PageLoadEvent, String)>>,
     navigation_event_handler: Option<Box<dyn Fn(NavigationEvent)>>,
@@ -218,11 +220,17 @@ impl WryNavigationDelegate {
     on_web_content_process_terminate_handler: Option<Box<dyn Fn()>>,
     mtm: MainThreadMarker,
   ) -> Retained<Self> {
-    let navigation_policy_function = Box::new(move |url: String| -> bool {
-      navigation_handler
-        .as_ref()
-        .map_or(true, |navigation_handler| (navigation_handler)(url))
-    });
+    let navigation_policy_function = Box::new(
+      move |url: String, action: AppleNavigationAction| -> bool {
+        if let Some(navigation_handler) = apple_navigation_action_handler.as_ref() {
+          (navigation_handler)(url, action)
+        } else {
+          navigation_handler
+            .as_ref()
+            .is_none_or(|navigation_handler| (navigation_handler)(url))
+        }
+      },
+    );
 
     let on_page_load_handler = if let Some(handler) = on_page_load_handler {
       let custom_handler = Box::new(move |event| {

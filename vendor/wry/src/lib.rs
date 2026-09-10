@@ -734,6 +734,15 @@ struct WebViewAttributes<'a> {
   /// `true` allows to navigate and `false` does not.
   pub navigation_handler: Option<Box<dyn Fn(String) -> bool>>,
 
+  /// Apple-only navigation policy callback with native action provenance.
+  ///
+  /// When set, this callback replaces [`Self::navigation_handler`] for Apple
+  /// navigation actions. It lets security-sensitive embedders distinguish a
+  /// browser history traversal from page-driven links, forms, and reloads.
+  #[cfg(any(target_os = "macos", target_os = "ios"))]
+  pub apple_navigation_action_handler:
+    Option<Box<dyn Fn(String, AppleNavigationAction) -> bool>>,
+
   /// A download started handler to manage incoming downloads.
   ///
   /// The closure takes two parameters, the first is a `String` representing the url being downloaded from and the
@@ -976,6 +985,8 @@ impl Default for WebViewAttributes<'_> {
       ipc_handler: None,
       drag_drop_handler: None,
       navigation_handler: None,
+      #[cfg(any(target_os = "macos", target_os = "ios"))]
+      apple_navigation_action_handler: None,
       download_started_handler: Some(Box::new(|_, _| true)),
       download_completed_handler: None,
       download_policy: DownloadPolicy::UseHandlers,
@@ -1466,6 +1477,18 @@ impl<'a> WebViewBuilder<'a> {
   /// `true` allows to navigate and `false` does not.
   pub fn with_navigation_handler(mut self, callback: impl Fn(String) -> bool + 'static) -> Self {
     self.attrs.navigation_handler = Some(Box::new(callback));
+    self
+  }
+
+  /// Set an Apple navigation policy handler that also receives immutable
+  /// native action provenance. This replaces the URL-only callback on macOS
+  /// and iOS and is unavailable on other platforms.
+  #[cfg(any(target_os = "macos", target_os = "ios"))]
+  pub fn with_apple_navigation_action_handler(
+    mut self,
+    callback: impl Fn(String, AppleNavigationAction) -> bool + 'static,
+  ) -> Self {
+    self.attrs.apple_navigation_action_handler = Some(Box::new(callback));
     self
   }
 
@@ -3040,6 +3063,37 @@ pub struct NavigationEvent {
   /// Bounded URL safely attributed to this native navigation phase. See
   /// [`NavigationEventPhase::Redirected`] for the platform fallback.
   pub url: String,
+}
+
+/// Native cause of an Apple WebKit navigation policy decision.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppleNavigationType {
+  /// A user or page activated a link.
+  LinkActivated,
+  /// A form submitted for the first time.
+  FormSubmitted,
+  /// WebKit requested a back/forward-list traversal.
+  BackForward,
+  /// The current document was reloaded.
+  Reload,
+  /// A form submission was replayed.
+  FormResubmitted,
+  /// WebKit reported another navigation cause.
+  Other,
+}
+
+/// Bounded native provenance accompanying an Apple navigation policy request.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AppleNavigationAction {
+  /// Native navigation cause.
+  pub navigation_type: AppleNavigationType,
+  /// Whether the request method is exactly `GET`.
+  pub is_get: bool,
+  /// Whether WebKit identified the target as the main frame. `None` denotes a
+  /// target-less/new-window action and must not be treated as main-frame work.
+  pub target_is_main_frame: Option<bool>,
 }
 
 /// Background throttling policy

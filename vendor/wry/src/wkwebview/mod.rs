@@ -839,6 +839,7 @@ impl InnerWebView {
         pending_scripts.clone(),
         has_download_handler,
         attributes.navigation_handler,
+        attributes.apple_navigation_action_handler,
         download_delegate.clone(),
         attributes.on_page_load_handler,
         attributes.navigation_event_handler,

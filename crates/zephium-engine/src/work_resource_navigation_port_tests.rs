@@ -199,6 +199,46 @@ fn exact_policy_request_retains_native_debt_through_callback_return() {
 }
 
 #[test]
+fn revocation_closes_undispatched_navigation_but_preserves_only_completion_debt() {
+    let (mut rows, admission, guard) = setup();
+    let lease = leased(&mut rows, &guard);
+    let (request, _, _) = request(&mut rows, &guard, &lease);
+    let operation = request.navigation().operation();
+    guard.admit_navigation(&request, tick(4)).unwrap();
+    assert!(guard.navigation_dispatch_current(&lease, operation, tick(4)));
+
+    let revoke = rows.revoke(&lease).unwrap();
+    guard.admit_lifecycle(&revoke, tick(4)).unwrap();
+    assert!(
+        !guard.navigation_dispatch_current(&lease, operation, tick(4)),
+        "a PARK acknowledgement arriving after revoke owns no native dispatch"
+    );
+    assert!(
+        guard.navigation_completion_current(&lease, operation, tick(4)),
+        "only an operation already dispatched before revoke may drain"
+    );
+
+    let callbacks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let callback_count = callbacks.clone();
+    *guard.notification_dispatch.lock().unwrap() = Some(Arc::new(|task| {
+        drop(task);
+        true
+    }));
+    let task = WorkNavigationTask {
+        request: Some(request),
+        completion: Some(Box::new(move |_| {
+            callback_count.fetch_add(1, Ordering::SeqCst);
+        })),
+        guard: guard.clone(),
+        permit: admission.reserve().unwrap(),
+    };
+    task.complete(Err(ContextPortFailure::Stale));
+    assert_eq!(callbacks.load(Ordering::SeqCst), 1);
+    assert!(guard.state.lock().unwrap().navigation.is_none());
+    assert_eq!(admission.pending(), Some(0));
+}
+
+#[test]
 fn synchronous_navigation_refusal_returns_original_without_callback() {
     let (mut rows, admission, guard) = setup();
     let lease = leased(&mut rows, &guard);

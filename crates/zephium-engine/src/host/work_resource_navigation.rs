@@ -147,7 +147,7 @@ impl WorkNativeResource {
     }
 
     pub(super) fn progress_navigation(&mut self, erased: bool) {
-        let (lease, native, host_deadline) = {
+        let (lease, source, native, host_deadline, stage) = {
             let Some(pending) = self.navigation.as_ref() else {
                 return;
             };
@@ -161,8 +161,10 @@ impl WorkNativeResource {
             };
             (
                 request.lease().clone(),
+                request.source(),
                 request.navigation().clone(),
                 pending.deadline,
+                pending.stage,
             )
         };
         let operation = native.operation();
@@ -185,7 +187,14 @@ impl WorkNativeResource {
                     crate::WorkSuccessorNavigationFailure::LeaseDeadlineExpired,
                 );
                 Some(Err(ContextPortFailure::TimedOut))
-            } else if !self.guard.navigation_current(&lease, operation, now, true) {
+            } else if !(match stage {
+                WorkNavigationStage::Parking => self
+                    .guard
+                    .navigation_dispatch_current(&lease, operation, now),
+                WorkNavigationStage::Navigating => self
+                    .guard
+                    .navigation_completion_current(&lease, operation, now),
+            }) {
                 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
                 self.record_successor_navigation_failure(
                     crate::WorkSuccessorNavigationFailure::AuthorityChanged,
@@ -207,6 +216,9 @@ impl WorkNativeResource {
                     }
                     let dispatched = self.view.as_mut().is_some_and(|view| {
                         view.prepare_semantic_document_load().is_ok()
+                            && view
+                                .work_navigation()
+                                .is_some_and(|gate| gate.arm_successor(source, &native).is_ok())
                             && view
                                 .view()
                                 .load_url(native.target().as_url().as_str())
@@ -289,6 +301,7 @@ impl WorkNativeResource {
             .task
             .request()
             .map(|request| (request.lease().clone(), request.operation()));
+        let stage = pending.stage;
         let outcome = if erased || !self.guard.is_healthy() {
             Some(Err(ContextPortFailure::NativeRefused))
         } else if Instant::now() >= pending.deadline {
@@ -298,7 +311,14 @@ impl WorkNativeResource {
                 .as_ref()
                 .is_none_or(|(lease, operation)| {
                     now >= lease.deadline()
-                        || !self.guard.navigation_current(lease, *operation, now, true)
+                        || !(match stage {
+                            WorkNavigationStage::Parking => self
+                                .guard
+                                .navigation_dispatch_current(lease, *operation, now),
+                            WorkNavigationStage::Navigating => self
+                                .guard
+                                .navigation_completion_current(lease, *operation, now),
+                        })
                 })
         }) {
             Some(Err(ContextPortFailure::TimedOut))
@@ -310,21 +330,35 @@ impl WorkNativeResource {
             {
                 return;
             }
-            let (ticket, expected) = match self.history_back.as_ref().and_then(|pending| {
-                pending
-                    .task
-                    .request()
-                    .map(|request| (pending.ticket, request.target().clone()))
-            }) {
-                Some(values) => values,
-                None => {
-                    self.guard.fail();
-                    return;
-                }
-            };
+            let (ticket, source, operation, expected) =
+                match self.history_back.as_ref().and_then(|pending| {
+                    pending.task.request().map(|request| {
+                        (
+                            pending.ticket,
+                            request.source(),
+                            request.operation(),
+                            request.target().clone(),
+                        )
+                    })
+                }) {
+                    Some(values) => values,
+                    None => {
+                        self.guard.fail();
+                        return;
+                    }
+                };
+            let gate = self
+                .view
+                .as_ref()
+                .and_then(|view| view.work_navigation())
+                .cloned();
             let dispatched = self.view.as_mut().is_some_and(|view| {
                 view.reactivate_history_destination(ticket)
                     .is_ok_and(|target| target == expected)
+                    && gate.as_ref().is_some_and(|gate| {
+                        gate.arm_history_back(source, operation, expected.clone())
+                            .is_ok()
+                    })
                     && view.dispatch_history_back(ticket)
             });
             if !dispatched {
@@ -423,8 +457,6 @@ impl EngineHost {
         };
         let lease = request.lease().clone();
         let operation = request.operation();
-        let source = request.source();
-        let target = request.target().clone();
         let Some(resource) = self
             .work_resources
             .get_mut(&guard.resource().identity().context())
@@ -434,7 +466,7 @@ impl EngineHost {
             return;
         };
         let accepted = work_browser_monotonic_now()
-            .is_some_and(|now| guard.navigation_current(&lease, operation, now, false))
+            .is_some_and(|now| guard.navigation_dispatch_current(&lease, operation, now))
             && !self.erasure_tombstones.contains(&resource.profile())
             && !resource.pending()
             && resource.ready()
@@ -461,19 +493,10 @@ impl EngineHost {
             task.complete(Err(ContextPortFailure::Stale));
             return;
         };
-        let Some(gate) = view.work_navigation().cloned() else {
-            task.complete(Err(ContextPortFailure::NativeRefused));
-            return;
-        };
         let Ok(ticket) = view.prepare_history_back() else {
             task.complete(Err(ContextPortFailure::NativeRefused));
             return;
         };
-        if gate.arm_history_back(source, operation, target).is_err() {
-            let _ = view.refuse_history_back(ticket);
-            task.complete(Err(ContextPortFailure::NativeRefused));
-            return;
-        }
         let timeout_guard = guard.clone();
         let timer = crate::platform::imp::schedule_content_policy_timeout(duration, move || {
             let rejected = timeout_guard.clone();
@@ -520,7 +543,6 @@ impl EngineHost {
             return;
         };
         let lease = request.lease().clone();
-        let source = request.source();
         let native = request.navigation().clone();
         let operation = native.operation();
         let Some(resource) = self
@@ -536,7 +558,7 @@ impl EngineHost {
             return;
         };
         let accepted = work_browser_monotonic_now()
-            .is_some_and(|now| guard.navigation_current(&lease, operation, now, false))
+            .is_some_and(|now| guard.navigation_dispatch_current(&lease, operation, now))
             && !self.erasure_tombstones.contains(&resource.profile())
             && !resource.pending()
             && resource.ready()
@@ -616,7 +638,7 @@ impl EngineHost {
                     ));
                     dispatched = false;
                 }
-                Some(now) if !guard.navigation_current(&lease, operation, now, false) => {
+                Some(now) if !guard.navigation_dispatch_current(&lease, operation, now) => {
                     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
                     guard.record_failure_cause(ResourceFailureCause::SuccessorNavigation(
                         crate::WorkSuccessorNavigationFailure::AuthorityChanged,
@@ -628,35 +650,19 @@ impl EngineHost {
         }
         if dispatched {
             if let Some(view) = resource.view.as_mut() {
-                if let Some(gate) = view.work_navigation() {
-                    if gate.arm_successor(source, &native).is_err() {
-                        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
-                        guard.record_failure_cause(ResourceFailureCause::SuccessorNavigation(
-                            crate::WorkSuccessorNavigationFailure::ArmRefused,
-                        ));
-                        dispatched = false;
-                    } else {
-                        let parked_guard = guard.clone();
-                        if view
-                            .park_semantic_runtime(move |parked| {
-                                if !parked {
-                                    parked_guard.fail();
-                                }
-                                crate::host::notify_work_resource(parked_guard);
-                            })
-                            .is_err()
-                        {
-                            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
-                            guard.record_failure_cause(ResourceFailureCause::SuccessorNavigation(
-                                crate::WorkSuccessorNavigationFailure::SemanticPreparationRefused,
-                            ));
-                            dispatched = false;
+                let parked_guard = guard.clone();
+                if view
+                    .park_semantic_runtime(move |parked| {
+                        if !parked {
+                            parked_guard.fail();
                         }
-                    }
-                } else {
+                        crate::host::notify_work_resource(parked_guard);
+                    })
+                    .is_err()
+                {
                     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
                     guard.record_failure_cause(ResourceFailureCause::SuccessorNavigation(
-                        crate::WorkSuccessorNavigationFailure::GateUnavailableOrFailed,
+                        crate::WorkSuccessorNavigationFailure::SemanticPreparationRefused,
                     ));
                     dispatched = false;
                 }

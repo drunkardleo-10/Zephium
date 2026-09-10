@@ -8,7 +8,7 @@ use objc2::{DeclaredClass, Message};
 use objc2_foundation::{MainThreadMarker, NSError, NSObjectProtocol, NSString};
 use objc2_web_kit::{
   WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationResponse,
-  WKNavigationResponsePolicy,
+  WKNavigationResponsePolicy, WKNavigationType,
 };
 
 #[cfg(target_os = "ios")]
@@ -17,8 +17,9 @@ use crate::wkwebview::ios::WKWebView::WKWebView;
 use objc2_web_kit::WKWebView;
 
 use crate::{
-  native_bounds::{bounded_nsstring, PAGE_URL_LIMIT},
-  NavigationEvent, NavigationEventPhase, NavigationId, PageLoadEvent,
+  native_bounds::{bounded_nsstring, CUSTOM_PROTOCOL_METHOD_LIMIT, PAGE_URL_LIMIT},
+  AppleNavigationAction, AppleNavigationType, NavigationEvent, NavigationEventPhase, NavigationId,
+  PageLoadEvent,
 };
 
 use super::class::wry_navigation_delegate::WryNavigationDelegate;
@@ -706,7 +707,26 @@ pub(crate) fn navigation_policy(
         return;
       }
       let function = &this.ivars().navigation_policy_function;
-      let policy_allows = function(url.clone());
+      let navigation_type = match action.navigationType() {
+        WKNavigationType::LinkActivated => AppleNavigationType::LinkActivated,
+        WKNavigationType::FormSubmitted => AppleNavigationType::FormSubmitted,
+        WKNavigationType::BackForward => AppleNavigationType::BackForward,
+        WKNavigationType::Reload => AppleNavigationType::Reload,
+        WKNavigationType::FormResubmitted => AppleNavigationType::FormResubmitted,
+        _ => AppleNavigationType::Other,
+      };
+      let is_get = request
+        .HTTPMethod()
+        .and_then(|method| bounded_nsstring(&method, CUSTOM_PROTOCOL_METHOD_LIMIT))
+        .is_some_and(|method| method == "GET");
+      let policy_allows = function(
+        url.clone(),
+        AppleNavigationAction {
+          navigation_type,
+          is_get,
+          target_is_main_frame,
+        },
+      );
       match policy_allows {
         true => (*handler).call((WKNavigationActionPolicy::Allow,)),
         false => (*handler).call((WKNavigationActionPolicy::Cancel,)),

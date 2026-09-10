@@ -1056,7 +1056,11 @@ impl AgentWorkController {
         let viewport_screenshot = task.allows_viewport_screenshot();
         let standalone_wait = task.allows_standalone_wait();
         let human_request = task.allows_human_request();
-        let history_back = task.allows_history_back();
+        let history_back_requested = task.allows_history_back();
+        let history_back = history_back_requested
+            && retained
+                .as_ref()
+                .is_some_and(|browser| browser.supports_history_back());
         let navigation_target = task.navigation_target().cloned();
         let navigation_route = task.navigation_route().cloned();
         let navigation_discovery = task.navigation_discovery().cloned();
@@ -1082,10 +1086,6 @@ impl AgentWorkController {
                     && !retained
                         .as_ref()
                         .is_some_and(|browser| browser.supports_navigation()))
-                || (history_back
-                    && !retained
-                        .as_ref()
-                        .is_some_and(|browser| browser.supports_history_back()))
                 || (viewport_screenshot
                     && !retained
                         .as_ref()
@@ -1181,6 +1181,7 @@ impl AgentWorkController {
                     viewport_screenshot,
                     standalone_wait,
                     human_request,
+                    history_back_requested,
                     history_back,
                     navigation_target,
                     navigation_route,
@@ -1213,6 +1214,7 @@ struct WorkState {
     viewport_screenshot: bool,
     standalone_wait: bool,
     human_request: bool,
+    history_back_requested: bool,
     history_back: bool,
     extraction_schema: Option<SemanticExtractionSchema>,
     actions_before_extraction: bool,
@@ -1394,7 +1396,7 @@ impl WorkState {
             || self.task.allows_viewport_screenshot() != self.viewport_screenshot
             || self.task.allows_standalone_wait() != self.standalone_wait
             || self.task.allows_human_request() != self.human_request
-            || self.task.allows_history_back() != self.history_back
+            || self.task.allows_history_back() != self.history_back_requested
         {
             return Err(AgentWorkFailure::Contract);
         }

@@ -75,7 +75,7 @@ impl WorkResourceGuard {
         state.observed = None;
         Ok(())
     }
-    pub(crate) fn navigation_current(
+    fn navigation_current(
         &self,
         lease: &WorkBrowserExecutionLease,
         operation: ContextOperationJoin,
@@ -94,6 +94,27 @@ impl WorkResourceGuard {
                     && state.callbacks == 0
                     && now < lease.deadline()
             })
+    }
+    /// Admission immediately before native dispatch. A revoke closes this
+    /// boundary even when an earlier asynchronous preparation (such as PARK)
+    /// is still outstanding.
+    pub(crate) fn navigation_dispatch_current(
+        &self,
+        lease: &WorkBrowserExecutionLease,
+        operation: ContextOperationJoin,
+        now: AgentPolicyInstant,
+    ) -> bool {
+        self.navigation_current(lease, operation, now, false)
+    }
+    /// Drain-only authority after native dispatch. Revocation cannot erase an
+    /// already-owned callback debt, but this must never authorize new I/O.
+    pub(crate) fn navigation_completion_current(
+        &self,
+        lease: &WorkBrowserExecutionLease,
+        operation: ContextOperationJoin,
+        now: AgentPolicyInstant,
+    ) -> bool {
+        self.navigation_current(lease, operation, now, true)
     }
     fn navigation_terminal_begin(&self, operation: ContextOperationJoin) {
         let mut state = self

@@ -578,10 +578,10 @@ where
         .with_fullscreen_enabled(false)
         .with_picture_in_picture_enabled(false)
         .with_general_autofill_enabled(false)
-        .with_navigation_handler(move |target| {
+        .with_apple_navigation_action_handler(move |target, action| {
             work_policy.as_ref().map_or_else(
                 || navigation_policy.allows(&target),
-                |gate| gate.allows(&target),
+                |gate| gate.allows_apple_action(&target, action),
             )
         })
         .with_navigation_event_handler(move |event| {
@@ -956,7 +956,7 @@ mod tests {
         ] {
             assert!(!source.contains(forbidden));
         }
-        assert!(source.contains("with_navigation_handler(move |target|"));
+        assert!(source.contains("with_apple_navigation_action_handler(move |target, action|"));
         assert!(source.contains("state.bootstrap_available = false"));
         assert!(source.contains("controller.userScripts()"));
     }

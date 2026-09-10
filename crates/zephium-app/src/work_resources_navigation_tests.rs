@@ -186,7 +186,7 @@ fn retained_observations_carry_only_the_frozen_discovery_url_capability() {
         native.discovery.store(true, Ordering::Release);
         let mut responses = vec![navigation_stream(1, FIRST), navigation_stream(2, SECOND)];
         responses.extend(final_streams());
-        let (controller, mut result, scope, server, _) = prepare_with_profile(
+        let (controller, mut result, scope, server, requests) = prepare_with_profile(
             browser,
             responses,
             Arc::new(Clock(AtomicU64::new(2))),
@@ -203,6 +203,14 @@ fn retained_observations_carry_only_the_frozen_discovery_url_capability() {
             .iter()
             .all(|budget| budget.includes_link_url_state() == production));
         drop(budgets);
+        assert!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|request| !request.contains(r#""name":"back""#)),
+            "a production task must remain usable while an unsupported adapter omits Back"
+        );
         assert!(matches!(
             lifecycle.drain_until(Instant::now() + Duration::from_secs(2)),
             AgentRuntimeScopedDrain::Drained(_)

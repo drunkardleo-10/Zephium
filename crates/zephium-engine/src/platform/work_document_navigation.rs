@@ -20,6 +20,11 @@ enum Phase {
     Refused,
     Retired,
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AdmissionKind {
+    ProgrammaticGet,
+    HistoryBackGet,
+}
 struct State {
     phase: Phase,
     bootstrap_available: bool,
@@ -33,6 +38,7 @@ struct State {
     location_revision: u64,
     native_id: Option<wry::NavigationId>,
     requested: bool,
+    admission_kind: Option<AdmissionKind>,
     navigation_epoch: u64,
     operation: Option<ContextOperationJoin>,
     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
@@ -160,6 +166,7 @@ impl Default for WorkDocumentNavigation {
             location_revision: 0,
             native_id: None,
             requested: false,
+            admission_kind: None,
             navigation_epoch: 1,
             operation: None,
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
@@ -243,6 +250,7 @@ impl WorkDocumentNavigation {
         state.policy = request.document_policy();
         state.native_id = None;
         state.requested = false;
+        state.admission_kind = Some(AdmissionKind::ProgrammaticGet);
         state.finalization_generation = state.finalization_generation.checked_add(1).ok_or(())?;
         state.location_revision = 0;
         #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
@@ -281,6 +289,7 @@ impl WorkDocumentNavigation {
         state.policy = zephium_agentic::WorkBrowserDocumentPolicy::Exact;
         state.native_id = None;
         state.requested = false;
+        state.admission_kind = Some(AdmissionKind::HistoryBackGet);
         state.finalization_generation = state.finalization_generation.checked_add(1).ok_or(())?;
         state.location_revision = 0;
         state.phase = Phase::Armed;
@@ -346,6 +355,7 @@ impl WorkDocumentNavigation {
         state.bootstrap_available = false;
         state.bootstrap_id = None;
         state.target = Some(target);
+        state.admission_kind = Some(AdmissionKind::ProgrammaticGet);
         state.policy = policy;
         state.finalization_generation = state.finalization_generation.checked_add(1).ok_or(())?;
         state.location_revision = 0;
@@ -356,6 +366,7 @@ impl WorkDocumentNavigation {
         state.phase = Phase::Armed;
         Ok(())
     }
+    #[cfg(test)]
     pub(crate) fn allows(&self, target: &str) -> bool {
         let Ok(mut state) = self.0.lock() else {
             return false;
@@ -375,6 +386,55 @@ impl WorkDocumentNavigation {
             return true;
         }
         // A refused unsolicited navigation grants no replacement document.
+        false
+    }
+    /// Apple policy admission joins the exact armed transition class with the
+    /// native request cause, method and frame. URL equality alone cannot turn
+    /// a page-driven form or history action into host authority.
+    pub(crate) fn allows_apple_action(
+        &self,
+        target: &str,
+        action: wry::AppleNavigationAction,
+    ) -> bool {
+        use wry::{AppleNavigationAction, AppleNavigationType};
+        let Ok(mut state) = self.0.lock() else {
+            return false;
+        };
+        if state.phase == Phase::Bootstrap
+            && target == "about:blank"
+            && state.bootstrap_available
+            && action
+                == (AppleNavigationAction {
+                    navigation_type: AppleNavigationType::Other,
+                    is_get: true,
+                    target_is_main_frame: Some(true),
+                })
+        {
+            state.bootstrap_available = false;
+            return true;
+        }
+        let cause_matches = match state.admission_kind {
+            Some(AdmissionKind::ProgrammaticGet) => {
+                action.navigation_type == AppleNavigationType::Other
+            }
+            Some(AdmissionKind::HistoryBackGet) => {
+                action.navigation_type == AppleNavigationType::BackForward
+            }
+            None => false,
+        };
+        if state.phase == Phase::Armed
+            && !state.requested
+            && cause_matches
+            && action.is_get
+            && action.target_is_main_frame == Some(true)
+            && state
+                .target
+                .as_ref()
+                .is_some_and(|expected| expected.as_url().as_str() == target)
+        {
+            state.requested = true;
+            return true;
+        }
         false
     }
     /// Returns (actual document committed, resource owner must reconcile).
@@ -698,6 +758,62 @@ mod tests {
             gate.observe(event(1, phase, URL)).unwrap();
         }
         gate
+    }
+    fn apple_action(
+        navigation_type: wry::AppleNavigationType,
+        is_get: bool,
+    ) -> wry::AppleNavigationAction {
+        wry::AppleNavigationAction {
+            navigation_type,
+            is_get,
+            target_is_main_frame: Some(true),
+        }
+    }
+    #[test]
+    fn apple_admission_stays_closed_until_dispatch_and_binds_exact_native_cause() {
+        use wry::AppleNavigationType as T;
+
+        let gate = ready_gate();
+        let (source, request) = next_request();
+        let target = request.target().as_url().as_str();
+        assert!(
+            !gate.allows_apple_action(target, apple_action(T::BackForward, true)),
+            "page-driven history during PARK cannot consume authority"
+        );
+        assert!(
+            !gate.allows_apple_action(target, apple_action(T::FormSubmitted, false)),
+            "a same-URL POST during PARK cannot consume authority"
+        );
+        gate.arm_history_back(source, request.operation(), request.target().clone())
+            .unwrap();
+        for (kind, is_get) in [
+            (T::LinkActivated, true),
+            (T::FormSubmitted, false),
+            (T::Reload, true),
+            (T::FormResubmitted, false),
+            (T::Other, true),
+        ] {
+            assert!(!gate.allows_apple_action(target, apple_action(kind, is_get)));
+        }
+        assert!(!gate.allows_apple_action(target, apple_action(T::BackForward, false)));
+        let mut child = apple_action(T::BackForward, true);
+        child.target_is_main_frame = Some(false);
+        assert!(!gate.allows_apple_action(target, child));
+        assert!(gate.allows_apple_action(target, apple_action(T::BackForward, true)));
+        assert!(!gate.allows_apple_action(target, apple_action(T::BackForward, true)));
+
+        let gate = ready_gate();
+        gate.arm_successor(source, &request).unwrap();
+        for (kind, is_get) in [
+            (T::LinkActivated, true),
+            (T::FormSubmitted, false),
+            (T::BackForward, true),
+            (T::Reload, true),
+            (T::FormResubmitted, false),
+        ] {
+            assert!(!gate.allows_apple_action(target, apple_action(kind, is_get)));
+        }
+        assert!(gate.allows_apple_action(target, apple_action(T::Other, true)));
     }
     #[test]
     fn successor_uses_same_gate_exact_lineage_and_one_terminal_without_bootstrap() {
