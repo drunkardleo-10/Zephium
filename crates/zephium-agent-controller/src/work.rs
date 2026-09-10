@@ -185,6 +185,11 @@ pub trait AgentWorkTask: Send {
     fn allows_viewport_screenshot(&self) -> bool {
         false
     }
+    /// Enables bounded standalone waits over semantic change or one exact
+    /// target-state predicate. The model cannot select timer-only success.
+    fn allows_standalone_wait(&self) -> bool {
+        false
+    }
     /// Explicitly permits one terminal native subtree read anchored to the
     /// exact model-acknowledged observation. Frozen at admission; default is
     /// initial-scope only. This grants no action or navigation authority.
@@ -965,6 +970,7 @@ impl AgentWorkController {
         let baseline_read = task.allows_baseline_read();
         let progressive_observation = task.allows_progressive_observation();
         let viewport_screenshot = task.allows_viewport_screenshot();
+        let standalone_wait = task.allows_standalone_wait();
         let navigation_target = task.navigation_target().cloned();
         let navigation_route = task.navigation_route().cloned();
         let navigation_discovery = task.navigation_discovery().cloned();
@@ -1083,6 +1089,7 @@ impl AgentWorkController {
                     baseline_read,
                     progressive_observation,
                     viewport_screenshot,
+                    standalone_wait,
                     navigation_target,
                     navigation_route,
                     navigation_discovery,
@@ -1110,6 +1117,7 @@ struct WorkState {
     baseline_read: bool,
     progressive_observation: bool,
     viewport_screenshot: bool,
+    standalone_wait: bool,
     extraction_schema: Option<SemanticExtractionSchema>,
     actions_before_extraction: bool,
     subtree_extraction: bool,
@@ -1153,6 +1161,7 @@ impl WorkState {
                 || self.baseline_read
                 || self.progressive_observation
                 || self.viewport_screenshot
+                || self.standalone_wait
                 || self.actions_before_extraction
                 || self.subtree_extraction)
     }
@@ -1270,6 +1279,7 @@ impl WorkState {
             || self.task.allows_baseline_read() != self.baseline_read
             || self.task.allows_progressive_observation() != self.progressive_observation
             || self.task.allows_viewport_screenshot() != self.viewport_screenshot
+            || self.task.allows_standalone_wait() != self.standalone_wait
         {
             return Err(AgentWorkFailure::Contract);
         }
@@ -1885,6 +1895,9 @@ impl AgentWorkController {
         if state.viewport_screenshot {
             session.config = session.config.with_viewport_screenshot();
         }
+        if state.standalone_wait {
+            session.config = session.config.with_standalone_wait();
+        }
         if decision_budget {
             session.config = session
                 .config
@@ -2338,6 +2351,20 @@ impl AgentWorkController {
                 turn = Self::screenshot_current(state, worker, browser, turn, &observation).await?;
                 continue;
             }
+            if turn.turn.proposal().kind() == AgentBrowserToolKind::Wait {
+                let next = Self::wait_current(state, worker, browser, turn, observation).await?;
+                observation = next.0;
+                captured_at = next.1;
+                turn = next.2;
+                frames.clear();
+                frames.extend(
+                    observation
+                        .frames()
+                        .iter()
+                        .map(|snapshot| snapshot.frame().clone()),
+                );
+                continue;
+            }
             let step = turn;
             if step.turn.proposal().kind() == AgentBrowserToolKind::Navigate {
                 if state.navigation_discovery.is_none() {
@@ -2722,6 +2749,105 @@ impl AgentWorkController {
             session.continue_after_screenshot(turn.into_tool_turn(), screenshot, observation),
         )
         .await
+    }
+
+    async fn wait_current(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        turn: AgentBrowserProviderTurn,
+        observation: SemanticObservation,
+    ) -> Result<
+        (
+            SemanticObservation,
+            SemanticCaptureInstant,
+            AgentBrowserProviderTurn,
+        ),
+        AgentWorkFailure,
+    > {
+        state.check_task_contract()?;
+        if !state.standalone_wait {
+            return Err(AgentWorkFailure::Browser(
+                AgentBrowserProviderError::UnsupportedTool(AgentBrowserToolKind::Wait),
+            ));
+        }
+        let AgentBrowserToolProposal::Wait { condition, timeout } = turn.turn.proposal() else {
+            return Err(AgentWorkFailure::Contract);
+        };
+        let wait_deadline = Instant::now()
+            .checked_add(Duration::from_millis(u64::from(timeout.millis())))
+            .map_or(state.native.deadline, |deadline| {
+                deadline.min(state.native.deadline)
+            });
+        let mut wait = SemanticStandaloneWait::prepare(
+            *condition,
+            observation,
+            turn.turn.continuation().baseline(),
+        )
+        .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Authority))?;
+        let result = loop {
+            let now = Instant::now();
+            if now >= wait_deadline {
+                break wait.time_out();
+            }
+            let wake = now
+                .checked_add(Duration::from_millis(50))
+                .map_or(wait_deadline, |wake| wake.min(wait_deadline));
+            tokio::select! {
+                biased;
+                event = state.native.next_event(worker, browser) => {
+                    state.native.retain(event?)?;
+                    return Err(AgentWorkFailure::Mailbox);
+                }
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
+            }
+            if Instant::now() >= wait_deadline {
+                break wait.time_out();
+            }
+            state.journal_mut()?.emit(AgentWorkEventKind::Observing)?;
+            let current = match Self::observe_once(state, worker, browser).await {
+                Err(AgentWorkFailure::Observation(SemanticRuntimePortFailure::NotReady)) => {
+                    continue;
+                }
+                result => result?,
+            };
+            let step = wait
+                .advance(current)
+                .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Authority))?;
+            if Instant::now() >= wait_deadline {
+                break match step {
+                    SemanticStandaloneWaitStep::Pending(pending) => pending.time_out(),
+                    SemanticStandaloneWaitStep::Satisfied(result) => result.into_timed_out(),
+                };
+            }
+            match step {
+                SemanticStandaloneWaitStep::Pending(pending) => wait = pending,
+                SemanticStandaloneWaitStep::Satisfied(result) => break result,
+            }
+        };
+        state.native.check_control(worker, browser)?;
+        state.refresh_account(worker, browser)?;
+        let action_authority = state.action_authority(result.observation())?;
+        let captured_at = {
+            let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+            let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
+            SemanticCaptureInstant::from_millis(now.millis())
+        };
+        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let cancellation = session.cancellation.clone();
+        let (next_turn, observation) = Self::provider(
+            &mut state.native,
+            worker,
+            browser,
+            cancellation,
+            session.continue_after_standalone_wait(
+                turn.into_tool_turn(),
+                result,
+                Some(&action_authority),
+            ),
+        )
+        .await?;
+        Ok((observation, captured_at, next_turn))
     }
 
     async fn extract_current(

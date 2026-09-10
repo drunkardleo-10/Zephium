@@ -744,6 +744,7 @@ pub struct AgentProviderCallConfig {
     baseline_read: bool,
     progressive_observation: bool,
     viewport_screenshot: bool,
+    standalone_wait: bool,
     decision_budget: Option<(AgentModelCallId, u8)>,
 }
 
@@ -796,6 +797,7 @@ impl AgentProviderCallConfig {
             baseline_read: false,
             progressive_observation: false,
             viewport_screenshot: false,
+            standalone_wait: false,
             decision_budget: None,
         })
     }
@@ -860,6 +862,23 @@ impl AgentProviderCallConfig {
 
     pub(super) fn adds_viewport_screenshot(&self) -> bool {
         self.viewport_screenshot && self.tools != BrowserToolProfile::Full
+    }
+
+    /// Enables only proof-carrying semantic-change and exact target-state waits.
+    /// The host remains responsible for one absolute deadline and fresh native
+    /// observations; this setting grants no timer or action authority.
+    pub fn with_standalone_wait(mut self) -> Self {
+        self.standalone_wait = true;
+        self
+    }
+
+    /// Whether this immutable provider lineage permits a bounded semantic wait.
+    pub const fn permits_standalone_wait(&self) -> bool {
+        self.standalone_wait
+    }
+
+    pub(super) fn adds_standalone_wait(&self) -> bool {
+        self.standalone_wait && self.tools != BrowserToolProfile::Full
     }
 
     /// Restricts browser planning to the one trusted run-local extraction
@@ -974,6 +993,9 @@ impl AgentProviderCallConfig {
             return true;
         }
         if self.viewport_screenshot && kind == AgentBrowserToolKind::Screenshot {
+            return true;
+        }
+        if self.standalone_wait && kind == AgentBrowserToolKind::Wait {
             return true;
         }
         match self.tools {

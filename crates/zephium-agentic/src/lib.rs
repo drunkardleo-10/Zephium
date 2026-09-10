@@ -125,6 +125,7 @@ mod semantic_screenshot;
 mod semantic_settle;
 mod semantic_settle_coordinator;
 mod semantic_verify;
+mod semantic_wait;
 mod semantic_wire;
 mod sign_in_handoff;
 
@@ -312,6 +313,10 @@ pub use provider_transport::{
     MAX_AGENT_PROVIDER_READ_TIMEOUT_MILLIS, MAX_AGENT_PROVIDER_REQUEST_TIMEOUT_MILLIS,
     MAX_AGENT_PROVIDER_RESPONSE_HEADER_BYTES, MAX_AGENT_PROVIDER_TRANSPORT_CALLS,
     MAX_AGENT_PROVIDER_TRANSPORT_SHUTDOWN_PROOF_BYTES, MAX_OPENAI_INPUT_TOKEN_RESPONSE_BYTES,
+};
+pub use semantic_wait::{
+    SemanticStandaloneWait, SemanticStandaloneWaitError, SemanticStandaloneWaitOutcome,
+    SemanticStandaloneWaitResult, SemanticStandaloneWaitStep,
 };
 
 pub use semantic_locate::{

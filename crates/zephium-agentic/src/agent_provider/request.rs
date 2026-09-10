@@ -1655,6 +1655,38 @@ impl AgentPreparedObservationRequest {
         )
     }
 
+    /// Delivers the fresh observation and explicit terminal status of one
+    /// proof-carrying standalone wait through the original tool correlation.
+    pub fn try_standalone_wait_for_provider_exact_count(
+        policy: &mut AgentRunPolicy,
+        call_request: AgentModelCallRequest,
+        result: &crate::SemanticStandaloneWaitResult,
+        payload: SemanticModelPayload,
+        config: AgentProviderCallConfig,
+        continuation: super::AgentProviderContinuation,
+        action_authority: Option<&AgentProviderActionAuthority>,
+    ) -> Result<Self, AgentProviderRequestError> {
+        let observation = result.observation();
+        let (prior, transcript) = continuation
+            .bind_wait_observation_with_authority(
+                result,
+                call_request,
+                &config,
+                &payload,
+                action_authority,
+            )
+            .map_err(|_| AgentPolicyError::Authority)?;
+        Self::try_bound_observation_for_provider_exact_count(
+            policy,
+            call_request,
+            observation,
+            payload,
+            config,
+            prior,
+            transcript,
+        )
+    }
+
     fn try_bound_observation_for_provider_exact_count(
         policy: &mut AgentRunPolicy,
         call_request: AgentModelCallRequest,
@@ -4201,6 +4233,11 @@ fn encode_openai_observation_body_with_action_targets(
                 .adds_viewport_screenshot()
                 .then(|| &*VIEWPORT_SCREENSHOT_TOOL),
         )
+        .chain(
+            config
+                .adds_standalone_wait()
+                .then(|| &*STANDALONE_WAIT_TOOL),
+        )
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| OpenAiToolWire {
             r#type: "function",
@@ -4319,6 +4356,11 @@ pub(in crate::agent_provider) fn encode_openai_continuation_body(
             config
                 .adds_viewport_screenshot()
                 .then(|| &*VIEWPORT_SCREENSHOT_TOOL),
+        )
+        .chain(
+            config
+                .adds_standalone_wait()
+                .then(|| &*STANDALONE_WAIT_TOOL),
         )
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| OpenAiToolWire {
@@ -4534,6 +4576,11 @@ fn encode_openai_screenshot_continuation_body(
                 .adds_viewport_screenshot()
                 .then(|| &*VIEWPORT_SCREENSHOT_TOOL),
         )
+        .chain(
+            config
+                .adds_standalone_wait()
+                .then(|| &*STANDALONE_WAIT_TOOL),
+        )
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| OpenAiToolWire {
             r#type: "function",
@@ -4596,6 +4643,7 @@ fn encode_anthropic_body_with_action_targets(
         config.adds_baseline_read(),
         config.adds_progressive_observation(),
         config.adds_viewport_screenshot(),
+        config.adds_standalone_wait(),
     )?;
     let tools = definitions
         .iter()
@@ -4613,6 +4661,11 @@ fn encode_anthropic_body_with_action_targets(
             config
                 .adds_viewport_screenshot()
                 .then(|| &*ANTHROPIC_VIEWPORT_SCREENSHOT_TOOL),
+        )
+        .chain(
+            config
+                .adds_standalone_wait()
+                .then(|| &*ANTHROPIC_STANDALONE_WAIT_TOOL),
         )
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| AnthropicToolWire {
@@ -4676,6 +4729,7 @@ fn encode_anthropic_continuation_body(
         config.adds_baseline_read(),
         config.adds_progressive_observation(),
         config.adds_viewport_screenshot(),
+        config.adds_standalone_wait(),
     )?;
     let message_count = 1_usize
         .checked_add(
@@ -4751,6 +4805,11 @@ fn encode_anthropic_continuation_body(
             config
                 .adds_viewport_screenshot()
                 .then(|| &*ANTHROPIC_VIEWPORT_SCREENSHOT_TOOL),
+        )
+        .chain(
+            config
+                .adds_standalone_wait()
+                .then(|| &*ANTHROPIC_STANDALONE_WAIT_TOOL),
         )
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| AnthropicToolWire {
@@ -4893,6 +4952,7 @@ fn encode_anthropic_screenshot_continuation_body(
         config.adds_baseline_read(),
         config.adds_progressive_observation(),
         config.adds_viewport_screenshot(),
+        config.adds_standalone_wait(),
     )?;
     if transcript.navigation_checkpoint().is_some() {
         return Err(AgentProviderRequestError::Encoding);
@@ -5014,6 +5074,11 @@ fn encode_anthropic_screenshot_continuation_body(
                 .adds_viewport_screenshot()
                 .then(|| &*ANTHROPIC_VIEWPORT_SCREENSHOT_TOOL),
         )
+        .chain(
+            config
+                .adds_standalone_wait()
+                .then(|| &*ANTHROPIC_STANDALONE_WAIT_TOOL),
+        )
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| AnthropicToolWire {
             name: tool.kind.as_str(),
@@ -5084,12 +5149,14 @@ fn validate_anthropic_tool_definitions(
     baseline_read: bool,
     progressive_observation: bool,
     viewport_screenshot: bool,
+    standalone_wait: bool,
 ) -> Result<(), AgentProviderRequestError> {
     let union_parameters = definitions
         .iter()
         .chain(baseline_read.then(|| &*ANTHROPIC_BASELINE_READ_TOOL))
         .chain(progressive_observation.then(|| &*ANTHROPIC_PROGRESSIVE_OBSERVATION_TOOL))
         .chain(viewport_screenshot.then(|| &*ANTHROPIC_VIEWPORT_SCREENSHOT_TOOL))
+        .chain(standalone_wait.then(|| &*ANTHROPIC_STANDALONE_WAIT_TOOL))
         .try_fold(0_usize, |total, tool| {
             total.checked_add(count_schema_unions(&tool.input_schema))
         });
@@ -5097,6 +5164,7 @@ fn validate_anthropic_tool_definitions(
         + usize::from(baseline_read)
         + usize::from(progressive_observation)
         + usize::from(viewport_screenshot)
+        + usize::from(standalone_wait)
         > MAX_ANTHROPIC_STRICT_TOOLS
         || union_parameters.is_none_or(|count| count > MAX_ANTHROPIC_SCHEMA_UNIONS)
     {
@@ -5189,6 +5257,27 @@ static ANTHROPIC_VIEWPORT_SCREENSHOT_TOOL: LazyLock<AnthropicBrowserToolDefiniti
         kind: VIEWPORT_SCREENSHOT_TOOL.kind,
         description: VIEWPORT_SCREENSHOT_TOOL.description,
         input_schema: project_anthropic_schema(&VIEWPORT_SCREENSHOT_TOOL.parameters),
+    });
+
+static STANDALONE_WAIT_TOOL: LazyLock<BrowserToolDefinition> = LazyLock::new(|| {
+    BrowserToolDefinition {
+        kind: AgentBrowserToolKind::Wait,
+        description: "Wait for either a semantic projection change or one exact current ref to gain or lose an allowlisted state. Timeouts are reported explicitly and never count as condition success. Use wait only for state expected to change without another browser action.",
+        parameters: with_reference_definition(strict_object(vec![
+            ("condition", bounded_standalone_wait_schema()),
+            (
+                "timeout_millis",
+                json!({"type":"integer","minimum":1,"maximum":MAX_SEMANTIC_ACTION_SETTLE_MILLIS}),
+            ),
+        ])),
+    }
+});
+
+static ANTHROPIC_STANDALONE_WAIT_TOOL: LazyLock<AnthropicBrowserToolDefinition> =
+    LazyLock::new(|| AnthropicBrowserToolDefinition {
+        kind: STANDALONE_WAIT_TOOL.kind,
+        description: STANDALONE_WAIT_TOOL.description,
+        input_schema: project_anthropic_schema(&STANDALONE_WAIT_TOOL.parameters),
     });
 
 static EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolDefinition>> = LazyLock::new(|| {
@@ -6054,6 +6143,20 @@ fn standalone_wait_schema() -> Value {
     ])
 }
 
+fn bounded_standalone_wait_schema() -> Value {
+    any_of(vec![
+        tagged_object(
+            "target_state",
+            vec![
+                ("target", reference_schema()),
+                ("state", state_schema()),
+                ("present", json!({"type":"boolean"})),
+            ],
+        ),
+        tagged_object("semantic_change", Vec::new()),
+    ])
+}
+
 fn verification_schema(action: SemanticActionKind, snapshot_only: bool) -> Value {
     let target_state = || {
         let mut states = state_schema();
@@ -6711,6 +6814,43 @@ mod tests {
                 .unwrap()
                 .is_empty());
             assert_eq!(screenshot_schema["additionalProperties"], false);
+            let waiting = config
+                .clone()
+                .restrict_to_navigation_and_extraction()
+                .with_standalone_wait();
+            assert!(waiting.permits_standalone_wait());
+            assert!(waiting.permits_tool(AgentBrowserToolKind::Wait));
+            let waiting_body = match provider {
+                AgentProviderKind::OpenAiResponses => {
+                    encode_openai_body(&waiting, "objective", "observation")
+                }
+                AgentProviderKind::AnthropicMessages => {
+                    encode_anthropic_body(&waiting, "objective", "observation")
+                }
+            }
+            .unwrap();
+            let waiting_wire: Value = serde_json::from_slice(&waiting_body).unwrap();
+            let waits = waiting_wire["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|tool| tool["name"] == "wait")
+                .collect::<Vec<_>>();
+            assert_eq!(waits.len(), 1);
+            let wait_schema = match provider {
+                AgentProviderKind::OpenAiResponses => &waits[0]["parameters"],
+                AgentProviderKind::AnthropicMessages => &waits[0]["input_schema"],
+            };
+            assert_eq!(
+                wait_schema["properties"]["condition"]["anyOf"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|condition| condition["properties"]["kind"]["enum"][0].as_str().unwrap())
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from(["semantic_change", "target_state"])
+            );
+            assert!(!wait_schema.to_string().contains("mutation_quiet"));
             let extraction = config.clone().restrict_to_extraction();
             let combined = config.clone().restrict_to_actions_and_extraction();
             for base in [
@@ -7708,7 +7848,7 @@ mod tests {
                 (AgentBrowserToolKind::Reload, 201),
                 (AgentBrowserToolKind::Snapshot, 1_513),
                 (AgentBrowserToolKind::Locate, 2_357),
-                (AgentBrowserToolKind::Act, 10_638),
+                (AgentBrowserToolKind::Act, 11_001),
                 (AgentBrowserToolKind::Wait, 2_152),
                 (AgentBrowserToolKind::Read, 1_510),
                 (AgentBrowserToolKind::Extract, 1_602),
@@ -7717,7 +7857,7 @@ mod tests {
                 (AgentBrowserToolKind::ResumeAfterHuman, 204),
             ]
         );
-        assert_eq!(sizes.iter().map(|(_, bytes)| bytes).sum::<usize>(), 21_405);
+        assert_eq!(sizes.iter().map(|(_, bytes)| bytes).sum::<usize>(), 21_768);
     }
 
     #[test]

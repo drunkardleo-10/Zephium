@@ -30,25 +30,26 @@ use zephium_agent_runtime::{
 use zephium_agentic::{
     encode_semantic_diff, encode_semantic_locate_result, encode_semantic_observation,
     encode_semantic_runtime_invocation, locate_semantic_observation, AgentAuditDeliveryId,
-    AgentAuditDispatch, AgentAuditEventId, AgentAuditLedger, AgentAuditPort,
-    AgentContextAccountBinding, AgentDelegationSpec, AgentDelegationTopology, AgentModelCallBudget,
-    AgentModelCallId, AgentModelCallReceipt, AgentModelCallRequest, AgentModelCallSettlement,
-    AgentNodeExecution, AgentPlanLeaseBinding, AgentPolicyInstant, AgentPreparedObservationRequest,
-    AgentProviderBatchDisposition, AgentProviderCallConfig, AgentProviderCancellation,
-    AgentProviderDiffRequestDraft, AgentProviderDisclosureStage, AgentProviderFailureClass,
-    AgentProviderImmediateSettlement, AgentProviderLocateRequestDraft, AgentProviderObjective,
-    AgentProviderPolicySettlement, AgentProviderProtocolError, AgentProviderProtocolEvent,
-    AgentProviderRequestSettlement, AgentProviderScreenshotRequestDraft,
-    AgentProviderSettledToolTurn, AgentProviderStopReason, AgentProviderStreamConclusion,
-    AgentProviderTransportInput, AgentProviderTransportOutcome, AgentProviderTransportResult,
-    AgentRunAccountingMetrics, AgentRunActionPerformanceMetrics, AgentRunMetricClosure,
-    AgentRunPolicy, AgentRunProgressMetrics, AgentRunProviderInputMetrics, AgentRunSupervisor,
-    AgentSupervisorAttemptId, AgentSupervisorCancellationId, AgentSupervisorCancellationReason,
-    AgentSupervisorCompletion, AgentSupervisorFailure, AgentSupervisorId, ContextDispatch,
-    ContextNativeEvent, SemanticInvocationId, SemanticLocateBudget, SemanticLocateId,
-    SemanticLocateRequest, SemanticModelEncodingBudget, SemanticModelEncodingError,
-    SemanticObservationAssembler, SemanticObservationRequest, SemanticRuntimeBudget,
-    SemanticScreenshot, SemanticSnapshotGeneration, MAX_AGENT_AUDIT_DELIVERY_EVENTS,
+    AgentAuditDispatch, AgentAuditEventId, AgentAuditLedger, AgentAuditPort, AgentBrowserToolKind,
+    AgentBrowserToolProposal, AgentContextAccountBinding, AgentDelegationSpec,
+    AgentDelegationTopology, AgentModelCallBudget, AgentModelCallId, AgentModelCallReceipt,
+    AgentModelCallRequest, AgentModelCallSettlement, AgentNodeExecution, AgentPlanLeaseBinding,
+    AgentPolicyInstant, AgentPreparedObservationRequest, AgentProviderBatchDisposition,
+    AgentProviderCallConfig, AgentProviderCancellation, AgentProviderDiffRequestDraft,
+    AgentProviderDisclosureStage, AgentProviderFailureClass, AgentProviderImmediateSettlement,
+    AgentProviderLocateRequestDraft, AgentProviderObjective, AgentProviderPolicySettlement,
+    AgentProviderProtocolError, AgentProviderProtocolEvent, AgentProviderRequestSettlement,
+    AgentProviderScreenshotRequestDraft, AgentProviderSettledToolTurn, AgentProviderStopReason,
+    AgentProviderStreamConclusion, AgentProviderTransportInput, AgentProviderTransportOutcome,
+    AgentProviderTransportResult, AgentRunAccountingMetrics, AgentRunActionPerformanceMetrics,
+    AgentRunMetricClosure, AgentRunPolicy, AgentRunProgressMetrics, AgentRunProviderInputMetrics,
+    AgentRunSupervisor, AgentSupervisorAttemptId, AgentSupervisorCancellationId,
+    AgentSupervisorCancellationReason, AgentSupervisorCompletion, AgentSupervisorFailure,
+    AgentSupervisorId, ContextDispatch, ContextNativeEvent, SemanticInvocationId,
+    SemanticLocateBudget, SemanticLocateId, SemanticLocateRequest, SemanticModelEncodingBudget,
+    SemanticModelEncodingError, SemanticObservationAssembler, SemanticObservationRequest,
+    SemanticRuntimeBudget, SemanticScreenshot, SemanticSnapshotGeneration,
+    MAX_AGENT_AUDIT_DELIVERY_EVENTS,
 };
 
 use crate::action::AgentBrowserVerifiedTransition;
@@ -2480,6 +2481,63 @@ impl AgentBrowserSession {
             })
             .map_err(|_| AgentBrowserProviderError::Authority)?;
         self.drive(prepared.into_transport_input()).await
+    }
+
+    /// Continues after one bounded standalone wait. The semantic runtime, not
+    /// the model or timer, supplies the terminal proof and replacement state.
+    pub async fn continue_after_standalone_wait(
+        &mut self,
+        turn: AgentProviderSettledToolTurn,
+        result: zephium_agentic::SemanticStandaloneWaitResult,
+        action_authority: Option<&zephium_agentic::AgentProviderActionAuthority>,
+    ) -> Result<
+        (
+            AgentBrowserProviderTurn,
+            zephium_agentic::SemanticObservation,
+        ),
+        AgentBrowserProviderError,
+    > {
+        self.check_live()?;
+        if self.turns >= self.max_model_calls {
+            return Err(AgentBrowserProviderError::TurnLimit);
+        }
+        if !self.config.permits_tool(AgentBrowserToolKind::Wait)
+            || !matches!(turn.proposal(), AgentBrowserToolProposal::Wait { .. })
+        {
+            return Err(AgentBrowserProviderError::UnsupportedTool(
+                AgentBrowserToolKind::Wait,
+            ));
+        }
+        if let Some(journal) = &self.journal {
+            journal
+                .emit(work::AgentWorkEventKind::ToolProposed(
+                    AgentBrowserToolKind::Wait,
+                ))
+                .map_err(|_| AgentBrowserProviderError::Journal)?;
+        }
+        let (_, continuation) = turn.into_parts();
+        let payload = encode_semantic_observation(
+            result.observation(),
+            SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
+        .map_err(AgentBrowserProviderError::InitialEncoding)?;
+        let request = self.next_model_call_request()?;
+        let prepared =
+            AgentPreparedObservationRequest::try_standalone_wait_for_provider_exact_count(
+                &mut self.policy,
+                request,
+                &result,
+                payload,
+                self.config.clone(),
+                continuation,
+                action_authority,
+            )
+            .map_err(|_| AgentBrowserProviderError::Authority)?;
+        let input = prepared.into_transport_input();
+        let observation = result.into_observation();
+        let turn = self.drive(input).await?;
+        Ok((turn, observation))
     }
 
     /// Consumes one schema-bound terminal extraction proposal. The returned

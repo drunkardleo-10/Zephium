@@ -1078,6 +1078,89 @@ impl AgentProviderContinuation {
         Ok((prior, transcript.try_bind(correlation, output)?))
     }
 
+    /// Binds one independently observed standalone-wait terminal. The result
+    /// replaces the prior observation and retires every old ref; host-projected
+    /// action authority must therefore be rebuilt for the exact fresh state.
+    pub(super) fn bind_wait_observation_with_authority(
+        self,
+        result: &crate::SemanticStandaloneWaitResult,
+        request: AgentModelCallRequest,
+        config: &AgentProviderCallConfig,
+        payload: &crate::SemanticModelPayload,
+        action_authority: Option<&AgentProviderActionAuthority>,
+    ) -> Result<
+        (AgentProviderCallIdentity, AgentProviderBoundTranscript),
+        AgentProviderContinuationError,
+    > {
+        if action_authority.is_none()
+            && self
+                .transcript
+                .action_targets()
+                .is_some_and(AgentProviderActionTargets::is_host_projected)
+        {
+            return Err(AgentProviderContinuationError::Baseline);
+        }
+        if config != &self.config {
+            return Err(AgentProviderContinuationError::Config);
+        }
+        if self.correlation.kind() != AgentBrowserToolKind::Wait {
+            return Err(AgentProviderContinuationError::ToolKind);
+        }
+        let current = result.observation();
+        if result.baseline() != &self.baseline
+            || current.request().context() != self.baseline.context()
+            || current.request().id().get() <= self.baseline.observation().get()
+        {
+            return Err(AgentProviderContinuationError::Baseline);
+        }
+        if !matches!(current.request().scope(), crate::SemanticScope::Initial) {
+            return Err(AgentProviderContinuationError::Scope);
+        }
+        if request.id() <= self.prior_call.call()
+            || request.lease() != self.prior_call.lease()
+            || request.account().context() != current.request().context()
+        {
+            return Err(AgentProviderContinuationError::Lineage);
+        }
+        if !payload.matches_observation(current) {
+            return Err(AgentProviderContinuationError::Payload);
+        }
+        let (status, guidance) = match result.outcome() {
+            crate::SemanticStandaloneWaitOutcome::Satisfied => (
+                "satisfied",
+                "The requested condition was independently observed in fresh semantic state.",
+            ),
+            crate::SemanticStandaloneWaitOutcome::TimedOut => (
+                "timed_out",
+                "The absolute wait deadline elapsed without observing the requested condition. This is not condition success; reconsider the next step using the fresh state below.",
+            ),
+        };
+        let output = serde_json::json!({
+            "status": status,
+            "update": "replace_observation",
+            "guidance": format!("{guidance} All prior semantic refs are retired. Use only refs in this replacement observation."),
+            "observation": payload.as_str(),
+        })
+        .to_string();
+        let (prior, _, _, correlation, transcript) = self.into_parts();
+        let mut transcript = AgentProviderTranscript::try_initial_with_checkpoints(
+            transcript.objective,
+            "Prior page observations and their refs are retired. Current browser state follows in the standalone wait tool result.".into(),
+            transcript.navigation_checkpoint,
+            None,
+        )
+        .ok_or(AgentProviderContinuationError::TranscriptLimit)?;
+        transcript.set_action_targets(
+            action_authority
+                .map_or_else(
+                    || AgentProviderActionTargets::try_from_observation(current),
+                    |authority| AgentProviderActionTargets::try_from_authority(current, authority),
+                )
+                .ok_or(AgentProviderContinuationError::Baseline)?,
+        );
+        Ok((prior, transcript.try_bind(correlation, output)?))
+    }
+
     /// Binds one provisional same-plan request to the exact admitted diff.
     ///
     /// This derives only content-free correlation; it does not reserve policy
