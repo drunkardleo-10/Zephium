@@ -140,7 +140,13 @@ impl WorkObservationPresentation {
         let responder = main
             .firstResponder()
             .ok_or(PresentationState::Unavailable)?;
-        if !foreground(&app, &main, &responder) {
+        if !foreground(
+            &app,
+            &main,
+            &responder,
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            failure_diagnostic.as_ref(),
+        ) {
             return Err(PresentationState::Unavailable);
         }
         // SAFETY: the exact native page is read on its owning main thread;
@@ -227,7 +233,7 @@ impl WorkObservationPresentation {
             self.state = PresentationState::Failed;
             return self.state;
         }
-        if !foreground(&self.app, &self.main, &self.responder) {
+        if !self.human_current() {
             self.state = PresentationState::Unavailable;
             return self.state;
         }
@@ -298,7 +304,7 @@ impl WorkObservationPresentation {
         ) {
             return self.state;
         }
-        if !foreground(&self.app, &self.main, &self.responder) {
+        if !self.human_current() {
             self.state = PresentationState::Unavailable;
         } else if Instant::now() >= self.deadline {
             self.state = PresentationState::Expired;
@@ -416,7 +422,13 @@ impl WorkObservationPresentation {
             || !self.page.isHidden()
     }
     pub(crate) fn human_current(&self) -> bool {
-        foreground(&self.app, &self.main, &self.responder)
+        foreground(
+            &self.app,
+            &self.main,
+            &self.responder,
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            self.failure_diagnostic.as_ref(),
+        )
     }
 
     /// Fixed native ownership fence retained until the runtime hands the action
@@ -425,7 +437,17 @@ impl WorkObservationPresentation {
         let app = self.app.clone();
         let main = self.main.clone();
         let responder = self.responder.clone();
-        Box::new(move || foreground(&app, &main, &responder))
+        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+        let failure_diagnostic = self.failure_diagnostic.clone();
+        Box::new(move || {
+            foreground(
+                &app,
+                &main,
+                &responder,
+                #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                failure_diagnostic.as_ref(),
+            )
+        })
     }
 }
 #[cfg(feature = "native-agentic-work-resource-probe")]
@@ -485,8 +507,15 @@ fn admitted_frame(frame: NSRect, screen: NSRect) -> bool {
         && frame.origin.x + frame.size.width <= screen.origin.x + screen.size.width
         && frame.origin.y + frame.size.height <= screen.origin.y + screen.size.height
 }
-fn foreground(app: &NSApplication, main: &NSWindow, responder: &NSResponder) -> bool {
-    foreground_facts([
+fn foreground(
+    app: &NSApplication,
+    main: &NSWindow,
+    responder: &NSResponder,
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")] diagnostic: &dyn Fn(
+        PresentationFailure,
+    ),
+) -> bool {
+    let facts = [
         app.isActive(),
         main.isVisible(),
         !main.isMiniaturized(),
@@ -496,7 +525,22 @@ fn foreground(app: &NSApplication, main: &NSWindow, responder: &NSResponder) -> 
             .is_some_and(|window| std::ptr::eq(&*window, main)),
         main.firstResponder()
             .is_some_and(|current| std::ptr::eq(&*current, responder)),
-    ])
+    ];
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    if !foreground_facts(facts) {
+        invoke_failure_diagnostic(
+            diagnostic,
+            PresentationFailure::HumanOwnership {
+                app_active: facts[0],
+                main_visible: facts[1],
+                main_not_minimized: facts[2],
+                key_window_matches: facts[3],
+                main_window_matches: facts[4],
+                responder_matches: facts[5],
+            },
+        );
+    }
+    foreground_facts(facts)
 }
 fn foreground_facts(facts: [bool; 6]) -> bool {
     facts.into_iter().all(|fact| fact)

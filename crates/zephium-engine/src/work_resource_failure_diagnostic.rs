@@ -170,6 +170,14 @@ impl WorkUrlObservationFailure {
 /// Variants encode relations only; no native value or page data is retained.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkObservationPresentationFailure {
+    HumanOwnership {
+        app_active: bool,
+        main_visible: bool,
+        main_not_minimized: bool,
+        key_window_matches: bool,
+        main_window_matches: bool,
+        responder_matches: bool,
+    },
     PrepareMainThread,
     PrepareMissingParent,
     PreparePageNotHidden,
