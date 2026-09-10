@@ -29,6 +29,8 @@
   const CHANNEL_RESULT_PREFIX = "R1:";
   const CHANNEL_ACK = "A1";
   const CHANNEL_STOP = "S1";
+  const CHANNEL_PARK = "K1";
+  const CHANNEL_PARKED = "K1:A";
   const CHANNEL_EXHAUSTED = "X1";
 
   const objectDefineProperty = Object.defineProperty;
@@ -40,6 +42,7 @@
   const jsonParse = JSON.parse;
   const jsonStringify = JSON.stringify;
   const reflectApply = Reflect.apply;
+  const eventTargetAddEventListener = EventTarget.prototype.addEventListener;
   const numberIsFinite = Number.isFinite;
   const numberIsSafeInteger = Number.isSafeInteger;
   const mathRound = Math.round;
@@ -151,7 +154,7 @@
   const shadowHostGetter =
     typeof ShadowRoot === "function" ? getter(ShadowRoot.prototype, "host") : null;
 
-  const nodeKeys = new WeakMap();
+  let nodeKeys = new WeakMap();
   const keyNodes = new Map();
   let nextNodeKey = 1;
   let busy = false;
@@ -159,9 +162,22 @@
   let lastObservationGeneration = 0;
   // Only a requested UI-transition action pays for these bounded samples.
   // Weak identities do not retain DOM nodes or enter the model projection.
-  const dialogKeys = new WeakMap();
+  let dialogKeys = new WeakMap();
   let nextDialogKey = 1;
   let pendingDialogSample = null;
+  let transportActive = false;
+
+  function clearDocumentState() {
+    nodeKeys = new WeakMap();
+    keyNodes.clear();
+    nextNodeKey = 1;
+    busy = false;
+    lastObservationInvocation = 0;
+    lastObservationGeneration = 0;
+    dialogKeys = new WeakMap();
+    nextDialogKey = 1;
+    pendingDialogSample = null;
+  }
 
   const IDENTITY_EXHAUSTED = objectFreeze({});
 
@@ -2855,6 +2871,17 @@
         return;
       }
       if (encoded === CHANNEL_STOP) return;
+      if (encoded === CHANNEL_PARK) {
+        clearDocumentState();
+        let parked;
+        try {
+          parked = await apply(post, channel, [CHANNEL_PARKED]);
+        } catch (_) {
+          return;
+        }
+        if (parked !== CHANNEL_ACK) return;
+        return;
+      }
 
       const invoked = invoke(encoded);
       const result = typeof invoked === "string" ? invoked : await invoked;
@@ -2875,6 +2902,7 @@
   }
 
   function startNativeTransport() {
+    if (transportActive) return;
     let channel;
     let post;
     try {
@@ -2886,7 +2914,12 @@
       return;
     }
     if (typeof post !== "function") return;
-    void serveNativeInvocations(channel, post);
+    transportActive = true;
+    const serving = serveNativeInvocations(channel, post);
+    void apply(promiseThen, serving, [
+      () => { transportActive = false; },
+      () => { transportActive = false; }
+    ]);
   }
 
   objectFreeze(invoke);
@@ -2897,5 +2930,6 @@
     configurable: false,
     enumerable: false
   });
+  apply(eventTargetAddEventListener, globalThis, ["pageshow", startNativeTransport, true]);
   startNativeTransport();
 })();

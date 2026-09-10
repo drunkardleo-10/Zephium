@@ -351,6 +351,8 @@ pub struct MacosAgenticHistoryRuntimeProbeReport {
     pub pageshow_observed: bool,
     /// The pageshow event identified a BFCache restoration.
     pub pageshow_persisted: bool,
+    /// The parked isolated-world runtime resumed and produced a fresh snapshot.
+    pub semantic_runtime_reactivated: bool,
 }
 
 /// Fixed run authority bound to one live release-excluded semantic context.
@@ -774,11 +776,17 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
                 &first_url,
                 &runtime,
             )?;
+            view.enroll_current_work_history_get(
+                ContextNavigationTarget::parse(&first_url)
+                    .map_err(|_| "history_probe_first_target")?,
+            )
+            .map_err(|_| "history_probe_first_enrollment")?;
             install_history_lifecycle_witness(&page, &runtime)?;
             let first_item = native_current_history_item(&page)?;
             if native_item_url(&first_item).as_deref() != Some(first_url.as_str()) {
                 return Err("history_probe_first_item");
             }
+            park_semantic_runtime(&mut view, &runtime)?;
             let (_second_context, _) = navigate_with_receipt(
                 &mut view,
                 &mut registry,
@@ -787,6 +795,11 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
                 &second_url,
                 &runtime,
             )?;
+            view.enroll_current_work_history_get(
+                ContextNavigationTarget::parse(&second_url)
+                    .map_err(|_| "history_probe_second_target")?,
+            )
+            .map_err(|_| "history_probe_second_enrollment")?;
             let list = unsafe { page.backForwardList() };
             let current = unsafe { list.currentItem() }.ok_or("history_probe_current_item")?;
             let predecessor = unsafe { list.backItem() }.ok_or("history_probe_back_item")?;
@@ -796,7 +809,7 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
             if !exact_item_identity {
                 return Err("history_probe_item_identity");
             }
-            history_back_with_receipt(
+            let restored_context = history_back_with_receipt(
                 &mut view,
                 &mut registry,
                 identity.id(),
@@ -810,11 +823,24 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
                 return Err("history_probe_restored_item");
             }
             let lifecycle = read_history_lifecycle_witness(&page, &runtime)?;
+            let restored_capture = capture_snapshot(
+                &view,
+                restored_context,
+                &first_url,
+                SemanticSnapshotGeneration::INITIAL,
+                &mut next_invocation,
+                &mut successful_snapshots,
+                &runtime,
+            )?;
+            let semantic_runtime_reactivated = restored_capture.snapshot.frame().context()
+                == restored_context
+                && restored_capture.snapshot.generation() == SemanticSnapshotGeneration::INITIAL;
             **report = Some(MacosAgenticHistoryRuntimeProbeReport {
                 exact_item_identity,
                 bfcache_restored: lifecycle[0],
                 pageshow_observed: lifecycle[1],
                 pageshow_persisted: lifecycle[2],
+                semantic_runtime_reactivated,
             });
             return Ok(None);
         }
@@ -1886,6 +1912,26 @@ fn navigate_with_receipt(
         .map_err(|_| "navigation_settle")
 }
 
+fn park_semantic_runtime(
+    view: &mut AgentOwnedView,
+    runtime: &ProbeRuntime<'_, '_>,
+) -> Result<(), &'static str> {
+    let result = Rc::new(Cell::new(None));
+    let completion = result.clone();
+    view.park_semantic_runtime(move |parked| completion.set(Some(parked)))
+        .map_err(|_| "history_probe_park_dispatch")?;
+    let deadline = Instant::now()
+        .checked_add(SNAPSHOT_TIMEOUT)
+        .ok_or("history_probe_park_timeout")?;
+    while result.get().is_none() && !runtime.failed() && Instant::now() < deadline {
+        runtime.pump();
+    }
+    if result.get() != Some(true) || !view.semantic_runtime_parked() || runtime.failed() {
+        return Err("history_probe_park_terminal");
+    }
+    Ok(())
+}
+
 fn history_back_with_receipt(
     view: &mut AgentOwnedView,
     registry: &mut ContextRegistry,
@@ -1905,6 +1951,13 @@ fn history_back_with_receipt(
     if std::ptr::eq(&*current, item) || !std::ptr::eq(&*back, item) {
         return Err("history_probe_pre_dispatch_identity");
     }
+    let ticket = view
+        .prepare_history_back()
+        .map_err(|_| "history_probe_back_authority")?;
+    park_semantic_runtime(view, runtime)?;
+    let reactivated_target = view
+        .reactivate_history_destination(ticket)
+        .map_err(|_| "history_probe_reactivate")?;
     let operation = registry
         .begin_navigation(
             id,
@@ -1913,9 +1966,10 @@ fn history_back_with_receipt(
         .map_err(|_| "history_probe_navigation_state")?;
     let target = ContextNavigationTarget::parse(expected_url)
         .map_err(|_| "history_probe_navigation_target")?;
-    if view.prepare_semantic_document_load().is_err() {
+    if reactivated_target != target {
         let _ = registry.settle_navigation(id, operation, ContextSettlement::Refused);
-        return Err("history_probe_semantic_epoch");
+        let _ = view.refuse_history_back(ticket);
+        return Err("history_probe_back_target");
     }
     let terminal_claimed = Arc::new(AtomicBool::new(false));
     if view
@@ -1926,11 +1980,10 @@ fn history_back_with_receipt(
         let _ = registry.settle_navigation(id, operation, ContextSettlement::Refused);
         return Err("history_probe_navigation_arm");
     }
-    // SAFETY: the retained item was sampled from this exact page's immediate
-    // back slot immediately before dispatch on the WebKit main thread.
-    if unsafe { page.goToBackForwardListItem(item) }.is_none() {
+    if !view.dispatch_history_back(ticket) {
         let _ = view.navigation().disarm(operation);
         let _ = registry.settle_navigation(id, operation, ContextSettlement::Refused);
+        let _ = view.refuse_history_back(ticket);
         return Err("history_probe_native_dispatch");
     }
     let deadline = Instant::now()
@@ -1968,8 +2021,11 @@ fn history_back_with_receipt(
         )
         .map_err(|_| "history_probe_navigation_settle")?;
     if !applied || !disarmed || runtime.failed() || !terminal_claimed.load(Ordering::Acquire) {
+        let _ = view.refuse_history_back(ticket);
         return Err("history_probe_navigation_terminal");
     }
+    view.settle_history_back(ticket)
+        .map_err(|_| "history_probe_history_settle")?;
     registry
         .join(id)
         .map_err(|_| "history_probe_navigation_settle")

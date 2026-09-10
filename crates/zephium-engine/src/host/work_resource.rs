@@ -967,6 +967,14 @@ impl EngineHost {
                         DocumentFinalizationProgress::Ready(effective)
                             if guard.construction_current() =>
                         {
+                            #[cfg(target_os = "macos")]
+                            if resource.view.as_mut().is_none_or(|view| {
+                                view.enroll_current_work_history_get(effective.clone())
+                                    .is_err()
+                            }) {
+                                guard.fail();
+                                return;
+                            }
                             resource.watchdog = None;
                             resource.lifecycle_deadline = None;
                             if let Some(task) = resource.construction.take() {
@@ -1019,6 +1027,20 @@ impl EngineHost {
                     .as_ref()
                     .is_some_and(|view| view.semantic_pending_for_audit() == Some(false))
             {
+                #[cfg(target_os = "macos")]
+                {
+                    let Some(document) = guard.document() else {
+                        guard.fail();
+                        return;
+                    };
+                    if resource.view.as_mut().is_none_or(|view| {
+                        view.enroll_current_work_history_get(document.clone())
+                            .is_err()
+                    }) {
+                        guard.fail();
+                        return;
+                    }
+                }
                 resource.watchdog = None;
                 resource.lifecycle_deadline = None;
                 if let Some(task) = resource.construction.take() {

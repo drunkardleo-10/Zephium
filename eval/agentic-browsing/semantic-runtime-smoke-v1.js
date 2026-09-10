@@ -68,6 +68,10 @@ class EventTarget {
 }
 
 const terminalObservers = new Set();
+const smokeDispatchEvent = EventTarget.prototype.dispatchEvent;
+// Window implements EventTarget in WebKit. The synthetic global must retain
+// the same minimal listener state before the document-start runtime executes.
+globalThis._listeners = new Map();
 class MutationObserver {
   constructor(callback) { this.callback = callback; }
   observe(target, options) {
@@ -494,7 +498,8 @@ html.attributes[relayReady] = "1";
 
 const nativeTransportResults = [];
 let nativeTransportPulls = 0;
-let stopNativeTransport = null;
+const dormantNativeTransportPulls = [];
+let nativeTransportParked = 0;
 let releasePreparedFill = null;
 let preparationRequests = 0;
 globalThis.webkit = {
@@ -516,10 +521,14 @@ globalThis.webkit = {
               b: { n: 128, t: 16384, w: 65536, x: 512, geo: false }
             }));
           }
-          return new Promise((resolve) => { stopNativeTransport = resolve; });
+          return new Promise((resolve) => { dormantNativeTransportPulls.push(resolve); });
         }
         if (typeof message === "string" && message.startsWith("R1:")) {
           nativeTransportResults.push(message.slice(3));
+          return Promise.resolve("A1");
+        }
+        if (message === "K1:A") {
+          nativeTransportParked += 1;
           return Promise.resolve("A1");
         }
         return Promise.reject(new Error("unexpected semantic transport message"));
@@ -959,7 +968,7 @@ async function finish() {
     "native transport lost exact invocation authority"
   );
   assert(nativeTransportPulls === 2, "native transport did not hold one dormant pull");
-  assert(typeof stopNativeTransport === "function", "native transport did not retain its pull");
+  assert(dormantNativeTransportPulls.length === 1, "native transport did not retain its pull");
 
   const saveNode = transported.n.find((node) => node.r === "button" && node.n === "Save");
   assert(saveNode && saveNode.o === 9, "action target missing");
@@ -1393,9 +1402,6 @@ async function finish() {
     "attribute prefix ceiling hid uninspected name content behind local completeness");
   assert(metadataOverflowSnapshot.n.some(node => node.n === "aria0" && node.fc === false),
     "oversized ARIA identifier was silently discarded");
-
-  stopNativeTransport("S1");
-  await new Promise((resolve) => setImmediate(resolve));
 
   // The production commerce shape: named semantic children inside an unnamed
   // actionable link. Preserve both children and the composed link name without
@@ -2109,6 +2115,16 @@ async function finish() {
     }
   }
 
+  dormantNativeTransportPulls.shift()("K1");
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert(nativeTransportParked === 1, "native transport did not acknowledge park");
+  smokeDispatchEvent.call(globalThis, new Event("pageshow"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert(nativeTransportPulls === 3, "pageshow did not reactivate exactly one transport");
+  assert(dormantNativeTransportPulls.length === 1, "reactivated transport lost dormant pull");
+  dormantNativeTransportPulls.shift()("S1");
+
   process.stdout.write(`${JSON.stringify({
     empty_contenteditable_roundtrip: true,
     independent_page_dialog_samples: true,
@@ -2136,6 +2152,7 @@ async function finish() {
     reattached_identity_preserved: true,
     native_transport_settled: true,
     native_transport_dormant_pull: true,
+    native_transport_park_reactivate: true,
     action_descriptor_golden: true,
     no_webcrypto_required: true,
     fixed_action_execution: true,

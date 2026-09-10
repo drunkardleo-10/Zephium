@@ -10,6 +10,13 @@ pub(super) struct WorkNavigation {
     task: WorkNavigationTask,
     timer: Option<crate::platform::imp::ContentPolicyTimeout>,
     deadline: Instant,
+    stage: WorkNavigationStage,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkNavigationStage {
+    Parking,
+    Navigating,
 }
 impl WorkNavigation {
     pub(super) fn refuse(mut self, failure: ContextPortFailure) {
@@ -81,6 +88,13 @@ impl WorkNativeResource {
         };
         if native.document_policy() != zephium_agentic::WorkBrowserDocumentPolicy::Exact {
             if gate.ready(Some(target.as_url().as_str())) {
+                #[cfg(target_os = "macos")]
+                if self.view.as_mut().is_none_or(|view| {
+                    view.enroll_current_work_history_get(target.clone())
+                        .is_err()
+                }) {
+                    return Some(Err(ContextPortFailure::NativeRefused));
+                }
                 return Some(Ok(target));
             }
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
@@ -94,6 +108,13 @@ impl WorkNativeResource {
             .as_ref()
             .and_then(|view| crate::platform::imp::current_url(view.view()));
         if gate.ready(current.as_deref()) {
+            #[cfg(target_os = "macos")]
+            if self.view.as_mut().is_none_or(|view| {
+                view.enroll_current_work_history_get(target.clone())
+                    .is_err()
+            }) {
+                return Some(Err(ContextPortFailure::NativeRefused));
+            }
             Some(Ok(target))
         } else {
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
@@ -156,34 +177,65 @@ impl WorkNativeResource {
                 );
                 Some(Err(ContextPortFailure::TimedOut))
             } else if self.view.is_some() {
-                if let Some(gate) = self
-                    .view
+                #[cfg(target_os = "macos")]
+                if self
+                    .navigation
                     .as_ref()
-                    .and_then(|view| view.work_navigation())
-                    .cloned()
+                    .is_some_and(|navigation| navigation.stage == WorkNavigationStage::Parking)
                 {
-                    if gate.failed() {
+                    let parked = self
+                        .view
+                        .as_ref()
+                        .is_some_and(|view| view.semantic_runtime_parked());
+                    if !parked {
+                        return;
+                    }
+                    let dispatched = self.view.as_mut().is_some_and(|view| {
+                        view.prepare_semantic_document_load().is_ok()
+                            && view
+                                .view()
+                                .load_url(native.target().as_url().as_str())
+                                .is_ok()
+                    });
+                    if !dispatched {
+                        self.guard.fail();
+                        Some(Err(ContextPortFailure::NativeRefused))
+                    } else {
+                        if let Some(navigation) = self.navigation.as_mut() {
+                            navigation.stage = WorkNavigationStage::Navigating;
+                        }
+                        None
+                    }
+                } else {
+                    if let Some(gate) = self
+                        .view
+                        .as_ref()
+                        .and_then(|view| view.work_navigation())
+                        .cloned()
+                    {
+                        if gate.failed() {
+                            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                            self.record_successor_navigation_failure(
+                                crate::WorkSuccessorNavigationFailure::GateUnavailableOrFailed,
+                            );
+                            Some(Err(ContextPortFailure::NativeRefused))
+                        } else if self
+                            .view
+                            .as_ref()
+                            .and_then(|view| view.semantic_pending_for_audit())
+                            != Some(false)
+                        {
+                            None
+                        } else {
+                            self.settle_successor_gate(&gate, &native, operation)
+                        }
+                    } else {
                         #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
                         self.record_successor_navigation_failure(
                             crate::WorkSuccessorNavigationFailure::GateUnavailableOrFailed,
                         );
                         Some(Err(ContextPortFailure::NativeRefused))
-                    } else if self
-                        .view
-                        .as_ref()
-                        .and_then(|view| view.semantic_pending_for_audit())
-                        != Some(false)
-                    {
-                        None
-                    } else {
-                        self.settle_successor_gate(&gate, &native, operation)
                     }
-                } else {
-                    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
-                    self.record_successor_navigation_failure(
-                        crate::WorkSuccessorNavigationFailure::GateUnavailableOrFailed,
-                    );
-                    Some(Err(ContextPortFailure::NativeRefused))
                 }
             } else {
                 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
@@ -293,6 +345,7 @@ impl EngineHost {
             task,
             timer,
             deadline,
+            stage: WorkNavigationStage::Parking,
         });
         let mut dispatched = true;
         if resource
@@ -341,22 +394,23 @@ impl EngineHost {
                             crate::WorkSuccessorNavigationFailure::ArmRefused,
                         ));
                         dispatched = false;
-                    } else if view.prepare_semantic_document_load().is_err() {
-                        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
-                        guard.record_failure_cause(ResourceFailureCause::SuccessorNavigation(
-                            crate::WorkSuccessorNavigationFailure::SemanticPreparationRefused,
-                        ));
-                        dispatched = false;
-                    } else if view
-                        .view()
-                        .load_url(native.target().as_url().as_str())
-                        .is_err()
-                    {
-                        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
-                        guard.record_failure_cause(ResourceFailureCause::SuccessorNavigation(
-                            crate::WorkSuccessorNavigationFailure::NativeLoadRefused,
-                        ));
-                        dispatched = false;
+                    } else {
+                        let parked_guard = guard.clone();
+                        if view
+                            .park_semantic_runtime(move |parked| {
+                                if !parked {
+                                    parked_guard.fail();
+                                }
+                                crate::host::notify_work_resource(parked_guard);
+                            })
+                            .is_err()
+                        {
+                            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                            guard.record_failure_cause(ResourceFailureCause::SuccessorNavigation(
+                                crate::WorkSuccessorNavigationFailure::SemanticPreparationRefused,
+                            ));
+                            dispatched = false;
+                        }
                     }
                 } else {
                     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]

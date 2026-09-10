@@ -1,5 +1,7 @@
 #[cfg(feature = "agentic-browser")]
 mod agent_context;
+#[cfg(feature = "agentic-browser")]
+mod agent_history;
 #[cfg(feature = "native-agentic-foreground-probe")]
 pub(crate) mod agentic_foreground_driver;
 #[cfg(feature = "native-agentic-foreground-probe")]

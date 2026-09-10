@@ -117,6 +117,8 @@ pub(crate) struct AgentOwnedView {
     navigation: AgentNavigationController,
     work_navigation: Option<crate::platform::work_document_navigation::WorkDocumentNavigation>,
     semantic: Option<AgentSemanticRuntimeRegistration>,
+    history: super::agent_history::AgentHistoryLedger,
+    next_document_runtime: u64,
     viewport: ContextOwnedViewport,
     _navigation_observer: super::InstalledNavigationObserver,
     view: WebView,
@@ -147,9 +149,117 @@ impl AgentOwnedView {
     }
 
     pub(crate) fn retire_semantic_runtime(&mut self) -> bool {
+        self.history.clear();
         self.semantic
             .take()
             .is_some_and(|registration| registration.retire().is_ok())
+    }
+
+    pub(crate) fn enroll_current_work_history_get(
+        &mut self,
+        target: zephium_agentic::ContextNavigationTarget,
+    ) -> Result<(), ()> {
+        let runtime = super::agent_history::AgentDocumentRuntimeId::new(self.next_document_runtime)
+            .ok_or(())?;
+        let page = super::native_webview(&self.view);
+        // SAFETY: all owned-view lifecycle operations run on WebKit's main
+        // thread. objc2 retains the current native history item.
+        let item = unsafe { page.backForwardList().currentItem() }.ok_or(())?;
+        self.history.enroll_get(item, target, runtime)?;
+        if self
+            .semantic
+            .as_mut()
+            .ok_or(())?
+            .bind_active_runtime(runtime)
+            .is_err()
+        {
+            self.history.clear();
+            return Err(());
+        }
+        self.next_document_runtime = self.next_document_runtime.checked_add(1).ok_or(())?;
+        Ok(())
+    }
+
+    pub(crate) fn park_semantic_runtime(
+        &mut self,
+        completion: impl FnOnce(bool) + 'static,
+    ) -> Result<(), ()> {
+        self.semantic.as_mut().ok_or(())?.park_active(completion)
+    }
+
+    pub(crate) fn semantic_runtime_parked(&self) -> bool {
+        self.semantic
+            .as_ref()
+            .is_some_and(AgentSemanticRuntimeRegistration::active_parked)
+    }
+
+    pub(crate) fn prepare_history_back(
+        &mut self,
+    ) -> Result<super::agent_history::AgentHistoryBackTicket, ()> {
+        let page = super::native_webview(&self.view);
+        // SAFETY: owned agent views and their native history are confined to
+        // WebKit's main thread for this entire authorization read.
+        let (current, predecessor) = unsafe {
+            let list = page.backForwardList();
+            (list.currentItem(), list.backItem())
+        };
+        self.history.authorize_back(
+            current.as_deref().ok_or(())?,
+            predecessor.as_deref().ok_or(())?,
+        )
+    }
+
+    pub(crate) fn reactivate_history_destination(
+        &mut self,
+        ticket: super::agent_history::AgentHistoryBackTicket,
+    ) -> Result<zephium_agentic::ContextNavigationTarget, ()> {
+        let target = self.history.destination_target(ticket).cloned().ok_or(())?;
+        self.semantic
+            .as_mut()
+            .ok_or(())?
+            .reactivate_runtime(ticket.destination_runtime())?;
+        Ok(target)
+    }
+
+    pub(crate) fn dispatch_history_back(
+        &mut self,
+        ticket: super::agent_history::AgentHistoryBackTicket,
+    ) -> bool {
+        let page = super::native_webview(&self.view);
+        // SAFETY: all values are retained from this exact page's native list
+        // and immediately revalidated by opaque identity before dispatch.
+        let (current, predecessor) = unsafe {
+            let list = page.backForwardList();
+            (list.currentItem(), list.backItem())
+        };
+        let Some(item) = current.as_deref().and_then(|current| {
+            predecessor
+                .as_deref()
+                .and_then(|predecessor| self.history.dispatch_item(ticket, current, predecessor))
+        }) else {
+            return false;
+        };
+        // SAFETY: the ledger returned the exact retained predecessor after an
+        // immediate identity join against this page's current native list.
+        unsafe { page.goToBackForwardListItem(item) }.is_some()
+    }
+
+    pub(crate) fn settle_history_back(
+        &mut self,
+        ticket: super::agent_history::AgentHistoryBackTicket,
+    ) -> Result<(), ()> {
+        let page = super::native_webview(&self.view);
+        // SAFETY: currentItem is a bounded retained identity read on WebKit's
+        // main thread; the ledger requires the authorized destination exactly.
+        let current = unsafe { page.backForwardList().currentItem() }.ok_or(())?;
+        self.history.settle_back(ticket, &current, None)
+    }
+
+    pub(crate) fn refuse_history_back(
+        &mut self,
+        ticket: super::agent_history::AgentHistoryBackTicket,
+    ) -> bool {
+        self.history.refuse_back(ticket)
     }
 
     pub(crate) fn dispatch_semantic(
@@ -617,6 +727,8 @@ where
         navigation,
         work_navigation,
         semantic: Some(semantic),
+        history: super::agent_history::AgentHistoryLedger::default(),
+        next_document_runtime: 1,
         viewport,
         _navigation_observer: navigation_observer,
         view,

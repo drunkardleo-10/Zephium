@@ -55,11 +55,11 @@ pub const MAX_SEMANTIC_RUNTIME_VISITED_NODES: u32 = 32 * 1024;
 pub const MAX_SEMANTIC_RUNTIME_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 /// Maximum immutable production runtime source bytes installed per document.
 ///
-/// The fixed 113 KiB ceiling covers the digest-pinned semantic runtime including
+/// The fixed 115 KiB ceiling covers the digest-pinned semantic runtime including
 /// production Fill, native-select, public links and bounded source-coalesced
 /// windows, keyword discovery, independent page-dialog samples and bounded fill diagnostics with an
 /// explicit installation bound per platform.
-pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 113 * 1024;
+pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 115 * 1024;
 /// Sole fixed isolated-world global installed by the production runtime.
 pub const SEMANTIC_RUNTIME_GLOBAL_NAME: &str = "__zephiumSemanticRuntimeV1";
 /// Sole fixed native message handler visible in the production isolated world.
@@ -72,6 +72,11 @@ pub const SEMANTIC_RUNTIME_CHANNEL_RESULT_PREFIX: &str = "R1:";
 pub const SEMANTIC_RUNTIME_CHANNEL_ACK: &str = "A1";
 /// Exact native settlement that stops a document's dormant pull loop.
 pub const SEMANTIC_RUNTIME_CHANNEL_STOP: &str = "S1";
+/// Exact native settlement asking an idle document to clear all retained
+/// semantic state before a possible history restoration.
+pub const SEMANTIC_RUNTIME_CHANNEL_PARK: &str = "K1";
+/// Exact runtime acknowledgement after semantic state has been cleared.
+pub const SEMANTIC_RUNTIME_CHANNEL_PARKED: &str = "K1:A";
 /// Exact runtime notice after exhausting its per-document invocation budget.
 pub const SEMANTIC_RUNTIME_CHANNEL_EXHAUSTED: &str = "X1";
 /// Maximum closed invocations accepted by one document before a fresh document is required.
@@ -82,8 +87,8 @@ pub const MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES: usize =
 
 const SEMANTIC_RUNTIME_SOURCE: &str = include_str!("../assets/semantic-runtime-v1.js");
 const SEMANTIC_RUNTIME_SOURCE_SHA256: [u8; 32] = [
-    0xaa, 0x38, 0x90, 0x6c, 0x71, 0xc6, 0x5f, 0x50, 0x68, 0x78, 0xdf, 0x42, 0x3c, 0x7e, 0x4c, 0xae,
-    0xa1, 0x6f, 0xcf, 0x69, 0xb5, 0x76, 0x3c, 0x12, 0xa7, 0x0e, 0x67, 0x2c, 0x0e, 0x6a, 0xe6, 0xf8,
+    0x5c, 0xf5, 0x64, 0x03, 0x60, 0x99, 0x48, 0xd4, 0x2d, 0xd6, 0xfe, 0xed, 0x49, 0xab, 0xaf, 0x83,
+    0xf8, 0xcf, 0x1c, 0x7a, 0x89, 0xbd, 0xac, 0x44, 0x79, 0x32, 0x2f, 0xca, 0x01, 0x35, 0x4b, 0x0d,
 ];
 
 /// Immutable production program passed only to a trusted isolated-world adapter.
@@ -1596,7 +1601,6 @@ mod tests {
         for forbidden in [
             "MutationObserver",
             "CustomEvent",
-            "addEventListener",
             "setTimeout",
             "PAGE_RELAY",
         ] {
@@ -1613,7 +1617,7 @@ mod tests {
         );
         assert_eq!(source.matches("Element.prototype.setAttribute").count(), 1);
         assert!(!source.contains(".setAttribute("));
-        assert!(source.contains("const nodeKeys = new WeakMap()"));
+        assert!(source.contains("let nodeKeys = new WeakMap()"));
         assert!(source.contains("keyNodes.set(key, { node, generation })"));
         assert!(source.contains("sweepIdentities(request.g);"));
         assert_eq!(
@@ -1623,7 +1627,14 @@ mod tests {
             1
         );
         assert_eq!(source.matches("channel.postMessage").count(), 1);
-        assert_eq!(source.matches("await apply(post, channel").count(), 3);
+        assert_eq!(source.matches("await apply(post, channel").count(), 4);
+        assert_eq!(
+            source
+                .matches("EventTarget.prototype.addEventListener")
+                .count(),
+            1
+        );
+        assert!(!source.contains(".addEventListener("));
         assert!(source.contains("completed < MAX_DOCUMENT_INVOCATIONS"));
         assert!(!source.contains("evaluateJavaScript"));
         assert!(!source.contains("callAsyncJavaScript"));

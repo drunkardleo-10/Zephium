@@ -39,8 +39,8 @@ use zephium_agentic::{
     SemanticSnapshot, MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES,
     MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS, SEMANTIC_RUNTIME_CHANNEL_ACK,
     SEMANTIC_RUNTIME_CHANNEL_EXHAUSTED, SEMANTIC_RUNTIME_CHANNEL_NAME,
-    SEMANTIC_RUNTIME_CHANNEL_PULL, SEMANTIC_RUNTIME_CHANNEL_RESULT_PREFIX,
-    SEMANTIC_RUNTIME_CHANNEL_STOP,
+    SEMANTIC_RUNTIME_CHANNEL_PARK, SEMANTIC_RUNTIME_CHANNEL_PARKED, SEMANTIC_RUNTIME_CHANNEL_PULL,
+    SEMANTIC_RUNTIME_CHANNEL_RESULT_PREFIX, SEMANTIC_RUNTIME_CHANNEL_STOP,
 };
 
 const SEMANTIC_RUNTIME_WORLD_NAME_PREFIX: &str = "zephium-semantic-runtime-v1-";
@@ -51,6 +51,7 @@ type ReplyBlock = RcBlock<dyn Fn(*mut AnyObject, *mut NSString)>;
 type SemanticCompletion = Box<dyn FnOnce(Result<SemanticSnapshot, AgentSemanticRuntimeFailure>)>;
 type SemanticActionCompletion =
     Box<dyn FnOnce(Result<SemanticActionRuntimeEvidence, AgentSemanticActionRuntimeFailure>)>;
+type SemanticParkCompletion = Box<dyn FnOnce(bool)>;
 
 /// Synchronous refusal before one exact invocation enters the native channel.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -125,6 +126,8 @@ impl RuntimeChannelFailure {
 enum DocumentPhase {
     Loading,
     Ready,
+    Parking,
+    Parked,
     // Admission is permanently closed. Only the exact handed-off action may
     // return evidence; this phase never grants document authority.
     AuthorityRevoked,
@@ -216,6 +219,7 @@ struct ChannelActions {
     first_reply: Option<ReplyAction>,
     second_reply: Option<ReplyAction>,
     completion: Option<CompletionAction>,
+    park_completion: Option<(SemanticParkCompletion, bool)>,
     invariant_failed: bool,
 }
 
@@ -241,6 +245,7 @@ struct SemanticRuntimeChannelState {
     // Lifetime evidence only: the exact page command returned an uncertain
     // applied effect. No read/action admission consults this field.
     settling_action: Option<SemanticActionAttemptId>,
+    park_completion: Option<SemanticParkCompletion>,
     completed_invocations: u16,
     #[cfg(feature = "native-agentic-semantic-probe")]
     prepared_fill: Option<program_probe::PreparedFill>,
@@ -256,6 +261,7 @@ impl Default for SemanticRuntimeChannelState {
             pending: None,
             awaiting_result: false,
             settling_action: None,
+            park_completion: None,
             completed_invocations: 0,
             #[cfg(feature = "native-agentic-semantic-probe")]
             prepared_fill: None,
@@ -335,6 +341,8 @@ impl SemanticRuntimeChannelState {
                 return Some(AgentSemanticRuntimeDispatchError::Exhausted);
             }
             DocumentPhase::AuthorityRevoked
+            | DocumentPhase::Parking
+            | DocumentPhase::Parked
             | DocumentPhase::RendererLost
             | DocumentPhase::Failed
             | DocumentPhase::Retired => {
@@ -377,6 +385,43 @@ impl SemanticRuntimeChannelState {
             self.active_world = None;
         }
         actions
+    }
+
+    fn begin_park(
+        &mut self,
+        completion: SemanticParkCompletion,
+    ) -> Result<ChannelActions, SemanticParkCompletion> {
+        if self.phase != DocumentPhase::Ready
+            || self.pending.is_some()
+            || self.awaiting_result
+            || self.settling_action.is_some()
+            || self.park_completion.is_some()
+        {
+            return Err(completion);
+        }
+        let Some(pull) = self.pull.take() else {
+            return Err(completion);
+        };
+        self.phase = DocumentPhase::Parking;
+        self.park_completion = Some(completion);
+        let mut actions = ChannelActions::default();
+        actions.push_reply(ReplyAction::success(pull, SEMANTIC_RUNTIME_CHANNEL_PARK));
+        Ok(actions)
+    }
+
+    fn reactivate(&mut self, world: usize) -> Result<ChannelActions, ()> {
+        if self.phase != DocumentPhase::Parked
+            || self.pending.is_some()
+            || self.awaiting_result
+            || self.pull.is_some()
+            || self.park_completion.is_some()
+        {
+            return Err(());
+        }
+        self.phase = DocumentPhase::Loading;
+        self.completed_invocations = 0;
+        self.active_world = Some(world);
+        Ok(ChannelActions::default())
     }
 
     fn registration_failed(&mut self) -> ChannelActions {
@@ -517,6 +562,9 @@ impl SemanticRuntimeChannelState {
             actions.push_reply(ReplyAction::success(pull, SEMANTIC_RUNTIME_CHANNEL_STOP));
         }
         self.awaiting_result = false;
+        if let Some(completion) = self.park_completion.take() {
+            actions.park_completion = Some((completion, false));
+        }
         if let Some(pending) = self.pending.take() {
             actions.completion = Some(match pending {
                 PendingInvocation::Observation { completion, .. } => {
@@ -545,6 +593,9 @@ impl SemanticRuntimeChannelState {
         if body == SEMANTIC_RUNTIME_CHANNEL_EXHAUSTED {
             return self.on_exhausted(reply);
         }
+        if body == SEMANTIC_RUNTIME_CHANNEL_PARKED {
+            return self.on_parked(reply);
+        }
         if let Some(result) = body.strip_prefix(SEMANTIC_RUNTIME_CHANNEL_RESULT_PREFIX) {
             return self.on_result(result.as_bytes(), reply);
         }
@@ -555,6 +606,8 @@ impl SemanticRuntimeChannelState {
         if matches!(
             self.phase,
             DocumentPhase::AuthorityRevoked
+                | DocumentPhase::Parking
+                | DocumentPhase::Parked
                 | DocumentPhase::RendererLost
                 | DocumentPhase::ExhaustionNoticePending
                 | DocumentPhase::Exhausted
@@ -570,6 +623,26 @@ impl SemanticRuntimeChannelState {
         }
         self.pull = Some(reply);
         self.prepare_pump()
+    }
+
+    fn on_parked(&mut self, reply: ReplyBlock) -> ChannelActions {
+        if self.phase != DocumentPhase::Parking
+            || self.pending.is_some()
+            || self.awaiting_result
+            || self.pull.is_some()
+            || self.settling_action.is_some()
+        {
+            return self.fail_transport(Some(reply));
+        }
+        let Some(completion) = self.park_completion.take() else {
+            return self.fail_transport(Some(reply));
+        };
+        self.completed_invocations = 0;
+        self.phase = DocumentPhase::Parked;
+        let mut actions = ChannelActions::default();
+        actions.push_reply(ReplyAction::success(reply, SEMANTIC_RUNTIME_CHANNEL_ACK));
+        actions.park_completion = Some((completion, true));
+        actions
     }
 
     fn on_result(&mut self, bytes: &[u8], reply: ReplyBlock) -> ChannelActions {
@@ -758,6 +831,27 @@ pub(crate) struct AgentSemanticRuntimeController {
 }
 
 impl AgentSemanticRuntimeController {
+    pub(crate) fn park(&self, completion: impl FnOnce(bool) + 'static) -> Result<(), ()> {
+        let completion: SemanticParkCompletion = Box::new(completion);
+        let Ok(mut state) = self.state.try_borrow_mut() else {
+            return Err(());
+        };
+        let actions = state.begin_park(completion).map_err(|_| ())?;
+        drop(state);
+        self.execute(actions);
+        Ok(())
+    }
+
+    fn reactivate(&self, world: &WKContentWorld) -> Result<(), ()> {
+        let actions = self
+            .state
+            .try_borrow_mut()
+            .map_err(|_| ())?
+            .reactivate(std::ptr::from_ref(world).addr())?;
+        self.execute(actions);
+        Ok(())
+    }
+
     /// Close all future use while retaining only an action already handed to
     /// this exact content world. Its original timeout/cancel owners still win.
     pub(crate) fn revoke_document_authority(&self) {
@@ -946,12 +1040,24 @@ impl AgentSemanticRuntimeController {
             && (!matches!(
                 state.phase,
                 DocumentPhase::RendererLost
+                    | DocumentPhase::Parking
+                    | DocumentPhase::Parked
                     | DocumentPhase::ExhaustionNoticePending
                     | DocumentPhase::Exhausted
                     | DocumentPhase::Failed
                     | DocumentPhase::Retired
             ) || (!pending && !state.awaiting_result && state.pull.is_none()));
         valid.then_some(pending)
+    }
+
+    pub(crate) fn parked_for_history(&self) -> bool {
+        self.state.try_borrow().is_ok_and(|state| {
+            state.phase == DocumentPhase::Parked
+                && state.pending.is_none()
+                && !state.awaiting_result
+                && state.pull.is_none()
+                && state.park_completion.is_none()
+        })
     }
 
     // Private debug evidence only. Addresses never leave the in-memory witness.
@@ -1054,6 +1160,14 @@ impl AgentSemanticRuntimeController {
         }
         if let Some(completion) = actions.completion.take() {
             invoke_completion(completion, self.on_callback_panic.as_ref());
+        }
+        if let Some((completion, parked)) = actions.park_completion.take() {
+            if std::panic::catch_unwind(AssertUnwindSafe(|| completion(parked))).is_err() {
+                invoke_unit_callback(
+                    self.on_invariant_failure.as_ref(),
+                    self.on_callback_panic.as_ref(),
+                );
+            }
         }
     }
 }
@@ -1207,6 +1321,47 @@ struct SemanticRuntimeEpochRegistration {
     handler: Retained<SemanticMessageHandler>,
 }
 
+struct SemanticRuntimeEpochs {
+    active: Option<SemanticRuntimeEpochRegistration>,
+    active_runtime: Option<super::agent_history::AgentDocumentRuntimeId>,
+    parked: Vec<(
+        super::agent_history::AgentDocumentRuntimeId,
+        SemanticRuntimeEpochRegistration,
+    )>,
+}
+
+fn attach_semantic_runtime_epoch(
+    controller: &WKUserContentController,
+    handler_name: &NSString,
+    epoch: &SemanticRuntimeEpochRegistration,
+) -> Result<(), ()> {
+    let _mtm = MainThreadMarker::new().ok_or(())?;
+    let protocol_handler = objc2::runtime::ProtocolObject::from_ref(&*epoch.handler);
+    let attached = objc2::exception::catch(AssertUnwindSafe(|| unsafe {
+        controller.addScriptMessageHandlerWithReply_contentWorld_name(
+            protocol_handler,
+            &epoch.world,
+            handler_name,
+        );
+        controller.addUserScript(&epoch.script);
+    }))
+    .is_ok();
+    if !attached {
+        let _ = clear_semantic_runtime_controller(controller, handler_name, Some(&epoch.world));
+        return Err(());
+    }
+    // SAFETY: main-thread access is proven above and objc2 retains the bounded
+    // controller inventory for this exact comparison.
+    let scripts = unsafe { controller.userScripts() };
+    if scripts.count() != 1
+        || Retained::as_ptr(&scripts.objectAtIndex(0)) != Retained::as_ptr(&epoch.script)
+    {
+        let _ = clear_semantic_runtime_controller(controller, handler_name, Some(&epoch.world));
+        return Err(());
+    }
+    Ok(())
+}
+
 fn next_semantic_runtime_world(mtm: MainThreadMarker) -> Result<Retained<WKContentWorld>, ()> {
     let identifier = NEXT_SEMANTIC_RUNTIME_WORLD
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -1344,7 +1499,7 @@ fn install_semantic_runtime_epoch(
 pub(crate) struct AgentSemanticRuntimeRegistration {
     controller: Retained<WKUserContentController>,
     handler_name: Retained<NSString>,
-    active: Option<SemanticRuntimeEpochRegistration>,
+    epochs: Rc<RefCell<SemanticRuntimeEpochs>>,
     channel: AgentSemanticRuntimeController,
     retired: bool,
 }
@@ -1371,7 +1526,11 @@ impl AgentSemanticRuntimeRegistration {
         let registration = Self {
             controller,
             handler_name,
-            active: Some(active),
+            epochs: Rc::new(RefCell::new(SemanticRuntimeEpochs {
+                active: Some(active),
+                active_runtime: None,
+                parked: Vec::new(),
+            })),
             channel,
             retired: false,
         };
@@ -1387,6 +1546,115 @@ impl AgentSemanticRuntimeRegistration {
         &self.channel
     }
 
+    pub(crate) fn bind_active_runtime(
+        &mut self,
+        runtime: super::agent_history::AgentDocumentRuntimeId,
+    ) -> Result<(), ()> {
+        if self.retired {
+            return Err(());
+        }
+        let mut epochs = self.epochs.try_borrow_mut().map_err(|_| ())?;
+        if epochs.active.is_none() || epochs.active_runtime.is_some() {
+            return Err(());
+        }
+        epochs.active_runtime = Some(runtime);
+        Ok(())
+    }
+
+    pub(crate) fn active_parked(&self) -> bool {
+        if self.retired || !self.channel.parked_for_history() {
+            return false;
+        }
+        self.epochs.try_borrow().is_ok_and(|epochs| {
+            epochs.active.is_none() && epochs.active_runtime.is_none() && !epochs.parked.is_empty()
+        })
+    }
+
+    pub(crate) fn reactivate_runtime(
+        &mut self,
+        runtime: super::agent_history::AgentDocumentRuntimeId,
+    ) -> Result<(), ()> {
+        if self.retired || !self.channel.parked_for_history() {
+            return Err(());
+        }
+        let epoch = {
+            let mut epochs = self.epochs.try_borrow_mut().map_err(|_| ())?;
+            if epochs.active.is_some() || epochs.active_runtime.is_some() {
+                return Err(());
+            }
+            let index = epochs
+                .parked
+                .iter()
+                .position(|(candidate, _)| *candidate == runtime)
+                .ok_or(())?;
+            epochs.parked.remove(index).1
+        };
+        if attach_semantic_runtime_epoch(&self.controller, &self.handler_name, &epoch).is_err()
+            || self.channel.reactivate(&epoch.world).is_err()
+        {
+            let _ = clear_semantic_runtime_controller(
+                &self.controller,
+                &self.handler_name,
+                Some(&epoch.world),
+            );
+            self.channel.registration_failed();
+            return Err(());
+        }
+        let mut epochs = self.epochs.try_borrow_mut().map_err(|_| ())?;
+        epochs.active = Some(epoch);
+        epochs.active_runtime = Some(runtime);
+        Ok(())
+    }
+
+    /// Asks the exact active document to discard every semantic capability,
+    /// then detaches its handler/script and retains the opaque epoch for a
+    /// possible exact native-history traversal. The completion is called only
+    /// after the page acknowledged that it has no pending reply or node state.
+    pub(crate) fn park_active(
+        &mut self,
+        completion: impl FnOnce(bool) + 'static,
+    ) -> Result<(), ()> {
+        if self.retired {
+            return Err(());
+        }
+        {
+            let epochs = self.epochs.try_borrow().map_err(|_| ())?;
+            if epochs.active.is_none() || epochs.active_runtime.is_none() {
+                return Err(());
+            }
+        }
+        let controller = self.controller.clone();
+        let handler_name = self.handler_name.clone();
+        let epochs = self.epochs.clone();
+        self.channel.park(move |acknowledged| {
+            let parked = if acknowledged {
+                epochs.try_borrow_mut().is_ok_and(|mut epochs| {
+                    let Some(runtime) = epochs.active_runtime.take() else {
+                        return false;
+                    };
+                    let Some(active) = epochs.active.take() else {
+                        return false;
+                    };
+                    if !clear_semantic_runtime_controller(
+                        &controller,
+                        &handler_name,
+                        Some(&active.world),
+                    ) {
+                        return false;
+                    }
+                    if epochs.parked.len() >= super::agent_history::MAX_AGENT_HISTORY_ENTRIES {
+                        return false;
+                    }
+                    epochs.parked.push((runtime, active));
+                    true
+                })
+            } else {
+                false
+            };
+            completion(parked);
+        })
+    }
+
     /// Revokes the old document world and installs the immutable program in a
     /// fresh one before native navigation can begin.
     pub(crate) fn prepare_document_load(&mut self) -> Result<(), ()> {
@@ -1394,19 +1662,24 @@ impl AgentSemanticRuntimeRegistration {
             return Err(());
         }
         self.channel.begin_document_load();
-        let Some(old) = self.active.take() else {
-            self.channel.registration_failed();
-            return Err(());
+        let old = {
+            let mut epochs = self.epochs.try_borrow_mut().map_err(|_| ())?;
+            if epochs.active_runtime.is_some() {
+                self.channel.registration_failed();
+                return Err(());
+            }
+            epochs.active.take()
         };
-        if !clear_semantic_runtime_controller(
-            &self.controller,
-            &self.handler_name,
-            Some(&old.world),
-        ) {
-            self.channel.registration_failed();
-            return Err(());
+        if let Some(old) = old {
+            if !clear_semantic_runtime_controller(
+                &self.controller,
+                &self.handler_name,
+                Some(&old.world),
+            ) {
+                self.channel.registration_failed();
+                return Err(());
+            }
         }
-        drop(old);
         let Some(mtm) = MainThreadMarker::new() else {
             self.channel.registration_failed();
             return Err(());
@@ -1418,17 +1691,28 @@ impl AgentSemanticRuntimeRegistration {
             mtm,
         ) {
             Ok(active) => {
-                self.active = Some(active);
+                if self
+                    .epochs
+                    .try_borrow_mut()
+                    .map_err(|_| ())?
+                    .active
+                    .replace(active)
+                    .is_some()
+                {
+                    self.channel.registration_failed();
+                    return Err(());
+                }
                 if self.attest_controller().is_ok() {
                     Ok(())
                 } else {
-                    let world = self.active.as_ref().map(|active| &*active.world);
+                    let mut epochs = self.epochs.try_borrow_mut().map_err(|_| ())?;
+                    let active = epochs.active.take();
+                    let world = active.as_ref().map(|active| &*active.world);
                     let _ = clear_semantic_runtime_controller(
                         &self.controller,
                         &self.handler_name,
                         world,
                     );
-                    self.active = None;
                     self.channel.registration_failed();
                     Err(())
                 }
@@ -1459,7 +1743,8 @@ impl AgentSemanticRuntimeRegistration {
 
     fn attest_controller(&self) -> Result<(), ()> {
         let _mtm = MainThreadMarker::new().ok_or(())?;
-        let active = self.active.as_ref().ok_or(())?;
+        let epochs = self.epochs.try_borrow().map_err(|_| ())?;
+        let active = epochs.active.as_ref().ok_or(())?;
         if self.channel.world_matches(&active.world) != Ok(true) {
             return Err(());
         }
@@ -1496,10 +1781,12 @@ impl AgentSemanticRuntimeRegistration {
 
     pub(crate) fn retire(mut self) -> Result<(), ()> {
         let channel_clean = self.channel.retire();
-        let world = self.active.as_ref().map(|active| &*active.world);
-        let removed =
-            clear_semantic_runtime_controller(&self.controller, &self.handler_name, world);
-        self.active = None;
+        let removed = clear_semantic_runtime_controller(&self.controller, &self.handler_name, None);
+        if let Ok(mut epochs) = self.epochs.try_borrow_mut() {
+            epochs.active = None;
+            epochs.active_runtime = None;
+            epochs.parked.clear();
+        }
         self.retired = true;
         if channel_clean && removed {
             Ok(())
@@ -1515,9 +1802,12 @@ impl Drop for AgentSemanticRuntimeRegistration {
             return;
         }
         let _ = self.channel.retire();
-        let world = self.active.as_ref().map(|active| &*active.world);
-        let _ = clear_semantic_runtime_controller(&self.controller, &self.handler_name, world);
-        self.active = None;
+        let _ = clear_semantic_runtime_controller(&self.controller, &self.handler_name, None);
+        if let Ok(mut epochs) = self.epochs.try_borrow_mut() {
+            epochs.active = None;
+            epochs.active_runtime = None;
+            epochs.parked.clear();
+        }
         self.retired = true;
     }
 }
@@ -1843,18 +2133,19 @@ mod tests {
             source.contains("descriptorMatches(request.f, runtimeDescriptor(target, request.g))")
         );
         assert!(source.contains("const fixedDispatchEvent = EventTarget.prototype.dispatchEvent"));
-        for forbidden in [
-            "CustomEvent",
-            "addEventListener",
-            "PAGE_RELAY",
-            "querySelector",
-            "eval(",
-        ] {
+        for forbidden in ["CustomEvent", "PAGE_RELAY", "querySelector", "eval("] {
             assert!(
                 !source.contains(forbidden),
                 "forbidden isolated fill surface: {forbidden}"
             );
         }
+        assert_eq!(
+            source
+                .matches("EventTarget.prototype.addEventListener")
+                .count(),
+            1
+        );
+        assert!(!source.contains(".addEventListener("));
     }
     use zephium_core::ids::ProfileId;
 
@@ -1969,6 +2260,76 @@ mod tests {
         assert_eq!(state.completed_invocations, 1);
         assert!(!state.awaiting_result);
         assert!(state.pending.is_none());
+    }
+
+    #[test]
+    fn park_requires_idle_pull_and_acknowledges_before_reactivation() {
+        let mut state = SemanticRuntimeChannelState {
+            expected_view: Some(7),
+            active_world: Some(8),
+            phase: DocumentPhase::Ready,
+            pull: Some(reply()),
+            completed_invocations: 19,
+            ..SemanticRuntimeChannelState::default()
+        };
+        let actions = state
+            .begin_park(Box::new(|_| {}))
+            .unwrap_or_else(|_| panic!("park"));
+        assert_eq!(
+            success_value(actions.first_reply.expect("park request")).as_ref(),
+            SEMANTIC_RUNTIME_CHANNEL_PARK
+        );
+        assert_eq!(state.phase, DocumentPhase::Parking);
+        assert!(state.pull.is_none());
+        assert!(state.park_completion.is_some());
+
+        let mut actions = state.on_message(SEMANTIC_RUNTIME_CHANNEL_PARKED, reply());
+        assert_eq!(
+            success_value(actions.first_reply.take().expect("park ack")).as_ref(),
+            SEMANTIC_RUNTIME_CHANNEL_ACK
+        );
+        assert!(matches!(actions.park_completion.take(), Some((_, true))));
+        assert_eq!(state.phase, DocumentPhase::Parked);
+        assert_eq!(state.completed_invocations, 0);
+        assert!(state.pending.is_none());
+        assert!(!state.awaiting_result);
+        assert!(state.pull.is_none());
+
+        state.reactivate(9).expect("reactivate");
+        assert_eq!(state.phase, DocumentPhase::Loading);
+        let actions = state.on_message(SEMANTIC_RUNTIME_CHANNEL_PULL, reply());
+        assert!(actions.first_reply.is_none());
+        assert!(state.pull.is_some());
+        let actions = state.document_committed();
+        assert!(!actions.invariant_failed);
+        assert_eq!(state.phase, DocumentPhase::Ready);
+    }
+
+    #[test]
+    fn park_refuses_busy_state_and_lifecycle_loss_completes_failure_once() {
+        let mut busy = SemanticRuntimeChannelState {
+            expected_view: Some(7),
+            active_world: Some(8),
+            phase: DocumentPhase::Ready,
+            pull: Some(reply()),
+            pending: Some(PendingInvocation::Observation {
+                invocation: invocation(1, SemanticSnapshotGeneration::INITIAL),
+                completion: Box::new(|_| {}),
+            }),
+            ..SemanticRuntimeChannelState::default()
+        };
+        assert!(busy.begin_park(Box::new(|_| {})).is_err());
+
+        busy.pending = None;
+        let _ = busy
+            .begin_park(Box::new(|_| {}))
+            .unwrap_or_else(|_| panic!("park"));
+        let mut actions = busy.renderer_lost();
+        assert!(matches!(actions.park_completion.take(), Some((_, false))));
+        assert!(busy.park_completion.is_none());
+        assert_eq!(busy.phase, DocumentPhase::RendererLost);
+        let actions = busy.renderer_lost();
+        assert!(actions.park_completion.is_none());
     }
 
     #[test]
