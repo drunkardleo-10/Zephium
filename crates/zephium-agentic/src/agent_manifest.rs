@@ -693,7 +693,9 @@ impl AgentPlanNodeAuthority {
         self.navigation_route.as_ref()
     }
 
-    /// Freezes public read-only discovered-link authority, excluding fixed routes.
+    /// Freezes read-only discovered-link authority for one approved account,
+    /// excluding fixed routes. Public semantic sensitivity is still required;
+    /// an authenticated session does not grant sensitive data disclosure.
     pub fn with_navigation_discovery(
         mut self,
         discovery: AgentNavigationDiscovery,
@@ -701,7 +703,7 @@ impl AgentPlanNodeAuthority {
         if self.navigation_route.is_some()
             || self.navigation_discovery.is_some()
             || self.origins.binary_search(discovery.origin()).is_err()
-            || self.accounts != [AgentAccountScope::Anonymous]
+            || self.accounts.len() != 1
             || self.max_sensitivity != SemanticSensitivity::Public
             || self.effects != AgentEffectScope::try_new(&[SemanticEffectClass::Read])?
         {
@@ -1635,12 +1637,27 @@ mod tests {
                 sensitivity,
                 effects(&[SemanticEffectClass::Read]),
             );
-            assert!(authority
-                .with_navigation_discovery(
-                    AgentNavigationDiscovery::try_new(target("start"), "/".into(), 1).unwrap()
-                )
-                .is_err());
+            assert_eq!(
+                authority
+                    .with_navigation_discovery(
+                        AgentNavigationDiscovery::try_new(target("start"), "/".into(), 1).unwrap()
+                    )
+                    .is_ok(),
+                sensitivity == SemanticSensitivity::Public
+            );
         }
+        let multiple_accounts = authority(
+            vec![profile(1)],
+            vec![AgentAccountScope::Anonymous, account(1)],
+            vec![origin("sink")],
+            SemanticSensitivity::Public,
+            effects(&[SemanticEffectClass::Read]),
+        );
+        assert!(multiple_accounts
+            .with_navigation_discovery(
+                AgentNavigationDiscovery::try_new(target("start"), "/".into(), 1).unwrap()
+            )
+            .is_err());
     }
 
     #[test]

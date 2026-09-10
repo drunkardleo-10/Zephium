@@ -76,10 +76,8 @@ const MAX_DEFERRED_RUNTIME_EVENTS: usize =
     MAX_AGENT_RUNTIME_TERMINAL_CAPACITY + MAX_AGENT_RUNTIME_SIGNAL_CAPACITY;
 const MAX_BROWSER_MODEL_TURNS: u8 = 8;
 const MAX_BROWSER_ACTIONS: u64 = 8;
-// Initial sample plus one per bounded model/effect admission. Cache hits do
-// not consume a slot; a host cannot turn refresh into an unbounded side loop.
-const MAX_BROWSER_ACCOUNT_ATTESTATIONS: usize =
-    1 + MAX_BROWSER_MODEL_TURNS as usize + MAX_BROWSER_ACTIONS as usize;
+const MAX_WORK_MODEL_CALLS: u8 = 64;
+const MAX_WORK_ACTIONS: u64 = 64;
 const LUNA_PROVIDER_EXACT_RESERVATION_COST_MICRO_USD: u64 = 77_830;
 
 const _: () = {
@@ -276,6 +274,7 @@ pub struct TerraControllerRunInput {
     clock: Arc<dyn TerraControllerClock>,
     deadline: Instant,
     max_model_calls: u8,
+    max_actions: u64,
 }
 
 impl TerraControllerRunInput {
@@ -380,6 +379,7 @@ impl TerraControllerRunInput {
             clock,
             deadline,
             max_model_calls: MAX_BROWSER_MODEL_TURNS,
+            max_actions: MAX_BROWSER_ACTIONS,
         })
     }
 }
@@ -1957,6 +1957,8 @@ pub struct AgentBrowserSession {
     deadline: Instant,
     turns: u8,
     max_model_calls: u8,
+    max_actions: u64,
+    max_account_attestations: usize,
     finished: bool,
 }
 
@@ -2025,7 +2027,7 @@ impl AgentBrowserSession {
             if self.account_attestations.contains(&account.attestation()) {
                 return Err(refusal(AgentBrowserAccountError::Replayed));
             }
-            if self.account_attestations.len() >= MAX_BROWSER_ACCOUNT_ATTESTATIONS {
+            if self.account_attestations.len() >= self.max_account_attestations {
                 return Err(refusal(AgentBrowserAccountError::Limit));
             }
         }
@@ -2107,6 +2109,7 @@ impl AgentBrowserSession {
             clock,
             deadline,
             max_model_calls,
+            max_actions,
             ..
         } = input;
         if Instant::now() >= deadline {
@@ -2134,7 +2137,11 @@ impl AgentBrowserSession {
         let policy = AgentRunPolicy::try_new(manifest, vec![lease])
             .map_err(|_| AgentBrowserProviderError::Authority)?;
         let next_call = ids.model_call().get();
-        let mut account_attestations = Vec::with_capacity(MAX_BROWSER_ACCOUNT_ATTESTATIONS);
+        // Initial sample, up to two per model turn (before native inspection or
+        // navigation and again at provider admission), plus action admission.
+        // Cache hits consume no slot; refresh remains independently bounded.
+        let max_account_attestations = 1 + 2 * usize::from(max_model_calls) + max_actions as usize;
+        let mut account_attestations = Vec::with_capacity(max_account_attestations);
         account_attestations.push(account.attestation());
         Ok(Self {
             policy,
@@ -2157,6 +2164,8 @@ impl AgentBrowserSession {
             account_attestations,
             next_call,
             max_model_calls,
+            max_actions,
+            max_account_attestations,
             clock,
             last_policy_at: now,
             cancellation: AgentProviderCancellation::new(),
@@ -2831,7 +2840,8 @@ impl AgentBrowserSession {
     ///
     /// The host supplies the complete native-current frame cohort. No tool is
     /// retried on refusal. Every provider turn is exposed only as content-free
-    /// accounting, and the shared eight-turn transcript ceiling is authoritative.
+    /// accounting. Run allowance and transcript byte/input limits are checked
+    /// independently before each admission.
     pub async fn next_action(
         &mut self,
         turn: AgentBrowserProviderTurn,
@@ -2935,7 +2945,7 @@ impl AgentBrowserSession {
         current_frames: &[zephium_agentic::SemanticFrameJoin],
     ) -> Result<crate::AgentBrowserActionProposal, AgentBrowserProviderError> {
         self.check_live()?;
-        if self.next_action > MAX_BROWSER_ACTIONS {
+        if self.next_action > self.max_actions {
             return Err(AgentBrowserProviderError::ActionLimit);
         }
         if self.action.is_some() {
@@ -2964,7 +2974,7 @@ impl AgentBrowserSession {
         requested_at: zephium_agentic::SemanticActionExecutionInstant,
     ) -> Result<zephium_agentic::SemanticActionNativeRequest, AgentBrowserProviderError> {
         self.check_live()?;
-        if self.next_action > MAX_BROWSER_ACTIONS {
+        if self.next_action > self.max_actions {
             return Err(AgentBrowserProviderError::ActionLimit);
         }
         if self.action.is_some() {
@@ -3677,6 +3687,14 @@ mod tests {
     fn browser_fixture_with_budget(
         budget: AgentRunBudget,
     ) -> (AgentBrowserSession, SemanticObservation) {
+        browser_fixture_with_limits(budget, MAX_BROWSER_MODEL_TURNS, MAX_BROWSER_ACTIONS)
+    }
+
+    fn browser_fixture_with_limits(
+        budget: AgentRunBudget,
+        max_model_calls: u8,
+        max_actions: u64,
+    ) -> (AgentBrowserSession, SemanticObservation) {
         let profile = 13_u128.into();
         let identity = ContextIdentity::new(
             ContextId::generate(),
@@ -3795,7 +3813,7 @@ mod tests {
             "Prepare a fixture field".to_owned(),
         )
         .expect("turn");
-        let input = TerraControllerRunInput::try_new_for_model(
+        let mut input = TerraControllerRunInput::try_new_for_model(
             manifest,
             lease,
             turn,
@@ -3805,6 +3823,8 @@ mod tests {
             AgentBrowserModel::Luna,
         )
         .expect("input");
+        input.max_model_calls = max_model_calls;
+        input.max_actions = max_actions;
         let credential = AgentProviderCredential::try_new(
             AgentProviderKind::OpenAiResponses,
             "fixture-not-a-credential".to_owned(),
@@ -3971,7 +3991,7 @@ mod tests {
                     );
                 }
                 7 => {
-                    for _ in 1..MAX_BROWSER_ACCOUNT_ATTESTATIONS {
+                    for _ in 1..session.max_account_attestations {
                         session
                             .refresh_account(AgentContextAccountBinding::new(
                                 AgentAccountAttestationId::generate(),
@@ -3985,7 +4005,7 @@ mod tests {
                     session.refresh_account(current).unwrap();
                     assert_eq!(
                         session.account_attestations.len(),
-                        MAX_BROWSER_ACCOUNT_ATTESTATIONS
+                        session.max_account_attestations
                     );
                 }
                 _ => unreachable!(),
@@ -4006,6 +4026,39 @@ mod tests {
             assert_eq!(session.next_action, 1);
             assert!(session.try_finish_unsuccessful().is_ok());
         }
+    }
+
+    #[test]
+    fn extended_session_retains_old_account_replay_protection_without_renewing_authority() {
+        let budget = AgentRunBudget::try_new(80, 300_000, 1_000_000, 1).unwrap();
+        let (mut session, _) = browser_fixture_with_limits(budget, 24, 12);
+        let original = session.account;
+        session.clock = Arc::new(FixedBrowserClock(1001));
+        for _ in 0..32 {
+            session
+                .refresh_account(AgentContextAccountBinding::new(
+                    AgentAccountAttestationId::generate(),
+                    original.context(),
+                    original.account(),
+                    original.observed_at(),
+                ))
+                .unwrap();
+        }
+        assert_eq!(session.policy.accounting().reserved_operations(), 0);
+        assert_eq!(
+            session
+                .policy
+                .remaining_operations(session.lease.lease())
+                .unwrap(),
+            80
+        );
+        assert_eq!(
+            session.refresh_account(original),
+            Err(AgentBrowserProviderError::Account(
+                AgentBrowserAccountError::Replayed
+            ))
+        );
+        assert!(session.try_finish_unsuccessful().is_ok());
     }
 
     #[test]

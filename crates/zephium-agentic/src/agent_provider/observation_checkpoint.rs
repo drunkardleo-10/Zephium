@@ -5,6 +5,10 @@ use crate::{
     SemanticObservationBudget, SemanticObservationRequest, SemanticReferenceId,
 };
 
+// Inspection metadata has its own retention bound. Increasing a run's model
+// allowance must not also widen the retained observation/evidence window.
+pub(super) const MAX_AGENT_INSPECTION_CAPTURES: usize = 8;
+
 /// One consumed Snapshot proposal after old provider replay has been retired.
 /// Carries no page body or native handle. It authorizes neither native dispatch
 /// nor provider transport: both retain their original independent admission.
@@ -483,7 +487,7 @@ impl AgentInspectionProgress {
             context: current.request().context(),
             captures: Vec::new(),
         });
-        if progress.captures.len() >= MAX_AGENT_PROVIDER_CONTINUATION_TURNS {
+        if progress.captures.len() >= MAX_AGENT_INSPECTION_CAPTURES {
             return Err(crate::AgentProviderRequestError::Encoding);
         }
         let (scope, window) = match current.request().scope() {

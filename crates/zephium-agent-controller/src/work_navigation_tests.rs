@@ -33,6 +33,17 @@ fn two_discovered_hops_settle_original_progress_accounting_and_extract() {
 }
 
 #[test]
+fn authenticated_discovery_uses_fresh_host_account_samples_across_two_documents() {
+    let _serial = lock(&SERIAL);
+    provider_fixture_with_discovery_account(
+        ProviderFault::Navigation(NavigationFault::DiscoveryTwoHops),
+        None,
+        None,
+        Some(AgentAccountScope::Authenticated(AgentAccountId::generate())),
+    );
+}
+
+#[test]
 fn discovery_budget_reserves_mapping_and_rejects_last_decision_inspection() {
     let _serial = lock(&SERIAL);
     for (limit, refusal) in [(8, false), (4, false), (8, true)] {
@@ -40,6 +51,21 @@ fn discovery_budget_reserves_mapping_and_rejects_last_decision_inspection() {
             limit, refusal, 24,
         )));
     }
+}
+
+#[test]
+fn extended_run_budget_crosses_eight_turns_and_preserves_terminal_reservation() {
+    let _serial = lock(&SERIAL);
+    for refusal in [false, true] {
+        provider_fixture(ProviderFault::Navigation(NavigationFault::DiscoveryBudget(
+            12, refusal, 24,
+        )));
+    }
+    // This exceeds the original 64-record pending audit capacity and must
+    // stream committed batches without dropping events or reusing delivery IDs.
+    provider_fixture(ProviderFault::Navigation(NavigationFault::DiscoveryBudget(
+        40, false, 64,
+    )));
 }
 
 #[test]
@@ -74,16 +100,29 @@ fn discovery_returns_invalid_search_scope_without_capture_and_preserves_budgets(
 
 #[test]
 fn per_run_model_call_allowance_cannot_widen_product_limits() {
-    for limit in [0, 1, 9, u8::MAX] {
+    for limit in [0, 1, 65, u8::MAX] {
         assert!(input().settings.with_max_model_calls(limit).is_err());
     }
-    for limit in [2, 4, 8] {
+    for limit in [2, 4, 8, 24, 64] {
         assert_eq!(
             input()
                 .settings
                 .with_max_model_calls(limit)
                 .unwrap()
                 .max_model_calls,
+            limit
+        );
+    }
+    for limit in [65, u64::MAX] {
+        assert!(input().settings.with_max_actions(limit).is_err());
+    }
+    for limit in [0, 1, 8, 24, 64] {
+        assert_eq!(
+            input()
+                .settings
+                .with_max_actions(limit)
+                .unwrap()
+                .max_actions,
             limit
         );
     }

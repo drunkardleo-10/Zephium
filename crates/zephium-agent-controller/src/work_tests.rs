@@ -741,6 +741,22 @@ fn input_with_navigation_budget(
     discovery: Option<AgentNavigationDiscovery>,
     operations: u32,
 ) -> AgentWorkRunInput {
+    input_with_navigation_account(
+        allowed,
+        route,
+        discovery,
+        operations,
+        AgentAccountScope::Anonymous,
+    )
+}
+
+fn input_with_navigation_account(
+    allowed: &[SemanticEffectClass],
+    route: Option<AgentNavigationRoute>,
+    discovery: Option<AgentNavigationDiscovery>,
+    operations: u32,
+    account: AgentAccountScope,
+) -> AgentWorkRunInput {
     let profile = 1_u128.into();
     let context = ContextIdentity::new(
         ContextId::generate(),
@@ -756,7 +772,7 @@ fn input_with_navigation_budget(
         + zephium_agent_provider_transport::MAX_AGENT_PROVIDER_REQUEST_TIMEOUT_MILLIS;
     let authority = AgentPlanNodeAuthority::try_new(
         vec![profile],
-        vec![AgentAccountScope::Anonymous],
+        vec![account],
         vec![origin.clone()],
         SemanticSensitivity::Public,
         effects,
@@ -777,7 +793,7 @@ fn input_with_navigation_budget(
         context.owner(),
         AgentRunScope::try_new(
             vec![profile],
-            vec![AgentAccountScope::Anonymous],
+            vec![account],
             vec![origin.clone()],
             SemanticSensitivity::Public,
             effects,
@@ -1341,7 +1357,15 @@ fn drive_with_schedule(
     assert!(lock(&port.calls).is_empty());
     runtime.start_run().expect("run");
     let wait_deadline = Instant::now() + Duration::from_secs(12);
+    let mut events = Vec::new();
+    #[cfg(feature = "probe-harness")]
+    let drain_live = matches!(fault, Fault::Navigation(NavigationFault::DiscoveryBudget(limit, ..)) if limit > 8);
+    #[cfg(not(feature = "probe-harness"))]
+    let drain_live = false;
     let outcome = loop {
+        if drain_live {
+            events.extend(std::iter::from_fn(|| handle.take_event()));
+        }
         // Never keep the diagnostic mutex across the blocking lifecycle join:
         // cleanup callbacks on the worker also append their call codes.
         let shutdown_ready = fault == Fault::ShutdownObservation && lock(&port.calls).contains(&3);
@@ -1372,7 +1396,7 @@ fn drive_with_schedule(
             .shutdown_until(Instant::now() + Duration::from_secs(2))
     });
     let calls = lock(&port.calls).clone();
-    let events = std::iter::from_fn(|| handle.take_event()).collect();
+    events.extend(std::iter::from_fn(|| handle.take_event()));
     (outcome, shutdown, calls, events)
 }
 
@@ -1693,6 +1717,16 @@ fn provider_fixture_with_account(
     form: Option<&str>,
     account: Option<AccountFault>,
 ) {
+    provider_fixture_with_discovery_account(fault, form, account, None);
+}
+
+#[cfg(feature = "probe-harness")]
+fn provider_fixture_with_discovery_account(
+    fault: ProviderFault,
+    form: Option<&str>,
+    account: Option<AccountFault>,
+    discovery_account: Option<AgentAccountScope>,
+) {
     use std::io::{Read as _, Write as _};
     struct Continue;
     impl AgentWorkTask for Continue {
@@ -1968,7 +2002,7 @@ fn provider_fixture_with_account(
                 | NavigationFault::DiscoveryMissingLink
         )
     ) {
-        input_with_navigation_budget(
+        input_with_navigation_account(
             &[SemanticEffectClass::Read],
             None,
             Some(navigation_tests::discovery_scope()),
@@ -1979,6 +2013,7 @@ fn provider_fixture_with_account(
                 }
                 _ => 24,
             },
+            discovery_account.unwrap_or(AgentAccountScope::Anonymous),
         )
     } else if matches!(
         fault,
@@ -2051,16 +2086,46 @@ fn provider_fixture_with_account(
                 | NavigationFault::DiscoveryTwoHopsBlockedFrame
                 | NavigationFault::DiscoveryMissingLink
         ) {
-            Box::new(
+            let fields =
+                vec![SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap()];
+            Box::new(if let Some(account) = discovery_account {
+                struct Source {
+                    account: AgentAccountScope,
+                    clock: Arc<dyn TerraControllerClock>,
+                }
+                impl crate::AgentWorkAccountSource for Source {
+                    fn sample(
+                        &self,
+                        context: ContextJoin,
+                    ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
+                        // Independent synthetic account authority for this fixture.
+                        Ok(AgentContextAccountBinding::new(
+                            AgentAccountAttestationId::generate(),
+                            context,
+                            self.account,
+                            self.clock.now().map_err(|_| AgentWorkFailure::Contract)?,
+                        ))
+                    }
+                }
+                crate::AgentWorkDiscoveryTask::try_new_with_account_source(
+                    approved.context.identity,
+                    navigation_tests::discovery_scope(),
+                    fields,
+                    account,
+                    Box::new(Source {
+                        account,
+                        clock: approved.settings.clock.clone(),
+                    }),
+                )
+                .unwrap()
+            } else {
                 crate::AgentWorkDiscoveryTask::try_new(
                     approved.context.identity,
                     navigation_tests::discovery_scope(),
-                    vec![
-                        SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap(),
-                    ],
+                    fields,
                 )
-                .unwrap(),
-            )
+                .unwrap()
+            })
         } else if let NavigationFault::Route(fault) = fault {
             Box::new(navigation_tests::route_tests::RouteTask::new(
                 fault,

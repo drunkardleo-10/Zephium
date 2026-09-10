@@ -48,7 +48,9 @@ pub const MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES: usize = 32 
 /// Maximum private structured transcript bytes retained by one continuation.
 pub const MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES: usize = 256 * 1024;
 /// Maximum completed tool/result pairs retained by one continuation.
-pub const MAX_AGENT_PROVIDER_CONTINUATION_TURNS: usize = 8;
+/// The independent byte and input-token ceilings still apply; more small tool
+/// results do not authorize retaining a larger page or a larger transcript.
+pub const MAX_AGENT_PROVIDER_CONTINUATION_TURNS: usize = 64;
 
 const _: () = {
     assert!(
@@ -2730,7 +2732,7 @@ mod tests {
     fn inspection_history_has_a_hard_bound_without_renewing_capture_authority() {
         let mut previous = observation(context(), 1, 1, 1, "body");
         let mut history = None;
-        for index in 0..MAX_AGENT_PROVIDER_CONTINUATION_TURNS {
+        for index in 0..super::observation_checkpoint::MAX_AGENT_INSPECTION_CAPTURES {
             let generation = index as u64 + 2;
             let current = observation(context(), generation, generation, generation, "body");
             history = Some(AgentInspectionProgress::record(history, &previous, &current).unwrap());

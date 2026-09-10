@@ -1,7 +1,7 @@
-//! Frozen authority for bounded discovery through observed public links.
+//! Frozen authority for bounded discovery through observed non-sensitive links.
 use super::*;
 
-/// Public, read-only navigation scope. Destinations are selected from the
+/// Read-only navigation scope. Destinations are selected from the
 /// current acknowledged document, never added to authority by model text.
 #[derive(Clone, Eq, PartialEq)]
 pub struct AgentNavigationDiscovery {

@@ -216,7 +216,7 @@ fn validate_account_refresh(terra: &str, work: &str, policy: &str) -> Result<(),
         "account != self.account",
         "account.attestation() == self.account.attestation()",
         "self.account_attestations.contains(&account.attestation())",
-        "self.account_attestations.len() >= MAX_BROWSER_ACCOUNT_ATTESTATIONS",
+        "self.account_attestations.len() >= self.max_account_attestations",
     ] {
         if !refresh.contains(required) {
             return Err(format!("account refresh lost authority fence: {required}"));
@@ -991,7 +991,7 @@ fn validate_progressive_observation(inspection: &str, checkpoint: &str) -> Resul
         "node.parent().is_some()",
         "self.context == observation.request().context()",
         "capture.snapshot == observation.frames()[0].generation().get()",
-        "progress.captures.len() >= MAX_AGENT_PROVIDER_CONTINUATION_TURNS",
+        "progress.captures.len() >= MAX_AGENT_INSPECTION_CAPTURES",
         ".find(|node| node.key() == key)",
         "node.reference().model_token()",
     ] {
@@ -1211,7 +1211,7 @@ mod tests {
             "node.parent().is_some()",
             "self.context == observation.request().context()",
             "capture.snapshot == observation.frames()[0].generation().get()",
-            "progress.captures.len() >= MAX_AGENT_PROVIDER_CONTINUATION_TURNS",
+            "progress.captures.len() >= MAX_AGENT_INSPECTION_CAPTURES",
             ".find(|node| node.key() == key)",
             "node.reference().model_token()",
         ] {

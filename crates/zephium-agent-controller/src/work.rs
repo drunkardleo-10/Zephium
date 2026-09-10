@@ -231,6 +231,7 @@ pub struct AgentWorkRunSettings {
     clock: Arc<dyn TerraControllerClock>,
     deadline: Instant,
     max_model_calls: u8,
+    max_actions: u64,
 }
 
 impl AgentWorkRunSettings {
@@ -248,17 +249,30 @@ impl AgentWorkRunSettings {
             clock,
             deadline,
             max_model_calls: super::MAX_BROWSER_MODEL_TURNS,
+            max_actions: super::MAX_BROWSER_ACTIONS,
         }
     }
 
-    /// Narrows this run's total provider-call allowance, including terminal
-    /// mapping. It cannot increase the product ceiling or renew any manifest
-    /// token/cost budget or absolute deadline.
+    /// Sets this run's total provider-call allowance, including terminal
+    /// mapping (2–64; default 8). This trusted application setting grants no
+    /// manifest operation, token, cost, scope or deadline authority. Stateless
+    /// context retention and provider input bounds remain independently enforced.
     pub fn with_max_model_calls(mut self, max_calls: u8) -> Result<Self, AgentWorkFailure> {
-        if !(2..=super::MAX_BROWSER_MODEL_TURNS).contains(&max_calls) {
+        if !(2..=super::MAX_WORK_MODEL_CALLS).contains(&max_calls) {
             return Err(AgentWorkFailure::Contract);
         }
         self.max_model_calls = max_calls;
+        Ok(self)
+    }
+
+    /// Sets the native action-attempt allowance (0–64; default 8). Zero
+    /// disables action admission. Each attempt still needs the approved
+    /// manifest's effect authority and remaining operation budget.
+    pub fn with_max_actions(mut self, max_actions: u64) -> Result<Self, AgentWorkFailure> {
+        if max_actions > super::MAX_WORK_ACTIONS {
+            return Err(AgentWorkFailure::Contract);
+        }
+        self.max_actions = max_actions;
         Ok(self)
     }
 }
@@ -1685,6 +1699,7 @@ impl AgentWorkController {
             clock: input.settings.clock,
             deadline: input.settings.deadline,
             max_model_calls: input.settings.max_model_calls,
+            max_actions: input.settings.max_actions,
         };
         let decision_budget = state.requires_decision_budget();
         let mut session = AgentBrowserSession::try_new_with_transport(
@@ -2020,6 +2035,11 @@ impl AgentWorkController {
             .collect::<Vec<_>>();
         loop {
             state.check_task_contract()?;
+            // Deliver acknowledged audit batches while idle so long runs keep
+            // their fixed pending-event bound and leave room for terminal debt.
+            if state.journal_mut()?.audit.status().pending() >= 32 {
+                Self::drain_audit(state, worker, browser, None).await?;
+            }
             // The last decision was advertised as Extract-only. Independently
             // enforce that narrowing before any native capture, navigation or
             // local inspection can consume the reserved mapping call.
@@ -2854,17 +2874,29 @@ impl AgentWorkController {
         cleanup: Option<Instant>,
     ) -> Result<(), AgentWorkFailure> {
         let state = self.state.as_mut().ok_or(AgentWorkFailure::Contract)?;
-        for raw in 1..=4 {
+        Self::drain_audit(state, worker, browser, cleanup).await?;
+        state
+            .journal_mut()?
+            .audit
+            .is_quiescent()
+            .then_some(())
+            .ok_or(AgentWorkFailure::Audit)
+    }
+
+    async fn drain_audit(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        cleanup: Option<Instant>,
+    ) -> Result<(), AgentWorkFailure> {
+        for _ in 0..MAX_PENDING_AGENT_AUDIT_EVENTS.div_ceil(MAX_AGENT_AUDIT_DELIVERY_EVENTS) {
             let journal = state.journal_mut()?;
-            if journal.audit.is_quiescent() {
+            if journal.audit.status().pending() == 0 {
                 return Ok(());
             }
             let batch = journal
                 .audit
-                .begin_delivery(
-                    AgentAuditDeliveryId::new(raw).ok_or(AgentWorkFailure::Contract)?,
-                    MAX_AGENT_AUDIT_DELIVERY_EVENTS,
-                )
+                .begin_next_delivery(MAX_AGENT_AUDIT_DELIVERY_EVENTS)
                 .map_err(|_| AgentWorkFailure::Audit)?;
             let expected = batch.proof();
             let settlement = match state.audit.append(batch, worker.audit_completion()) {
@@ -2909,10 +2941,7 @@ impl AgentWorkController {
                 return Err(AgentWorkFailure::Audit);
             }
         }
-        state
-            .journal_mut()?
-            .audit
-            .is_quiescent()
+        (state.journal_mut()?.audit.status().pending() == 0)
             .then_some(())
             .ok_or(AgentWorkFailure::Audit)
     }
