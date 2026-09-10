@@ -879,6 +879,10 @@ mod tests {
     use zephium_core::ids::ProfileId;
 
     fn observation() -> (SemanticObservation, ContextRegistry) {
+        observation_with_fill_role("textbox")
+    }
+
+    fn observation_with_fill_role(role: &str) -> (SemanticObservation, ContextRegistry) {
         let identity = ContextIdentity::new(
             ContextId::from_raw(71),
             ContextRunId::from_raw(72),
@@ -922,7 +926,7 @@ mod tests {
             json!([
                 {"k": 1, "r": "document", "o": 16},
                 {"k": 2, "p": 0, "r": "button", "n": "Private submit", "o": 1},
-                {"k": 3, "p": 0, "r": "textbox", "n": "Private title",
+                {"k": 3, "p": 0, "r": role, "n": "Private title",
                  "v": {"k": "text", "value": "old"}, "o": 10,
                  "b": {"x": 10, "y": 20, "w": 200, "h": 30}},
                 {"k": 4, "p": 0, "r": "checkbox", "n": "Private toggle", "o": 1},
@@ -1057,6 +1061,62 @@ mod tests {
             panic!("immediate settlement was pending");
         };
         *terminal
+    }
+
+    #[test]
+    fn editable_combobox_fill_requires_bound_operation_and_exact_text_postcondition() {
+        let (observation, _) = observation_with_fill_role("combobox");
+        let batch = bind(
+            &observation,
+            SemanticActionIntent::Fill {
+                target: SemanticReferenceId::new(3).expect("target"),
+                value: SemanticActionText::try_new("query".to_owned()).expect("text"),
+            },
+            SemanticWaitCondition::Immediate,
+            SemanticVerification::TargetValueMatchesInput,
+        )
+        .expect("editable combobox bound");
+        let action = batch.actions()[0]
+            .prepare(&observation.frames()[0])
+            .expect("prepare");
+        for (operations, value, succeeds) in [
+            (10, json!({"k": "text", "value": "query"}), true),
+            (10, json!({"k": "text", "value": "wrong query"}), false),
+            (10, json!({"k": "ordinal", "value": 0}), false),
+            (12, json!({"k": "text", "value": "query"}), false),
+        ] {
+            let snapshot = current(
+                &observation,
+                json!([
+                    {"k": 1, "r": "document", "o": 16},
+                    {"k": 3, "p": 0, "r": "combobox", "n": "Private title",
+                     "v": value, "o": operations}
+                ]),
+            );
+            let verified = prepare_semantic_action_snapshot_evidence(
+                &action,
+                SemanticActionAttemptId::new(1).expect("attempt"),
+                SemanticSettleInstant::from_millis(101),
+                &snapshot,
+            )
+            .is_ok_and(|evidence| {
+                verify_semantic_action(&immediate(&action, 1), &action, evidence).is_ok()
+            });
+            assert_eq!(verified, succeeds);
+        }
+        assert!(
+            bind(
+                &observation,
+                SemanticActionIntent::Fill {
+                    target: SemanticReferenceId::new(5).expect("select-only combobox"),
+                    value: SemanticActionText::try_new("query".to_owned()).expect("text"),
+                },
+                SemanticWaitCondition::Immediate,
+                SemanticVerification::TargetValueMatchesInput,
+            )
+            .is_err(),
+            "combobox role alone cannot bind Fill"
+        );
     }
 
     #[test]

@@ -209,7 +209,10 @@ pub fn decode_semantic_snapshot(
                     || child_kinds > 7
                     || (child_count == 0) != (child_kinds == 0)
                     || child_kinds.count_ones() > u32::from(child_count.min(128))
-                    || !matches!(role, SemanticRole::Textbox | SemanticRole::Searchbox)
+                    || !matches!(
+                        role,
+                        SemanticRole::Textbox | SemanticRole::Searchbox | SemanticRole::Combobox
+                    )
                 {
                     return Err(SemanticDecodeError::NodeContract);
                 }
@@ -234,9 +237,11 @@ pub fn decode_semantic_snapshot(
             })
             .transpose()?;
         if let Some(support) = fill_support {
-            if !matches!(role, SemanticRole::Textbox | SemanticRole::Searchbox)
-                || (support == crate::SemanticFillSupport::Supported)
-                    != operations.contains(SemanticOperationClass::Fill)
+            if !matches!(
+                role,
+                SemanticRole::Textbox | SemanticRole::Searchbox | SemanticRole::Combobox
+            ) || (support == crate::SemanticFillSupport::Supported)
+                != operations.contains(SemanticOperationClass::Fill)
             {
                 return Err(SemanticDecodeError::NodeContract);
             }
@@ -486,7 +491,7 @@ fn allowed_operations(role: SemanticRole) -> Result<SemanticOperations, Semantic
         | SemanticRole::Password
         | SemanticRole::Searchbox
         | SemanticRole::Spinbutton => &[Click, Fill, Press],
-        SemanticRole::Combobox => &[Click, Select, Press],
+        SemanticRole::Combobox => &[Click, Fill, Select, Press],
         SemanticRole::Listbox => &[Select, Press, Scroll],
         SemanticRole::Group
         | SemanticRole::Document
@@ -980,6 +985,27 @@ mod tests {
                 .is_err(),
                 "structure cannot promote rich targets to Fill"
             );
+        }
+    }
+
+    #[test]
+    fn editable_combobox_capabilities_and_diagnostics_decode_without_changing_role() {
+        for node in [
+            json!({"k":1,"r":"combobox","fs":1,"o":11,"v":{"k":"text","value":"query"}}),
+            json!({"k":1,"r":"combobox","fs":1,"o":11,"es":[1,1,false]}),
+            json!({"k":1,"r":"combobox","fs":10,"o":9,"v":{"k":"text","value":"readonly"}}),
+            json!({"k":1,"r":"combobox","fs":2,"o":13,"v":{"k":"ordinal","value":0}}),
+        ] {
+            let snapshot = decode_semantic_snapshot(decode_context(), &payload(json!([node])))
+                .expect("combobox capabilities");
+            assert_eq!(snapshot.nodes()[0].role(), SemanticRole::Combobox);
+        }
+        for node in [
+            json!({"k":1,"r":"combobox","fs":2,"o":11}),
+            json!({"k":1,"r":"combobox","fs":1,"o":13}),
+            json!({"k":1,"r":"combobox","fs":1,"o":11,"es":[1,2,false]}),
+        ] {
+            assert!(decode_semantic_snapshot(decode_context(), &payload(json!([node]))).is_err());
         }
     }
 

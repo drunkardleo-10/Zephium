@@ -1139,7 +1139,7 @@ impl SemanticPreparedAction {
         if self.kind() != SemanticActionKind::Fill
             || !matches!(
                 self.bound_action().target_role(),
-                SemanticRole::Textbox | SemanticRole::Searchbox
+                SemanticRole::Textbox | SemanticRole::Searchbox | SemanticRole::Combobox
             )
             || self.target_sensitivity() == SemanticSensitivity::Secret
         {
@@ -1148,7 +1148,7 @@ impl SemanticPreparedAction {
         let (_, target) = self.verification_target(current)?;
         if !matches!(
             target.role(),
-            SemanticRole::Textbox | SemanticRole::Searchbox
+            SemanticRole::Textbox | SemanticRole::Searchbox | SemanticRole::Combobox
         ) || !target.operations().contains(SemanticOperationClass::Fill)
         {
             return Err(SemanticActionRevalidationError::OperationDenied);

@@ -191,6 +191,25 @@ fn select(observation: &SemanticObservation, option: u16) -> SemanticPreparedAct
 }
 
 #[test]
+fn form_goal_accepts_editable_combobox_without_granting_role_only_fill() {
+    let frame = frame();
+    for (operations, accepts) in [(3, true), (9, false), (13, false)] {
+        let mut task = task(&frame, vec![phase("query", false)]);
+        let initial = decode(
+            &frame,
+            1,
+            &format!(
+                r#"{{"v":1,"i":1,"g":1,"c":"complete","n":[{{"k":1,"r":"document","o":16}},{{"k":2,"p":0,"r":"combobox","n":"Query","o":{operations},"b":{{"x":10,"y":20,"w":120,"h":30}}}}]}}"#
+            ),
+        );
+        assert_eq!(task.evaluate(&initial).is_ok(), accepts);
+        if accepts {
+            assert!(task.assess(&fill(&initial, "query")).is_ok());
+        }
+    }
+}
+
+#[test]
 fn phased_form_is_variable_order_and_exact_not_action_count() {
     for language_first in [true, false] {
         let frame = frame();

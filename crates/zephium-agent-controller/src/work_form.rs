@@ -20,14 +20,15 @@ pub struct AgentWorkFormGoal {
     kind: SemanticActionKind,
 }
 impl AgentWorkFormGoal {
-    /// Requires the exact complete value of a unique textbox or searchbox.
+    /// Requires the exact complete value of a unique fill-capable textbox,
+    /// searchbox or editable combobox.
     /// Empty text explicitly means clearing the field. Values are bounded to
     /// the independently observable preview ceiling, not silently truncated.
     pub fn fill(name: Option<String>, value: String) -> Result<Self, AgentWorkFailure> {
         Self::new(name, None, value, SemanticActionKind::Fill)
     }
-    /// Requires an exact, complete observed transition on a textbox or
-    /// searchbox. The prior value is both a target discriminator and a
+    /// Requires an exact, complete observed transition on a fill-capable text
+    /// control. The prior value is both a target discriminator and a
     /// fail-closed precondition: a field containing any third value grants no
     /// action. Observing the destination value is already satisfied.
     pub fn fill_transition(
@@ -80,8 +81,13 @@ impl AgentWorkFormGoal {
         let role = match self.kind {
             SemanticActionKind::Fill => {
                 matches!(node.role(), SemanticRole::Textbox | SemanticRole::Searchbox)
+                    || (node.role() == SemanticRole::Combobox
+                        && node.operations().contains(SemanticOperationClass::Fill))
             }
-            SemanticActionKind::Select => node.role() == SemanticRole::Combobox,
+            SemanticActionKind::Select => {
+                node.role() == SemanticRole::Combobox
+                    && node.operations().contains(SemanticOperationClass::Select)
+            }
             _ => false,
         };
         role && self.name.as_ref().is_none_or(|name| {

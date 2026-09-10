@@ -354,6 +354,26 @@ const searchInput = new HTMLInputElement(
   { type: "search", "aria-label": "Account search" },
   "fixture search"
 );
+const editableCombobox = new HTMLInputElement(
+  { type: "text", role: "combobox", "aria-label": "Editable suggestions" },
+  ""
+);
+const readonlyCombobox = new HTMLInputElement(
+  { type: "search", role: "combobox", readonly: "", "aria-label": "Readonly suggestions" },
+  "read only query"
+);
+const roleOnlyCombobox = new Element("div", { role: "combobox", "aria-label": "Popup trigger" });
+const unsupportedCombobox = new HTMLInputElement(
+  { type: "number", role: "combobox", "aria-label": "Number suggestions" }, "4"
+);
+const credentialCombobox = new HTMLInputElement(
+  { type: "text", role: "combobox", "aria-label": "API key" },
+  "never-cross-combobox-bridge"
+);
+const editableComboboxHost = new Element("div", {
+  contenteditable: "plaintext-only", role: "combobox", "aria-label": "Editable suggestion host"
+});
+editableComboboxHost.append(new CharacterData("host query"));
 const textarea = new HTMLTextAreaElement(
   { "aria-label": "Account notes" },
   "fixture notes"
@@ -442,7 +462,7 @@ const closedHost = new Element("div");
 closedHost._closedInternal = new Element("button", { "aria-label": "Closed shadow secret" });
 
 const fillEvents = new Map();
-for (const target of [textInput, searchInput, textarea, contentEditable]) {
+for (const target of [textInput, searchInput, textarea, contentEditable, editableCombobox, editableComboboxHost]) {
   const events = [];
   fillEvents.set(target, events);
   target.addEventListener("beforeinput", (event) => {
@@ -506,6 +526,8 @@ main.append(heading);
 main.append(button);
 main.append(textInput);
 main.append(searchInput);
+for (const combo of [editableCombobox, readonlyCombobox, roleOnlyCombobox,
+  unsupportedCombobox, credentialCombobox, editableComboboxHost]) main.append(combo);
 main.append(textarea);
 main.append(contentEditable);
 main.append(implicitEditable);
@@ -612,6 +634,7 @@ assert(initial.v === 1 && initial.i === 7 && initial.g === 1, "authority mismatc
 assert(initial.c === "complete", `unexpected completeness ${initial.c}`);
 assert(!initialWire.includes("never-cross-bridge"), "password value crossed bridge");
 assert(!initialWire.includes("never-cross-editable-bridge"), "credential editable text crossed bridge");
+assert(!initialWire.includes("never-cross-combobox-bridge"), "credential combobox value crossed bridge");
 assert(!initialWire.includes("Closed shadow secret"), "closed shadow root was bypassed");
 assert(initial.n.some((node) => node.n === "Open shadow action"), "open shadow root missing");
 assert(initial.n.some((node) => node.n === "Save"), "captured element methods were poisoned");
@@ -625,6 +648,20 @@ assert(initial.n.some(node => node.n === "Implicit editable" && (node.o & 2) ===
   "an editable host with inline markup advertised destructive plain-text fill");
 const languageNode = initial.n.find((node) => node.n === "Language");
 assert(languageNode && languageNode.r === "combobox", "visible native select missing");
+assert(languageNode.o === 13 && languageNode.v?.k === "ordinal" && languageNode.fs !== 1,
+  "native select acquired text-fill capability");
+for (const [name, value] of [["Editable suggestions", ""],
+  ["Editable suggestion host", "host query"]]) {
+  const combo = initial.n.find(node => node.n === name);
+  assert(combo?.r === "combobox" && combo.o === 11 && combo.fs === 1 &&
+    (value === "" ? combo.v === undefined : combo.v?.k === "text" && combo.v.value === value),
+    "proven editable combobox lost its text value or fill authority");
+}
+for (const name of ["Readonly suggestions", "Popup trigger", "Number suggestions"]) {
+  const combo = initial.n.find(node => node.n === name);
+  assert(combo?.r === "combobox" && combo.o === 9 && combo.fs !== 1,
+    "readonly, unsupported, or role-only combobox gained fill/select authority");
+}
 const languageNodeIndex = initial.n.indexOf(languageNode);
 const englishNode = initial.n.find((node) => node.n === "English");
 const germanNode = initial.n.find((node) => node.n === "Deutsch");
@@ -1074,6 +1111,34 @@ async function finish() {
     textNode && searchNode && textareaNode && editableNode,
     `fill targets missing: ${transported.n.map((node) => `${node.r}:${node.n || ""}`).join("|")}`
   );
+
+  for (const [target, name, value, attempt] of [
+    [editableCombobox, "Editable suggestions", "next query", 40],
+    [editableComboboxHost, "Editable suggestion host", "next host query", 41]
+  ]) {
+    const combo = actionNode(name);
+    document._hit = target;
+    const result = JSON.parse(await runtime.invoke(fillRequest(combo, value, attempt)));
+    assert(result.a === attempt && result.b === "fixed_semantic_recipe" && result.r === "form",
+      "proven editable combobox failed fixed fill/postcondition verification");
+    assertInputEvent(target, value);
+  }
+  for (const [target, name, error] of [
+    [readonlyCombobox, "Readonly suggestions", "target_disabled"],
+    [roleOnlyCombobox, "Popup trigger", "unsupported_interaction"],
+    [unsupportedCombobox, "Number suggestions", "unsupported_interaction"],
+    [languageSelect, "Language", "unsupported_interaction"]
+  ]) {
+    document._hit = target;
+    assert(runtime.invoke(fillRequest(actionNode(name), "forbidden query", 42)) === `E2:${error}`,
+      "uneditable combobox accepted a forged fill operation");
+  }
+  editableCombobox._value = "";
+  editableCombobox.attributes.type = "password";
+  document._hit = editableCombobox;
+  assert(runtime.invoke(fillRequest(actionNode("Editable suggestions"), "forbidden query", 43)) ===
+    "E2:credential_boundary", "combobox-to-password transition escaped revalidation");
+  editableCombobox.attributes.type = "text";
 
   document._hit = textInput;
   const textFill = JSON.parse(await runtime.invoke(fillRequest(textNode, "Zephium fixed text", 8)));

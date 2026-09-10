@@ -961,7 +961,9 @@
       case "spinbutton":
         return readonly ? 1 | 8 : 1 | 2 | 8;
       case "combobox":
-        return readonly ? 1 | 8 : 1 | 4 | 8;
+        // Role alone grants neither Fill nor Select.
+        return readonly ? 1 | 8 : descriptor.tag === "select" ? 1 | 4 | 8 :
+          fillControlKind(descriptor, "") !== 0 ? 1 | 2 | 8 : 1 | 8;
       case "listbox":
         return 4 | 8 | 16;
       case "group":
@@ -1471,8 +1473,7 @@
     ) {
       return hasName ? null : "name";
     }
-    if (descriptor.contentEditable === true &&
-        (descriptor.role === "textbox" || descriptor.role === "searchbox")) return "value";
+    if (descriptor.contentEditable === true && textFillRole(descriptor.role)) return "value";
     if (
       descriptor.role === "paragraph" ||
       descriptor.role === "list_item" ||
@@ -1514,7 +1515,7 @@
     const operations = operationBits(descriptor, disabled, readonly);
     // Closed host diagnostics only, omitted from provider projections. No
     // markup, tag strings, field values or page-authored reason reaches Rust.
-    if (descriptor.role === "textbox" || descriptor.role === "searchbox") {
+    if (textFillRole(descriptor.role)) {
       wire.fs = disabled ? 11 : readonly ? 10 :
         fillControlKind(descriptor, "") !== 0 ? 1 :
         descriptor.tag === "input" || descriptor.tag === "textarea" ? 12 :
@@ -1554,7 +1555,7 @@
       } else if (descriptor.role === "checkbox" || descriptor.role === "radio") {
         wire.v = { k: "boolean", value: (states & 1) !== 0 };
       } else if (
-        descriptor.role === "combobox" ||
+        (descriptor.role === "combobox" && descriptor.tag === "select") ||
         descriptor.role === "listbox" ||
         descriptor.role === "option"
       ) {
@@ -1568,11 +1569,7 @@
       } else if (descriptor.role === "slider" || descriptor.role === "progress") {
         const raw = attribute(element, "aria-valuenow", 64) || attribute(element, "value", 64) || "0";
         wire.v = { k: "ordinal", value: boundedOrdinal(raw) };
-      } else if (
-        descriptor.role === "textbox" ||
-        descriptor.role === "searchbox" ||
-        descriptor.role === "spinbutton"
-      ) {
+      } else if (textFillRole(descriptor.role) || descriptor.role === "spinbutton") {
         if (credentialField(element, descriptor, wire.n || "")) {
           wire.v = { k: "redacted" };
           setSensitivity(record, "secret");
@@ -2473,27 +2470,22 @@
     } catch (_) { return 9; }
   }
 
+  function textFillRole(role) {
+    return role === "textbox" || role === "searchbox" || role === "combobox";
+  }
+
   function fillControlKind(descriptor, value) {
+    if (!textFillRole(descriptor.role)) return 0;
     if (descriptor.tag === "input") {
-      if (
-        (descriptor.inputType !== "text" && descriptor.inputType !== "search") ||
-        (descriptor.role !== "textbox" && descriptor.role !== "searchbox")
-      ) {
-        return 0;
-      }
+      if (descriptor.inputType !== "text" && descriptor.inputType !== "search") return 0;
       for (const character of value) {
         const point = character.codePointAt(0);
         if (point === 0x09 || point === 0x0a || point === 0x0d) return 0;
       }
       return 1;
     }
-    if (descriptor.tag === "textarea" && descriptor.role === "textbox") {
-      return 2;
-    }
-    if (descriptor.contentEditable === true && descriptor.plainTextEditable === true &&
-        (descriptor.role === "textbox" || descriptor.role === "searchbox")) {
-      return 3;
-    }
+    if (descriptor.tag === "textarea" && descriptor.role !== "searchbox") return 2;
+    if (descriptor.contentEditable === true && descriptor.plainTextEditable === true) return 3;
     return 0;
   }
 

@@ -140,7 +140,7 @@ impl AgentWorkEffectReinspection {
             || action.verification() != SemanticVerification::TargetValueMatchesInput
             || !matches!(
                 action.bound_action().target_role(),
-                SemanticRole::Textbox | SemanticRole::Searchbox
+                SemanticRole::Textbox | SemanticRole::Searchbox | SemanticRole::Combobox
             )
             || source_account.context() != source
             || current.identity().profile() != source.identity().profile()
