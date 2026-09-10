@@ -1920,7 +1920,10 @@ mod tests {
                  "b": {"x": 10, "y": 90, "w": 200, "h": 30}},
                 {"k": 5, "p": 3, "r": "option", "n": "Private high",
                  "v": {"k": "ordinal", "value": 1}, "o": 9,
-                 "b": {"x": 10, "y": 120, "w": 200, "h": 30}}
+                 "b": {"x": 10, "y": 120, "w": 200, "h": 30}},
+                {"k": 6, "p": 0, "r": "dialog", "n": "Private dialog"},
+                {"k": 7, "p": 5, "r": "button", "n": "Private dialog result", "o": 9,
+                 "b": {"x": 10, "y": 160, "w": 200, "h": 30}}
             ]),
         );
 
@@ -2025,7 +2028,7 @@ mod tests {
             87,
             proposal(
                 SemanticActionIntent::Click {
-                    target: SemanticReferenceId::new(2).unwrap(),
+                    target: SemanticReferenceId::new(7).unwrap(),
                 },
                 SemanticEffectClass::Read,
                 SemanticVerification::PageDialogClosed,

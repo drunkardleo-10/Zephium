@@ -670,7 +670,12 @@ pub(crate) fn verify_semantic_action(
                 {
                     return Err(SemanticVerificationError::StaleEvidence);
                 }
-                if !sample.before.iter().any(|key| !sample.after.contains(key)) {
+                // The bound target is independently required to remain under its
+                // exact dialog ancestor through the pre-dispatch checkpoint.
+                // Requiring a sole visible dialog immediately before the click
+                // makes the sampled identity unambiguous: an unrelated dialog
+                // cannot close and satisfy this proof.
+                if sample.before.len() != 1 || !sample.after.is_empty() {
                     return Err(SemanticVerificationError::OutcomeNotObserved);
                 }
                 (
@@ -961,7 +966,9 @@ mod tests {
                 {"k": 4, "p": 0, "r": "checkbox", "n": "Private toggle", "o": 1},
                 {"k": 5, "p": 0, "r": "combobox", "n": "Private priority",
                  "v": {"k": "ordinal", "value": 0}, "o": 12},
-                {"k": 6, "p": 4, "r": "option", "n": "Private high", "o": 1}
+                {"k": 6, "p": 4, "r": "option", "n": "Private high", "o": 1},
+                {"k": 7, "p": 0, "r": "dialog", "n": "Private dialog"},
+                {"k": 8, "p": 6, "r": "button", "n": "Private dialog result", "o": 1}
             ]),
         );
         let request = crate::SemanticObservationRequest::initial(
@@ -1944,7 +1951,7 @@ mod tests {
         let batch = bind(
             &observation,
             SemanticActionIntent::Click {
-                target: SemanticReferenceId::new(2).unwrap(),
+                target: SemanticReferenceId::new(8).unwrap(),
             },
             SemanticWaitCondition::Immediate,
             SemanticVerification::PageDialogClosed,
@@ -1965,8 +1972,8 @@ mod tests {
             a: 2,
             i: 1,
             g: 1,
-            before: vec![8, 9],
-            after: vec![8],
+            before: vec![9],
+            after: vec![],
         });
         let evidence = prepare_semantic_action_snapshot_evidence(
             &action,
@@ -1982,7 +1989,8 @@ mod tests {
             SemanticEffectProofKind::PageDialogClosed
         );
 
-        snapshot.page_dialog_sample.as_mut().unwrap().after = vec![8, 9, 10];
+        snapshot.page_dialog_sample.as_mut().unwrap().before = vec![8, 9];
+        snapshot.page_dialog_sample.as_mut().unwrap().after = vec![8];
         let evidence = prepare_semantic_action_snapshot_evidence(
             &action,
             SemanticActionAttemptId::new(2).unwrap(),

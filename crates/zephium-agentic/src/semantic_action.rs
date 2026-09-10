@@ -629,6 +629,7 @@ struct BoundNode {
     trust: SemanticTrust,
     geometry: Option<SemanticRect>,
     structural_digest: [u8; 32],
+    page_dialog_ancestor: Option<SemanticNodeKey>,
     fields_complete: bool,
 }
 
@@ -648,6 +649,7 @@ impl fmt::Debug for BoundNode {
             .field("trust", &self.trust)
             .field("geometry", &self.geometry)
             .field("structural_digest", &"[redacted]")
+            .field("inside_page_dialog", &self.page_dialog_ancestor.is_some())
             .finish()
     }
 }
@@ -850,6 +852,21 @@ impl SemanticBoundAction {
             Some(self.kind().operation()),
             matches!(self.intent, BoundActionIntent::Fill { .. }),
         )?;
+        if self.verification == SemanticVerification::PageDialogClosed {
+            let Some(dialog_key) = self.intent.target().page_dialog_ancestor else {
+                return Err(SemanticActionRevalidationError::TargetChanged);
+            };
+            let Some(dialog_index) = current
+                .nodes()
+                .iter()
+                .position(|node| node.key() == dialog_key && node.role() == SemanticRole::Dialog)
+            else {
+                return Err(SemanticActionRevalidationError::TargetChanged);
+            };
+            if !is_descendant(current, target_index, dialog_index) {
+                return Err(SemanticActionRevalidationError::TargetChanged);
+            }
+        }
         if let BoundActionIntent::Select { option, .. } = &self.intent {
             let (option_index, option_node) = revalidate_node(option, current, None, false)
                 .map_err(|_| SemanticActionRevalidationError::SelectionTarget)?;
@@ -1417,6 +1434,9 @@ fn validate_bound_verification(
             key,
             SemanticPressKey::Enter | SemanticPressKey::Escape | SemanticPressKey::Space
         ),
+        (intent, SemanticVerification::PageDialogClosed) => {
+            intent.target().page_dialog_ancestor.is_some()
+        }
         _ => true,
     };
     if compatible {
@@ -1708,6 +1728,18 @@ fn bind_node(snapshot: &SemanticSnapshot, node: &crate::SemanticNode) -> BoundNo
         .parent()
         .and_then(|parent| snapshot.nodes().get(usize::from(parent)))
         .map(crate::SemanticNode::key);
+    let mut ancestor = node.parent().map(usize::from);
+    let mut page_dialog_ancestor = None;
+    while let Some(index) = ancestor {
+        let Some(parent) = snapshot.nodes().get(index) else {
+            break;
+        };
+        if parent.role() == SemanticRole::Dialog {
+            page_dialog_ancestor = Some(parent.key());
+            break;
+        }
+        ancestor = parent.parent().map(usize::from);
+    }
     BoundNode {
         reference: node.reference(),
         node_key: node.key(),
@@ -1721,6 +1753,7 @@ fn bind_node(snapshot: &SemanticSnapshot, node: &crate::SemanticNode) -> BoundNo
         trust: node.trust(),
         geometry: node.geometry(),
         structural_digest: structural_digest(node, parent_key.map(|key| key.get())),
+        page_dialog_ancestor,
         fields_complete: snapshot.has_complete_node_fields(node.key()),
     }
 }
@@ -2906,6 +2939,21 @@ mod tests {
             Err(SemanticActionContractError::OutcomeContract)
         );
         let observation = observation();
+        assert_eq!(
+            SemanticActionBatch::bind(
+                SemanticActionBatchId::new(28).expect("batch"),
+                &observation,
+                &frames(&observation),
+                vec![proposal(
+                    SemanticActionIntent::Click {
+                        target: SemanticReferenceId::new(2).expect("button"),
+                    },
+                    SemanticEffectClass::Read,
+                    SemanticVerification::PageDialogClosed,
+                )],
+            ),
+            Err(SemanticActionBindingError::OutcomeContract)
+        );
         assert_eq!(
             SemanticActionBatch::bind(
                 SemanticActionBatchId::new(29).expect("batch"),
