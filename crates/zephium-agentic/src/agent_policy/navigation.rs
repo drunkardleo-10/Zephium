@@ -245,6 +245,40 @@ impl fmt::Debug for AgentNavigationReceipt {
 }
 
 impl AgentRunPolicy {
+    /// Historical extraction may cite only this exact lease's successfully
+    /// traversed document prefix. This grants no old observation/action refs.
+    pub(super) fn historical_extraction_contexts(
+        &self,
+        request: AgentModelCallRequest,
+        current: ContextJoin,
+    ) -> Result<Vec<ContextJoin>, AgentPolicyError> {
+        let Some(checkpoint) = self.navigation_checkpoint_for_context(request, current)? else {
+            return Ok(Vec::new());
+        };
+        if !checkpoint.is_discovery() {
+            return Ok(Vec::new());
+        }
+        let mut next = current;
+        let mut contexts = Vec::with_capacity(self.navigation_attempts);
+        for receipt in self.navigation_receipts[..self.navigation_attempts]
+            .iter()
+            .rev()
+        {
+            let receipt = receipt.ok_or(AgentPolicyError::Navigation)?;
+            if !receipt.matches_manifest_revision(self.manifest.id(), self.manifest.guard())
+                || receipt.lease() != request.lease()
+                || receipt.account() != request.account().account()
+                || receipt.settlement() != AgentNavigationSettlement::Committed
+                || receipt.operation().context() != next
+                || !is_document_successor(receipt.source(), next)
+            {
+                return Err(AgentPolicyError::Navigation);
+            }
+            next = receipt.source();
+            contexts.push(next);
+        }
+        Ok(contexts)
+    }
     /// Binds descriptive initial-document metadata to the original retained
     /// resource receipt before any provider call. It grants no navigation.
     pub fn bind_retained_initial_document(
@@ -800,6 +834,9 @@ impl AgentNavigationCheckpoint<'_> {
     }
     pub(crate) const fn is_discovery(&self) -> bool {
         self.discovery
+    }
+    pub(crate) const fn current_document_epoch(&self) -> u64 {
+        self.binding.context.navigation_epoch().get()
     }
     /// Exact current document under the validated committed receipt prefix.
     pub(crate) fn current_document(&self) -> Option<&ContextNavigationTarget> {

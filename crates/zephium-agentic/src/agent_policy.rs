@@ -1928,7 +1928,19 @@ impl AgentRunPolicy {
             .plan_node(node_id)
             .ok_or(AgentPolicyError::Invariant)?;
         validate_time(&self.manifest, node.expires_at(), account, request.now())?;
-        validate_context_scope(&self.manifest, node, context, account, &candidates)?;
+        let historical_contexts = if kind == ModelInputKind::Extraction {
+            self.historical_extraction_contexts(request, context)?
+        } else {
+            Vec::new()
+        };
+        validate_context_scope_with_history(
+            &self.manifest,
+            node,
+            context,
+            account,
+            &candidates,
+            &historical_contexts,
+        )?;
 
         let input_token_limit = token_reservation
             .measured
@@ -2299,6 +2311,17 @@ fn validate_context_scope(
     account: AgentContextAccountBinding,
     candidates: &[AgentTaintCohort],
 ) -> Result<(), AgentPolicyError> {
+    validate_context_scope_with_history(manifest, node, context, account, candidates, &[])
+}
+
+fn validate_context_scope_with_history(
+    manifest: &AgentRunManifest,
+    node: &crate::AgentPlanNodeScope,
+    context: ContextJoin,
+    account: AgentContextAccountBinding,
+    candidates: &[AgentTaintCohort],
+    historical_contexts: &[ContextJoin],
+) -> Result<(), AgentPolicyError> {
     if account.context() != context || context.identity().owner() != manifest.run() {
         return Err(AgentPolicyError::Authority);
     }
@@ -2323,7 +2346,7 @@ fn validate_context_scope(
         return Err(AgentPolicyError::SourceOutsideScope);
     }
     for candidate in candidates {
-        if candidate.context != context
+        if (candidate.context != context && !historical_contexts.contains(&candidate.context))
             || candidate.profile() != profile
             || candidate.account != account.account()
             || manifest

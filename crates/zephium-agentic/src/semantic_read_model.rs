@@ -415,6 +415,7 @@ pub fn encode_semantic_read(
 ) -> Result<SemanticEncodedRead, SemanticModelEncodingError> {
     validate_read(read)?;
     let frames = read_frames(read);
+    let cross_document = frames.iter().any(|frame| frame.context() != read.context());
     let mut cohorts = Vec::new();
     if read.has_retained_evidence() {
         for fragment in read.fragments() {
@@ -497,6 +498,15 @@ pub fn encode_semantic_read(
             &mut output,
             format_args!(" trust={}", frame_trust_label(frame.trust())),
         )?;
+        if cross_document {
+            checked_write(
+                &mut output,
+                format_args!(
+                    " document_epoch={}",
+                    frame.context().navigation_epoch().get()
+                ),
+            )?;
+        }
         if !read.has_retained_evidence() {
             checked_write(
                 &mut output,
@@ -626,8 +636,8 @@ fn validate_read(read: &SemanticReadResult<'_>) -> Result<(), SemanticModelEncod
             u16::try_from(index + 1).map_err(|_| SemanticModelEncodingError::Invariant)?;
         let provenance = fragment.provenance();
         if fragment.id().get() != expected
-            || provenance.context() != read.context()
-            || ((provenance.observation() != read.observation()
+            || ((provenance.context() != read.context()
+                || provenance.observation() != read.observation()
                 || provenance.observation_generation() != read.observation_generation()
                 || provenance.captured_at() != read.captured_at())
                 && read.source_acknowledgement(provenance).is_none())

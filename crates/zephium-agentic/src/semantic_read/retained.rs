@@ -79,7 +79,9 @@ struct Capture {
     stats: SemanticReadStats,
 }
 
-/// Bounded safe evidence from acknowledged observations of one document.
+/// Bounded safe evidence from acknowledged observations. Crossing documents
+/// requires an explicit committed navigation receipt; retained references
+/// remain historical and can only contribute to terminal extraction.
 ///
 /// Holds at most eight captures and STANDARD's 128 fragments / 32 KiB content.
 /// New captures displace oldest captures when necessary; omissions remain
@@ -100,6 +102,27 @@ impl SemanticRetainedReadEvidence {
     /// Releases all private data at a navigation, task or account boundary.
     pub fn clear(&mut self) {
         *self = Self::default();
+    }
+
+    /// Advances the read owner along one accounted native navigation. This
+    /// does not make old references actionable or authorize model disclosure;
+    /// extraction policy independently rejoins every historical source to its
+    /// original committed taint and the same lease's navigation receipts.
+    pub fn advance_after_navigation(
+        &mut self,
+        receipt: crate::AgentNavigationReceipt,
+    ) -> Result<(), SemanticReadError> {
+        if self.context != Some(receipt.source())
+            || receipt.settlement() != crate::AgentNavigationSettlement::Committed
+            || !crate::agent_policy::is_document_successor(
+                receipt.source(),
+                receipt.operation().context(),
+            )
+        {
+            return Err(SemanticReadError::AuthorityMismatch);
+        }
+        self.context = Some(receipt.operation().context());
+        Ok(())
     }
 
     /// Safe primitive bytes retained, excluding bounded structural metadata.

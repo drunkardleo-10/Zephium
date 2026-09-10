@@ -30,6 +30,7 @@ impl AgentWorkController {
         browser: &WorkBrowser<'_>,
         turn: AgentBrowserProviderTurn,
         observation: &SemanticObservation,
+        captured_at: SemanticCaptureInstant,
         progress: AgentWorkTaskProgress,
     ) -> Result<
         (
@@ -130,6 +131,27 @@ impl AgentWorkController {
             .1
             .retire_for_navigation(observation, &target, &session.config)
             .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation))?;
+        if state.navigation_discovery.is_some() {
+            let schema = state
+                .extraction_schema
+                .as_ref()
+                .ok_or(AgentWorkFailure::Contract)?;
+            let read = read_selected_semantic_observation(
+                observation,
+                SemanticReadAuthority::Acknowledged(checkpoint.baseline()),
+                captured_at,
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::STANDARD,
+                schema.source_roles(),
+            )
+            .map_err(|error| AgentWorkFailure::Browser(AgentBrowserProviderError::Read(error)))?;
+            state
+                .retained_read_evidence
+                .retain(&read, checkpoint.baseline())
+                .map_err(|error| {
+                    AgentWorkFailure::Browser(AgentBrowserProviderError::Read(error))
+                })?;
+        }
         let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
         let permit = session
             .policy
@@ -302,6 +324,14 @@ impl AgentWorkController {
         state.check_task_contract()?;
         if receipt.hop() != state.navigation_hops {
             return Err(AgentWorkFailure::Contract);
+        }
+        if state.navigation_discovery.is_some() {
+            state
+                .retained_read_evidence
+                .advance_after_navigation(receipt)
+                .map_err(|error| {
+                    AgentWorkFailure::Browser(AgentBrowserProviderError::Read(error))
+                })?;
         }
         state.navigation_hops += 1;
         let fresh = Self::observe(state, worker, browser).await?;

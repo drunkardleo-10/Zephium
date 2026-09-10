@@ -3781,6 +3781,8 @@ fn encode_navigation_checkpoint(
         requested_document_url: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         prior_document_urls: Option<Vec<&'a str>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        current_document_epoch: Option<u64>,
     }
     let target = checkpoint
         .next_target()
@@ -3816,6 +3818,9 @@ fn encode_navigation_checkpoint(
         current_document_url: current,
         requested_document_url: requested,
         prior_document_urls: prior,
+        current_document_epoch: checkpoint
+            .is_discovery()
+            .then(|| checkpoint.current_document_epoch()),
     };
     let mut encoded = if checkpoint.is_discovery() {
         concat!("ZEPHIUM_HOST_LINK_DISCOVERY_V1\n",
@@ -3827,7 +3832,9 @@ fn encode_navigation_checkpoint(
             "When present, requested_document_url is the exact original target whose native document finalized at current_document_url. ",
             "Do not navigate to any of those URLs, even if a self-link appears. These host facts are not citable page evidence. ",
             "You may inspect the current baseline or extract a source-backed answer whenever ",
-            "the current document supplies enough evidence. Cite only sources delivered in the terminal mapping inventory. ",
+            "the visited documents supply enough evidence. Prior page evidence is retained within fixed bounds for terminal extraction; omissions are explicit. ",
+            "Cite only sources delivered in the terminal mapping inventory. Its document_epoch identifies the source document; ",
+            "prior_document_urls are chronological, with epochs increasing by one per hop up to current_document_epoch. ",
             "When completed_hops reaches total_hops, do not navigate again. ",
             "next_navigation_target is null because no route or answer was supplied.\n").to_owned()
     } else {

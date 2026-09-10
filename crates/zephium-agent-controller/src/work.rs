@@ -2173,10 +2173,19 @@ impl AgentWorkController {
             }
             let step = turn;
             if step.turn.proposal().kind() == AgentBrowserToolKind::Navigate {
-                state.retained_read_evidence.clear();
-                let next =
-                    Self::navigate_current(state, worker, browser, step, &observation, progress)
-                        .await?;
+                if state.navigation_discovery.is_none() {
+                    state.retained_read_evidence.clear();
+                }
+                let next = Self::navigate_current(
+                    state,
+                    worker,
+                    browser,
+                    step,
+                    &observation,
+                    captured_at,
+                    progress,
+                )
+                .await?;
                 observation = next.0;
                 captured_at = next.1;
                 progress = next.2;
@@ -2470,7 +2479,7 @@ impl AgentWorkController {
                 &frames,
                 captured_at,
                 schema,
-                if state.progressive_observation {
+                if state.progressive_observation || state.navigation_discovery.is_some() {
                     Some(&state.retained_read_evidence)
                 } else {
                     None

@@ -608,6 +608,146 @@ fn discovery_progress_urls_join_exact_committed_receipts_and_current_document() 
 }
 
 #[test]
+fn historical_extraction_requires_the_exact_discovery_receipt_chain() {
+    for fault in 0..6 {
+        let (mut fixture, terminals) = committed_navigation(true);
+        let current = terminals[1].1.operation().context();
+        let request = call_request(
+            3,
+            if fault == 5 {
+                AgentPlanLeaseId::generate()
+            } else {
+                fixture.lease
+            },
+            if fault == 3 {
+                AgentContextAccountBinding::new(
+                    AgentAccountAttestationId::generate(),
+                    current,
+                    AgentAccountScope::Authenticated(AgentAccountId::generate()),
+                    AgentPolicyInstant::from_millis(NOW),
+                )
+            } else {
+                account(current, NOW)
+            },
+            0,
+            0,
+            0,
+            NOW,
+        );
+        match fault {
+            1 => fixture.policy.navigation_receipts[0] = None,
+            2 => fixture.policy.navigation_receipts.swap(0, 1),
+            4 => fixture.policy.navigation_attempts = 1,
+            _ => {}
+        }
+        let historical = fixture
+            .policy
+            .historical_extraction_contexts(request, current);
+        if fault != 0 {
+            assert!(historical.is_err(), "changed history {fault} must refuse");
+            continue;
+        }
+        let historical = historical.unwrap();
+        assert_eq!(
+            historical,
+            vec![terminals[1].1.source(), terminals[0].1.source()]
+        );
+        let node = fixture
+            .policy
+            .manifest()
+            .plan_node(AgentPlanNodeId::from_raw(1))
+            .unwrap();
+        let candidates = fixture.policy.taints.clone();
+        assert_eq!(
+            validate_context_scope(
+                fixture.policy.manifest(),
+                node,
+                current,
+                request.account(),
+                &candidates
+            ),
+            Err(AgentPolicyError::SourceOutsideScope)
+        );
+        assert!(validate_context_scope_with_history(
+            fixture.policy.manifest(),
+            node,
+            current,
+            request.account(),
+            &candidates,
+            &historical
+        )
+        .is_ok());
+    }
+
+    // Fixed-route qualifications still require their terminal document. They
+    // cannot gain historical extraction merely because some receipts exist.
+    let (fixture, terminals) = committed_navigation(false);
+    let current = terminals[1].1.operation().context();
+    let request = call_request(3, fixture.lease, account(current, NOW), 0, 0, 0, NOW);
+    assert!(fixture
+        .policy
+        .historical_extraction_contexts(request, current)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn historical_extraction_departed_read_rejoins_original_provider_taint() {
+    let (fixture, terminals) = committed_navigation(true);
+    let first = discovery_observation(terminals[0].1.source(), 1);
+    let last = discovery_observation(terminals[1].1.operation().context(), 3);
+    let first_ack = baseline(&first);
+    let last_ack = baseline(&last);
+    let read = |observation, acknowledgement| {
+        read_semantic_observation(
+            observation,
+            SemanticReadAuthority::Acknowledged(acknowledgement),
+            SemanticCaptureInstant::from_millis(NOW),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .unwrap()
+    };
+    let mut evidence = crate::SemanticRetainedReadEvidence::default();
+    evidence
+        .retain(&read(&first, &first_ack), &first_ack)
+        .unwrap();
+    assert!(evidence
+        .merge_for_extraction(read(&last, &last_ack))
+        .is_err());
+    assert!(evidence.advance_after_navigation(terminals[1].1).is_err());
+    evidence.advance_after_navigation(terminals[0].1).unwrap();
+    assert!(evidence.advance_after_navigation(terminals[0].1).is_err());
+    evidence.advance_after_navigation(terminals[1].1).unwrap();
+    let merged = evidence
+        .merge_for_extraction(read(&last, &last_ack))
+        .unwrap();
+    assert!(merged
+        .fragments()
+        .iter()
+        .any(|fragment| fragment.provenance().context() == first.request().context()));
+    assert!(crate::encode_semantic_read(
+        &merged,
+        SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE
+    )
+    .is_ok());
+
+    let binding = account(last.request().context(), NOW);
+    let mut taints = fixture.policy.taints.clone();
+    taints.extend(observation_taints(&last, binding).unwrap());
+    assert!(provider_extraction_read_taints(&merged, &last_ack, binding, &taints).is_ok());
+    assert_eq!(
+        provider_read_taints(&merged, &last_ack, binding, &taints),
+        Err(AgentPolicyError::Authority)
+    );
+    let current_only = observation_taints(&last, binding).unwrap();
+    assert_eq!(
+        provider_extraction_read_taints(&merged, &last_ack, binding, &current_only),
+        Err(AgentPolicyError::ReadBaselineMissing)
+    );
+}
+
+#[test]
 fn provider_route_checkpoint_is_derived_from_exact_ordered_committed_receipts() {
     for fault in 0..13 {
         let (mut f, terminals) = committed_route();

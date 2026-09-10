@@ -79,7 +79,7 @@ fn discovery_operation_budget_preserves_the_mapping_call_after_navigation() {
 }
 
 #[test]
-fn discovery_preserves_sources_after_empty_inspection_without_cross_document_leakage() {
+fn discovery_merges_accounted_documents_after_empty_inspection_and_rejects_unknown_sources() {
     let _serial = lock(&SERIAL);
     for foreign in [false, true] {
         provider_fixture(ProviderFault::Navigation(
@@ -338,7 +338,8 @@ impl NavigationFault {
                     .stream(3)
                     .replace("resp_3", "resp_4")
                     .replace("msg_3", "msg_4")
-                    .replace("@r1", if foreign { "@r2" } else { "@r1" }),
+                    .replace("Arrival certificate", "Arrival and departure certificates")
+                    .replace("@r1", if foreign { "@r99" } else { r#"@r1\",\"@r2"# }),
             };
         }
         if let Self::DiscoveryBudget(limit, refusal, operations) = self {
@@ -493,8 +494,8 @@ impl NavigationFault {
                 );
                 assert!(text.contains("historical_observation="));
                 assert!(
-                    !text.contains("Departure certificate"),
-                    "navigation clears the prior document"
+                    text.contains("Departure certificate"),
+                    "accounted navigation retains historical read evidence for extraction"
                 );
             }
             return;
@@ -570,8 +571,8 @@ impl NavigationFault {
             assert!(!text.contains("Arrival certificate"));
         } else {
             assert!(
-                !text.contains("Departure certificate"),
-                "old page transcript is retired"
+                (self == Self::Discovery && turns == 2) || !text.contains("Departure certificate"),
+                "only terminal discovery extraction may include prior document evidence"
             );
             assert!(!text.contains("call_1"), "old tool correlation is retired");
             assert!(!text.contains("resp_1"));
@@ -989,11 +990,24 @@ pub(super) fn assert_outcome(
             let SemanticExtractedValue::Text(value) = result.fields()[0].value() else {
                 panic!();
             };
-            let source = result.sources(value.source_span()).unwrap().next().unwrap();
+            let sources = result
+                .sources(value.source_span())
+                .unwrap()
+                .collect::<Vec<_>>();
+            assert_eq!(sources.len(), 2);
+            let source = sources[0];
             assert!(source.observation < result.observation());
             assert!(source.captured_at.millis() < result.captured_at().millis());
             assert!(
                 matches!(&source.content, SemanticOwnedReadContent::Text(text) if text == "Arrival certificate")
+            );
+            assert!(
+                matches!(&sources[1].content, SemanticOwnedReadContent::Text(text) if text == "Departure certificate")
+            );
+            assert_ne!(sources[0].frame.context(), sources[1].frame.context());
+            assert_eq!(
+                sources[0].frame.context().identity(),
+                sources[1].frame.context().identity()
             );
         }
         assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
