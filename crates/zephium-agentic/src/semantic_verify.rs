@@ -13,10 +13,10 @@ use crate::semantic_settle::exact_document_successor;
 use crate::{
     AgentActiveEffect, ContextJoin, SemanticActionAttemptId, SemanticActionExecutionApplied,
     SemanticActionFailure, SemanticActionRevalidationError, SemanticActionSettlementTerminal,
-    SemanticCompleteness, SemanticDialogState, SemanticInvocationId, SemanticPreparedAction,
-    SemanticScrollAmount, SemanticScrollDirection, SemanticSettleInstant, SemanticSettleStatus,
-    SemanticSettleTracker, SemanticSnapshot, SemanticSnapshotGeneration, SemanticState,
-    SemanticVerification, MAX_SEMANTIC_ACTION_TEXT_BYTES,
+    SemanticDialogState, SemanticInvocationId, SemanticPreparedAction, SemanticScrollAmount,
+    SemanticScrollDirection, SemanticSettleInstant, SemanticSettleStatus, SemanticSettleTracker,
+    SemanticSnapshot, SemanticSnapshotGeneration, SemanticState, SemanticVerification,
+    MAX_SEMANTIC_ACTION_TEXT_BYTES,
 };
 
 /// Largest absolute independently sampled scroll coordinate.
@@ -674,7 +674,7 @@ pub(crate) fn verify_semantic_action(
                     after,
                 },
             ) => {
-                if snapshot.completeness() != SemanticCompleteness::Complete {
+                if !action.has_complete_snapshot_evidence(snapshot) {
                     return Err(SemanticVerificationError::IncompleteSnapshot);
                 }
                 let (observed_before, observed_after) = action
@@ -823,7 +823,7 @@ fn verification_target<'a>(
     action: &SemanticPreparedAction,
     snapshot: &'a SemanticSnapshot,
 ) -> Result<(usize, &'a crate::SemanticNode), SemanticVerificationError> {
-    if snapshot.completeness() != SemanticCompleteness::Complete {
+    if !action.has_complete_snapshot_evidence(snapshot) {
         return Err(SemanticVerificationError::IncompleteSnapshot);
     }
     action
@@ -1061,6 +1061,167 @@ mod tests {
             panic!("immediate settlement was pending");
         };
         *terminal
+    }
+
+    #[test]
+    fn field_clipped_siblings_do_not_block_an_independently_complete_fill_target() {
+        let (template, _) = observation_with_fill_role("combobox");
+        let frame = template.frames()[0].frame().clone();
+        let nodes = |complete: Option<bool>, value: &str| {
+            let mut target = json!({"k": 3, "p": 0, "r": "combobox", "n": "Private title",
+                "o": 10, "v": {"k": "text", "value": value}});
+            if let Some(complete) = complete {
+                target["fc"] = json!(complete);
+            }
+            json!([
+                {"k": 1, "r": "document", "o": 16, "fc": true},
+                target,
+                {"k": 8, "p": 0, "r": "button", "n": "x".repeat(512), "o": 9, "fc": false}
+            ])
+        };
+        for status in [
+            "field_limit",
+            "node_limit",
+            "text_limit",
+            "depth_limit",
+            "inspection_limit",
+            "wire_limit",
+            "scope_boundary",
+            "unsupported_frame",
+        ] {
+            for local in [None, Some(false), Some(true)] {
+                let before = snapshot_for_frame(frame.clone(), 1, 1, status, nodes(local, "old"));
+                let request = crate::SemanticObservationRequest::initial(
+                    SemanticObservationId::new(1).unwrap(),
+                    frame.context(),
+                    SemanticObservationBudget::INITIAL_FILTERED,
+                );
+                let observation = SemanticObservationAssembler::new(request, before)
+                    .unwrap()
+                    .finish()
+                    .unwrap();
+                let batch = bind(
+                    &observation,
+                    SemanticActionIntent::Fill {
+                        target: SemanticReferenceId::new(2).unwrap(),
+                        value: SemanticActionText::try_new("query".to_owned()).unwrap(),
+                    },
+                    SemanticWaitCondition::Immediate,
+                    SemanticVerification::TargetValueMatchesInput,
+                )
+                .unwrap();
+                let prepared = batch.actions()[0].prepare(&observation.frames()[0]);
+                let allowed = status == "field_limit" && local == Some(true);
+                assert_eq!(prepared.is_ok(), allowed, "preparation: {status}/{local:?}");
+                if !allowed {
+                    // A later complete checkpoint cannot repair an incomplete
+                    // model-delivered binding by silently laundering its ref.
+                    let current = snapshot_for_frame(
+                        frame.clone(),
+                        2,
+                        2,
+                        "field_limit",
+                        nodes(Some(true), "old"),
+                    );
+                    assert!(batch.actions()[0].prepare(&current).is_err());
+                    continue;
+                }
+                let action = prepared.unwrap();
+                for after_status in [
+                    "field_limit",
+                    "node_limit",
+                    "text_limit",
+                    "depth_limit",
+                    "inspection_limit",
+                    "wire_limit",
+                    "scope_boundary",
+                    "unsupported_frame",
+                ] {
+                    for after_local in [None, Some(false), Some(true)] {
+                        let after = snapshot_for_frame(
+                            frame.clone(),
+                            2,
+                            2,
+                            after_status,
+                            nodes(after_local, "query"),
+                        );
+                        let evidence = prepare_semantic_action_snapshot_evidence(
+                            &action,
+                            SemanticActionAttemptId::new(1).unwrap(),
+                            SemanticSettleInstant::from_millis(101),
+                            &after,
+                        )
+                        .unwrap();
+                        let verified =
+                            verify_semantic_action(&immediate(&action, 1), &action, evidence);
+                        assert_eq!(
+                            verified.is_ok(),
+                            after_status == "field_limit" && after_local == Some(true),
+                            "verification: {after_status}/{after_local:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn field_clipping_requires_complete_select_target_and_exact_option() {
+        let (observation, _) = observation();
+        let batch = bind(
+            &observation,
+            SemanticActionIntent::Select {
+                target: SemanticReferenceId::new(5).unwrap(),
+                option: SemanticReferenceId::new(6).unwrap(),
+            },
+            SemanticWaitCondition::Immediate,
+            SemanticVerification::TargetSelectionMatchesOption,
+        )
+        .unwrap();
+        for target_complete in [None, Some(false), Some(true)] {
+            for option_complete in [None, Some(false), Some(true)] {
+                let nodes = |selected: bool| {
+                    let mut target = json!({"k":5,"p":0,"r":"combobox","n":"Private priority","o":12,"v":{"k":"ordinal","value":u8::from(selected)}});
+                    let mut option = json!({"k":6,"p":1,"r":"option","n":"Private high","o":1,"s":if selected {2} else {0}});
+                    if let Some(complete) = target_complete {
+                        target["fc"] = json!(complete);
+                    }
+                    if let Some(complete) = option_complete {
+                        option["fc"] = json!(complete);
+                    }
+                    json!([{"k":1,"r":"document","o":16},target,option,{"k":8,"p":0,"r":"paragraph","t":"x".repeat(4096),"fc":false}])
+                };
+                let before = snapshot_for_frame(
+                    observation.frames()[0].frame().clone(),
+                    1,
+                    1,
+                    "field_limit",
+                    nodes(false),
+                );
+                let prepared = batch.actions()[0].prepare(&before);
+                let allowed = target_complete == Some(true) && option_complete == Some(true);
+                assert_eq!(prepared.is_ok(), allowed);
+                let action = batch.actions()[0]
+                    .prepare(&observation.frames()[0])
+                    .unwrap();
+                let after = snapshot_for_frame(
+                    observation.frames()[0].frame().clone(),
+                    2,
+                    2,
+                    "field_limit",
+                    nodes(true),
+                );
+                let evidence = SemanticEffectEvidence::snapshot(
+                    SemanticActionAttemptId::new(1).unwrap(),
+                    SemanticSettleInstant::from_millis(101),
+                    &after,
+                );
+                assert_eq!(
+                    verify_semantic_action(&immediate(&action, 1), &action, evidence).is_ok(),
+                    allowed
+                );
+            }
+        }
     }
 
     #[test]

@@ -12,9 +12,8 @@ use thiserror::Error;
 
 use crate::semantic::SemanticNodeKey;
 use crate::{
-    ContextJoin, FrameId, SemanticActionRevalidationError, SemanticCompleteness,
-    SemanticDialogState, SemanticFrameJoin, SemanticPreparedAction, SemanticSnapshot,
-    SemanticSnapshotGeneration, SemanticWaitCondition,
+    ContextJoin, FrameId, SemanticActionRevalidationError, SemanticDialogState, SemanticFrameJoin,
+    SemanticPreparedAction, SemanticSnapshot, SemanticSnapshotGeneration, SemanticWaitCondition,
 };
 
 /// Maximum exact facts or snapshots one action settlement may consume.
@@ -559,7 +558,7 @@ impl SemanticSettleTracker {
         if snapshot.frame() != &self.frame {
             return Err(SemanticSettleError::AuthorityMismatch);
         }
-        if snapshot.completeness() != SemanticCompleteness::Complete {
+        if !snapshot.has_complete_node_fields(self.target) {
             return Err(SemanticSettleError::IncompleteSnapshot);
         }
         if observed_at > self.deadline {
@@ -960,6 +959,71 @@ mod tests {
         );
         assert_eq!(tracker.next_wake(), None);
         assert_eq!(tracker.elapsed_millis(), Some(150));
+    }
+
+    #[test]
+    fn target_state_settlement_requires_local_completeness_on_field_clipping() {
+        let (observation, _) = observation();
+        let action = action(
+            &observation,
+            SemanticWaitCondition::TargetState {
+                state: SemanticState::Expanded,
+                present: true,
+            },
+            SemanticVerification::TargetState {
+                state: SemanticState::Expanded,
+                present: true,
+            },
+            250,
+        );
+        for status in [
+            "field_limit",
+            "node_limit",
+            "text_limit",
+            "depth_limit",
+            "inspection_limit",
+            "wire_limit",
+            "scope_boundary",
+            "unsupported_frame",
+        ] {
+            for local in [None, Some(false), Some(true)] {
+                let mut target =
+                    json!({"k":2,"p":0,"r":"button","n":"Sensitive button label","s":4,"o":9});
+                if let Some(complete) = local {
+                    target["fc"] = json!(complete);
+                }
+                let raw = serde_json::to_vec(&json!({"v":1,"i":12,"g":2,"c":status,"n":[{"k":1,"r":"document","o":16},target,{"k":3,"p":0,"r":"paragraph","t":"x".repeat(4096),"fc":false}]})).unwrap();
+                let snapshot = decode_semantic_snapshot(
+                    SemanticDecodeContext::new(
+                        SemanticInvocationId::new(12).unwrap(),
+                        observation.frames()[0].frame().clone(),
+                        SemanticSnapshotGeneration::new(2).unwrap(),
+                    ),
+                    &raw,
+                )
+                .unwrap();
+                let attempt = SemanticActionAttemptId::new(3).unwrap();
+                let mut tracker = SemanticSettleTracker::begin(
+                    attempt,
+                    &action,
+                    SemanticSettleInstant::from_millis(50),
+                )
+                .unwrap();
+                let result = tracker.observe_snapshot(
+                    attempt,
+                    SemanticSettleInstant::from_millis(75),
+                    &snapshot,
+                );
+                assert_eq!(
+                    result.is_ok(),
+                    status == "field_limit" && local == Some(true),
+                    "{status}/{local:?}"
+                );
+                if result.is_err() {
+                    assert_eq!(tracker.event_count(), 0);
+                }
+            }
+        }
     }
 
     #[test]

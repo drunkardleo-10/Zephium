@@ -362,6 +362,7 @@ pub fn decode_semantic_snapshot(
             operations,
             fill_support,
             editable_structure,
+            fields_complete: raw_node.fields_complete,
             sensitivity,
             trust: SemanticTrust::UntrustedPage,
             geometry,
@@ -369,6 +370,17 @@ pub fn decode_semantic_snapshot(
     }
 
     let page_dialog_sample = raw.page_dialog_sample;
+    if matches!(raw.completeness, RawCompleteness::Complete)
+        && nodes.iter().any(|node| node.fields_complete == Some(false))
+    {
+        return Err(SemanticDecodeError::NodeContract);
+    }
+    if matches!(raw.completeness, RawCompleteness::FieldLimit)
+        && nodes.iter().any(|node| node.fields_complete == Some(true))
+        && !nodes.iter().any(|node| node.fields_complete == Some(false))
+    {
+        return Err(SemanticDecodeError::NodeContract);
+    }
     if let Some(sample) = &page_dialog_sample {
         sample.validate()?;
     }
@@ -738,6 +750,8 @@ struct RawNode {
     fill_support: Option<u8>,
     #[serde(rename = "es", default)]
     editable_structure: Option<(u16, u8, bool)>,
+    #[serde(rename = "fc", default)]
+    fields_complete: Option<bool>,
     #[serde(rename = "q", default)]
     sensitivity: RawSensitivity,
     #[serde(rename = "b", default)]
@@ -933,6 +947,38 @@ mod tests {
             "n": nodes,
         }))
         .expect("encode")
+    }
+
+    #[test]
+    fn local_field_completeness_is_explicit_consistent_and_not_inferred() {
+        for (status, fields, succeeds) in [
+            ("complete", json!([true, true]), true),
+            ("complete", json!([true, false]), false),
+            ("field_limit", json!([true, false]), true),
+            ("field_limit", json!([true, true]), false),
+            ("field_limit", json!([true, null]), false),
+            ("field_limit", json!([null, null]), true),
+            ("field_limit", json!([false, false]), true),
+            ("field_limit", json!(["true", false]), false),
+        ] {
+            let mut nodes = json!([{"k":1,"r":"button","n":"short","o":1},
+                {"k":2,"r":"button","n":"x".repeat(512),"o":1}]);
+            for index in 0..2 {
+                if !fields[index].is_null() {
+                    nodes[index]["fc"] = fields[index].clone();
+                }
+            }
+            let raw = serde_json::to_vec(&json!({"v":1,"i":7,"g":9,"c":status,"n":nodes})).unwrap();
+            let decoded = decode_semantic_snapshot(decode_context(), &raw);
+            assert_eq!(decoded.is_ok(), succeeds, "{status}/{fields}");
+            if status == "field_limit" && succeeds {
+                let snapshot = decoded.unwrap();
+                assert_eq!(
+                    snapshot.has_complete_node_fields(snapshot.nodes()[0].key()),
+                    fields[0] == true
+                );
+            }
+        }
     }
 
     #[test]

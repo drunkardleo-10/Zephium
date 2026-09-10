@@ -580,9 +580,10 @@
     return apply(stringToLowerCase, value, []);
   }
 
-  function attribute(element, name, limit = 1024) {
+  function attribute(element, name, limit = 1024, state = null) {
     const value = apply(getAttribute, element, [name]);
     if (typeof value !== "string") return null;
+    if (state !== null && value.length > limit) mark(state, "field_limit", false);
     return value.length > limit ? apply(stringSlice, value, [0, limit]) : value;
   }
 
@@ -600,6 +601,7 @@
   }
 
   function mark(state, completeness, stop = true) {
+    if (completeness === "field_limit") state.fieldTruncations = (state.fieldTruncations || 0) + 1;
     if (state.completeness === "complete" || completeness === "text_limit" ||
         (state.completeness === "field_limit" && completeness !== "field_limit")) {
       state.completeness = completeness;
@@ -1055,7 +1057,7 @@
             chunks.push(clipped.value);
             bytes += clipped.bytes;
             if (clipped.truncated) mark(state, "field_limit", false);
-          }
+          } else mark(state, "field_limit", false);
         }
         if (normalized.truncated) mark(state, "field_limit", false);
         continue;
@@ -1063,17 +1065,20 @@
       if (type === 1 && shouldSkipSubtree(current)) continue;
       if (type === 1 || type === 9 || type === 11) pushChildren(stack, current, {}, state);
     }
+    if (stack.length !== 0 && bytes >= limit) mark(state, "field_limit", false);
     return chunks.join("");
   }
 
   function labelledText(element, descriptor, state) {
-    const labelledBy = attribute(element, "aria-labelledby", 1024);
+    const labelledBy = attribute(element, "aria-labelledby", 1024, state);
     if (labelledBy !== null) {
       const identifiers = apply(stringSplit, labelledBy, [/\s+/]);
+      if (identifiers.length > 8) mark(state, "field_limit", false);
       const labels = [];
       for (let index = 0; index < identifiers.length && index < 8 && !state.stopped; index += 1) {
         const identifier = identifiers[index];
-        if (identifier.length === 0 || identifier.length > 128) continue;
+        if (identifier.length === 0) continue;
+        if (identifier.length > 128) { mark(state, "field_limit", false); continue; }
         const target = apply(documentGetElementById, document, [identifier]);
         if (target !== null) {
           const text = flatText(target, state, MAX_NAME_BYTES);
@@ -1083,7 +1088,7 @@
       if (labels.length !== 0) return labels.join(" ");
     }
 
-    const ariaLabel = attribute(element, "aria-label", MAX_NAME_BYTES * 4);
+    const ariaLabel = attribute(element, "aria-label", MAX_NAME_BYTES * 4, state);
     if (ariaLabel !== null && ariaLabel !== "") return ariaLabel;
 
     if (descriptor.tag === "option" && optionLabelGetter !== null) {
@@ -1108,6 +1113,7 @@
         labels = null;
       }
       if (labels !== null && labels !== undefined) {
+        if (listLength(labels) > 4) mark(state, "field_limit", false);
         const length = mathMin(listLength(labels), 4);
         const values = [];
         for (let index = 0; index < length && !state.stopped; index += 1) {
@@ -1122,19 +1128,19 @@
     }
 
     if (descriptor.role === "image" || descriptor.inputType === "image") {
-      const alt = attribute(element, "alt", MAX_NAME_BYTES * 4);
+      const alt = attribute(element, "alt", MAX_NAME_BYTES * 4, state);
       if (alt !== null && alt !== "") return alt;
     }
     if (
       descriptor.tag === "input" &&
       ["button", "submit", "reset"].includes(descriptor.inputType)
     ) {
-      const value = attribute(element, "value", MAX_NAME_BYTES * 4);
+      const value = attribute(element, "value", MAX_NAME_BYTES * 4, state);
       if (value !== null && value !== "") return value;
     }
-    const placeholder = attribute(element, "placeholder", MAX_NAME_BYTES * 4);
+    const placeholder = attribute(element, "placeholder", MAX_NAME_BYTES * 4, state);
     if (placeholder !== null && placeholder !== "") return placeholder;
-    const title = attribute(element, "title", MAX_NAME_BYTES * 4);
+    const title = attribute(element, "title", MAX_NAME_BYTES * 4, state);
     return title !== null && title !== "" ? title : null;
   }
 
@@ -1327,9 +1333,7 @@
     }
     state.textBytes += bytes;
     if (normalized.truncated || (raw.length !== 0 && remaining === 0)) {
-      // A saturated name/prose field must not hide unrelated later evidence.
-      // Global exhaustion still stops the walk; descriptor revalidation rejects
-      // either incomplete status before admitting any action.
+      // Field clipping preserves siblings; global exhaustion stops traversal.
       const aggregate = remaining <= fieldLimit;
       mark(state, aggregate ? "text_limit" : "field_limit", aggregate);
     }
@@ -1338,9 +1342,7 @@
 
   function consumeValueField(raw, state, fieldLimit = MAX_VALUE_BYTES) {
     const remaining = mathMax(0, state.request.b.t - state.textBytes);
-    // Bound hostile-page work before trim/lower/split can allocate. Oversized
-    // live values are conservatively redacted; only a complete <=4-KiB value
-    // reaches secret classification and the exact verification projection.
+    // Bound allocation; only complete <=4-KiB values reach classification.
     const valueClass = classifyLiveValue(raw);
     if (valueClass !== 2 || (raw !== "" && looksLikeSecret(raw))) {
       const redactedBytes = 10;
@@ -1394,16 +1396,17 @@
     }
     if (current === "[redacted]") return;
     const fieldLimit = record.sink === "name" ? MAX_NAME_BYTES : record.sink === "value" ? MAX_VALUE_BYTES : MAX_NODE_TEXT_BYTES;
-    // Editable values are exact DOM text, including whitespace and adjacency
-    // across inline text nodes. Prose/name normalization must never rewrite
-    // an action's before-value or its verification postcondition.
+    // Editable values preserve exact whitespace and inline adjacency.
     const separator = current === "" || record.sink === "value" ? "" : " ";
     const remainingField = mathMax(0, fieldLimit - record.sinkBytes - (separator === "" ? 0 : 1));
     const separatorBytes = separator === "" ? 0 : 1;
     const field = record.sink === "value"
       ? consumeValueField(raw, state, remainingField)
       : consumeField(raw, remainingField, state, separatorBytes);
-    if (field.truncated) record.saturated = true;
+    if (field.truncated) {
+      record.saturated = true;
+      record.wire.fc = false;
+    }
     if (field.value === "") return;
     const combined = `${current}${separator}${field.value}`;
     if (separator !== "") {
@@ -1434,13 +1437,8 @@
     if (item.sink !== null) appendSink(records[item.sink], raw, state);
     if (item.nameAncestors === false) return;
     let proseSeen = item.sink !== null && records[item.sink].sink === "text";
-    // A link/button/heading may contain semantic children (for example a
-    // product heading and price paragraph). Their own text must not erase the
-    // enclosing control's content-derived name. Walk only the already bounded
-    // retained ancestry: no second DOM traversal, selector, or unbounded text
-    // getter. The nearest prose sink also retains inline link labels in DOM
-    // order, without flattening nested paragraphs/list items into outer prose.
-    // Every copy remains charged to the same field/global text budget.
+    // Preserve control names and nearest prose across inline semantic children.
+    // Walk bounded retained ancestry, charging copies to existing text limits.
     for (let index = item.parent, depth = 0;
       index !== null && depth <= MAX_TREE_DEPTH && !state.stopped;
       index = records[index].wire.p === undefined ? null : records[index].wire.p, depth += 1) {
@@ -1493,7 +1491,8 @@
   }
 
   function buildRecord(element, descriptor, parent, rect, disabled, focused, state) {
-    const wire = { k: keyFor(element, state.request.g) };
+    const beforeFieldTruncations = state.fieldTruncations || 0;
+    const wire = { k: keyFor(element, state.request.g), fc: true };
     if (state.recordEditingWitness === true) {
       keyNodes.get(wire.k).editingContext = descriptor.contentEditable === true && descriptor.plainTextEditable === true
         ? descriptor.editingContext || null : undefined;
@@ -1513,8 +1512,7 @@
       (has(element, "readonly") || lower(attribute(element, "aria-readonly", 16) || "") === "true");
     const states = isDocument ? 0 : stateBits(element, descriptor, disabled, focused);
     const operations = operationBits(descriptor, disabled, readonly);
-    // Closed host diagnostics only, omitted from provider projections. No
-    // markup, tag strings, field values or page-authored reason reaches Rust.
+    // Closed host diagnostics, omitted from model context.
     if (textFillRole(descriptor.role)) {
       wire.fs = disabled ? 11 : readonly ? 10 :
         fillControlKind(descriptor, "") !== 0 ? 1 :
@@ -1585,6 +1583,7 @@
         }
       }
     }
+    if ((state.fieldTruncations || 0) !== beforeFieldTruncations) wire.fc = false;
     return record;
   }
 
@@ -2789,14 +2788,12 @@
         if (records === null) return fault("anchor_missing");
       } else if (request.s.k === "frame") {
         records = traverse(anchor, state, true);
-        if (state.completeness === "complete") state.completeness = "scope_boundary";
+        mark(state, "scope_boundary", false);
       } else {
         records = traverse(anchor, state, true);
       }
     }
-    if (state.regionBoundary && state.completeness === "complete") {
-      state.completeness = "scope_boundary";
-    }
+    if (state.regionBoundary) mark(state, "scope_boundary", false);
     return encodeSnapshot(request, records, state.completeness);
   }
 

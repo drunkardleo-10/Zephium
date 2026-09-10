@@ -1326,6 +1326,28 @@ async function finish() {
     "carriage-return fill text crossed the runtime boundary"
   );
 
+  const boundedLabelInput = (character, length, suffix) => {
+    const label = new Element("label");
+    label.append(new CharacterData(character.repeat(length)));
+    if (suffix !== null) label.append(new CharacterData(suffix));
+    const input = main.append(new HTMLInputElement({ type: "text" }, "bounded label fixture"));
+    input._labels = new NodeList([label]);
+  };
+  boundedLabelInput("l", 512, "IMPORTANT TRAILING WORDS");
+  boundedLabelInput("m", 511, "z");
+  boundedLabelInput("n", 512, null);
+  const multiLabelInput = main.append(new HTMLInputElement({ type: "text" }, "labels fixture"));
+  multiLabelInput._labels = new NodeList(Array.from({length:5}, (_, index) => {
+    const label = new Element("label");
+    label.append(new CharacterData(`label${index}`));
+    return label;
+  }));
+  const labelIds = Array.from({length:9}, (_, index) => `bounded-label-${index}`);
+  for (const [index, id] of labelIds.entries()) main.append(new Element("span", {id}))
+    .append(new CharacterData(`aria${index}`));
+  main.append(new HTMLInputElement({type:"text", "aria-labelledby":labelIds.join(" ")}, "ARIA labels fixture"));
+  main.append(new HTMLInputElement({type:"text", "aria-label":" ".repeat(2048) + "uninspected suffix"}, "attribute fixture"));
+  main.append(new HTMLInputElement({type:"text", "aria-labelledby":labelIds[0] + " " + "u".repeat(129)}, "long ID fixture"));
   main.append(ariaOverflowInput);
   setOwner(main, document);
   const metadataOverflowWire = invoke(102, 102, { k: "initial" });
@@ -1338,6 +1360,22 @@ async function finish() {
       !metadataOverflowWire.includes(metadataOverflowValues[1]),
     "513-byte accessible-name overflow did not fail closed"
   );
+  assert(metadataOverflowSnapshot.n.some(node => node.n === "x".repeat(506) + "api ke" && node.fc === false),
+    "label truncation during node construction claimed local completeness");
+  assert(metadataOverflowSnapshot.n.some(node => node.n === "l".repeat(512) && node.fc === false),
+    "exact-ceiling label prefix hid pending descendants behind local completeness");
+  assert(metadataOverflowSnapshot.n.some(node => node.n === "m".repeat(511) && node.fc === false),
+    "label separator hid an omitted final text fragment behind local completeness");
+  assert(metadataOverflowSnapshot.n.some(node => node.n === "n".repeat(512) && node.fc === true),
+    "an exactly complete label was confused with a truncated prefix");
+  assert(metadataOverflowSnapshot.n.some(node => node.n === "label0 label1 label2 label3" && node.fc === false),
+    "native label-count ceiling silently discarded later labels");
+  assert(metadataOverflowSnapshot.n.some(node => node.n === "aria0 aria1 aria2 aria3 aria4 aria5 aria6 aria7" && node.fc === false),
+    "ARIA label-count ceiling silently discarded later references");
+  assert(metadataOverflowSnapshot.n.some(node => node.r === "textbox" && node.n === undefined && node.fc === false),
+    "attribute prefix ceiling hid uninspected name content behind local completeness");
+  assert(metadataOverflowSnapshot.n.some(node => node.n === "aria0" && node.fc === false),
+    "oversized ARIA identifier was silently discarded");
 
   stopNativeTransport("S1");
   await new Promise((resolve) => setImmediate(resolve));
@@ -1492,6 +1530,7 @@ async function finish() {
   page.append(new Element("p")).append(new CharacterData("Useful parent-region evidence beyond the index."));
   const child = page.append(new Element("article", { "aria-label": "Independent article" }));
   child.append(new Element("p")).append(new CharacterData("Nested article evidence."));
+  page.append(new Element("button", { "aria-label": "q".repeat(513) }));
   document._root = page; setOwner(page, document);
   const beforeRegion = JSON.parse(invoke(115, 115, { k: "initial" }));
   const parentKey = beforeRegion.n.find(node => node.n === "Workspace").k;
@@ -1499,6 +1538,8 @@ async function finish() {
   const region = JSON.parse(regionWire);
   assert(regionWire.includes("Useful parent-region evidence") && !regionWire.includes("Index item") && !regionWire.includes("Nested article evidence"), "nested regions starved or silently widened parent-region capture");
   assert(region.c === "scope_boundary" && region.n.some(node => node.n === "Reference index") && region.n.some(node => node.n === "Independent article"), "region omission lost truthful boundaries or expandable anchors");
+  assert(region.n.some(node => node.n === "q".repeat(512) && node.fc === false),
+    "region fixture did not exercise field clipping alongside structural omission");
   const nestedKey = region.n.find(node => node.n === "Independent article").k;
   assert(invoke(117, 117, { k: "region", a: nestedKey }).includes("Nested article evidence"), "nested region anchor cannot be independently inspected");
   const restored = JSON.parse(invoke(118, 118, { k: "initial" }));
@@ -1529,6 +1570,13 @@ async function finish() {
   document._root = product; setOwner(product, document);
   const productInitial = JSON.parse(invoke(121, 121, { k: "initial" }));
   assert(productInitial.c === "field_limit", "local field saturation was reported as aggregate exhaustion");
+  assert(productInitial.n.find(node => node.r === "button").fc === false,
+    "clipped content-derived button name claimed local completeness");
+  assert(productInitial.n.find(node => node.t && node.t.startsWith("Building detail")).fc === false,
+    "clipped prose claimed local completeness");
+  assert(productInitial.n.find(node => node.t === "Later evidence remains visible.").fc === true &&
+    productInitial.n.find(node => node.n === "Display model").fc === true,
+    "unrelated field clipping contaminated exact sibling fields");
   assert(productInitial.n.some(node => node.t === "Later evidence remains visible.") &&
     productInitial.n.some(node => node.t === "Width 28 cm; depth 18 cm; height 32 cm."),
   "a long earlier field starved independent later evidence");
@@ -1986,6 +2034,14 @@ async function finish() {
       assert(!JSON.parse(invoke(next+1,next+1,{k:"initial"})).u, "dialog witness replayed");
     }
   }
+
+  const clippedFrame = new Element("iframe", {"aria-label":"f".repeat(513)});
+  document._root = clippedFrame; setOwner(clippedFrame, document);
+  const frameInventory = JSON.parse(invoke(450,450,{k:"initial"}));
+  const clippedFrameKey = frameInventory.n.find(node => node.r === "frame_boundary").k;
+  const frameScope = JSON.parse(invoke(451,451,{k:"frame",a:clippedFrameKey}));
+  assert(frameScope.c === "scope_boundary" && frameScope.n.some(node => node.fc === false),
+    "frame scope omission was masked by local accessible-name clipping");
 
   process.stdout.write(`${JSON.stringify({
     independent_page_dialog_samples: true,

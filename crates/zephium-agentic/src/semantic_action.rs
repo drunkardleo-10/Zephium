@@ -15,12 +15,11 @@ use thiserror::Error;
 use crate::semantic::SemanticNodeKey;
 use crate::semantic_wire::looks_like_secret_value;
 use crate::{
-    ContextJoin, FrameId, SemanticCompleteness, SemanticFrameJoin, SemanticInvocationId,
-    SemanticObservation, SemanticObservationGeneration, SemanticObservationId,
-    SemanticOperationClass, SemanticOperations, SemanticRect, SemanticReferenceError,
-    SemanticReferenceId, SemanticRole, SemanticSensitivity, SemanticSnapshot,
-    SemanticSnapshotGeneration, SemanticState, SemanticStates, SemanticTrust, SemanticValueSummary,
-    MAX_SEMANTIC_FRAMES,
+    ContextJoin, FrameId, SemanticFrameJoin, SemanticInvocationId, SemanticObservation,
+    SemanticObservationGeneration, SemanticObservationId, SemanticOperationClass,
+    SemanticOperations, SemanticRect, SemanticReferenceError, SemanticReferenceId, SemanticRole,
+    SemanticSensitivity, SemanticSnapshot, SemanticSnapshotGeneration, SemanticState,
+    SemanticStates, SemanticTrust, SemanticValueSummary, MAX_SEMANTIC_FRAMES,
 };
 
 /// Maximum sequential actions proposed in one model turn.
@@ -622,6 +621,7 @@ struct BoundNode {
     trust: SemanticTrust,
     geometry: Option<SemanticRect>,
     structural_digest: [u8; 32],
+    fields_complete: bool,
 }
 
 impl fmt::Debug for BoundNode {
@@ -863,7 +863,11 @@ impl SemanticBoundAction {
         &self,
         current: &SemanticSnapshot,
     ) -> Result<SemanticPreparedAction, SemanticActionPreparationError> {
-        if current.completeness() != SemanticCompleteness::Complete {
+        if !self.intent.target().fields_complete
+            || !current.has_complete_node_fields(self.target_key())
+            || matches!(&self.intent, BoundActionIntent::Select { option, .. }
+                if !option.fields_complete || !current.has_complete_node_fields(option.node_key))
+        {
             return Err(SemanticActionPreparationError::IncompleteSnapshot);
         }
         self.revalidate(current)
@@ -1088,6 +1092,13 @@ impl SemanticPreparedAction {
 
     pub(crate) const fn target_key(&self) -> SemanticNodeKey {
         self.action.target_key()
+    }
+
+    pub(crate) fn has_complete_snapshot_evidence(&self, current: &SemanticSnapshot) -> bool {
+        current.has_complete_node_fields(self.target_key())
+            && self
+                .option_key()
+                .is_none_or(|key| current.has_complete_node_fields(key))
     }
 
     pub(crate) const fn option_key(&self) -> Option<SemanticNodeKey> {
@@ -1704,6 +1715,7 @@ fn bind_node(snapshot: &SemanticSnapshot, node: &crate::SemanticNode) -> BoundNo
         trust: node.trust(),
         geometry: node.geometry(),
         structural_digest: structural_digest(node, parent_key.map(|key| key.get())),
+        fields_complete: snapshot.has_complete_node_fields(node.key()),
     }
 }
 

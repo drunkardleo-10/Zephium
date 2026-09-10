@@ -1299,7 +1299,7 @@ mod tests {
                 {"k": 9101, "r": "document", "o": 16},
                 {"k": 9102, "p": 0, "r": "textbox", "n": "Long value",
                  "v": {"k": "text", "value": value}, "o": 11, "fs": support,
-                 "es": support.map(|_| (1, 1, false))}
+                 "es": support.map(|_| (1, 1, false)), "fc": support.map(|_| true)}
             ]
         }))
         .expect("wire");
@@ -1410,7 +1410,7 @@ mod tests {
     }
 
     #[test]
-    fn fill_support_diagnostics_never_enter_provider_projection() {
+    fn host_fill_and_completeness_metadata_never_enter_provider_projection() {
         let encoding_budget = budget(8192, 1000, SemanticTokenCountRequirement::Exact);
         let plain = encode_semantic_observation(
             &observation_with_fill_support("fixture", None),

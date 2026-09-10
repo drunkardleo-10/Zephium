@@ -974,6 +974,7 @@ pub struct SemanticNode {
     operations: SemanticOperations,
     fill_support: Option<SemanticFillSupport>,
     editable_structure: Option<SemanticEditableStructure>,
+    fields_complete: Option<bool>,
     sensitivity: SemanticSensitivity,
     trust: SemanticTrust,
     geometry: Option<SemanticRect>,
@@ -1042,6 +1043,12 @@ impl SemanticNode {
         self.editable_structure
     }
 
+    /// Whether the fixed runtime completely retained this node's local fields.
+    /// Absent on older wire records; never inferred from bounded field lengths.
+    pub const fn fields_complete(&self) -> Option<bool> {
+        self.fields_complete
+    }
+
     /// Deterministic sensitivity label.
     pub const fn sensitivity(&self) -> SemanticSensitivity {
         self.sensitivity
@@ -1104,6 +1111,7 @@ pub(crate) struct SemanticNodeInput {
     pub(crate) operations: SemanticOperations,
     pub(crate) fill_support: Option<SemanticFillSupport>,
     pub(crate) editable_structure: Option<SemanticEditableStructure>,
+    pub(crate) fields_complete: Option<bool>,
     pub(crate) sensitivity: SemanticSensitivity,
     pub(crate) trust: SemanticTrust,
     pub(crate) geometry: Option<SemanticRect>,
@@ -1123,6 +1131,20 @@ pub struct SemanticSnapshot {
 }
 
 impl SemanticSnapshot {
+    /// Local positive evidence can survive unrelated field clipping. Any
+    /// structural/global truncation still refuses action evidence, and legacy
+    /// records without an explicit local witness remain closed on FieldLimit.
+    pub(crate) fn has_complete_node_fields(&self, key: SemanticNodeKey) -> bool {
+        match self.completeness {
+            SemanticCompleteness::Complete => true,
+            SemanticCompleteness::Truncated(SemanticTruncation::FieldLimit) => self
+                .nodes
+                .iter()
+                .find(|node| node.key == key)
+                .is_some_and(|node| node.fields_complete == Some(true)),
+            SemanticCompleteness::Truncated(_) => false,
+        }
+    }
     /// Exact native invocation correlation.
     pub const fn invocation(&self) -> SemanticInvocationId {
         self.invocation
@@ -1285,6 +1307,7 @@ impl SemanticSnapshot {
                 operations: input.operations,
                 fill_support: input.fill_support,
                 editable_structure: input.editable_structure,
+                fields_complete: input.fields_complete,
                 sensitivity: input.sensitivity,
                 trust: input.trust,
                 geometry: input.geometry,
@@ -1433,6 +1456,7 @@ mod tests {
             operations,
             fill_support: None,
             editable_structure: None,
+            fields_complete: None,
             sensitivity: SemanticSensitivity::Public,
             trust: SemanticTrust::UntrustedPage,
             geometry: Some(SemanticRect::try_new(1, 2, 30, 40).expect("rect")),
