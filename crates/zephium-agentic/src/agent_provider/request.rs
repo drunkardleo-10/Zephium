@@ -111,7 +111,11 @@ const AGENT_BROWSER_INSTRUCTIONS_V1: &str = concat!(
     "request selectors, JavaScript, DOM, HTML, CDP, native handles, credentials, cookies, tokens, ",
     "or authorization values. Tool calls are proposals: Zephium independently checks scope, ",
     "identity, effects, approval, freshness, and verification. Do not claim an effect succeeded ",
-    "until a later semantic observation verifies it. Ask for human control when a safe supplied ",
+    "until a later semantic observation verifies it. Choose verification for the intended ",
+    "outcome, not an incidental click effect: opening a search or command dialog requires ",
+    "page_dialog_opened, then fresh inspection of its contents. Never substitute focused=true ",
+    "for opening, activating, submitting or changing something. Focus verification is valid ",
+    "only when focusing the target is itself the intended outcome. Ask for human control when a safe supplied ",
     "operation cannot complete the objective."
 );
 
@@ -5013,7 +5017,7 @@ static NAVIGATION_ACTIONS_EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolD
         }
         tools.push(BrowserToolDefinition {
             kind: AgentBrowserToolKind::Act,
-            description: "Propose one current-ref Click, Fill or Select with an independently verified postcondition. Only Read/LocalWrite effects are available, subject to trusted host assessment. Use immediate or mutation_quiet settlement with at least 2000 milliseconds. To open a page dialog use page_dialog_opened: the runtime independently samples visible DOM dialogs before and after the click. This proves only a dialog appeared; inspect fresh state to identify its contents. Native dialogs, navigation, keyboard and scroll effects are unavailable through act. A target_state verification proves only that target state; focus does not prove a dialog opened. Navigate through the separate navigate tool when authorized.",
+            description: "Propose one current-ref Click, Fill or Select with verification of its intended outcome. Only Read/LocalWrite effects are available, subject to trusted host assessment. Use immediate or mutation_quiet settlement with at least 2000 milliseconds. Opening a page dialog requires page_dialog_opened, followed by fresh inspection of its contents. Native dialogs, navigation, keyboard and scroll effects are unavailable through act. Navigate through the separate navigate tool when authorized.",
             parameters: action,
         });
         tools.push(BrowserToolDefinition {
@@ -5609,22 +5613,38 @@ fn standalone_wait_schema() -> Value {
 
 fn verification_schema(action: SemanticActionKind, snapshot_only: bool) -> Value {
     let target_state = || {
-        tagged_object(
+        let mut states = state_schema();
+        if snapshot_only && action == SemanticActionKind::Click {
+            // The retained surface has no keyboard sequence that needs focus
+            // preparation: Fill/Select address refs directly. Incidental focus
+            // must not become a substitute for the intended click outcome.
+            // The full surface retains explicit focus-only verification.
+            states["enum"]
+                .as_array_mut()
+                .expect("fixed state enum")
+                .retain(|state| state != "focused");
+        }
+        let mut schema = tagged_object(
             "target_state",
-            vec![
-                ("state", state_schema()),
-                ("present", json!({"type":"boolean"})),
-            ],
-        )
+            vec![("state", states), ("present", json!({"type":"boolean"}))],
+        );
+        if action == SemanticActionKind::Click {
+            schema["description"] = json!(if snapshot_only {
+                "Verify the clicked target's intended state, such as checked or expanded. To open a page dialog use page_dialog_opened instead. Incidental focus is not an available click outcome."
+            } else {
+                "Verify the clicked target's intended state (for example checked or expanded). focused is allowed only for a focus-only intent; it cannot verify opening a dialog, activation, submission or any other click outcome."
+            });
+        }
+        schema
+    };
+    let page_dialog_opened = || {
+        let mut schema = tagged_object("page_dialog_opened", Vec::new());
+        schema["description"] = json!("Use when the click is intended to open a page dialog, such as search or a command palette. Independently verifies a newly visible DOM dialog; inspect fresh state next to identify its contents.");
+        schema
     };
     if snapshot_only {
         match action {
-            SemanticActionKind::Click => {
-                return any_of(vec![
-                    target_state(),
-                    tagged_object("page_dialog_opened", Vec::new()),
-                ])
-            }
+            SemanticActionKind::Click => return any_of(vec![target_state(), page_dialog_opened()]),
             SemanticActionKind::Press => {
                 return any_of(vec![
                     target_state(),
@@ -5638,7 +5658,7 @@ fn verification_schema(action: SemanticActionKind, snapshot_only: bool) -> Value
     match action {
         SemanticActionKind::Click => any_of(vec![
             target_state(),
-            tagged_object("page_dialog_opened", Vec::new()),
+            page_dialog_opened(),
             tagged_object("navigation_committed", Vec::new()),
             tagged_object("dialog", vec![("state", dialog_schema())]),
         ]),
@@ -6019,6 +6039,14 @@ mod tests {
             }
             .unwrap();
             let retained_wire: Value = serde_json::from_slice(&retained_body).unwrap();
+            let instruction_key = match provider {
+                AgentProviderKind::OpenAiResponses => "instructions",
+                AgentProviderKind::AnthropicMessages => "system",
+            };
+            assert!(retained_wire[instruction_key]
+                .as_str()
+                .unwrap()
+                .contains("Never substitute focused=true"));
             let retained_tools = retained_wire["tools"].as_array().unwrap();
             assert_eq!(
                 retained_tools
@@ -6069,15 +6097,37 @@ mod tests {
                 );
                 let expected_verification = match properties["kind"]["enum"][0].as_str().unwrap() {
                     "click" => {
+                        let verifications = properties["verification"]["anyOf"].as_array().unwrap();
                         assert_eq!(
-                            properties["verification"]["anyOf"]
-                                .as_array()
-                                .unwrap()
+                            verifications
                                 .iter()
                                 .map(|v| v["properties"]["kind"]["enum"][0].as_str().unwrap())
                                 .collect::<BTreeSet<_>>(),
                             BTreeSet::from(["target_state", "page_dialog_opened"])
                         );
+                        let target_state = verifications
+                            .iter()
+                            .find(|v| v["properties"]["kind"]["enum"][0] == "target_state")
+                            .unwrap();
+                        assert_eq!(
+                            target_state["properties"]["state"]["enum"],
+                            json!([
+                                "checked", "selected", "expanded", "disabled", "required",
+                                "invalid"
+                            ])
+                        );
+                        assert!(target_state["description"]
+                            .as_str()
+                            .unwrap()
+                            .contains("page_dialog_opened"));
+                        let dialog = verifications
+                            .iter()
+                            .find(|v| v["properties"]["kind"]["enum"][0] == "page_dialog_opened")
+                            .unwrap();
+                        assert!(dialog["description"]
+                            .as_str()
+                            .unwrap()
+                            .contains("inspect fresh state"));
                         continue;
                     }
                     "fill" => "target_value_matches_input",
@@ -6379,6 +6429,34 @@ mod tests {
                 assert_eq!(wire["store"], false);
             }
         }
+    }
+
+    #[test]
+    fn focus_verification_remains_available_only_on_full_click_surface() {
+        for snapshot_only in [false, true] {
+            let schema = verification_schema(SemanticActionKind::Click, snapshot_only);
+            for projected in [schema.clone(), project_anthropic_schema(&schema)] {
+                let target = projected["anyOf"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|v| v["properties"]["kind"]["enum"][0] == "target_state")
+                    .unwrap();
+                assert_eq!(
+                    target["properties"]["state"]["enum"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!("focused")),
+                    !snapshot_only
+                );
+            }
+        }
+        // Focus remains observable and usable as a wait condition. Restricting
+        // retained click outcomes does not remove focus from page semantics.
+        assert!(state_schema()["enum"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("focused")));
     }
 
     #[test]
@@ -6929,7 +7007,7 @@ mod tests {
                 (AgentBrowserToolKind::Reload, 201),
                 (AgentBrowserToolKind::Snapshot, 1_513),
                 (AgentBrowserToolKind::Locate, 2_357),
-                (AgentBrowserToolKind::Act, 9_835),
+                (AgentBrowserToolKind::Act, 10_273),
                 (AgentBrowserToolKind::Wait, 2_152),
                 (AgentBrowserToolKind::Read, 1_510),
                 (AgentBrowserToolKind::Extract, 1_602),
@@ -6938,7 +7016,7 @@ mod tests {
                 (AgentBrowserToolKind::ResumeAfterHuman, 204),
             ]
         );
-        assert_eq!(sizes.iter().map(|(_, bytes)| bytes).sum::<usize>(), 20_602);
+        assert_eq!(sizes.iter().map(|(_, bytes)| bytes).sum::<usize>(), 21_040);
     }
 
     #[test]
