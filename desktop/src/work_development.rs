@@ -36,6 +36,7 @@ use zephium_work_composition::{
 const CONFIG_BYTES: u64 = 32 * 1024;
 const OUTPUT_BYTES: usize = 64 * 1024;
 const CONFIG_ENV: &str = "ZEPHIUM_WORK_REQUEST";
+const FOREGROUND_GRACE: Duration = Duration::from_secs(10);
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -298,6 +299,13 @@ impl Run {
                     Ok(result) => {
                         self.invocation = Some(result?);
                         self.preparation = None;
+                        self.next_profile_poll = Instant::now() + FOREGROUND_GRACE;
+                        emit(json!({
+                            "work_development":"prepared",
+                            "next":"focus_zephium",
+                            "grace_millis":FOREGROUND_GRACE.as_millis()
+                        }));
+                        return Ok(());
                     }
                     Err(mpsc::TryRecvError::Empty) => return Ok(()),
                     Err(mpsc::TryRecvError::Disconnected) => {

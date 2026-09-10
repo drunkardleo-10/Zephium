@@ -4831,7 +4831,7 @@ static PROGRESSIVE_OBSERVATION_TOOL: LazyLock<BrowserToolDefinition> = LazyLock:
         });
     BrowserToolDefinition {
         kind: AgentBrowserToolKind::Snapshot,
-        description: "Inspect rendered page content without clicking, scrolling or navigating. text_search finds visible passages omitted by compact observations below a current document/landmark/group/dialog ref; query matches any exact word or number, case-insensitively, without stemming or synonyms. Symbol-only queries match the trimmed literal substring: $ finds dollar prices; no regex. Use page wording or likely units, not abstract field names: availability does not match available. Query limit is 256 UTF-8 bytes; output is up to 16 ranked contiguous passages and 8 KiB under a bounded scan. It cannot reveal hidden/unmounted content. initial restores the viewport plus heading anchors, not a content cursor. region reads own content and leaves nested regions as anchors; subtree recursively reads descendants (heading subtrees exclude following prose). surrounding_text reads around an actual heading/content ref. Prefer a relevant region; repeating a truncated scope does not advance it. Each capture replaces action refs. Terminal extraction can receive bounded retained evidence with original capture provenance. Use current refs only; missing/truncated content is not absence. Frames are unsupported.",
+        description: "Inspect rendered page content without clicking, scrolling or navigating. text_search finds visible passages omitted by compact observations below a current document/landmark/group/dialog ref; query matches any exact word or number, case-insensitively, without stemming or synonyms. Symbol-only queries match the trimmed literal substring: $ finds dollar prices; no regex. Use page wording or likely units, not abstract field names: availability does not match available. Query limit is 256 UTF-8 bytes; output is up to 16 ranked contiguous passages and 8 KiB under a bounded scan. It cannot reveal hidden/unmounted content. initial restores the viewport plus heading anchors, not a content cursor. region reads own content and leaves nested regions as anchors; subtree recursively reads descendants (heading subtrees exclude following prose). surrounding_text reads 1-4096 bytes on each side of an actual heading/content ref. Prefer a relevant region; repeating a truncated scope does not advance it. Each capture replaces action refs. Terminal extraction can receive bounded retained evidence with original capture provenance. Use current refs only; missing/truncated content is not absence. Frames are unsupported.",
         parameters: strict_object(vec![("scope", scopes)]),
     }
 });
@@ -5343,11 +5343,11 @@ fn scope_schema() -> Value {
                 ("target", reference_schema()),
                 (
                     "before_bytes",
-                    json!({"type":"integer","minimum":0,"maximum":MAX_SEMANTIC_SURROUNDING_TEXT_BYTES}),
+                    json!({"type":"integer","minimum":1,"maximum":MAX_SEMANTIC_SURROUNDING_TEXT_BYTES / 2}),
                 ),
                 (
                     "after_bytes",
-                    json!({"type":"integer","minimum":0,"maximum":MAX_SEMANTIC_SURROUNDING_TEXT_BYTES}),
+                    json!({"type":"integer","minimum":1,"maximum":MAX_SEMANTIC_SURROUNDING_TEXT_BYTES / 2}),
                 ),
             ],
         ),
@@ -5903,6 +5903,21 @@ mod tests {
                     && schema.contains("region")
                     && schema.contains("subtree")
             );
+            if provider == AgentProviderKind::OpenAiResponses {
+                let surrounding = parameters["properties"]["scope"]["anyOf"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|scope| scope["properties"]["kind"]["enum"][0] == "surrounding_text")
+                    .unwrap();
+                for side in ["before_bytes", "after_bytes"] {
+                    assert_eq!(surrounding["properties"][side]["minimum"], 1);
+                    assert_eq!(
+                        surrounding["properties"][side]["maximum"],
+                        MAX_SEMANTIC_SURROUNDING_TEXT_BYTES / 2
+                    );
+                }
+            }
             assert!(!schema.contains("\"frame\"") && !schema.contains("\"table\""));
             assert!(snapshots[0]["description"]
                 .as_str()

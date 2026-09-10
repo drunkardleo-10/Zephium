@@ -123,7 +123,12 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
         }
         if let Some(sample) = self.account.get() {
             if sample.context() == context && self.account_source.is_none() {
-                return Ok(sample);
+                if now < sample.observed_at() {
+                    return Err(AgentWorkFailure::Contract);
+                }
+                if now == sample.observed_at() {
+                    return Ok(sample);
+                }
             }
             let prior = sample.context();
             if prior != context
@@ -145,8 +150,10 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
             self.account.set(Some(sample));
             return Ok(sample);
         }
-        // The trusted caller admitted an isolated anonymous public session.
-        // Cache each original document sample; repeated calls cannot renew it.
+        // Anonymous scope has no external service identity to re-sample. The
+        // trusted monotonic Work clock may therefore mint a fresh same-context
+        // attestation at each idle boundary; session policy still enforces
+        // identity, ordering, replay, age and the per-run attestation cap.
         let sample = AgentContextAccountBinding::new(
             AgentAccountAttestationId::generate(),
             context,
@@ -203,6 +210,45 @@ mod tests {
             .begin_context(identity.id(), ContextOperationId::new(1).unwrap())
             .unwrap()
             .context()
+    }
+
+    #[test]
+    fn anonymous_account_attestation_renews_only_from_the_trusted_monotonic_clock() {
+        let context = context();
+        let task = AgentWorkDiscoveryTask::try_new(
+            context.identity(),
+            AgentNavigationDiscovery::try_new(
+                ContextNavigationTarget::parse("https://example.test/start").unwrap(),
+                "/".into(),
+                2,
+            )
+            .unwrap(),
+            vec![SemanticExtractionFieldSchema::try_text("summary".into(), true, 64).unwrap()],
+        )
+        .unwrap();
+        let first = task
+            .attest_account(context, AgentPolicyInstant::from_millis(100))
+            .unwrap();
+        assert_eq!(
+            task.attest_account(context, AgentPolicyInstant::from_millis(100)),
+            Ok(first),
+            "one clock instant does not consume another attestation"
+        );
+        let renewed = task
+            .attest_account(context, AgentPolicyInstant::from_millis(30_101))
+            .unwrap();
+        assert_eq!(renewed.context(), first.context());
+        assert_eq!(renewed.account(), AgentAccountScope::Anonymous);
+        assert_ne!(renewed.attestation(), first.attestation());
+        assert_eq!(
+            renewed.observed_at(),
+            AgentPolicyInstant::from_millis(30_101)
+        );
+        assert_eq!(
+            task.attest_account(context, AgentPolicyInstant::from_millis(30_100)),
+            Err(AgentWorkFailure::Contract),
+            "the task cannot rewrite a trusted clock backwards"
+        );
     }
 
     #[test]
