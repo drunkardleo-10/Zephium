@@ -1,9 +1,46 @@
 //! Exact, pre-dispatch rejection of a settled model action proposal.
 use super::*;
 use crate::{
-    SemanticActionBatch, SemanticActionBatchId, SemanticActionBindingError, SemanticFrameJoin,
-    SemanticObservation, SemanticReferenceError,
+    SemanticActionBatch, SemanticActionBatchId, SemanticActionBindingError, SemanticActionKind,
+    SemanticFrameJoin, SemanticObservation, SemanticObservationGeneration, SemanticObservationId,
+    SemanticOperationClass, SemanticOperations, SemanticReferenceError, SemanticReferenceId,
+    SemanticRole,
 };
+
+/// Content-free identity of one rejected action against one exact observation.
+///
+/// This is safe to retain for bounded loop detection: it includes neither
+/// model-authored fill text nor page-authored labels.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AgentProviderActionRefusalKey {
+    observation: SemanticObservationId,
+    generation: SemanticObservationGeneration,
+    kind: SemanticActionKind,
+    target: SemanticReferenceId,
+    error: SemanticActionBindingError,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AgentProviderActionRefusalContext {
+    observation: SemanticObservationId,
+    generation: SemanticObservationGeneration,
+    kind: SemanticActionKind,
+    target: SemanticReferenceId,
+    role: SemanticRole,
+    operations: SemanticOperations,
+}
+
+impl AgentProviderActionRefusalContext {
+    const fn key(self, error: SemanticActionBindingError) -> AgentProviderActionRefusalKey {
+        AgentProviderActionRefusalKey {
+            observation: self.observation,
+            generation: self.generation,
+            kind: self.kind,
+            target: self.target,
+            error,
+        }
+    }
+}
 
 /// Binding either produces an unapproved batch or proves no action was admitted.
 #[must_use]
@@ -48,6 +85,29 @@ impl super::super::AgentProviderSettledToolTurn {
                 AgentProviderContinuationError::ToolKind,
             ));
         };
+        let refusal_context = if actions.actions().len() == 1 {
+            let action = &actions.actions()[0];
+            let target = action.intent().target();
+            observation
+                .reference_frame(target)
+                .ok()
+                .and_then(|expected| {
+                    frames
+                        .iter()
+                        .find(|current| current.frame() == expected.frame())
+                })
+                .and_then(|current| observation.resolve_node(target, current).ok())
+                .map(|node| AgentProviderActionRefusalContext {
+                    observation: observation.request().id(),
+                    generation: observation.request().generation(),
+                    kind: action.intent().kind(),
+                    target,
+                    role: node.role(),
+                    operations: node.operations(),
+                })
+        } else {
+            None
+        };
         match SemanticActionBatch::bind(id, observation, frames, actions.into_actions()) {
             Ok(batch) => Ok(AgentProviderActionResolution::Bound(batch, continuation)),
             Err(
@@ -59,6 +119,7 @@ impl super::super::AgentProviderSettledToolTurn {
                 AgentProviderActionRefusal {
                     continuation,
                     error,
+                    context: refusal_context,
                 },
             )),
             Err(error) => Err(Error::Binding(error)),
@@ -71,12 +132,20 @@ impl super::super::AgentProviderSettledToolTurn {
 pub struct AgentProviderActionRefusal {
     continuation: AgentProviderContinuation,
     error: SemanticActionBindingError,
+    context: Option<AgentProviderActionRefusalContext>,
 }
 
 impl AgentProviderActionRefusal {
     /// Content-free rejection reason for auditing.
     pub const fn reason(&self) -> SemanticActionBindingError {
         self.error
+    }
+
+    /// Exact content-free proposal identity when the rejected batch contained
+    /// one resolvable target. Callers may use it only to stop repeated retries;
+    /// it grants no replacement action or native authority.
+    pub fn key(&self) -> Option<AgentProviderActionRefusalKey> {
+        self.context.map(|context| context.key(self.error))
     }
 
     pub(in crate::agent_provider) fn bind(
@@ -97,7 +166,7 @@ impl AgentProviderActionRefusal {
         let (code, guidance) = match self.error {
             SemanticActionBindingError::Reference(SemanticReferenceError::OperationDenied) => (
                 "operation_not_supported",
-                "The requested operation is not in the target ref's advertised ops. Choose a supported operation on an observed ref. A button cannot be filled; inspect or activate it with an advertised operation to reveal an editable control. Do not repeat the rejected operation.",
+                "The requested operation is not in the target ref's advertised ops. The rejected metadata identifies the exact operation, target, role and observed capabilities without echoing action content. Choose a supplied tool operation advertised for an observed ref, or inspect to reveal a suitable control. Do not repeat the rejected operation on that target.",
             ),
             SemanticActionBindingError::OutcomeAlreadySatisfied => (
                 "outcome_already_satisfied",
@@ -105,11 +174,19 @@ impl AgentProviderActionRefusal {
             ),
             _ => return Err(AgentProviderContinuationError::ToolKind),
         };
-        let result = serde_json::json!({
+        let mut result = serde_json::json!({
             "status": "refused", "code": code, "executed": false,
             "guidance": guidance, "observation_unchanged": true,
-        })
-        .to_string();
+        });
+        if let Some(context) = self.context {
+            result["rejected"] = serde_json::json!({
+                "operation": action_kind_label(context.kind),
+                "target": context.target.model_token(),
+                "target_role": crate::semantic_model::role_label(context.role),
+                "advertised_ops": operation_labels(context.operations),
+            });
+        }
+        let result = result.to_string();
         let (call, _, _, correlation, transcript) = self.continuation.into_parts();
         let transcript = AgentProviderTranscript::try_initial_with_checkpoints(
             transcript.objective,
@@ -120,6 +197,29 @@ impl AgentProviderActionRefusal {
         .ok_or(AgentProviderContinuationError::TranscriptLimit)?;
         Ok((call, transcript.try_bind(correlation, result)?))
     }
+}
+
+const fn action_kind_label(kind: SemanticActionKind) -> &'static str {
+    match kind {
+        SemanticActionKind::Click => "click",
+        SemanticActionKind::Fill => "fill",
+        SemanticActionKind::Select => "select",
+        SemanticActionKind::Press => "press",
+        SemanticActionKind::Scroll => "scroll",
+    }
+}
+
+fn operation_labels(operations: SemanticOperations) -> Vec<&'static str> {
+    [
+        (SemanticOperationClass::Click, "click"),
+        (SemanticOperationClass::Fill, "fill"),
+        (SemanticOperationClass::Select, "select"),
+        (SemanticOperationClass::Press, "press"),
+        (SemanticOperationClass::Scroll, "scroll"),
+    ]
+    .into_iter()
+    .filter_map(|(operation, label)| operations.contains(operation).then_some(label))
+    .collect()
 }
 
 impl fmt::Debug for AgentProviderActionRefusal {

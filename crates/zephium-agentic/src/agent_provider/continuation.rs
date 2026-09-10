@@ -37,7 +37,8 @@ mod observation_checkpoint;
 #[cfg(any(test, feature = "provider-transport"))]
 use super::{AgentCommittedProviderInput, AgentProviderInputEvidence};
 pub use action_refusal::{
-    AgentProviderActionRefusal, AgentProviderActionResolution, AgentProviderActionResolutionError,
+    AgentProviderActionRefusal, AgentProviderActionRefusalKey, AgentProviderActionResolution,
+    AgentProviderActionResolutionError,
 };
 pub(super) use observation_checkpoint::AgentInspectionProgress;
 pub use observation_checkpoint::{
@@ -2295,6 +2296,10 @@ mod tests {
         assert_eq!(result["code"], "operation_not_supported");
         assert_eq!(result["executed"], false);
         assert_eq!(result["observation_unchanged"], true);
+        assert_eq!(result["rejected"]["operation"], "fill");
+        assert_eq!(result["rejected"]["target"], "@a1");
+        assert_eq!(result["rejected"]["target_role"], "document");
+        assert_eq!(result["rejected"]["advertised_ops"], json!(["scroll"]));
         // No false native failure or action settlement is supplied to the model.
         assert!(!result.to_string().contains("new value"));
 

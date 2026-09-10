@@ -2100,6 +2100,12 @@ impl AgentWorkController {
             .iter()
             .map(|snapshot| snapshot.frame().clone())
             .collect::<Vec<_>>();
+        // One corrective model decision is allowed for each exact rejected
+        // operation/target/baseline. Retaining only content-free keys prevents
+        // secret fill values from entering controller state while ensuring a
+        // weak model cannot consume the rest of a run repeating an impossible
+        // proposal. Fresh observations carry distinct identities.
+        let mut action_refusals = Vec::<AgentProviderActionRefusalKey>::new();
         loop {
             state.check_task_contract()?;
             // Deliver acknowledged audit batches while idle so long runs keep
@@ -2330,6 +2336,17 @@ impl AgentWorkController {
                             state.journal_mut()?.emit(
                                 AgentWorkEventKind::ActionProposalRefused(refusal.reason()),
                             )?;
+                            if let Some(key) = refusal.key() {
+                                if action_refusals.contains(&key) {
+                                    return Err(AgentWorkFailure::Browser(
+                                        AgentBrowserProviderError::ActionProposalLoop,
+                                    ));
+                                }
+                                action_refusals
+                                    .try_reserve(1)
+                                    .map_err(|_| AgentWorkFailure::Contract)?;
+                                action_refusals.push(key);
+                            }
                             let session =
                                 state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
                             turn = Self::provider(

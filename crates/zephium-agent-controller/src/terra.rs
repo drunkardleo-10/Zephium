@@ -3684,6 +3684,10 @@ pub enum AgentBrowserProviderError {
     /// The settled terminal did not release one tool proposal.
     #[error("Terra probe did not return exactly one tool proposal")]
     Proposal,
+    /// The model repeated an identical pre-dispatch action refusal against the
+    /// same observation after one explicit corrective result.
+    #[error("browser model repeated a refused action proposal")]
+    ActionProposalLoop,
     /// The verified result could not bind to the exact prior provider turn.
     #[error("Terra probe continuation did not match the prior turn")]
     Continuation,

@@ -310,7 +310,13 @@ impl NavigationFault {
     pub(super) fn requests(self) -> u8 {
         match self {
             Self::DiscoveryAction(_) => 8,
-            Self::DiscoveryActionRefusal(_) => 10,
+            Self::DiscoveryActionRefusal(repeat) => {
+                if repeat {
+                    4
+                } else {
+                    10
+                }
+            }
             Self::DiscoveryScopeRefusal(_) => 10,
             Self::DiscoveryEvidence(_) => 8,
             Self::DiscoveryBudget(limit, refusal, operations) => {
@@ -1081,9 +1087,9 @@ pub(super) fn assert_outcome(
             };
             assert_eq!(
                 closed.failure(),
-                AgentWorkFailure::Browser(AgentBrowserProviderError::TurnLimit)
+                AgentWorkFailure::Browser(AgentBrowserProviderError::ActionProposalLoop)
             );
-            assert_eq!(closed.policy_settlement().closure().model_calls(), 5);
+            assert_eq!(closed.policy_settlement().closure().model_calls(), 2);
             assert_eq!(closed.policy_settlement().closure().effects(), 0);
             assert!(!calls.contains(&7), "invalid actions never dispatch");
             assert!(!calls.contains(&9), "invalid actions never navigate");
@@ -1106,7 +1112,7 @@ pub(super) fn assert_outcome(
                     AgentWorkEventKind::ActionProposalRefused(_)
                 ))
                 .count(),
-            if repeat { 4 } else { 1 }
+            if repeat { 2 } else { 1 }
         );
         assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
         return;
