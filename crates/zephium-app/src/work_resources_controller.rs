@@ -236,6 +236,12 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
     fn supports_navigation(&self) -> bool {
         true
     }
+    fn supports_history_back(&self) -> bool {
+        self.browser
+            .shared
+            .port
+            .supports_work_resource_history_back()
+    }
     fn supports_actions(&self) -> bool {
         true
     }
@@ -327,6 +333,17 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
             return ContextDispatch::Rejected(ContextPortFailure::NativeRefused);
         };
         let result = pending.dispatch(active);
+        if pending.finished() {
+            self.navigation.take();
+        }
+        result
+    }
+    fn dispatch_history_back(&mut self, active: &AgentActiveNavigation) -> ContextDispatch {
+        let Some(pending) = self.navigation.as_mut() else {
+            self.browser.refusal();
+            return ContextDispatch::Rejected(ContextPortFailure::NativeRefused);
+        };
+        let result = pending.dispatch_history_back(active);
         if pending.finished() {
             self.navigation.take();
         }

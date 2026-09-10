@@ -26,8 +26,9 @@ pub use effect::{
 pub(crate) use navigation::is_document_successor;
 use navigation::AgentNavigationRow;
 pub use navigation::{
-    AgentActiveNavigation, AgentNavigationAuthorizationRequest, AgentNavigationPermit,
-    AgentNavigationProgressId, AgentNavigationReceipt, AgentNavigationSettlement,
+    AgentActiveNavigation, AgentNavigationAuthorizationRequest, AgentNavigationKind,
+    AgentNavigationPermit, AgentNavigationProgressId, AgentNavigationReceipt,
+    AgentNavigationSettlement,
 };
 pub(crate) use navigation::{AgentNavigationCheckpoint, AgentNavigationCheckpointBinding};
 
@@ -1084,6 +1085,9 @@ pub struct AgentRunPolicy {
     navigation_effective_destinations:
         [Option<crate::ContextNavigationTarget>; crate::MAX_AGENT_NAVIGATION_DISCOVERY_HOPS],
     navigation_attempts: usize,
+    navigation_history:
+        [Option<crate::ContextNavigationTarget>; crate::MAX_AGENT_NAVIGATION_DISCOVERY_HOPS + 1],
+    navigation_history_cursor: Option<usize>,
     last_call: Option<AgentModelCallId>,
     last_effect: Option<AgentEffectId>,
     last_action_attempt: Option<SemanticActionAttemptId>,
@@ -1138,6 +1142,8 @@ impl AgentRunPolicy {
             initial_navigation_document: None,
             navigation_effective_destinations: std::array::from_fn(|_| None),
             navigation_attempts: 0,
+            navigation_history: std::array::from_fn(|_| None),
+            navigation_history_cursor: None,
             last_call: None,
             last_effect: None,
             last_action_attempt: None,
@@ -4504,7 +4510,9 @@ mod tests {
         assert!(wire.get("previous_response_id").is_none());
         assert!(wire.get("metadata").is_none());
         assert_eq!(wire["input"].as_array().expect("input").len(), 2);
-        assert_eq!(wire["tools"].as_array().expect("tools").len(), 13);
+        let tools = wire["tools"].as_array().expect("tools");
+        assert_eq!(tools.len(), crate::AgentBrowserToolKind::ALL.len() - 1);
+        assert!(tools.iter().all(|tool| tool["name"] != "back"));
         assert!(wire["tools"]
             .as_array()
             .expect("tools")

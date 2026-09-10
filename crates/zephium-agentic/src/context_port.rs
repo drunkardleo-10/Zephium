@@ -1001,6 +1001,12 @@ pub type SemanticActionNativeCompletion =
 /// never project owned contexts into tab/session/extension inventories and
 /// must retain no queue, worker, timer, or page when no contexts exist.
 pub trait AgentBrowserPort: Send + Sync {
+    /// Whether this bound native adapter implements the production history
+    /// retention/reactivation contract on the running platform version.
+    fn supports_work_resource_history_back(&self) -> bool {
+        false
+    }
+
     /// Already policy-authorized semantic effect on one retained execution
     /// lease. An adapter must own the exact recipe, native callback and physical
     /// callback-return debt; it must not route this through legacy tab contexts.
@@ -1024,6 +1030,19 @@ pub trait AgentBrowserPort: Send + Sync {
         _completion: crate::WorkBrowserNavigationCompletionCallback,
     ) -> crate::WorkBrowserNavigationDispatch {
         crate::WorkBrowserNavigationDispatch::Rejected {
+            request: Box::new(request),
+            failure: ContextPortFailure::Unsupported,
+        }
+    }
+
+    /// Policy-bound exact predecessor traversal on a retained execution lease.
+    /// Unsupported adapters return the original request without a callback.
+    fn work_resource_back(
+        &self,
+        request: crate::WorkBrowserHistoryBackRequest,
+        _completion: crate::WorkBrowserHistoryBackCompletionCallback,
+    ) -> crate::WorkBrowserHistoryBackDispatch {
+        crate::WorkBrowserHistoryBackDispatch::Rejected {
             request: Box::new(request),
             failure: ContextPortFailure::Unsupported,
         }

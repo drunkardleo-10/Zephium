@@ -746,6 +746,8 @@ pub struct AgentProviderCallConfig {
     viewport_screenshot: bool,
     standalone_wait: bool,
     human_request: bool,
+    history_back: bool,
+    history_back_available: bool,
     decision_budget: Option<(AgentModelCallId, u8)>,
 }
 
@@ -800,6 +802,8 @@ impl AgentProviderCallConfig {
             viewport_screenshot: false,
             standalone_wait: false,
             human_request: false,
+            history_back: false,
+            history_back_available: false,
             decision_budget: None,
         })
     }
@@ -1019,6 +1023,9 @@ impl AgentProviderCallConfig {
         if self.human_request && kind == AgentBrowserToolKind::ShowForHuman {
             return true;
         }
+        if kind == AgentBrowserToolKind::Back {
+            return self.history_back && self.history_back_available;
+        }
         match self.tools {
             BrowserToolProfile::Full => true,
             BrowserToolProfile::Extraction => kind == AgentBrowserToolKind::Extract,
@@ -1051,6 +1058,21 @@ impl AgentProviderCallConfig {
                     | AgentBrowserToolKind::Extract
             ),
         }
+    }
+
+    /// Enables one-step native history proposals. Policy and the native adapter
+    /// still require an exact run-enrolled predecessor for every invocation.
+    pub fn with_history_back(mut self) -> Self {
+        self.history_back = true;
+        self
+    }
+
+    /// Projects current-phase Back availability without changing whether the
+    /// host supports the primitive. This may only be enabled after a committed
+    /// run-local predecessor exists and must be cleared again at history root.
+    pub fn with_history_back_available(mut self, available: bool) -> Self {
+        self.history_back_available = self.history_back && available;
+        self
     }
 
     /// Enables provider-side response retention for an inspectable public-data probe.
@@ -2172,6 +2194,16 @@ mod tests {
                 fixed_input_tokens: 512
             }
         );
+        assert!(!config.permits_tool(AgentBrowserToolKind::Back));
+        let supported = config.clone().with_history_back();
+        assert!(!supported.permits_tool(AgentBrowserToolKind::Back));
+        assert!(supported
+            .clone()
+            .with_history_back_available(true)
+            .permits_tool(AgentBrowserToolKind::Back));
+        assert!(!supported
+            .with_history_back_available(false)
+            .permits_tool(AgentBrowserToolKind::Back));
         assert_eq!(
             config.reasoning_effort(),
             AgentProviderReasoningEffort::High

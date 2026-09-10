@@ -1060,6 +1060,17 @@ impl AgentSemanticRuntimeController {
         })
     }
 
+    pub(crate) fn ready_for_history(&self) -> bool {
+        self.state.try_borrow().is_ok_and(|state| {
+            state.phase == DocumentPhase::Ready
+                && state.active_world.is_some()
+                && state.pull.is_some()
+                && state.pending.is_none()
+                && !state.awaiting_result
+                && state.park_completion.is_none()
+        })
+    }
+
     // Private debug evidence only. Addresses never leave the in-memory witness.
     #[cfg(feature = "native-agentic-work-resource-probe")]
     pub(crate) fn witness_identity(&self) -> Option<(usize, usize, u16)> {
@@ -1606,6 +1617,10 @@ impl AgentSemanticRuntimeRegistration {
         self.epochs.try_borrow().is_ok_and(|epochs| {
             epochs.active.is_none() && epochs.active_runtime.is_none() && !epochs.parked.is_empty()
         })
+    }
+
+    pub(crate) fn active_ready_for_history(&self) -> bool {
+        !self.retired && self.channel.ready_for_history()
     }
 
     pub(crate) fn reactivate_runtime(
@@ -2342,6 +2357,7 @@ mod tests {
         let actions = state.document_committed();
         assert!(!actions.invariant_failed);
         assert_eq!(state.phase, DocumentPhase::Ready);
+        assert!(state.pull.is_some());
     }
 
     #[test]

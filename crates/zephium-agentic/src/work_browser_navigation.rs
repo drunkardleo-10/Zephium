@@ -44,6 +44,60 @@ impl WorkBrowserNavigationPreparation {
             request,
         })
     }
+
+    /// Binds the same exact successor owner to a policy-derived native Back.
+    /// The active policy row supplies the predecessor target; no model URL is
+    /// accepted and the native adapter must independently match its item ledger.
+    pub fn bind_history_back(
+        self,
+        active: &AgentActiveNavigation,
+    ) -> Result<WorkBrowserHistoryBackRequest, Box<Self>> {
+        if active.operation() != self.join.operation
+            || active.kind() != crate::AgentNavigationKind::HistoryBack
+        {
+            return Err(Box::new(self));
+        }
+        Ok(WorkBrowserHistoryBackRequest {
+            join: self.join,
+            target: active.target().clone(),
+        })
+    }
+}
+
+/// Move-only policy-bound request for one exact run-local predecessor.
+#[must_use]
+#[derive(Debug)]
+pub struct WorkBrowserHistoryBackRequest {
+    join: NavigationJoin,
+    target: ContextNavigationTarget,
+}
+
+impl WorkBrowserHistoryBackRequest {
+    /// Exact retained resource lease owning this traversal.
+    pub const fn lease(&self) -> &WorkBrowserExecutionLease {
+        &self.join.lease
+    }
+    /// Revoked source document authority.
+    pub const fn source(&self) -> ContextJoin {
+        self.join.source
+    }
+    /// Exact next document operation reserved before native dispatch.
+    pub const fn operation(&self) -> ContextOperationJoin {
+        self.join.operation
+    }
+    /// Policy-derived predecessor target for native/result correlation.
+    pub const fn target(&self) -> &ContextNavigationTarget {
+        &self.target
+    }
+    /// Transfers the original terminal owner; default settlement is Shutdown.
+    pub fn into_completion(self) -> WorkBrowserNavigationCompletion {
+        WorkBrowserNavigationCompletion {
+            join: self.join,
+            target: self.target,
+            document_policy: crate::WorkBrowserDocumentPolicy::Exact,
+            outcome: Err(ContextPortFailure::Shutdown),
+        }
+    }
 }
 
 /// Move-only, policy-bound request on one original resource/lease/document.
@@ -194,6 +248,13 @@ impl WorkBrowserResources {
     ) -> Result<(), WorkBrowserResourceError> {
         self.refuse_navigation(request.join)
     }
+    /// Lossless synchronous non-admission of one exact native Back request.
+    pub fn history_back_dispatch_refused(
+        &mut self,
+        request: WorkBrowserHistoryBackRequest,
+    ) -> Result<(), WorkBrowserResourceError> {
+        self.refuse_navigation(request.join)
+    }
     fn refuse_navigation(&mut self, join: NavigationJoin) -> Result<(), WorkBrowserResourceError> {
         let row = self.row_mut(join.lease.resource())?;
         if row.navigation.as_ref() != Some(&join) {
@@ -270,6 +331,25 @@ pub enum WorkBrowserNavigationDispatch {
     Rejected {
         /// Original request, never a reconstructed operation.
         request: Box<WorkBrowserNavigationRequest>,
+        /// Closed native refusal.
+        failure: ContextPortFailure,
+    },
+}
+
+/// Exact completion obligation for a scheduled native Back traversal.
+pub type WorkBrowserHistoryBackCompletionCallback =
+    Box<dyn FnOnce(WorkBrowserNavigationCompletion) + Send + 'static>;
+
+/// Explicit native Back admission preserving the original request on refusal.
+#[must_use]
+#[derive(Debug)]
+pub enum WorkBrowserHistoryBackDispatch {
+    /// Native owns the terminal and callback-return debt.
+    Scheduled,
+    /// No callback transferred; the exact request remains accountable.
+    Rejected {
+        /// Original request, never reconstructed from a URL.
+        request: Box<WorkBrowserHistoryBackRequest>,
         /// Closed native refusal.
         failure: ContextPortFailure,
     },

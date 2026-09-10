@@ -203,6 +203,45 @@ fn production_navigation_fixture() -> (PolicyFixture, ContextRegistry, SemanticO
         )],
     )
     .unwrap();
+    let departure =
+        ContextNavigationTarget::parse("https://source.example.test/start?q=one#top").unwrap();
+    let mut rows = crate::WorkBrowserResources::new(crate::WorkId::generate(), profile(912));
+    let construction = rows
+        .construct_document_with_policy(
+            crate::WorkBrowserResourceId::generate(),
+            ContextId::from_raw(913),
+            crate::ContextProfileStorageClass::Ephemeral,
+            departure.clone(),
+            crate::WorkBrowserDocumentPolicy::Exact,
+            AgentPolicyInstant::from_millis(0),
+        )
+        .unwrap();
+    let resource = construction.resource().clone();
+    let _ = rows
+        .settle_at(
+            construction.complete_document(departure),
+            AgentPolicyInstant::from_millis(0),
+        )
+        .unwrap();
+    let acquire = rows
+        .acquire(
+            &resource,
+            ContextRunId::from_raw(911),
+            AgentPolicyInstant::from_millis(1),
+            AgentPolicyInstant::from_millis(EXPIRES_AT),
+        )
+        .unwrap();
+    let retained_lease = acquire.lease().unwrap().clone();
+    let _ = rows
+        .settle_at(
+            acquire.complete(crate::WorkBrowserResourceNativeOutcome::Acquired),
+            AgentPolicyInstant::from_millis(1),
+        )
+        .unwrap();
+    let binding = rows
+        .read_binding(&retained_lease, AgentPolicyInstant::from_millis(2))
+        .unwrap();
+    policy.bind_retained_initial_document(&binding).unwrap();
     commit_observation_to_model(
         &mut policy,
         lease,
@@ -303,6 +342,119 @@ fn production_navigation_admits_scoped_cross_origin_queries_fragments_and_depart
     assert_eq!(receipt.hop(), 1);
     assert_eq!(fixture.policy.navigation_destinations[0], Some(destination));
     assert_eq!(fixture.policy.accounting().consumed_operations(), 4);
+}
+
+#[test]
+fn native_back_is_policy_derived_and_advances_only_after_exact_committed_predecessor() {
+    let (mut fixture, mut registry, source) = production_navigation_fixture();
+    let destination =
+        ContextNavigationTarget::parse("https://docs.example.test/guide/result?q=rust#details")
+            .unwrap();
+    let departure =
+        ContextNavigationTarget::parse("https://source.example.test/start?q=one#top").unwrap();
+    assert!(fixture
+        .policy
+        .authorize_history_back(
+            route_request(
+                &fixture,
+                &registry,
+                &source,
+                account(source.request().context(), NOW - 1),
+            ),
+            &source,
+            &baseline(&source),
+        )
+        .is_err());
+
+    let permit = fixture
+        .policy
+        .authorize_navigation(
+            route_request(
+                &fixture,
+                &registry,
+                &source,
+                account(source.request().context(), NOW - 1),
+            ),
+            &source,
+            &baseline(&source),
+            &destination,
+        )
+        .unwrap();
+    let load = registry
+        .begin_navigation(
+            source.request().context().identity().id(),
+            ContextOperationId::new(2).unwrap(),
+        )
+        .unwrap();
+    let active = fixture
+        .policy
+        .dispatch_navigation(permit, load, AgentPolicyInstant::from_millis(NOW))
+        .unwrap();
+    fixture
+        .policy
+        .settle_navigation(
+            &active,
+            &ContextNavigationSettlement::try_new(load, Ok(destination)).unwrap(),
+            AgentPolicyInstant::from_millis(NOW),
+        )
+        .unwrap();
+    registry
+        .settle_navigation(
+            load.context().identity().id(),
+            load,
+            ContextSettlement::Applied,
+        )
+        .unwrap();
+    registry
+        .acknowledge_observation(load.context().identity().id(), load.context())
+        .unwrap();
+    let current = observation(
+        load.context(),
+        origin("docs"),
+        2,
+        vec![json!({"k":1,"r":"link","n":"Other","u":"https://docs.example.test/guide/other"})],
+    );
+    let account = account(load.context(), NOW);
+    commit_observation_to_model(&mut fixture.policy, fixture.lease, 2, account, &current);
+
+    let permit = fixture
+        .policy
+        .authorize_history_back(
+            route_request(&fixture, &registry, &current, account),
+            &current,
+            &baseline(&current),
+        )
+        .unwrap();
+    assert_eq!(permit.target(), &departure);
+    let back = registry
+        .begin_navigation(
+            load.context().identity().id(),
+            ContextOperationId::new(3).unwrap(),
+        )
+        .unwrap();
+    let active = fixture
+        .policy
+        .dispatch_navigation(permit, back, AgentPolicyInstant::from_millis(NOW))
+        .unwrap();
+    assert_eq!(active.kind(), AgentNavigationKind::HistoryBack);
+    assert!(active.native_request().is_err());
+    assert!(fixture
+        .policy
+        .settle_navigation(
+            &active,
+            &ContextNavigationSettlement::try_new(back, Ok(target())).unwrap(),
+            AgentPolicyInstant::from_millis(NOW),
+        )
+        .is_err());
+    let receipt = fixture
+        .policy
+        .settle_navigation(
+            &active,
+            &ContextNavigationSettlement::try_new(back, Ok(departure.clone())).unwrap(),
+            AgentPolicyInstant::from_millis(NOW),
+        )
+        .unwrap();
+    assert_eq!(receipt.kind(), AgentNavigationKind::HistoryBack);
 }
 
 fn final_target() -> ContextNavigationTarget {

@@ -1092,9 +1092,10 @@ pub use observation::{
 #[path = "work_browser_navigation.rs"]
 mod navigation;
 pub use navigation::{
-    WorkBrowserNavigationCompletion, WorkBrowserNavigationCompletionCallback,
-    WorkBrowserNavigationDispatch, WorkBrowserNavigationEvent, WorkBrowserNavigationPreparation,
-    WorkBrowserNavigationRequest,
+    WorkBrowserHistoryBackCompletionCallback, WorkBrowserHistoryBackDispatch,
+    WorkBrowserHistoryBackRequest, WorkBrowserNavigationCompletion,
+    WorkBrowserNavigationCompletionCallback, WorkBrowserNavigationDispatch,
+    WorkBrowserNavigationEvent, WorkBrowserNavigationPreparation, WorkBrowserNavigationRequest,
 };
 
 #[path = "work_browser_action.rs"]

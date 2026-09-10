@@ -171,6 +171,12 @@ impl Default for WorkDocumentNavigation {
 }
 
 impl WorkDocumentNavigation {
+    pub(crate) fn ready_target(&self) -> Option<ContextNavigationTarget> {
+        let state = self.0.lock().ok()?;
+        (state.phase == Phase::Ready && state.operation.is_none())
+            .then(|| state.effective.clone())
+            .flatten()
+    }
     /// Content-free control stage for release-excluded lifetime diagnostics.
     /// This never samples the current URL or exposes native navigation IDs.
     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
@@ -243,6 +249,40 @@ impl WorkDocumentNavigation {
         {
             state.url_observation_failure = None;
         }
+        state.phase = Phase::Armed;
+        Ok(())
+    }
+
+    pub(crate) fn arm_history_back(
+        &self,
+        source: ContextJoin,
+        operation: ContextOperationJoin,
+        target: ContextNavigationTarget,
+    ) -> Result<(), ()> {
+        let mut state = self.0.lock().map_err(|_| ())?;
+        let next = operation.context();
+        if state.phase != Phase::Ready
+            || state.operation.is_some()
+            || state.native_id.is_none()
+            || state.navigation_epoch != source.navigation_epoch().get()
+            || source.identity() != next.identity()
+            || source.context_generation() != next.context_generation()
+            || source.cancellation_generation() != next.cancellation_generation()
+            || source.frame() != zephium_agentic::FrameId::MAIN
+            || next.frame() != zephium_agentic::FrameId::MAIN
+            || source.navigation_epoch().get().checked_add(1) != Some(next.navigation_epoch().get())
+            || source.frame_generation().get().checked_add(1) != Some(next.frame_generation().get())
+        {
+            return Err(());
+        }
+        state.operation = Some(operation);
+        state.target = Some(target);
+        state.effective = None;
+        state.policy = zephium_agentic::WorkBrowserDocumentPolicy::Exact;
+        state.native_id = None;
+        state.requested = false;
+        state.finalization_generation = state.finalization_generation.checked_add(1).ok_or(())?;
+        state.location_revision = 0;
         state.phase = Phase::Armed;
         Ok(())
     }

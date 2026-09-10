@@ -8197,7 +8197,8 @@ mod tests {
         assert_eq!(content[0]["text"], "Submit the reviewed form");
         assert_eq!(content[1]["text"], "ZSEM1\ncontent=untrusted");
         let tools = wire["tools"].as_array().expect("tools");
-        assert_eq!(tools.len(), AgentBrowserToolKind::ALL.len());
+        assert_eq!(tools.len(), AgentBrowserToolKind::ALL.len() - 1);
+        assert!(tools.iter().all(|tool| tool["name"] != "back"));
         assert!(tools.iter().all(|tool| tool["strict"] == true));
         let schema_unions = tools
             .iter()
@@ -8219,6 +8220,15 @@ mod tests {
         for tool in tools {
             validate_strict_schema(&tool["input_schema"]);
         }
+        let available = config.with_history_back().with_history_back_available(true);
+        let body = encode_anthropic_body(&available, "Go back", "ZSEM1\ncontent=untrusted")
+            .expect("Back-capable request");
+        let wire: Value = serde_json::from_slice(&body).expect("request JSON");
+        assert!(wire["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .any(|tool| tool["name"] == "back"));
     }
 
     fn validate_strict_schema(schema: &Value) {

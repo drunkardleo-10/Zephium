@@ -205,6 +205,12 @@ impl AgentOwnedView {
             .is_some_and(AgentSemanticRuntimeRegistration::active_parked)
     }
 
+    pub(crate) fn semantic_runtime_ready_for_history(&self) -> bool {
+        self.semantic
+            .as_ref()
+            .is_some_and(AgentSemanticRuntimeRegistration::active_ready_for_history)
+    }
+
     pub(crate) fn prepare_history_back(
         &mut self,
     ) -> Result<super::agent_history::AgentHistoryBackTicket, ()> {

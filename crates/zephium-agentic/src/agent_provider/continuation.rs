@@ -953,6 +953,38 @@ impl AgentProviderContinuation {
                 .is_some_and(AgentProviderActionTargets::is_host_projected),
         })
     }
+
+    /// Consumes an argument-free Back proposal and binds it to the trusted
+    /// policy/native predecessor target. The provider never receives or chooses
+    /// that target, and all prior replay is retired exactly as for a load.
+    pub fn retire_for_history_back(
+        self,
+        observation: &crate::SemanticObservation,
+        target: &crate::ContextNavigationTarget,
+        config: &AgentProviderCallConfig,
+    ) -> Result<AgentProviderNavigationCheckpoint, AgentProviderContinuationError> {
+        if config != &self.config {
+            return Err(AgentProviderContinuationError::Config);
+        }
+        if self.correlation.kind() != AgentBrowserToolKind::Back
+            || self.correlation.navigation_target.is_some()
+        {
+            return Err(AgentProviderContinuationError::ToolKind);
+        }
+        if !self.baseline.matches(observation) {
+            return Err(AgentProviderContinuationError::Baseline);
+        }
+        Ok(AgentProviderNavigationCheckpoint {
+            prior_call: self.prior_call,
+            config: self.config,
+            baseline: self.baseline,
+            target: target.clone(),
+            host_projected_actions: self
+                .transcript
+                .action_targets()
+                .is_some_and(AgentProviderActionTargets::is_host_projected),
+        })
+    }
     /// Exact completed provider call that produced the pending tool result.
     pub const fn prior_call(&self) -> AgentProviderCallIdentity {
         self.prior_call
@@ -4618,10 +4650,9 @@ mod tests {
             .as_str()
             .expect("diff output")
             .starts_with("ZDIFF3 "));
-        assert_eq!(
-            wire["tools"].as_array().expect("tools").len(),
-            AgentBrowserToolKind::ALL.len()
-        );
+        let tools = wire["tools"].as_array().expect("tools");
+        assert_eq!(tools.len(), AgentBrowserToolKind::ALL.len() - 1);
+        assert!(tools.iter().all(|tool| tool["name"] != "back"));
         let debug = format!("{draft:?}");
         for secret in [
             "private objective",

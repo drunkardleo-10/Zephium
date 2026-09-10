@@ -1152,7 +1152,7 @@ mod tests;
 
 #[path = "work_resource_navigation_port.rs"]
 mod navigation;
-pub(crate) use navigation::WorkNavigationTask;
+pub(crate) use navigation::{WorkHistoryBackTask, WorkNavigationTask};
 
 #[path = "work_resource_action_port.rs"]
 mod action;

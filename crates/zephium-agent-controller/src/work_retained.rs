@@ -64,6 +64,10 @@ pub trait AgentWorkRetainedBrowser: Send {
     fn supports_navigation(&self) -> bool {
         false
     }
+    /// Whether the retained backing implements exact run-local native Back.
+    fn supports_history_back(&self) -> bool {
+        false
+    }
     /// Current acknowledged observation authority, not a navigation permit.
     fn automation_state(
         &self,
@@ -85,6 +89,12 @@ pub trait AgentWorkRetainedBrowser: Send {
     }
     /// Binds only the original policy's active operation; no arbitrary URL port.
     fn dispatch_navigation(&mut self, _active: &AgentActiveNavigation) -> ContextDispatch {
+        ContextDispatch::Unsupported
+    }
+    /// Dispatches an argument-free native Back bound to the policy's exact
+    /// run-enrolled predecessor. The prepared navigation owner is shared with
+    /// ordinary loads, so polling/terminal accounting stays identical.
+    fn dispatch_history_back(&mut self, _active: &AgentActiveNavigation) -> ContextDispatch {
         ContextDispatch::Unsupported
     }
     /// Returns the original core-accounted terminal, including after revocation.

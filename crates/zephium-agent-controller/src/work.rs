@@ -195,6 +195,11 @@ pub trait AgentWorkTask: Send {
     fn allows_human_request(&self) -> bool {
         false
     }
+    /// Enables a native Back step only when policy and the retained platform
+    /// both prove an exact predecessor enrolled by this run.
+    fn allows_history_back(&self) -> bool {
+        false
+    }
     /// Explicitly permits one terminal native subtree read anchored to the
     /// exact model-acknowledged observation. Frozen at admission; default is
     /// initial-scope only. This grants no action or navigation authority.
@@ -1051,6 +1056,7 @@ impl AgentWorkController {
         let viewport_screenshot = task.allows_viewport_screenshot();
         let standalone_wait = task.allows_standalone_wait();
         let human_request = task.allows_human_request();
+        let history_back = task.allows_history_back();
         let navigation_target = task.navigation_target().cloned();
         let navigation_route = task.navigation_route().cloned();
         let navigation_discovery = task.navigation_discovery().cloned();
@@ -1076,6 +1082,10 @@ impl AgentWorkController {
                     && !retained
                         .as_ref()
                         .is_some_and(|browser| browser.supports_navigation()))
+                || (history_back
+                    && !retained
+                        .as_ref()
+                        .is_some_and(|browser| browser.supports_history_back()))
                 || (viewport_screenshot
                     && !retained
                         .as_ref()
@@ -1171,6 +1181,7 @@ impl AgentWorkController {
                     viewport_screenshot,
                     standalone_wait,
                     human_request,
+                    history_back,
                     navigation_target,
                     navigation_route,
                     navigation_discovery,
@@ -1202,6 +1213,7 @@ struct WorkState {
     viewport_screenshot: bool,
     standalone_wait: bool,
     human_request: bool,
+    history_back: bool,
     extraction_schema: Option<SemanticExtractionSchema>,
     actions_before_extraction: bool,
     subtree_extraction: bool,
@@ -1262,6 +1274,7 @@ impl WorkState {
                 || self.viewport_screenshot
                 || self.standalone_wait
                 || self.human_request
+                || self.history_back
                 || self.actions_before_extraction
                 || self.subtree_extraction)
     }
@@ -1381,6 +1394,7 @@ impl WorkState {
             || self.task.allows_viewport_screenshot() != self.viewport_screenshot
             || self.task.allows_standalone_wait() != self.standalone_wait
             || self.task.allows_human_request() != self.human_request
+            || self.task.allows_history_back() != self.history_back
         {
             return Err(AgentWorkFailure::Contract);
         }
@@ -2002,6 +2016,9 @@ impl AgentWorkController {
         if state.human_request {
             session.config = session.config.with_human_request();
         }
+        if state.history_back {
+            session.config = session.config.with_history_back();
+        }
         if decision_budget {
             session.config = session
                 .config
@@ -2492,7 +2509,10 @@ impl AgentWorkController {
                 continue;
             }
             let step = turn;
-            if step.turn.proposal().kind() == AgentBrowserToolKind::Navigate {
+            if matches!(
+                step.turn.proposal().kind(),
+                AgentBrowserToolKind::Navigate | AgentBrowserToolKind::Back
+            ) {
                 if state.navigation_discovery.is_none() {
                     state.retained_read_evidence.clear();
                 }

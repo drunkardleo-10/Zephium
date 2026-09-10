@@ -44,6 +44,16 @@ pub(super) struct AgentNavigationRow {
     operation: Option<ContextOperationJoin>,
     started_at: AgentPolicyInstant,
     hop: usize,
+    kind: AgentNavigationKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Physical browser transition class covered by one policy receipt.
+pub enum AgentNavigationKind {
+    /// An exact host-issued HTTP(S) GET load.
+    Load,
+    /// One exact predecessor traversal in the run-local native history ledger.
+    HistoryBack,
 }
 
 impl AgentNavigationRow {
@@ -57,6 +67,14 @@ impl AgentNavigationRow {
 pub struct AgentNavigationPermit {
     manifest_guard: [u8; 32],
     row: AgentNavigationRow,
+}
+
+impl AgentNavigationPermit {
+    /// Trusted policy-derived destination. For native Back this is the exact
+    /// successful-history predecessor, never a model-supplied argument.
+    pub const fn target(&self) -> &ContextNavigationTarget {
+        &self.row.target
+    }
 }
 
 /// Opaque exact navigation authority for content-free audit/progress joins.
@@ -127,11 +145,22 @@ impl AgentActiveNavigation {
     pub fn native_request(
         &self,
     ) -> Result<ContextNavigationRequest, crate::ContextPortContractError> {
+        if self.row.kind != AgentNavigationKind::Load {
+            return Err(crate::ContextPortContractError::OperationKind);
+        }
         ContextNavigationRequest::try_new_with_document_policy(
             self.operation,
             self.row.target.clone(),
             self.row.document_policy,
         )
+    }
+    /// The independently authorized physical transition class.
+    pub const fn kind(&self) -> AgentNavigationKind {
+        self.row.kind
+    }
+    /// Trusted destination derived by policy rather than model arguments.
+    pub const fn target(&self) -> &ContextNavigationTarget {
+        &self.row.target
     }
 }
 
@@ -160,6 +189,7 @@ pub struct AgentNavigationReceipt {
     account: AgentAccountScope,
     settled_at: AgentPolicyInstant,
     hop: usize,
+    kind: AgentNavigationKind,
 }
 
 impl AgentNavigationReceipt {
@@ -202,6 +232,10 @@ impl AgentNavigationReceipt {
     /// Closed native outcome, never task completion.
     pub const fn settlement(self) -> AgentNavigationSettlement {
         self.settlement
+    }
+    /// The physical transition class included in terminal accounting.
+    pub const fn kind(self) -> AgentNavigationKind {
+        self.kind
     }
     /// Account scope that must be independently re-attested in the successor.
     pub const fn account(self) -> AgentAccountScope {
@@ -312,6 +346,8 @@ impl AgentRunPolicy {
         }
         self.initial_navigation_document =
             Some((binding.frame().context(), binding.document().clone()));
+        self.navigation_history[0] = Some(binding.document().clone());
+        self.navigation_history_cursor = Some(0);
         Ok(())
     }
     pub(crate) fn reject_unstructured_navigation_input(
@@ -503,6 +539,47 @@ impl AgentRunPolicy {
         baseline: &SemanticObservationAcknowledgement,
         target: &ContextNavigationTarget,
     ) -> Result<AgentNavigationPermit, AgentPolicyError> {
+        self.authorize_navigation_kind(
+            request,
+            observation,
+            baseline,
+            target,
+            AgentNavigationKind::Load,
+        )
+    }
+
+    /// Reserves one step to the policy-owned successful-history predecessor.
+    /// The model supplies no URL and cannot select an ambient browser entry.
+    pub fn authorize_history_back(
+        &mut self,
+        request: AgentNavigationAuthorizationRequest,
+        observation: &SemanticObservation,
+        baseline: &SemanticObservationAcknowledgement,
+    ) -> Result<AgentNavigationPermit, AgentPolicyError> {
+        let cursor = self
+            .navigation_history_cursor
+            .and_then(|cursor| cursor.checked_sub(1))
+            .ok_or(AgentPolicyError::Navigation)?;
+        let target = self.navigation_history[cursor]
+            .clone()
+            .ok_or(AgentPolicyError::Navigation)?;
+        self.authorize_navigation_kind(
+            request,
+            observation,
+            baseline,
+            &target,
+            AgentNavigationKind::HistoryBack,
+        )
+    }
+
+    fn authorize_navigation_kind(
+        &mut self,
+        request: AgentNavigationAuthorizationRequest,
+        observation: &SemanticObservation,
+        baseline: &SemanticObservationAcknowledgement,
+        target: &ContextNavigationTarget,
+        kind: AgentNavigationKind,
+    ) -> Result<AgentNavigationPermit, AgentPolicyError> {
         if self.sealed {
             return Err(AgentPolicyError::Sealed);
         }
@@ -532,11 +609,14 @@ impl AgentRunPolicy {
         );
         if hop >= limit
             || hop != self.navigation_receipts.iter().flatten().count()
-            || route.is_some_and(|route| route.destinations().get(hop) != Some(target))
+            || (kind == AgentNavigationKind::Load
+                && route.is_some_and(|route| route.destinations().get(hop) != Some(target)))
+            || (kind == AgentNavigationKind::HistoryBack
+                && !discovery.is_some_and(|scope| scope.is_production()))
         {
             return Err(AgentPolicyError::Navigation);
         }
-        if let Some(scope) = discovery {
+        if let Some(scope) = discovery.filter(|_| kind == AgentNavigationKind::Load) {
             if !scope.admits(target)
                 || self
                     .navigation_destinations
@@ -602,7 +682,7 @@ impl AgentRunPolicy {
         {
             return Err(AgentPolicyError::Navigation);
         }
-        if let Some(scope) = discovery {
+        if let Some(scope) = discovery.filter(|_| kind == AgentNavigationKind::Load) {
             let current = if hop == 0 {
                 self.initial_navigation_document
                     .as_ref()
@@ -647,6 +727,7 @@ impl AgentRunPolicy {
             operation: None,
             started_at: request.now,
             hop,
+            kind,
         };
         self.navigation = Some(row.clone());
         self.navigation_attempts += 1;
@@ -788,6 +869,32 @@ impl AgentRunPolicy {
         if slot.is_some() || self.navigation_destinations[active.row.hop].is_some() {
             return Err(AgentPolicyError::Invariant);
         }
+        let history_cursor = if settlement == AgentNavigationSettlement::Committed {
+            match active.row.kind {
+                AgentNavigationKind::Load => match self.navigation_history_cursor {
+                    Some(cursor) => {
+                        let next = cursor.checked_add(1).ok_or(AgentPolicyError::Invariant)?;
+                        if next >= self.navigation_history.len() {
+                            return Err(AgentPolicyError::Invariant);
+                        }
+                        Some(next)
+                    }
+                    None => None,
+                },
+                AgentNavigationKind::HistoryBack => {
+                    let prior = self
+                        .navigation_history_cursor
+                        .and_then(|cursor| cursor.checked_sub(1))
+                        .ok_or(AgentPolicyError::Invariant)?;
+                    if self.navigation_history[prior].as_ref() != effective {
+                        return Err(AgentPolicyError::Navigation);
+                    }
+                    Some(prior)
+                }
+            }
+        } else {
+            None
+        };
         let added = ConsumedUsage {
             operations: 1,
             model_tokens: 0,
@@ -812,11 +919,27 @@ impl AgentRunPolicy {
             account: active.row.account.account(),
             settled_at: now,
             hop: active.row.hop,
+            kind: active.row.kind,
         };
         *slot = Some(receipt);
         if discovery && settlement == AgentNavigationSettlement::Committed {
             self.navigation_destinations[active.row.hop] = Some(active.row.target.clone());
             self.navigation_effective_destinations[active.row.hop] = effective.cloned();
+        }
+        if let Some(cursor) = history_cursor {
+            match active.row.kind {
+                AgentNavigationKind::Load => {
+                    let next = cursor;
+                    for entry in &mut self.navigation_history[next..] {
+                        *entry = None;
+                    }
+                    self.navigation_history[next] = effective.cloned();
+                    self.navigation_history_cursor = Some(next);
+                }
+                AgentNavigationKind::HistoryBack => {
+                    self.navigation_history_cursor = Some(cursor);
+                }
+            }
         }
         Ok(receipt)
     }

@@ -42,6 +42,18 @@ impl AgentWorkController {
         AgentWorkFailure,
     > {
         state.check_task_contract()?;
+        let kind = turn.turn.proposal().kind();
+        let is_back = kind == AgentBrowserToolKind::Back;
+        if !matches!(
+            kind,
+            AgentBrowserToolKind::Navigate | AgentBrowserToolKind::Back
+        ) || (is_back
+            && (state.navigation_discovery.is_none()
+                || !state.history_back
+                || state.native.retained.is_none()))
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
         let discovery = state.navigation_discovery.as_ref();
         let expected = if discovery.is_some() {
             AgentWorkTaskProgress::Continue
@@ -51,24 +63,32 @@ impl AgentWorkController {
         if state.navigation_complete() || progress != expected {
             return Err(AgentWorkFailure::TaskPhase {
                 expected: progress,
-                proposed: AgentBrowserToolKind::Navigate,
+                proposed: kind,
             });
         }
-        let target = if let Some(scope) = discovery {
+        let proposed_target = if is_back {
+            None
+        } else if let Some(scope) = discovery {
             let AgentBrowserToolProposal::Navigate(target) = turn.turn.proposal() else {
                 return Err(AgentWorkFailure::Contract);
             };
             if !scope.admits(target) {
                 return Err(AgentWorkFailure::Contract);
             }
-            target.clone()
+            Some(target.clone())
         } else {
-            state
-                .current_navigation_target()
-                .cloned()
-                .ok_or(AgentWorkFailure::Contract)?
+            Some(
+                state
+                    .current_navigation_target()
+                    .cloned()
+                    .ok_or(AgentWorkFailure::Contract)?,
+            )
         };
-        if !matches!(turn.turn.proposal(), AgentBrowserToolProposal::Navigate(proposed) if proposed == &target)
+        if !is_back
+            && !matches!(
+                (turn.turn.proposal(), proposed_target.as_ref()),
+                (AgentBrowserToolProposal::Navigate(proposed), Some(target)) if proposed == target
+            )
         {
             return Err(AgentWorkFailure::Contract);
         }
@@ -98,9 +118,9 @@ impl AgentWorkController {
             ));
         }
         state.refresh_account(worker, browser)?;
-        state.journal_mut()?.emit(AgentWorkEventKind::ToolProposed(
-            AgentBrowserToolKind::Navigate,
-        ))?;
+        state
+            .journal_mut()?
+            .emit(AgentWorkEventKind::ToolProposed(kind))?;
         state.native.check_control(worker, browser)?;
         state.check_task_contract()?;
         let id = state.native.identity.id();
@@ -125,12 +145,7 @@ impl AgentWorkController {
             None
         };
         let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
-        let checkpoint = turn
-            .into_tool_turn()
-            .into_parts()
-            .1
-            .retire_for_navigation(observation, &target, &session.config)
-            .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation))?;
+        let continuation = turn.into_tool_turn().into_parts().1;
         if state.navigation_discovery.is_some() {
             let schema = state
                 .extraction_schema
@@ -138,7 +153,7 @@ impl AgentWorkController {
                 .ok_or(AgentWorkFailure::Contract)?;
             let read = read_selected_semantic_observation(
                 observation,
-                SemanticReadAuthority::Acknowledged(checkpoint.baseline()),
+                SemanticReadAuthority::Acknowledged(continuation.baseline()),
                 captured_at,
                 SemanticReadSensitivityLimit::PublicOnly,
                 SemanticReadBudget::STANDARD,
@@ -147,28 +162,50 @@ impl AgentWorkController {
             .map_err(|error| AgentWorkFailure::Browser(AgentBrowserProviderError::Read(error)))?;
             state
                 .retained_read_evidence
-                .retain(&read, checkpoint.baseline())
+                .retain(&read, continuation.baseline())
                 .map_err(|error| {
                     AgentWorkFailure::Browser(AgentBrowserProviderError::Read(error))
                 })?;
         }
         let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
-        let permit = session
-            .policy
-            .authorize_navigation(
-                AgentNavigationAuthorizationRequest::new(
-                    session.lease.lease(),
-                    session.account,
-                    automation,
-                    now,
-                ),
+        let authorization = AgentNavigationAuthorizationRequest::new(
+            session.lease.lease(),
+            session.account,
+            automation,
+            now,
+        );
+        let permit = if is_back {
+            session.policy.authorize_history_back(
+                authorization,
                 observation,
-                checkpoint.baseline(),
-                &target,
+                continuation.baseline(),
             )
-            .map_err(|error| {
-                AgentWorkFailure::Browser(AgentBrowserProviderError::Navigation(error))
-            })?;
+        } else {
+            session.policy.authorize_navigation(
+                authorization,
+                observation,
+                continuation.baseline(),
+                proposed_target.as_ref().ok_or(AgentWorkFailure::Contract)?,
+            )
+        }
+        .map_err(|error| AgentWorkFailure::Browser(AgentBrowserProviderError::Navigation(error)))?;
+        let target = permit.target().clone();
+        let checkpoint = if is_back {
+            continuation.retire_for_history_back(observation, &target, &session.config)
+        } else {
+            continuation.retire_for_navigation(observation, &target, &session.config)
+        }
+        .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation));
+        let checkpoint = match checkpoint {
+            Ok(checkpoint) => checkpoint,
+            Err(failure) => {
+                session
+                    .policy
+                    .cancel_navigation(permit)
+                    .map_err(|_| AgentWorkFailure::Contract)?;
+                return Err(failure);
+            }
+        };
         let prepared = if let Some(retained) = &mut state.native.retained {
             retained.prepare_navigation(automation.context(), now)
         } else {
@@ -219,7 +256,11 @@ impl AgentWorkController {
             .ok_or(AgentWorkFailure::Contract)?;
         state.native.operation = Some(operation);
         let dispatch = if let Some(retained) = &mut state.native.retained {
-            retained.dispatch_navigation(active)
+            if is_back {
+                retained.dispatch_history_back(active)
+            } else {
+                retained.dispatch_navigation(active)
+            }
         } else {
             let request = active
                 .native_request()
@@ -483,6 +524,20 @@ impl AgentBrowserSession {
                 action_authority,
             )
             .map_err(|_| AgentBrowserProviderError::Continuation)?;
+        self.history_depth = match receipt.kind() {
+            AgentNavigationKind::Load => self
+                .history_depth
+                .checked_add(1)
+                .ok_or(AgentBrowserProviderError::Continuation)?,
+            AgentNavigationKind::HistoryBack => self
+                .history_depth
+                .checked_sub(1)
+                .ok_or(AgentBrowserProviderError::Continuation)?,
+        };
+        self.config = self
+            .config
+            .clone()
+            .with_history_back_available(self.history_depth > 0);
         let payload = encode_semantic_observation(
             observation,
             SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,

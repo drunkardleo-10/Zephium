@@ -68,6 +68,7 @@ pub(super) struct WorkNativeResource {
     observation: Option<observation::WorkObservation>,
     action: Option<action::WorkAction>,
     navigation: Option<navigation::WorkNavigation>,
+    history_back: Option<navigation::WorkHistoryBack>,
     #[cfg(target_os = "macos")]
     pub(super) screenshot: Option<AgentPendingScreenshot>,
     document_finalization_wake: Option<DocumentFinalizationWake>,
@@ -144,6 +145,7 @@ impl WorkNativeResource {
             observation: None,
             action: None,
             navigation: None,
+            history_back: None,
             #[cfg(target_os = "macos")]
             screenshot: None,
             document_finalization_wake: None,
@@ -188,6 +190,7 @@ impl WorkNativeResource {
             || self.observation.is_some()
             || self.action.is_some()
             || self.navigation.is_some()
+            || self.history_back.is_some()
             || {
                 #[cfg(target_os = "macos")]
                 {
@@ -271,6 +274,7 @@ impl WorkNativeResource {
             && self.observation.is_none()
             && self.action.is_none()
             && self.navigation.is_none()
+            && self.history_back.is_none()
             && {
                 #[cfg(target_os = "macos")]
                 {
@@ -302,6 +306,9 @@ impl WorkNativeResource {
         }
         if let Some(navigation) = self.navigation.take() {
             navigation.refuse(ContextPortFailure::Shutdown);
+        }
+        if let Some(history) = self.history_back.take() {
+            history.refuse(ContextPortFailure::Shutdown);
         }
         if let Some(task) = self.revocation.take() {
             task.complete(Outcome::Refused);
@@ -633,6 +640,7 @@ impl EngineHost {
                     cause: "build_refused",
                     port_failure: result.err(),
                     navigation: None,
+                    history_back: None,
                     document_started: false,
                     deadline_expired: false,
                     guard_healthy: guard.is_healthy(),
@@ -748,6 +756,7 @@ impl EngineHost {
             observation: None,
             action: None,
             navigation: None,
+            history_back: None,
             #[cfg(target_os = "macos")]
             screenshot: None,
             document_finalization_wake: None,
@@ -881,6 +890,7 @@ impl EngineHost {
             return;
         }
         resource.progress_navigation(self.erasure_tombstones.contains(&resource.profile()));
+        resource.progress_history_back(self.erasure_tombstones.contains(&resource.profile()));
         if resource
             .view
             .as_ref()
@@ -1047,6 +1057,7 @@ impl EngineHost {
                 && resource.observation.is_none()
                 && resource.action.is_none()
                 && resource.navigation.is_none()
+                && resource.history_back.is_none()
                 && {
                     #[cfg(target_os = "macos")]
                     {

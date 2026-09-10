@@ -140,6 +140,9 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
     fn allows_human_request(&self) -> bool {
         self.discovery.is_production()
     }
+    fn allows_history_back(&self) -> bool {
+        self.discovery.is_production()
+    }
     fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
         self.extraction.extraction_schema()
     }

@@ -52,8 +52,8 @@ pub(crate) mod work_resource_failure_diagnostic;
 pub use work_resource::{work_browser_monotonic_deadline, work_browser_monotonic_now};
 #[cfg(target_os = "macos")]
 pub(crate) use work_resource::{
-    WorkActionTask, WorkLifecycleTask, WorkNavigationTask, WorkNotificationPermit,
-    WorkObservationTask, WorkResourceGuard,
+    WorkActionTask, WorkHistoryBackTask, WorkLifecycleTask, WorkNavigationTask,
+    WorkNotificationPermit, WorkObservationTask, WorkResourceGuard,
 };
 
 pub(crate) type AgentContextEventSink = Arc<dyn Fn(ContextNativeEvent) + Send + Sync>;
@@ -1458,6 +1458,12 @@ impl EngineAgentBrowserPort {
 
 impl AgentBrowserPort for EngineAgentBrowserPort {
     #[cfg(target_os = "macos")]
+    fn supports_work_resource_history_back(&self) -> bool {
+        let version = objc2_foundation::NSProcessInfo::processInfo().operatingSystemVersion();
+        version.majorVersion >= 26
+    }
+
+    #[cfg(target_os = "macos")]
     fn work_resource_act(
         &self,
         request: zephium_agentic::WorkBrowserActionRequest,
@@ -1472,6 +1478,14 @@ impl AgentBrowserPort for EngineAgentBrowserPort {
         completion: zephium_agentic::WorkBrowserNavigationCompletionCallback,
     ) -> zephium_agentic::WorkBrowserNavigationDispatch {
         self.schedule_work_navigation(request, completion)
+    }
+    #[cfg(target_os = "macos")]
+    fn work_resource_back(
+        &self,
+        request: zephium_agentic::WorkBrowserHistoryBackRequest,
+        completion: zephium_agentic::WorkBrowserHistoryBackCompletionCallback,
+    ) -> zephium_agentic::WorkBrowserHistoryBackDispatch {
+        self.schedule_work_history_back(request, completion)
     }
     #[cfg(target_os = "macos")]
     fn work_resource_lifecycle(

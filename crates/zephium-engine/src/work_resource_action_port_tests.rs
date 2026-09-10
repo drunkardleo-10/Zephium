@@ -18,7 +18,7 @@ pub(crate) fn request(
     guard.admit_read(&request, tick(2)).unwrap();
     let (invocation, owner) = request.into_parts();
     let frame = invocation.frame().clone();
-    let bytes = serde_json::to_vec(&serde_json::json!({"v": SEMANTIC_WIRE_VERSION,"i": invocation.invocation().get(),"g": invocation.snapshot_generation().get(),"c":"complete","n":[{"k":1,"r":"document"},{"k":2,"p":0,"r":"textbox","n":"Draft","o":2,"b":{"x":10,"y":20,"w":100,"h":30}}]})).unwrap();
+    let bytes = serde_json::to_vec(&serde_json::json!({"v": SEMANTIC_WIRE_VERSION,"i": invocation.invocation().get(),"g": invocation.snapshot_generation().get(),"c":"complete","n":[{"k":1,"r":"document"},{"k":2,"p":0,"r":"textbox","n":"Draft","o":2,"v":{"k":"text","value":""},"b":{"x":10,"y":20,"w":100,"h":30}}]})).unwrap();
     let snapshot = invocation.decode_result(&bytes).unwrap();
     guard.read_terminal_begin();
     let event = rows

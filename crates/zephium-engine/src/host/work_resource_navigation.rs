@@ -1,6 +1,7 @@
 //! Exact retained-page navigation. The original resource owns the view, gate
 //! and callback channels throughout; only this task belongs to the actor lease.
 use super::*;
+use crate::agent_context_port::WorkHistoryBackTask;
 use crate::agent_context_port::WorkNavigationTask;
 use zephium_agentic::ContextOperationJoin;
 
@@ -19,6 +20,20 @@ enum WorkNavigationStage {
     Navigating,
 }
 impl WorkNavigation {
+    pub(super) fn refuse(mut self, failure: ContextPortFailure) {
+        self.timer = None;
+        self.task.complete(Err(failure));
+    }
+}
+
+pub(super) struct WorkHistoryBack {
+    task: WorkHistoryBackTask,
+    timer: Option<crate::platform::imp::ContentPolicyTimeout>,
+    deadline: Instant,
+    ticket: crate::platform::macos::AgentHistoryBackTicket,
+    stage: WorkNavigationStage,
+}
+impl WorkHistoryBack {
     pub(super) fn refuse(mut self, failure: ContextPortFailure) {
         self.timer = None;
         self.task.complete(Err(failure));
@@ -266,8 +281,234 @@ impl WorkNativeResource {
             }
         }
     }
+    pub(super) fn progress_history_back(&mut self, erased: bool) {
+        let Some(pending) = self.history_back.as_ref() else {
+            return;
+        };
+        let request_coordinates = pending
+            .task
+            .request()
+            .map(|request| (request.lease().clone(), request.operation()));
+        let outcome = if erased || !self.guard.is_healthy() {
+            Some(Err(ContextPortFailure::NativeRefused))
+        } else if Instant::now() >= pending.deadline {
+            Some(Err(ContextPortFailure::TimedOut))
+        } else if work_browser_monotonic_now().is_none_or(|now| {
+            request_coordinates
+                .as_ref()
+                .is_none_or(|(lease, operation)| {
+                    now >= lease.deadline()
+                        || !self.guard.navigation_current(lease, *operation, now, true)
+                })
+        }) {
+            Some(Err(ContextPortFailure::TimedOut))
+        } else if pending.stage == WorkNavigationStage::Parking {
+            if !self
+                .view
+                .as_ref()
+                .is_some_and(|view| view.semantic_runtime_parked())
+            {
+                return;
+            }
+            let (ticket, expected) = match self.history_back.as_ref().and_then(|pending| {
+                pending
+                    .task
+                    .request()
+                    .map(|request| (pending.ticket, request.target().clone()))
+            }) {
+                Some(values) => values,
+                None => {
+                    self.guard.fail();
+                    return;
+                }
+            };
+            let dispatched = self.view.as_mut().is_some_and(|view| {
+                view.reactivate_history_destination(ticket)
+                    .is_ok_and(|target| target == expected)
+                    && view.dispatch_history_back(ticket)
+            });
+            if !dispatched {
+                Some(Err(ContextPortFailure::NativeRefused))
+            } else {
+                if let Some(pending) = self.history_back.as_mut() {
+                    pending.stage = WorkNavigationStage::Navigating;
+                }
+                None
+            }
+        } else {
+            let Some((_, operation)) = request_coordinates else {
+                self.guard.fail();
+                return;
+            };
+            if self
+                .view
+                .as_ref()
+                .and_then(|view| view.work_navigation())
+                .is_none_or(|gate| gate.failed())
+            {
+                Some(Err(ContextPortFailure::NativeRefused))
+            } else if !self
+                .view
+                .as_ref()
+                .is_some_and(|view| view.semantic_runtime_ready_for_history())
+            {
+                return;
+            } else {
+                let terminal = self
+                    .view
+                    .as_ref()
+                    .and_then(|view| view.work_navigation())
+                    .and_then(|gate| gate.take_successor_terminal());
+                let Some((actual, outcome)) = terminal else {
+                    return;
+                };
+                let expected = self
+                    .history_back
+                    .as_ref()
+                    .and_then(|pending| pending.task.request())
+                    .map(|request| request.target().clone());
+                if actual != operation || outcome.as_ref().ok() != expected.as_ref() {
+                    Some(Err(ContextPortFailure::NativeRefused))
+                } else {
+                    let current = self
+                        .view
+                        .as_ref()
+                        .and_then(|view| crate::platform::imp::current_url(view.view()));
+                    let ready = self
+                        .view
+                        .as_ref()
+                        .and_then(|view| view.work_navigation())
+                        .is_some_and(|gate| gate.ready(current.as_deref()));
+                    let ticket = self.history_back.as_ref().map(|pending| pending.ticket);
+                    let settled = match ticket {
+                        Some(ticket) if ready => self
+                            .view
+                            .as_mut()
+                            .is_some_and(|view| view.settle_history_back(ticket).is_ok()),
+                        _ => false,
+                    };
+                    if settled {
+                        Some(outcome)
+                    } else {
+                        Some(Err(ContextPortFailure::NativeRefused))
+                    }
+                }
+            }
+        };
+        if let Some(outcome) = outcome {
+            if outcome.is_err() {
+                self.guard.fail();
+                if let Some(ticket) = self.history_back.as_ref().map(|pending| pending.ticket) {
+                    if let Some(view) = self.view.as_mut() {
+                        let _ = view.refuse_history_back(ticket);
+                    }
+                }
+                if let Some(gate) = self.view.as_ref().and_then(|view| view.work_navigation()) {
+                    gate.refuse();
+                }
+            }
+            if let Some(mut pending) = self.history_back.take() {
+                pending.timer = None;
+                pending.task.complete(outcome);
+            }
+        }
+    }
 }
 impl EngineHost {
+    pub(crate) fn handle_work_history_back_task(&mut self, task: WorkHistoryBackTask) {
+        let guard = task.guard();
+        let Some(request) = task.request() else {
+            task.complete(Err(ContextPortFailure::NativeRefused));
+            return;
+        };
+        let lease = request.lease().clone();
+        let operation = request.operation();
+        let source = request.source();
+        let target = request.target().clone();
+        let Some(resource) = self
+            .work_resources
+            .get_mut(&guard.resource().identity().context())
+            .filter(|resource| Arc::ptr_eq(&resource.guard, &guard))
+        else {
+            task.complete(Err(ContextPortFailure::Stale));
+            return;
+        };
+        let accepted = work_browser_monotonic_now()
+            .is_some_and(|now| guard.navigation_current(&lease, operation, now, false))
+            && !self.erasure_tombstones.contains(&resource.profile())
+            && !resource.pending()
+            && resource.ready()
+            && resource
+                .view
+                .as_ref()
+                .is_some_and(|view| view.semantic_pending_for_audit() == Some(false));
+        if !accepted {
+            task.complete(Err(ContextPortFailure::Stale));
+            return;
+        }
+        let Some(now) = work_browser_monotonic_now() else {
+            task.complete(Err(ContextPortFailure::TimedOut));
+            return;
+        };
+        let duration = NAVIGATION_BUDGET.min(Duration::from_millis(
+            lease.deadline().millis().saturating_sub(now.millis()),
+        ));
+        let Some(deadline) = Instant::now().checked_add(duration) else {
+            task.complete(Err(ContextPortFailure::TimedOut));
+            return;
+        };
+        let Some(view) = resource.view.as_mut() else {
+            task.complete(Err(ContextPortFailure::Stale));
+            return;
+        };
+        let Some(gate) = view.work_navigation().cloned() else {
+            task.complete(Err(ContextPortFailure::NativeRefused));
+            return;
+        };
+        let Ok(ticket) = view.prepare_history_back() else {
+            task.complete(Err(ContextPortFailure::NativeRefused));
+            return;
+        };
+        if gate.arm_history_back(source, operation, target).is_err() {
+            let _ = view.refuse_history_back(ticket);
+            task.complete(Err(ContextPortFailure::NativeRefused));
+            return;
+        }
+        let timeout_guard = guard.clone();
+        let timer = crate::platform::imp::schedule_content_policy_timeout(duration, move || {
+            let rejected = timeout_guard.clone();
+            if !crate::host::try_with_agent_context_terminal(move |host| {
+                host.progress_work_resource(&timeout_guard)
+            }) {
+                rejected.fail();
+            }
+        });
+        resource.history_back = Some(WorkHistoryBack {
+            task,
+            timer,
+            deadline,
+            ticket,
+            stage: WorkNavigationStage::Parking,
+        });
+        let parked_guard = guard.clone();
+        let dispatched = resource
+            .history_back
+            .as_ref()
+            .is_some_and(|pending| pending.timer.is_some())
+            && view
+                .park_semantic_runtime(move |parked| {
+                    if !parked {
+                        parked_guard.fail();
+                    }
+                    crate::host::notify_work_resource(parked_guard);
+                })
+                .is_ok();
+        if !dispatched {
+            guard.fail();
+        }
+        self.progress_work_resource(&guard);
+    }
+
     pub(crate) fn handle_work_navigation_task(&mut self, task: WorkNavigationTask) {
         let guard = task.guard();
         let Some(request) = task.request() else {

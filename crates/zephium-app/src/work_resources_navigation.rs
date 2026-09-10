@@ -110,6 +110,73 @@ impl PendingNavigation {
             }
         }
     }
+    pub(super) fn dispatch_history_back(
+        &mut self,
+        active: &AgentActiveNavigation,
+    ) -> ContextDispatch {
+        let Ok(mut slot) = self.resource.lock_local(&self.slot) else {
+            return ContextDispatch::Rejected(ContextPortFailure::Shutdown);
+        };
+        let Some(preparation) = slot.preparation.take() else {
+            self.resource.fail();
+            return ContextDispatch::Rejected(ContextPortFailure::NativeRefused);
+        };
+        let request = match preparation.bind_history_back(active) {
+            Ok(request) => request,
+            Err(preparation) => {
+                slot.preparation = Some(*preparation);
+                let _ = slot.refuse_preparation(&self.shared, &self.resource);
+                return ContextDispatch::Rejected(ContextPortFailure::NativeRefused);
+            }
+        };
+        let Some(callback) = slot.callback.take() else {
+            self.resource.fail();
+            let _ = self.shared.lock_rows().and_then(|mut rows| {
+                rows.history_back_dispatch_refused(request)
+                    .map_err(Into::into)
+            });
+            return ContextDispatch::Rejected(ContextPortFailure::NativeRefused);
+        };
+        drop(slot);
+        let result = if !self.shared.global_current() || !self.resource.current() {
+            drop(callback);
+            Ok(WorkBrowserHistoryBackDispatch::Rejected {
+                request: Box::new(request),
+                failure: ContextPortFailure::Shutdown,
+            })
+        } else {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.shared.port.work_resource_back(request, callback)
+            }))
+        };
+        match result {
+            Ok(WorkBrowserHistoryBackDispatch::Scheduled) => ContextDispatch::Scheduled,
+            Ok(WorkBrowserHistoryBackDispatch::Rejected { request, failure }) => {
+                if let Ok(mut slot) = self.resource.lock_local(&self.slot) {
+                    slot.flight.rejected(&self.resource);
+                    if self
+                        .shared
+                        .lock_rows()
+                        .and_then(|mut rows| {
+                            rows.history_back_dispatch_refused(*request)
+                                .map_err(Into::into)
+                        })
+                        .is_err()
+                    {
+                        self.resource.fail();
+                    }
+                    if !slot.flight.contradictory {
+                        slot.flight.finish(&self.resource);
+                    }
+                }
+                ContextDispatch::Rejected(failure)
+            }
+            Err(_) => {
+                self.resource.fail();
+                ContextDispatch::Scheduled
+            }
+        }
+    }
     pub(super) fn cancel_preparation(&mut self) -> Result<(), Refusal> {
         self.resource
             .lock_local(&self.slot)?
