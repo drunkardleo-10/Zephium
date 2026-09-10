@@ -391,6 +391,9 @@ mod tests {
             "https://example.test/app/start#access_token%3Dshortsecret",
             "https://example.test/app/start?access_token%3Dshortsecret",
             "https://example.test/app/start#q=token=shortsecret",
+            "https://example.test/app/start#q=a=b=c=token=shortsecret",
+            "https://example.test/app/start?q=a=b=c=d=token=shortsecret",
+            "https://example.test/app/start?return=https%3A%2F%2Fother.test%2F%23token%3Dshortsecret",
         ] {
             assert!(
                 AgentNavigationDiscovery::try_new_production(

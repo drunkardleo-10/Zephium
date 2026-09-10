@@ -603,10 +603,16 @@ fn contains_sensitive_embedded_url_state_at_depth(value: &str, depth: u8) -> boo
         Some(decoded) => decoded,
         None => return true,
     };
-    if depth == MAX_NESTED_URL_STATE_DEPTH && decoded != value {
-        return true;
+    if depth == MAX_NESTED_URL_STATE_DEPTH {
+        // Reaching the fixed parsing budget with either another encoded layer
+        // or another assignment is ambiguous URL state. Fail closed instead of
+        // treating a credential label one level deeper as public.
+        return decoded != value
+            || decoded
+                .split(['?', '#', '&', ';'])
+                .any(|component| component.contains('='));
     }
-    decoded.split(['?', '&', ';']).any(|component| {
+    decoded.split(['?', '#', '&', ';']).any(|component| {
         component.split_once('=').is_some_and(|(key, nested)| {
             is_sensitive_url_parameter_name(key)
                 || has_credential_label(key)
@@ -1296,6 +1302,21 @@ mod tests {
             ),
             (
                 "https://example.test/docs#q=token=shortsecret",
+                "public",
+                false,
+            ),
+            (
+                "https://example.test/docs#q=a=b=c=token=shortsecret",
+                "public",
+                false,
+            ),
+            (
+                "https://example.test/docs?q=a=b=c=d=token=shortsecret",
+                "public",
+                false,
+            ),
+            (
+                "https://example.test/docs?return=https%3A%2F%2Fother.test%2F%23token%3Dshortsecret",
                 "public",
                 false,
             ),

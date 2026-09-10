@@ -7626,6 +7626,9 @@ mod tests {
             "https://example.test/docs#access_token%3Dshortsecret",
             "https://example.test/docs?access_token%3Dshortsecret",
             "https://example.test/docs#q=token=shortsecret",
+            "https://example.test/docs#q=a=b=c=token=shortsecret",
+            "https://example.test/docs?q=a=b=c=d=token=shortsecret",
+            "https://example.test/docs?return=https%3A%2F%2Fother.test%2F%23token%3Dshortsecret",
         ] {
             let target = crate::ContextNavigationTarget::parse(sensitive).unwrap();
             assert!(
