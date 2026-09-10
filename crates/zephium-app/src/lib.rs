@@ -28,7 +28,14 @@ mod store_reads;
 #[cfg(feature = "work-execution")]
 mod work;
 #[cfg(feature = "work-execution")]
+mod work_account;
+#[cfg(feature = "work-execution")]
 mod work_profile;
+#[cfg(feature = "work-execution")]
+pub use work_account::{
+    AgentWorkAccountCollector, AgentWorkAccountEnrollment, AgentWorkAccountFailure,
+    AgentWorkCollectedAccount, AgentWorkEnrolledAccount,
+};
 #[cfg(feature = "work-execution")]
 pub use work_profile::{
     AgentWorkProfileBinding, AgentWorkProfileReadiness, AgentWorkProfileRequest,
