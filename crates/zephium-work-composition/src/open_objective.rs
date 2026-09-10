@@ -209,10 +209,13 @@ impl PublicLocalActionWorkInvocation {
         if self.read.persist_result {
             input = input.persist_extraction_result()?;
         }
-        Ok(
-            TrustedWorkRequest::new(input, self.read.config, self.read.credential, task)
-                .with_browser_profile(profile),
-        )
+        let request = TrustedWorkRequest::new(input, self.read.config, self.read.credential, task)
+            .with_browser_profile(profile);
+        #[cfg(feature = "public-qualification")]
+        if self.read.inspectable_public {
+            return Ok(request.with_public_qualification_retention());
+        }
+        Ok(request)
     }
 }
 

@@ -23,7 +23,7 @@ use zephium_agent_controller::{
     AgentWorkLocalActionPolicy,
 };
 use zephium_agent_provider_transport::{
-    load_macos_development_openai_credential, AgentProviderTransportConfig,
+    load_macos_probe_openai_credential, AgentProviderTransportConfig,
 };
 use zephium_agent_runtime::AgentRuntimeConfig;
 use zephium_agentic::*;
@@ -92,7 +92,44 @@ enum Account {
 #[serde(deny_unknown_fields)]
 struct LocalActionApproval {
     max_actions: u64,
+    #[serde(default)]
+    clicks: Vec<ClickApproval>,
+    #[serde(default)]
     fills: Vec<FillApproval>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClickApproval {
+    target_name: String,
+    state: ClickState,
+    present: bool,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ClickState {
+    Checked,
+    Selected,
+    Expanded,
+    Disabled,
+    Required,
+    Invalid,
+    Focused,
+}
+
+impl From<ClickState> for SemanticState {
+    fn from(value: ClickState) -> Self {
+        match value {
+            ClickState::Checked => Self::Checked,
+            ClickState::Selected => Self::Selected,
+            ClickState::Expanded => Self::Expanded,
+            ClickState::Disabled => Self::Disabled,
+            ClickState::Required => Self::Required,
+            ClickState::Invalid => Self::Invalid,
+            ClickState::Focused => Self::Focused,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -150,46 +187,71 @@ struct ApprovedFill {
     value: SemanticActionText,
 }
 
+struct ApprovedClick {
+    target_name: String,
+    state: SemanticState,
+    present: bool,
+}
+
 struct DevelopmentLocalActionPolicy {
     origin: SemanticOrigin,
+    clicks: Vec<ApprovedClick>,
     fills: Vec<ApprovedFill>,
 }
 
-/// Release-excluded exact intent fixture. It approves only one unambiguous,
-/// public fill target/value pair and never grants a remote write.
+/// Release-excluded exact intent fixture. It approves only an unambiguous,
+/// public local interaction with a frozen postcondition and never grants a
+/// remote write.
 impl AgentWorkLocalActionPolicy for DevelopmentLocalActionPolicy {
     fn assess(
         &self,
         action: &SemanticPreparedAction,
         observation: &SemanticObservation,
     ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
-        if action.kind() != SemanticActionKind::Fill
-            || action.effect() != SemanticEffectClass::LocalWrite
-            || action.verification() != SemanticVerification::TargetValueMatchesInput
+        if action.effect() != SemanticEffectClass::LocalWrite
             || action.target_sensitivity() != SemanticSensitivity::Public
         {
             return Err(AgentWorkFailure::Contract);
         }
+        let operation = match action.kind() {
+            SemanticActionKind::Click => SemanticOperationClass::Click,
+            SemanticActionKind::Fill => SemanticOperationClass::Fill,
+            _ => return Err(AgentWorkFailure::Contract),
+        };
         let frame = observation
             .reference_frame(action.target_reference())
             .map_err(|_| AgentWorkFailure::Contract)?;
         let node = observation
-            .resolve(
-                action.target_reference(),
-                frame,
-                SemanticOperationClass::Fill,
-            )
+            .resolve(action.target_reference(), frame, operation)
             .map_err(|_| AgentWorkFailure::Contract)?;
         let Some(name) = node.name().map(SemanticText::as_str) else {
             return Err(AgentWorkFailure::Contract);
         };
-        let Some(value) = action.fill_text() else {
-            return Err(AgentWorkFailure::Contract);
+        let approved = match action.kind() {
+            SemanticActionKind::Click => {
+                let SemanticVerification::TargetState { state, present } = action.verification()
+                else {
+                    return Err(AgentWorkFailure::Contract);
+                };
+                self.clicks.iter().any(|approved| {
+                    approved.target_name == name
+                        && approved.state == state
+                        && approved.present == present
+                })
+            }
+            SemanticActionKind::Fill => {
+                if action.verification() != SemanticVerification::TargetValueMatchesInput {
+                    return Err(AgentWorkFailure::Contract);
+                }
+                let Some(value) = action.fill_text() else {
+                    return Err(AgentWorkFailure::Contract);
+                };
+                self.fills
+                    .iter()
+                    .any(|approved| approved.target_name == name && approved.value == *value)
+            }
+            _ => false,
         };
-        let approved = self
-            .fills
-            .iter()
-            .any(|approved| approved.target_name == name && approved.value == *value);
         let matching_targets = observation
             .frames()
             .iter()
@@ -198,13 +260,7 @@ impl AgentWorkLocalActionPolicy for DevelopmentLocalActionPolicy {
                 candidate
                     .name()
                     .is_some_and(|candidate| candidate.as_str() == name)
-                    && matches!(
-                        candidate.role(),
-                        SemanticRole::Textbox | SemanticRole::Searchbox
-                    )
-                    && candidate
-                        .operations()
-                        .contains(SemanticOperationClass::Fill)
+                    && candidate.operations().contains(operation)
                     && candidate.sensitivity() == SemanticSensitivity::Public
             })
             .take(2)
@@ -345,7 +401,7 @@ fn prepare(request: Request, deadline: Instant) -> Result<PreparedInvocation, &'
     let local_actions = local_actions
         .map(|actions| prepare_local_actions(origin, actions))
         .transpose()?;
-    let credential = load_macos_development_openai_credential()
+    let credential = load_macos_probe_openai_credential()
         .map_err(|_| "development Keychain credential unavailable")?;
     if Instant::now() >= deadline {
         return Err("Work deadline elapsed during preparation");
@@ -431,17 +487,31 @@ fn prepare_local_actions(
     origin: SemanticOrigin,
     approval: LocalActionApproval,
 ) -> Result<(DevelopmentLocalActionPolicy, u64), &'static str> {
-    if approval.fills.is_empty() || approval.fills.len() > 16 {
-        return Err("invalid local fill approval count");
+    if approval.clicks.len() + approval.fills.len() == 0
+        || approval.clicks.len() + approval.fills.len() > 16
+    {
+        return Err("invalid local action approval count");
+    }
+    let mut clicks = Vec::with_capacity(approval.clicks.len());
+    for click in approval.clicks {
+        validate_target_name(&click.target_name)?;
+        let state = click.state.into();
+        if clicks.iter().any(|existing: &ApprovedClick| {
+            existing.target_name == click.target_name
+                && existing.state == state
+                && existing.present == click.present
+        }) {
+            return Err("duplicate local click approval");
+        }
+        clicks.push(ApprovedClick {
+            target_name: click.target_name,
+            state,
+            present: click.present,
+        });
     }
     let mut fills = Vec::with_capacity(approval.fills.len());
     for fill in approval.fills {
-        if fill.target_name.trim().is_empty()
-            || fill.target_name.len() > 256
-            || fill.target_name.chars().any(char::is_control)
-        {
-            return Err("invalid local fill target name");
-        }
+        validate_target_name(&fill.target_name)?;
         let value =
             SemanticActionText::try_new(fill.value).map_err(|_| "invalid local fill value")?;
         if fills.iter().any(|existing: &ApprovedFill| {
@@ -455,9 +525,20 @@ fn prepare_local_actions(
         });
     }
     Ok((
-        DevelopmentLocalActionPolicy { origin, fills },
+        DevelopmentLocalActionPolicy {
+            origin,
+            clicks,
+            fills,
+        },
         approval.max_actions,
     ))
+}
+
+fn validate_target_name(name: &str) -> Result<(), &'static str> {
+    if name.trim().is_empty() || name.len() > 256 || name.chars().any(char::is_control) {
+        return Err("invalid local action target name");
+    }
+    Ok(())
 }
 
 pub(super) fn on_run_event(app: &tauri::AppHandle, event: &tauri::RunEvent) {
@@ -701,12 +782,17 @@ mod tests {
     }
 
     #[test]
-    fn local_action_fixture_freezes_bounded_unique_fill_intent() {
+    fn local_action_fixture_freezes_bounded_unique_intent() {
         let origin = SemanticOrigin::parse("https://app.notion.com").unwrap();
         let (policy, maximum) = prepare_local_actions(
             origin.clone(),
             LocalActionApproval {
                 max_actions: 2,
+                clicks: vec![ClickApproval {
+                    target_name: "Search".into(),
+                    state: ClickState::Expanded,
+                    present: true,
+                }],
                 fills: vec![FillApproval {
                     target_name: "Search".into(),
                     value: "Zephium Agent Qualification".into(),
@@ -716,11 +802,33 @@ mod tests {
         .unwrap();
         assert_eq!(maximum, 2);
         assert_eq!(policy.origin, origin);
+        assert_eq!(policy.clicks.len(), 1);
         assert_eq!(policy.fills.len(), 1);
         assert!(prepare_local_actions(
             SemanticOrigin::parse("https://app.notion.com").unwrap(),
             LocalActionApproval {
                 max_actions: 2,
+                clicks: vec![
+                    ClickApproval {
+                        target_name: "Search".into(),
+                        state: ClickState::Expanded,
+                        present: true,
+                    },
+                    ClickApproval {
+                        target_name: "Search".into(),
+                        state: ClickState::Expanded,
+                        present: true,
+                    },
+                ],
+                fills: Vec::new(),
+            }
+        )
+        .is_err());
+        assert!(prepare_local_actions(
+            SemanticOrigin::parse("https://app.notion.com").unwrap(),
+            LocalActionApproval {
+                max_actions: 2,
+                clicks: Vec::new(),
                 fills: vec![
                     FillApproval {
                         target_name: "Search".into(),
