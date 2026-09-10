@@ -226,20 +226,22 @@ impl EngineHost {
         let Some(action) = resource.action.as_ref() else {
             return;
         };
-        let current = work_browser_monotonic_now()
-            .is_some_and(|now| guard.action_current(&action.lease, action.attempt, now))
-            && !self.erasure_tombstones.contains(&resource.profile())
-            && resource.ready()
-            && action
-                .presentation
-                .as_ref()
-                .is_none_or(WorkObservationPresentation::human_current)
-            && resource
-                .view
-                .as_ref()
-                .and_then(|view| view.work_navigation())
-                .and_then(|gate| gate.observation_stamp(action.context))
-                == Some(action.document);
+        let lease_current = work_browser_monotonic_now()
+            .is_some_and(|now| guard.action_current(&action.lease, action.attempt, now));
+        let profile_current = !self.erasure_tombstones.contains(&resource.profile());
+        let resource_ready = resource.ready();
+        let human_current = action
+            .presentation
+            .as_ref()
+            .is_none_or(WorkObservationPresentation::human_current);
+        let document_current = resource
+            .view
+            .as_ref()
+            .and_then(|view| view.work_navigation())
+            .and_then(|gate| gate.observation_stamp(action.context))
+            == Some(action.document);
+        let current =
+            lease_current && profile_current && resource_ready && human_current && document_current;
         // URL drift closes authority, but cannot erase a recipe already handed
         // to the page. Only its exact runtime receiver may opt into this drain;
         // ordinary health loss, document replacement and controls still stop it.
@@ -271,6 +273,15 @@ impl EngineHost {
             }
         }
         if expired || (!current && !drain) {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            guard.record_failure_cause(ResourceFailureCause::ActionProgressAuthority {
+                lease_current,
+                profile_current,
+                resource_ready,
+                human_current,
+                document_current,
+                expired,
+            });
             #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
             if !action.cancelled {
                 save_window_probe::passive_lifetime_stop(
@@ -355,16 +366,30 @@ impl EngineHost {
                             native,
                             action.requested_at,
                             Box::new(move || {
-                                let current = Instant::now() < deadline
-                                    && human.as_ref().is_some_and(|fence| fence())
-                                    && work_browser_monotonic_now().is_some_and(|now| {
+                                let deadline_current = Instant::now() < deadline;
+                                let human_current = human.as_ref().is_some_and(|fence| fence());
+                                let lease_current =
+                                    work_browser_monotonic_now().is_some_and(|now| {
                                         authority_guard.action_current(&lease, attempt, now)
-                                    })
-                                    && gate
-                                        .as_ref()
-                                        .and_then(|gate| gate.observation_stamp(context))
-                                        == Some(document);
+                                    });
+                                let document_current = gate
+                                    .as_ref()
+                                    .and_then(|gate| gate.observation_stamp(context))
+                                    == Some(document);
+                                let current = deadline_current
+                                    && human_current
+                                    && lease_current
+                                    && document_current;
                                 if !current {
+                                    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                                    authority_guard.record_failure_cause(
+                                        ResourceFailureCause::ActionHandoffAuthority {
+                                            deadline_current,
+                                            human_current,
+                                            lease_current,
+                                            document_current,
+                                        },
+                                    );
                                     authority_guard.fail();
                                 }
                                 current

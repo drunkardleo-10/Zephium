@@ -23,9 +23,61 @@ pub enum WorkResourceFailureCause {
     LifecycleDeadline(WorkResourceDeadlineStage),
     ObservationPresentation(WorkObservationPresentationFailure),
     NativeAdmission(ContextPortFailure),
+    /// Exact compiled call site of an otherwise unclassified native failure.
+    /// Source is a closed code-owner tag; line is a source-code line, never a
+    /// page location, URL, identifier, or dynamically supplied message.
+    NativeGuardFailure {
+        source: WorkNativeGuardFailureSource,
+        line: u32,
+    },
+    /// Actual predicate results at the retained recipe's page handoff.
+    ActionHandoffAuthority {
+        deadline_current: bool,
+        human_current: bool,
+        lease_current: bool,
+        document_current: bool,
+    },
+    ActionProgressAuthority {
+        lease_current: bool,
+        profile_current: bool,
+        resource_ready: bool,
+        human_current: bool,
+        document_current: bool,
+        expired: bool,
+    },
     /// No original native edge supplied a more specific cause (for example,
     /// external resource invalidation). Never guess navigation or focus loss.
     UnattributedResourceFailure,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkNativeGuardFailureSource {
+    ActionHost,
+    ActionPort,
+    ResourceHost,
+    ResourcePort,
+    ObservationHost,
+    NavigationHost,
+    Other,
+}
+impl WorkNativeGuardFailureSource {
+    pub(super) fn of(file: &str) -> Self {
+        if file.ends_with("/host/work_resource_action.rs") {
+            Self::ActionHost
+        } else if file.ends_with("/work_resource_action_port.rs") {
+            Self::ActionPort
+        } else if file.ends_with("/host/work_resource.rs") {
+            Self::ResourceHost
+        } else if file.ends_with("/work_resource_port.rs") {
+            Self::ResourcePort
+        } else if file.ends_with("/host/work_resource_observation.rs") {
+            Self::ObservationHost
+        } else if file.ends_with("/host/work_resource_navigation.rs") {
+            Self::NavigationHost
+        } else {
+            Self::Other
+        }
+    }
 }
 
 /// Content-free first cause for one retained-page successor navigation. These

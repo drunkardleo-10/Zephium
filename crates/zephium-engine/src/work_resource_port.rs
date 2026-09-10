@@ -164,9 +164,12 @@ impl WorkResourceGuard {
             self.fail();
         }
     }
+    #[cfg_attr(feature = "native-agentic-work-lifetime-diagnostic", track_caller)]
     fn report_uncertainty(&self) {
         let uncertain = self.state.lock().map_or(true, |state| state.uncertain);
         if uncertain {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            self.record_unclassified_failure();
             if let Some(health) = &self.health {
                 health.invalidate();
             }
@@ -225,7 +228,10 @@ impl WorkResourceGuard {
     pub(crate) fn document_policy(&self) -> zephium_agentic::WorkBrowserDocumentPolicy {
         self.document_policy
     }
+    #[cfg_attr(feature = "native-agentic-work-lifetime-diagnostic", track_caller)]
     pub(crate) fn fail(&self) {
+        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+        self.record_unclassified_failure();
         // Invalidate the stable application observation before waking it. No
         // native ownership lock is held while invoking its coalesced wake.
         if let Some(health) = &self.health {
@@ -239,6 +245,18 @@ impl WorkResourceGuard {
         if !matches!(state.phase, Phase::Destroying | Phase::Destroyed) {
             state.phase = Phase::Quarantined;
         }
+    }
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    #[track_caller]
+    fn record_unclassified_failure(&self) {
+        use super::work_resource_failure_diagnostic::{
+            WorkNativeGuardFailureSource, WorkResourceFailureCause,
+        };
+        let caller = std::panic::Location::caller();
+        self.record_failure_cause(WorkResourceFailureCause::NativeGuardFailure {
+            source: WorkNativeGuardFailureSource::of(caller.file()),
+            line: caller.line(),
+        });
     }
     fn admit_lifecycle(
         &self,

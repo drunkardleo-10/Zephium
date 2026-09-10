@@ -47,6 +47,39 @@ fn source() -> (WorkBrowserResources, WorkBrowserResourceRequest) {
 
 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
 #[test]
+fn unclassified_guard_failure_records_original_caller_before_cleanup() {
+    use crate::{WorkNativeGuardFailureSource, WorkResourceFailureCause};
+    let (_, request) = source();
+    let guard = WorkResourceGuard::new(&request, &admission());
+    let first_line = line!() + 1;
+    guard.fail();
+    guard.fail();
+    guard.record_failure_cause(WorkResourceFailureCause::UnattributedResourceFailure);
+    assert_eq!(
+        *guard.failure_cause.lock().unwrap(),
+        Some(WorkResourceFailureCause::NativeGuardFailure {
+            source: WorkNativeGuardFailureSource::Other,
+            line: first_line,
+        })
+    );
+    let guard = WorkResourceGuard::new(&request, &admission());
+    guard.report_uncertainty();
+    assert_eq!(*guard.failure_cause.lock().unwrap(), None);
+    guard.state.lock().unwrap().uncertain = true;
+    let first_line = line!() + 1;
+    guard.report_uncertainty();
+    guard.fail();
+    assert_eq!(
+        *guard.failure_cause.lock().unwrap(),
+        Some(WorkResourceFailureCause::NativeGuardFailure {
+            source: WorkNativeGuardFailureSource::Other,
+            line: first_line,
+        })
+    );
+}
+
+#[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+#[test]
 fn resource_failure_cause_is_exact_first_wins_and_survives_retention_and_factory_seal() {
     use crate::{
         WorkObservationPresentationFailure as PresentationFailure,
