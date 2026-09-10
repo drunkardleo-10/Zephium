@@ -7,8 +7,33 @@ use zephium_agentic::*;
 #[must_use]
 pub struct AgentBrowserVerifiedTransition {
     pub(crate) continuation: AgentProviderContinuation,
-    pub(crate) diff: Box<SemanticDiff>,
+    #[cfg(feature = "probe-harness")]
+    pub(crate) probe_diff: Option<Box<SemanticDiff>>,
     pub(crate) terminal: Option<SemanticActionBatchResult>,
+}
+
+pub(crate) enum AgentBrowserVerifiedState {
+    Accounted(SemanticActionResult),
+    #[cfg(feature = "probe-harness")]
+    ProbeDiff(Box<SemanticDiff>),
+}
+
+impl AgentBrowserVerifiedState {
+    pub(crate) fn diff(&self) -> Option<&SemanticDiff> {
+        match self {
+            Self::Accounted(result) => result.diff(),
+            #[cfg(feature = "probe-harness")]
+            Self::ProbeDiff(diff) => Some(diff),
+        }
+    }
+
+    pub(crate) fn action_result(&self) -> Option<&SemanticActionResult> {
+        match self {
+            Self::Accounted(result) => Some(result),
+            #[cfg(feature = "probe-harness")]
+            Self::ProbeDiff(_) => None,
+        }
+    }
 }
 
 impl AgentBrowserVerifiedTransition {
@@ -18,15 +43,34 @@ impl AgentBrowserVerifiedTransition {
         self.terminal.as_ref()
     }
 
-    pub(crate) fn into_parts(self) -> (AgentProviderContinuation, Box<SemanticDiff>) {
-        (self.continuation, self.diff)
+    pub(crate) fn into_parts(
+        self,
+    ) -> Option<(AgentProviderContinuation, AgentBrowserVerifiedState)> {
+        #[cfg(feature = "probe-harness")]
+        if let Some(diff) = self.probe_diff {
+            return Some((
+                self.continuation,
+                AgentBrowserVerifiedState::ProbeDiff(diff),
+            ));
+        }
+        Some((
+            self.continuation,
+            AgentBrowserVerifiedState::Accounted(self.terminal?.into_final_state()?),
+        ))
     }
 }
 
 impl fmt::Debug for AgentBrowserVerifiedTransition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AgentBrowserVerifiedTransition")
-            .field("diff_stats", &self.diff.stats())
+            .field(
+                "next_state",
+                &self
+                    .terminal
+                    .as_ref()
+                    .and_then(|terminal| terminal.final_state())
+                    .map(SemanticActionResult::next_state),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -567,13 +611,8 @@ impl AgentBrowserAction {
         .map_err(|refusal| {
             AgentBrowserActionFinalizationRefusal::Finalization(Box::new(refusal))
         })?;
-        // The finalizer already enforces the complete baseline/proof/current join.
-        // A fallback remains a typed stop; it cannot be replayed as an action diff.
-        let Some(diff) = result.result().diff().cloned() else {
-            return Err(AgentBrowserActionFinalizationRefusal::FreshSnapshot(
-                Box::new(result),
-            ));
-        };
+        // Both a delta and a fresh observation carry the same independently
+        // verified effect. Record its batch/accounting before provider delivery.
         self.proposal
             .batch
             .record_success(&self.proposal.action, result)
@@ -587,7 +626,8 @@ impl AgentBrowserAction {
             .map_err(AgentBrowserActionFinalizationRefusal::Batch)?;
         Ok(AgentBrowserVerifiedTransition {
             continuation: self.proposal.continuation,
-            diff: Box::new(diff),
+            #[cfg(feature = "probe-harness")]
+            probe_diff: None,
             terminal: Some(terminal),
         })
     }
@@ -647,8 +687,6 @@ pub enum AgentBrowserActionError {
 pub enum AgentBrowserActionFinalizationRefusal {
     /// The full charged owner and observation remain available for reconciliation.
     Finalization(Box<AgentAccountedSemanticActionResultRefusal>),
-    /// This exact action requires a new full-observation turn.
-    FreshSnapshot(Box<AgentAccountedSemanticActionResult>),
     /// Complete accounted result remains owned after batch correlation refusal.
     BatchAdmission(Box<SemanticActionBatchAdmissionRefusal>),
     /// Closed batch invariant failure; no successful continuation exists.

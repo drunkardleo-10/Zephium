@@ -4,6 +4,7 @@ use super::*;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum CombinedFault {
     None,
+    BoundaryAfterAction,
     Premature,
     ExtraAction,
     WrongSchema,
@@ -19,6 +20,12 @@ pub(super) enum CombinedFault {
     Ceiling,
     ResultRefused,
     ActionLost,
+}
+
+#[test]
+fn verified_action_with_changed_boundary_continues_with_fresh_evidence() {
+    let _serial = lock(&SERIAL);
+    provider_fixture(ProviderFault::Combined(CombinedFault::BoundaryAfterAction));
 }
 
 pub(super) struct CombinedTask {
@@ -134,7 +141,10 @@ pub(super) fn assert_outcome(
         calls.iter().filter(|call| **call == 7).count(),
         effects as usize
     );
-    if matches!(fault, CombinedFault::None | CombinedFault::Ceiling) {
+    if matches!(
+        fault,
+        CombinedFault::None | CombinedFault::Ceiling | CombinedFault::BoundaryAfterAction
+    ) {
         let AgentWorkOutcome::Succeeded(mut success) = outcome else {
             panic!("{outcome:?}");
         };

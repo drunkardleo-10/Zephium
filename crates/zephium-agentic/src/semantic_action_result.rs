@@ -83,6 +83,9 @@ enum SemanticActionStateUpdate {
 /// model delivery. The contained diff or fresh observation must still pass the
 /// existing token-admission and committed-delivery boundary.
 pub struct SemanticActionResult {
+    // Exact acknowledged predecessor joined by the finalizer. Full-state
+    // continuations must prove the same predecessor as delta continuations.
+    pub(crate) baseline: SemanticObservationAcknowledgement,
     verified: SemanticVerifiedAction,
     update: SemanticActionStateUpdate,
 }
@@ -389,11 +392,15 @@ fn finish_semantic_action_result(
             }
         }
     };
-    SemanticActionResult { verified, update }
+    SemanticActionResult {
+        baseline: acknowledgement.clone(),
+        verified,
+        update,
+    }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::semantic_diff::SemanticObservationFingerprint;
     use crate::{
@@ -551,6 +558,45 @@ mod tests {
             ),
         )
         .expect("verify")
+    }
+
+    pub(crate) fn fresh_provider_fixture(
+        baseline_id: u64,
+        current_id: u64,
+        expanded: bool,
+    ) -> (SemanticObservation, SemanticActionResult) {
+        let context = context();
+        let baseline = observation(context, baseline_id, 1, 1, false, "Private old status");
+        let action = prepared(&baseline, 1);
+        let current = observation(context, current_id, 2, 2, true, "Private new status");
+        let current = if expanded {
+            let request = baseline
+                .begin_expansion(
+                    SemanticObservationId::new(current_id).unwrap(),
+                    SemanticReferenceId::new(1).unwrap(),
+                    baseline.frames()[0].frame(),
+                    crate::SemanticExpansionKind::Subtree,
+                    SemanticObservationBudget::INITIAL_FILTERED,
+                )
+                .unwrap();
+            SemanticObservationAssembler::new(request, current.frames()[0].clone())
+                .unwrap()
+                .finish()
+                .unwrap()
+        } else {
+            current
+        };
+        let result = finalize_semantic_action_result(
+            &action,
+            verify(&action, &current, 1),
+            &baseline,
+            &acknowledge(&baseline),
+            post(current, 101),
+            SemanticDiffBudget::try_new(1).unwrap(),
+        )
+        .unwrap();
+        assert!(result.fresh_snapshot().is_some());
+        (baseline, result)
     }
 
     #[test]

@@ -1336,6 +1336,35 @@ impl AgentRunPolicy {
         )
     }
 
+    /// Reserve full observation delivery for an already-bound tool result.
+    /// The predecessor's exact plan node must survive policy rejoining before
+    /// any observation taint or model budget can be admitted.
+    pub(crate) fn prepare_provider_continuation_observation_input(
+        &mut self,
+        request: AgentModelCallRequest,
+        expected: AgentModelCallExpectation,
+        observation: &SemanticObservation,
+        payload: &SemanticModelPayload,
+        structured_input_tokens: u64,
+    ) -> Result<AgentModelCallAdmission, AgentPolicyError> {
+        if request.id() != expected.call
+            || request.lease() != expected.lease
+            || self.manifest.id() != expected.manifest
+            || self
+                .lease_index(expected.lease)
+                .and_then(|index| self.leases.get(index))
+                .is_none_or(|lease| lease.binding.node() != expected.node)
+        {
+            return Err(AgentPolicyError::Authority);
+        }
+        self.prepare_provider_observation_input(
+            request,
+            observation,
+            payload,
+            structured_input_tokens,
+        )
+    }
+
     /// Reserves exact semantic-diff input before any model transport receives bytes.
     ///
     /// The diff must extend an exact baseline already committed to this policy.
@@ -4610,6 +4639,81 @@ mod tests {
         ));
         assert_eq!(refused.policy.pending_model_calls(), 0);
         assert!(refused.policy.taints().is_empty());
+    }
+
+    #[test]
+    fn full_observation_continuation_rejects_foreign_plan_node_before_reservation() {
+        let source = origin("replacement");
+        let context = make_context(29_007, 29_008, 29_009);
+        let observation = observation(
+            context,
+            source.clone(),
+            2,
+            vec![json!({"k":1,"r":"document","o":16})],
+        );
+        let payload = encode_semantic_observation(
+            &observation,
+            SemanticModelEncodingBudget::INITIAL_CONSERVATIVE,
+        )
+        .unwrap()
+        .admit_conservative_utf8(&tokenizer())
+        .unwrap();
+        let mut fixture = policy_fixture(
+            29_007,
+            29_008,
+            source,
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read],
+            run_budget(10, 100_000, 100_000),
+        );
+        let request = call_request(
+            2,
+            fixture.lease,
+            account(context, NOW),
+            64_000,
+            128,
+            100_000,
+            NOW,
+        );
+        let expected = AgentModelCallExpectation::new(
+            fixture.policy.manifest.id(),
+            request.id(),
+            fixture.lease,
+            AgentPlanNodeId::from_raw(999),
+        );
+        assert_eq!(
+            fixture
+                .policy
+                .prepare_provider_continuation_observation_input(
+                    request,
+                    expected,
+                    &observation,
+                    &payload,
+                    512
+                )
+                .err(),
+            Some(AgentPolicyError::Authority)
+        );
+        assert_eq!(fixture.policy.pending_model_calls(), 0);
+        assert_eq!(fixture.policy.accounting().reserved_operations(), 0);
+        assert_eq!(fixture.policy.accounting().reserved_model_tokens(), 0);
+        assert_eq!(fixture.policy.accounting().reserved_cost_micro_usd(), 0);
+        let expected = AgentModelCallExpectation::new(
+            fixture.policy.manifest.id(),
+            request.id(),
+            fixture.lease,
+            fixture.policy.leases[0].binding.node(),
+        );
+        assert!(fixture
+            .policy
+            .prepare_provider_continuation_observation_input(
+                request,
+                expected,
+                &observation,
+                &payload,
+                512
+            )
+            .is_ok());
     }
 
     #[test]

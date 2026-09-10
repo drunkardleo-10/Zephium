@@ -2216,7 +2216,7 @@ impl AgentBrowserSession {
         self.drive(prepared.into_transport_input()).await
     }
 
-    /// Sends one independently verified action diff as the exact tool result.
+    /// Sends independently verified action state as the exact tool result.
     pub async fn continue_after_verified_action(
         &mut self,
         transition: AgentBrowserVerifiedTransition,
@@ -2229,20 +2229,47 @@ impl AgentBrowserSession {
             return Err(AgentBrowserProviderError::Deadline);
         }
         let request = self.next_model_call_request()?;
-        let (continuation, diff) = transition.into_parts();
+        let (continuation, result) = transition
+            .into_parts()
+            .ok_or(AgentBrowserProviderError::Continuation)?;
+        let Some(diff) = result.diff() else {
+            let result = result
+                .action_result()
+                .ok_or(AgentBrowserProviderError::Continuation)?;
+            let observation = result
+                .fresh_snapshot()
+                .ok_or(AgentBrowserProviderError::Continuation)?;
+            let payload = encode_semantic_observation(
+                observation,
+                SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
+            )
+            .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
+            .map_err(AgentBrowserProviderError::InitialEncoding)?;
+            let prepared =
+                AgentPreparedObservationRequest::try_verified_action_for_provider_exact_count(
+                    &mut self.policy,
+                    request,
+                    result,
+                    payload,
+                    self.config.clone(),
+                    continuation,
+                )
+                .map_err(|_| AgentBrowserProviderError::Authority)?;
+            return self.drive(prepared.into_transport_input()).await;
+        };
         let payload = encode_semantic_diff(
-            &diff,
+            diff,
             SemanticModelEncodingBudget::ACTION_DIFF_PROVIDER_EXACT_CONSERVATIVE,
         )
         .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
         .map_err(AgentBrowserProviderError::DiffEncoding)?;
         let bound = continuation
-            .bind_diff_request(request, &self.config, &diff, payload)
+            .bind_diff_request(request, &self.config, diff, payload)
             .map_err(|_| AgentBrowserProviderError::Continuation)?;
         let draft = AgentProviderDiffRequestDraft::try_new(bound)
             .map_err(|_| AgentBrowserProviderError::Continuation)?;
         let prepared = draft
-            .try_prepare_for_provider_exact_count(&mut self.policy, request, &diff)
+            .try_prepare_for_provider_exact_count(&mut self.policy, request, diff)
             .map_err(|_| AgentBrowserProviderError::Authority)?;
         self.drive(prepared.into_transport_input()).await
     }

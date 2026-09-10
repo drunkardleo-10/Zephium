@@ -882,6 +882,8 @@ enum Fault {
     #[cfg(feature = "probe-harness")]
     ActionApplied,
     #[cfg(feature = "probe-harness")]
+    ActionAppliedBoundary,
+    #[cfg(feature = "probe-harness")]
     ActionBudget,
     #[cfg(feature = "probe-harness")]
     ActionCancel,
@@ -1067,8 +1069,18 @@ impl AgentBrowserPort for Port {
             wire
         };
         #[cfg(feature = "probe-harness")]
-        let wire = if self.fault == Fault::ActionApplied && lock(&self.calls).contains(&7) {
+        let wire = if matches!(
+            self.fault,
+            Fault::ActionApplied | Fault::ActionAppliedBoundary
+        ) && lock(&self.calls).contains(&7)
+        {
             wire.replace("\"value\":\"\"", "\"value\":\"fixture value\"")
+        } else {
+            wire
+        };
+        #[cfg(feature = "probe-harness")]
+        let wire = if self.fault == Fault::ActionAppliedBoundary && lock(&self.calls).contains(&7) {
+            wire.replace("]}", ",{\"k\":3,\"p\":0,\"r\":\"frame_boundary\"}]}")
         } else {
             wire
         };
@@ -1226,6 +1238,7 @@ impl AgentBrowserPort for Port {
             Fault::ActionCallback => {}
             Fault::ActionVerification
             | Fault::ActionApplied
+            | Fault::ActionAppliedBoundary
             | Fault::Navigation(NavigationFault::DiscoveryAction(_))
             | Fault::Scoped(ScopedFault::Combined) => {
                 let now = request.requested_at();
@@ -1882,6 +1895,27 @@ fn provider_fixture_with_discovery_account(
             if let ProviderFault::Navigation(fault) = fault {
                 fault.check_request(&request[header + 4..], turns);
             }
+            if fault == ProviderFault::Combined(CombinedFault::BoundaryAfterAction) && turns == 1 {
+                let wire: serde_json::Value =
+                    serde_json::from_slice(&request[header + 4..]).unwrap();
+                let input = wire["input"].as_array().unwrap();
+                let outputs = input
+                    .iter()
+                    .filter(|item| item["type"] == "function_call_output")
+                    .collect::<Vec<_>>();
+                assert_eq!(outputs.len(), 1);
+                assert_eq!(outputs[0]["call_id"], "call_1");
+                let output: serde_json::Value =
+                    serde_json::from_str(outputs[0]["output"].as_str().unwrap()).unwrap();
+                assert_eq!(output["status"], "verified");
+                assert_eq!(output["update"], "replace_observation");
+                let observation = output["observation"].as_str().unwrap();
+                assert!(
+                    observation.contains("fixture value")
+                        && observation.contains("snapshot=2")
+                        && observation.contains("frame_boundary")
+                );
+            }
             let (kind, body) = if is_count {
                 (
                     "application/json",
@@ -2240,6 +2274,8 @@ fn provider_fixture_with_discovery_account(
         Fault::Scoped(fault)
     } else if fault == ProviderFault::Combined(CombinedFault::ActionLost) {
         Fault::ActionLost
+    } else if fault == ProviderFault::Combined(CombinedFault::BoundaryAfterAction) {
+        Fault::ActionAppliedBoundary
     } else if matches!(fault, ProviderFault::Combined(_)) {
         Fault::ActionApplied
     } else if let ProviderFault::Native(fault) = fault {
@@ -2318,6 +2354,12 @@ fn provider_fixture_with_discovery_account(
         return;
     }
     if let ProviderFault::Combined(fault) = fault {
+        if fault == CombinedFault::BoundaryAfterAction {
+            assert!(
+                matches!(outcome, AgentWorkOutcome::Succeeded(_)),
+                "{outcome:?}"
+            );
+        }
         assert_eq!(
             server.join().expect("combined fixture server"),
             requests / 2

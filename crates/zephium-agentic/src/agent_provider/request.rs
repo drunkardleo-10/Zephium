@@ -1538,6 +1538,34 @@ pub struct AgentPreparedObservationRequest {
 }
 
 impl AgentPreparedObservationRequest {
+    /// Deliver the exact verified post-action observation when conservative
+    /// delta premises fail. The replacement uses the original action tool ID,
+    /// full-input reservation, and committed observation-delivery boundary.
+    /// Qualified only for OpenAI's provider-exact input accounting; other
+    /// provider/accounting combinations refuse before policy reservation.
+    pub fn try_verified_action_for_provider_exact_count(
+        policy: &mut AgentRunPolicy,
+        call_request: AgentModelCallRequest,
+        result: &crate::SemanticActionResult,
+        payload: SemanticModelPayload,
+        config: AgentProviderCallConfig,
+        continuation: super::AgentProviderContinuation,
+    ) -> Result<Self, AgentProviderRequestError> {
+        let observation = result.fresh_snapshot().ok_or(AgentPolicyError::Authority)?;
+        let (prior, transcript) = continuation
+            .bind_action_observation(result, call_request, &config, &payload)
+            .map_err(|_| AgentPolicyError::Authority)?;
+        Self::try_bound_observation_for_provider_exact_count(
+            policy,
+            call_request,
+            observation,
+            payload,
+            config,
+            prior,
+            transcript,
+        )
+    }
+
     /// Return an exact pre-dispatch scope refusal through the authenticated
     /// provider tool-result protocol. The current observation is redelivered,
     /// not recaptured; all bytes and the next call use the original run budget.
@@ -1550,14 +1578,34 @@ impl AgentPreparedObservationRequest {
         config: AgentProviderCallConfig,
         refusal: super::AgentProviderObservationRefusal,
     ) -> Result<Self, AgentProviderRequestError> {
-        let semantic_payload_tokens =
-            AgentProviderInputTokenCount::from_measurement(payload.token_measurement());
         let (prior, transcript) = refusal
             .bind(observation, &config, payload.as_str().to_owned())
             .map_err(|_| AgentPolicyError::Authority)?;
+        Self::try_bound_observation_for_provider_exact_count(
+            policy,
+            call_request,
+            observation,
+            payload,
+            config,
+            prior,
+            transcript,
+        )
+    }
+
+    fn try_bound_observation_for_provider_exact_count(
+        policy: &mut AgentRunPolicy,
+        call_request: AgentModelCallRequest,
+        observation: &SemanticObservation,
+        payload: SemanticModelPayload,
+        config: AgentProviderCallConfig,
+        prior: AgentProviderCallIdentity,
+        transcript: AgentProviderBoundTranscript,
+    ) -> Result<Self, AgentProviderRequestError> {
+        let semantic_payload_tokens =
+            AgentProviderInputTokenCount::from_measurement(payload.token_measurement());
         if !prior.matches_manifest_revision(policy.manifest().id(), policy.manifest().guard())
             || prior.lease() != call_request.lease()
-            || prior.call() == call_request.id()
+            || call_request.id() <= prior.call()
         {
             return Err(AgentPolicyError::Authority.into());
         }
@@ -1576,8 +1624,14 @@ impl AgentPreparedObservationRequest {
             Some(payload.token_measurement()),
             &structured_input,
         )?;
-        let admission = policy.prepare_provider_observation_input(
+        let admission = policy.prepare_provider_continuation_observation_input(
             call_request,
+            AgentModelCallExpectation::new(
+                prior.manifest(),
+                call_request.id(),
+                prior.lease(),
+                prior.node(),
+            ),
             observation,
             &payload,
             u64::from(structured_input.tokens()),

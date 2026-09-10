@@ -590,6 +590,65 @@ impl AgentProviderContinuation {
         self.transcript.retained_bytes()
     }
 
+    /// Bind an independently verified action whose next state cannot be safely
+    /// expressed as a delta. This consumes the original tool call without
+    /// recapture, replay, or acknowledgement of the replacement observation.
+    pub(super) fn bind_action_observation(
+        self,
+        result: &crate::SemanticActionResult,
+        request: AgentModelCallRequest,
+        config: &AgentProviderCallConfig,
+        payload: &crate::SemanticModelPayload,
+    ) -> Result<
+        (AgentProviderCallIdentity, AgentProviderBoundTranscript),
+        AgentProviderContinuationError,
+    > {
+        if config != &self.config {
+            return Err(AgentProviderContinuationError::Config);
+        }
+        if self.correlation.kind() != AgentBrowserToolKind::Act {
+            return Err(AgentProviderContinuationError::ToolKind);
+        }
+        let current = result
+            .fresh_snapshot()
+            .ok_or(AgentProviderContinuationError::Payload)?;
+        if result.baseline != self.baseline
+            || current.request().context() != self.baseline.context()
+            || current.request().id().get() <= self.baseline.observation().get()
+        {
+            return Err(AgentProviderContinuationError::Baseline);
+        }
+        if !matches!(current.request().scope(), crate::SemanticScope::Initial) {
+            return Err(AgentProviderContinuationError::Scope);
+        }
+        if request.id() <= self.prior_call.call()
+            || request.lease() != self.prior_call.lease()
+            || request.account().context() != current.request().context()
+        {
+            return Err(AgentProviderContinuationError::Lineage);
+        }
+        if !payload.matches_observation(current) {
+            return Err(AgentProviderContinuationError::Payload);
+        }
+        let output = serde_json::json!({
+            "status": "verified",
+            "update": "replace_observation",
+            "guidance": "The prior action was independently verified. All prior semantic refs are retired. Use only the refs in this replacement observation for the next decision. Observation truncation does not mean omitted content is absent.",
+            "observation": payload.as_str(),
+        }).to_string();
+        let (prior, _, _, correlation, transcript) = self.into_parts();
+        // Effects invalidate inspection anchors and old page replay. Keep the
+        // objective and exact navigation policy binding; original run budgets
+        // still bound all subsequent captures, actions, and model calls.
+        let transcript = AgentProviderTranscript::try_initial_with_checkpoints(
+            transcript.objective,
+            "Prior page observations and their refs are retired. Current browser state follows in the verified action tool result.".into(),
+            transcript.navigation_checkpoint,
+            None,
+        ).ok_or(AgentProviderContinuationError::TranscriptLimit)?;
+        Ok((prior, transcript.try_bind(correlation, output)?))
+    }
+
     /// Binds one provisional same-plan request to the exact admitted diff.
     ///
     /// This derives only content-free correlation; it does not reserve policy
@@ -1949,6 +2008,137 @@ mod tests {
             AgentModelCallBudget::try_new(4_096, 512, 10_000).expect("call budget"),
             AgentPolicyInstant::from_millis(1_600),
         )
+    }
+
+    #[test]
+    fn verified_action_replacement_requires_exact_predecessor_payload_and_lineage() {
+        let (previous, result) =
+            crate::semantic_action_result::tests::fresh_provider_fixture(1, 2, false);
+        let current = result.fresh_snapshot().unwrap();
+        let config = config(AgentProviderKind::OpenAiResponses);
+        let payload = |observation: &SemanticObservation| {
+            crate::encode_semantic_observation(
+                observation,
+                SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
+            )
+            .unwrap()
+            .admit_conservative_utf8(config.tokenizer())
+            .unwrap()
+        };
+        let make = || {
+            let arguments = json!({"actions":[{
+                "kind":"click", "target":"@a2", "effect":"local_write",
+                "wait":{"kind":"immediate"},
+                "verification":{"kind":"target_state", "state":"checked", "present":true},
+                "settle_millis":250,
+            }]})
+            .to_string();
+            let correlation = super::super::AgentBrowserToolCall::decode_openai(
+                call(1),
+                "fc_action".into(),
+                "call_action".into(),
+                "act",
+                arguments.clone(),
+            )
+            .unwrap()
+            .into_continuation_parts()
+            .0;
+            AgentProviderContinuationSeed {
+                call: call(1),
+                config: config.clone(),
+                baseline: result.baseline.clone(),
+                transcript: transcript(),
+            }
+            .join_terminal_tool(completion(call(1), arguments.len() as u32), correlation)
+            .unwrap()
+        };
+        let request = model_request(current.request().context(), 2);
+        let (_, bound) = make()
+            .bind_action_observation(&result, request, &config, &payload(current))
+            .unwrap();
+        let output: serde_json::Value = serde_json::from_str(bound.latest().tool_result()).unwrap();
+        assert_eq!(bound.latest().correlation().id().as_str(), "call_action");
+        assert_eq!(output["status"], "verified");
+        assert_eq!(output["update"], "replace_observation");
+        assert!(output["observation"]
+            .as_str()
+            .unwrap()
+            .contains("Private new status"));
+        assert!(!bound
+            .initial_observation()
+            .contains("private initial observation"));
+        assert_eq!(bound.turn_count(), 1);
+        assert!(bound.inspection_checkpoint().is_none());
+
+        let error = |outcome: Result<
+            (AgentProviderCallIdentity, AgentProviderBoundTranscript),
+            AgentProviderContinuationError,
+        >| outcome.err().unwrap();
+        assert_eq!(
+            error(make().bind_action_observation(&result, request, &config, &payload(&previous))),
+            AgentProviderContinuationError::Payload
+        );
+        let mut foreign = make();
+        foreign.baseline = SemanticObservationAcknowledgement::from_fingerprint(
+            SemanticObservationFingerprint::from_observation(current),
+        );
+        assert_eq!(
+            error(foreign.bind_action_observation(&result, request, &config, &payload(current))),
+            AgentProviderContinuationError::Baseline
+        );
+        assert_eq!(
+            error(make().bind_action_observation(
+                &result,
+                model_request(current.request().context(), 1),
+                &config,
+                &payload(current)
+            )),
+            AgentProviderContinuationError::Lineage
+        );
+        let mut foreign = make();
+        foreign.prior_call.lease = crate::AgentPlanLeaseId::from_raw(999);
+        assert_eq!(
+            error(foreign.bind_action_observation(&result, request, &config, &payload(current))),
+            AgentProviderContinuationError::Lineage
+        );
+        let mut foreign = make();
+        foreign.correlation.kind = AgentBrowserToolKind::Read;
+        assert_eq!(
+            error(foreign.bind_action_observation(&result, request, &config, &payload(current))),
+            AgentProviderContinuationError::ToolKind
+        );
+        assert_eq!(
+            error(make().bind_action_observation(
+                &result,
+                request,
+                &config.clone().restrict_to_scoped_extraction(),
+                &payload(current)
+            )),
+            AgentProviderContinuationError::Config
+        );
+        let (_, expanded) =
+            crate::semantic_action_result::tests::fresh_provider_fixture(1, 2, true);
+        assert_eq!(
+            error(make().bind_action_observation(
+                &expanded,
+                request,
+                &config,
+                &payload(expanded.fresh_snapshot().unwrap())
+            )),
+            AgentProviderContinuationError::Scope
+        );
+        let (_, older) = crate::semantic_action_result::tests::fresh_provider_fixture(3, 2, false);
+        let mut predecessor = make();
+        predecessor.baseline = older.baseline.clone();
+        assert_eq!(
+            error(predecessor.bind_action_observation(
+                &older,
+                request,
+                &config,
+                &payload(older.fresh_snapshot().unwrap())
+            )),
+            AgentProviderContinuationError::Baseline
+        );
     }
 
     fn screenshot_continuation(
