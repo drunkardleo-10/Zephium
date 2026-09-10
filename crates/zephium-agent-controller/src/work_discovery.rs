@@ -17,9 +17,9 @@ pub trait AgentWorkAccountSource: Send {
 }
 
 /// Host-owned approval and independent effect classifier for local reversible
-/// actions during an open objective. The host freezes the approved intent in
-/// this object before admission. Implementations must establish that the exact
-/// target and operands are within that intent and have only local effects.
+/// actions, including read-only UI interactions, during an open objective. The
+/// host freezes the approved intent before admission and must establish that
+/// the exact target and operands are within that intent and have only local effects.
 /// Roles, names, page claims and the model-declared effect do not establish
 /// this: autosaving inputs, submits, remote writes and capability boundaries
 /// must refuse. Calls must be bounded and nonblocking. No native work belongs
@@ -167,13 +167,16 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
             || action.bound_action().snapshot_generation() != snapshot.generation()
             || action.checkpoint_snapshot() != snapshot.generation()
             || action.checkpoint_invocation() != snapshot.invocation()
-            || action.effect() != SemanticEffectClass::LocalWrite
+            || !matches!(
+                action.effect(),
+                SemanticEffectClass::Read | SemanticEffectClass::LocalWrite
+            )
         {
             return Err(AgentWorkFailure::Contract);
         }
         let assessment = policy.assess(action, observation)?;
         if !assessment.matches_action(action)
-            || assessment.actual_effect() != SemanticEffectClass::LocalWrite
+            || assessment.actual_effect() != action.effect()
             || assessment.destination_origin() != self.discovery.origin()
         {
             return Err(AgentWorkFailure::Contract);
@@ -262,7 +265,20 @@ mod tests {
             action: &SemanticPreparedAction,
             _: &SemanticObservation,
         ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
-            if action.fill_text().map(SemanticActionText::as_str) != Some("approved") {
+            let approved = match action.kind() {
+                SemanticActionKind::Click => {
+                    action.verification()
+                        == SemanticVerification::TargetState {
+                            state: SemanticState::Focused,
+                            present: true,
+                        }
+                }
+                SemanticActionKind::Fill => {
+                    action.fill_text().map(SemanticActionText::as_str) == Some("approved")
+                }
+                _ => false,
+            };
+            if !approved {
                 return Err(AgentWorkFailure::Contract);
             }
             Ok(AgentEffectAssessment::new(
@@ -283,7 +299,7 @@ mod tests {
         )
         .unwrap();
         let wire = format!(
-            r#"{{"v":1,"i":{generation},"g":{generation},"c":"complete","n":[{{"k":1,"r":"document","o":16}},{{"k":2,"p":0,"r":"textbox","n":"Search","s":64,"o":3,"v":{{"k":"text","value":""}},"b":{{"x":1,"y":2,"w":100,"h":30}}}}]}}"#
+            r#"{{"v":1,"i":{generation},"g":{generation},"c":"complete","n":[{{"k":1,"r":"document","o":16}},{{"k":2,"p":0,"r":"textbox","n":"Search","s":0,"o":3,"v":{{"k":"text","value":""}},"b":{{"x":1,"y":2,"w":100,"h":30}}}}]}}"#
         );
         let snapshot = decode_semantic_snapshot(
             SemanticDecodeContext::new(
@@ -332,6 +348,69 @@ mod tests {
         )
         .unwrap();
         batch.actions()[0].prepare(snapshot).unwrap()
+    }
+
+    #[test]
+    fn read_click_requires_matching_host_classification_and_current_evidence() {
+        let context = context();
+        let observation = local_observation(context, 1);
+        let snapshot = &observation.frames()[0];
+        let proposal = SemanticActionProposal::try_new(
+            SemanticActionIntent::Click {
+                target: SemanticReferenceId::new(2).unwrap(),
+            },
+            SemanticEffectClass::Read,
+            SemanticWaitCondition::Immediate,
+            SemanticVerification::TargetState {
+                state: SemanticState::Focused,
+                present: true,
+            },
+            SemanticSettleBudget::try_new(2000).unwrap(),
+        )
+        .unwrap();
+        let batch = SemanticActionBatch::bind(
+            SemanticActionBatchId::new(1).unwrap(),
+            &observation,
+            &[snapshot.frame().clone()],
+            vec![proposal],
+        )
+        .unwrap();
+        let action = batch.actions()[0].prepare(snapshot).unwrap();
+        let origin = SemanticOrigin::parse("https://example.test/").unwrap();
+        for (effect, destination, accepted) in [
+            (SemanticEffectClass::Read, origin.clone(), true),
+            (SemanticEffectClass::LocalWrite, origin.clone(), false),
+            (SemanticEffectClass::ExternalWrite, origin.clone(), false),
+            (
+                SemanticEffectClass::Read,
+                SemanticOrigin::parse("https://foreign.test/").unwrap(),
+                false,
+            ),
+        ] {
+            let mut task = AgentWorkDiscoveryTask::try_new(
+                context.identity(),
+                AgentNavigationDiscovery::try_new(
+                    ContextNavigationTarget::parse("https://example.test/start").unwrap(),
+                    "/".into(),
+                    2,
+                )
+                .unwrap(),
+                vec![SemanticExtractionFieldSchema::try_text("answer".into(), true, 64).unwrap()],
+            )
+            .unwrap();
+            task.evaluate(&observation).unwrap();
+            assert!(task.assess_observed(&action, &observation).is_err());
+            let mut task = task.with_local_actions(Box::new(LocalPolicy {
+                effect,
+                destination,
+            }));
+            assert_eq!(
+                task.assess_observed(&action, &observation).is_ok(),
+                accepted
+            );
+            task.evaluate(&local_observation(context, 2)).unwrap();
+            assert!(task.assess_observed(&action, &observation).is_err());
+        }
     }
 
     #[test]

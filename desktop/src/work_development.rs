@@ -102,8 +102,28 @@ struct LocalActionApproval {
 #[serde(deny_unknown_fields)]
 struct ClickApproval {
     target_name: String,
+    #[serde(default)]
+    effect: ClickEffect,
     state: ClickState,
     present: bool,
+}
+
+/// Trusted fixture classification, never inferred from the model or page.
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ClickEffect {
+    Read,
+    #[default]
+    LocalWrite,
+}
+
+impl From<ClickEffect> for SemanticEffectClass {
+    fn from(value: ClickEffect) -> Self {
+        match value {
+            ClickEffect::Read => Self::Read,
+            ClickEffect::LocalWrite => Self::LocalWrite,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -189,6 +209,7 @@ struct ApprovedFill {
 
 struct ApprovedClick {
     target_name: String,
+    effect: SemanticEffectClass,
     state: SemanticState,
     present: bool,
 }
@@ -208,9 +229,7 @@ impl AgentWorkLocalActionPolicy for DevelopmentLocalActionPolicy {
         action: &SemanticPreparedAction,
         observation: &SemanticObservation,
     ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
-        if action.effect() != SemanticEffectClass::LocalWrite
-            || action.target_sensitivity() != SemanticSensitivity::Public
-        {
+        if action.target_sensitivity() != SemanticSensitivity::Public {
             return Err(AgentWorkFailure::Contract);
         }
         let operation = match action.kind() {
@@ -227,17 +246,20 @@ impl AgentWorkLocalActionPolicy for DevelopmentLocalActionPolicy {
         let Some(name) = node.name().map(SemanticText::as_str) else {
             return Err(AgentWorkFailure::Contract);
         };
-        let approved = match action.kind() {
+        let actual_effect = match action.kind() {
             SemanticActionKind::Click => {
                 let SemanticVerification::TargetState { state, present } = action.verification()
                 else {
                     return Err(AgentWorkFailure::Contract);
                 };
-                self.clicks.iter().any(|approved| {
-                    approved.target_name == name
-                        && approved.state == state
-                        && approved.present == present
-                })
+                self.clicks
+                    .iter()
+                    .find(|approved| {
+                        approved.target_name == name
+                            && approved.state == state
+                            && approved.present == present
+                    })
+                    .map(|approved| approved.effect)
             }
             SemanticActionKind::Fill => {
                 if action.verification() != SemanticVerification::TargetValueMatchesInput {
@@ -249,8 +271,9 @@ impl AgentWorkLocalActionPolicy for DevelopmentLocalActionPolicy {
                 self.fills
                     .iter()
                     .any(|approved| approved.target_name == name && approved.value == *value)
+                    .then_some(SemanticEffectClass::LocalWrite)
             }
-            _ => false,
+            _ => None,
         };
         let matching_targets = observation
             .frames()
@@ -265,13 +288,14 @@ impl AgentWorkLocalActionPolicy for DevelopmentLocalActionPolicy {
             })
             .take(2)
             .count();
-        if !approved || matching_targets != 1 {
+        let actual_effect = actual_effect.ok_or(AgentWorkFailure::Contract)?;
+        if actual_effect != action.effect() || matching_targets != 1 {
             return Err(AgentWorkFailure::Contract);
         }
         Ok(AgentEffectAssessment::new(
             action,
             self.origin.clone(),
-            SemanticEffectClass::LocalWrite,
+            actual_effect,
         ))
     }
 }
@@ -501,10 +525,13 @@ fn prepare_local_actions(
                 && existing.state == state
                 && existing.present == click.present
         }) {
+            // One intent cannot carry conflicting classifications, even when
+            // the caller supplies different effects for otherwise equal clicks.
             return Err("duplicate local click approval");
         }
         clicks.push(ApprovedClick {
             target_name: click.target_name,
+            effect: click.effect.into(),
             state,
             present: click.present,
         });
@@ -790,6 +817,7 @@ mod tests {
                 max_actions: 2,
                 clicks: vec![ClickApproval {
                     target_name: "Search".into(),
+                    effect: ClickEffect::Read,
                     state: ClickState::Expanded,
                     present: true,
                 }],
@@ -803,6 +831,7 @@ mod tests {
         assert_eq!(maximum, 2);
         assert_eq!(policy.origin, origin);
         assert_eq!(policy.clicks.len(), 1);
+        assert_eq!(policy.clicks[0].effect, SemanticEffectClass::Read);
         assert_eq!(policy.fills.len(), 1);
         assert!(prepare_local_actions(
             SemanticOrigin::parse("https://app.notion.com").unwrap(),
@@ -811,11 +840,13 @@ mod tests {
                 clicks: vec![
                     ClickApproval {
                         target_name: "Search".into(),
+                        effect: ClickEffect::Read,
                         state: ClickState::Expanded,
                         present: true,
                     },
                     ClickApproval {
                         target_name: "Search".into(),
+                        effect: ClickEffect::LocalWrite,
                         state: ClickState::Expanded,
                         present: true,
                     },
@@ -842,6 +873,30 @@ mod tests {
             }
         )
         .is_err());
+    }
+
+    #[test]
+    fn click_fixture_effect_is_explicit_and_cannot_grant_remote_writes() {
+        let legacy: ClickApproval =
+            serde_json::from_str(r#"{"target_name":"Search","state":"expanded","present":true}"#)
+                .unwrap();
+        assert_eq!(
+            SemanticEffectClass::from(legacy.effect),
+            SemanticEffectClass::LocalWrite
+        );
+        for effect in [
+            "external_write",
+            "communication",
+            "purchase",
+            "destructive",
+            "capability_boundary",
+        ] {
+            let approval = json!({
+                "target_name": "Search", "effect": effect,
+                "state": "expanded", "present": true
+            });
+            assert!(serde_json::from_value::<ClickApproval>(approval).is_err());
+        }
     }
 
     #[test]
