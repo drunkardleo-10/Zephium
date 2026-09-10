@@ -41,6 +41,21 @@ pub trait AgentWorkLocalActionPolicy: Send {
         action: &SemanticPreparedAction,
         observation: &SemanticObservation,
     ) -> Result<AgentEffectAssessment, AgentWorkFailure>;
+
+    /// Advances policy-owned task progress only after independent native
+    /// verification. Pre-dispatch assessment must remain side-effect free.
+    fn accept_verified_action(
+        &mut self,
+        _: &SemanticActionBatchResult,
+        _: &SemanticObservation,
+    ) -> Result<(), AgentWorkFailure> {
+        Ok(())
+    }
+
+    /// Whether the required verified local-action sequence is complete.
+    fn terminal_extraction_ready(&self) -> bool {
+        true
+    }
 }
 
 /// Bounded observed-link exploration followed by one current-document mapping.
@@ -131,6 +146,21 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
             .as_ref()
             .ok_or(AgentWorkFailure::Contract)?
             .model_action_operations(node, observation)
+    }
+    fn accept_verified_action(
+        &mut self,
+        result: &SemanticActionBatchResult,
+        observation: &SemanticObservation,
+    ) -> Result<(), AgentWorkFailure> {
+        self.local_actions
+            .as_mut()
+            .ok_or(AgentWorkFailure::Contract)?
+            .accept_verified_action(result, observation)
+    }
+    fn terminal_extraction_ready(&self) -> bool {
+        self.local_actions
+            .as_ref()
+            .is_none_or(|policy| policy.terminal_extraction_ready())
     }
     fn evaluate(
         &mut self,
@@ -260,6 +290,7 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
         if self.complete
             || result.observation() != observation
             || self.account.get().map(|sample| sample.context()) != Some(context)
+            || !self.terminal_extraction_ready()
         {
             return Err(AgentWorkFailure::Contract);
         }

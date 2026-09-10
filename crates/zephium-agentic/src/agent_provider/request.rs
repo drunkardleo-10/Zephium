@@ -123,6 +123,8 @@ const AGENT_BROWSER_INSTRUCTIONS_V1: &str = concat!(
     "advance to the next useful step. Choose verification for the intended ",
     "outcome, not an incidental click effect: opening a search or command dialog requires ",
     "page_dialog_opened, then fresh inspection of its contents. Never substitute focused=true ",
+    "for opening. Choosing an item whose intended outcome is dismissing an open page dialog ",
+    "requires page_dialog_closed. Never substitute focused=true ",
     "for opening, activating, submitting or changing something. Focus verification is valid ",
     "only when focusing the target is itself the intended outcome. Ask for human control when a safe supplied ",
     "operation cannot complete the objective."
@@ -5318,7 +5320,7 @@ static NAVIGATION_ACTIONS_EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolD
         }
         tools.push(BrowserToolDefinition {
             kind: AgentBrowserToolKind::Act,
-            description: "Propose one current-ref Click, Fill or Select with verification of its intended outcome. Fill and Select require local_write, including editing a search field. Click uses read for exploration or opening a dialog, local_write for reversible local changes. Only these effects are available; autosaved external changes are outside this profile. Trusted host assessment still decides permission. Use immediate or mutation_quiet settlement with at least 2000 milliseconds. Opening a page dialog requires page_dialog_opened, followed by fresh inspection of its contents. Native dialogs, navigation, keyboard and scroll effects are unavailable through act. Navigate through the separate navigate tool when authorized.",
+            description: "Propose one current-ref Click, Fill or Select with verification of its intended outcome. Fill and Select require local_write, including editing a search field. Click uses read for exploration or opening a dialog, local_write for reversible local changes. Only these effects are available; autosaved external changes are outside this profile. Trusted host assessment still decides permission. Use immediate or mutation_quiet settlement with at least 2000 milliseconds. Opening a page dialog requires page_dialog_opened; choosing an item that dismisses it requires page_dialog_closed. Both are followed by fresh inspection. Native dialogs, navigation, keyboard and scroll effects are unavailable through act. Navigate through the separate navigate tool when authorized.",
             parameters: action,
         });
         tools.push(BrowserToolDefinition {
@@ -6031,9 +6033,20 @@ fn verification_schema(action: SemanticActionKind, snapshot_only: bool) -> Value
         schema["description"] = json!("Use when the click is intended to open a page dialog, such as search or a command palette. Independently verifies a newly visible DOM dialog; inspect fresh state next to identify its contents.");
         schema
     };
+    let page_dialog_closed = || {
+        let mut schema = tagged_object("page_dialog_closed", Vec::new());
+        schema["description"] = json!("Use when choosing an item inside an open page dialog is intended to dismiss it. Independently verifies that a previously visible DOM dialog disappeared; inspect fresh state next to verify the selected content.");
+        schema
+    };
     if snapshot_only {
         match action {
-            SemanticActionKind::Click => return any_of(vec![target_state(), page_dialog_opened()]),
+            SemanticActionKind::Click => {
+                return any_of(vec![
+                    target_state(),
+                    page_dialog_opened(),
+                    page_dialog_closed(),
+                ])
+            }
             SemanticActionKind::Press => {
                 return any_of(vec![
                     target_state(),
@@ -6048,6 +6061,7 @@ fn verification_schema(action: SemanticActionKind, snapshot_only: bool) -> Value
         SemanticActionKind::Click => any_of(vec![
             target_state(),
             page_dialog_opened(),
+            page_dialog_closed(),
             tagged_object("navigation_committed", Vec::new()),
             tagged_object("dialog", vec![("state", dialog_schema())]),
         ]),
@@ -6507,7 +6521,11 @@ mod tests {
                                 .iter()
                                 .map(|v| v["properties"]["kind"]["enum"][0].as_str().unwrap())
                                 .collect::<BTreeSet<_>>(),
-                            BTreeSet::from(["target_state", "page_dialog_opened"])
+                            BTreeSet::from([
+                                "target_state",
+                                "page_dialog_opened",
+                                "page_dialog_closed",
+                            ])
                         );
                         let target_state = verifications
                             .iter()
@@ -6532,6 +6550,14 @@ mod tests {
                             .as_str()
                             .unwrap()
                             .contains("inspect fresh state"));
+                        let closed = verifications
+                            .iter()
+                            .find(|v| v["properties"]["kind"]["enum"][0] == "page_dialog_closed")
+                            .unwrap();
+                        assert!(closed["description"]
+                            .as_str()
+                            .unwrap()
+                            .contains("previously visible DOM dialog disappeared"));
                         continue;
                     }
                     "fill" => "target_value_matches_input",

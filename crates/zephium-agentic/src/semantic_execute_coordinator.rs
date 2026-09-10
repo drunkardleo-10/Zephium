@@ -595,6 +595,9 @@ impl SemanticModelActionQualificationExecution {
             crate::SemanticVerification::PageDialogOpened => {
                 crate::SemanticEffectProofKind::PageDialogOpened
             }
+            crate::SemanticVerification::PageDialogClosed => {
+                crate::SemanticEffectProofKind::PageDialogClosed
+            }
             crate::SemanticVerification::TargetState { .. } => {
                 crate::SemanticEffectProofKind::TargetState
             }

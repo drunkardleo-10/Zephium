@@ -1149,6 +1149,7 @@ fn decode_verification(
             present,
         },
         VerificationWire::PageDialogOpened {} => SemanticVerification::PageDialogOpened,
+        VerificationWire::PageDialogClosed {} => SemanticVerification::PageDialogClosed,
         VerificationWire::TargetValueMatchesInput => SemanticVerification::TargetValueMatchesInput,
         VerificationWire::TargetValueChanged => SemanticVerification::TargetValueChanged,
         VerificationWire::TargetSelectionMatchesOption => {
@@ -1376,6 +1377,7 @@ enum StandaloneWaitWire {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum VerificationWire {
     PageDialogOpened {},
+    PageDialogClosed {},
     TargetState { state: StateWire, present: bool },
     TargetValueMatchesInput,
     TargetValueChanged,
@@ -1769,6 +1771,7 @@ mod tests {
     fn all_semantic_action_variants_decode_through_existing_contracts() {
         let arguments = r#"{"actions":[
           {"kind":"click","target":"@a1","effect":"read","wait":{"kind":"target_state","state":"expanded","present":true},"verification":{"kind":"target_state","state":"expanded","present":true},"settle_millis":1000},
+          {"kind":"click","target":"@a7","effect":"read","wait":{"kind":"immediate"},"verification":{"kind":"page_dialog_closed"},"settle_millis":1000},
           {"kind":"fill","target":"@a2","value":"ordinary value","effect":"read","wait":{"kind":"semantic_change"},"verification":{"kind":"target_value_matches_input"},"settle_millis":1000},
           {"kind":"select","target":"@a3","option":"@a4","effect":"read","wait":{"kind":"immediate"},"verification":{"kind":"target_selection_matches_option"},"settle_millis":1000},
           {"kind":"press","target":"@a5","key":"enter","effect":"read","wait":{"kind":"navigation_committed"},"verification":{"kind":"navigation_committed"},"settle_millis":1000},
@@ -1778,9 +1781,9 @@ mod tests {
         let AgentBrowserToolProposal::Act(batch) = call.proposal() else {
             panic!("act");
         };
-        assert_eq!(batch.actions().len(), 5);
+        assert_eq!(batch.actions().len(), 6);
         assert_eq!(batch.effect(), SemanticEffectClass::Read);
-        assert_eq!(batch.settle_millis(), 5_000);
+        assert_eq!(batch.settle_millis(), 6_000);
         assert_eq!(batch.text_bytes(), "ordinary value".len());
     }
 

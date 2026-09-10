@@ -238,7 +238,7 @@ impl fmt::Debug for SemanticEffectEvidence<'_> {
 /// deliberately different: its verifier needs the exact adjacent before/after
 /// values, but those values must never become public runtime data. This helper
 /// selects and borrows them inside the agentic core, returning only the opaque
-/// evidence envelope. Page-dialog opening consumes independent bounded samples
+/// evidence envelope. Page-dialog transitions consume independent bounded samples
 /// carried privately by the adjacent snapshot. Native navigation/dialog/scroll
 /// postconditions require other evidence and therefore fail closed here.
 pub fn prepare_semantic_action_snapshot_evidence<'a>(
@@ -248,11 +248,9 @@ pub fn prepare_semantic_action_snapshot_evidence<'a>(
     snapshot: &'a SemanticSnapshot,
 ) -> Result<SemanticEffectEvidence<'a>, SemanticSnapshotEvidenceError> {
     match action.verification() {
-        SemanticVerification::PageDialogOpened => Ok(SemanticEffectEvidence::snapshot(
-            attempt,
-            observed_at,
-            snapshot,
-        )),
+        SemanticVerification::PageDialogOpened | SemanticVerification::PageDialogClosed => Ok(
+            SemanticEffectEvidence::snapshot(attempt, observed_at, snapshot),
+        ),
         SemanticVerification::TargetValueMatchesInput => {
             let (before, after) = action.verification_fill_values(snapshot)?;
             Ok(SemanticEffectEvidence::exact_target_value(
@@ -287,6 +285,8 @@ pub fn prepare_semantic_action_snapshot_evidence<'a>(
 pub enum SemanticEffectProofKind {
     /// An independently sampled DOM dialog became visible in the same frame.
     PageDialogOpened,
+    /// An independently sampled DOM dialog disappeared in the same frame.
+    PageDialogClosed,
     /// Exact allowlisted target state transitioned in the adjacent snapshot.
     TargetState,
     /// Exact safe fill value matched the requested bounded input.
@@ -646,6 +646,35 @@ pub(crate) fn verify_semantic_action(
                 }
                 (
                     SemanticEffectProofKind::PageDialogOpened,
+                    snapshot.frame().context(),
+                    Some(snapshot.invocation()),
+                    Some(snapshot.generation()),
+                )
+            }
+            (
+                SemanticVerification::PageDialogClosed,
+                SemanticEffectEvidenceKind::Snapshot(snapshot),
+            ) => {
+                let sample = snapshot
+                    .page_dialog_sample
+                    .as_ref()
+                    .ok_or(SemanticVerificationError::OutcomeNotObserved)?;
+                if snapshot.frame() != action.frame()
+                    || action.checkpoint_snapshot().get().checked_add(1)
+                        != Some(snapshot.generation().get())
+                    || action.checkpoint_invocation().get().checked_add(1)
+                        != Some(snapshot.invocation().get())
+                    || sample.a != evidence.attempt.get()
+                    || sample.i != action.checkpoint_invocation().get()
+                    || sample.g != action.checkpoint_snapshot().get()
+                {
+                    return Err(SemanticVerificationError::StaleEvidence);
+                }
+                if !sample.before.iter().any(|key| !sample.after.contains(key)) {
+                    return Err(SemanticVerificationError::OutcomeNotObserved);
+                }
+                (
+                    SemanticEffectProofKind::PageDialogClosed,
                     snapshot.frame().context(),
                     Some(snapshot.invocation()),
                     Some(snapshot.generation()),
@@ -1907,6 +1936,64 @@ mod tests {
             }
             assert!(verify(&invalid).is_err(), "accepted {field}");
         }
+    }
+
+    #[test]
+    fn page_dialog_close_requires_a_removed_correlated_dialog() {
+        let (observation, _) = observation();
+        let batch = bind(
+            &observation,
+            SemanticActionIntent::Click {
+                target: SemanticReferenceId::new(2).unwrap(),
+            },
+            SemanticWaitCondition::Immediate,
+            SemanticVerification::PageDialogClosed,
+        )
+        .unwrap();
+        let action = batch.actions()[0]
+            .prepare(&observation.frames()[0])
+            .unwrap();
+        let tracker = immediate(&action, 2);
+        let mut snapshot = snapshot_for_frame(
+            observation.frames()[0].frame().clone(),
+            2,
+            2,
+            "complete",
+            json!([{"k": 1, "r": "document"}]),
+        );
+        snapshot.page_dialog_sample = Some(crate::semantic_wire::PageDialogSample {
+            a: 2,
+            i: 1,
+            g: 1,
+            before: vec![8, 9],
+            after: vec![8],
+        });
+        let evidence = prepare_semantic_action_snapshot_evidence(
+            &action,
+            SemanticActionAttemptId::new(2).unwrap(),
+            SemanticSettleInstant::from_millis(101),
+            &snapshot,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_semantic_action(&tracker, &action, evidence)
+                .unwrap()
+                .proof(),
+            SemanticEffectProofKind::PageDialogClosed
+        );
+
+        snapshot.page_dialog_sample.as_mut().unwrap().after = vec![8, 9, 10];
+        let evidence = prepare_semantic_action_snapshot_evidence(
+            &action,
+            SemanticActionAttemptId::new(2).unwrap(),
+            SemanticSettleInstant::from_millis(101),
+            &snapshot,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_semantic_action(&tracker, &action, evidence),
+            Err(SemanticVerificationError::OutcomeNotObserved)
+        );
     }
 
     #[test]

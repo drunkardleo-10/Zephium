@@ -148,15 +148,28 @@ enum Account {
 struct LocalActionApproval {
     max_actions: u64,
     #[serde(default)]
+    required_sequence: Option<RequiredLocalActionSequence>,
+    #[serde(default)]
     clicks: Vec<ClickApproval>,
     #[serde(default)]
     fills: Vec<FillApproval>,
 }
 
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RequiredLocalActionSequence {
+    DialogSearchResult,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ClickApproval {
-    target_name: String,
+    #[serde(default)]
+    target_name: Option<String>,
+    #[serde(default)]
+    target_name_prefix: Option<String>,
+    #[serde(default)]
+    target_role: Option<ClickTargetRole>,
     #[serde(default)]
     effect: ClickEffect,
     verification: ClickVerification,
@@ -167,6 +180,7 @@ struct ClickApproval {
 enum ClickVerification {
     TargetState { state: ClickState, present: bool },
     PageDialogOpened {},
+    PageDialogClosed {},
 }
 
 impl From<ClickVerification> for SemanticVerification {
@@ -177,6 +191,7 @@ impl From<ClickVerification> for SemanticVerification {
                 present,
             },
             ClickVerification::PageDialogOpened {} => Self::PageDialogOpened,
+            ClickVerification::PageDialogClosed {} => Self::PageDialogClosed,
         }
     }
 }
@@ -188,6 +203,24 @@ enum ClickEffect {
     Read,
     #[default]
     LocalWrite,
+}
+
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum ClickTargetRole {
+    Link,
+    Button,
+    Option,
+}
+
+impl From<ClickTargetRole> for SemanticRole {
+    fn from(value: ClickTargetRole) -> Self {
+        match value {
+            ClickTargetRole::Link => Self::Link,
+            ClickTargetRole::Button => Self::Button,
+            ClickTargetRole::Option => Self::Option,
+        }
+    }
 }
 
 impl From<ClickEffect> for SemanticEffectClass {
@@ -287,15 +320,79 @@ struct ApprovedFill {
 }
 
 struct ApprovedClick {
-    target_name: String,
+    target: ApprovedClickTarget,
     effect: SemanticEffectClass,
     verification: SemanticVerification,
+}
+
+#[derive(Eq, PartialEq)]
+enum ApprovedClickTarget {
+    ExactName(String),
+    UniqueRoleNamePrefix { role: SemanticRole, prefix: String },
+}
+
+impl ApprovedClickTarget {
+    fn matches(&self, node: &SemanticNode) -> bool {
+        let Some(name) = node.name().map(SemanticText::as_str) else {
+            return false;
+        };
+        match self {
+            Self::ExactName(expected) => name == expected,
+            Self::UniqueRoleNamePrefix { role, prefix } => {
+                node.role() == *role && name.starts_with(prefix)
+            }
+        }
+    }
 }
 
 struct DevelopmentLocalActionPolicy {
     origin: SemanticOrigin,
     clicks: Vec<ApprovedClick>,
     fills: Vec<ApprovedFill>,
+    phase: Option<DevelopmentActionPhase>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DevelopmentActionPhase {
+    OpenDialog,
+    FillQuery,
+    SelectResult,
+    Complete,
+}
+
+impl DevelopmentLocalActionPolicy {
+    fn advance_verified(
+        &mut self,
+        kind: SemanticActionKind,
+        proof: SemanticEffectProofKind,
+    ) -> Result<(), AgentWorkFailure> {
+        let Some(phase) = self.phase else {
+            return Ok(());
+        };
+        let expected = match phase {
+            DevelopmentActionPhase::OpenDialog => (
+                SemanticActionKind::Click,
+                SemanticEffectProofKind::PageDialogOpened,
+                DevelopmentActionPhase::FillQuery,
+            ),
+            DevelopmentActionPhase::FillQuery => (
+                SemanticActionKind::Fill,
+                SemanticEffectProofKind::ExactTargetValue,
+                DevelopmentActionPhase::SelectResult,
+            ),
+            DevelopmentActionPhase::SelectResult => (
+                SemanticActionKind::Click,
+                SemanticEffectProofKind::PageDialogClosed,
+                DevelopmentActionPhase::Complete,
+            ),
+            DevelopmentActionPhase::Complete => return Err(AgentWorkFailure::Contract),
+        };
+        if kind != expected.0 || proof != expected.1 {
+            return Err(AgentWorkFailure::Contract);
+        }
+        self.phase = Some(expected.2);
+        Ok(())
+    }
 }
 
 /// Release-excluded exact intent fixture. It approves only an unambiguous,
@@ -310,39 +407,48 @@ impl AgentWorkLocalActionPolicy for DevelopmentLocalActionPolicy {
         if node.sensitivity() != SemanticSensitivity::Public {
             return Ok(SemanticOperations::NONE);
         }
-        let Some(name) = node.name().map(SemanticText::as_str) else {
-            return Ok(SemanticOperations::NONE);
-        };
         let mut approved = Vec::with_capacity(2);
-        for (operation, permitted) in [
-            (
-                SemanticOperationClass::Click,
-                self.clicks.iter().any(|click| click.target_name == name),
-            ),
-            (
-                SemanticOperationClass::Fill,
-                self.fills.iter().any(|fill| fill.target_name == name),
-            ),
-        ] {
-            if !permitted || !node.operations().contains(operation) {
-                continue;
-            }
-            let exact_matches = observation
-                .frames()
-                .iter()
-                .flat_map(|snapshot| snapshot.nodes())
-                .filter(|candidate| {
-                    candidate.sensitivity() == SemanticSensitivity::Public
-                        && candidate.operations().contains(operation)
-                        && candidate
-                            .name()
-                            .is_some_and(|candidate| candidate.as_str() == name)
+        if node.operations().contains(SemanticOperationClass::Click)
+            && self.clicks.iter().any(|click| {
+                click.verification
+                    == match self.phase {
+                        None => click.verification,
+                        Some(DevelopmentActionPhase::OpenDialog) => {
+                            SemanticVerification::PageDialogOpened
+                        }
+                        Some(DevelopmentActionPhase::SelectResult) => {
+                            SemanticVerification::PageDialogClosed
+                        }
+                        _ => return false,
+                    }
+                    && click.target.matches(node)
+                    && unique_public_operation_match(
+                        observation,
+                        SemanticOperationClass::Click,
+                        |candidate| click.target.matches(candidate),
+                    )
+            })
+        {
+            approved.push(SemanticOperationClass::Click);
+        }
+        if node.operations().contains(SemanticOperationClass::Fill)
+            && matches!(self.phase, None | Some(DevelopmentActionPhase::FillQuery))
+            && node.name().is_some_and(|name| {
+                self.fills.iter().any(|fill| {
+                    fill.target_name == name.as_str()
+                        && unique_public_operation_match(
+                            observation,
+                            SemanticOperationClass::Fill,
+                            |candidate| {
+                                candidate
+                                    .name()
+                                    .is_some_and(|candidate| candidate.as_str() == fill.target_name)
+                            },
+                        )
                 })
-                .take(2)
-                .count();
-            if exact_matches == 1 {
-                approved.push(operation);
-            }
+            })
+        {
+            approved.push(SemanticOperationClass::Fill);
         }
         SemanticOperations::try_new(&approved).map_err(|_| AgentWorkFailure::Contract)
     }
@@ -366,17 +472,29 @@ impl AgentWorkLocalActionPolicy for DevelopmentLocalActionPolicy {
         let node = observation
             .resolve(action.target_reference(), frame, operation)
             .map_err(|_| AgentWorkFailure::Contract)?;
-        let Some(name) = node.name().map(SemanticText::as_str) else {
-            return Err(AgentWorkFailure::Contract);
-        };
-        let actual_effect = match action.kind() {
-            SemanticActionKind::Click => self
-                .clicks
-                .iter()
-                .find(|approved| {
-                    approved.target_name == name && approved.verification == action.verification()
-                })
-                .map(|approved| approved.effect),
+        let (actual_effect, matching_targets) = match action.kind() {
+            SemanticActionKind::Click => {
+                let approved = self
+                    .clicks
+                    .iter()
+                    .find(|approved| {
+                        approved.target.matches(node)
+                            && approved.verification == action.verification()
+                    })
+                    .ok_or(AgentWorkFailure::Contract)?;
+                let matches = observation
+                    .frames()
+                    .iter()
+                    .flat_map(|snapshot| snapshot.nodes())
+                    .filter(|candidate| {
+                        approved.target.matches(candidate)
+                            && candidate.operations().contains(operation)
+                            && candidate.sensitivity() == SemanticSensitivity::Public
+                    })
+                    .take(2)
+                    .count();
+                (approved.effect, matches)
+            }
             SemanticActionKind::Fill => {
                 if action.verification() != SemanticVerification::TargetValueMatchesInput {
                     return Err(AgentWorkFailure::Contract);
@@ -384,27 +502,32 @@ impl AgentWorkLocalActionPolicy for DevelopmentLocalActionPolicy {
                 let Some(value) = action.fill_text() else {
                     return Err(AgentWorkFailure::Contract);
                 };
-                self.fills
+                let Some(name) = node.name().map(SemanticText::as_str) else {
+                    return Err(AgentWorkFailure::Contract);
+                };
+                let effect = self
+                    .fills
                     .iter()
                     .any(|approved| approved.target_name == name && approved.value == *value)
                     .then_some(SemanticEffectClass::LocalWrite)
+                    .ok_or(AgentWorkFailure::Contract)?;
+                let matches = observation
+                    .frames()
+                    .iter()
+                    .flat_map(|snapshot| snapshot.nodes())
+                    .filter(|candidate| {
+                        candidate
+                            .name()
+                            .is_some_and(|candidate| candidate.as_str() == name)
+                            && candidate.operations().contains(operation)
+                            && candidate.sensitivity() == SemanticSensitivity::Public
+                    })
+                    .take(2)
+                    .count();
+                (effect, matches)
             }
-            _ => None,
+            _ => return Err(AgentWorkFailure::Contract),
         };
-        let matching_targets = observation
-            .frames()
-            .iter()
-            .flat_map(|snapshot| snapshot.nodes())
-            .filter(|candidate| {
-                candidate
-                    .name()
-                    .is_some_and(|candidate| candidate.as_str() == name)
-                    && candidate.operations().contains(operation)
-                    && candidate.sensitivity() == SemanticSensitivity::Public
-            })
-            .take(2)
-            .count();
-        let actual_effect = actual_effect.ok_or(AgentWorkFailure::Contract)?;
         if actual_effect != action.effect() || matching_targets != 1 {
             return Err(AgentWorkFailure::Contract);
         }
@@ -414,6 +537,44 @@ impl AgentWorkLocalActionPolicy for DevelopmentLocalActionPolicy {
             actual_effect,
         ))
     }
+
+    fn accept_verified_action(
+        &mut self,
+        result: &SemanticActionBatchResult,
+        _: &SemanticObservation,
+    ) -> Result<(), AgentWorkFailure> {
+        if result.outcome() != SemanticActionBatchOutcome::Complete
+            || result.total() != 1
+            || result.completions().len() != 1
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
+        let completion = result.completions()[0];
+        self.advance_verified(completion.kind(), completion.proof())
+    }
+
+    fn terminal_extraction_ready(&self) -> bool {
+        matches!(self.phase, None | Some(DevelopmentActionPhase::Complete))
+    }
+}
+
+fn unique_public_operation_match(
+    observation: &SemanticObservation,
+    operation: SemanticOperationClass,
+    matches: impl Fn(&SemanticNode) -> bool,
+) -> bool {
+    observation
+        .frames()
+        .iter()
+        .flat_map(|snapshot| snapshot.nodes())
+        .filter(|candidate| {
+            candidate.sensitivity() == SemanticSensitivity::Public
+                && candidate.operations().contains(operation)
+                && matches(candidate)
+        })
+        .take(2)
+        .count()
+        == 1
 }
 
 /// No file means no runner. All request data comes from the caller's bounded
@@ -640,17 +801,34 @@ fn prepare_local_actions(
     }
     let mut clicks = Vec::with_capacity(approval.clicks.len());
     for click in approval.clicks {
-        validate_target_name(&click.target_name)?;
+        let target = match (
+            click.target_name,
+            click.target_name_prefix,
+            click.target_role,
+        ) {
+            (Some(name), None, None) => {
+                validate_target_name(&name)?;
+                ApprovedClickTarget::ExactName(name)
+            }
+            (None, Some(prefix), Some(role)) => {
+                validate_target_name(&prefix)?;
+                ApprovedClickTarget::UniqueRoleNamePrefix {
+                    role: role.into(),
+                    prefix,
+                }
+            }
+            _ => return Err("invalid local click target"),
+        };
         let verification = click.verification.into();
         if clicks.iter().any(|existing: &ApprovedClick| {
-            existing.target_name == click.target_name && existing.verification == verification
+            existing.target == target && existing.verification == verification
         }) {
             // One intent cannot carry conflicting classifications, even when
             // the caller supplies different effects for otherwise equal clicks.
             return Err("duplicate local click approval");
         }
         clicks.push(ApprovedClick {
-            target_name: click.target_name,
+            target,
             effect: click.effect.into(),
             verification,
         });
@@ -670,11 +848,28 @@ fn prepare_local_actions(
             value,
         });
     }
+    let phase = match approval.required_sequence {
+        Some(RequiredLocalActionSequence::DialogSearchResult) => {
+            if !clicks
+                .iter()
+                .any(|click| click.verification == SemanticVerification::PageDialogOpened)
+                || !clicks
+                    .iter()
+                    .any(|click| click.verification == SemanticVerification::PageDialogClosed)
+                || fills.is_empty()
+            {
+                return Err("dialog search sequence is incomplete");
+            }
+            Some(DevelopmentActionPhase::OpenDialog)
+        }
+        None => None,
+    };
     Ok((
         DevelopmentLocalActionPolicy {
             origin,
             clicks,
             fills,
+            phase,
         },
         approval.max_actions,
     ))
@@ -1001,6 +1196,67 @@ mod tests {
         .finish()
         .unwrap()
     }
+
+    fn search_result_observation(duplicate_result: bool) -> SemanticObservation {
+        let identity = ContextIdentity::new(
+            ContextId::from_raw(51),
+            ContextRunId::from_raw(52),
+            ProfileId::from(53),
+            ContextKind::Owned,
+        );
+        let mut registry = ContextRegistry::new();
+        registry
+            .reserve(
+                identity,
+                ContextCapabilities::try_new(
+                    ContextKind::Owned,
+                    &[ContextCapability::Observe, ContextCapability::Act],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let operation = registry
+            .begin_context(identity.id(), ContextOperationId::new(1).unwrap())
+            .unwrap();
+        registry
+            .settle_construction(identity.id(), operation, ContextSettlement::Applied)
+            .unwrap();
+        let context = registry.join(identity.id()).unwrap();
+        let frame = SemanticFrameJoin::try_new(
+            context,
+            FrameId::MAIN,
+            context.frame_generation(),
+            SemanticOrigin::parse("https://app.notion.com").unwrap(),
+            SemanticFrameTrust::SameOrigin,
+        )
+        .unwrap();
+        let nodes = if duplicate_result {
+            r#"[{"k":1,"r":"document","o":16},{"k":2,"p":0,"r":"dialog","n":"Search Notion"},{"k":3,"p":1,"r":"combobox","n":"Search","o":2,"v":{"k":"text","value":"Zephium Agent Qualification"}},{"k":4,"p":1,"r":"option","n":"Zephium Agent Qualification Current Page 3nigma • Edited 20h ago","o":5},{"k":5,"p":1,"r":"option","n":"Zephium Agent Qualification Current Page duplicate","o":5},{"k":6,"p":0,"r":"button","n":"Zephium Agent Qualification","o":1}]"#
+        } else {
+            r#"[{"k":1,"r":"document","o":16},{"k":2,"p":0,"r":"dialog","n":"Search Notion"},{"k":3,"p":1,"r":"combobox","n":"Search","o":2,"v":{"k":"text","value":"Zephium Agent Qualification"}},{"k":4,"p":1,"r":"option","n":"Zephium Agent Qualification Current Page 3nigma • Edited 20h ago","o":5},{"k":5,"p":0,"r":"button","n":"Zephium Agent Qualification","o":1}]"#
+        };
+        let wire = format!(r#"{{"v":1,"i":1,"g":1,"c":"complete","n":{nodes}}}"#);
+        let snapshot = decode_semantic_snapshot(
+            SemanticDecodeContext::new(
+                SemanticInvocationId::new(1).unwrap(),
+                frame,
+                SemanticSnapshotGeneration::new(1).unwrap(),
+            ),
+            wire.as_bytes(),
+        )
+        .unwrap();
+        SemanticObservationAssembler::new(
+            SemanticObservationRequest::initial(
+                SemanticObservationId::new(1).unwrap(),
+                context,
+                SemanticObservationBudget::INITIAL_FILTERED,
+            ),
+            snapshot,
+        )
+        .unwrap()
+        .finish()
+        .unwrap()
+    }
     #[test]
     fn dynamic_input_rejects_routes_or_answer_oracles() {
         let mut input = json!({"objective":"Find relevant guidance and explain it", "account":"anonymous_public", "start_url":"https://example.test/", "path_prefix":"/", "max_hops":2, "output_fields":[{"name":"answer","max_bytes":2048}], "model":"luna", "max_model_calls":24, "operations":64, "model_tokens":200000, "cost_micro_usd":500000, "deadline_seconds":300, "inspectable_public":true,"persist_result":true});
@@ -1044,8 +1300,11 @@ mod tests {
             origin.clone(),
             LocalActionApproval {
                 max_actions: 2,
+                required_sequence: None,
                 clicks: vec![ClickApproval {
-                    target_name: "Search".into(),
+                    target_name: Some("Search".into()),
+                    target_name_prefix: None,
+                    target_role: None,
                     effect: ClickEffect::Read,
                     verification: ClickVerification::PageDialogOpened {},
                 }],
@@ -1069,14 +1328,19 @@ mod tests {
             SemanticOrigin::parse("https://app.notion.com").unwrap(),
             LocalActionApproval {
                 max_actions: 2,
+                required_sequence: None,
                 clicks: vec![
                     ClickApproval {
-                        target_name: "Search".into(),
+                        target_name: Some("Search".into()),
+                        target_name_prefix: None,
+                        target_role: None,
                         effect: ClickEffect::Read,
                         verification: ClickVerification::PageDialogOpened {},
                     },
                     ClickApproval {
-                        target_name: "Search".into(),
+                        target_name: Some("Search".into()),
+                        target_name_prefix: None,
+                        target_role: None,
                         effect: ClickEffect::LocalWrite,
                         verification: ClickVerification::PageDialogOpened {},
                     },
@@ -1089,6 +1353,7 @@ mod tests {
             SemanticOrigin::parse("https://app.notion.com").unwrap(),
             LocalActionApproval {
                 max_actions: 2,
+                required_sequence: None,
                 clicks: Vec::new(),
                 fills: vec![
                     FillApproval {
@@ -1111,8 +1376,11 @@ mod tests {
             SemanticOrigin::parse("https://app.notion.com").unwrap(),
             LocalActionApproval {
                 max_actions: 2,
+                required_sequence: None,
                 clicks: vec![ClickApproval {
-                    target_name: "Search".into(),
+                    target_name: Some("Search".into()),
+                    target_name_prefix: None,
+                    target_role: None,
                     effect: ClickEffect::Read,
                     verification: ClickVerification::PageDialogOpened {},
                 }],
@@ -1156,6 +1424,138 @@ mod tests {
                 SemanticOperationClass::Fill,
             ])
             .unwrap()
+        );
+    }
+
+    #[test]
+    fn result_selection_requires_one_role_scoped_prefix_match() {
+        let (mut policy, maximum) = prepare_local_actions(
+            SemanticOrigin::parse("https://app.notion.com").unwrap(),
+            LocalActionApproval {
+                max_actions: 3,
+                required_sequence: Some(RequiredLocalActionSequence::DialogSearchResult),
+                clicks: vec![
+                    ClickApproval {
+                        target_name: Some("Search or ask".into()),
+                        target_name_prefix: None,
+                        target_role: None,
+                        effect: ClickEffect::Read,
+                        verification: ClickVerification::PageDialogOpened {},
+                    },
+                    ClickApproval {
+                        target_name: None,
+                        target_name_prefix: Some(
+                            "Zephium Agent Qualification Current Page ".into(),
+                        ),
+                        target_role: Some(ClickTargetRole::Option),
+                        effect: ClickEffect::Read,
+                        verification: ClickVerification::PageDialogClosed {},
+                    },
+                ],
+                fills: vec![FillApproval {
+                    target_name: "Search".into(),
+                    value: "Zephium Agent Qualification".into(),
+                }],
+            },
+        )
+        .unwrap();
+        assert_eq!(maximum, 3);
+        assert!(!policy.terminal_extraction_ready());
+        policy.phase = Some(DevelopmentActionPhase::SelectResult);
+
+        let observation = search_result_observation(false);
+        let nodes = observation.frames()[0].nodes();
+        assert_eq!(
+            policy
+                .model_action_operations(&nodes[3], &observation)
+                .unwrap(),
+            SemanticOperations::try_new(&[SemanticOperationClass::Click]).unwrap()
+        );
+        assert_eq!(
+            policy
+                .model_action_operations(&nodes[4], &observation)
+                .unwrap(),
+            SemanticOperations::NONE,
+            "the underlying page title is not the role-scoped search result"
+        );
+
+        let ambiguous = search_result_observation(true);
+        for node in &ambiguous.frames()[0].nodes()[3..5] {
+            assert_eq!(
+                policy.model_action_operations(node, &ambiguous).unwrap(),
+                SemanticOperations::NONE,
+                "ambiguous result prefixes must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn required_search_sequence_advances_only_from_exact_verified_proofs() {
+        let (mut policy, _) = prepare_local_actions(
+            SemanticOrigin::parse("https://app.notion.com").unwrap(),
+            LocalActionApproval {
+                max_actions: 3,
+                required_sequence: Some(RequiredLocalActionSequence::DialogSearchResult),
+                clicks: vec![
+                    ClickApproval {
+                        target_name: Some("Search or ask".into()),
+                        target_name_prefix: None,
+                        target_role: None,
+                        effect: ClickEffect::Read,
+                        verification: ClickVerification::PageDialogOpened {},
+                    },
+                    ClickApproval {
+                        target_name: None,
+                        target_name_prefix: Some(
+                            "Zephium Agent Qualification Current Page ".into(),
+                        ),
+                        target_role: Some(ClickTargetRole::Option),
+                        effect: ClickEffect::Read,
+                        verification: ClickVerification::PageDialogClosed {},
+                    },
+                ],
+                fills: vec![FillApproval {
+                    target_name: "Search".into(),
+                    value: "Zephium Agent Qualification".into(),
+                }],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            policy.advance_verified(
+                SemanticActionKind::Fill,
+                SemanticEffectProofKind::ExactTargetValue,
+            ),
+            Err(AgentWorkFailure::Contract)
+        );
+        assert_eq!(policy.phase, Some(DevelopmentActionPhase::OpenDialog));
+        for (kind, proof, phase) in [
+            (
+                SemanticActionKind::Click,
+                SemanticEffectProofKind::PageDialogOpened,
+                DevelopmentActionPhase::FillQuery,
+            ),
+            (
+                SemanticActionKind::Fill,
+                SemanticEffectProofKind::ExactTargetValue,
+                DevelopmentActionPhase::SelectResult,
+            ),
+            (
+                SemanticActionKind::Click,
+                SemanticEffectProofKind::PageDialogClosed,
+                DevelopmentActionPhase::Complete,
+            ),
+        ] {
+            policy.advance_verified(kind, proof).unwrap();
+            assert_eq!(policy.phase, Some(phase));
+        }
+        assert!(policy.terminal_extraction_ready());
+        assert_eq!(
+            policy.advance_verified(
+                SemanticActionKind::Click,
+                SemanticEffectProofKind::PageDialogClosed,
+            ),
+            Err(AgentWorkFailure::Contract)
         );
     }
 

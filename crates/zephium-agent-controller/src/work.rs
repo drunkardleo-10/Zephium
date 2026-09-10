@@ -201,6 +201,20 @@ pub trait AgentWorkTask: Send {
     ) -> Result<SemanticOperations, AgentWorkFailure> {
         Ok(SemanticOperations::NONE)
     }
+    /// Advances trusted task state from one independently verified native
+    /// action terminal. The default has no action-progress contract.
+    fn accept_verified_action(
+        &mut self,
+        _: &SemanticActionBatchResult,
+        _: &SemanticObservation,
+    ) -> Result<(), AgentWorkFailure> {
+        Ok(())
+    }
+    /// Whether terminal extraction is currently authorized by trusted task
+    /// state. This is dynamic progress, not a frozen capability grant.
+    fn terminal_extraction_ready(&self) -> bool {
+        true
+    }
     /// Optional single trusted extraction schema. Identity 1 is run-local;
     /// model/page content cannot register or replace it. Default is no extraction.
     fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
@@ -2331,6 +2345,12 @@ impl AgentWorkController {
             let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
             let proposal = match step.turn.proposal().kind() {
                 AgentBrowserToolKind::Extract => {
+                    if !state.task.terminal_extraction_ready() {
+                        return Err(AgentWorkFailure::TaskPhase {
+                            expected: progress,
+                            proposed: AgentBrowserToolKind::Extract,
+                        });
+                    }
                     if state.has_navigation()
                         && state.navigation_discovery.is_none()
                         && (navigation_incomplete
@@ -2523,6 +2543,12 @@ impl AgentWorkController {
                 .map_err(AgentWorkFailure::Browser)?;
             observation = current;
             captured_at = SemanticCaptureInstant::from_millis(now.millis());
+            state.task.accept_verified_action(
+                transition
+                    .batch_result()
+                    .ok_or(AgentWorkFailure::Contract)?,
+                &observation,
+            )?;
             progress = state.task_progress(&observation)?;
             if progress == AgentWorkTaskProgress::Complete {
                 state.observation = Some(observation);

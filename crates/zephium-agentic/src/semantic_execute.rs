@@ -1107,8 +1107,11 @@ pub(crate) fn prepare_semantic_action_execution(
             active,
         },
         SemanticActionNativeRequest {
-            page_dialog_opened: action.verification()
-                == crate::SemanticVerification::PageDialogOpened,
+            page_dialog_opened: matches!(
+                action.verification(),
+                crate::SemanticVerification::PageDialogOpened
+                    | crate::SemanticVerification::PageDialogClosed
+            ),
             correlation,
             role: action.bound_action().target_role(),
             expected_geometry,
@@ -2007,6 +2010,30 @@ mod tests {
         let (_, native) = prepare_semantic_action_execution(
             active(&dialog, 66),
             &dialog,
+            SemanticActionExecutionInstant::from_millis(1),
+        )
+        .unwrap();
+        let wire: serde_json::Value = serde_json::from_str(
+            crate::encode_semantic_action_runtime_invocation(&native)
+                .unwrap()
+                .as_str(),
+        )
+        .unwrap();
+        assert_eq!(wire["u"], true);
+        let dialog_close = prepared(
+            &observation,
+            87,
+            proposal(
+                SemanticActionIntent::Click {
+                    target: SemanticReferenceId::new(2).unwrap(),
+                },
+                SemanticEffectClass::Read,
+                SemanticVerification::PageDialogClosed,
+            ),
+        );
+        let (_, native) = prepare_semantic_action_execution(
+            active(&dialog_close, 67),
+            &dialog_close,
             SemanticActionExecutionInstant::from_millis(1),
         )
         .unwrap();

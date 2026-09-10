@@ -227,7 +227,7 @@ pub struct AgentEffectAccountingMetrics {
     verified: u32,
     failed: u32,
     classes: [AgentEffectClassMetrics; 7],
-    proofs: [u32; 9],
+    proofs: [u32; 10],
     failures: [u32; 17],
 }
 
@@ -997,6 +997,7 @@ const fn effect_index(effect: SemanticEffectClass) -> usize {
 const fn proof_index(proof: SemanticEffectProofKind) -> usize {
     match proof {
         SemanticEffectProofKind::PageDialogOpened => 8,
+        SemanticEffectProofKind::PageDialogClosed => 9,
         SemanticEffectProofKind::TargetState => 0,
         SemanticEffectProofKind::ExactTargetValue => 1,
         SemanticEffectProofKind::TargetValueChanged => 2,
