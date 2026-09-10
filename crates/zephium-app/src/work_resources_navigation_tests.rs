@@ -110,9 +110,32 @@ fn prepare_with_clock(
     responses: Vec<String>,
     clock: Arc<dyn TerraControllerClock>,
 ) -> PreparedDiscovery {
+    prepare_with_profile(browser, responses, clock, false)
+}
+fn prepare_with_profile(
+    browser: RetainedBrowser,
+    responses: Vec<String>,
+    clock: Arc<dyn TerraControllerClock>,
+    production: bool,
+) -> PreparedDiscovery {
     let binding = browser.binding();
-    let scope =
-        AgentNavigationDiscovery::try_new(binding.document().clone(), "/".into(), 2).unwrap();
+    let scope = if production {
+        AgentNavigationDiscovery::try_new_production(
+            binding.document().clone(),
+            vec![AgentNavigationOriginRule::try_new(
+                binding.frame().origin().clone(),
+                "/".into(),
+                true,
+                true,
+            )
+            .unwrap()],
+            2,
+            1,
+        )
+        .unwrap()
+    } else {
+        AgentNavigationDiscovery::try_new(binding.document().clone(), "/".into(), 2).unwrap()
+    };
     let input = input_for_context_authority(
         binding.frame().context().identity(),
         binding.frame().origin().clone(),
@@ -152,6 +175,47 @@ fn prepare_with_clock(
     .unwrap();
     (controller, handle, scope, server, requests)
 }
+
+#[test]
+fn retained_observations_carry_only_the_frozen_discovery_url_capability() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for production in [false, true] {
+        let (owner, native, resource, browser) = setup();
+        native.discovery.store(true, Ordering::Release);
+        let mut responses = vec![navigation_stream(1, FIRST), navigation_stream(2, SECOND)];
+        responses.extend(final_streams());
+        let (controller, mut result, scope, server, _) = prepare_with_profile(
+            browser,
+            responses,
+            Arc::new(Clock(AtomicU64::new(2))),
+            production,
+        );
+        let (_, lifecycle) = start(controller, scope);
+        assert!(matches!(
+            finish(&mut result),
+            AgentWorkRetainedOutcome::Accepted { .. }
+        ));
+        let budgets = native.observation_budgets.lock().unwrap();
+        assert_eq!(budgets.len(), 3);
+        assert!(budgets
+            .iter()
+            .all(|budget| budget.includes_link_url_state() == production));
+        drop(budgets);
+        assert!(matches!(
+            lifecycle.drain_until(Instant::now() + Duration::from_secs(2)),
+            AgentRuntimeScopedDrain::Drained(_)
+        ));
+        native.join();
+        assert_eq!(server.join().unwrap(), 4);
+        let mut destroy = owner.destroy(&resource).unwrap();
+        assert!(destroy.poll(now()).unwrap().is_some());
+        owner.seal_resources().unwrap();
+        assert!(owner.locally_retired());
+    }
+}
+
 fn finish(result: &mut AgentWorkRetainedHandle) -> AgentWorkRetainedOutcome {
     let mut outcome = None;
     wait_until(|| {
@@ -606,14 +670,14 @@ fn retained_dense_region_reaches_counted_mapping_with_exact_sources_and_cleanup(
             .lines()
             .filter(|line| line.starts_with("P "))
             .count(),
-        2
+        3
     );
     assert_eq!(
         evidence
             .lines()
             .filter(|line| line.starts_with("R @r"))
             .count(),
-        122
+        127
     );
     assert_eq!(
         evidence
@@ -623,12 +687,9 @@ fn retained_dense_region_reaches_counted_mapping_with_exact_sources_and_cleanup(
         117
     );
     assert!(evidence.contains("R @r117 @a118 text paragraph"));
-    assert!(
-        !evidence.contains("document_marker_0"),
-        "departure document is never retained across navigation"
-    );
-    // The five initial arrival-page sources remain historical evidence beside
-    // the 117 expanded-region sources, under the same 16 KiB ceiling.
+    // Both five-row run-enrolled page cohorts remain historical, read-only
+    // evidence beside the 117 expanded-region sources. Ambient history is
+    // never enrolled, and the combined inventory stays under the 16 KiB cap.
     assert!(
         evidence.contains("R @r118 @a1 text landmark \"Fixture result document_marker_1\" p=p2\n")
     );
@@ -644,6 +705,25 @@ fn retained_dense_region_reaches_counted_mapping_with_exact_sources_and_cleanup(
         assert!(evidence.contains(&format!(
             "R @r{} @a{} name link \"{}\" p=p2\n",
             index + 119,
+            index + 2,
+            name
+        )));
+    }
+    assert!(
+        evidence.contains("R @r123 @a1 text landmark \"Fixture result document_marker_0\" p=p3\n")
+    );
+    for (index, name) in [
+        "First source",
+        "Second source",
+        "Out of scope source",
+        "Original source",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert!(evidence.contains(&format!(
+            "R @r{} @a{} name link \"{}\" p=p3\n",
+            index + 124,
             index + 2,
             name
         )));

@@ -43,10 +43,15 @@ impl AgentWorkController {
         ))?;
         state.journal_mut()?.emit(AgentWorkEventKind::Observing)?;
         let current = if state.native.retained.is_some() {
+            let capability = state.observation_capability();
             let expansion = checkpoint
                 .expansion()
                 .map(|(target, kind)| (previous, checkpoint.baseline(), target, kind));
-            match state.native.observe_retained_scope(worker, expansion).await {
+            match state
+                .native
+                .observe_retained_scope(worker, expansion, capability)
+                .await
+            {
                 Ok(current) => current,
                 Err(AgentWorkFailure::InspectionAnchorLost) if checkpoint.expansion().is_some() => {
                     checkpoint = checkpoint
@@ -57,7 +62,10 @@ impl AgentWorkController {
                         .emit(AgentWorkEventKind::InspectionAnchorLost)?;
                     state.native.check_control(worker, browser)?;
                     state.refresh_account(worker, browser)?;
-                    state.native.observe_retained_scope(worker, None).await?
+                    state
+                        .native
+                        .observe_retained_scope(worker, None, capability)
+                        .await?
                 }
                 Err(error) => return Err(error),
             }

@@ -1084,9 +1084,9 @@ impl WorkBrowserResources {
 #[path = "work_browser_observation.rs"]
 mod observation;
 pub use observation::{
-    WorkBrowserObservationCompletion, WorkBrowserObservationCompletionCallback,
-    WorkBrowserObservationDispatch, WorkBrowserObservationEvent, WorkBrowserObservationRequest,
-    WorkBrowserReadBinding,
+    WorkBrowserObservationCapability, WorkBrowserObservationCompletion,
+    WorkBrowserObservationCompletionCallback, WorkBrowserObservationDispatch,
+    WorkBrowserObservationEvent, WorkBrowserObservationRequest, WorkBrowserReadBinding,
 };
 
 #[path = "work_browser_navigation.rs"]

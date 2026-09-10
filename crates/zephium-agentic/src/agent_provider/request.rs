@@ -7624,6 +7624,8 @@ mod tests {
             "https://example.test/callback?state=c2lnbmVkLW9hdXRoLXN0YXRl",
             "https://example.test/docs#q=ghp%5Fabcdefghijklmnop",
             "https://example.test/docs#access_token%3Dshortsecret",
+            "https://example.test/docs?access_token%3Dshortsecret",
+            "https://example.test/docs#q=token=shortsecret",
         ] {
             let target = crate::ContextNavigationTarget::parse(sensitive).unwrap();
             assert!(

@@ -1248,6 +1248,12 @@ impl WorkState {
             || self.navigation_discovery.is_some()
     }
 
+    fn observation_capability(&self) -> WorkBrowserObservationCapability {
+        WorkBrowserObservationCapability::for_navigation_discovery(
+            self.navigation_discovery.as_ref(),
+        )
+    }
+
     fn requires_decision_budget(&self) -> bool {
         self.extraction_schema.is_some()
             && (self.has_navigation()
@@ -2052,7 +2058,8 @@ impl AgentWorkController {
         browser: &WorkBrowser<'_>,
     ) -> Result<SemanticObservation, AgentWorkFailure> {
         if state.native.retained.is_some() {
-            return state.native.observe_retained(worker).await;
+            let capability = state.observation_capability();
+            return state.native.observe_retained(worker, capability).await;
         }
         let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
         session.check_live().map_err(AgentWorkFailure::Browser)?;

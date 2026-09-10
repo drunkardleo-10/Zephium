@@ -361,6 +361,13 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
         Ok(Some(event.into_terminal()))
     }
     fn begin_observation(&mut self, now: AgentPolicyInstant) -> Result<(), AgentWorkFailure> {
+        self.begin_observation_with_capability(WorkBrowserObservationCapability::RESTRICTED, now)
+    }
+    fn begin_observation_with_capability(
+        &mut self,
+        capability: WorkBrowserObservationCapability,
+        now: AgentPolicyInstant,
+    ) -> Result<(), AgentWorkFailure> {
         self.listener().map_err(Self::error)?;
         self.check_health(now)?;
         if self.read.is_some()
@@ -376,7 +383,7 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
             .shared
             .lock_rows()
             .map_err(Self::error)?
-            .observe_initial(&self.browser.lease, now)
+            .observe_initial_with_capability(&self.browser.lease, capability, now)
             .map_err(Refusal::from)
             .map_err(Self::error)?;
         let observation = request.observation().clone();
@@ -400,6 +407,24 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
         kind: SemanticExpansionKind,
         now: AgentPolicyInstant,
     ) -> Result<(), AgentWorkFailure> {
+        self.begin_expansion_with_capability(
+            previous,
+            acknowledgement,
+            target,
+            kind,
+            WorkBrowserObservationCapability::RESTRICTED,
+            now,
+        )
+    }
+    fn begin_expansion_with_capability(
+        &mut self,
+        previous: &SemanticObservation,
+        acknowledgement: &SemanticObservationAcknowledgement,
+        target: SemanticReferenceId,
+        kind: SemanticExpansionKind,
+        capability: WorkBrowserObservationCapability,
+        now: AgentPolicyInstant,
+    ) -> Result<(), AgentWorkFailure> {
         self.listener().map_err(Self::error)?;
         self.check_health(now)?;
         if self.read.is_some()
@@ -415,12 +440,13 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
             .shared
             .lock_rows()
             .map_err(Self::error)?
-            .observe_expansion(
+            .observe_expansion_with_capability(
                 &self.browser.lease,
                 previous,
                 acknowledgement,
                 target,
                 kind,
+                capability,
                 now,
             )
             .map_err(Refusal::from)

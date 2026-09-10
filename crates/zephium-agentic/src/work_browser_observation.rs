@@ -4,18 +4,50 @@
 
 use super::*;
 use crate::{
-    encode_semantic_runtime_invocation, ContextGeneration, ContextIdentity, ContextJoin,
-    ContextKind, FrameId, SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId,
-    SemanticObservationBudget, SemanticObservationId, SemanticObservationRequest, SemanticOrigin,
-    SemanticRuntimeBudget, SemanticRuntimeCorrelation, SemanticRuntimeInvocation,
-    SemanticRuntimePortFailure, SemanticRuntimeSettlement, SemanticSnapshot,
-    SemanticSnapshotGeneration, MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS,
+    encode_semantic_runtime_invocation, AgentNavigationDiscovery, ContextGeneration,
+    ContextIdentity, ContextJoin, ContextKind, FrameId, SemanticFrameJoin, SemanticFrameTrust,
+    SemanticInvocationId, SemanticObservationBudget, SemanticObservationId,
+    SemanticObservationRequest, SemanticOrigin, SemanticRuntimeBudget, SemanticRuntimeCorrelation,
+    SemanticRuntimeInvocation, SemanticRuntimePortFailure, SemanticRuntimeSettlement,
+    SemanticSnapshot, SemanticSnapshotGeneration, MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ObservationJoin {
     lease: WorkBrowserExecutionLease,
     correlation: SemanticRuntimeCorrelation,
+}
+
+/// Immutable host-selected semantic disclosure capability for one retained
+/// observation. The model cannot construct or widen this value; public link
+/// URL state is available only for the separately validated production
+/// navigation profile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkBrowserObservationCapability {
+    runtime_budget: SemanticRuntimeBudget,
+}
+
+impl WorkBrowserObservationCapability {
+    /// Conservative observation with no query/fragment projection.
+    pub const RESTRICTED: Self = Self {
+        runtime_budget: SemanticRuntimeBudget::INITIAL_FILTERED,
+    };
+
+    /// Derives the exact observation capability from frozen trusted discovery.
+    pub fn for_navigation_discovery(discovery: Option<&AgentNavigationDiscovery>) -> Self {
+        if discovery.is_some_and(AgentNavigationDiscovery::is_production) {
+            Self {
+                runtime_budget: SemanticRuntimeBudget::INITIAL_FILTERED.with_link_url_state(),
+            }
+        } else {
+            Self::RESTRICTED
+        }
+    }
+
+    /// Exact runtime budget authorized by this closed capability.
+    pub const fn runtime_budget(self) -> SemanticRuntimeBudget {
+        self.runtime_budget
+    }
 }
 
 /// Original-row description for one current retained-page execution lease.
@@ -208,7 +240,22 @@ impl WorkBrowserResources {
         lease: &WorkBrowserExecutionLease,
         now: AgentPolicyInstant,
     ) -> Result<WorkBrowserObservationRequest, WorkBrowserResourceError> {
-        self.observe(lease, now, None)
+        self.observe_initial_with_capability(
+            lease,
+            WorkBrowserObservationCapability::RESTRICTED,
+            now,
+        )
+    }
+
+    /// Admits one initial read under an immutable host-derived disclosure
+    /// capability. This never accepts a raw caller-authored runtime budget.
+    pub fn observe_initial_with_capability(
+        &mut self,
+        lease: &WorkBrowserExecutionLease,
+        capability: WorkBrowserObservationCapability,
+        now: AgentPolicyInstant,
+    ) -> Result<WorkBrowserObservationRequest, WorkBrowserResourceError> {
+        self.observe(lease, capability, now, None)
     }
 
     /// Captures only an exact current, provider-acknowledged structural scope.
@@ -222,6 +269,29 @@ impl WorkBrowserResources {
         kind: crate::SemanticExpansionKind,
         now: AgentPolicyInstant,
     ) -> Result<WorkBrowserObservationRequest, WorkBrowserResourceError> {
+        self.observe_expansion_with_capability(
+            lease,
+            previous,
+            acknowledgement,
+            target,
+            kind,
+            WorkBrowserObservationCapability::RESTRICTED,
+            now,
+        )
+    }
+
+    /// Admits one acknowledged expansion under the same immutable disclosure
+    /// capability as its run's initial observation.
+    pub fn observe_expansion_with_capability(
+        &mut self,
+        lease: &WorkBrowserExecutionLease,
+        previous: &crate::SemanticObservation,
+        acknowledgement: &crate::SemanticObservationAcknowledgement,
+        target: crate::SemanticReferenceId,
+        kind: crate::SemanticExpansionKind,
+        capability: WorkBrowserObservationCapability,
+        now: AgentPolicyInstant,
+    ) -> Result<WorkBrowserObservationRequest, WorkBrowserResourceError> {
         if !acknowledgement.matches(previous)
             || matches!(
                 &kind,
@@ -230,12 +300,13 @@ impl WorkBrowserResources {
         {
             return Err(WorkBrowserResourceError::Stale);
         }
-        self.observe(lease, now, Some((previous, target, kind)))
+        self.observe(lease, capability, now, Some((previous, target, kind)))
     }
 
     fn observe(
         &mut self,
         lease: &WorkBrowserExecutionLease,
+        capability: WorkBrowserObservationCapability,
         now: AgentPolicyInstant,
         expansion: Option<(
             &crate::SemanticObservation,
@@ -292,7 +363,7 @@ impl WorkBrowserResources {
                 .ok_or(WorkBrowserResourceError::Exhausted)?,
             SemanticSnapshotGeneration::new(u64::from(sequence))
                 .ok_or(WorkBrowserResourceError::Exhausted)?,
-            SemanticRuntimeBudget::INITIAL_FILTERED,
+            capability.runtime_budget(),
         )
         .map_err(|_| WorkBrowserResourceError::Phase)?;
         let join = ObservationJoin {
@@ -692,6 +763,40 @@ mod tests {
         );
         assert_eq!(request.invocation().invocation().get(), 2);
         assert_eq!(request.invocation().snapshot_generation().get(), 2);
+    }
+
+    #[test]
+    fn retained_observation_capability_is_derived_from_frozen_discovery_profile() {
+        let departure = ContextNavigationTarget::parse("https://example.test/frozen").unwrap();
+        let restrictive =
+            AgentNavigationDiscovery::try_new(departure.clone(), "/".into(), 2).unwrap();
+        let production = AgentNavigationDiscovery::try_new_production(
+            departure,
+            vec![crate::AgentNavigationOriginRule::try_new(
+                SemanticOrigin::parse("https://example.test").unwrap(),
+                "/".into(),
+                true,
+                true,
+            )
+            .unwrap()],
+            2,
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            WorkBrowserObservationCapability::for_navigation_discovery(None),
+            WorkBrowserObservationCapability::RESTRICTED
+        );
+        assert!(
+            !WorkBrowserObservationCapability::for_navigation_discovery(Some(&restrictive))
+                .runtime_budget()
+                .includes_link_url_state()
+        );
+        assert!(
+            WorkBrowserObservationCapability::for_navigation_discovery(Some(&production))
+                .runtime_budget()
+                .includes_link_url_state()
+        );
     }
     #[test]
     fn same_run_cannot_reuse_prior_lease_references_or_restart_document_budget() {

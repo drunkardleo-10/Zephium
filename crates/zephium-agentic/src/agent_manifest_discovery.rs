@@ -389,6 +389,8 @@ mod tests {
             "https://example.test/app/start?code=Qm9VT3F2cW1ROGxobTVoQ2c",
             "https://example.test/app/start#q=ghp%5Fabcdefghijklmnop",
             "https://example.test/app/start#access_token%3Dshortsecret",
+            "https://example.test/app/start?access_token%3Dshortsecret",
+            "https://example.test/app/start#q=token=shortsecret",
         ] {
             assert!(
                 AgentNavigationDiscovery::try_new_production(

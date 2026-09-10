@@ -221,8 +221,7 @@ impl EngineHost {
             && !resource.pending()
             && resource.ready()
             && request.invocation().invocation().get() > resource.last_invocation
-            && request.invocation().budget()
-                == zephium_agentic::SemanticRuntimeBudget::INITIAL_FILTERED
+            && admitted_observation_budget(request.invocation().budget())
             && current_scope(request.observation().scope(), resource.last_invocation);
         if !admitted {
             task.refuse(SemanticRuntimePortFailure::Stale);
@@ -515,6 +514,11 @@ impl EngineHost {
         self.progress_work_observation(guard);
     }
 }
+
+fn admitted_observation_budget(budget: zephium_agentic::SemanticRuntimeBudget) -> bool {
+    budget == zephium_agentic::SemanticRuntimeBudget::INITIAL_FILTERED
+        || budget == zephium_agentic::SemanticRuntimeBudget::INITIAL_FILTERED.with_link_url_state()
+}
 fn presentation_failure(state: PresentationState) -> SemanticRuntimePortFailure {
     match state {
         PresentationState::Unavailable => SemanticRuntimePortFailure::NotReady,
@@ -527,6 +531,18 @@ fn presentation_failure(state: PresentationState) -> SemanticRuntimePortFailure 
 mod tests {
     use super::*;
     use zephium_agentic::*;
+    #[test]
+    fn retained_engine_accepts_only_closed_observation_budget_profiles() {
+        assert!(admitted_observation_budget(
+            SemanticRuntimeBudget::INITIAL_FILTERED
+        ));
+        assert!(admitted_observation_budget(
+            SemanticRuntimeBudget::INITIAL_FILTERED.with_link_url_state()
+        ));
+        assert!(!admitted_observation_budget(
+            SemanticRuntimeBudget::try_new(64, 4096, 16 * 1024, 4096, false).unwrap()
+        ));
+    }
     fn observation() -> WorkObservation {
         let tick = AgentPolicyInstant::from_millis;
         let mut rows = WorkBrowserResources::new(WorkId::generate(), ProfileId::generate());

@@ -102,6 +102,18 @@ pub trait AgentWorkRetainedBrowser: Send {
     }
     /// Reserves and dispatches one exact bounded initial read.
     fn begin_observation(&mut self, now: AgentPolicyInstant) -> Result<(), AgentWorkFailure>;
+    /// Reserves an initial read with one immutable host-derived disclosure
+    /// capability. Legacy adapters remain restricted by default.
+    fn begin_observation_with_capability(
+        &mut self,
+        capability: WorkBrowserObservationCapability,
+        now: AgentPolicyInstant,
+    ) -> Result<(), AgentWorkFailure> {
+        if capability != WorkBrowserObservationCapability::RESTRICTED {
+            return Err(AgentWorkFailure::Contract);
+        }
+        self.begin_observation(now)
+    }
     /// Whether the original observation owner supports acknowledged expansions.
     fn supports_expansion(&self) -> bool {
         false
@@ -116,6 +128,22 @@ pub trait AgentWorkRetainedBrowser: Send {
         _now: AgentPolicyInstant,
     ) -> Result<(), AgentWorkFailure> {
         Err(AgentWorkFailure::Contract)
+    }
+    /// Reserves an expansion with the same immutable disclosure capability.
+    /// Legacy adapters remain restricted by default.
+    fn begin_expansion_with_capability(
+        &mut self,
+        previous: &SemanticObservation,
+        acknowledgement: &SemanticObservationAcknowledgement,
+        target: SemanticReferenceId,
+        kind: SemanticExpansionKind,
+        capability: WorkBrowserObservationCapability,
+        now: AgentPolicyInstant,
+    ) -> Result<(), AgentWorkFailure> {
+        if capability != WorkBrowserObservationCapability::RESTRICTED {
+            return Err(AgentWorkFailure::Contract);
+        }
+        self.begin_expansion(previous, acknowledgement, target, kind, now)
     }
     /// Accounts the original terminal and returns its original observation.
     /// `InspectionAnchorLost` is reserved for an accounted, anchored expansion
@@ -748,8 +776,9 @@ impl WorkNative {
     pub(super) async fn observe_retained(
         &mut self,
         worker: &mut AgentRuntimeWorker,
+        capability: WorkBrowserObservationCapability,
     ) -> Result<SemanticObservation, AgentWorkFailure> {
-        self.observe_retained_scope(worker, None).await
+        self.observe_retained_scope(worker, None, capability).await
     }
 
     pub(super) async fn observe_retained_scope(
@@ -761,6 +790,7 @@ impl WorkNative {
             SemanticReferenceId,
             SemanticExpansionKind,
         )>,
+        capability: WorkBrowserObservationCapability,
     ) -> Result<SemanticObservation, AgentWorkFailure> {
         self.check_control(worker, &WorkBrowser::Retained)?;
         let clock = self
@@ -771,10 +801,16 @@ impl WorkNative {
         let browser = self.retained.as_mut().ok_or(AgentWorkFailure::Contract)?;
         let now = clock.now().map_err(|_| AgentWorkFailure::Contract)?;
         match expansion {
-            Some((previous, acknowledgement, target, kind)) => {
-                browser.begin_expansion(previous, acknowledgement, target, kind, now)?
-            }
-            None => browser.begin_observation(now)?,
+            Some((previous, acknowledgement, target, kind)) => browser
+                .begin_expansion_with_capability(
+                    previous,
+                    acknowledgement,
+                    target,
+                    kind,
+                    capability,
+                    now,
+                )?,
+            None => browser.begin_observation_with_capability(capability, now)?,
         }
         let result =
             tokio::time::timeout_at(tokio::time::Instant::from_std(self.deadline), async {

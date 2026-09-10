@@ -593,12 +593,28 @@ fn fragment_contains_sensitive_data(value: &str) -> bool {
 }
 
 fn contains_sensitive_embedded_url_state(value: &str) -> bool {
-    value.split(['?', '&', ';']).any(|component| {
-        component.split_once('=').is_some_and(|(key, value)| {
+    contains_sensitive_embedded_url_state_at_depth(value, 0)
+}
+
+fn contains_sensitive_embedded_url_state_at_depth(value: &str, depth: u8) -> bool {
+    const MAX_NESTED_URL_STATE_DEPTH: u8 = 3;
+
+    let decoded = match percent_decode_url_component(value) {
+        Some(decoded) => decoded,
+        None => return true,
+    };
+    if depth == MAX_NESTED_URL_STATE_DEPTH && decoded != value {
+        return true;
+    }
+    decoded.split(['?', '&', ';']).any(|component| {
+        component.split_once('=').is_some_and(|(key, nested)| {
             is_sensitive_url_parameter_name(key)
                 || has_credential_label(key)
                 || looks_like_secret_value(key)
-                || looks_like_secret_value(value)
+                || looks_like_secret_value(nested)
+                || (depth < MAX_NESTED_URL_STATE_DEPTH
+                    && (contains_sensitive_embedded_url_state_at_depth(key, depth + 1)
+                        || contains_sensitive_embedded_url_state_at_depth(nested, depth + 1)))
         })
     })
 }
@@ -617,6 +633,7 @@ pub(crate) fn model_safe_public_url(target: &crate::ContextNavigationTarget) -> 
                 || looks_like_secret_value(key.as_ref())
                 || looks_like_secret_value(value.as_ref())
                 || value.contains('%')
+                || contains_sensitive_embedded_url_state(key.as_ref())
                 || contains_sensitive_embedded_url_state(value.as_ref())
         })
         && !url.fragment().is_some_and(fragment_contains_sensitive_data)
@@ -1269,6 +1286,16 @@ mod tests {
             ),
             (
                 "https://example.test/docs#access_token%3Dshortsecret",
+                "public",
+                false,
+            ),
+            (
+                "https://example.test/docs?access_token%3Dshortsecret",
+                "public",
+                false,
+            ),
+            (
+                "https://example.test/docs#q=token=shortsecret",
                 "public",
                 false,
             ),

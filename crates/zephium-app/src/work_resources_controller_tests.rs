@@ -83,6 +83,7 @@ struct Native {
     missing_expansion_anchor: AtomicBool,
     not_ready: AtomicBool,
     reads: AtomicUsize,
+    observation_budgets: Mutex<Vec<SemanticRuntimeBudget>>,
     acquisitions: AtomicUsize,
     destructions: AtomicUsize,
     arm_notification: Mutex<Option<Arc<AtomicBool>>>,
@@ -289,6 +290,10 @@ impl AgentBrowserPort for Native {
         callback: WorkBrowserObservationCompletionCallback,
     ) -> WorkBrowserObservationDispatch {
         self.reads.fetch_add(1, Ordering::AcqRel);
+        self.observation_budgets
+            .lock()
+            .unwrap()
+            .push(request.invocation().budget());
         let expansion = request.invocation().scope() != SemanticRuntimeScopeClass::Initial;
         if expansion && self.missing_expansion_anchor.swap(false, Ordering::AcqRel) {
             let (_, completion) = request.into_parts();
