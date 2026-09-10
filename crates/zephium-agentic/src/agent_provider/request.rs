@@ -4820,7 +4820,7 @@ static ANTHROPIC_BASELINE_READ_TOOL: LazyLock<AnthropicBrowserToolDefinition> =
 static PROGRESSIVE_OBSERVATION_TOOL: LazyLock<BrowserToolDefinition> = LazyLock::new(|| {
     let mut scopes = scope_schema();
     scopes["anyOf"].as_array_mut().expect("fixed scope schema").push(tagged_object(
-        "text_search", vec![("target", reference_schema()), ("query", json!({"type":"string","minLength":1,"maxLength":crate::MAX_SEMANTIC_TEXT_SEARCH_QUERY_BYTES,"description":"Nonblank literal text, at most 256 UTF-8 bytes. Words/numbers use case-insensitive exact-word OR matching, without stemming or synonyms. A symbol-only query (e.g. $, €, %) matches that trimmed literal substring. No regex. Prefer page wording or units."}))],
+        "text_search", vec![("target", reference_schema()), ("query", json!({"type":"string","minLength":1,"maxLength":crate::MAX_SEMANTIC_TEXT_SEARCH_QUERY_BYTES,"pattern":browser_text_pattern(false, false, true),"description":"Nonblank literal text, at most 256 UTF-8 bytes. Words/numbers use case-insensitive exact-word OR matching, without stemming or synonyms. A symbol-only query (e.g. $, €, %) matches that trimmed literal substring. No regex. Prefer page wording or units."}))],
     ));
     scopes["anyOf"]
         .as_array_mut()
@@ -4832,7 +4832,7 @@ static PROGRESSIVE_OBSERVATION_TOOL: LazyLock<BrowserToolDefinition> = LazyLock:
     BrowserToolDefinition {
         kind: AgentBrowserToolKind::Snapshot,
         description: "Inspect rendered page content without clicking, scrolling or navigating. text_search finds visible passages omitted by compact observations below a current document/landmark/group/dialog ref; query matches any exact word or number, case-insensitively, without stemming or synonyms. Symbol-only queries match the trimmed literal substring: $ finds dollar prices; no regex. Use page wording or likely units, not abstract field names: availability does not match available. Query limit is 256 UTF-8 bytes; output is up to 16 ranked contiguous passages and 8 KiB under a bounded scan. It cannot reveal hidden/unmounted content. initial restores the viewport plus heading anchors, not a content cursor. region reads own content and leaves nested regions as anchors; subtree recursively reads descendants (heading subtrees exclude following prose). surrounding_text reads 1-4096 bytes on each side of an actual heading/content ref. Prefer a relevant region; repeating a truncated scope does not advance it. Each capture replaces action refs. Terminal extraction can receive bounded retained evidence with original capture provenance. Use current refs only; missing/truncated content is not absence. Frames are unsupported.",
-        parameters: strict_object(vec![("scope", scopes)]),
+        parameters: with_reference_definition(strict_object(vec![("scope", scopes)])),
     }
 });
 
@@ -4888,10 +4888,10 @@ fn scoped_extraction_tools(actions: bool) -> Vec<BrowserToolDefinition> {
     tools.push(BrowserToolDefinition {
         kind: AgentBrowserToolKind::Extract,
         description: "Extract the approved fields with trusted schema 1. Use initial for the delivered observation, or subtree with one current opaque target ref for a fresh bounded native read of that subtree. Prefer the smallest relevant subtree; locate its ref if needed. Only extract after the approved task postcondition holds. This is terminal mapping, not action or navigation authority.",
-        parameters: strict_object(vec![
+        parameters: with_reference_definition(strict_object(vec![
             ("scope", json!({"anyOf":[tagged_object("initial", vec![]), tagged_object("subtree", vec![("target", reference_schema())])]})),
             ("schema_id", json!({"type":"integer","enum":[1]})),
-        ]),
+        ])),
     });
     tools
 }
@@ -4993,6 +4993,40 @@ static ANTHROPIC_NAVIGATION_EXTRACTION_TOOL_DEFINITIONS: LazyLock<
         .collect()
 });
 
+static NAVIGATION_ACTIONS_EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolDefinition>> =
+    LazyLock::new(|| {
+        let mut tools: Vec<_> = build_browser_tool_definitions(false)
+            .into_iter()
+            .filter(|tool| {
+                matches!(
+                    tool.kind,
+                    AgentBrowserToolKind::Locate
+                        | AgentBrowserToolKind::Navigate
+                        | AgentBrowserToolKind::Act
+                )
+            })
+            .collect();
+        tools.push(BrowserToolDefinition {
+            kind: AgentBrowserToolKind::Extract,
+            description: "Extract approved fields with trusted schema 1 from the current acknowledged baseline. Actions require independent host assessment and policy approval; only current @a refs may be used. Historical @r evidence is citation-only and never action authority. Extraction completes the objective with a source-bound result, not a claim that an unverified action succeeded.",
+            parameters: EXTRACTION_TOOL_DEFINITIONS[0].parameters.clone(),
+        });
+        tools
+    });
+
+static ANTHROPIC_NAVIGATION_ACTIONS_EXTRACTION_TOOL_DEFINITIONS: LazyLock<
+    Vec<AnthropicBrowserToolDefinition>,
+> = LazyLock::new(|| {
+    NAVIGATION_ACTIONS_EXTRACTION_TOOL_DEFINITIONS
+        .iter()
+        .map(|tool| AnthropicBrowserToolDefinition {
+            kind: tool.kind,
+            description: tool.description,
+            input_schema: project_anthropic_schema(&tool.parameters),
+        })
+        .collect()
+});
+
 pub(super) fn browser_tool_definitions() -> &'static [BrowserToolDefinition] {
     &BROWSER_TOOL_DEFINITIONS
 }
@@ -5001,6 +5035,9 @@ fn browser_tool_definitions_for(
     config: &AgentProviderCallConfig,
 ) -> &'static [BrowserToolDefinition] {
     match config.tools {
+        super::BrowserToolProfile::NavigationActionsExtraction => {
+            &NAVIGATION_ACTIONS_EXTRACTION_TOOL_DEFINITIONS
+        }
         super::BrowserToolProfile::NavigationExtraction => &NAVIGATION_EXTRACTION_TOOL_DEFINITIONS,
         super::BrowserToolProfile::Extraction => &EXTRACTION_TOOL_DEFINITIONS,
         super::BrowserToolProfile::LocateAct => &LOCATE_ACT_TOOL_DEFINITIONS,
@@ -5017,6 +5054,9 @@ fn anthropic_browser_tool_definitions(
     config: &AgentProviderCallConfig,
 ) -> &'static [AnthropicBrowserToolDefinition] {
     match config.tools {
+        super::BrowserToolProfile::NavigationActionsExtraction => {
+            &ANTHROPIC_NAVIGATION_ACTIONS_EXTRACTION_TOOL_DEFINITIONS
+        }
         super::BrowserToolProfile::NavigationExtraction => {
             &ANTHROPIC_NAVIGATION_EXTRACTION_TOOL_DEFINITIONS
         }
@@ -5275,7 +5315,7 @@ fn tool_description(kind: AgentBrowserToolKind) -> &'static str {
 }
 
 fn tool_parameters(kind: AgentBrowserToolKind, snapshot_only: bool) -> Value {
-    match kind {
+    with_reference_definition(match kind {
         AgentBrowserToolKind::Navigate => strict_object(vec![(
             "url",
             json!({"type":"string","minLength":1,"maxLength":MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES}),
@@ -5291,7 +5331,7 @@ fn tool_parameters(kind: AgentBrowserToolKind, snapshot_only: bool) -> Value {
         AgentBrowserToolKind::Locate => strict_object(vec![
             (
                 "semantic_query",
-                json!({"type":"string","minLength":1,"maxLength":super::MAX_AGENT_BROWSER_SEMANTIC_QUERY_BYTES}),
+                json!({"type":"string","minLength":1,"maxLength":super::MAX_AGENT_BROWSER_SEMANTIC_QUERY_BYTES,"pattern":browser_text_pattern(true, true, true)}),
             ),
             ("scope", scope_schema()),
         ]),
@@ -5313,7 +5353,10 @@ fn tool_parameters(kind: AgentBrowserToolKind, snapshot_only: bool) -> Value {
         ]),
         AgentBrowserToolKind::Extract => strict_object(vec![
             ("scope", scope_schema()),
-            ("schema_id", json!({"type":"integer","minimum":1})),
+            (
+                "schema_id",
+                json!({"type":"integer","minimum":1,"maximum":u64::MAX}),
+            ),
         ]),
         AgentBrowserToolKind::ShowForHuman => strict_object(vec![(
             "reason",
@@ -5327,7 +5370,7 @@ fn tool_parameters(kind: AgentBrowserToolKind, snapshot_only: bool) -> Value {
                 "human_challenge",
             ]),
         )]),
-    }
+    })
 }
 
 fn scope_schema() -> Value {
@@ -5370,7 +5413,7 @@ fn action_schema(snapshot_only: bool) -> Value {
                 ("target", reference_schema()),
                 (
                     "value",
-                    json!({"type":"string","maxLength":MAX_SEMANTIC_ACTION_TEXT_BYTES}),
+                    json!({"type":"string","maxLength":MAX_SEMANTIC_ACTION_TEXT_BYTES,"pattern":browser_text_pattern(true, false, false)}),
                 ),
             ],
         ),
@@ -5595,7 +5638,70 @@ fn dialog_schema() -> Value {
 }
 
 fn reference_schema() -> Value {
-    json!({"type":"string","pattern":"^@a[1-9][0-9]*$","maxLength":22})
+    json!({"$ref":"#/$defs/action_ref"})
+}
+
+// A compact generation aid for the character checks shared by semantic text
+// constructors. UTF-8 byte limits, supplementary-plane format characters,
+// secret detection and locate normalization remain Rust admission checks.
+fn browser_text_pattern(allow_lines: bool, allow_cr: bool, nonblank: bool) -> String {
+    let controls = match (allow_lines, allow_cr) {
+        (true, true) => r"\u0000-\u0008\u000B\u000C\u000E-\u001F",
+        (true, false) => r"\u0000-\u0008\u000B-\u001F",
+        _ => r"\u0000-\u001F",
+    };
+    let forbidden = format!(
+        "{controls}{}",
+        r"\u007F-\u009F\u00AD\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\uFFF9-\uFFFB"
+    );
+    if nonblank {
+        // Spell out Rust char::is_whitespace rather than relying on a regex
+        // engine's different Unicode interpretation of \\s.
+        let whitespace =
+            r"\u0009-\u000D\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000";
+        format!("^[^{forbidden}]*[^{forbidden}{whitespace}][^{forbidden}]*$")
+    } else {
+        format!("^[^{forbidden}]*$")
+    }
+}
+
+fn with_reference_definition(mut schema: Value) -> Value {
+    fn uses_reference(value: &Value) -> bool {
+        match value {
+            Value::Object(fields) => {
+                fields.contains_key("$ref") || fields.values().any(uses_reference)
+            }
+            Value::Array(items) => items.iter().any(uses_reference),
+            _ => false,
+        }
+    }
+    if uses_reference(&schema) {
+        schema["$defs"] = json!({"action_ref":{
+            "type":"string", "pattern":reference_pattern(), "maxLength":2 + crate::MAX_SEMANTIC_NODES.to_string().len()
+        }});
+    }
+    schema
+}
+
+// Keep every canonical reference under the semantic snapshot node ceiling.
+// A digit-count ceiling alone also admits IDs rejected before snapshot binding.
+fn reference_pattern() -> String {
+    let maximum = crate::MAX_SEMANTIC_NODES.to_string();
+    let mut variants = vec![format!("[1-9][0-9]{{0,{}}}", maximum.len() - 2)];
+    for (index, digit) in maximum.bytes().enumerate() {
+        let minimum = if index == 0 { b'1' } else { b'0' };
+        if digit > minimum {
+            variants.push(format!(
+                "{}[{}-{}][0-9]{{{}}}",
+                &maximum[..index],
+                char::from(minimum),
+                char::from(digit - 1),
+                maximum.len() - index - 1,
+            ));
+        }
+    }
+    variants.push(maximum);
+    format!("^@a({})$", variants.join("|"))
 }
 
 fn string_enum(values: &[&str]) -> Value {
@@ -6583,6 +6689,104 @@ mod tests {
     }
 
     #[test]
+    fn browser_reference_schema_generates_only_canonical_bounded_references() {
+        use proptest::strategy::{Strategy, ValueTree};
+        let pattern = reference_pattern();
+        let strategy = proptest::string::string_regex(
+            pattern
+                .strip_prefix('^')
+                .and_then(|pattern| pattern.strip_suffix('$'))
+                .expect("reference schema pattern is anchored"),
+        )
+        .unwrap();
+        let mut runner = proptest::test_runner::TestRunner::deterministic();
+        for _ in 0..1_024 {
+            let reference = strategy.new_tree(&mut runner).unwrap().current();
+            assert!(crate::SemanticReferenceId::parse(&reference).is_some());
+        }
+        // Every upper-bound prefix branch is generated from the same numeric
+        // ceiling as the decoder, and the exact maximum has its own branch.
+        assert!(reference_pattern().ends_with(&format!("|{})$", crate::MAX_SEMANTIC_NODES)));
+        assert_eq!(
+            tool_parameters(AgentBrowserToolKind::Extract, false)["properties"]["schema_id"]
+                ["maximum"],
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn browser_text_schema_patterns_generate_admissible_characters() {
+        use proptest::strategy::{Strategy, ValueTree};
+        for (lines, cr, nonblank) in [
+            (true, true, true),
+            (true, false, false),
+            (false, false, true),
+        ] {
+            let pattern = browser_text_pattern(lines, cr, nonblank);
+            let strategy = proptest::string::string_regex(
+                pattern
+                    .strip_prefix('^')
+                    .and_then(|pattern| pattern.strip_suffix('$'))
+                    .expect("browser text schema pattern is anchored"),
+            )
+            .unwrap();
+            let mut runner = proptest::test_runner::TestRunner::deterministic();
+            for _ in 0..256 {
+                let value = strategy.new_tree(&mut runner).unwrap().current();
+                for character in value
+                    .chars()
+                    .filter(|character| u32::from(*character) <= 0xffff)
+                {
+                    assert!(!crate::semantic_locate::invalid_query_character(character));
+                    assert!(lines || !character.is_control());
+                    assert!(cr || character != '\r');
+                }
+                assert!(!nonblank || !value.chars().all(char::is_whitespace));
+            }
+        }
+    }
+
+    #[test]
+    fn browser_tool_reference_definitions_are_rooted_in_every_profile() {
+        fn check(value: &Value, root: &Value) {
+            match value {
+                Value::Object(fields) => {
+                    if let Some(reference) = fields.get("$ref") {
+                        assert_eq!(reference, "#/$defs/action_ref");
+                        assert_eq!(root["$defs"]["action_ref"]["pattern"], reference_pattern());
+                    }
+                    for child in fields.values() {
+                        check(child, root);
+                    }
+                }
+                Value::Array(items) => {
+                    for item in items {
+                        check(item, root);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for tools in [
+            &*BROWSER_TOOL_DEFINITIONS,
+            &*LOCATE_ACT_TOOL_DEFINITIONS,
+            &*EXTRACTION_TOOL_DEFINITIONS,
+            &*LOCATE_ACT_EXTRACTION_TOOL_DEFINITIONS,
+            &*SCOPED_EXTRACTION_TOOL_DEFINITIONS,
+            &*LOCATE_ACT_SCOPED_EXTRACTION_TOOL_DEFINITIONS,
+            &*NAVIGATION_EXTRACTION_TOOL_DEFINITIONS,
+            &*NAVIGATION_ACTIONS_EXTRACTION_TOOL_DEFINITIONS,
+        ] {
+            for tool in tools {
+                check(&tool.parameters, &tool.parameters);
+            }
+        }
+        for tool in [&*PROGRESSIVE_OBSERVATION_TOOL, &*BASELINE_READ_TOOL] {
+            check(&tool.parameters, &tool.parameters);
+        }
+    }
+
+    #[test]
     fn browser_tool_wire_sizes_remain_explicit() {
         let sizes = browser_tool_definitions()
             .iter()
@@ -6609,18 +6813,18 @@ mod tests {
                 (AgentBrowserToolKind::Back, 195),
                 (AgentBrowserToolKind::Forward, 197),
                 (AgentBrowserToolKind::Reload, 201),
-                (AgentBrowserToolKind::Snapshot, 1_530),
-                (AgentBrowserToolKind::Locate, 1_769),
-                (AgentBrowserToolKind::Act, 9_579),
-                (AgentBrowserToolKind::Wait, 2_076),
-                (AgentBrowserToolKind::Read, 1_527),
-                (AgentBrowserToolKind::Extract, 1_588),
+                (AgentBrowserToolKind::Snapshot, 1_513),
+                (AgentBrowserToolKind::Locate, 2_357),
+                (AgentBrowserToolKind::Act, 9_698),
+                (AgentBrowserToolKind::Wait, 2_152),
+                (AgentBrowserToolKind::Read, 1_510),
+                (AgentBrowserToolKind::Extract, 1_602),
                 (AgentBrowserToolKind::Screenshot, 205),
                 (AgentBrowserToolKind::ShowForHuman, 367),
                 (AgentBrowserToolKind::ResumeAfterHuman, 204),
             ]
         );
-        assert_eq!(sizes.iter().map(|(_, bytes)| bytes).sum::<usize>(), 19_702);
+        assert_eq!(sizes.iter().map(|(_, bytes)| bytes).sum::<usize>(), 20_465);
     }
 
     #[test]

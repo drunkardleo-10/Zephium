@@ -1846,6 +1846,29 @@ mod tests {
     }
 
     #[test]
+    fn single_local_write_keeps_cross_field_settle_contract_fail_closed() {
+        for (quiet, settle, valid) in [
+            (250, 250, true),
+            (250, 249, false),
+            (1_000, 1_000, true),
+            (1_000, 250, false),
+        ] {
+            let arguments = serde_json::json!({"actions":[{
+                "kind":"fill", "target":"@a1", "value":"ordinary title",
+                "effect":"local_write", "wait":{"kind":"mutation_quiet","millis":quiet},
+                "verification":{"kind":"target_value_matches_input"}, "settle_millis":settle
+            }]})
+            .to_string();
+            let result = decode("act", &arguments).map(|_| ());
+            if valid {
+                assert_eq!(result, Ok(()));
+            } else {
+                assert_eq!(result, Err(AgentBrowserToolContractError::Action));
+            }
+        }
+    }
+
+    #[test]
     fn action_secret_outcome_mismatch_and_batch_widening_are_refused() {
         let secret = r#"{"actions":[{"kind":"fill","target":"@a2","value":"sk-secret-secret-secret-secret-value","effect":"local_write","wait":{"kind":"immediate"},"verification":{"kind":"target_value_matches_input"},"settle_millis":1000}]}"#;
         assert_eq!(
