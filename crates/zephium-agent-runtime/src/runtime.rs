@@ -22,7 +22,8 @@ use zephium_agentic::{
     ContextNativeRequest, ContextNavigationReplacement, ContextRendererLoss,
     ContextResourceAuditId, ContextShutdownDispatch, SemanticActionNativeCompletion,
     SemanticActionNativeRequest, SemanticActionNativeSettlement, SemanticRuntimeInvocation,
-    SemanticScreenshotNativeCompletion, SemanticScreenshotNativeRequest,
+    SemanticScreenshotNativeCapture, SemanticScreenshotNativeCompletion,
+    SemanticScreenshotNativeFailure, SemanticScreenshotNativeRequest,
 };
 
 use crate::mailbox::{
@@ -379,6 +380,10 @@ pub enum AgentRuntimeEvent {
     NativeTerminal(ContextNativeEvent),
     /// A terminal settlement from an exact semantic native action callback.
     SemanticActionTerminal(SemanticActionNativeSettlement),
+    /// A terminal result from one exact native viewport-capture callback.
+    SemanticScreenshotTerminal(
+        Result<SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure>,
+    ),
     /// A terminal settlement from an exact durable audit callback.
     AuditTerminal(AgentAuditDeliverySettlement),
     /// A page-initiated or otherwise unsolicited navigation replacement.
@@ -425,6 +430,7 @@ impl fmt::Debug for AgentRuntimeEvent {
             Self::RunStarted(_) => "RunStarted",
             Self::NativeTerminal(_) => "NativeTerminal",
             Self::SemanticActionTerminal(_) => "SemanticActionTerminal",
+            Self::SemanticScreenshotTerminal(_) => "SemanticScreenshotTerminal",
             Self::AuditTerminal(_) => "AuditTerminal",
             Self::NavigationReplaced(_) => "NavigationReplaced",
             Self::RendererLost(_) => "RendererLost",
@@ -749,6 +755,11 @@ impl AgentRuntimeWorker {
         self.inner.mailbox.semantic_action_sink().completion()
     }
 
+    /// Creates one exact move-only semantic-screenshot completion callback.
+    pub fn semantic_screenshot_completion(&self) -> SemanticScreenshotNativeCompletion {
+        self.inner.mailbox.semantic_screenshot_sink().completion()
+    }
+
     /// Creates one exact move-only durable-audit completion callback.
     pub fn audit_completion(&self) -> AgentAuditCompletion {
         self.inner.mailbox.audit_sink().completion()
@@ -824,6 +835,9 @@ fn controller_event_from_mailbox(item: AgentRuntimeMailboxItem) -> AgentRuntimeE
         AgentRuntimeMailboxItem::NativeTerminal(event) => AgentRuntimeEvent::NativeTerminal(event),
         AgentRuntimeMailboxItem::SemanticActionTerminal(settlement) => {
             AgentRuntimeEvent::SemanticActionTerminal(settlement)
+        }
+        AgentRuntimeMailboxItem::SemanticScreenshotTerminal(settlement) => {
+            AgentRuntimeEvent::SemanticScreenshotTerminal(settlement)
         }
         AgentRuntimeMailboxItem::AuditTerminal(settlement) => {
             AgentRuntimeEvent::AuditTerminal(settlement)
@@ -2250,6 +2264,9 @@ mod tests {
                         Ok(AgentRuntimeEvent::NativeTerminal(_)) => "NativeTerminal",
                         Ok(AgentRuntimeEvent::SemanticActionTerminal(_)) => {
                             "SemanticActionTerminal"
+                        }
+                        Ok(AgentRuntimeEvent::SemanticScreenshotTerminal(_)) => {
+                            "SemanticScreenshotTerminal"
                         }
                         Ok(AgentRuntimeEvent::AuditTerminal(_)) => "AuditTerminal",
                         Ok(AgentRuntimeEvent::NavigationReplaced(_)) => "NavigationReplaced",

@@ -38,16 +38,17 @@ use zephium_agentic::{
     AgentProviderDiffRequestDraft, AgentProviderDisclosureStage, AgentProviderFailureClass,
     AgentProviderImmediateSettlement, AgentProviderLocateRequestDraft, AgentProviderObjective,
     AgentProviderPolicySettlement, AgentProviderProtocolError, AgentProviderProtocolEvent,
-    AgentProviderRequestSettlement, AgentProviderSettledToolTurn, AgentProviderStopReason,
-    AgentProviderStreamConclusion, AgentProviderTransportInput, AgentProviderTransportOutcome,
-    AgentProviderTransportResult, AgentRunAccountingMetrics, AgentRunActionPerformanceMetrics,
-    AgentRunMetricClosure, AgentRunPolicy, AgentRunProgressMetrics, AgentRunProviderInputMetrics,
-    AgentRunSupervisor, AgentSupervisorAttemptId, AgentSupervisorCancellationId,
-    AgentSupervisorCancellationReason, AgentSupervisorCompletion, AgentSupervisorFailure,
-    AgentSupervisorId, ContextDispatch, ContextNativeEvent, SemanticInvocationId,
-    SemanticLocateBudget, SemanticLocateId, SemanticLocateRequest, SemanticModelEncodingBudget,
-    SemanticModelEncodingError, SemanticObservationAssembler, SemanticObservationRequest,
-    SemanticRuntimeBudget, SemanticSnapshotGeneration, MAX_AGENT_AUDIT_DELIVERY_EVENTS,
+    AgentProviderRequestSettlement, AgentProviderScreenshotRequestDraft,
+    AgentProviderSettledToolTurn, AgentProviderStopReason, AgentProviderStreamConclusion,
+    AgentProviderTransportInput, AgentProviderTransportOutcome, AgentProviderTransportResult,
+    AgentRunAccountingMetrics, AgentRunActionPerformanceMetrics, AgentRunMetricClosure,
+    AgentRunPolicy, AgentRunProgressMetrics, AgentRunProviderInputMetrics, AgentRunSupervisor,
+    AgentSupervisorAttemptId, AgentSupervisorCancellationId, AgentSupervisorCancellationReason,
+    AgentSupervisorCompletion, AgentSupervisorFailure, AgentSupervisorId, ContextDispatch,
+    ContextNativeEvent, SemanticInvocationId, SemanticLocateBudget, SemanticLocateId,
+    SemanticLocateRequest, SemanticModelEncodingBudget, SemanticModelEncodingError,
+    SemanticObservationAssembler, SemanticObservationRequest, SemanticRuntimeBudget,
+    SemanticScreenshot, SemanticSnapshotGeneration, MAX_AGENT_AUDIT_DELIVERY_EVENTS,
 };
 
 use crate::action::AgentBrowserVerifiedTransition;
@@ -2436,6 +2437,46 @@ impl AgentBrowserSession {
         let prepared = AgentProviderReadContinuationRequestDraft::try_new(bound)
             .and_then(|draft| {
                 draft.try_prepare_for_provider_exact_count(&mut self.policy, request, &read)
+            })
+            .map_err(|_| AgentBrowserProviderError::Authority)?;
+        self.drive(prepared.into_transport_input()).await
+    }
+
+    /// Delivers one policy-admitted, canonical viewport capture requested by
+    /// the prior model turn. The image is bound to that turn's exact semantic
+    /// baseline and retained for this single provider request only.
+    pub async fn continue_after_screenshot(
+        &mut self,
+        turn: AgentProviderSettledToolTurn,
+        screenshot: SemanticScreenshot,
+        observation: &zephium_agentic::SemanticObservation,
+    ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
+        self.check_live()?;
+        if self.turns >= self.max_model_calls {
+            return Err(AgentBrowserProviderError::TurnLimit);
+        }
+        if !self.config.permits_tool(AgentBrowserToolKind::Screenshot)
+            || !matches!(turn.proposal(), AgentBrowserToolProposal::Screenshot)
+        {
+            return Err(AgentBrowserProviderError::UnsupportedTool(
+                AgentBrowserToolKind::Screenshot,
+            ));
+        }
+        if let Some(journal) = &self.journal {
+            journal
+                .emit(work::AgentWorkEventKind::ToolProposed(
+                    AgentBrowserToolKind::Screenshot,
+                ))
+                .map_err(|_| AgentBrowserProviderError::Journal)?;
+        }
+        let (_, continuation) = turn.into_parts();
+        let request = self.next_model_call_request()?;
+        let bound = continuation
+            .bind_screenshot_request(request, &self.config, screenshot)
+            .map_err(|_| AgentBrowserProviderError::Continuation)?;
+        let prepared = AgentProviderScreenshotRequestDraft::try_new(bound)
+            .and_then(|draft| {
+                draft.try_prepare_for_provider_exact_count(&mut self.policy, request, observation)
             })
             .map_err(|_| AgentBrowserProviderError::Authority)?;
         self.drive(prepared.into_transport_input()).await

@@ -122,9 +122,8 @@ const AGENT_BROWSER_INSTRUCTIONS_V1: &str = concat!(
     "or focused=true for an already-focused target. If the intended state already exists, ",
     "advance to the next useful step. Choose verification for the intended ",
     "outcome, not an incidental click effect: opening a search or command dialog requires ",
-    "page_dialog_opened, then fresh inspection of its contents. Never substitute focused=true ",
-    "for opening. Choosing an item whose intended outcome is dismissing an open page dialog ",
-    "requires page_dialog_closed. Never substitute focused=true ",
+    "page_dialog_opened, then fresh inspection of its contents. Choosing an item whose intended ",
+    "outcome is dismissing an open page dialog requires page_dialog_closed. Never substitute focused=true ",
     "for opening, activating, submitting or changing something. Focus verification is valid ",
     "only when focusing the target is itself the intended outcome. Ask for human control when a safe supplied ",
     "operation cannot complete the objective."
@@ -4197,6 +4196,11 @@ fn encode_openai_observation_body_with_action_targets(
                 .adds_progressive_observation()
                 .then(|| &*PROGRESSIVE_OBSERVATION_TOOL),
         )
+        .chain(
+            config
+                .adds_viewport_screenshot()
+                .then(|| &*VIEWPORT_SCREENSHOT_TOOL),
+        )
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| OpenAiToolWire {
             r#type: "function",
@@ -4310,6 +4314,11 @@ pub(in crate::agent_provider) fn encode_openai_continuation_body(
             config
                 .adds_progressive_observation()
                 .then(|| &*PROGRESSIVE_OBSERVATION_TOOL),
+        )
+        .chain(
+            config
+                .adds_viewport_screenshot()
+                .then(|| &*VIEWPORT_SCREENSHOT_TOOL),
         )
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| OpenAiToolWire {
@@ -4520,6 +4529,11 @@ fn encode_openai_screenshot_continuation_body(
                 .adds_progressive_observation()
                 .then(|| &*PROGRESSIVE_OBSERVATION_TOOL),
         )
+        .chain(
+            config
+                .adds_viewport_screenshot()
+                .then(|| &*VIEWPORT_SCREENSHOT_TOOL),
+        )
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| OpenAiToolWire {
             r#type: "function",
@@ -4581,6 +4595,7 @@ fn encode_anthropic_body_with_action_targets(
         definitions,
         config.adds_baseline_read(),
         config.adds_progressive_observation(),
+        config.adds_viewport_screenshot(),
     )?;
     let tools = definitions
         .iter()
@@ -4593,6 +4608,11 @@ fn encode_anthropic_body_with_action_targets(
             config
                 .adds_progressive_observation()
                 .then(|| &*ANTHROPIC_PROGRESSIVE_OBSERVATION_TOOL),
+        )
+        .chain(
+            config
+                .adds_viewport_screenshot()
+                .then(|| &*ANTHROPIC_VIEWPORT_SCREENSHOT_TOOL),
         )
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| AnthropicToolWire {
@@ -4655,6 +4675,7 @@ fn encode_anthropic_continuation_body(
         definitions,
         config.adds_baseline_read(),
         config.adds_progressive_observation(),
+        config.adds_viewport_screenshot(),
     )?;
     let message_count = 1_usize
         .checked_add(
@@ -4725,6 +4746,11 @@ fn encode_anthropic_continuation_body(
             config
                 .adds_progressive_observation()
                 .then(|| &*ANTHROPIC_PROGRESSIVE_OBSERVATION_TOOL),
+        )
+        .chain(
+            config
+                .adds_viewport_screenshot()
+                .then(|| &*ANTHROPIC_VIEWPORT_SCREENSHOT_TOOL),
         )
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| AnthropicToolWire {
@@ -4866,6 +4892,7 @@ fn encode_anthropic_screenshot_continuation_body(
         definitions,
         config.adds_baseline_read(),
         config.adds_progressive_observation(),
+        config.adds_viewport_screenshot(),
     )?;
     if transcript.navigation_checkpoint().is_some() {
         return Err(AgentProviderRequestError::Encoding);
@@ -4982,6 +5009,11 @@ fn encode_anthropic_screenshot_continuation_body(
                 .adds_progressive_observation()
                 .then(|| &*ANTHROPIC_PROGRESSIVE_OBSERVATION_TOOL),
         )
+        .chain(
+            config
+                .adds_viewport_screenshot()
+                .then(|| &*ANTHROPIC_VIEWPORT_SCREENSHOT_TOOL),
+        )
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| AnthropicToolWire {
             name: tool.kind.as_str(),
@@ -5051,15 +5083,20 @@ fn validate_anthropic_tool_definitions(
     definitions: &[AnthropicBrowserToolDefinition],
     baseline_read: bool,
     progressive_observation: bool,
+    viewport_screenshot: bool,
 ) -> Result<(), AgentProviderRequestError> {
     let union_parameters = definitions
         .iter()
         .chain(baseline_read.then(|| &*ANTHROPIC_BASELINE_READ_TOOL))
         .chain(progressive_observation.then(|| &*ANTHROPIC_PROGRESSIVE_OBSERVATION_TOOL))
+        .chain(viewport_screenshot.then(|| &*ANTHROPIC_VIEWPORT_SCREENSHOT_TOOL))
         .try_fold(0_usize, |total, tool| {
             total.checked_add(count_schema_unions(&tool.input_schema))
         });
-    if definitions.len() + usize::from(baseline_read) + usize::from(progressive_observation)
+    if definitions.len()
+        + usize::from(baseline_read)
+        + usize::from(progressive_observation)
+        + usize::from(viewport_screenshot)
         > MAX_ANTHROPIC_STRICT_TOOLS
         || union_parameters.is_none_or(|count| count > MAX_ANTHROPIC_SCHEMA_UNIONS)
     {
@@ -5137,6 +5174,21 @@ static ANTHROPIC_PROGRESSIVE_OBSERVATION_TOOL: LazyLock<AnthropicBrowserToolDefi
         kind: PROGRESSIVE_OBSERVATION_TOOL.kind,
         description: PROGRESSIVE_OBSERVATION_TOOL.description,
         input_schema: project_anthropic_schema(&PROGRESSIVE_OBSERVATION_TOOL.parameters),
+    });
+
+static VIEWPORT_SCREENSHOT_TOOL: LazyLock<BrowserToolDefinition> = LazyLock::new(|| {
+    BrowserToolDefinition {
+        kind: AgentBrowserToolKind::Screenshot,
+        description: "Request one bounded viewport screenshot only when the current acknowledged semantic observation cannot answer a genuinely visual question. The host refuses captures for incomplete frame coverage or secret/redacted content. Pixels create no refs or action authority; use semantic refs for every action.",
+        parameters: with_reference_definition(strict_object(Vec::new())),
+    }
+});
+
+static ANTHROPIC_VIEWPORT_SCREENSHOT_TOOL: LazyLock<AnthropicBrowserToolDefinition> =
+    LazyLock::new(|| AnthropicBrowserToolDefinition {
+        kind: VIEWPORT_SCREENSHOT_TOOL.kind,
+        description: VIEWPORT_SCREENSHOT_TOOL.description,
+        input_schema: project_anthropic_schema(&VIEWPORT_SCREENSHOT_TOOL.parameters),
     });
 
 static EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolDefinition>> = LazyLock::new(|| {
@@ -6623,6 +6675,42 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("heading subtrees exclude following prose"));
+            let visual = config
+                .clone()
+                .restrict_to_navigation_and_extraction()
+                .with_viewport_screenshot();
+            assert!(visual.permits_viewport_screenshot());
+            assert!(visual.permits_tool(AgentBrowserToolKind::Screenshot));
+            let visual_body = match provider {
+                AgentProviderKind::OpenAiResponses => {
+                    encode_openai_body(&visual, "objective", "observation")
+                }
+                AgentProviderKind::AnthropicMessages => {
+                    encode_anthropic_body(&visual, "objective", "observation")
+                }
+            }
+            .unwrap();
+            let visual_wire: Value = serde_json::from_slice(&visual_body).unwrap();
+            let screenshots = visual_wire["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|tool| tool["name"] == "screenshot")
+                .collect::<Vec<_>>();
+            assert_eq!(screenshots.len(), 1);
+            assert!(screenshots[0]["description"]
+                .as_str()
+                .unwrap()
+                .contains("semantic observation cannot answer"));
+            let screenshot_schema = match provider {
+                AgentProviderKind::OpenAiResponses => &screenshots[0]["parameters"],
+                AgentProviderKind::AnthropicMessages => &screenshots[0]["input_schema"],
+            };
+            assert!(screenshot_schema["properties"]
+                .as_object()
+                .unwrap()
+                .is_empty());
+            assert_eq!(screenshot_schema["additionalProperties"], false);
             let extraction = config.clone().restrict_to_extraction();
             let combined = config.clone().restrict_to_actions_and_extraction();
             for base in [
@@ -7582,7 +7670,11 @@ mod tests {
                 check(&tool.parameters, &tool.parameters);
             }
         }
-        for tool in [&*PROGRESSIVE_OBSERVATION_TOOL, &*BASELINE_READ_TOOL] {
+        for tool in [
+            &*PROGRESSIVE_OBSERVATION_TOOL,
+            &*BASELINE_READ_TOOL,
+            &*VIEWPORT_SCREENSHOT_TOOL,
+        ] {
             check(&tool.parameters, &tool.parameters);
         }
     }

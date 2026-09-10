@@ -1068,7 +1068,178 @@ impl EngineHost {
 
     #[cfg(target_os = "macos")]
     pub(crate) fn handle_agent_screenshot_task(&mut self, task: AgentScreenshotTask) {
+        let retained = task.request().is_some_and(|request| {
+            self.work_resources
+                .contains_key(&request.context().identity().id())
+        });
+        if retained {
+            self.start_work_resource_screenshot(task);
+            return;
+        }
         self.start_owned_agent_screenshot(task);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn start_work_resource_screenshot(&mut self, mut task: AgentScreenshotTask) {
+        let Some(request) = task.request() else {
+            task.refuse(SemanticScreenshotNativeFailure::Transport);
+            return;
+        };
+        let context = request.context();
+        let id = context.identity().id();
+        let request_id = request.id();
+        let snapshot_generation = request.snapshot_generation();
+        let admitted_at = task.admitted_at();
+        let Some(capture_window_millis) = request
+            .deadline()
+            .millis()
+            .checked_sub(request.requested_at().millis())
+        else {
+            task.refuse(SemanticScreenshotNativeFailure::TimedOut);
+            return;
+        };
+        let capture_window = Duration::from_millis(capture_window_millis);
+        let elapsed = Instant::now().saturating_duration_since(admitted_at);
+        if capture_window.is_zero() || elapsed >= capture_window {
+            task.refuse(SemanticScreenshotNativeFailure::TimedOut);
+            return;
+        }
+
+        let failure = match self.work_resources.get(&id) {
+            None => Some(SemanticScreenshotNativeFailure::Stale),
+            Some(resource) if resource.guard.resource().context() != context => {
+                Some(SemanticScreenshotNativeFailure::Stale)
+            }
+            Some(resource) if !resource.guard.is_healthy() || !resource.ready() => {
+                Some(SemanticScreenshotNativeFailure::Shutdown)
+            }
+            Some(resource) if resource.pending() => {
+                Some(SemanticScreenshotNativeFailure::ResourceExhausted)
+            }
+            Some(resource) if snapshot_generation.get() != resource.last_invocation => {
+                Some(SemanticScreenshotNativeFailure::Stale)
+            }
+            Some(resource)
+                if resource
+                    .view
+                    .as_ref()
+                    .is_none_or(|view| view.semantic_pending_for_audit() != Some(false)) =>
+            {
+                Some(SemanticScreenshotNativeFailure::NotReady)
+            }
+            Some(_) => None,
+        };
+        if let Some(failure) = failure {
+            task.refuse(failure);
+            return;
+        }
+
+        let callback_guard = task.callback_guard();
+        let timeout_guard = callback_guard.clone();
+        let Some(watchdog) = crate::platform::imp::schedule_content_policy_timeout(
+            capture_window.saturating_sub(elapsed),
+            move || {
+                let rejected = timeout_guard.clone();
+                if !crate::host::try_with_agent_context_terminal(move |host| {
+                    host.finish_work_resource_screenshot(
+                        id,
+                        request_id,
+                        Err(SemanticScreenshotNativeFailure::TimedOut),
+                    );
+                }) {
+                    rejected.callback_dispatch_rejected();
+                }
+            },
+        ) else {
+            task.refuse(SemanticScreenshotNativeFailure::Transport);
+            return;
+        };
+        let Some(request) = task.take_request() else {
+            drop(watchdog);
+            task.refuse(SemanticScreenshotNativeFailure::Transport);
+            return;
+        };
+        let Some(physical) = task.take_physical() else {
+            drop(watchdog);
+            task.refuse(SemanticScreenshotNativeFailure::Transport);
+            return;
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let pending = AgentPendingScreenshot {
+            id: request_id,
+            context,
+            snapshot_generation,
+            cancelled: cancelled.clone(),
+            watchdog,
+            task,
+        };
+        let Some(resource) = self.work_resources.get_mut(&id) else {
+            pending.complete(Err(SemanticScreenshotNativeFailure::Stale));
+            return;
+        };
+        let Some(view) = resource.view.as_ref() else {
+            pending.complete(Err(SemanticScreenshotNativeFailure::Shutdown));
+            return;
+        };
+        let Some(document_gate) = view.work_navigation().cloned() else {
+            pending.complete(Err(SemanticScreenshotNativeFailure::Stale));
+            return;
+        };
+        let Some(document) = document_gate.observation_stamp(context) else {
+            pending.complete(Err(SemanticScreenshotNativeFailure::Stale));
+            return;
+        };
+        resource.screenshot = Some(pending);
+
+        let native_guard = callback_guard.clone();
+        let panic_guard = callback_guard.clone();
+        let dispatched = view.dispatch_screenshot(
+            request,
+            admitted_at,
+            cancelled,
+            move |outcome| {
+                drop(physical);
+                let outcome = if document_gate.observation_stamp(context) == Some(document) {
+                    outcome
+                } else {
+                    Err(SemanticScreenshotNativeFailure::Stale)
+                };
+                let rejected = native_guard.clone();
+                if !crate::host::try_with_agent_context_terminal(move |host| {
+                    host.finish_work_resource_screenshot(id, request_id, outcome);
+                }) {
+                    rejected.callback_dispatch_rejected();
+                }
+            },
+            move || panic_guard.callback_dispatch_rejected(),
+        );
+        if let Err(failure) = dispatched {
+            self.finish_work_resource_screenshot(id, request_id, Err(failure));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn finish_work_resource_screenshot(
+        &mut self,
+        id: ContextId,
+        request_id: SemanticScreenshotRequestId,
+        outcome: Result<SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure>,
+    ) {
+        let Some(pending) = self.work_resources.get_mut(&id).and_then(|resource| {
+            (resource
+                .screenshot
+                .as_ref()
+                .is_some_and(|pending| pending.id == request_id))
+            .then(|| resource.screenshot.take())
+            .flatten()
+        }) else {
+            return;
+        };
+        pending.complete(outcome);
+        if let Some(resource) = self.work_resources.get(&id) {
+            let guard = resource.guard.clone();
+            self.progress_work_resource(&guard);
+        }
     }
 
     #[cfg(target_os = "macos")]

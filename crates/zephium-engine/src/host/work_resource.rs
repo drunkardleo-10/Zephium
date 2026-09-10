@@ -64,6 +64,8 @@ pub(super) struct WorkNativeResource {
     observation: Option<observation::WorkObservation>,
     action: Option<action::WorkAction>,
     navigation: Option<navigation::WorkNavigation>,
+    #[cfg(target_os = "macos")]
+    screenshot: Option<AgentPendingScreenshot>,
     document_finalization_wake: Option<DocumentFinalizationWake>,
     document_finalization_ready:
         Option<crate::platform::work_document_navigation::WorkDocumentFinalizationTicket>,
@@ -138,6 +140,8 @@ impl WorkNativeResource {
             observation: None,
             action: None,
             navigation: None,
+            #[cfg(target_os = "macos")]
+            screenshot: None,
             document_finalization_wake: None,
             document_finalization_ready: None,
             last_invocation: 0,
@@ -180,6 +184,16 @@ impl WorkNativeResource {
             || self.observation.is_some()
             || self.action.is_some()
             || self.navigation.is_some()
+            || {
+                #[cfg(target_os = "macos")]
+                {
+                    self.screenshot.is_some()
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    false
+                }
+            }
     }
     fn schedule_document_finalization_wake(
         &mut self,
@@ -253,6 +267,16 @@ impl WorkNativeResource {
             && self.observation.is_none()
             && self.action.is_none()
             && self.navigation.is_none()
+            && {
+                #[cfg(target_os = "macos")]
+                {
+                    self.screenshot.is_none()
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    true
+                }
+            }
     }
     fn retire_construction(&mut self) {
         if let Some(task) = self.construction.take() {
@@ -266,6 +290,12 @@ impl WorkNativeResource {
         self.retire_construction();
         self.cancel_observation(SemanticRuntimePortFailure::Shutdown);
         self.cancel_action();
+        #[cfg(target_os = "macos")]
+        if let Some(screenshot) = &self.screenshot {
+            // Native capture owns physical capacity until its callback returns.
+            // Cancellation prevents disclosure but does not counterfeit drain.
+            screenshot.cancelled.store(true, Ordering::Release);
+        }
         if let Some(navigation) = self.navigation.take() {
             navigation.refuse(ContextPortFailure::Shutdown);
         }
@@ -536,6 +566,10 @@ impl EngineHost {
             {
                 let deadline = LifecycleDeadline::from_task(&task);
                 resource.revocation = Some(task);
+                #[cfg(target_os = "macos")]
+                if let Some(screenshot) = &resource.screenshot {
+                    screenshot.cancelled.store(true, Ordering::Release);
+                }
                 resource.deadline_expired = false;
                 resource.lifecycle_deadline = Instant::now()
                     .checked_add(DRAIN_BUDGET)
@@ -698,6 +732,8 @@ impl EngineHost {
             observation: None,
             action: None,
             navigation: None,
+            #[cfg(target_os = "macos")]
+            screenshot: None,
             document_finalization_wake: None,
             document_finalization_ready: None,
             last_invocation: 0,
@@ -995,6 +1031,16 @@ impl EngineHost {
                 && resource.observation.is_none()
                 && resource.action.is_none()
                 && resource.navigation.is_none()
+                && {
+                    #[cfg(target_os = "macos")]
+                    {
+                        resource.screenshot.is_none()
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        true
+                    }
+                }
                 && resource.ready()
                 && resource
                     .view

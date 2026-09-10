@@ -178,6 +178,13 @@ pub trait AgentWorkTask: Send {
     fn allows_progressive_observation(&self) -> bool {
         false
     }
+    /// Explicitly permits one-shot viewport captures when semantic inspection
+    /// cannot represent a visual/layout question. Captures remain bound to an
+    /// acknowledged complete public observation and the provider disclosure
+    /// policy; this opt-in alone grants neither pixels nor native authority.
+    fn allows_viewport_screenshot(&self) -> bool {
+        false
+    }
     /// Explicitly permits one terminal native subtree read anchored to the
     /// exact model-acknowledged observation. Frozen at admission; default is
     /// initial-scope only. This grants no action or navigation authority.
@@ -957,6 +964,7 @@ impl AgentWorkController {
         let subtree_extraction = task.allows_subtree_extraction();
         let baseline_read = task.allows_baseline_read();
         let progressive_observation = task.allows_progressive_observation();
+        let viewport_screenshot = task.allows_viewport_screenshot();
         let navigation_target = task.navigation_target().cloned();
         let navigation_route = task.navigation_route().cloned();
         let navigation_discovery = task.navigation_discovery().cloned();
@@ -981,7 +989,11 @@ impl AgentWorkController {
                 || (navigation_discovery.is_some()
                     && !retained
                         .as_ref()
-                        .is_some_and(|browser| browser.supports_navigation())))
+                        .is_some_and(|browser| browser.supports_navigation()))
+                || (viewport_screenshot
+                    && !retained
+                        .as_ref()
+                        .is_some_and(|browser| browser.supports_screenshots())))
         {
             return Err(AgentWorkFailure::Contract);
         }
@@ -1070,6 +1082,7 @@ impl AgentWorkController {
                     subtree_extraction,
                     baseline_read,
                     progressive_observation,
+                    viewport_screenshot,
                     navigation_target,
                     navigation_route,
                     navigation_discovery,
@@ -1096,6 +1109,7 @@ struct WorkState {
     navigation_hops: usize,
     baseline_read: bool,
     progressive_observation: bool,
+    viewport_screenshot: bool,
     extraction_schema: Option<SemanticExtractionSchema>,
     actions_before_extraction: bool,
     subtree_extraction: bool,
@@ -1138,6 +1152,7 @@ impl WorkState {
             && (self.has_navigation()
                 || self.baseline_read
                 || self.progressive_observation
+                || self.viewport_screenshot
                 || self.actions_before_extraction
                 || self.subtree_extraction)
     }
@@ -1254,6 +1269,7 @@ impl WorkState {
             || self.task.allows_subtree_extraction() != self.subtree_extraction
             || self.task.allows_baseline_read() != self.baseline_read
             || self.task.allows_progressive_observation() != self.progressive_observation
+            || self.task.allows_viewport_screenshot() != self.viewport_screenshot
         {
             return Err(AgentWorkFailure::Contract);
         }
@@ -1294,6 +1310,8 @@ struct WorkNative {
     recovery_close: Option<ContextOperationJoin>,
     observation: Option<SemanticRuntimeCorrelation>,
     snapshot_generation: Option<SemanticSnapshotGeneration>,
+    screenshots: SemanticScreenshotCoordinator,
+    screenshot_pending: Option<SemanticScreenshotPending>,
     action_pending: bool,
     cancellation: Option<ContextJoin>,
     shutdown_audit: Option<ContextResourceAuditId>,
@@ -1308,7 +1326,6 @@ struct WorkContextResources {
     contexts: ContextRegistry,
     profiles: ContextProfileLeaseRegistry,
     cookies: ContextCookieTransferRegistry,
-    screenshots: SemanticScreenshotCoordinator,
 }
 
 impl WorkNative {
@@ -1367,7 +1384,6 @@ impl WorkNative {
                 contexts: ContextRegistry::new(),
                 profiles: ContextProfileLeaseRegistry::new(),
                 cookies: ContextCookieTransferRegistry::new(),
-                screenshots: SemanticScreenshotCoordinator::new(),
             }),
             retained,
             retained_delivery: None,
@@ -1379,6 +1395,8 @@ impl WorkNative {
             recovery_close: None,
             observation: None,
             snapshot_generation: None,
+            screenshots: SemanticScreenshotCoordinator::new(),
+            screenshot_pending: None,
             action_pending: false,
             cancellation: None,
             shutdown_audit: None,
@@ -1864,6 +1882,9 @@ impl AgentWorkController {
         if state.progressive_observation {
             session.config = session.config.with_progressive_observation();
         }
+        if state.viewport_screenshot {
+            session.config = session.config.with_viewport_screenshot();
+        }
         if decision_budget {
             session.config = session
                 .config
@@ -2313,6 +2334,10 @@ impl AgentWorkController {
                 .await?;
                 continue;
             }
+            if turn.turn.proposal().kind() == AgentBrowserToolKind::Screenshot {
+                turn = Self::screenshot_current(state, worker, browser, turn, &observation).await?;
+                continue;
+            }
             let step = turn;
             if step.turn.proposal().kind() == AgentBrowserToolKind::Navigate {
                 if state.navigation_discovery.is_none() {
@@ -2584,6 +2609,119 @@ impl AgentWorkController {
             )
             .await?;
         }
+    }
+
+    async fn screenshot_current(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        turn: AgentBrowserProviderTurn,
+        observation: &SemanticObservation,
+    ) -> Result<AgentBrowserProviderTurn, AgentWorkFailure> {
+        state.check_task_contract()?;
+        if !state.viewport_screenshot
+            || state.native.screenshot_pending.is_some()
+            || state
+                .native
+                .retained
+                .as_ref()
+                .is_some_and(|browser| !browser.supports_screenshots())
+        {
+            return Err(AgentWorkFailure::Browser(
+                AgentBrowserProviderError::UnsupportedTool(AgentBrowserToolKind::Screenshot),
+            ));
+        }
+        let baseline = turn.turn.continuation().baseline();
+        let now = state
+            .session
+            .as_ref()
+            .ok_or(AgentWorkFailure::Contract)?
+            .policy_now()
+            .map_err(AgentWorkFailure::Browser)?;
+        let remaining = state
+            .native
+            .deadline
+            .saturating_duration_since(Instant::now());
+        let window_millis = u64::try_from(remaining.as_millis())
+            .unwrap_or(u64::MAX)
+            .min(MAX_SEMANTIC_SCREENSHOT_CAPTURE_MILLIS);
+        if window_millis == 0 {
+            return Err(AgentWorkFailure::Deadline);
+        }
+        let requested_at = SemanticCaptureInstant::from_millis(now.millis());
+        let deadline = SemanticCaptureInstant::from_millis(
+            now.millis()
+                .checked_add(window_millis)
+                .ok_or(AgentWorkFailure::Contract)?,
+        );
+        let request = prepare_semantic_screenshot(
+            SemanticScreenshotRequestId::new(state.native.id()?)
+                .ok_or(AgentWorkFailure::Contract)?,
+            observation,
+            baseline,
+            requested_at,
+            deadline,
+            SemanticScreenshotBudget::STANDARD,
+        )
+        .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Authority))?;
+        let (pending, native) = state
+            .native
+            .screenshots
+            .begin(request)
+            .map_err(|_| AgentWorkFailure::Contract)?;
+        state.native.screenshot_pending = Some(pending);
+        let dispatch = if let Some(retained) = &mut state.native.retained {
+            retained.dispatch_screenshot(native, worker.semantic_screenshot_completion(), now)
+        } else {
+            browser.capture_semantic_screenshot(native, worker.semantic_screenshot_completion())
+        };
+        if dispatch != ContextDispatch::Scheduled {
+            let pending = state
+                .native
+                .screenshot_pending
+                .take()
+                .ok_or(AgentWorkFailure::Contract)?;
+            state
+                .native
+                .screenshots
+                .cancel(pending)
+                .map_err(|_| AgentWorkFailure::Contract)?;
+            return Err(AgentWorkFailure::Context);
+        }
+        let capture = match state.native.next_event(worker, browser).await? {
+            AgentRuntimeEvent::SemanticScreenshotTerminal(capture) => {
+                if let Some(retained) = &mut state.native.retained {
+                    retained.account_screenshot_terminal(now)?;
+                }
+                capture.map_err(AgentWorkFailure::Screenshot)?
+            }
+            event => {
+                state.native.retain(event)?;
+                return Err(AgentWorkFailure::Mailbox);
+            }
+        };
+        let pending = state
+            .native
+            .screenshot_pending
+            .take()
+            .ok_or(AgentWorkFailure::Contract)?;
+        let context = observation.request().context();
+        let screenshot = state
+            .native
+            .screenshots
+            .admit(pending, context, capture)
+            .map_err(|_| AgentWorkFailure::ContextLost)?;
+        state.native.check_control(worker, browser)?;
+        state.refresh_account(worker, browser)?;
+        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        Self::provider(
+            &mut state.native,
+            worker,
+            browser,
+            session.cancellation.clone(),
+            session.continue_after_screenshot(turn.into_tool_turn(), screenshot, observation),
+        )
+        .await
     }
 
     async fn extract_current(
@@ -2878,6 +3016,7 @@ impl AgentWorkController {
             || state.native.recovery_close.is_some()
             || state.native.observation.is_some()
             || state.native.action_pending
+            || state.native.screenshot_pending.is_some()
             || state.native.cancellation.is_some()
             || state.native.shutdown_audit.is_some()
             || state.native_terminal.is_some()
@@ -2895,6 +3034,11 @@ impl AgentWorkController {
         cleanup: Option<Instant>,
     ) -> Result<(), AgentWorkFailure> {
         let state = self.state.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        state.native.screenshots.seal_for_shutdown();
+        let screenshots = std::mem::replace(
+            &mut state.native.screenshots,
+            SemanticScreenshotCoordinator::new(),
+        );
         let resources = state
             .native
             .resources
@@ -2912,7 +3056,6 @@ impl AgentWorkController {
             .cookies
             .seal_for_shutdown()
             .map_err(|_| AgentWorkFailure::Shutdown)?;
-        resources.screenshots.seal_for_shutdown();
         let session = state.session.take().ok_or(AgentWorkFailure::Contract)?;
         let finished = if cleanup.is_some() {
             session.try_finish_unsuccessful()
@@ -2957,7 +3100,7 @@ impl AgentWorkController {
                 resources.cookies,
                 action_executions,
                 action_settlements,
-                resources.screenshots,
+                screenshots,
             )),
             proof: None,
             delivery: None,
@@ -3174,6 +3317,7 @@ impl AgentWorkController {
             || state.native.recovery_close.is_some()
             || state.native.observation.is_some()
             || state.native.action_pending
+            || state.native.screenshot_pending.is_some()
             || state.native.cancellation.is_some()
             || state.native.shutdown_audit.is_some()
             || state.native_terminal.is_some()
@@ -3344,6 +3488,7 @@ impl AgentWorkController {
             || state.native.recovery_close.is_some()
             || state.native.observation.is_some()
             || state.native.action_pending
+            || state.native.screenshot_pending.is_some()
             || state.native.cancellation.is_some()
             || state.native.shutdown_audit.is_some()
             || state
@@ -3379,6 +3524,7 @@ impl AgentWorkController {
                 {
                     state.native.action_pending = false
                 }
+                AgentRuntimeEvent::SemanticScreenshotTerminal(_) => {}
                 _ => {}
             }
             let accounted = match &event {
@@ -3410,6 +3556,25 @@ impl AgentWorkController {
                 )) if state.native.cancellation == Some(value.current()) => {
                     state.native.cancellation = None;
                     value.outcome().is_ok()
+                }
+                AgentRuntimeEvent::SemanticScreenshotTerminal(_) => {
+                    let pending = state.native.screenshot_pending.take();
+                    let now = state
+                        .native
+                        .clock
+                        .as_ref()
+                        .and_then(|clock| clock.now().ok());
+                    let retained = state.native.retained.as_mut();
+                    let accounted = match (retained, now) {
+                        (Some(retained), Some(now)) => {
+                            retained.account_screenshot_terminal(now).is_ok()
+                        }
+                        (None, _) => true,
+                        _ => false,
+                    };
+                    pending.is_some_and(|pending| {
+                        state.native.screenshots.cancel(pending).is_ok() && accounted
+                    })
                 }
                 AgentRuntimeEvent::NativeTerminal(ContextNativeEvent::TransitionSettled(value))
                     if state.native.recovery_close == Some(value.operation()) =>
@@ -3662,6 +3827,8 @@ pub enum AgentWorkFailure {
     Native(ContextPortFailure),
     /// Exact content-free semantic runtime refusal.
     Observation(SemanticRuntimePortFailure),
+    /// Exact bounded native viewport-capture refusal.
+    Screenshot(SemanticScreenshotNativeFailure),
     /// Renderer or navigation authority changed; stale refs are revoked.
     ContextLost,
     /// Provider or action authority returned a closed refusal.

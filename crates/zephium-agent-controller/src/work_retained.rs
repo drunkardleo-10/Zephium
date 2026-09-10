@@ -7,6 +7,30 @@ use std::task::Waker;
 /// operation slots outside the worker; no native port or registry is exposed.
 /// Registration is immutable, bounded and precedes every native dispatch.
 pub trait AgentWorkRetainedBrowser: Send {
+    /// Whether this exact retained backing can own a bounded native viewport
+    /// capture callback for its leased document.
+    fn supports_screenshots(&self) -> bool {
+        false
+    }
+    /// Dispatches one already policy-bound native screenshot half. Returning
+    /// `Scheduled` transfers exactly one completion obligation.
+    fn dispatch_screenshot(
+        &mut self,
+        _request: SemanticScreenshotNativeRequest,
+        _completion: SemanticScreenshotNativeCompletion,
+        _now: AgentPolicyInstant,
+    ) -> ContextDispatch {
+        ContextDispatch::Unsupported
+    }
+    /// Accounts the exact screenshot callback after the runtime mailbox has
+    /// transferred its terminal. This releases retained-resource exclusion;
+    /// it does not validate or disclose image bytes.
+    fn account_screenshot_terminal(
+        &mut self,
+        _now: AgentPolicyInstant,
+    ) -> Result<(), AgentWorkFailure> {
+        Err(AgentWorkFailure::Contract)
+    }
     /// Whether the exact backing owns authorized semantic action callbacks.
     /// This is ownership support only; the task and policy still approve
     /// effects, and the native platform may reject an unsupported recipe.
@@ -279,6 +303,16 @@ impl WorkBrowser<'_> {
     ) -> ContextDispatch {
         match self {
             Self::Legacy(browser) => browser.execute_semantic_action(request, completion),
+            Self::Retained => ContextDispatch::Unsupported,
+        }
+    }
+    pub(super) fn capture_semantic_screenshot(
+        &self,
+        request: SemanticScreenshotNativeRequest,
+        completion: SemanticScreenshotNativeCompletion,
+    ) -> ContextDispatch {
+        match self {
+            Self::Legacy(browser) => browser.capture_semantic_screenshot(request, completion),
             Self::Retained => ContextDispatch::Unsupported,
         }
     }

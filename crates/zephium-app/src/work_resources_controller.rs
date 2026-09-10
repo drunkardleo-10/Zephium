@@ -88,6 +88,7 @@ pub(super) struct RetainedBrowser {
     read: Option<(PendingRead, SemanticObservationRequest)>,
     navigation: Option<PendingNavigation>,
     action: Option<PendingAction>,
+    screenshot: bool,
     revoke: Option<PendingLifecycle>,
     delivered: bool,
 }
@@ -106,6 +107,7 @@ impl WorkResourceOwner {
             read: None,
             navigation: None,
             action: None,
+            screenshot: false,
             revoke: None,
             delivered: false,
         })
@@ -140,6 +142,47 @@ impl RetainedBrowser {
     }
 }
 impl AgentWorkRetainedBrowser for RetainedBrowser {
+    fn supports_screenshots(&self) -> bool {
+        cfg!(target_os = "macos")
+    }
+    fn dispatch_screenshot(
+        &mut self,
+        request: SemanticScreenshotNativeRequest,
+        completion: SemanticScreenshotNativeCompletion,
+        now: AgentPolicyInstant,
+    ) -> ContextDispatch {
+        if !self.supports_screenshots()
+            || self.listener().is_err()
+            || self.check_health(now).is_err()
+            || self.read.is_some()
+            || self.navigation.is_some()
+            || self.action.is_some()
+            || self.screenshot
+            || self.revoke.is_some()
+            || self.delivered
+        {
+            return ContextDispatch::Rejected(ContextPortFailure::Stale);
+        }
+        let dispatch = self
+            .browser
+            .shared
+            .port
+            .capture_semantic_screenshot(request, completion);
+        self.screenshot = matches!(dispatch, ContextDispatch::Scheduled);
+        dispatch
+    }
+    fn account_screenshot_terminal(
+        &mut self,
+        _now: AgentPolicyInstant,
+    ) -> Result<(), AgentWorkFailure> {
+        if !self.screenshot {
+            return Err(AgentWorkFailure::Contract);
+        }
+        self.screenshot = false;
+        // This is original callback accounting, not new browser authority.
+        // It must remain possible after cancellation revoked the lease.
+        Ok(())
+    }
     fn binding(&self) -> &WorkBrowserReadBinding {
         &self.binding
     }
@@ -148,6 +191,7 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
             || self.read.is_some()
             || self.navigation.is_some()
             || self.action.is_some()
+            || self.screenshot
             || self.revoke.is_some()
         {
             return Err(Self::error(self.browser.refusal()));
@@ -205,6 +249,7 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
             || self.read.is_some()
             || self.navigation.is_some()
             || self.action.is_some()
+            || self.screenshot
             || self.revoke.is_some()
             || self.delivered
         {
@@ -259,6 +304,7 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
         if self.read.is_some()
             || self.navigation.is_some()
             || self.action.is_some()
+            || self.screenshot
             || self.revoke.is_some()
             || self.delivered
         {
@@ -500,6 +546,9 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
         // and reconcile its independent policy/audit receipt. Never silently
         // drain navigation here just to make the resource lease look closed.
         if self.navigation.is_some() || self.action.is_some() {
+            return Ok(None);
+        }
+        if self.screenshot {
             return Ok(None);
         }
         if let Some((pending, _)) = self.read.as_mut() {

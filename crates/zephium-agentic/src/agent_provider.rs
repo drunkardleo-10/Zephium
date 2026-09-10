@@ -743,6 +743,7 @@ pub struct AgentProviderCallConfig {
     tools: BrowserToolProfile,
     baseline_read: bool,
     progressive_observation: bool,
+    viewport_screenshot: bool,
     decision_budget: Option<(AgentModelCallId, u8)>,
 }
 
@@ -794,6 +795,7 @@ impl AgentProviderCallConfig {
             tools: BrowserToolProfile::Full,
             baseline_read: false,
             progressive_observation: false,
+            viewport_screenshot: false,
             decision_budget: None,
         })
     }
@@ -840,6 +842,24 @@ impl AgentProviderCallConfig {
 
     pub(super) fn adds_progressive_observation(&self) -> bool {
         self.progressive_observation && self.tools != BrowserToolProfile::Full
+    }
+
+    /// Enables one bounded viewport capture of the exact acknowledged semantic
+    /// observation. This only freezes model vocabulary; task policy, native
+    /// platform support, secret screening and current-document admission remain
+    /// independently mandatory for every capture.
+    pub fn with_viewport_screenshot(mut self) -> Self {
+        self.viewport_screenshot = true;
+        self
+    }
+
+    /// Whether this immutable provider lineage can request a viewport capture.
+    pub const fn permits_viewport_screenshot(&self) -> bool {
+        self.viewport_screenshot
+    }
+
+    pub(super) fn adds_viewport_screenshot(&self) -> bool {
+        self.viewport_screenshot && self.tools != BrowserToolProfile::Full
     }
 
     /// Restricts browser planning to the one trusted run-local extraction
@@ -951,6 +971,9 @@ impl AgentProviderCallConfig {
             return true;
         }
         if self.progressive_observation && kind == AgentBrowserToolKind::Snapshot {
+            return true;
+        }
+        if self.viewport_screenshot && kind == AgentBrowserToolKind::Screenshot {
             return true;
         }
         match self.tools {
