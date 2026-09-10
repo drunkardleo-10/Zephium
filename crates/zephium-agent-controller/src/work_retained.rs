@@ -933,9 +933,18 @@ impl AgentWorkController {
         if state.drained.is_some() || state.native.resources.is_some() {
             return Err(AgentWorkFailure::Contract);
         }
+        let terminal_intent = match cleanup {
+            Some(_) => WorkTerminalIntent::ClosedUnsuccessfully(
+                state.failure.ok_or(AgentWorkFailure::Contract)?,
+            ),
+            None => state.model_human_request.map_or(
+                WorkTerminalIntent::Succeeded,
+                WorkTerminalIntent::WaitingForHuman,
+            ),
+        };
         // A retained accepted outcome must contain the independently accepted
         // source-bound result; task `Complete` before mapping is insufficient.
-        let waiting = state.model_human_request.is_some() && cleanup.is_none();
+        let waiting = matches!(terminal_intent, WorkTerminalIntent::WaitingForHuman(_));
         if cleanup.is_none() && state.extraction.is_none() && !waiting {
             return Err(AgentWorkFailure::Contract);
         }
@@ -975,7 +984,7 @@ impl AgentWorkController {
             state.native.retained_delivery = Some(delivery);
         }
         let session = state.session.take().ok_or(AgentWorkFailure::Contract)?;
-        let terminal = match if cleanup.is_some() || waiting {
+        let terminal = match if !matches!(terminal_intent, WorkTerminalIntent::Succeeded) {
             session.try_finish_unsuccessful()
         } else {
             session.try_finish()
@@ -987,6 +996,15 @@ impl AgentWorkController {
                 return Err(AgentWorkFailure::Browser(error));
             }
         };
+        if state.terminal_intent.replace(terminal_intent).is_some() {
+            state.session = Some(*terminal.session);
+            return Err(AgentWorkFailure::Contract);
+        }
+        state.model_human_request = None;
+        // Mirror the legacy closure boundary: an accepted model handoff whose
+        // provider session is now closed wins over a later stop, while exact
+        // retained/audit debt must still settle within the original deadline.
+        let cleanup = cleanup.or_else(|| waiting.then_some(state.native.deadline));
         let AgentBrowserSession {
             policy,
             journal,

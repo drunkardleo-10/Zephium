@@ -946,6 +946,104 @@ fn prepared_with_audit(
     (controller, handle, scope, server)
 }
 
+struct HumanRequestTask(AgentWorkExtractionTask);
+impl AgentWorkTask for HumanRequestTask {
+    fn allows_human_request(&self) -> bool {
+        true
+    }
+    fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
+        self.0.extraction_schema()
+    }
+    fn evaluate(
+        &mut self,
+        observation: &SemanticObservation,
+    ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+        self.0.evaluate(observation)
+    }
+    fn assess(
+        &self,
+        action: &SemanticPreparedAction,
+    ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+        self.0.assess(action)
+    }
+    fn attest_account(
+        &self,
+        context: ContextJoin,
+        now: AgentPolicyInstant,
+    ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
+        self.0.attest_account(context, now)
+    }
+    fn accept_extraction(
+        &mut self,
+        result: &SemanticExtractionResult<'_>,
+    ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+        self.0.accept_extraction(result)
+    }
+}
+
+#[test]
+fn retained_model_handoff_closes_as_waiting_and_relinquishes_actor_authority() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (owner, native, resource, browser) = setup();
+    let input = input(browser.binding(), Arc::new(Clock(AtomicU64::new(2))));
+    let response = response_stream(1)
+        .replace("\"name\":\"extract\"", "\"name\":\"show_for_human\"")
+        .replace(
+            r#"{\"scope\":{\"kind\":\"initial\"},\"schema_id\":1}"#,
+            r#"{\"reason\":\"sign_in\"}"#,
+        );
+    let (transport, server) = fixture_provider_responses(vec![response]);
+    let (controller, mut result, scope) = AgentWorkRetainedController::try_new_for_probe(
+        input,
+        Box::new(browser),
+        transport,
+        AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "fixture-not-a-secret".into(),
+        )
+        .unwrap(),
+        Arc::new(Audit(false)),
+        Box::new(HumanRequestTask(task())),
+    )
+    .unwrap();
+    let (_handle, lifecycle) = start(controller, scope);
+    let mut outcome = None;
+    wait_until(|| {
+        while result.take_event().is_some() {}
+        outcome = result.take_outcome();
+        outcome.is_some()
+    });
+    let Some(AgentWorkRetainedOutcome::WaitingForHuman(waiting)) = outcome else {
+        panic!("retained model handoff must be a clean waiting outcome");
+    };
+    assert_eq!(waiting.request().reason(), AgentBrowserHumanReason::SignIn);
+    assert_eq!(
+        waiting.request().retained_resource(),
+        Some(resource.identity())
+    );
+    assert_eq!(waiting.closure().model_calls(), 1);
+    assert_eq!(waiting.closure().effects(), 0);
+    assert!(matches!(
+        lifecycle.drain_until(Instant::now() + Duration::from_secs(2)),
+        AgentRuntimeScopedDrain::Drained(_)
+    ));
+    native.join();
+    assert_eq!(native.reads.load(Ordering::Acquire), 1);
+    assert_eq!(native.destructions.load(Ordering::Acquire), 0);
+    let mut destroy = owner.destroy(&resource).unwrap();
+    assert!(matches!(
+        destroy.poll(now()).unwrap(),
+        Some(LifecycleResult::Event(WorkBrowserResourceEvent::Destroyed(
+            _
+        )))
+    ));
+    owner.seal_resources().unwrap();
+    assert!(owner.locally_retired());
+    assert_eq!(server.join().unwrap(), 1);
+}
+
 struct GatedAudit {
     dispatched: mpsc::SyncSender<(AgentAuditDeliveryProof, AgentAuditCompletion)>,
     release: Mutex<mpsc::Receiver<()>>,
