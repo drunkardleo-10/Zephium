@@ -4248,6 +4248,7 @@ fn encode_openai_observation_body_with_action_targets(
                 .adds_standalone_wait()
                 .then(|| &*STANDALONE_WAIT_TOOL),
         )
+        .chain(config.adds_human_request().then(|| &*HUMAN_REQUEST_TOOL))
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| OpenAiToolWire {
             r#type: "function",
@@ -4372,6 +4373,7 @@ pub(in crate::agent_provider) fn encode_openai_continuation_body(
                 .adds_standalone_wait()
                 .then(|| &*STANDALONE_WAIT_TOOL),
         )
+        .chain(config.adds_human_request().then(|| &*HUMAN_REQUEST_TOOL))
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| OpenAiToolWire {
             r#type: "function",
@@ -4591,6 +4593,7 @@ fn encode_openai_screenshot_continuation_body(
                 .adds_standalone_wait()
                 .then(|| &*STANDALONE_WAIT_TOOL),
         )
+        .chain(config.adds_human_request().then(|| &*HUMAN_REQUEST_TOOL))
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| OpenAiToolWire {
             r#type: "function",
@@ -4654,6 +4657,7 @@ fn encode_anthropic_body_with_action_targets(
         config.adds_progressive_observation(),
         config.adds_viewport_screenshot(),
         config.adds_standalone_wait(),
+        config.adds_human_request(),
     )?;
     let tools = definitions
         .iter()
@@ -4676,6 +4680,11 @@ fn encode_anthropic_body_with_action_targets(
             config
                 .adds_standalone_wait()
                 .then(|| &*ANTHROPIC_STANDALONE_WAIT_TOOL),
+        )
+        .chain(
+            config
+                .adds_human_request()
+                .then(|| &*ANTHROPIC_HUMAN_REQUEST_TOOL),
         )
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| AnthropicToolWire {
@@ -4740,6 +4749,7 @@ fn encode_anthropic_continuation_body(
         config.adds_progressive_observation(),
         config.adds_viewport_screenshot(),
         config.adds_standalone_wait(),
+        config.adds_human_request(),
     )?;
     let message_count = 1_usize
         .checked_add(
@@ -4820,6 +4830,11 @@ fn encode_anthropic_continuation_body(
             config
                 .adds_standalone_wait()
                 .then(|| &*ANTHROPIC_STANDALONE_WAIT_TOOL),
+        )
+        .chain(
+            config
+                .adds_human_request()
+                .then(|| &*ANTHROPIC_HUMAN_REQUEST_TOOL),
         )
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| AnthropicToolWire {
@@ -4963,6 +4978,7 @@ fn encode_anthropic_screenshot_continuation_body(
         config.adds_progressive_observation(),
         config.adds_viewport_screenshot(),
         config.adds_standalone_wait(),
+        config.adds_human_request(),
     )?;
     if transcript.navigation_checkpoint().is_some() {
         return Err(AgentProviderRequestError::Encoding);
@@ -5089,6 +5105,11 @@ fn encode_anthropic_screenshot_continuation_body(
                 .adds_standalone_wait()
                 .then(|| &*ANTHROPIC_STANDALONE_WAIT_TOOL),
         )
+        .chain(
+            config
+                .adds_human_request()
+                .then(|| &*ANTHROPIC_HUMAN_REQUEST_TOOL),
+        )
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| AnthropicToolWire {
             name: tool.kind.as_str(),
@@ -5160,6 +5181,7 @@ fn validate_anthropic_tool_definitions(
     progressive_observation: bool,
     viewport_screenshot: bool,
     standalone_wait: bool,
+    human_request: bool,
 ) -> Result<(), AgentProviderRequestError> {
     let union_parameters = definitions
         .iter()
@@ -5167,6 +5189,7 @@ fn validate_anthropic_tool_definitions(
         .chain(progressive_observation.then(|| &*ANTHROPIC_PROGRESSIVE_OBSERVATION_TOOL))
         .chain(viewport_screenshot.then(|| &*ANTHROPIC_VIEWPORT_SCREENSHOT_TOOL))
         .chain(standalone_wait.then(|| &*ANTHROPIC_STANDALONE_WAIT_TOOL))
+        .chain(human_request.then(|| &*ANTHROPIC_HUMAN_REQUEST_TOOL))
         .try_fold(0_usize, |total, tool| {
             total.checked_add(count_schema_unions(&tool.input_schema))
         });
@@ -5175,6 +5198,7 @@ fn validate_anthropic_tool_definitions(
         + usize::from(progressive_observation)
         + usize::from(viewport_screenshot)
         + usize::from(standalone_wait)
+        + usize::from(human_request)
         > MAX_ANTHROPIC_STRICT_TOOLS
         || union_parameters.is_none_or(|count| count > MAX_ANTHROPIC_SCHEMA_UNIONS)
     {
@@ -5288,6 +5312,32 @@ static ANTHROPIC_STANDALONE_WAIT_TOOL: LazyLock<AnthropicBrowserToolDefinition> 
         kind: STANDALONE_WAIT_TOOL.kind,
         description: STANDALONE_WAIT_TOOL.description,
         input_schema: project_anthropic_schema(&STANDALONE_WAIT_TOOL.parameters),
+    });
+
+static HUMAN_REQUEST_TOOL: LazyLock<BrowserToolDefinition> = LazyLock::new(|| {
+    BrowserToolDefinition {
+        kind: AgentBrowserToolKind::ShowForHuman,
+        description: "Stop this run and request a person using one closed reason. Use only when safe autonomous progress is blocked. This is a terminal handoff: it does not grant human input, preserve refs, or let the model resume. A trusted host must separately admit a fresh successor run.",
+        parameters: with_reference_definition(strict_object(vec![(
+            "reason",
+            string_enum(&[
+                "sign_in",
+                "permission",
+                "unsupported_interaction",
+                "verification",
+                "user_decision",
+                "sensitive_effect",
+                "human_challenge",
+            ]),
+        )])),
+    }
+});
+
+static ANTHROPIC_HUMAN_REQUEST_TOOL: LazyLock<AnthropicBrowserToolDefinition> =
+    LazyLock::new(|| AnthropicBrowserToolDefinition {
+        kind: HUMAN_REQUEST_TOOL.kind,
+        description: HUMAN_REQUEST_TOOL.description,
+        input_schema: project_anthropic_schema(&HUMAN_REQUEST_TOOL.parameters),
     });
 
 static EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolDefinition>> = LazyLock::new(|| {
@@ -6861,6 +6911,58 @@ mod tests {
                 BTreeSet::from(["semantic_change", "target_state"])
             );
             assert!(!wait_schema.to_string().contains("mutation_quiet"));
+            let handoff = config
+                .clone()
+                .restrict_to_navigation_and_extraction()
+                .with_human_request();
+            assert!(handoff.permits_human_request());
+            assert!(handoff.permits_tool(AgentBrowserToolKind::ShowForHuman));
+            assert!(!handoff.permits_tool(AgentBrowserToolKind::ResumeAfterHuman));
+            let handoff_body = match provider {
+                AgentProviderKind::OpenAiResponses => {
+                    encode_openai_body(&handoff, "objective", "observation")
+                }
+                AgentProviderKind::AnthropicMessages => {
+                    encode_anthropic_body(&handoff, "objective", "observation")
+                }
+            }
+            .unwrap();
+            let handoff_wire: Value = serde_json::from_slice(&handoff_body).unwrap();
+            let tools = handoff_wire["tools"].as_array().unwrap();
+            assert_eq!(
+                tools
+                    .iter()
+                    .filter(|tool| tool["name"] == "show_for_human")
+                    .count(),
+                1
+            );
+            assert!(tools
+                .iter()
+                .all(|tool| tool["name"] != "resume_after_human"));
+            let tool = tools
+                .iter()
+                .find(|tool| tool["name"] == "show_for_human")
+                .unwrap();
+            let schema = match provider {
+                AgentProviderKind::OpenAiResponses => &tool["parameters"],
+                AgentProviderKind::AnthropicMessages => &tool["input_schema"],
+            };
+            assert_eq!(
+                schema["properties"]["reason"]["enum"],
+                json!([
+                    "sign_in",
+                    "permission",
+                    "unsupported_interaction",
+                    "verification",
+                    "user_decision",
+                    "sensitive_effect",
+                    "human_challenge"
+                ])
+            );
+            assert!(tool["description"]
+                .as_str()
+                .unwrap()
+                .contains("trusted host must separately admit a fresh successor"));
             let extraction = config.clone().restrict_to_extraction();
             let combined = config.clone().restrict_to_actions_and_extraction();
             for base in [

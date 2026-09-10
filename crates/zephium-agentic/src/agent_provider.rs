@@ -745,6 +745,7 @@ pub struct AgentProviderCallConfig {
     progressive_observation: bool,
     viewport_screenshot: bool,
     standalone_wait: bool,
+    human_request: bool,
     decision_budget: Option<(AgentModelCallId, u8)>,
 }
 
@@ -798,6 +799,7 @@ impl AgentProviderCallConfig {
             progressive_observation: false,
             viewport_screenshot: false,
             standalone_wait: false,
+            human_request: false,
             decision_budget: None,
         })
     }
@@ -879,6 +881,22 @@ impl AgentProviderCallConfig {
 
     pub(super) fn adds_standalone_wait(&self) -> bool {
         self.standalone_wait && self.tools != BrowserToolProfile::Full
+    }
+
+    /// Enables model-requested human handoff with one closed reason. This never
+    /// enables `resume_after_human`; only a trusted host can start a successor.
+    pub fn with_human_request(mut self) -> Self {
+        self.human_request = true;
+        self
+    }
+
+    /// Whether this immutable lineage lets the model stop and request a person.
+    pub const fn permits_human_request(&self) -> bool {
+        self.human_request
+    }
+
+    pub(super) fn adds_human_request(&self) -> bool {
+        self.human_request && self.tools != BrowserToolProfile::Full
     }
 
     /// Restricts browser planning to the one trusted run-local extraction
@@ -996,6 +1014,9 @@ impl AgentProviderCallConfig {
             return true;
         }
         if self.standalone_wait && kind == AgentBrowserToolKind::Wait {
+            return true;
+        }
+        if self.human_request && kind == AgentBrowserToolKind::ShowForHuman {
             return true;
         }
         match self.tools {
