@@ -1,10 +1,10 @@
 //! Retained action ingress owns the original recipe and callback return debt.
 use super::*;
 use zephium_agentic::{
-    SemanticActionAttemptId, SemanticActionExecutionInstant, SemanticActionKind,
-    SemanticActionNativeFailure, SemanticActionNativeSettlement,
-    WorkBrowserActionCompletionCallback, WorkBrowserActionCompletionOwner,
-    WorkBrowserActionDeliveryCompletion, WorkBrowserActionDispatch, WorkBrowserActionRequest,
+    SemanticActionAttemptId, SemanticActionExecutionInstant, SemanticActionNativeFailure,
+    SemanticActionNativeSettlement, WorkBrowserActionCompletionCallback,
+    WorkBrowserActionCompletionOwner, WorkBrowserActionDeliveryCompletion,
+    WorkBrowserActionDispatch, WorkBrowserActionRequest,
 };
 
 impl WorkResourceGuard {
@@ -235,10 +235,8 @@ impl EngineAgentBrowserPort {
             request: Box::new(request),
             failure,
         };
-        if !matches!(
-            request.action().kind(),
-            SemanticActionKind::Click | SemanticActionKind::Fill | SemanticActionKind::Select
-        ) || request.action().frame().frame() != zephium_agentic::FrameId::MAIN
+        if !zephium_agentic::AGENT_BROWSER_SNAPSHOT_ACTION_KINDS.contains(&request.action().kind())
+            || request.action().frame().frame() != zephium_agentic::FrameId::MAIN
             || request.action().frame().trust() != zephium_agentic::SemanticFrameTrust::SameOrigin
         {
             return reject(request, ContextPortFailure::Unsupported);

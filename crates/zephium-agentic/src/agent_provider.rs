@@ -97,6 +97,15 @@ pub const MAX_AGENT_PROVIDER_MODEL_REVISION_BYTES: usize = 96;
 /// admitted by the current snapshot-action driver. This is not a required wait.
 /// Public native qualification observed >1 s captures on throttled owned pages.
 pub const MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS: u32 = 2_000;
+
+/// Fixed isolated-runtime actions supported by the retained snapshot-verifying
+/// controller and both desktop adapters. Keyboard and scroll input need their
+/// own dispatch/evidence integration before this capability can include them.
+pub const AGENT_BROWSER_SNAPSHOT_ACTION_KINDS: [crate::SemanticActionKind; 3] = [
+    crate::SemanticActionKind::Click,
+    crate::SemanticActionKind::Fill,
+    crate::SemanticActionKind::Select,
+];
 /// Maximum bytes in one provider-attested service-tier identity.
 pub const MAX_AGENT_PROVIDER_SERVICE_TIER_BYTES: usize = 32;
 /// Maximum trusted effective model revisions accepted for one requested alias.
@@ -846,8 +855,10 @@ impl AgentProviderCallConfig {
         self
     }
 
-    /// Enables model-selected navigation, bounded actions and terminal mapping
-    /// inside one frozen lineage. Trusted host assessment, exact current refs,
+    /// Enables model-selected navigation, one snapshot-verifiable Click, Fill
+    /// or Select action per turn, and terminal mapping. Only Read/LocalWrite
+    /// effects and immediate/mutation-quiet settlement are advertised inside
+    /// one frozen lineage. Trusted host assessment, exact current refs,
     /// policy admission and independent verification remain mandatory per effect.
     pub fn restrict_to_navigation_actions_and_extraction(mut self) -> Self {
         self.tools = BrowserToolProfile::NavigationActionsExtraction;

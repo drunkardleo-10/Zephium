@@ -85,6 +85,9 @@ impl AgentBrowserActionProposal {
         let action = bound
             .prepare(snapshot)
             .map_err(AgentBrowserActionError::Checkpoint)?;
+        if !AGENT_BROWSER_SNAPSHOT_ACTION_KINDS.contains(&action.kind()) {
+            return Err(AgentBrowserActionError::UnsupportedInteraction);
+        }
         let batch =
             SemanticActionBatchExecution::new(&batch).map_err(AgentBrowserActionError::Batch)?;
         // This vertical admits only independently snapshot-verifiable effects.
@@ -607,6 +610,8 @@ pub enum AgentBrowserActionError {
     Tool,
     /// This vertical accepts exactly one action per tool turn.
     ActionCount,
+    /// The retained native adapters do not dispatch this interaction kind.
+    UnsupportedInteraction,
     /// Exact observed references failed binding.
     Binding(SemanticActionBindingError),
     /// Fresh action checkpoint failed.

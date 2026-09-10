@@ -5000,12 +5000,22 @@ static NAVIGATION_ACTIONS_EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolD
             .filter(|tool| {
                 matches!(
                     tool.kind,
-                    AgentBrowserToolKind::Locate
-                        | AgentBrowserToolKind::Navigate
-                        | AgentBrowserToolKind::Act
+                    AgentBrowserToolKind::Locate | AgentBrowserToolKind::Navigate
                 )
             })
             .collect();
+        let mut action = tool_parameters(AgentBrowserToolKind::Act, true);
+        for variant in action["properties"]["actions"]["items"]["anyOf"]
+            .as_array_mut()
+            .expect("fixed action schema")
+        {
+            variant["properties"]["effect"] = string_enum(&["read", "local_write"]);
+        }
+        tools.push(BrowserToolDefinition {
+            kind: AgentBrowserToolKind::Act,
+            description: "Propose one current-ref Click, Fill or Select with an independently snapshot-verifiable postcondition. Only Read/LocalWrite effects are available, subject to trusted host assessment. Use immediate or mutation_quiet settlement with at least 2000 milliseconds. Dialog, navigation, keyboard and scroll effects are unavailable through act. A target_state verification proves only that target state; it does not prove a dialog opened or navigation completed. Navigate through the separate navigate tool when authorized.",
+            parameters: action,
+        });
         tools.push(BrowserToolDefinition {
             kind: AgentBrowserToolKind::Extract,
             description: "Extract approved fields with trusted schema 1 from the current acknowledged baseline. Actions require independent host assessment and policy approval; only current @a refs may be used. Historical @r evidence is citation-only and never action authority. Extraction completes the objective with a source-bound result, not a claim that an unverified action succeeded.",
@@ -5468,8 +5478,20 @@ fn action_schema(snapshot_only: bool) -> Value {
         ),
     ];
     if snapshot_only {
-        variants.pop();
-    } // Scroll requires a distinct native evidence adapter.
+        let kinds = [
+            SemanticActionKind::Click,
+            SemanticActionKind::Fill,
+            SemanticActionKind::Select,
+            SemanticActionKind::Press,
+            SemanticActionKind::Scroll,
+        ];
+        variants = kinds
+            .into_iter()
+            .zip(variants)
+            .filter(|(kind, _)| super::AGENT_BROWSER_SNAPSHOT_ACTION_KINDS.contains(kind))
+            .map(|(_, variant)| variant)
+            .collect();
+    }
     any_of(variants)
 }
 
@@ -5975,6 +5997,81 @@ mod tests {
             )
             .expect("config");
             let restricted = config.clone().restrict_to_locate_and_act();
+            // Regression: the retained navigation profile previously selected
+            // the full Act schema, admitting dialog/navigation waits and
+            // evidence that its snapshot-verifying controller cannot supply.
+            let retained = config
+                .clone()
+                .restrict_to_navigation_actions_and_extraction();
+            let retained_body = match provider {
+                AgentProviderKind::OpenAiResponses => {
+                    encode_openai_body(&retained, "objective", "observation")
+                }
+                AgentProviderKind::AnthropicMessages => {
+                    encode_anthropic_body(&retained, "objective", "observation")
+                }
+            }
+            .unwrap();
+            let retained_wire: Value = serde_json::from_slice(&retained_body).unwrap();
+            let retained_tools = retained_wire["tools"].as_array().unwrap();
+            assert_eq!(
+                retained_tools
+                    .iter()
+                    .map(|tool| tool["name"].as_str().unwrap())
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from(["act", "extract", "locate", "navigate"])
+            );
+            let act = retained_tools
+                .iter()
+                .find(|tool| tool["name"] == "act")
+                .unwrap();
+            let parameter_key = match provider {
+                AgentProviderKind::OpenAiResponses => "parameters",
+                AgentProviderKind::AnthropicMessages => "input_schema",
+            };
+            let parameters = &act[parameter_key];
+            validate_strict_schema(parameters);
+            let actions = &parameters["properties"]["actions"];
+            if provider == AgentProviderKind::OpenAiResponses {
+                assert_eq!(actions["maxItems"], 1);
+            }
+            let variants = actions["items"]["anyOf"].as_array().unwrap();
+            assert_eq!(
+                variants
+                    .iter()
+                    .map(|action| action["properties"]["kind"]["enum"][0].as_str().unwrap())
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from(["click", "fill", "select"])
+            );
+            for variant in variants {
+                let properties = &variant["properties"];
+                assert_eq!(properties["effect"]["enum"], json!(["read", "local_write"]));
+                if provider == AgentProviderKind::OpenAiResponses {
+                    assert_eq!(
+                        properties["settle_millis"]["minimum"],
+                        super::super::MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS
+                    );
+                }
+                assert_eq!(
+                    properties["wait"]["anyOf"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|wait| wait["properties"]["kind"]["enum"][0].as_str().unwrap())
+                        .collect::<BTreeSet<_>>(),
+                    BTreeSet::from(["immediate", "mutation_quiet"])
+                );
+                let expected_verification = match properties["kind"]["enum"][0].as_str().unwrap() {
+                    "click" => "target_state",
+                    "fill" => "target_value_matches_input",
+                    "select" => "target_selection_matches_option",
+                    _ => unreachable!("asserted retained action vocabulary"),
+                };
+                assert_eq!(
+                    properties["verification"]["properties"]["kind"]["enum"][0],
+                    expected_verification
+                );
+            }
             let progressive = config
                 .clone()
                 .restrict_to_navigation_and_extraction()
@@ -6200,7 +6297,7 @@ mod tests {
             let actions = &act.parameters["properties"]["actions"];
             assert_eq!(actions["maxItems"], 1);
             let variants = actions["items"]["anyOf"].as_array().expect("actions");
-            assert_eq!(variants.len(), 4);
+            assert_eq!(variants.len(), 3);
             for action in variants {
                 assert_eq!(
                     action["properties"]["settle_millis"]["minimum"],

@@ -48,10 +48,10 @@ use zephium_agentic::{
     ContextNavigationRequest, ContextNavigationSettlement, ContextNavigationTarget,
     ContextOperationJoin, ContextOperationKind, ContextOwnedViewport, ContextProfileLease,
     ContextProfileLeasePurpose, ContextProfileStorageClass, ContextTransitionRequest,
-    ContextTransitionSettlement, FrameId, SemanticActionKind, SemanticActionNativeFailure,
-    SemanticFrameTrust, SemanticInvocationId, SemanticRuntimePortFailure,
-    SemanticRuntimeSettlement, SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure,
-    SemanticScreenshotRequestId, SemanticSnapshotGeneration, MAX_LIVE_CONTEXTS,
+    ContextTransitionSettlement, FrameId, SemanticActionNativeFailure, SemanticFrameTrust,
+    SemanticInvocationId, SemanticRuntimePortFailure, SemanticRuntimeSettlement,
+    SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure, SemanticScreenshotRequestId,
+    SemanticSnapshotGeneration, MAX_LIVE_CONTEXTS,
 };
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use zephium_core::ports::engine::Partition;
@@ -1670,10 +1670,7 @@ impl EngineHost {
             task.refuse(SemanticActionNativeFailure::TimedOut);
             return;
         }
-        if !matches!(
-            request.kind(),
-            SemanticActionKind::Click | SemanticActionKind::Fill | SemanticActionKind::Select
-        ) {
+        if !zephium_agentic::AGENT_BROWSER_SNAPSHOT_ACTION_KINDS.contains(&request.kind()) {
             task.refuse(SemanticActionNativeFailure::UnsupportedInteraction);
             return;
         }

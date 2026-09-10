@@ -20,7 +20,7 @@
 use std::time::Instant;
 
 use zephium_agentic::{
-    encode_semantic_action_runtime_invocation, SemanticActionExecutionInstant, SemanticActionKind,
+    encode_semantic_action_runtime_invocation, SemanticActionExecutionInstant,
     SemanticActionNativeFailure, SemanticActionNativeRequest, SemanticActionNativeSettlement,
     SemanticActionRuntimeFault, SemanticActionRuntimeResultError,
 };
@@ -48,10 +48,7 @@ pub(super) fn dispatch_guarded(
     authority: Option<Box<dyn Fn() -> bool>>,
     completion: impl FnOnce(SemanticActionNativeSettlement) + 'static,
 ) {
-    if !matches!(
-        request.kind(),
-        SemanticActionKind::Click | SemanticActionKind::Fill | SemanticActionKind::Select
-    ) {
+    if !zephium_agentic::AGENT_BROWSER_SNAPSHOT_ACTION_KINDS.contains(&request.kind()) {
         let completed_at = failure_instant(
             &request,
             admitted_at,
