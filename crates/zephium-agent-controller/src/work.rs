@@ -190,6 +190,11 @@ pub trait AgentWorkTask: Send {
     fn allows_standalone_wait(&self) -> bool {
         false
     }
+    /// Lets the model stop cleanly and request a person using one closed reason.
+    /// This grants no resume capability; successor admission belongs to the host.
+    fn allows_human_request(&self) -> bool {
+        false
+    }
     /// Explicitly permits one terminal native subtree read anchored to the
     /// exact model-acknowledged observation. Frozen at admission; default is
     /// initial-scope only. This grants no action or navigation authority.
@@ -575,6 +580,10 @@ pub enum AgentWorkOutcome {
     /// Trusted task completion with durable policy/accounting closure. Native
     /// and provider shutdown proofs are consumed by the runtime lifecycle.
     Succeeded(AgentWorkSuccess),
+    /// The current run closed cleanly after the model requested a person. All
+    /// execution authority is revoked; only a trusted host may admit a fresh
+    /// successor run.
+    WaitingForHuman(AgentWorkWaitingForHuman),
     /// Task failed or was cancelled, but all original execution owners drained.
     /// This never carries an extraction result or authorizes another run.
     ClosedUnsuccessfully(AgentWorkClosedUnsuccessfully),
@@ -595,6 +604,72 @@ pub struct AgentWorkClosedUnsuccessfully {
     settlement: AgentRunPolicySettlement,
     failure: AgentWorkFailure,
     human_review: Option<AgentNeedsHumanTransition>,
+}
+
+/// Durable, non-authorizing model request for human intervention.
+///
+/// It is bound to the exact delivered observation at which the run stopped.
+/// It carries no provider continuation, old ref authority, or resume token.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AgentWorkHumanRequest {
+    context: ContextJoin,
+    observation: SemanticObservationId,
+    generation: SemanticObservationGeneration,
+    reason: AgentBrowserHumanReason,
+    retained_resource: Option<WorkBrowserResourceIdentity>,
+}
+
+impl AgentWorkHumanRequest {
+    /// Exact document/cancellation authority at the handoff request.
+    pub const fn context(self) -> ContextJoin {
+        self.context
+    }
+
+    /// Exact model-delivered observation at the handoff request.
+    pub const fn observation(self) -> SemanticObservationId {
+        self.observation
+    }
+
+    /// Exact progressive-observation generation at the handoff request.
+    pub const fn generation(self) -> SemanticObservationGeneration {
+        self.generation
+    }
+
+    /// Closed model-selected reason for requesting a person.
+    pub const fn reason(self) -> AgentBrowserHumanReason {
+        self.reason
+    }
+
+    /// Exact retained resource whose run lease was revoked at handoff. Legacy
+    /// owned contexts return `None` because clean closure destroys that page.
+    pub const fn retained_resource(self) -> Option<WorkBrowserResourceIdentity> {
+        self.retained_resource
+    }
+}
+
+/// Clean terminal handoff. This contains durable accounting and descriptive
+/// correlation only: no provider continuation, native lease, refs, or model
+/// authority survives the stopped run.
+pub struct AgentWorkWaitingForHuman {
+    settlement: AgentRunPolicySettlement,
+    request: AgentWorkHumanRequest,
+}
+
+impl AgentWorkWaitingForHuman {
+    /// Closed model request bound to the last delivered observation.
+    pub const fn request(&self) -> AgentWorkHumanRequest {
+        self.request
+    }
+
+    /// Original clean policy/accounting closure for the stopped actor.
+    pub const fn policy_settlement(&self) -> AgentRunPolicySettlement {
+        self.settlement
+    }
+
+    /// Content-free metric closure for product persistence and diagnostics.
+    pub const fn closure(&self) -> AgentRunMetricClosure {
+        self.settlement.closure()
+    }
 }
 
 impl AgentWorkClosedUnsuccessfully {
@@ -832,6 +907,10 @@ impl fmt::Debug for AgentWorkOutcome {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Succeeded(_) => formatter.write_str("AgentWorkOutcome::Succeeded"),
+            Self::WaitingForHuman(value) => formatter
+                .debug_tuple("AgentWorkOutcome::WaitingForHuman")
+                .field(&value.request.reason)
+                .finish(),
             Self::ClosedUnsuccessfully(value) => formatter
                 .debug_tuple("AgentWorkOutcome::ClosedUnsuccessfully")
                 .field(&value.failure)
@@ -971,6 +1050,7 @@ impl AgentWorkController {
         let progressive_observation = task.allows_progressive_observation();
         let viewport_screenshot = task.allows_viewport_screenshot();
         let standalone_wait = task.allows_standalone_wait();
+        let human_request = task.allows_human_request();
         let navigation_target = task.navigation_target().cloned();
         let navigation_route = task.navigation_route().cloned();
         let navigation_discovery = task.navigation_discovery().cloned();
@@ -1090,6 +1170,7 @@ impl AgentWorkController {
                     progressive_observation,
                     viewport_screenshot,
                     standalone_wait,
+                    human_request,
                     navigation_target,
                     navigation_route,
                     navigation_discovery,
@@ -1099,6 +1180,7 @@ impl AgentWorkController {
                     failure: None,
                     observation: None,
                     native_terminal: None,
+                    model_human_request: None,
                 }),
                 terminal: Arc::clone(&terminal),
                 retained_terminal: None,
@@ -1118,6 +1200,7 @@ struct WorkState {
     progressive_observation: bool,
     viewport_screenshot: bool,
     standalone_wait: bool,
+    human_request: bool,
     extraction_schema: Option<SemanticExtractionSchema>,
     actions_before_extraction: bool,
     subtree_extraction: bool,
@@ -1135,6 +1218,7 @@ struct WorkState {
     failure: Option<AgentWorkFailure>,
     observation: Option<SemanticObservation>,
     native_terminal: Option<SemanticActionNativeSettlement>,
+    model_human_request: Option<AgentWorkHumanRequest>,
 }
 
 impl WorkState {
@@ -1162,6 +1246,7 @@ impl WorkState {
                 || self.progressive_observation
                 || self.viewport_screenshot
                 || self.standalone_wait
+                || self.human_request
                 || self.actions_before_extraction
                 || self.subtree_extraction)
     }
@@ -1280,6 +1365,7 @@ impl WorkState {
             || self.task.allows_progressive_observation() != self.progressive_observation
             || self.task.allows_viewport_screenshot() != self.viewport_screenshot
             || self.task.allows_standalone_wait() != self.standalone_wait
+            || self.task.allows_human_request() != self.human_request
         {
             return Err(AgentWorkFailure::Contract);
         }
@@ -1898,6 +1984,9 @@ impl AgentWorkController {
         if state.standalone_wait {
             session.config = session.config.with_standalone_wait();
         }
+        if state.human_request {
+            session.config = session.config.with_human_request();
+        }
         if decision_budget {
             session.config = session
                 .config
@@ -2351,6 +2440,42 @@ impl AgentWorkController {
                 turn = Self::screenshot_current(state, worker, browser, turn, &observation).await?;
                 continue;
             }
+            if turn.turn.proposal().kind() == AgentBrowserToolKind::ShowForHuman {
+                state.check_task_contract()?;
+                if !state.human_request {
+                    return Err(AgentWorkFailure::Browser(
+                        AgentBrowserProviderError::UnsupportedTool(
+                            AgentBrowserToolKind::ShowForHuman,
+                        ),
+                    ));
+                }
+                let (proposal, continuation) = turn.into_tool_turn().into_parts();
+                let AgentBrowserToolProposal::ShowForHuman(reason) = proposal else {
+                    return Err(AgentWorkFailure::Contract);
+                };
+                if !continuation.baseline().authenticates(&observation) {
+                    return Err(AgentWorkFailure::Browser(
+                        AgentBrowserProviderError::Authority,
+                    ));
+                }
+                let request = AgentWorkHumanRequest {
+                    context: observation.request().context(),
+                    observation: observation.request().id(),
+                    generation: observation.request().generation(),
+                    reason,
+                    retained_resource: state
+                        .native
+                        .retained
+                        .as_ref()
+                        .map(|browser| browser.binding().lease().resource().identity()),
+                };
+                state
+                    .journal_mut()?
+                    .emit(AgentWorkEventKind::ModelRequestedHuman(reason))?;
+                state.model_human_request = Some(request);
+                state.observation = Some(observation);
+                return Ok(());
+            }
             if turn.turn.proposal().kind() == AgentBrowserToolKind::Wait {
                 let next = Self::wait_current(state, worker, browser, turn, observation).await?;
                 observation = next.0;
@@ -2661,7 +2786,7 @@ impl AgentWorkController {
         let baseline = turn.turn.continuation().baseline();
         let now = state
             .session
-            .as_ref()
+            .as_mut()
             .ok_or(AgentWorkFailure::Contract)?
             .policy_now()
             .map_err(AgentWorkFailure::Browser)?;
@@ -2832,7 +2957,7 @@ impl AgentWorkController {
         state.refresh_account(worker, browser)?;
         let action_authority = state.action_authority(result.observation())?;
         let captured_at = {
-            let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+            let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
             let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
             SemanticCaptureInstant::from_millis(now.millis())
         };
@@ -3186,7 +3311,8 @@ impl AgentWorkController {
             .seal_for_shutdown()
             .map_err(|_| AgentWorkFailure::Shutdown)?;
         let session = state.session.take().ok_or(AgentWorkFailure::Contract)?;
-        let finished = if cleanup.is_some() {
+        let waiting = state.model_human_request.is_some() && cleanup.is_none();
+        let finished = if cleanup.is_some() || waiting {
             session.try_finish_unsuccessful()
         } else {
             session.try_finish()
@@ -3299,48 +3425,52 @@ impl AgentWorkController {
         let state = self.state.as_mut().ok_or(AgentWorkFailure::Contract)?;
         let drained = state.drained.as_mut().ok_or(AgentWorkFailure::Contract)?;
         let journal = drained.journal.as_mut().ok_or(AgentWorkFailure::Contract)?;
-        let completion = match state.failure.filter(|_| cleanup.is_some()) {
-            Some(failure) => {
-                let cancellation = match worker.stop_reason() {
-                    Some(AgentRuntimeStopReason::HumanTakeover) => {
-                        Some(AgentSupervisorCancellationReason::HumanTakeover)
+        let completion = if state.model_human_request.is_some() && cleanup.is_none() {
+            AgentSupervisorCompletion::Failed(AgentSupervisorFailure::PolicyDenied)
+        } else {
+            match state.failure.filter(|_| cleanup.is_some()) {
+                Some(failure) => {
+                    let cancellation = match worker.stop_reason() {
+                        Some(AgentRuntimeStopReason::HumanTakeover) => {
+                            Some(AgentSupervisorCancellationReason::HumanTakeover)
+                        }
+                        Some(AgentRuntimeStopReason::PolicyRevoked) => {
+                            Some(AgentSupervisorCancellationReason::PolicyRevoked)
+                        }
+                        Some(
+                            AgentRuntimeStopReason::Cancelled | AgentRuntimeStopReason::Suspend,
+                        ) => Some(AgentSupervisorCancellationReason::UserRequested),
+                        None if failure == AgentWorkFailure::Deadline => {
+                            Some(AgentSupervisorCancellationReason::DeadlineExceeded)
+                        }
+                        None => None,
+                    };
+                    let cancellation = if worker.shutdown_deadline().is_some() {
+                        Some(AgentSupervisorCancellationReason::Shutdown)
+                    } else {
+                        cancellation
+                    };
+                    if let Some(reason) = cancellation {
+                        let _ = journal
+                            .supervisor
+                            .cancel_subtree(journal.root, journal.cancellation, reason)
+                            .map_err(|_| AgentWorkFailure::Accounting)?;
+                        journal.record()?;
                     }
-                    Some(AgentRuntimeStopReason::PolicyRevoked) => {
-                        Some(AgentSupervisorCancellationReason::PolicyRevoked)
-                    }
-                    Some(AgentRuntimeStopReason::Cancelled | AgentRuntimeStopReason::Suspend) => {
-                        Some(AgentSupervisorCancellationReason::UserRequested)
-                    }
-                    None if failure == AgentWorkFailure::Deadline => {
-                        Some(AgentSupervisorCancellationReason::DeadlineExceeded)
-                    }
-                    None => None,
-                };
-                let cancellation = if worker.shutdown_deadline().is_some() {
-                    Some(AgentSupervisorCancellationReason::Shutdown)
-                } else {
-                    cancellation
-                };
-                if let Some(reason) = cancellation {
-                    let _ = journal
-                        .supervisor
-                        .cancel_subtree(journal.root, journal.cancellation, reason)
-                        .map_err(|_| AgentWorkFailure::Accounting)?;
-                    journal.record()?;
+                    AgentSupervisorCompletion::Failed(match failure {
+                        AgentWorkFailure::Browser(AgentBrowserProviderError::Action(
+                            crate::AgentBrowserActionError::NeedsHuman(_),
+                        )) => AgentSupervisorFailure::PolicyDenied,
+                        AgentWorkFailure::Browser(
+                            AgentBrowserProviderError::Account(_)
+                            | AgentBrowserProviderError::NoExtractionEvidence,
+                        ) => AgentSupervisorFailure::PolicyDenied,
+                        AgentWorkFailure::Browser(_) => AgentSupervisorFailure::ProviderFailed,
+                        _ => AgentSupervisorFailure::PolicyDenied,
+                    })
                 }
-                AgentSupervisorCompletion::Failed(match failure {
-                    AgentWorkFailure::Browser(AgentBrowserProviderError::Action(
-                        crate::AgentBrowserActionError::NeedsHuman(_),
-                    )) => AgentSupervisorFailure::PolicyDenied,
-                    AgentWorkFailure::Browser(
-                        AgentBrowserProviderError::Account(_)
-                        | AgentBrowserProviderError::NoExtractionEvidence,
-                    ) => AgentSupervisorFailure::PolicyDenied,
-                    AgentWorkFailure::Browser(_) => AgentSupervisorFailure::ProviderFailed,
-                    _ => AgentSupervisorFailure::PolicyDenied,
-                })
+                None => AgentSupervisorCompletion::Succeeded,
             }
-            None => AgentSupervisorCompletion::Succeeded,
         };
         let execution = journal.execution.take().ok_or(AgentWorkFailure::Contract)?;
         journal
@@ -3478,12 +3608,13 @@ impl AgentWorkController {
         } else {
             AgentRuntimeControllerTerminalClass::Ordinary
         };
-        let failure = if unsuccessful {
+        let waiting = state.model_human_request.is_some() && state.failure.is_none();
+        let failure = if unsuccessful && !waiting {
             Some(state.failure.ok_or(AgentWorkFailure::Contract)?)
         } else {
             None
         };
-        if (closure.outcome() == AgentRunProgressOutcome::Succeeded) == unsuccessful {
+        if (closure.outcome() == AgentRunProgressOutcome::Succeeded) == (unsuccessful || waiting) {
             return Err(AgentWorkFailure::Accounting);
         }
         let claim = match if self.retained_terminal.is_some() {
@@ -3545,40 +3676,53 @@ impl AgentWorkController {
                 closure.outcome()
                     == AgentRunProgressOutcome::Failed(AgentSupervisorFailure::PolicyDenied)
             });
+        let model_human_request = state.model_human_request;
         // Completion is separate from the bounded progress lane: saturation
         // cannot discard an already-consumed clean terminal owner.
         let _ = lock(&journal.events).publish(AgentWorkEventKind::Terminal);
         if let Some(terminal) = &self.retained_terminal {
-            *lock(terminal) = Some(match failure {
-                Some(failure) => {
+            *lock(terminal) = Some(match (model_human_request, failure) {
+                (Some(request), None) => {
+                    AgentWorkRetainedOutcome::WaitingForHuman(AgentWorkWaitingForHuman {
+                        settlement,
+                        request,
+                    })
+                }
+                (None, Some(failure)) => {
                     AgentWorkRetainedOutcome::ClosedUnsuccessfully(AgentWorkClosedUnsuccessfully {
                         settlement,
                         failure,
                         human_review,
                     })
                 }
-                None => AgentWorkRetainedOutcome::Accepted {
+                (None, None) => AgentWorkRetainedOutcome::Accepted {
                     settlement,
                     extraction: Box::new(
                         state.extraction.take().ok_or(AgentWorkFailure::Contract)?,
                     ),
                 },
+                (Some(_), Some(_)) => return Err(AgentWorkFailure::Contract),
             });
             self.state.take();
             return Ok(());
         }
-        *lock(&self.terminal) = Some(match failure {
-            Some(failure) => {
+        *lock(&self.terminal) = Some(match (model_human_request, failure) {
+            (Some(request), None) => AgentWorkOutcome::WaitingForHuman(AgentWorkWaitingForHuman {
+                settlement,
+                request,
+            }),
+            (None, Some(failure)) => {
                 AgentWorkOutcome::ClosedUnsuccessfully(AgentWorkClosedUnsuccessfully {
                     settlement,
                     failure,
                     human_review,
                 })
             }
-            None => AgentWorkOutcome::Succeeded(AgentWorkSuccess {
+            (None, None) => AgentWorkOutcome::Succeeded(AgentWorkSuccess {
                 settlement,
                 extraction: state.extraction.take().map(Box::new),
             }),
+            (Some(_), Some(_)) => return Err(AgentWorkFailure::Contract),
         });
         self.state.take();
         Ok(())
@@ -3881,6 +4025,8 @@ pub enum AgentWorkEventKind {
     Verified,
     /// An explicit policy/human boundary stopped execution.
     NeedsHuman(AgentNeedsHumanReason),
+    /// The model deliberately stopped and requested a person with a closed reason.
+    ModelRequestedHuman(AgentBrowserHumanReason),
     /// Execution owners closed; the separate outcome distinguishes task
     /// success from a fully drained failure/cancellation.
     Terminal,

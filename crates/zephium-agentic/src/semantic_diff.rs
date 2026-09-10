@@ -599,6 +599,12 @@ impl SemanticObservationAcknowledgement {
         self.fingerprint == SemanticObservationFingerprint::from_observation(observation)
     }
 
+    /// Verifies that this opaque delivery acknowledgement authenticates the
+    /// complete exact observation supplied by a trusted runtime boundary.
+    pub fn authenticates(&self, observation: &SemanticObservation) -> bool {
+        self.matches(observation)
+    }
+
     pub(crate) const fn guard(&self) -> [u8; 32] {
         self.fingerprint.digest
     }

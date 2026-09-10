@@ -485,5 +485,8 @@ pub(super) fn assert_outcome(
                 _ => {}
             }
         }
+        AgentWorkOutcome::WaitingForHuman(_) => {
+            panic!("scoped extraction fixture cannot request a human")
+        }
     }
 }

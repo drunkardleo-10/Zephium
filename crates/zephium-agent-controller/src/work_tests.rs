@@ -1823,6 +1823,7 @@ enum ProviderFault {
     CancelStream,
     Native(Fault),
     Extraction(ExtractionFault),
+    HumanRequest,
 }
 
 #[cfg(feature = "probe-harness")]
@@ -1896,6 +1897,13 @@ fn settled_provider_refusals_and_count_stream_cancellation_close_without_success
 }
 
 #[cfg(feature = "probe-harness")]
+#[test]
+fn model_requested_human_is_a_clean_terminal_handoff_without_resume_authority() {
+    let _guard = lock(&SERIAL);
+    provider_fixture(ProviderFault::HumanRequest);
+}
+
+#[cfg(feature = "probe-harness")]
 fn provider_fixture(fault: ProviderFault) {
     provider_fixture_with_form(fault, None);
 }
@@ -1955,8 +1963,13 @@ fn provider_fixture_with_discovery_account(
     discovery_account: Option<AgentAccountScope>,
 ) {
     use std::io::{Read as _, Write as _};
-    struct Continue;
+    struct Continue {
+        human_request: bool,
+    }
     impl AgentWorkTask for Continue {
+        fn allows_human_request(&self) -> bool {
+            self.human_request
+        }
         fn evaluate(
             &mut self,
             _: &SemanticObservation,
@@ -2201,6 +2214,8 @@ fn provider_fixture_with_discovery_account(
                         } else {
                             extraction_stream(fault)
                         }
+                    } else if fault == ProviderFault::HumanRequest {
+                        named_tool_stream(turns, "show_for_human", r#"{\"reason\":\"sign_in\"}"#)
                     } else {
                         let stream = tool_stream(turns, matches!(fault, ProviderFault::Native(_)));
                         if fault == ProviderFault::Native(Fault::ActionBudget) {
@@ -2446,7 +2461,9 @@ fn provider_fixture_with_discovery_account(
             extraction
         })
     } else {
-        Box::new(Continue)
+        Box::new(Continue {
+            human_request: fault == ProviderFault::HumanRequest,
+        })
     };
     let task: Box<dyn AgentWorkTask> = match account {
         Some(AccountFault::Static) => task,
@@ -2700,6 +2717,25 @@ fn provider_fixture_with_discovery_account(
                 );
             }
         }
+        return;
+    }
+    if fault == ProviderFault::HumanRequest {
+        let AgentWorkOutcome::WaitingForHuman(waiting) = outcome else {
+            panic!("model handoff must be a clean waiting outcome: {outcome:?}");
+        };
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        assert_eq!(calls, [1, 2, 3, 4, 5, 6]);
+        assert_eq!(waiting.request().reason(), AgentBrowserHumanReason::SignIn);
+        assert!(waiting.request().retained_resource().is_none());
+        assert_eq!(
+            waiting.closure().outcome(),
+            AgentRunProgressOutcome::Failed(AgentSupervisorFailure::PolicyDenied)
+        );
+        assert_eq!(waiting.closure().effects(), 0);
+        assert_eq!(waiting.closure().model_calls(), 1);
+        assert!(events.iter().any(|event| event.kind()
+            == AgentWorkEventKind::ModelRequestedHuman(AgentBrowserHumanReason::SignIn)));
+        assert_eq!(server.join().expect("fixture server"), 1);
         return;
     }
     if matches!(

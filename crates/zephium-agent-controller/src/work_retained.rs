@@ -150,6 +150,9 @@ pub enum AgentWorkRetainedOutcome {
         /// Bounded, source-bound but explicitly model-mapped data.
         extraction: Box<SemanticOwnedExtractionResult>,
     },
+    /// The run cleanly relinquished its lease after requesting a person. The
+    /// application still owns the retained page, but no actor authority.
+    WaitingForHuman(AgentWorkWaitingForHuman),
     /// An unsuccessful run whose original scoped operands were consumed.
     ClosedUnsuccessfully(AgentWorkClosedUnsuccessfully),
     /// Run-scoped uncertainty; the original application retains page cleanup.
@@ -333,6 +336,44 @@ pub(super) enum TerminalClaim {
 }
 
 impl AgentWorkRetainedController {
+    /// Starts a trusted successor after a clean human handoff.
+    ///
+    /// The waiting outcome is consumed, the original run must differ, and the
+    /// application must supply a freshly acquired lease for the exact retained
+    /// resource. Normal constructor validation then requires a fresh initial
+    /// observation and creates a new provider session; no old continuation or
+    /// semantic reference can cross this boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_after_human(
+        waiting: AgentWorkWaitingForHuman,
+        input: AgentWorkRunInput,
+        browser: Box<dyn AgentWorkRetainedBrowser>,
+        transport: AgentProviderTransportConfig,
+        credential: AgentProviderCredential,
+        audit: Arc<dyn AgentAuditPort>,
+        task: Box<dyn AgentWorkTask>,
+    ) -> Result<
+        (
+            Self,
+            AgentWorkRetainedHandle,
+            zephium_agent_runtime::AgentRuntimeScopedBinding,
+        ),
+        AgentWorkFailure,
+    > {
+        let prior = waiting.request();
+        let expected_resource = prior
+            .retained_resource()
+            .ok_or(AgentWorkFailure::Contract)?;
+        let binding = browser.binding();
+        if binding.lease().resource().identity() != expected_resource
+            || binding.lease().run() == prior.context().identity().owner()
+            || binding.frame().context().identity().owner() != binding.lease().run()
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
+        Self::try_new(input, browser, transport, credential, audit, task)
+    }
+
     /// Original dormant hard deadline, including the retained lease intersection.
     pub fn deadline(&self) -> Result<Instant, AgentWorkFailure> {
         self.0.deadline()
@@ -894,7 +935,8 @@ impl AgentWorkController {
         }
         // A retained accepted outcome must contain the independently accepted
         // source-bound result; task `Complete` before mapping is insufficient.
-        if cleanup.is_none() && state.extraction.is_none() {
+        let waiting = state.model_human_request.is_some() && cleanup.is_none();
+        if cleanup.is_none() && state.extraction.is_none() && !waiting {
             return Err(AgentWorkFailure::Contract);
         }
         if cleanup.is_none() {
@@ -933,7 +975,7 @@ impl AgentWorkController {
             state.native.retained_delivery = Some(delivery);
         }
         let session = state.session.take().ok_or(AgentWorkFailure::Contract)?;
-        let terminal = match if cleanup.is_some() {
+        let terminal = match if cleanup.is_some() || waiting {
             session.try_finish_unsuccessful()
         } else {
             session.try_finish()
