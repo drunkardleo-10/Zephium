@@ -293,6 +293,119 @@ fn retained_history_does_not_restore_inspection_authority_for_old_refs() {
 }
 
 #[test]
+fn retained_anchor_loss_refreshes_truthful_state_and_continues_original_run() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (owner, native, resource, browser) = setup();
+    native.discovery.store(true, Ordering::Release);
+    native
+        .missing_expansion_anchor
+        .store(true, Ordering::Release);
+    let mut responses = vec![inspection_stream(r#"{"kind":"subtree","target":"@a1"}"#)];
+    responses.extend(final_streams());
+    let (controller, mut result, scope, server, requests) = prepare(browser, responses);
+    let (_, lifecycle) = start(controller, scope);
+    let mut events = Vec::new();
+    let mut outcome = None;
+    wait_until(|| {
+        while let Some(event) = result.take_event() {
+            events.push(event.kind());
+        }
+        outcome = result.take_outcome();
+        outcome.is_some()
+    });
+    let AgentWorkRetainedOutcome::Accepted { settlement, .. } = outcome.unwrap() else {
+        panic!("fresh same-document capture should permit continuation")
+    };
+    assert_eq!(settlement.closure().model_calls(), 3);
+    assert_eq!(native.reads.load(Ordering::Acquire), 3);
+    assert_eq!(native.acquisitions.load(Ordering::Acquire), 1);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|kind| **kind == AgentWorkEventKind::InspectionAnchorLost)
+            .count(),
+        1
+    );
+    assert!(matches!(
+        lifecycle.drain_until(Instant::now() + Duration::from_secs(2)),
+        AgentRuntimeScopedDrain::Drained(_)
+    ));
+    native.join();
+    assert_eq!(server.join().unwrap(), 3);
+    let requests = requests.lock().unwrap();
+    assert!(requests[1].contains("failed_anchor_missing"));
+    assert!(requests[1].contains("document_marker_0"));
+    assert!(!requests[1].contains("new_scoped_evidence"));
+    assert!(!requests[1].contains("call_1"));
+    let mut destroy = owner.destroy(&resource).unwrap();
+    assert!(destroy.poll(now()).unwrap().is_some());
+    owner.seal_resources().unwrap();
+    assert!(owner.locally_retired());
+}
+
+#[test]
+fn retained_anchor_loss_after_document_invalidation_does_not_refresh() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (_owner, native, resource, mut browser) = setup();
+    browser
+        .register_listener(Arc::new(CountWake(AtomicUsize::new(0))).into())
+        .unwrap();
+    native.discovery.store(true, Ordering::Release);
+    browser.begin_observation(now()).unwrap();
+    let previous = browser.poll_observation(now()).unwrap().unwrap();
+    let acknowledgement = encode_semantic_observation(
+        &previous,
+        SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
+    )
+    .unwrap()
+    .admit_conservative_utf8(
+        &SemanticTokenizerRevision::try_new("test:anchor-loss:v1".into()).unwrap(),
+    )
+    .unwrap()
+    .settle_delivery(SemanticModelDeliverySettlement::Committed)
+    .unwrap();
+    native.hold_expansion.store(true, Ordering::Release);
+    browser
+        .begin_expansion(
+            &previous,
+            &acknowledgement,
+            SemanticReferenceId::new(1).unwrap(),
+            SemanticExpansionKind::Subtree,
+            now(),
+        )
+        .unwrap();
+    let (request, callback) = native.read.lock().unwrap().take().unwrap();
+    native
+        .reporters
+        .lock()
+        .unwrap()
+        .get(&resource.identity().context())
+        .unwrap()
+        .invalidate();
+    let (_, completion) = request.into_parts();
+    callback(completion.settle(Err(SemanticRuntimePortFailure::Result(
+        SemanticRuntimeResultError::Runtime(SemanticRuntimeFault::AnchorMissing),
+    ))));
+    // Retire the test reporter while its invalidation wake is still coalesced;
+    // it must not outlive the deliberately failed application listener.
+    native
+        .reporters
+        .lock()
+        .unwrap()
+        .remove(&resource.identity().context());
+    assert!(
+        matches!(browser.poll_observation(now()), Err(error) if error != AgentWorkFailure::InspectionAnchorLost)
+    );
+    assert!(browser.begin_observation(now()).is_err());
+    assert_eq!(native.reads.load(Ordering::Acquire), 2);
+    native.join();
+}
+
+#[test]
 fn retained_expansion_cancellation_and_lost_callback_keep_original_native_owners() {
     let _serial = crate::WORK_RUNTIME_TEST_SERIAL
         .lock()

@@ -94,6 +94,10 @@ pub trait AgentWorkRetainedBrowser: Send {
         Err(AgentWorkFailure::Contract)
     }
     /// Accounts the original terminal and returns its original observation.
+    /// `InspectionAnchorLost` is reserved for an accounted, anchored expansion
+    /// whose exact native result is AnchorMissing and whose original lease and
+    /// document binding remain live. Initial reads, dispatch refusals and stale
+    /// callbacks must not use that recoverable classification.
     fn poll_observation(
         &mut self,
         now: AgentPolicyInstant,

@@ -3394,6 +3394,9 @@ pub enum AgentWorkEventKind {
     /// Snapshot scope was incompatible with the delivered baseline. No native
     /// capture ran; one budgeted provider turn can select a different operation.
     InspectionRefused,
+    /// An exact native scoped capture lost its anchor. A separate initial
+    /// capture may restore current refs under the original run authority.
+    InspectionAnchorLost,
     /// An independently authorized native effect is active.
     ActionActive,
     /// Native synchronously refused admission; the failed effect and batch
@@ -3441,6 +3444,9 @@ impl AgentWorkEvent {
 /// Closed failure vocabulary; no variant contains page, provider or user text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentWorkFailure {
+    /// Accounted scoped read reported AnchorMissing while its original retained
+    /// document and lease remained live. Only progressive inspection may recover.
+    InspectionAnchorLost,
     /// A settled model proposal crossed the trusted task's fresh phase gate.
     TaskPhase {
         /// Current product-side task state, never model completion text.

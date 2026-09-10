@@ -402,7 +402,35 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
         let snapshot = match event {
             WorkBrowserObservationEvent::Snapshot(snapshot) => *snapshot,
             WorkBrowserObservationEvent::Refused(failure) => {
-                return Err(AgentWorkFailure::Observation(failure))
+                if request.scope().anchor().is_some()
+                    && failure
+                        == SemanticRuntimePortFailure::Result(SemanticRuntimeResultError::Runtime(
+                            SemanticRuntimeFault::AnchorMissing,
+                        ))
+                {
+                    // The exact callback has already been drained. Recheck the
+                    // original resource binding before classifying anchor churn;
+                    // navigation, account takeover and lease loss stay terminal.
+                    self.check_health(now)?;
+                    let current = self
+                        .browser
+                        .shared
+                        .lock_rows()
+                        .map_err(Self::error)?
+                        .read_binding(&self.browser.lease, now)
+                        .map_err(Refusal::from)
+                        .map_err(Self::error)?;
+                    if current.lease() != self.binding.lease()
+                        || current.frame() != self.binding.frame()
+                        || current.document() != self.binding.document()
+                        || current.current_requested_document()
+                            != self.binding.current_requested_document()
+                    {
+                        return Err(AgentWorkFailure::ContextLost);
+                    }
+                    return Err(AgentWorkFailure::InspectionAnchorLost);
+                }
+                return Err(AgentWorkFailure::Observation(failure));
             }
             WorkBrowserObservationEvent::DebtSettled => return Err(AgentWorkFailure::ContextLost),
         };

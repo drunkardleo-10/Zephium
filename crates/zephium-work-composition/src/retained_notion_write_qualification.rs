@@ -428,6 +428,7 @@ impl ApplicationObserver {
             }
             AgentWorkEventKind::ToolProposed(_)
             | AgentWorkEventKind::InspectionRefused
+            | AgentWorkEventKind::InspectionAnchorLost
             | AgentWorkEventKind::NeedsHuman(_)
             | AgentWorkEventKind::Recovery => self.failed = true,
             _ => {}

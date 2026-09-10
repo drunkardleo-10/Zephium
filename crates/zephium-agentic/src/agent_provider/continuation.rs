@@ -2247,6 +2247,84 @@ mod tests {
     }
 
     #[test]
+    fn anchor_loss_recovery_requires_exact_same_document_refresh_lineage() {
+        for provider in [
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderKind::AnthropicMessages,
+        ] {
+            let previous = observation(context(), 1, 1, 1, "old state");
+            let config = config(provider)
+                .restrict_to_navigation_and_extraction()
+                .with_baseline_read()
+                .with_progressive_observation();
+            let checkpoint = |scope| {
+                snapshot_scope_continuation(
+                    provider,
+                    SemanticObservationAcknowledgement::from_fingerprint(
+                        SemanticObservationFingerprint::from_observation(&previous),
+                    ),
+                    config.clone(),
+                    scope,
+                )
+                .retire_for_observation(&previous, &config)
+                .unwrap()
+            };
+            assert!(checkpoint(json!({"kind":"initial"}))
+                .after_anchor_loss()
+                .is_err());
+            let recovery = || {
+                checkpoint(json!({"kind":"subtree","target":"@a1"}))
+                    .after_anchor_loss()
+                    .unwrap()
+            };
+            assert!(recovery().after_anchor_loss().is_err());
+            for generation in [2, 3, 4] {
+                let request = recovery()
+                    .request(&previous, SemanticObservationId::new(generation).unwrap())
+                    .unwrap();
+                assert!(matches!(request.scope(), crate::SemanticScope::Initial));
+                let snapshot = decode_semantic_snapshot(
+                    SemanticDecodeContext::new(SemanticInvocationId::new(generation).unwrap(), previous.frames()[0].frame().clone(), SemanticSnapshotGeneration::new(generation).unwrap()),
+                    &serde_json::to_vec(&json!({"v":1,"i":generation,"g":generation,"c":"complete","n":[{"k":99,"r":"document"}]})).unwrap(),
+                ).unwrap();
+                let current = SemanticObservationAssembler::new(request, snapshot)
+                    .unwrap()
+                    .finish()
+                    .unwrap();
+                assert_eq!(
+                    recovery()
+                        .validate_successor(
+                            &previous,
+                            &current,
+                            model_request(context(), 2),
+                            &config
+                        )
+                        .is_ok(),
+                    generation == 3
+                );
+                if generation == 3 {
+                    assert!(checkpoint(json!({"kind":"subtree","target":"@a1"}))
+                        .validate_successor(
+                            &previous,
+                            &current,
+                            model_request(context(), 2),
+                            &config
+                        )
+                        .is_err());
+                    assert!(recovery()
+                        .validate_successor(
+                            &previous,
+                            &current,
+                            model_request(context(), 1),
+                            &config
+                        )
+                        .is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn progressive_checkpoint_requires_exact_native_scope_before_fresh_delivery() {
         for provider in [
             AgentProviderKind::OpenAiResponses,

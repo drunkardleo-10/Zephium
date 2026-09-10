@@ -80,6 +80,7 @@ struct Native {
     region_root: AtomicBool,
     dense_expansion: AtomicBool,
     reject_expansion: AtomicBool,
+    missing_expansion_anchor: AtomicBool,
     not_ready: AtomicBool,
     reads: AtomicUsize,
     acquisitions: AtomicUsize,
@@ -289,6 +290,13 @@ impl AgentBrowserPort for Native {
     ) -> WorkBrowserObservationDispatch {
         self.reads.fetch_add(1, Ordering::AcqRel);
         let expansion = request.invocation().scope() != SemanticRuntimeScopeClass::Initial;
+        if expansion && self.missing_expansion_anchor.swap(false, Ordering::AcqRel) {
+            let (_, completion) = request.into_parts();
+            callback(completion.settle(Err(SemanticRuntimePortFailure::Result(
+                SemanticRuntimeResultError::Runtime(SemanticRuntimeFault::AnchorMissing),
+            ))));
+            return WorkBrowserObservationDispatch::Scheduled;
+        }
         if expansion && self.reject_expansion.load(Ordering::Acquire) {
             return WorkBrowserObservationDispatch::Rejected {
                 request: Box::new(request),

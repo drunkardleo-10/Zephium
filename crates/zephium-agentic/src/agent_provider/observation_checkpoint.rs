@@ -19,6 +19,7 @@ pub struct AgentProviderObservationCheckpoint {
     baseline: SemanticObservationAcknowledgement,
     scope: AgentBrowserScopeProposal,
     inspections: Option<AgentInspectionProgress>,
+    anchor_lost: bool,
 }
 
 impl AgentProviderContinuation {
@@ -123,6 +124,7 @@ impl AgentProviderContinuation {
                 baseline: self.baseline,
                 scope,
                 inspections,
+                anchor_lost: false,
             },
         )))
     }
@@ -202,6 +204,17 @@ impl fmt::Debug for AgentProviderObservationRefusal {
 }
 
 impl AgentProviderObservationCheckpoint {
+    /// Retire one exact native anchored capture that reported AnchorMissing.
+    /// The trusted host must first account that callback and recheck its live
+    /// lease/document. This permits one initial refresh, never a scope replay.
+    pub fn after_anchor_loss(mut self) -> Result<Self, AgentProviderContinuationError> {
+        if self.anchor_lost || self.expansion().is_none() {
+            return Err(AgentProviderContinuationError::Scope);
+        }
+        self.anchor_lost = true;
+        Ok(self)
+    }
+
     /// Rejoins the original manifest revision and prepares fresh delivery using
     /// the selected provider's existing accounting contract. All validation and
     /// serialization precede a new original-policy model reservation.
@@ -223,13 +236,14 @@ impl AgentProviderObservationCheckpoint {
             return Err(crate::AgentPolicyError::Authority.into());
         }
         let inspections = self.inspections.take();
+        let anchor_lost = self.anchor_lost;
         self.validate_successor(previous, current, request, &config)
             .map_err(|_| crate::AgentPolicyError::Authority)?;
-        let inspections = Some(AgentInspectionProgress::record(
-            inspections,
-            previous,
-            current,
-        )?);
+        let inspections = Some(if anchor_lost {
+            AgentInspectionProgress::record_with_anchor_loss(inspections, previous, current, true)?
+        } else {
+            AgentInspectionProgress::record(inspections, previous, current)?
+        });
         crate::AgentPreparedObservationRequest::try_for_config_with_inspections(
             policy,
             request,
@@ -291,7 +305,7 @@ impl AgentProviderObservationCheckpoint {
         {
             return Err(AgentProviderContinuationError::Baseline);
         }
-        match self.expansion() {
+        match self.expansion().filter(|_| !self.anchor_lost) {
             Some((target, kind)) => previous
                 .begin_expansion(
                     id,
@@ -332,7 +346,17 @@ impl AgentProviderObservationCheckpoint {
         if &expected != current.request()
             || current.frames().len() != 1
             || current.frames()[0].frame() != previous.frames()[0].frame()
-            || Some(current.frames()[0].generation()) != previous.frames()[0].generation().next()
+            || Some(current.frames()[0].generation())
+                != previous.frames()[0]
+                    .generation()
+                    .next()
+                    .and_then(|generation| {
+                        if self.anchor_lost {
+                            generation.next()
+                        } else {
+                            Some(generation)
+                        }
+                    })
         {
             return Err(AgentProviderContinuationError::Baseline);
         }
@@ -436,6 +460,7 @@ struct InspectionCapture {
     window: Option<(u16, u16)>,
     nodes: u16,
     bounded: bool,
+    anchor_lost: bool,
 }
 impl AgentInspectionProgress {
     fn matches(&self, observation: &SemanticObservation) -> bool {
@@ -472,6 +497,15 @@ impl AgentInspectionProgress {
         previous: &SemanticObservation,
         current: &SemanticObservation,
     ) -> Result<Self, crate::AgentProviderRequestError> {
+        Self::record_with_anchor_loss(previous_progress, previous, current, false)
+    }
+
+    fn record_with_anchor_loss(
+        previous_progress: Option<Self>,
+        previous: &SemanticObservation,
+        current: &SemanticObservation,
+        anchor_lost: bool,
+    ) -> Result<Self, crate::AgentProviderRequestError> {
         if previous_progress
             .as_ref()
             .is_some_and(|progress| !progress.matches(previous))
@@ -479,7 +513,17 @@ impl AgentInspectionProgress {
             || previous.frames().len() != 1
             || current.frames().len() != 1
             || previous.frames()[0].frame() != current.frames()[0].frame()
-            || previous.frames()[0].generation().next() != Some(current.frames()[0].generation())
+            || previous.frames()[0]
+                .generation()
+                .next()
+                .and_then(|generation| {
+                    if anchor_lost {
+                        generation.next()
+                    } else {
+                        Some(generation)
+                    }
+                })
+                != Some(current.frames()[0].generation())
         {
             return Err(crate::AgentPolicyError::Authority.into());
         }
@@ -512,6 +556,7 @@ impl AgentInspectionProgress {
                 .map(|anchor| anchor.capability().node_key()),
             nodes: current.node_count(),
             bounded: current.frames()[0].completeness() != crate::SemanticCompleteness::Complete,
+            anchor_lost,
         });
         Ok(progress)
     }
@@ -534,9 +579,13 @@ impl AgentInspectionProgress {
                         .find(|node| node.key() == key)
                         .map(|node| node.reference().model_token())
                 });
-                serde_json::json!({"scope": capture.scope, "current_target": current_ref,
+                let mut result = serde_json::json!({"scope": capture.scope, "current_target": current_ref,
                 "window_bytes": capture.window, "snapshot": capture.snapshot,
-                "nodes": capture.nodes, "incomplete": capture.bounded})
+                "nodes": capture.nodes, "incomplete": capture.bounded});
+                if capture.anchor_lost {
+                    result["preceding_scoped_capture"] = serde_json::json!("failed_anchor_missing");
+                }
+                result
             })
             .collect();
         let mut text = concat!("\nZEPHIUM_HOST_INSPECTION_PROGRESS_V1\n",
@@ -547,6 +596,9 @@ impl AgentInspectionProgress {
             "snapshot(initial) restores the viewport; it does not scroll or advance a page cursor. ",
             "Region captures expose nested regions as anchors, not their descendants. ",
             "Earlier action refs are retired. Terminal mapping may use bounded retained sources supplied in its own read inventory. Every inspection uses the same finite run budget.\n").to_owned();
+        if self.captures.iter().any(|capture| capture.anchor_lost) {
+            text.push_str("failed_anchor_missing means the requested scoped capture failed because its anchor disappeared before execution. Its result is unavailable; the following initial viewport is an independently captured refresh. Use only the fresh refs and do not treat the failed scope as captured evidence.\n");
+        }
         text.push_str(
             &serde_json::json!({"completed_inspections": captures.len(), "captures": captures})
                 .to_string(),

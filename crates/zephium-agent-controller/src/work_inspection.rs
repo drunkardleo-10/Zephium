@@ -6,7 +6,7 @@ impl AgentWorkController {
         state: &mut WorkState,
         worker: &mut AgentRuntimeWorker,
         browser: &WorkBrowser<'_>,
-        checkpoint: AgentProviderObservationCheckpoint,
+        mut checkpoint: AgentProviderObservationCheckpoint,
         previous: &SemanticObservation,
     ) -> Result<
         (
@@ -46,10 +46,21 @@ impl AgentWorkController {
             let expansion = checkpoint
                 .expansion()
                 .map(|(target, kind)| (previous, checkpoint.baseline(), target, kind));
-            state
-                .native
-                .observe_retained_scope(worker, expansion)
-                .await?
+            match state.native.observe_retained_scope(worker, expansion).await {
+                Ok(current) => current,
+                Err(AgentWorkFailure::InspectionAnchorLost) if checkpoint.expansion().is_some() => {
+                    checkpoint = checkpoint
+                        .after_anchor_loss()
+                        .map_err(|_| AgentWorkFailure::Contract)?;
+                    state
+                        .journal_mut()?
+                        .emit(AgentWorkEventKind::InspectionAnchorLost)?;
+                    state.native.check_control(worker, browser)?;
+                    state.refresh_account(worker, browser)?;
+                    state.native.observe_retained_scope(worker, None).await?
+                }
+                Err(error) => return Err(error),
+            }
         } else {
             let id =
                 SemanticObservationId::new(state.native.id()?).ok_or(AgentWorkFailure::Contract)?;
