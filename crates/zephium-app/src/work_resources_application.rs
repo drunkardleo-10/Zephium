@@ -540,7 +540,8 @@ impl RetainedWork {
                         AdmissionPhase::Closing,
                         AgentWorkDisposition::Succeeded
                         | AgentWorkDisposition::Failed
-                        | AgentWorkDisposition::Cancelled,
+                        | AgentWorkDisposition::Cancelled
+                        | AgentWorkDisposition::WaitingForHuman,
                     ) => {
                         self.phase = AdmissionPhase::Terminal;
                     }
@@ -816,12 +817,27 @@ impl RetainedWork {
                         Some(AgentWorkRetainedOutcome::ClosedUnsuccessfully(closed)) => {
                             Some(closed.policy_settlement())
                         }
+                        Some(AgentWorkRetainedOutcome::WaitingForHuman(waiting)) => {
+                            Some(waiting.policy_settlement())
+                        }
                         _ => active.accepted,
                     };
                     let terminal = if policy == Some(drained.policy())
                         && drained.lease().resource() == &self.resource
                     {
-                        drained.work_terminal(&active.runtime, record)
+                        if let Some(AgentWorkRetainedOutcome::WaitingForHuman(waiting)) =
+                            active.outcome.as_ref()
+                        {
+                            AgentWorkHumanHandoff::try_new(
+                                waiting.request().reason(),
+                                waiting.request().observation(),
+                            )
+                            .and_then(|handoff| {
+                                drained.work_human_terminal(&active.runtime, record, handoff)
+                            })
+                        } else {
+                            drained.work_terminal(&active.runtime, record)
+                        }
                     } else {
                         Err(AgentWorkJournalError::Transition)
                     };

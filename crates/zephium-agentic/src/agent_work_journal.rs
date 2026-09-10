@@ -11,8 +11,9 @@ use std::fmt;
 mod tests;
 
 use crate::{
-    AgentNativeShutdownProof, AgentNeedsHumanTransition, AgentRunManifest,
+    AgentBrowserHumanReason, AgentNativeShutdownProof, AgentNeedsHumanTransition, AgentRunManifest,
     AgentRunPolicySettlement, AgentRunProgressOutcome, AgentSupervisorFailure,
+    SemanticObservationId,
 };
 
 /// Fixed version-one record width, including reserved zero bytes.
@@ -67,6 +68,9 @@ pub enum AgentWorkDisposition {
     Failed = 10,
     /// Task was cancelled, with original execution and lifecycle owners drained.
     Cancelled = 11,
+    /// The run cleanly relinquished all execution authority after requesting
+    /// human intervention. A fresh admission is required to continue.
+    WaitingForHuman = 12,
 }
 
 impl AgentWorkDisposition {
@@ -96,6 +100,7 @@ impl AgentWorkDisposition {
             9 => Self::FailedClosed,
             10 => Self::Failed,
             11 => Self::Cancelled,
+            12 => Self::WaitingForHuman,
             _ => return None,
         })
     }
@@ -113,6 +118,72 @@ impl AgentWorkDebt {
     /// Closed six-bit native/provider/policy/audit/runtime/context mask.
     pub const fn bits(self) -> u8 {
         self.0
+    }
+}
+
+/// Content-free durable handoff metadata. The run key plus exact bounded
+/// observation ordinal supplies correlation without persisting page content or
+/// revivable browser authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AgentWorkHumanHandoff {
+    reason: AgentBrowserHumanReason,
+    observation: u32,
+}
+
+impl AgentWorkHumanHandoff {
+    /// Binds the closed reason to the exact run-local observation request. Work
+    /// budgets keep this ordinal within `u32`; overflow fails before terminal
+    /// ownership is consumed.
+    pub fn try_new(
+        reason: AgentBrowserHumanReason,
+        observation: SemanticObservationId,
+    ) -> Result<Self, AgentWorkJournalError> {
+        Ok(Self {
+            reason,
+            observation: observation
+                .get()
+                .try_into()
+                .map_err(|_| AgentWorkJournalError::Capacity)?,
+        })
+    }
+
+    /// Closed reason suitable for product restoration.
+    pub const fn reason(self) -> AgentBrowserHumanReason {
+        self.reason
+    }
+
+    /// Exact run-local observation request correlation.
+    pub const fn observation(self) -> u32 {
+        self.observation
+    }
+
+    const fn reason_byte(self) -> u8 {
+        match self.reason {
+            AgentBrowserHumanReason::SignIn => 1,
+            AgentBrowserHumanReason::Permission => 2,
+            AgentBrowserHumanReason::UnsupportedInteraction => 3,
+            AgentBrowserHumanReason::Verification => 4,
+            AgentBrowserHumanReason::UserDecision => 5,
+            AgentBrowserHumanReason::SensitiveEffect => 6,
+            AgentBrowserHumanReason::HumanChallenge => 7,
+        }
+    }
+
+    fn decode(reason: u8, observation: u32) -> Option<Self> {
+        let reason = match reason {
+            1 => AgentBrowserHumanReason::SignIn,
+            2 => AgentBrowserHumanReason::Permission,
+            3 => AgentBrowserHumanReason::UnsupportedInteraction,
+            4 => AgentBrowserHumanReason::Verification,
+            5 => AgentBrowserHumanReason::UserDecision,
+            6 => AgentBrowserHumanReason::SensitiveEffect,
+            7 => AgentBrowserHumanReason::HumanChallenge,
+            _ => return None,
+        };
+        (observation != 0).then_some(Self {
+            reason,
+            observation,
+        })
     }
 }
 
@@ -138,9 +209,14 @@ impl AgentWorkRecord {
     pub fn decode(bytes: [u8; AGENT_WORK_RECORD_BYTES]) -> Option<Self> {
         let record = Self(bytes);
         let disposition = AgentWorkDisposition::decode(bytes[1])?;
+        let handoff = AgentWorkHumanHandoff::decode(
+            bytes[3],
+            u32::from_be_bytes(bytes[4..8].try_into().ok()?),
+        );
         if bytes[0] != 1
             || bytes[2] > 63
-            || bytes[3..8] != [0; 5]
+            || (disposition == AgentWorkDisposition::WaitingForHuman) != handoff.is_some()
+            || (disposition != AgentWorkDisposition::WaitingForHuman && bytes[3..8] != [0; 5])
             || record.revision() == 0
             || bytes[16..32] == [0; 16]
             || (!disposition.is_review_classification()
@@ -149,6 +225,7 @@ impl AgentWorkRecord {
                     AgentWorkDisposition::Succeeded
                         | AgentWorkDisposition::Failed
                         | AgentWorkDisposition::Cancelled
+                        | AgentWorkDisposition::WaitingForHuman
                 ) != (bytes[2] == 0))
         {
             return None;
@@ -185,6 +262,17 @@ impl AgentWorkRecord {
     /// Conservative debt retained even when human review closes the record.
     pub const fn debt(self) -> AgentWorkDebt {
         AgentWorkDebt(self.0[2])
+    }
+    /// Durable handoff reason and exact run-local observation correlation.
+    /// This is descriptive state only and cannot recreate browser authority.
+    pub fn human_handoff(self) -> Option<AgentWorkHumanHandoff> {
+        (self.disposition() == AgentWorkDisposition::WaitingForHuman).then(|| {
+            AgentWorkHumanHandoff::decode(
+                self.0[3],
+                u32::from_be_bytes(self.0[4..8].try_into().expect("fixed record slice")),
+            )
+            .expect("validated durable handoff")
+        })
     }
     /// Constructs a non-success transition. Approval acceptance never executes.
     pub fn transition(self, next: AgentWorkDisposition) -> Result<Self, AgentWorkJournalError> {
@@ -244,6 +332,41 @@ impl AgentWorkRecord {
             AgentRunProgressOutcome::Succeeded => return Err(AgentWorkJournalError::Transition),
         };
         self.next(disposition, self.incarnation(), AgentWorkDebt::NONE)
+    }
+    /// Records a clean, non-executable human handoff from the original
+    /// policy/audit and native closure proofs. The internal supervisor failure
+    /// is a fail-closed execution accounting fact, not the product outcome.
+    pub fn waiting_for_human(
+        self,
+        policy: AgentRunPolicySettlement,
+        _native: &AgentNativeShutdownProof,
+        handoff: AgentWorkHumanHandoff,
+    ) -> Result<Self, AgentWorkJournalError> {
+        self.waiting_for_human_policy(policy, handoff)
+    }
+
+    fn waiting_for_human_policy(
+        self,
+        policy: AgentRunPolicySettlement,
+        handoff: AgentWorkHumanHandoff,
+    ) -> Result<Self, AgentWorkJournalError> {
+        let closure = policy.closure();
+        if self.disposition() != AgentWorkDisposition::Running
+            || self.0[32..48] != closure.manifest().bytes()
+            || self.0[64..96] != closure.manifest_guard()
+            || closure.outcome()
+                != AgentRunProgressOutcome::Failed(AgentSupervisorFailure::PolicyDenied)
+        {
+            return Err(AgentWorkJournalError::Transition);
+        }
+        let mut next = self.next(
+            AgentWorkDisposition::WaitingForHuman,
+            self.incarnation(),
+            AgentWorkDebt::NONE,
+        )?;
+        next.0[3] = handoff.reason_byte();
+        next.0[4..8].copy_from_slice(&handoff.observation().to_be_bytes());
+        Ok(next)
     }
     /// Records an unexecuted policy refusal only after original failed policy,
     /// audit and native closure. The application must additionally own the
@@ -317,6 +440,7 @@ impl AgentWorkRecord {
             AgentWorkDisposition::Succeeded
                 | AgentWorkDisposition::Failed
                 | AgentWorkDisposition::Cancelled
+                | AgentWorkDisposition::WaitingForHuman
         ) {
             return previous.disposition() == AgentWorkDisposition::Running
                 && self.debt() == AgentWorkDebt::NONE;
@@ -462,6 +586,20 @@ impl AgentWorkJournalMutation {
             result_profile: None,
         })
     }
+    /// Persists a clean model-requested handoff only from the original joined
+    /// policy/audit and native shutdown proof.
+    pub fn waiting_for_human(
+        previous: AgentWorkRecord,
+        policy: AgentRunPolicySettlement,
+        native: &AgentNativeShutdownProof,
+        handoff: AgentWorkHumanHandoff,
+    ) -> Result<Self, AgentWorkJournalError> {
+        Ok(Self {
+            expected: Some(previous),
+            next: previous.waiting_for_human(policy, native, handoff)?,
+            result_profile: None,
+        })
+    }
     /// Closes only the run's retained-resource execution lease, not the resource
     /// or browser lifetime. The application must independently join the exact
     /// scoped worker drain before persisting this mutation. Decoded records,
@@ -486,6 +624,27 @@ impl AgentWorkJournalMutation {
         Ok(Self {
             expected: Some(previous),
             next: previous.next(disposition, previous.incarnation(), AgentWorkDebt::NONE)?,
+            result_profile: None,
+        })
+    }
+    /// Persists a clean retained-page handoff. The delivery proves the old run
+    /// lease drained; it does not grant a successor lease or resume token.
+    pub fn waiting_for_human_retained(
+        previous: AgentWorkRecord,
+        policy: AgentRunPolicySettlement,
+        delivery: &crate::WorkBrowserLeaseDeliveryProof,
+        handoff: AgentWorkHumanHandoff,
+    ) -> Result<Self, AgentWorkJournalError> {
+        if previous.disposition() != AgentWorkDisposition::Running
+            || previous.0[32..48] != policy.closure().manifest().bytes()
+            || previous.0[48..64] != delivery.lease().run().bytes()
+            || previous.0[64..96] != policy.closure().manifest_guard()
+        {
+            return Err(AgentWorkJournalError::Transition);
+        }
+        Ok(Self {
+            expected: Some(previous),
+            next: previous.waiting_for_human_policy(policy, handoff)?,
             result_profile: None,
         })
     }

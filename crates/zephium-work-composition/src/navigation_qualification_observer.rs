@@ -81,6 +81,7 @@ impl ApplicationObserver {
             AgentWorkApplicationPhase::Succeeded
                 | AgentWorkApplicationPhase::Failed
                 | AgentWorkApplicationPhase::Cancelled
+                | AgentWorkApplicationPhase::WaitingForHuman
                 | AgentWorkApplicationPhase::Recovery
                 | AgentWorkApplicationPhase::NeedsReview
                 | AgentWorkApplicationPhase::Reviewed

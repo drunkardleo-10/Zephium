@@ -959,6 +959,7 @@ impl Driver {
             Some(AgentWorkRetainedOutcome::ClosedUnsuccessfully(closed)) => {
                 ("closed_unsuccessfully", Some(closed.failure()))
             }
+            Some(AgentWorkRetainedOutcome::WaitingForHuman(_)) => ("waiting_for_human", None),
             Some(AgentWorkRetainedOutcome::Recovery(recovery)) => {
                 ("recovery", Some(recovery.failure()))
             }

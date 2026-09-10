@@ -1,6 +1,8 @@
 //! Persistent Work native page ownership. No run is stored in the page owner;
 //! only admitted invocation/task envelopes carry temporary execution leases.
 
+#[cfg(target_os = "macos")]
+use super::agent_context::AgentPendingScreenshot;
 use super::{
     profiles::{
         bind_profile_persistence_class, profile_scoped_value, profile_value_is_isolated,
@@ -15,6 +17,8 @@ use crate::agent_context_port::{
 };
 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
 use crate::WorkResourceFailureCause as ResourceFailureCause;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use zephium_agentic::{
@@ -56,7 +60,7 @@ mod navigation;
 mod observation;
 
 pub(super) struct WorkNativeResource {
-    guard: Arc<WorkResourceGuard>,
+    pub(super) guard: Arc<WorkResourceGuard>,
     construction: Option<WorkLifecycleTask>,
     revocation: Option<WorkLifecycleTask>,
     destruction: Option<WorkLifecycleTask>,
@@ -65,11 +69,11 @@ pub(super) struct WorkNativeResource {
     action: Option<action::WorkAction>,
     navigation: Option<navigation::WorkNavigation>,
     #[cfg(target_os = "macos")]
-    screenshot: Option<AgentPendingScreenshot>,
+    pub(super) screenshot: Option<AgentPendingScreenshot>,
     document_finalization_wake: Option<DocumentFinalizationWake>,
     document_finalization_ready:
         Option<crate::platform::work_document_navigation::WorkDocumentFinalizationTicket>,
-    last_invocation: u64,
+    pub(super) last_invocation: u64,
     document_started: bool,
     retirement_clean: bool,
     deadline_expired: bool,
@@ -78,7 +82,7 @@ pub(super) struct WorkNativeResource {
     // task fields happen to remain populated when the deadline wins.
     lifecycle_deadline: Option<(Instant, Operation)>,
     content_policy: Option<crate::platform::imp::ContentPolicyRegistration>,
-    view: Option<crate::platform::imp::AgentOwnedView>,
+    pub(super) view: Option<crate::platform::imp::AgentOwnedView>,
     native_resource: Option<NativeResourceLease>,
     #[cfg(feature = "native-agentic-work-resource-probe")]
     witness: Option<witness::RenderingHolder>,
@@ -315,7 +319,7 @@ impl WorkNativeResource {
             })
             && (self.view.is_none() || self.content_policy.is_some())
     }
-    fn ready(&self) -> bool {
+    pub(super) fn ready(&self) -> bool {
         let Some(view) = self.view.as_ref() else {
             return false;
         };

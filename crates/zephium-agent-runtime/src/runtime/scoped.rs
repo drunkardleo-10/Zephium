@@ -353,6 +353,27 @@ impl AgentRuntimeScopedDrained {
             &self.closure.delivery,
         )
     }
+
+    /// Prepares the distinct durable terminal for a clean model-requested
+    /// human handoff. This consumes no authority and cannot resume the actor;
+    /// a trusted host must separately admit a fresh run and lease.
+    pub fn work_human_terminal(
+        &self,
+        runtime: &AgentRuntimeHandle,
+        previous: zephium_agentic::AgentWorkRecord,
+        handoff: zephium_agentic::AgentWorkHumanHandoff,
+    ) -> Result<zephium_agentic::AgentWorkJournalMutation, zephium_agentic::AgentWorkJournalError>
+    {
+        if !self.matches_runtime(runtime) {
+            return Err(zephium_agentic::AgentWorkJournalError::Transition);
+        }
+        zephium_agentic::AgentWorkJournalMutation::waiting_for_human_retained(
+            previous,
+            self.closure.policy,
+            &self.closure.delivery,
+            handoff,
+        )
+    }
 }
 
 impl fmt::Debug for AgentRuntimeScopedDrained {

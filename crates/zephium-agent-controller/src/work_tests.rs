@@ -901,6 +901,8 @@ enum Fault {
     ActionNeedsHumanNativeLost,
     #[cfg(feature = "probe-harness")]
     ActionNeedsHumanTakeover,
+    #[cfg(feature = "probe-harness")]
+    ModelHumanTakeover,
     CancelObservation,
     TakeoverObservation,
     SuspendObservation,
@@ -1195,6 +1197,13 @@ impl AgentBrowserPort for Port {
         }
         #[cfg(feature = "probe-harness")]
         if self.fault == Fault::ActionNeedsHumanTakeover {
+            lock(&self.control)
+                .as_ref()
+                .unwrap()
+                .stop_and_seal(AgentRuntimeStopReason::HumanTakeover);
+        }
+        #[cfg(feature = "probe-harness")]
+        if self.fault == Fault::ModelHumanTakeover {
             lock(&self.control)
                 .as_ref()
                 .unwrap()
@@ -1824,6 +1833,8 @@ enum ProviderFault {
     Native(Fault),
     Extraction(ExtractionFault),
     HumanRequest,
+    HumanRequestTakeover,
+    HumanExtractionRequest,
 }
 
 #[cfg(feature = "probe-harness")]
@@ -1900,7 +1911,13 @@ fn settled_provider_refusals_and_count_stream_cancellation_close_without_success
 #[test]
 fn model_requested_human_is_a_clean_terminal_handoff_without_resume_authority() {
     let _guard = lock(&SERIAL);
-    provider_fixture(ProviderFault::HumanRequest);
+    for fault in [
+        ProviderFault::HumanRequest,
+        ProviderFault::HumanRequestTakeover,
+        ProviderFault::HumanExtractionRequest,
+    ] {
+        provider_fixture(fault);
+    }
 }
 
 #[cfg(feature = "probe-harness")]
@@ -1992,6 +2009,40 @@ fn provider_fixture_with_discovery_account(
             now: AgentPolicyInstant,
         ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
             Task.attest_account(context, now)
+        }
+    }
+    struct HumanExtraction(AgentWorkExtractionTask);
+    impl AgentWorkTask for HumanExtraction {
+        fn allows_human_request(&self) -> bool {
+            true
+        }
+        fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
+            self.0.extraction_schema()
+        }
+        fn evaluate(
+            &mut self,
+            observation: &SemanticObservation,
+        ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+            self.0.evaluate(observation)
+        }
+        fn assess(
+            &self,
+            action: &SemanticPreparedAction,
+        ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+            self.0.assess(action)
+        }
+        fn attest_account(
+            &self,
+            context: ContextJoin,
+            now: AgentPolicyInstant,
+        ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
+            self.0.attest_account(context, now)
+        }
+        fn accept_extraction(
+            &mut self,
+            result: &SemanticExtractionResult<'_>,
+        ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+            self.0.accept_extraction(result)
         }
     }
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback listener");
@@ -2214,7 +2265,12 @@ fn provider_fixture_with_discovery_account(
                         } else {
                             extraction_stream(fault)
                         }
-                    } else if fault == ProviderFault::HumanRequest {
+                    } else if matches!(
+                        fault,
+                        ProviderFault::HumanRequest
+                            | ProviderFault::HumanRequestTakeover
+                            | ProviderFault::HumanExtractionRequest
+                    ) {
                         named_tool_stream(turns, "show_for_human", r#"{\"reason\":\"sign_in\"}"#)
                     } else {
                         let stream = tool_stream(turns, matches!(fault, ProviderFault::Native(_)));
@@ -2460,9 +2516,20 @@ fn provider_fixture_with_discovery_account(
         } else {
             extraction
         })
+    } else if fault == ProviderFault::HumanExtractionRequest {
+        Box::new(HumanExtraction(
+            AgentWorkExtractionTask::try_new(
+                vec![SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap()],
+                AgentAccountScope::Anonymous,
+            )
+            .unwrap(),
+        ))
     } else {
         Box::new(Continue {
-            human_request: fault == ProviderFault::HumanRequest,
+            human_request: matches!(
+                fault,
+                ProviderFault::HumanRequest | ProviderFault::HumanRequestTakeover
+            ),
         })
     };
     let task: Box<dyn AgentWorkTask> = match account {
@@ -2523,6 +2590,8 @@ fn provider_fixture_with_discovery_account(
         Fault::ActionApplied
     } else if let ProviderFault::Native(fault) = fault {
         fault
+    } else if fault == ProviderFault::HumanRequestTakeover {
+        Fault::ModelHumanTakeover
     } else {
         Fault::None
     };
@@ -2719,7 +2788,12 @@ fn provider_fixture_with_discovery_account(
         }
         return;
     }
-    if fault == ProviderFault::HumanRequest {
+    if matches!(
+        fault,
+        ProviderFault::HumanRequest
+            | ProviderFault::HumanRequestTakeover
+            | ProviderFault::HumanExtractionRequest
+    ) {
         let AgentWorkOutcome::WaitingForHuman(waiting) = outcome else {
             panic!("model handoff must be a clean waiting outcome: {outcome:?}");
         };

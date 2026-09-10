@@ -176,6 +176,9 @@ pub enum AgentWorkApplicationPhase {
     Failed,
     /// Task was cancelled with all original execution/lifecycle owners drained.
     Cancelled,
+    /// The run closed cleanly after requesting a person. No old execution
+    /// authority remains; continuation requires a fresh admission.
+    WaitingForHuman,
 }
 
 /// Human review never resumes an old proposal or clears execution debt.
@@ -368,6 +371,7 @@ impl CallbackHandle {
             AgentWorkApplicationPhase::Succeeded
                 | AgentWorkApplicationPhase::Failed
                 | AgentWorkApplicationPhase::Cancelled
+                | AgentWorkApplicationPhase::WaitingForHuman
                 | AgentWorkApplicationPhase::Reviewed
         ) {
             return None;
@@ -611,6 +615,16 @@ impl ApplicationWork {
                 | AgentWorkDisposition::Rejected
                 | AgentWorkDisposition::FailedClosed,
             ) if closed.human_review().is_some() => AgentWorkApplicationPhase::Reviewed,
+            (
+                Some(AgentWorkOutcome::WaitingForHuman(waiting)),
+                AgentWorkDisposition::WaitingForHuman,
+            ) if matches!(
+                waiting.policy_settlement().closure().outcome(),
+                AgentRunProgressOutcome::Failed(AgentSupervisorFailure::PolicyDenied)
+            ) =>
+            {
+                AgentWorkApplicationPhase::WaitingForHuman
+            }
             _ => return false,
         };
         let projection = lock(&previous.projection);
@@ -853,6 +867,7 @@ impl ApplicationWork {
             AgentWorkDisposition::Succeeded => AgentWorkApplicationPhase::Succeeded,
             AgentWorkDisposition::Failed => AgentWorkApplicationPhase::Failed,
             AgentWorkDisposition::Cancelled => AgentWorkApplicationPhase::Cancelled,
+            AgentWorkDisposition::WaitingForHuman => AgentWorkApplicationPhase::WaitingForHuman,
             AgentWorkDisposition::NeedsApproval => AgentWorkApplicationPhase::NeedsReview,
             AgentWorkDisposition::FreshAdmissionRequired
             | AgentWorkDisposition::Rejected
@@ -1211,6 +1226,20 @@ impl ApplicationWork {
                         native,
                     ),
                 },
+                (Some(AgentWorkOutcome::WaitingForHuman(waiting)), Some(native), Some(true)) => {
+                    AgentWorkHumanHandoff::try_new(
+                        waiting.request().reason(),
+                        waiting.request().observation(),
+                    )
+                    .and_then(|handoff| {
+                        AgentWorkJournalMutation::waiting_for_human(
+                            record,
+                            waiting.policy_settlement(),
+                            native,
+                            handoff,
+                        )
+                    })
+                }
                 _ => AgentWorkJournalMutation::transition(
                     record,
                     if active.needs_review && !self.stopping {
@@ -1345,6 +1374,7 @@ impl ApplicationWork {
                         | AgentWorkApplicationPhase::Succeeded
                         | AgentWorkApplicationPhase::Failed
                         | AgentWorkApplicationPhase::Cancelled
+                        | AgentWorkApplicationPhase::WaitingForHuman
                 ) || record.disposition() != AgentWorkDisposition::Succeeded
                     || !lock(&self.projection).records.contains(&record)
                 {

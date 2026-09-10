@@ -128,6 +128,7 @@ fn result_handoff_is_one_shot_phase_gated_and_separate_from_diagnostics() {
         AgentWorkApplicationPhase::NeedsReview,
         AgentWorkApplicationPhase::Recovery,
         AgentWorkApplicationPhase::PersistenceUncertain,
+        AgentWorkApplicationPhase::WaitingForHuman,
     ] {
         lock(&actor.projection).snapshot.phase = phase;
         assert!(handle.take_extraction().is_none());

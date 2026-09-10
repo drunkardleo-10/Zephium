@@ -282,9 +282,10 @@ pub use agent_supervisor::{
     MAX_AGENT_WORK_ORCHESTRATION_TURNS,
 };
 pub use agent_work_journal::{
-    AgentWorkDebt, AgentWorkDisposition, AgentWorkIncarnation, AgentWorkJournalCompletion,
-    AgentWorkJournalError, AgentWorkJournalMutation, AgentWorkJournalPort, AgentWorkJournalReply,
-    AgentWorkJournalRequest, AgentWorkRecord, AGENT_WORK_RECORD_BYTES, MAX_DURABLE_AGENT_WORK_RUNS,
+    AgentWorkDebt, AgentWorkDisposition, AgentWorkHumanHandoff, AgentWorkIncarnation,
+    AgentWorkJournalCompletion, AgentWorkJournalError, AgentWorkJournalMutation,
+    AgentWorkJournalPort, AgentWorkJournalReply, AgentWorkJournalRequest, AgentWorkRecord,
+    AGENT_WORK_RECORD_BYTES, MAX_DURABLE_AGENT_WORK_RUNS,
 };
 #[cfg(all(
     feature = "provider-transport",
@@ -319,8 +320,7 @@ pub use provider_transport::{
 pub use semantic_wait::{
     SemanticStandaloneWait, SemanticStandaloneWaitBackoff, SemanticStandaloneWaitError,
     SemanticStandaloneWaitOutcome, SemanticStandaloneWaitResult, SemanticStandaloneWaitStep,
-    SEMANTIC_STANDALONE_WAIT_INITIAL_POLL_MILLIS,
-    SEMANTIC_STANDALONE_WAIT_MAX_POLL_MILLIS,
+    SEMANTIC_STANDALONE_WAIT_INITIAL_POLL_MILLIS, SEMANTIC_STANDALONE_WAIT_MAX_POLL_MILLIS,
 };
 
 pub use semantic_locate::{

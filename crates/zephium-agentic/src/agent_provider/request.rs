@@ -4172,7 +4172,8 @@ fn encode_decision_budget(
          Each snapshot, locate, read or navigation requires another decision call. \
          Extract uses the reserved mapping call to produce the final answer. \
          Navigation also consumes one run operation; remaining decisions may decrease after it. \
-         On the last decision choose extract using current evidence; report unresolved facts \
+         On the last decision choose extract using current evidence, or show_for_human when that \
+         tool is present and human intervention is genuinely required; report unresolved facts \
          and limitations honestly. These limits grant no task completion or source authority. \
          Aggregate token, cost and absolute deadline limits still apply."
     );
@@ -4192,8 +4193,17 @@ fn encode_decision_budget(
         let tools = wire["tools"]
             .as_array_mut()
             .ok_or(AgentProviderRequestError::Encoding)?;
-        tools.retain(|tool| tool["name"] == "extract");
-        if tools.len() != 1 {
+        tools.retain(|tool| {
+            tool["name"] == "extract"
+                || (config.permits_tool(AgentBrowserToolKind::ShowForHuman)
+                    && tool["name"] == "show_for_human")
+        });
+        let expected = if config.permits_tool(AgentBrowserToolKind::ShowForHuman) {
+            2
+        } else {
+            1
+        };
+        if tools.len() != expected {
             return Err(AgentProviderRequestError::Encoding);
         }
         wire["tool_choice"] = json!("required");
@@ -6579,6 +6589,28 @@ mod tests {
             )
             .is_err());
         }
+        let handoff = config.clone().with_human_request();
+        let body = encode_decision_budget(
+            encode_openai_body(&handoff, "objective", "evidence").unwrap(),
+            &handoff,
+            crate::AgentModelCallId::new(44).unwrap(),
+            u32::MAX,
+        )
+        .unwrap();
+        let wire: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            wire["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["extract", "show_for_human"])
+        );
+        assert!(wire["input"][2]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("show_for_human"));
         // A navigation consumes an operation independently of its model call.
         // At the same call identity the policy may therefore leave fewer
         // decisions than the immutable model-call allowance advertises.

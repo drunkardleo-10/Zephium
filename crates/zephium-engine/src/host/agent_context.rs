@@ -99,11 +99,11 @@ enum AgentReplacementRejoin {
 }
 
 #[cfg(target_os = "macos")]
-struct AgentPendingScreenshot {
+pub(super) struct AgentPendingScreenshot {
     id: SemanticScreenshotRequestId,
     context: ContextJoin,
     snapshot_generation: SemanticSnapshotGeneration,
-    cancelled: Arc<AtomicBool>,
+    pub(super) cancelled: Arc<AtomicBool>,
     watchdog: crate::platform::imp::ContentPolicyTimeout,
     task: AgentScreenshotTask,
 }
@@ -1107,7 +1107,9 @@ impl EngineHost {
 
         let failure = match self.work_resources.get(&id) {
             None => Some(SemanticScreenshotNativeFailure::Stale),
-            Some(resource) if resource.guard.resource().context() != context => {
+            Some(resource)
+                if resource.guard.resource().identity().context() != context.identity().id() =>
+            {
                 Some(SemanticScreenshotNativeFailure::Stale)
             }
             Some(resource) if !resource.guard.is_healthy() || !resource.ready() => {

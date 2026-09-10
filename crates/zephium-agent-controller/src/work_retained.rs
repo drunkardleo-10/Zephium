@@ -613,7 +613,7 @@ impl zephium_agent_runtime::AgentRuntimeScopedController for AgentWorkRetainedCo
                                 .is_ok_and(|journal| journal.audit.is_quiescent())
                         })
                     {
-                        let _ = controller.publish_terminal(&mut worker, false).await;
+                        let _ = controller.publish_terminal(&mut worker).await;
                     }
                 } else {
                     let _ = controller.close_retained(&mut worker, Some(deadline)).await;
