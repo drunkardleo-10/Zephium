@@ -391,6 +391,7 @@ impl WorkDocumentNavigation {
     /// Apple policy admission joins the exact armed transition class with the
     /// native request cause, method and frame. URL equality alone cannot turn
     /// a page-driven form or history action into host authority.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub(crate) fn allows_apple_action(
         &self,
         target: &str,
@@ -759,6 +760,7 @@ mod tests {
         }
         gate
     }
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     fn apple_action(
         navigation_type: wry::AppleNavigationType,
         is_get: bool,
@@ -769,6 +771,7 @@ mod tests {
             target_is_main_frame: Some(true),
         }
     }
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     #[test]
     fn apple_admission_stays_closed_until_dispatch_and_binds_exact_native_cause() {
         use wry::AppleNavigationType as T;
