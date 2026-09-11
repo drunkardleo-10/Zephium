@@ -362,7 +362,10 @@ fn input(
     origin: SemanticOrigin,
 ) -> Result<AgentWorkRunInput, &'static str> {
     let effects = AgentEffectScope::try_new(&[SemanticEffectClass::Read]).map_err(|_| "effects")?;
-    let budget = AgentRunBudget::try_new(8, 100_000, 100_000, 1).map_err(|_| "budget")?;
+    // Eight provider calls plus the two independently accounted native
+    // navigation effects. Keep the qualification's safety ceiling aligned
+    // with every route the advertised model-call budget can validly finish.
+    let budget = AgentRunBudget::try_new(10, 100_000, 100_000, 1).map_err(|_| "budget")?;
     let discovery = AgentNavigationDiscovery::try_new_production(
         departure.clone(),
         vec![AgentNavigationOriginRule::try_new(

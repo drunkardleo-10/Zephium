@@ -385,6 +385,7 @@ impl AgentWorkController {
                 .millis(),
         );
         let progress = state.task_progress(&fresh)?;
+        let navigation_available = !state.navigation_complete();
         let action_authority = state
             .session
             .as_ref()
@@ -415,6 +416,7 @@ impl AgentWorkController {
                 &fresh,
                 account,
                 action_authority.as_ref(),
+                navigation_available,
             ),
         )
         .await?;
@@ -493,6 +495,7 @@ impl AgentBrowserSession {
         observation: &SemanticObservation,
         account: AgentContextAccountBinding,
         action_authority: Option<&AgentProviderActionAuthority>,
+        navigation_available: bool,
     ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
         self.check_live()?;
         if self.turns >= self.max_model_calls {
@@ -537,6 +540,7 @@ impl AgentBrowserSession {
         self.config = self
             .config
             .clone()
+            .with_navigation_available(navigation_available)
             .with_history_back_available(self.history_depth > 0);
         let payload = encode_semantic_observation(
             observation,

@@ -746,6 +746,7 @@ pub struct AgentProviderCallConfig {
     viewport_screenshot: bool,
     standalone_wait: bool,
     human_request: bool,
+    navigation_available: bool,
     history_back: bool,
     history_back_available: bool,
     decision_budget: Option<(AgentModelCallId, u8)>,
@@ -802,6 +803,7 @@ impl AgentProviderCallConfig {
             viewport_screenshot: false,
             standalone_wait: false,
             human_request: false,
+            navigation_available: true,
             history_back: false,
             history_back_available: false,
             decision_budget: None,
@@ -1008,6 +1010,13 @@ impl AgentProviderCallConfig {
 
     /// Reports whether this immutable request profile advertises a tool kind.
     pub fn permits_tool(&self, kind: AgentBrowserToolKind) -> bool {
+        if matches!(
+            kind,
+            AgentBrowserToolKind::Navigate | AgentBrowserToolKind::Back
+        ) && !self.navigation_available
+        {
+            return false;
+        }
         if self.baseline_read && kind == AgentBrowserToolKind::Read {
             return true;
         }
@@ -1072,6 +1081,14 @@ impl AgentProviderCallConfig {
     /// run-local predecessor exists and must be cleared again at history root.
     pub fn with_history_back_available(mut self, available: bool) -> Self {
         self.history_back_available = self.history_back && available;
+        self
+    }
+
+    /// Projects whether another navigation effect can still be accepted by
+    /// the trusted route/discovery state. This removes both forward and Back
+    /// vocabulary; it grants no destination or navigation authority.
+    pub fn with_navigation_available(mut self, available: bool) -> Self {
+        self.navigation_available = available;
         self
     }
 
