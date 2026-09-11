@@ -337,6 +337,7 @@ pub enum ContentPolicyStatusQueryOutcome {
 
 #[derive(Clone, Debug)]
 pub enum Command {
+    WorkDocument(crate::WorkDocumentSubmission),
     #[cfg(feature = "work-execution")]
     AttachRetainedWork(crate::work_resources::product::RetainedWorkAttachment),
     #[cfg(feature = "work-execution")]

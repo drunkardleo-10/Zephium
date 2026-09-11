@@ -25,6 +25,7 @@ mod tabs;
 mod user_content_status;
 mod view_lifecycle;
 mod window_layout;
+mod work_authoring;
 mod zoom;
 
 use effects::{mutation_result, operation_result, NativeWork};
@@ -528,6 +529,7 @@ impl Shell {
             return;
         }
         match cmd {
+            Command::WorkDocument(submission) => self.work_document(submission),
             #[cfg(feature = "work-execution")]
             Command::AttachRetainedWork(attachment) => {
                 if let Some(mut work) =

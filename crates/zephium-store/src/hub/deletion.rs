@@ -634,6 +634,8 @@ fn scrub_profile_database(path: &Path) -> rusqlite::Result<()> {
     let tx = conn.transaction()?;
     tx.execute_batch(
         "INSERT INTO history_fts(history_fts, rank) VALUES('secure-delete', 1);
+         DELETE FROM works;
+         DELETE FROM work_payload_usage;
          DELETE FROM extension_profile_site_denials;
          DELETE FROM extension_profile_policy;
          DELETE FROM extension_grant_api_permissions;
@@ -865,6 +867,7 @@ mod tests {
             ],
         )
         .unwrap();
+        conn.execute("INSERT INTO works(id, schema_version, revision, status, objective, created_unix_ms, updated_unix_ms) VALUES ('00000000000000000000000001', 1, 1, 'draft', ?1, 1, 1)", [PROFILE_SCRUB_MARKER]).unwrap();
         drop(conn);
 
         scrub_profile_database(&path).unwrap();
@@ -907,6 +910,12 @@ mod tests {
             "sqlite_sequence",
             "userscript_catalog",
             "userscripts",
+            "work_events",
+            "work_payload_usage",
+            "work_plan_nodes",
+            "work_plans",
+            "work_questions",
+            "works",
         ];
         assert_eq!(
             actual_tables,
@@ -933,6 +942,12 @@ mod tests {
             "extension_grant_host_permissions",
             "extension_profile_policy",
             "extension_profile_site_denials",
+            "works",
+            "work_payload_usage",
+            "work_plans",
+            "work_plan_nodes",
+            "work_questions",
+            "work_events",
         ] {
             let count: i64 = conn
                 .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {

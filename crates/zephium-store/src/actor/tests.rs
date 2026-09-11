@@ -67,6 +67,7 @@ fn rgba() -> Vec<u8> {
 fn test_store_with_sender(tx: SyncSender<Cmd>) -> SqliteStore {
     let (_exit, exited) = mpsc::sync_channel(1);
     SqliteStore {
+        work_document_admission: OnceLock::new(),
         #[cfg(feature = "work-execution")]
         work_admission: OnceLock::new(),
         tx,
@@ -8661,5 +8662,50 @@ fn agent_audit_completion_panic_is_contained_by_the_actor() {
     assert_eq!(
         store.shutdown_until(Instant::now() + Duration::from_secs(2)),
         StoreShutdownOutcome::Clean
+    );
+}
+
+#[test]
+fn work_document_mailbox_is_lazy_bounded_and_releases_refused_owners() {
+    use zephium_core::work::{port::WorkRequest, WorkError};
+    let (tx, rx) = mpsc::sync_channel(8);
+    let store = test_store_with_sender(tx);
+    assert!(store.work_document_admission.get().is_none());
+    for _ in 0..4 {
+        store
+            .work_document(
+                1.into(),
+                WorkRequest::Read { id: 2.into() },
+                Box::new(|_| panic!("not executed")),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        store.work_document(
+            1.into(),
+            WorkRequest::Read { id: 2.into() },
+            Box::new(|_| panic!("refusal invoked callback"))
+        ),
+        Err(WorkError::Capacity)
+    );
+    for _ in 0..4 {
+        drop(rx.recv().unwrap());
+    }
+    assert_eq!(
+        store
+            .work_document_admission
+            .get()
+            .unwrap()
+            .load(Ordering::Acquire),
+        0
+    );
+    store.lifecycle.lock().unwrap().terminal_admitted = true;
+    assert_eq!(
+        store.work_document(
+            1.into(),
+            WorkRequest::Read { id: 2.into() },
+            Box::new(|_| panic!("shutdown invoked callback"))
+        ),
+        Err(WorkError::Shutdown)
     );
 }

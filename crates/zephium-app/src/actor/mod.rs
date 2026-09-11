@@ -769,6 +769,23 @@ impl Drop for Handle {
 }
 
 impl Handle {
+    /// Author a persistent Work under the actor-selected regular profile. This
+    /// is a typed Rust intent seam, not a raw manifest or execution endpoint.
+    pub fn work_document(
+        &self,
+        request: zephium_core::work::port::WorkRequest,
+    ) -> Result<crate::WorkDocumentRequest, zephium_core::work::WorkError> {
+        let (submission, receiver) =
+            crate::work_authoring::WorkDocumentSubmission::prepare(request)?;
+        match self.queue.try_push(Command::WorkDocument(submission)) {
+            Ok(()) => Ok(receiver),
+            Err(TryPushError::Full(_)) => Err(zephium_core::work::WorkError::Capacity),
+            Err(TryPushError::Sealed(_) | TryPushError::Closed(_)) => {
+                Err(zephium_core::work::WorkError::Shutdown)
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn new(queue: CommandQueue) -> Self {
         Self::with_workers(

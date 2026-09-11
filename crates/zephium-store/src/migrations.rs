@@ -1920,6 +1920,10 @@ pub static PROFILE: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 14,
+        up: |tx| tx.execute_batch(include_str!("work_schema_v1.sql")),
+    },
 ];
 
 #[cfg(test)]
@@ -2323,7 +2327,7 @@ mod tests {
     fn profile_v13_adds_bounded_default_allow_extension_policy() {
         let mut conn = Connection::open_in_memory().unwrap();
         apply(&mut conn, &PROFILE[..12]).unwrap();
-        apply(&mut conn, PROFILE).unwrap();
+        apply(&mut conn, &PROFILE[..13]).unwrap();
         assert_eq!(
             conn.query_row(
                 "SELECT revision, paused FROM extension_profile_policy WHERE id = 1",
@@ -3046,7 +3050,7 @@ mod tests {
                 .unwrap(),
             14
         );
-        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(13));
+        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(14));
     }
 
     #[test]

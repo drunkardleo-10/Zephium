@@ -179,3 +179,91 @@ separates that evidence from full desktop UI/bootstrap qualification. Remaining
 seams are trusted product task/plan authoring and user-facing Work state;
 persisted facts deliberately cannot automatically resume execution. No new UI,
 site tools, platform suspend support or battery qualification is included.
+
+
+## Product Work authoring (profile schema 14)
+
+The product aggregate now starts at `zephium_core::work::WorkSnapshot`, separate
+from the content-free execution journal above. The existing agentic `WorkId`
+is re-exported from Core with the same canonical ULID encoding and redacted
+Debug representation. Browser resources and orchestration still use that same
+identity, not a second product label.
+
+`Handle::work_document` admits a bounded, one-shot typed Rust request to Shell.
+Shell selects its focused regular profile and refuses private or quarantined
+profiles. Store independently checks the current durable registry and degraded
+profile state. This Rust-only entry point is not exposed through desktop IPC;
+there is no frontend, provider, worker, approval compiler, or execution attached
+to it yet. Reply ownership includes the selected profile, which presentation
+must recheck before rendering a delayed result.
+
+The supported vertical is create from plain objective, read/list, edit objective,
+open/answer clarification questions, replace a structured draft, and read a prior
+plan revision. Draft validation checks unique node/output identities, a bounded
+acyclic dependency graph, nonempty output contracts, and content bounds. Output
+review requirements distinguish mechanical verification, source-mapped material
+needing review, and user acceptance; these are requests, never proof of success.
+Every edit is a Work-revision CAS. Changes to objective or clarification context
+clear the current draft; unanswered questions prevent accepting a replacement
+draft. Revisions serialize as canonical decimal strings to avoid JavaScript
+rounding. Unknown payload fields and versions are refused, never repaired.
+
+### Persistence decision and recovery
+
+Use the existing per-profile database for these content-bearing facts, extending
+its established registration, schema-validation, degradation, and deletion
+lifecycle. Separate normalized envelopes retain Work ownership, ordered plan
+revisions, node identities/order, questions, status, and timestamps. Node-local
+requirements/dependencies and question content use bounded typed JSON under the
+owning Work schema version. A content-free semantic event shares every mutation
+transaction. This is current-state persistence with immutable plan revisions,
+not event sourcing or provider transcript retention.
+
+The alternative of placing Work content in the global execution journal would
+mix durable user content with the kernel's process-fenced admission facts.
+A separate database/worker would duplicate ownership and deletion protocols.
+An opaque whole-canvas document would make presentation the persistence model.
+The selected boundary keeps all three independent. Revisit the storage split
+when cross-profile export or large immutable artifact publication is implemented;
+those require explicit migration and ownership joins.
+
+Profile migration 14 is forward-only. Older binaries reject the newer schema.
+Failed transactions roll back state, nodes, byte accounting, and audit together;
+a failed commit or lost callback is uncertain and requires read/reconciliation
+of the same Work/revision. Replaying an old revision cannot overwrite later
+facts. Restart restores authoring state only: `plan_ready` means a draft exists,
+not that it is approved or executable. Neither decoding nor history lookup can
+create a manifest, native lease, or provider continuation. Profile deletion
+scrubs these tables through the existing crash-resumable erasure path.
+
+### Bounds and evidence
+
+Admission allows four retained application submissions and four Store commands;
+cloned Shell commands share a single consumable payload. Idle authoring creates
+no worker, timer, polling loop, provider session, or native browser context.
+Each profile supports 256 Works and 32 MiB of content payload. Transactional
+SQLite triggers maintain the payload counter without scanning historical bodies
+on each edit; normalized metadata is separately bounded by row limits. Each
+Work retains at most 32 plan revisions, 64 nodes per plan, 32 questions, and 2,048
+semantic transitions. Exhaustion refuses the edit and retains existing facts;
+there is no automatic history eviction. Lists use stable ID keyset pagination
+with at most 32 summaries, not a cross-page snapshot guarantee. Full Work reads
+are bounded by those aggregate limits. Normal text fields are at most 8 KiB.
+
+Core, Store, and application tests cover graph validation, exact revisions,
+profile/private boundaries, real Store round trips, restart, retained plans,
+transaction rollback, ambiguous acknowledgment reconciliation, quota refusal,
+corrupt payload preservation, migration/rollback refusal, deletion, and bounded
+mailbox ownership. This is deterministic authoring evidence, not qualification
+of model planning or the full intent-to-execution Work product.
+
+Verification on 2026-09-11: the Core (354), application (315), and agentic
+(618) unit suites passed. The final Store run with `work-execution` enabled
+passed 277 tests and four documentation tests, with one existing ignored test.
+The application one-shot settlement regression also passed after its final edit.
+The full dependency-inclusive strict Clippy command is not green: it reports
+existing `unreachable`, `too_many_arguments`, and `manual_contains` findings in
+unchanged agentic code. These findings are not waived by the authoring evidence.
+The scoped `--no-deps` strict Clippy run also found a pre-existing
+`nonminimal_bool` expression in `work_resources_application.rs`; it reported no
+authoring-code lint findings. Formatting and diff whitespace checks passed.

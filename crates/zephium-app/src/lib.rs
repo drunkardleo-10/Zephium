@@ -79,3 +79,6 @@ pub use shell::Shell;
 
 #[doc(hidden)]
 pub use store_reads::StoreReadResult;
+
+mod work_authoring;
+pub use work_authoring::{WorkDocumentProjection, WorkDocumentRequest, WorkDocumentSubmission};

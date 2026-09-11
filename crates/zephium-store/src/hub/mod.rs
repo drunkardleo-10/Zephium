@@ -21,6 +21,7 @@ mod page_permissions;
 mod session;
 mod settings;
 mod userscripts;
+mod work_document;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;

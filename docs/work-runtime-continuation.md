@@ -212,6 +212,23 @@ does **not** yet persist the complete Work, plan, task/resource graph, questions
 approvals, view-independent outcomes, or orchestration state required by the
 product.
 
+### Product authoring slice after the handoff baseline
+
+The continuation implementation adds a Rust-only durable authoring path through
+`Handle::work_document`, the normal Store actor, and profile schema 14. Core now
+owns the same canonical `WorkId` re-exported by agentic resources. Plain intent,
+clarification questions/answers, bounded editable plan revisions, semantic audit,
+CAS, history, and restart-safe full projections persist independently of runs.
+See the product-authoring section of `agent-work-persistence.md` for the contract,
+limits, migration decision, and tests.
+
+This advances the authoring/persistence boundary only. Model planning, trusted
+scope resolution, approval compilation, execution settlement into this aggregate,
+resources/artifacts/tasks, generated IPC, and frontend integration remain to be
+built. `plan_ready` is descriptive draft state and cannot authorize execution.
+The browser actor and its qualification baseline remain unchanged. The checked-in
+frame is the earlier browser frontend, not the separate Work design-system stream.
+
 ### 3.4 Frontend foundation
 
 The checked-in frame uses Svelte 5, strict TypeScript, Vite, Tailwind CSS v4,

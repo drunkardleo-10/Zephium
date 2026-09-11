@@ -7,6 +7,7 @@
 mod agent_audit;
 #[cfg(feature = "work-execution")]
 mod agent_work;
+mod work_document;
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -607,6 +608,12 @@ fn retry_delay(failures: u32) -> Duration {
 }
 
 enum Cmd {
+    WorkDocument(
+        ProfileId,
+        zephium_core::work::port::WorkRequest,
+        work_document::Permit,
+        zephium_core::work::port::WorkCompletion,
+    ),
     #[cfg(feature = "work-execution")]
     AgentWork(
         zephium_agentic::AgentWorkJournalRequest,
@@ -1510,6 +1517,7 @@ fn observe_extension_service_store_call<T>(
 }
 
 pub struct SqliteStore {
+    work_document_admission: OnceLock<Arc<AtomicUsize>>,
     #[cfg(feature = "work-execution")]
     work_admission: OnceLock<Arc<AtomicUsize>>,
     tx: SyncSender<Cmd>,
@@ -1615,6 +1623,7 @@ impl SqliteStore {
             })?;
         Ok(Self {
             tx,
+            work_document_admission: OnceLock::new(),
             #[cfg(feature = "work-execution")]
             work_admission: OnceLock::new(),
             latest_session,
@@ -2389,6 +2398,15 @@ impl SqliteStore {
 }
 
 impl Store for SqliteStore {
+    fn work_document(
+        &self,
+        profile: ProfileId,
+        request: zephium_core::work::port::WorkRequest,
+        completion: zephium_core::work::port::WorkCompletion,
+    ) -> Result<(), zephium_core::work::WorkError> {
+        self.dispatch_work_document(profile, request, completion)
+    }
+
     fn save_session(&self, session: SessionState) {
         if !admissible_session(&session) {
             return;
@@ -3609,6 +3627,11 @@ fn actor(
                     ProfileDeletionFinalizeOutcome::Failed
                 };
                 let _ = reply.send(result);
+            }
+            Some(Cmd::WorkDocument(profile, request, _permit, completion)) => {
+                let result = hub.work_document(profile, request);
+                let _ =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| completion(result)));
             }
             #[cfg(feature = "work-execution")]
             Some(Cmd::AgentWork(request, _permit, completion)) => {
