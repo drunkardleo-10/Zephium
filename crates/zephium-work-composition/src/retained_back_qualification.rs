@@ -63,7 +63,7 @@ impl BackTask {
     ) -> Result<Self, AgentWorkFailure> {
         let rule = AgentNavigationOriginRule::try_new(
             origin.clone(),
-            "/retained-back-".into(),
+            "/retained-back/".into(),
             false,
             false,
         )
@@ -367,7 +367,7 @@ fn input(
         departure.clone(),
         vec![AgentNavigationOriginRule::try_new(
             origin.clone(),
-            "/retained-back-".into(),
+            "/retained-back/".into(),
             false,
             false,
         )

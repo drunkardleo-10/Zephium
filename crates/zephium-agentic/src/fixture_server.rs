@@ -16,7 +16,7 @@ const MAX_REQUEST_BYTES: usize = 4 * 1_024;
 // No form, submission controls, scripts, event handlers, frames, remote assets
 // or persistence. The initial value deliberately differs from the trusted goal.
 const RETAINED_LOCAL_FORM_HTML: &str = r#"<!doctype html><html lang="en"><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; form-action 'none'; frame-src 'none'; base-uri 'none'"><title>Zephium local preparation witness</title><body><main><h1>Local draft</h1><label for="draft">Draft</label><input id="draft" type="text" value="Unprepared" autocomplete="off"><p>This field has no submission or persistence.</p></main></body></html>"#;
-const RETAINED_BACK_ORIGIN_HTML: &str = r#"<!doctype html><html lang="en"><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; form-action 'none'; frame-src 'none'; base-uri 'none'"><title>Zephium release card</title><body><main><h1>Zephium Release Card</h1><p>Release code</p><h2>ZEPH-R7-492</h2><p>Verify this candidate against the relevant linked record before reporting from this card.</p><nav aria-label="Release references"><a href="/retained-back-register-v1.html">Compatibility register</a><a href="/retained-back-handbook-v1.html">Release handbook</a></nav></main></body></html>"#;
+const RETAINED_BACK_ORIGIN_HTML: &str = r#"<!doctype html><html lang="en"><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; form-action 'none'; frame-src 'none'; base-uri 'none'"><title>Zephium release card</title><body><main><h1>Zephium Release Card</h1><p>Release code</p><h2>ZEPH-R7-492</h2><p>Verify this candidate against the relevant linked record before reporting from this card.</p><nav aria-label="Release references"><a href="/retained-back/register-v1.html">Compatibility register</a><a href="/retained-back/handbook-v1.html">Release handbook</a></nav></main></body></html>"#;
 const RETAINED_BACK_REGISTER_HTML: &str = r#"<!doctype html><html lang="en"><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; form-action 'none'; frame-src 'none'; base-uri 'none'"><title>Zephium compatibility register</title><body><main><h1>Compatibility Register</h1><h2>ZEPH-R7-492</h2><p>Status: cleared for native history validation.</p><p>The authoritative release code remains on the release card.</p></main></body></html>"#;
 const RETAINED_BACK_HANDBOOK_HTML: &str = r#"<!doctype html><html lang="en"><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; form-action 'none'; frame-src 'none'; base-uri 'none'"><title>Zephium release handbook</title><body><main><h1>Release Handbook</h1><p>This handbook describes process only and does not contain compatibility status.</p></main></body></html>"#;
 // A maximum 112-row matrix reloads the top document for activation isolation;
@@ -117,9 +117,9 @@ impl FixtureRoute {
             Self::SemanticRendering => "/semantic-rendering-v1.html",
             Self::OwnedSurfaceProbe => "/owned-surface-probe-v1.html",
             Self::RetainedLocalForm => "/retained-local-form-v1.html",
-            Self::RetainedBackOrigin => "/retained-back-origin-v1.html",
-            Self::RetainedBackRegister => "/retained-back-register-v1.html",
-            Self::RetainedBackHandbook => "/retained-back-handbook-v1.html",
+            Self::RetainedBackOrigin => "/retained-back/origin-v1.html",
+            Self::RetainedBackRegister => "/retained-back/register-v1.html",
+            Self::RetainedBackHandbook => "/retained-back/handbook-v1.html",
             Self::SemanticRuntimeRelay => "/semantic-runtime-relay-v1.html",
             Self::SemanticRuntimeRelayHostile => "/semantic-runtime-relay-hostile-v1.html",
             Self::SemanticRuntimeReplacement => "/semantic-runtime-replacement-v1.html",
@@ -572,22 +572,22 @@ fn handle(
             RETAINED_LOCAL_FORM_HTML.as_bytes(),
             FixtureScriptPolicy::InlineOnly,
         ),
-        b"GET /retained-back-origin-v1.html HTTP/1.1"
-        | b"GET /retained-back-origin-v1.html HTTP/1.0" => (
+        b"GET /retained-back/origin-v1.html HTTP/1.1"
+        | b"GET /retained-back/origin-v1.html HTTP/1.0" => (
             200,
             "text/html; charset=utf-8",
             RETAINED_BACK_ORIGIN_HTML.as_bytes(),
             FixtureScriptPolicy::InlineOnly,
         ),
-        b"GET /retained-back-register-v1.html HTTP/1.1"
-        | b"GET /retained-back-register-v1.html HTTP/1.0" => (
+        b"GET /retained-back/register-v1.html HTTP/1.1"
+        | b"GET /retained-back/register-v1.html HTTP/1.0" => (
             200,
             "text/html; charset=utf-8",
             RETAINED_BACK_REGISTER_HTML.as_bytes(),
             FixtureScriptPolicy::InlineOnly,
         ),
-        b"GET /retained-back-handbook-v1.html HTTP/1.1"
-        | b"GET /retained-back-handbook-v1.html HTTP/1.0" => (
+        b"GET /retained-back/handbook-v1.html HTTP/1.1"
+        | b"GET /retained-back/handbook-v1.html HTTP/1.0" => (
             200,
             "text/html; charset=utf-8",
             RETAINED_BACK_HANDBOOK_HTML.as_bytes(),
