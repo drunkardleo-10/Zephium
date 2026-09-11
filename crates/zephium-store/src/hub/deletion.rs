@@ -868,6 +868,9 @@ mod tests {
         )
         .unwrap();
         conn.execute("INSERT INTO works(id, schema_version, revision, status, objective, created_unix_ms, updated_unix_ms, lifecycle, objective_revision, context_revision, objective_author) VALUES ('00000000000000000000000001', 2, 1, 'draft', ?1, 1, 1, 'active', 1, 1, 'user')", [PROFILE_SCRUB_MARKER]).unwrap();
+        conn.execute("INSERT INTO work_plans(work_id, revision, plan_id, author, basis_revision) VALUES ('00000000000000000000000001', 2, '00000000000000000000000002', 'user', 1)", []).unwrap();
+        conn.execute("INSERT INTO work_executions(work_id, execution_id, plan_revision, owner_session, approved_unix_ms, expires_unix_ms, body) VALUES ('00000000000000000000000001', '00000000000000000000000003', 2, '00000000000000000000000004', 1, 2, ?1)", [PROFILE_SCRUB_MARKER]).unwrap();
+        conn.execute("INSERT INTO work_commands(work_id, command_id, request_digest, body) VALUES ('00000000000000000000000001', '00000000000000000000000005', zeroblob(32), ?1)", [PROFILE_SCRUB_MARKER]).unwrap();
         drop(conn);
 
         scrub_profile_database(&path).unwrap();
@@ -910,7 +913,9 @@ mod tests {
             "sqlite_sequence",
             "userscript_catalog",
             "userscripts",
+            "work_commands",
             "work_events",
+            "work_executions",
             "work_payload_usage",
             "work_plan_nodes",
             "work_plans",
@@ -948,6 +953,8 @@ mod tests {
             "work_plan_nodes",
             "work_questions",
             "work_events",
+            "work_executions",
+            "work_commands",
         ] {
             let count: i64 = conn
                 .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {

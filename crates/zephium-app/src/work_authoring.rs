@@ -131,6 +131,7 @@ pub(crate) struct Payload {
     pub(crate) owner: std::sync::Arc<std::sync::OnceLock<ProfileId>>,
     pub(crate) request: WorkRequest,
     pub(crate) expected_owner: Option<ProfileId>,
+    pub(crate) pinned_owner: bool,
     pub(crate) reply: WorkReplySender,
     pub(crate) permit: Permit,
 }
@@ -142,6 +143,30 @@ impl std::fmt::Debug for WorkDocumentSubmission {
     }
 }
 impl WorkDocumentSubmission {
+    #[cfg(feature = "work-runtime")]
+    pub(crate) fn prepare_pinned(
+        request: WorkRequest,
+        profile: ProfileId,
+    ) -> Result<(Self, WorkDocumentRequest), WorkError> {
+        if !matches!(
+            request,
+            WorkRequest::RuntimeRead { .. }
+                | WorkRequest::RuntimeUpdate { .. }
+                | WorkRequest::RuntimeAbandon { .. }
+        ) {
+            return Err(WorkError::Invalid);
+        }
+        let prepared = Self::prepare_bound(request, Some(profile))?;
+        prepared
+            .0
+             .0
+            .lock()
+            .map_err(|_| WorkError::Unavailable)?
+            .as_mut()
+            .ok_or(WorkError::Unavailable)?
+            .pinned_owner = true;
+        Ok(prepared)
+    }
     pub(crate) fn take(&self) -> Option<Payload> {
         self.0.lock().ok()?.take()
     }
@@ -153,6 +178,11 @@ impl WorkDocumentSubmission {
         request.validate()?;
         let work_id = match &request {
             WorkRequest::Create { id, .. }
+            | WorkRequest::ReadEvidence { id, .. }
+            | WorkRequest::RuntimeAbandon { id, .. }
+            | WorkRequest::RuntimeRead { id }
+            | WorkRequest::RuntimeCommand { id, .. }
+            | WorkRequest::RuntimeUpdate { id, .. }
             | WorkRequest::Edit { id, .. }
             | WorkRequest::Read { id }
             | WorkRequest::ReadPlan { id, .. }
@@ -177,6 +207,7 @@ impl WorkDocumentSubmission {
                 owner: owner.clone(),
                 request,
                 expected_owner,
+                pinned_owner: false,
                 reply,
                 permit: Permit,
             })))),

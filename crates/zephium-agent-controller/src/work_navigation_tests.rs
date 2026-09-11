@@ -536,8 +536,7 @@ impl NavigationFault {
                     .as_array()
                     .unwrap()
                     .iter()
-                    .filter(|item| item["type"] == "function_call_output")
-                    .last()
+                    .rfind(|item| item["type"] == "function_call_output")
                     .unwrap();
                 assert_eq!(result["call_id"], format!("call_{turns}"));
                 let error: serde_json::Value =

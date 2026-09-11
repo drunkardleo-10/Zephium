@@ -536,7 +536,10 @@ impl Shell {
                     crate::work_resources::product::ProductWork::take(&attachment)
                 {
                     if self.work.is_some()
-                        || self.retained_work.is_some()
+                        || self
+                            .retained_work
+                            .as_ref()
+                            .is_some_and(|work| !work.is_closed())
                         || !matches!(self.agent_lifecycle, AgentLifecycleOwner::Absent)
                         || !work.admits(&self.engine, &self.store, self.work_profile_binding())
                     {
@@ -1490,3 +1493,5 @@ pub(crate) mod tests;
 
 #[cfg(all(test, feature = "work-planning"))]
 mod work_planning_tests;
+#[cfg(all(test, feature = "work-runtime"))]
+mod work_runtime_tests;

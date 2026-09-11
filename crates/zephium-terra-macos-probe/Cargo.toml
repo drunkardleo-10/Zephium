@@ -8,6 +8,7 @@ build = false
 
 [features]
 default = []
+durable-runtime = ["live-probe", "zephium-work-composition/durable-runtime", "zephium-work-composition/retained-lifetime-diagnostic", "dep:zephium-agent-model-catalog"]
 live-probe = [
     "dep:zephium-app",
     "zephium-agent-controller/probe-harness",
@@ -23,6 +24,9 @@ path = "src/main.rs"
 required-features = ["live-probe"]
 
 [dependencies]
+zephium-agent-model-catalog = { workspace = true, optional = true }
+serde_json.workspace = true
+zephium-ipc.workspace = true
 zephium-agent-controller.workspace = true
 zephium-agent-provider-transport.workspace = true
 zephium-agentic.workspace = true

@@ -769,6 +769,39 @@ impl Drop for Handle {
 }
 
 impl Handle {
+    /// Revision-checked runtime user intent, bound to the displayed profile.
+    /// Store reconciliation never returns a live worker capability.
+    pub fn work_command(
+        &self,
+        profile: zephium_core::ids::ProfileId,
+        command: zephium_ipc::work::WorkCommandV1,
+    ) -> Result<crate::WorkDocumentRequest, zephium_core::work::WorkError> {
+        self.submit_work_document(command.into_request()?, Some(profile))
+    }
+
+    pub fn work_projection(
+        &self,
+        profile: zephium_core::ids::ProfileId,
+        id: zephium_core::work::WorkId,
+    ) -> Result<crate::WorkDocumentRequest, zephium_core::work::WorkError> {
+        self.submit_work_document(
+            zephium_core::work::port::WorkRequest::RuntimeRead { id },
+            Some(profile),
+        )
+    }
+
+    pub fn work_evidence(
+        &self,
+        profile: zephium_core::ids::ProfileId,
+        id: zephium_core::work::WorkId,
+        link: zephium_core::work::artifact::WorkEvidenceLink,
+    ) -> Result<crate::WorkDocumentRequest, zephium_core::work::WorkError> {
+        self.submit_work_document(
+            zephium_core::work::port::WorkRequest::ReadEvidence { id, link },
+            Some(profile),
+        )
+    }
+
     /// Author a persistent Work under the actor-selected regular profile. This
     /// is a typed Rust intent seam, not a raw manifest or execution endpoint.
     pub fn work_document(
@@ -785,6 +818,25 @@ impl Handle {
     ) -> Result<crate::WorkDocumentRequest, zephium_core::work::WorkError> {
         let (submission, receiver) =
             crate::work_authoring::WorkDocumentSubmission::prepare_bound(request, owner)?;
+        self.queue_work_document(submission, receiver)
+    }
+
+    #[cfg(feature = "work-runtime")]
+    pub(crate) fn submit_owned_work_runtime(
+        &self,
+        request: zephium_core::work::port::WorkRequest,
+        owner: zephium_core::ids::ProfileId,
+    ) -> Result<crate::WorkDocumentRequest, zephium_core::work::WorkError> {
+        let (submission, receiver) =
+            crate::work_authoring::WorkDocumentSubmission::prepare_pinned(request, owner)?;
+        self.queue_work_document(submission, receiver)
+    }
+
+    fn queue_work_document(
+        &self,
+        submission: crate::WorkDocumentSubmission,
+        receiver: crate::WorkDocumentRequest,
+    ) -> Result<crate::WorkDocumentRequest, zephium_core::work::WorkError> {
         match self.queue.try_push(Command::WorkDocument(submission)) {
             Ok(()) => Ok(receiver),
             Err(TryPushError::Full(_)) => Err(zephium_core::work::WorkError::Capacity),

@@ -292,6 +292,18 @@ pub fn run_macos_agentic_work_application_probe(
     platform::macos::run_agentic_work_application_probe(profile, start)
 }
 
+/// Full application qualification: forwards actual Engine events to the Shell
+/// and lets ordinary profile-policy compilation perform native admission.
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[doc(hidden)]
+pub fn run_macos_work_application_with_events_probe(
+    profile: zephium_core::ids::ProfileId,
+    events: impl Fn(EngineEvent) + Send + Sync + 'static,
+    start: impl FnOnce(std::sync::Arc<WebviewEngine>) -> Result<MacosAgentWorkProbePoll, &'static str>,
+) -> Result<(), &'static str> {
+    platform::macos::run_work_application_with_events_probe(profile, events, start)
+}
+
 /// Hosts one bounded variable-length public workflow through the production native adapter.
 /// The exact registry projection is supplied at each decision; all requests
 /// must already carry policy authority, and each callback must independently

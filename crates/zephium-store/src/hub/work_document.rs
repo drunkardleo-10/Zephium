@@ -8,6 +8,8 @@ use zephium_core::{
 };
 
 const MAX_BODY_BYTES: usize = 131072;
+#[path = "work_runtime.rs"]
+mod runtime_store;
 const _: [(); 512] = [(); MAX_WORKS_PER_PROFILE];
 const _: [(); 256] = [(); MAX_ACTIVE_WORKS_PER_PROFILE];
 const _: [(); 32] = [(); MAX_WORK_PLAN_REVISIONS];
@@ -29,11 +31,85 @@ impl Hub {
         if self.recovery_required.is_some() {
             return Err(WorkError::Unavailable);
         }
+        let runtime_session = runtime_store::RuntimeClock {
+            session: self.work_runtime_session,
+            tick_ms: i64::try_from(self.work_runtime_epoch.elapsed().as_millis())
+                .map_err(|_| WorkError::Unavailable)?,
+        };
+        if let WorkRequest::ReadEvidence { id, link } = &request {
+            // Both databases are owned by this actor. Validate the selected
+            // Work/profile first; no mutation can interleave the archive read.
+            let conn = self
+                .profile_conn(profile)
+                .map_err(|_| WorkError::Unavailable)?;
+            let state = runtime_store::projection(conn, profile, *id, runtime_session)?;
+            if !state
+                .executions
+                .iter()
+                .flat_map(|e| &e.artifacts)
+                .flat_map(|a| &a.evidence)
+                .any(|candidate| candidate == link)
+            {
+                return Err(WorkError::NotFound);
+            }
+            return super::agent_work::read_work_evidence(&self.meta, profile, link.clone())
+                .map(WorkReply::Evidence);
+        }
         let conn = self
             .profile_conn(profile)
             .map_err(|_| WorkError::Unavailable)?;
         let tx = conn.transaction().map_err(|_| WorkError::Unavailable)?;
         let (reply, write) = match request {
+            WorkRequest::ReadEvidence { .. } => return Err(WorkError::Invalid),
+            WorkRequest::RuntimeAbandon {
+                id,
+                execution,
+                attempt,
+            } => {
+                let expected = read(&tx, profile, id)?.revision;
+                runtime_store::update(
+                    &tx,
+                    profile,
+                    runtime_session,
+                    id,
+                    expected,
+                    runtime::WorkRuntimeUpdate::Settle {
+                        execution,
+                        attempt,
+                        status: runtime::WorkAttemptStatus::OutcomeUnknown,
+                        usage: None,
+                        artifacts: vec![],
+                    },
+                )?
+            }
+            WorkRequest::RuntimeRead { id } => (
+                WorkReply::Runtime(Box::new(runtime_store::projection(
+                    &tx,
+                    profile,
+                    id,
+                    runtime_session,
+                )?)),
+                false,
+            ),
+            WorkRequest::RuntimeCommand {
+                id,
+                expected,
+                command,
+                intent,
+            } => runtime_store::command(
+                &tx,
+                profile,
+                runtime_session,
+                id,
+                expected,
+                command,
+                intent,
+            )?,
+            WorkRequest::RuntimeUpdate {
+                id,
+                expected,
+                update,
+            } => runtime_store::update(&tx, profile, runtime_session, id, expected, update)?,
             WorkRequest::Create {
                 id,
                 objective,
@@ -63,6 +139,7 @@ impl Hub {
             }
             WorkRequest::Delete { id, expected } => {
                 let current = read(&tx, profile, id)?;
+                runtime_store::require_idle(&tx, id, current.revision)?;
                 if current.revision != expected {
                     return Err(WorkError::Conflict);
                 }
@@ -109,11 +186,14 @@ impl Hub {
                 author,
             } => {
                 let current = read(&tx, profile, id)?;
+                if !matches!(edit, WorkEdit::CompactHistory) {
+                    runtime_store::require_idle(&tx, id, current.revision)?;
+                }
                 let (next, event) = current.apply(expected, edit, author)?;
                 if event == WorkEventKind::HistoryCompacted {
                     // Explicit user action. Current plan and active clarification
                     // provenance survive; only obsolete authoring content is removed.
-                    tx.execute("DELETE FROM work_plans WHERE work_id = ?1 AND revision != coalesce((SELECT current_plan FROM works WHERE id = ?1), -1)", [id.to_string()]).map_err(db)?;
+                    tx.execute("DELETE FROM work_plans WHERE work_id = ?1 AND revision != coalesce((SELECT current_plan FROM works WHERE id = ?1), -1) AND NOT EXISTS (SELECT 1 FROM work_executions e WHERE e.work_id = ?1 AND e.plan_revision = work_plans.revision)", [id.to_string()]).map_err(db)?;
                     tx.execute(
                         "DELETE FROM work_questions WHERE work_id = ?1",
                         [id.to_string()],
@@ -193,6 +273,8 @@ fn db(error: rusqlite::Error) -> WorkError {
                 | "Work capacity exceeded"
                 | "Work event capacity exceeded"
                 | "Work plan capacity exceeded"
+                | "Work execution capacity exceeded"
+                | "Work command capacity exceeded"
         ) {
             return WorkError::Capacity;
         }
@@ -272,6 +354,7 @@ fn append_event(
     author: WorkAuthor,
 ) -> Result<(), WorkError> {
     let kind = match event {
+        WorkEventKind::RuntimeChanged => "runtime_changed",
         WorkEventKind::Archived => "archived",
         WorkEventKind::Restored => "restored",
         WorkEventKind::HistoryCompacted => "history_compacted",

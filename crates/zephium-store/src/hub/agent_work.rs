@@ -443,3 +443,63 @@ fn read_artifact(
     })
     .transpose()
 }
+
+/// Historical content access does not claim the process execution fence or
+/// reconstruct the original journal owner. The caller has checked membership
+/// in the selected profile's Work artifact projection on this same actor.
+pub(super) fn read_work_evidence(
+    connection: &Connection,
+    profile: ProfileId,
+    link: zephium_core::work::artifact::WorkEvidenceLink,
+) -> Result<zephium_core::work::artifact::WorkEvidencePreviewV1, zephium_core::work::WorkError> {
+    use zephium_agentic::ArchivedSourceContent;
+    use zephium_core::work::{artifact::WorkEvidencePreviewV1, WorkError};
+    let key: Option<Vec<u8>> = connection.query_row(
+        "SELECT CASE WHEN length(run_key) = 32 THEN run_key END FROM agent_work_artifacts WHERE profile_id = ?1 AND artifact_id = ?2",
+        params![profile.to_string(), link.extraction_id.bytes().as_slice()],
+        |row| row.get(0),
+    ).optional().map_err(|_| WorkError::Unavailable)?;
+    let key = key
+        .ok_or(WorkError::NotFound)?
+        .try_into()
+        .map_err(|_| WorkError::Invalid)?;
+    let archive = read_artifact(connection, key, profile)
+        .map_err(|_| WorkError::Invalid)?
+        .ok_or(WorkError::NotFound)?;
+    let source = archive.source(link.source_id).ok_or(WorkError::NotFound)?;
+    let (mut text, bytes, mut truncated) = match source.content() {
+        ArchivedSourceContent::Text { value } => (value.clone(), value.len() as u64, false),
+        ArchivedSourceContent::Preview {
+            value,
+            source_bytes,
+            truncated,
+        } => (value.clone(), *source_bytes, *truncated),
+        ArchivedSourceContent::Boolean { value } => {
+            let value = value.to_string();
+            let bytes = value.len() as u64;
+            (value, bytes, false)
+        }
+        ArchivedSourceContent::Ordinal { value } => {
+            let value = value.to_string();
+            let bytes = value.len() as u64;
+            (value, bytes, false)
+        }
+    };
+    if text.len() > 8192 {
+        let mut end = 8192;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        truncated = true;
+    }
+    Ok(WorkEvidencePreviewV1 {
+        version: 1,
+        link,
+        origin: source.origin().into(),
+        role: source.role().into(),
+        text,
+        truncated,
+        source_bytes: bytes.to_string(),
+    })
+}

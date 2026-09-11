@@ -45,6 +45,7 @@ impl RetainedWorkPorts {
 /// created until the original Shell accepts Engine/Store and selected profile.
 #[must_use]
 pub struct PreparedRetainedWork {
+    work: Option<WorkId>,
     engine: crate::SharedEngine,
     journal: Arc<dyn AgentWorkJournalPort>,
     audit: Arc<dyn AgentAuditPort>,
@@ -54,6 +55,12 @@ pub struct PreparedRetainedWork {
     actor: ActorRequest,
 }
 impl PreparedRetainedWork {
+    /// Preserve the durable aggregate selected by the trusted runtime owner.
+    /// This is an identity join and grants no additional native capability.
+    pub fn with_work_identity(mut self, work: WorkId) -> Self {
+        self.work = Some(work);
+        self
+    }
     pub fn try_new(
         input: AgentWorkRunInput,
         profile: AgentWorkProfileBinding,
@@ -100,6 +107,7 @@ impl PreparedRetainedWork {
             return Err(AgentWorkFailure::Contract);
         }
         Ok(Self {
+            work: None,
             engine,
             journal,
             audit,
@@ -173,6 +181,8 @@ struct Projection {
     review_active: bool,
 }
 struct ProductSignal {
+    close: AtomicBool,
+    closed: AtomicBool,
     projection: Mutex<Projection>,
     stop: AtomicBool,
     reconcile: AtomicBool,
@@ -186,6 +196,16 @@ pub struct RetainedWorkHandle {
     callback: CallbackHandle,
 }
 impl RetainedWorkHandle {
+    /// Request destruction of this exact owned resource after scoped drain.
+    /// Queue acceptance is not a cleanup acknowledgement.
+    pub fn close(&self) -> bool {
+        self.signal.close.store(true, Ordering::Release);
+        self.stop()
+    }
+    /// Set only by the original resource owner's native shutdown proof.
+    pub fn is_closed(&self) -> bool {
+        self.signal.closed.load(Ordering::Acquire)
+    }
     pub fn snapshot(&self) -> RetainedWorkSnapshot {
         match self.signal.projection.lock() {
             Ok(projection) => projection.snapshot,
@@ -296,6 +316,8 @@ impl CallbackHandle {
         prepared: PreparedRetainedWork,
     ) -> Option<RetainedWorkHandle> {
         let signal = Arc::new(ProductSignal {
+            close: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
             projection: Mutex::new(Projection {
                 #[cfg(feature = "work-execution-probe")]
                 construction_resource: None,
@@ -357,6 +379,9 @@ pub(crate) struct ProductWork {
     callback: CallbackHandle,
 }
 impl ProductWork {
+    pub(crate) fn is_closed(&self) -> bool {
+        self.signal.closed.load(Ordering::Acquire)
+    }
     pub(crate) fn take(attachment: &RetainedWorkAttachment) -> Option<Self> {
         attachment.0.lock().ok()?.take()
     }
@@ -396,7 +421,7 @@ impl ProductWork {
         let callback = self.callback.clone();
         let owner = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             WorkResourceOwner::new(
-                WorkId::generate(),
+                prepared.work.unwrap_or_else(WorkId::generate),
                 prepared.profile.profile(),
                 Arc::new(move || callback.wake_retained_work()),
                 prepared.native,
@@ -470,7 +495,14 @@ impl ProductWork {
         if self.signal.reconcile.swap(false, Ordering::AcqRel) {
             work.reconcile();
         }
-        work.poll(now);
+        if self.signal.close.load(Ordering::Acquire) {
+            work.begin_shutdown();
+            if matches!(work.poll_shutdown(now), Ok(true)) {
+                self.signal.closed.store(true, Ordering::Release);
+            }
+        } else {
+            work.poll(now);
+        }
         if let Ok(mut projection) = self.signal.projection.lock() {
             if let Some((record, decision)) = projection.review_requested.take() {
                 work.review(record, decision);

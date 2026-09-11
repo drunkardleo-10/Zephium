@@ -1472,7 +1472,9 @@ fn pre_provider_budget_refusal_drains_worker_and_preserves_late_original_reporte
     };
     assert_eq!(
         closed.failure(),
-        AgentWorkFailure::Browser(AgentBrowserProviderError::Authority)
+        AgentWorkFailure::Browser(AgentBrowserProviderError::RequestPolicy(
+            AgentPolicyError::Budget
+        ))
     );
     assert_eq!(closed.policy_settlement().closure().model_calls(), 0);
     assert!(release.returned().unwrap());

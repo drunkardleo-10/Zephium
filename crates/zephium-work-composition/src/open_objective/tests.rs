@@ -32,7 +32,7 @@ fn production_objective() -> PublicReadWorkObjective {
     PublicReadWorkObjective {
         objective: "Investigate the linked evidence and return a cited result.".into(),
         navigation: AgentNavigationDiscovery::try_new_production(
-            ContextNavigationTarget::parse("https://example.test/project?q=open#today").unwrap(),
+            ContextNavigationTarget::parse("https://example.test/project/?q=open#today").unwrap(),
             vec![
                 AgentNavigationOriginRule::try_new(source, "/project/".into(), true, true).unwrap(),
                 AgentNavigationOriginRule::try_new(docs, "/guide/".into(), true, false).unwrap(),
@@ -106,7 +106,7 @@ fn ordinary_admission_preserves_scope_storage_and_absolute_clock_without_a_route
 }
 
 #[test]
-fn production_admission_freezes_every_origin_and_enables_bounded_visual_wait_tools() {
+fn production_admission_preserves_navigation_and_enables_bounded_visual_wait_tools() {
     let identity = identity();
     let definition = production_objective();
     let expected = definition.navigation.clone();
@@ -117,9 +117,7 @@ fn production_admission_freezes_every_origin_and_enables_bounded_visual_wait_too
         settings(PublicReadWorkAccount::Anonymous),
     )
     .unwrap();
-    let node = input.manifest.plan_node(input.lease.node()).unwrap();
-    assert_eq!(node.origins().len(), 2);
-    assert_eq!(input.manifest.scope().origins().len(), 2);
+    assert_eq!(input.retained_resource_spec().unwrap().identity, identity);
     assert_eq!(task.navigation_discovery(), Some(&expected));
     assert!(task.allows_standalone_wait());
     assert!(task.allows_viewport_screenshot());

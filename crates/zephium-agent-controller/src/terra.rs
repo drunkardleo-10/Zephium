@@ -2236,7 +2236,7 @@ impl AgentBrowserSession {
                 self.config.clone(),
             ),
         }
-        .map_err(|_| AgentBrowserProviderError::Authority)?;
+        .map_err(AgentBrowserProviderError::from_request)?;
         self.drive(prepared.into_transport_input()).await
     }
 
@@ -2287,7 +2287,7 @@ impl AgentBrowserSession {
                 continuation,
                 action_authority,
             )
-                .map_err(|_| AgentBrowserProviderError::Authority)?;
+                .map_err(AgentBrowserProviderError::from_request)?;
             return self.drive(prepared.into_transport_input()).await;
         };
         let payload = encode_semantic_diff(
@@ -2309,7 +2309,7 @@ impl AgentBrowserSession {
             .map_err(|_| AgentBrowserProviderError::Continuation)?;
         let prepared = draft
             .try_prepare_for_provider_exact_count(&mut self.policy, request, diff)
-            .map_err(|_| AgentBrowserProviderError::Authority)?;
+            .map_err(AgentBrowserProviderError::from_request)?;
         self.drive(prepared.into_transport_input()).await
     }
 
@@ -2372,7 +2372,7 @@ impl AgentBrowserSession {
             .map_err(|_| AgentBrowserProviderError::Continuation)?;
         let prepared = draft
             .try_prepare_for_provider_exact_count(&mut self.policy, model_request, &result)
-            .map_err(|_| AgentBrowserProviderError::Authority)?;
+            .map_err(AgentBrowserProviderError::from_request)?;
         self.drive(prepared.into_transport_input()).await
     }
 
@@ -2441,7 +2441,7 @@ impl AgentBrowserSession {
             .and_then(|draft| {
                 draft.try_prepare_for_provider_exact_count(&mut self.policy, request, &read)
             })
-            .map_err(|_| AgentBrowserProviderError::Authority)?;
+            .map_err(AgentBrowserProviderError::from_request)?;
         self.drive(prepared.into_transport_input()).await
     }
 
@@ -2481,7 +2481,7 @@ impl AgentBrowserSession {
             .and_then(|draft| {
                 draft.try_prepare_for_provider_exact_count(&mut self.policy, request, observation)
             })
-            .map_err(|_| AgentBrowserProviderError::Authority)?;
+            .map_err(AgentBrowserProviderError::from_request)?;
         self.drive(prepared.into_transport_input()).await
     }
 
@@ -2535,7 +2535,7 @@ impl AgentBrowserSession {
                 continuation,
                 action_authority,
             )
-            .map_err(|_| AgentBrowserProviderError::Authority)?;
+            .map_err(AgentBrowserProviderError::from_request)?;
         let input = prepared.into_transport_input();
         let observation = result.into_observation();
         let turn = self.drive(input).await?;
@@ -2673,7 +2673,7 @@ impl AgentBrowserSession {
             .and_then(|draft| {
                 draft.try_prepare_for_provider_exact_count(&mut self.policy, request, schema, &read)
             })
-            .map_err(|_| AgentBrowserProviderError::Authority)?;
+            .map_err(AgentBrowserProviderError::from_request)?;
         let (input, output) = prepared.into_transport_parts();
         let (terminal, _, _) = self.drive_terminal(input, Some(output)).await?;
         self.extraction_output
@@ -3020,7 +3020,7 @@ impl AgentBrowserSession {
             .next_step(turn, observation, current_frames, None, false, record)
             .await?;
         match self.bind_action_turn(turn, observation, current_frames)? {
-            crate::action::AgentBrowserActionBinding::Prepared(proposal) => Ok(proposal),
+            crate::action::AgentBrowserActionBinding::Prepared(proposal) => Ok(*proposal),
             crate::action::AgentBrowserActionBinding::Refused(refusal) => {
                 Err(AgentBrowserProviderError::Action(
                     crate::AgentBrowserActionError::Binding(refusal.reason()),
@@ -3733,6 +3733,12 @@ pub enum AgentBrowserAccountError {
 /// Closed content-free session refusal. No variant authorizes a blind retry.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum AgentBrowserProviderError {
+    /// Closed policy refusal before model input reaches the provider.
+    #[error("browser provider policy admission was refused")]
+    RequestPolicy(zephium_agentic::AgentPolicyError),
+    /// Fixed request configuration did not fit its exact admission contract.
+    #[error("browser provider request contract was refused")]
+    RequestContract(zephium_agentic::AgentProviderContractError),
     /// Exact task-authorized native navigation policy refused its checkpoint.
     #[error("browser document navigation was refused")]
     Navigation(zephium_agentic::AgentPolicyError),
@@ -3832,6 +3838,17 @@ pub enum AgentBrowserProviderError {
     TurnLimit,
 }
 
+impl AgentBrowserProviderError {
+    fn from_request(error: zephium_agentic::AgentProviderRequestError) -> Self {
+        use zephium_agentic::AgentProviderRequestError;
+        match error {
+            AgentProviderRequestError::Policy(error) => Self::RequestPolicy(error),
+            AgentProviderRequestError::Contract(error) => Self::RequestContract(error),
+            _ => Self::Authority,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3875,6 +3892,10 @@ mod tests {
         max_model_calls: u8,
         max_actions: u64,
     ) -> (AgentBrowserSession, SemanticObservation) {
+        // Platform TLS initialization is fixture setup, not approved execution
+        // time. Freeze the test deadline only after this undispatched owner exists.
+        let transport = AgentProviderTransport::try_new(AgentProviderTransportConfig::STANDARD)
+            .expect("fixture transport");
         let profile = 13_u128.into();
         let identity = ContextIdentity::new(
             ContextId::generate(),
@@ -4010,9 +4031,9 @@ mod tests {
             "fixture-not-a-credential".to_owned(),
         )
         .expect("fixture credential");
-        let session = AgentBrowserSession::try_new(
+        let session = AgentBrowserSession::try_new_with_transport(
             input,
-            AgentProviderTransportConfig::STANDARD,
+            BrowserSessionTransport(transport),
             credential,
             AgentBrowserModel::Luna,
             AgentBrowserRetention::Stateless,
@@ -4370,6 +4391,24 @@ mod tests {
             session.next_model_call_request().expect_err("overflow"),
             AgentBrowserProviderError::Authority
         );
+    }
+
+    #[test]
+    fn browser_budget_refusal_is_explicit_and_retains_no_provider_debt() {
+        let budget = AgentRunBudget::try_new(8, 100_000, 50_000, 1).unwrap();
+        let (mut session, observation) = browser_fixture_with_budget(budget);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        assert_eq!(
+            runtime
+                .block_on(session.start_initial(&observation))
+                .unwrap_err(),
+            AgentBrowserProviderError::RequestPolicy(zephium_agentic::AgentPolicyError::Budget)
+        );
+        assert_eq!(session.turns, 0);
+        assert_eq!(session.policy.pending_model_calls(), 0);
+        assert!(session.try_finish_unsuccessful().is_ok());
     }
 
     #[test]

@@ -1984,6 +1984,21 @@ fn provider_fixture_with_discovery_account(
         human_request: bool,
     }
     impl AgentWorkTask for Continue {
+        fn model_action_operations(
+            &self,
+            node: &SemanticNode,
+            _: &SemanticObservation,
+        ) -> Result<SemanticOperations, AgentWorkFailure> {
+            // This fixture's native faults target one exact synthetic fill.
+            // Without the advertised operation, the production driver correctly
+            // rejects the proposal before the fault being tested can occur.
+            if node.name().is_some_and(|name| name.as_str() == "Field") {
+                SemanticOperations::try_new(&[SemanticOperationClass::Fill])
+                    .map_err(|_| AgentWorkFailure::Contract)
+            } else {
+                Ok(SemanticOperations::NONE)
+            }
+        }
         fn allows_human_request(&self) -> bool {
             self.human_request
         }
@@ -2090,6 +2105,14 @@ fn provider_fixture_with_discovery_account(
             _ => 2,
         }
     };
+    // Construct the client before the server's request deadline. Platform
+    // transport setup is not part of the native fault under test.
+    let transport = AgentProviderTransport::try_new_loopback(
+        AgentProviderTransportConfig::STANDARD,
+        &endpoint,
+        "http://127.0.0.1:9/v1/messages",
+    )
+    .expect("loopback transport");
     let server = std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(12);
         let mut turns = 0;
@@ -2298,12 +2321,6 @@ fn provider_fixture_with_discovery_account(
         }
         turns
     });
-    let transport = AgentProviderTransport::try_new_loopback(
-        AgentProviderTransportConfig::STANDARD,
-        &endpoint,
-        "http://127.0.0.1:9/v1/messages",
-    )
-    .expect("loopback transport");
     let credential = AgentProviderCredential::try_new(
         AgentProviderKind::OpenAiResponses,
         "fixture-not-a-secret".to_owned(),

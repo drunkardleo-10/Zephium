@@ -6308,6 +6308,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "specta",
  "tempfile",
  "ulid",
  "url",
@@ -6543,7 +6544,9 @@ name = "zephium-ipc"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
  "specta",
+ "zephium-core",
 ]
 
 [[package]]
@@ -6564,6 +6567,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "url",
  "windows",
@@ -6576,9 +6580,11 @@ dependencies = [
 name = "zephium-terra-macos-probe"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "tempfile",
  "tokio",
  "zephium-agent-controller",
+ "zephium-agent-model-catalog",
  "zephium-agent-provider-transport",
  "zephium-agent-runtime",
  "zephium-agentic",
@@ -6588,6 +6594,7 @@ dependencies = [
  "zephium-core",
  "zephium-engine",
  "zephium-extension-service",
+ "zephium-ipc",
  "zephium-store",
  "zephium-work-composition",
 ]
@@ -6608,6 +6615,8 @@ dependencies = [
 name = "zephium-work-composition"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
+ "tokio",
  "zephium-agent-controller",
  "zephium-agent-provider-transport",
  "zephium-agent-runtime",
@@ -6615,6 +6624,7 @@ dependencies = [
  "zephium-app",
  "zephium-core",
  "zephium-engine",
+ "zephium-ipc",
  "zephium-store",
 ]
 

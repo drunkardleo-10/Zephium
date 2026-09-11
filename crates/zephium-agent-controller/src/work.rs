@@ -1238,6 +1238,10 @@ struct WorkState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "One Copy terminal intent per bounded worker; keep the exact human handoff inline without a separate allocation"
+)]
 enum WorkTerminalIntent {
     Succeeded,
     WaitingForHuman(AgentWorkHumanRequest),
@@ -2604,7 +2608,7 @@ impl AgentWorkController {
                         .bind_action_turn(step, &observation, &frames)
                         .map_err(AgentWorkFailure::Browser)?
                     {
-                        crate::action::AgentBrowserActionBinding::Prepared(proposal) => proposal,
+                        crate::action::AgentBrowserActionBinding::Prepared(proposal) => *proposal,
                         crate::action::AgentBrowserActionBinding::Refused(refusal) => {
                             state.native.check_control(worker, browser)?;
                             state.refresh_account(worker, browser)?;
@@ -2629,7 +2633,7 @@ impl AgentWorkController {
                                 worker,
                                 browser,
                                 session.cancellation.clone(),
-                                session.continue_after_action_refusal(refusal, &observation),
+                                session.continue_after_action_refusal(*refusal, &observation),
                             )
                             .await?;
                             continue;

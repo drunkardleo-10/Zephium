@@ -6,6 +6,8 @@ macro_rules! durable_id {
     ($name:ident, $description:literal) => {
         #[doc = $description]
         #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+        #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+        #[cfg_attr(feature = "ipc-types", specta(type = String))]
         pub struct $name(Ulid);
 
         impl $name {
@@ -77,3 +79,17 @@ durable_id!(
     "Durable responsibility in a draft; not an execution lease or a Task."
 );
 durable_id!(WorkQuestionId, "Durable clarification question identity.");
+durable_id!(
+    WorkExecutionId,
+    "Durable execution identity, never a live admission."
+);
+durable_id!(WorkAttemptId, "Exact durable worker attempt identity.");
+durable_id!(WorkArtifactId, "Immutable semantic artifact identity.");
+durable_id!(
+    WorkCommandId,
+    "Idempotency correlation only, never an entity capability."
+);
+durable_id!(
+    WorkRuntimeSessionId,
+    "Store incarnation; never serialized as execution authority."
+);

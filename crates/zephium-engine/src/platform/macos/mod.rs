@@ -101,6 +101,8 @@ pub(crate) use agentic_semantic_probe::run_work_actor as run_agentic_work_actor_
 #[cfg(feature = "native-agentic-semantic-probe")]
 pub(crate) use agentic_semantic_probe::run_work_application as run_agentic_work_application_probe;
 #[cfg(feature = "native-agentic-semantic-probe")]
+pub(crate) use agentic_semantic_probe::run_work_application_with_events as run_work_application_with_events_probe;
+#[cfg(feature = "native-agentic-semantic-probe")]
 pub use agentic_semantic_probe::MacosAgenticHistoryRuntimeProbeReport;
 #[cfg(feature = "native-agentic-semantic-probe")]
 pub use agentic_semantic_probe::MacosAgenticRenderingProbeReport;

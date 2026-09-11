@@ -14,6 +14,7 @@ zephium-core.workspace = true
 zephium-private-fs = { workspace = true, optional = true }
 rusqlite.workspace = true
 serde.workspace = true
+sha2 = "=0.10.9"
 serde_json = { workspace = true, features = ["unbounded_depth"] }
 url.workspace = true
 

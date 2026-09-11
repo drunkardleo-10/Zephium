@@ -10,6 +10,8 @@ pub use crate::work::{WorkId, WorkPlanId, WorkPlanNodeId, WorkQuestionId};
 macro_rules! ulid_id {
     ($name:ident) => {
         #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+        #[cfg_attr(feature = "ipc-types", specta(type = String))]
         pub struct $name(Ulid);
 
         impl $name {

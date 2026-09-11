@@ -141,7 +141,7 @@ impl AgentBrowserSession {
                 self.config.clone(),
                 refusal,
             )
-            .map_err(|_| AgentBrowserProviderError::Authority)?;
+            .map_err(AgentBrowserProviderError::from_request)?;
         self.drive(prepared.into_transport_input()).await
     }
 
@@ -166,7 +166,7 @@ impl AgentBrowserSession {
             self.config.clone(),
             refusal,
         )
-        .map_err(|_| AgentBrowserProviderError::Authority)?;
+        .map_err(AgentBrowserProviderError::from_request)?;
         self.drive(prepared.into_transport_input()).await
     }
 
@@ -200,7 +200,7 @@ impl AgentBrowserSession {
                 objective,
                 action_authority,
             )
-            .map_err(|_| AgentBrowserProviderError::Authority)?;
+            .map_err(AgentBrowserProviderError::from_request)?;
         self.drive(prepared.into_transport_input()).await
     }
 }

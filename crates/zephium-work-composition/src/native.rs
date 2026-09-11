@@ -14,6 +14,7 @@ use zephium_store::SqliteStore;
 /// effect assessment, account attestation, manifest or profile assignment.
 /// This layer intentionally has no default task or implicit effect permission.
 pub struct TrustedWorkRequest {
+    work: Option<zephium_agentic::WorkId>,
     pub(crate) input: AgentWorkRunInput,
     pub(crate) config: AgentWorkApplicationConfig,
     pub(crate) credential: AgentProviderCredential,
@@ -32,6 +33,7 @@ impl TrustedWorkRequest {
         task: Box<dyn AgentWorkTask>,
     ) -> Self {
         Self {
+            work: None,
             input,
             config,
             credential,
@@ -40,6 +42,11 @@ impl TrustedWorkRequest {
             #[cfg(feature = "public-qualification")]
             public_qualification: false,
         }
+    }
+    /// Bind the aggregate owning this fresh dispatch; no authority is added.
+    pub fn with_work_identity(mut self, work: zephium_agentic::WorkId) -> Self {
+        self.work = Some(work);
+        self
     }
     /// Requests the exact actor-selected browser session, revalidated by Shell.
     pub fn with_browser_profile(mut self, binding: zephium_app::AgentWorkProfileBinding) -> Self {
@@ -116,6 +123,10 @@ impl MacosWorkComposition {
             request.task,
             ports,
         )?;
+        let prepared = match request.work {
+            Some(work) => prepared.with_work_identity(work),
+            None => prepared,
+        };
         Ok(shell.attach_retained_work(prepared))
     }
     /// Uses the same owners passed to the normal application shell.

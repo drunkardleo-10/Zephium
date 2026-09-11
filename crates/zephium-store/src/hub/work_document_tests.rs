@@ -1,7 +1,7 @@
 use super::*;
 use zephium_core::profiles::ProfileKind;
 use zephium_core::session::{PersistedProfile, SessionState};
-fn session() -> SessionState {
+pub(super) fn session() -> SessionState {
     SessionState {
         profiles: vec![
             PersistedProfile {
@@ -18,7 +18,7 @@ fn session() -> SessionState {
         ..SessionState::default()
     }
 }
-fn create(hub: &mut Hub) -> WorkSnapshot {
+pub(super) fn create(hub: &mut Hub) -> WorkSnapshot {
     let WorkReply::Snapshot(work) = hub
         .work_document(
             1.into(),
@@ -34,7 +34,7 @@ fn create(hub: &mut Hub) -> WorkSnapshot {
     };
     *work
 }
-fn draft() -> WorkPlanDraft {
+pub(super) fn draft() -> WorkPlanDraft {
     WorkPlanDraft {
         id: 11.into(),
         nodes: vec![WorkPlanNode {
@@ -49,7 +49,11 @@ fn draft() -> WorkPlanDraft {
         }],
     }
 }
-fn edit(hub: &mut Hub, work: &WorkSnapshot, edit: WorkEdit) -> Result<WorkSnapshot, WorkError> {
+pub(super) fn edit(
+    hub: &mut Hub,
+    work: &WorkSnapshot,
+    edit: WorkEdit,
+) -> Result<WorkSnapshot, WorkError> {
     match hub.work_document(
         work.profile,
         WorkRequest::Edit {

@@ -35,7 +35,7 @@ pub enum PublicReadWorkAccount {
     /// Explicit actor enrollment paired with an independent host collector.
     /// Admission checks the enrolled profile and service origin as well as the
     /// account; enrollment alone supplies no current-document evidence.
-    Enrolled(zephium_app::AgentWorkEnrolledAccount),
+    Enrolled(Box<zephium_app::AgentWorkEnrolledAccount>),
     /// A host source independently identifies the account for each current
     /// document. Missing, changed or stale samples prevent execution. The ID
     /// must name that identified account, never a generated stand-in inferred
@@ -183,6 +183,7 @@ impl PublicLocalActionWorkInvocation {
 
     /// Retains provider input for an explicitly inspectable public development
     /// or qualification run. This never changes effect, account or page scope.
+    #[cfg(feature = "public-qualification")]
     pub fn with_inspectable_public_retention(mut self) -> Self {
         self.read = self.read.with_inspectable_public_retention();
         self
@@ -390,7 +391,7 @@ fn assemble_with_actions(
                 objective.navigation,
                 objective.output_fields,
                 account,
-                Box::new(source),
+                source,
             )?
         }
     };

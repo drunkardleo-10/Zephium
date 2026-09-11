@@ -5,6 +5,8 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
+pub mod work;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 pub struct TabView {
     pub id: String,

@@ -552,6 +552,12 @@ fn selected_shell_retains_page_after_durable_result_and_owns_global_shutdown() {
     pump(&queue, &mut shell, || {
         legacy.snapshot().phase == crate::AgentWorkApplicationPhase::Recovery
     });
+    assert!(!view.is_closed());
+    assert!(view.close());
+    pump(&queue, &mut shell, || view.is_closed());
+    assert_eq!(native.destructions.load(Ordering::Acquire), 1);
+    assert!(native.global_sealed.load(Ordering::Acquire));
+    assert!(native.reporters.lock().unwrap().is_empty());
     let shutdown = owner.shutdown_with_deadline(Instant::now() + Duration::from_secs(5));
     while let Some(command) = queue.try_recv() {
         let terminal = matches!(command, Command::Shutdown { .. });

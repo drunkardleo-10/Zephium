@@ -14,6 +14,8 @@ mod work_application;
 #[cfg(target_os = "macos")]
 mod work_artifact_cleanup;
 mod work_commerce;
+#[cfg(all(target_os = "macos", feature = "durable-runtime"))]
+mod work_durable;
 mod work_navigation;
 mod work_route;
 mod work_sites;
@@ -63,6 +65,8 @@ fn main() {
             run_variable_workflow()
         }
         [argument] if argument == "--live-public-luna-work-actor-inspectable" => work_actor::run(),
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-public-durable-work" => work_durable::run(),
         [argument] if argument == "--live-public-luna-work-application-inspectable" => {
             work_application::run()
         }
@@ -321,6 +325,16 @@ impl ProbeFailure {
             Self::Provider(TerraProbeProviderError::Proposal) => "provider_proposal",
             Self::Provider(TerraProbeProviderError::Continuation) => "provider_continuation",
             Self::Provider(TerraProbeProviderError::TurnLimit) => "provider_turn_limit",
+            Self::Provider(TerraProbeProviderError::NoExtractionEvidence) => {
+                "provider_no_extraction_evidence"
+            }
+            Self::Provider(TerraProbeProviderError::RequestPolicy(_)) => "provider_request_policy",
+            Self::Provider(TerraProbeProviderError::RequestContract(_)) => {
+                "provider_request_contract"
+            }
+            Self::Provider(TerraProbeProviderError::ActionProposalLoop) => {
+                "provider_action_proposal_loop"
+            }
             Self::Proposal { .. } => "proposal_contract",
             Self::Engine(_) => "native_engine",
             Self::Verification => "fresh_snapshot_verification",

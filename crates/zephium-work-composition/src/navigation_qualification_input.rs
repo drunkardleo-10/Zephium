@@ -152,6 +152,7 @@ mod tests {
             1_u128.into(),
             ContextKind::Owned,
         );
+        #[allow(clippy::single_element_loop)] // Optional static witness matrix.
         for definition in [
             &DEFINITION,
             #[cfg(feature = "discovery-qualification")]

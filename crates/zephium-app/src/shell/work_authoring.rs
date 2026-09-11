@@ -5,6 +5,7 @@ impl crate::Shell {
         let Some(crate::work_authoring::Payload {
             request,
             expected_owner,
+            pinned_owner,
             owner,
             reply,
             permit,
@@ -12,10 +13,13 @@ impl crate::Shell {
         else {
             return;
         };
-        let profile = self
-            .windows
-            .focused()
-            .and_then(|w| self.profiles.get(w.profile))
+        let selected = if pinned_owner {
+            expected_owner
+        } else {
+            self.windows.focused().map(|w| w.profile)
+        };
+        let profile = selected
+            .and_then(|profile| self.profiles.get(profile))
             .filter(|p| p.kind != zephium_core::profiles::ProfileKind::Incognito)
             .filter(|p| !self.profile_deletion_quarantines(p.id))
             .map(|p| p.id);

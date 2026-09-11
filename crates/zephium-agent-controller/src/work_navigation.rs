@@ -571,7 +571,7 @@ impl AgentBrowserSession {
                 self.config.clone(),
             ),
         }
-        .map_err(|_| AgentBrowserProviderError::Authority)?;
+        .map_err(AgentBrowserProviderError::from_request)?;
         self.account_attestations.push(account.attestation());
         self.account = account;
         self.drive(prepared.into_transport_input()).await

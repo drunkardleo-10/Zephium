@@ -5,6 +5,33 @@ use super::*;
 
 #[derive(Clone)]
 pub enum WorkRequest {
+    /// On-demand historical evidence linked by this Work; never live authority.
+    ReadEvidence {
+        id: WorkId,
+        link: artifact::WorkEvidenceLink,
+    },
+    /// Owner drop notification. Exact attempt matching replaces user CAS; this
+    /// can only record uncertainty, never start work or publish a result.
+    RuntimeAbandon {
+        id: WorkId,
+        execution: WorkExecutionId,
+        attempt: WorkAttemptId,
+    },
+    RuntimeRead {
+        id: WorkId,
+    },
+    RuntimeCommand {
+        id: WorkId,
+        expected: WorkRevision,
+        command: WorkCommandId,
+        intent: runtime::WorkRuntimeIntent,
+    },
+    /// Host-only, never decoded from IPC or model output.
+    RuntimeUpdate {
+        id: WorkId,
+        expected: WorkRevision,
+        update: runtime::WorkRuntimeUpdate,
+    },
     Delete {
         id: WorkId,
         expected: WorkRevision,
@@ -40,6 +67,22 @@ pub enum WorkRequest {
 impl WorkRequest {
     pub fn validate(&self) -> Result<(), WorkError> {
         match self {
+            Self::RuntimeCommand {
+                intent: runtime::WorkRuntimeIntent::Approve { spec },
+                ..
+            } => spec.validate_bounds(),
+            Self::RuntimeUpdate {
+                update: runtime::WorkRuntimeUpdate::Settle { artifacts, .. },
+                ..
+            } => {
+                if artifacts.len() > artifact::MAX_WORK_ARTIFACTS {
+                    return Err(WorkError::Capacity);
+                }
+                for artifact in artifacts {
+                    artifact.validate()?;
+                }
+                Ok(())
+            }
             Self::Create { objective, .. } => validate_text(objective, MAX_WORK_TEXT_BYTES),
             Self::Edit { edit, .. } => edit.validate(),
             Self::List { limit, .. } if *limit == 0 || *limit > MAX_WORK_PAGE_SIZE => {
@@ -75,6 +118,18 @@ impl std::fmt::Debug for WorkSummary {
 }
 #[derive(Clone, Debug)]
 pub enum WorkReply {
+    Evidence(artifact::WorkEvidencePreviewV1),
+    /// Returned only to the original successful Begin observer, never by read
+    /// or command replay. This is data; the application owns the live attempt.
+    RuntimeStarted {
+        projection: Box<runtime::WorkRuntimeProjection>,
+        remaining_millis: u32,
+    },
+    Runtime(Box<runtime::WorkRuntimeProjection>),
+    RuntimeCommand {
+        projection: Box<runtime::WorkRuntimeProjection>,
+        receipt: runtime::WorkCommandReceipt,
+    },
     Deleted {
         id: WorkId,
     },

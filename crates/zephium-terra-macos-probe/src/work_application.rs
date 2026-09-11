@@ -16,7 +16,7 @@ use zephium_agent_runtime::{AgentRuntimeConfig, AgentRuntimeStopReason};
 use zephium_app::{AgentWorkApplicationConfig, AgentWorkApplicationPhase, ShutdownOutcome};
 use zephium_work_composition::{MacosWorkComposition, TrustedWorkRequest};
 
-struct NoChrome;
+pub(super) struct NoChrome;
 impl zephium_core::ports::chrome::Chrome for NoChrome {
     fn position(&self, _: zephium_core::ports::chrome::ChromeFrame) -> bool {
         false

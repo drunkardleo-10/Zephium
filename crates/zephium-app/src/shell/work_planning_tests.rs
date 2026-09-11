@@ -66,7 +66,9 @@ fn draft() -> WorkPlanningProposal {
         },
     }
 }
-fn fixture(store: Arc<zephium_store::SqliteStore>) -> (Shell, CommandQueue, Handle, ProfileId) {
+pub(super) fn fixture(
+    store: Arc<zephium_store::SqliteStore>,
+) -> (Shell, CommandQueue, Handle, ProfileId) {
     let mut shell = Shell::new(
         Arc::new(crate::shell::tests::FakeEngine::default()),
         store.clone(),
@@ -80,7 +82,11 @@ fn fixture(store: Arc<zephium_store::SqliteStore>) -> (Shell, CommandQueue, Hand
     let handle = Handle::new(queue.clone());
     (shell, queue, handle, profile)
 }
-async fn drive<F: Future>(shell: &mut Shell, queue: &CommandQueue, future: F) -> F::Output {
+pub(super) async fn drive<F: Future>(
+    shell: &mut Shell,
+    queue: &CommandQueue,
+    future: F,
+) -> F::Output {
     drive_with(shell, queue, future, |_, _| {}).await
 }
 async fn drive_with<F: Future>(

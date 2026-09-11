@@ -441,9 +441,9 @@ impl RetainedWork {
                         .windows(2)
                         .any(|pair| pair[0].key() >= pair[1].key())
                     || records.iter().any(|record| {
-                        !historical_record_admissible(*record)
-                            && !(record.disposition() == AgentWorkDisposition::Interrupted
-                                && record.incarnation() == owner)
+                        !(historical_record_admissible(*record)
+                            || (record.disposition() == AgentWorkDisposition::Interrupted
+                                && record.incarnation() == owner))
                     })
                 {
                     // Malformed or unreviewable recovery facts cannot admit work.

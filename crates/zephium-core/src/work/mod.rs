@@ -1,11 +1,13 @@
-//! Durable Work authoring facts. No provider, worker, clock, execution token,
-//! approval, native reference, or implicit resumption lives in this aggregate.
+//! Durable Work facts. Authoring and execution history remain distinct; neither
+//! contains a live provider, worker, execution token or native reference.
 //! An editable plan describes desired work; compilation is a separate boundary.
 
+pub mod artifact;
 mod ids;
 pub mod planning;
 pub mod port;
 pub mod proposal;
+pub mod runtime;
 #[cfg(test)]
 mod tests;
 use crate::ids::ProfileId;
@@ -28,7 +30,9 @@ pub const MAX_WORK_PAGE_SIZE: usize = 32;
 
 /// SQLite- and JavaScript-safe ordered revision. The wire representation is a
 /// decimal string, so later revisions cannot be rounded by a frontend number.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[cfg_attr(feature = "ipc-types", specta(type = String))]
 pub struct WorkRevision(u64);
 impl WorkRevision {
     pub const INITIAL: Self = Self(1);
@@ -72,6 +76,7 @@ pub enum WorkError {
     OutcomeUnknown,
 }
 
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkAuthoringStatus {
@@ -82,6 +87,7 @@ pub enum WorkAuthoringStatus {
 
 /// Attribution is descriptive history, never authorization. Legacy content has
 /// unknown attribution; application callers cannot impersonate agent authors.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkAuthor {
@@ -91,6 +97,7 @@ pub enum WorkAuthor {
     LegacyUnknown,
 }
 
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkLifecycle {
@@ -98,6 +105,7 @@ pub enum WorkLifecycle {
     Archived,
 }
 
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkQuestionState {
@@ -108,6 +116,7 @@ pub enum WorkQuestionState {
 }
 
 /// Requested output review level, never evidence that a requirement was met.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkOutputReview {
@@ -116,6 +125,7 @@ pub enum WorkOutputReview {
     UserAcceptance,
 }
 
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkExpectedOutput {
@@ -124,6 +134,7 @@ pub struct WorkExpectedOutput {
     pub review: WorkOutputReview,
 }
 
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkPlanNode {
@@ -133,6 +144,7 @@ pub struct WorkPlanNode {
     pub outputs: Vec<WorkExpectedOutput>,
 }
 
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkPlanDraft {
@@ -185,6 +197,7 @@ impl WorkPlanDraft {
     }
 }
 
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkPlanRevision {
@@ -195,6 +208,7 @@ pub struct WorkPlanRevision {
     pub draft: WorkPlanDraft,
 }
 
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkQuestion {
@@ -245,6 +259,7 @@ impl WorkQuestion {
 }
 
 /// Bounded full-resynchronization projection. Serialized facts grant nothing.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkSnapshot {
@@ -468,6 +483,7 @@ impl WorkSnapshot {
     }
 }
 
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkEdit {
@@ -522,9 +538,11 @@ impl WorkEdit {
     }
 }
 
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkEventKind {
+    RuntimeChanged,
     Archived,
     Restored,
     HistoryCompacted,

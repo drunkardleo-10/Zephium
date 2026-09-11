@@ -70,6 +70,8 @@ pub(crate) const MAX_TITLE_BYTES: usize = zephium_core::item::MAX_PAGE_TITLE_CHA
 pub(crate) const MAX_NAME_BYTES: usize = MAX_SESSION_NAME_CHARS * 4;
 
 pub struct Hub {
+    work_runtime_session: zephium_core::work::WorkRuntimeSessionId,
+    work_runtime_epoch: std::time::Instant,
     #[cfg(feature = "work-execution")]
     work: Option<std::sync::Arc<agent_work::WorkOwnership>>,
     dir: Option<PathBuf>,
@@ -138,6 +140,8 @@ impl Hub {
             |row| row.get::<_, bool>(0),
         )?;
         let mut hub = Self {
+            work_runtime_session: zephium_core::work::WorkRuntimeSessionId::generate(),
+            work_runtime_epoch: std::time::Instant::now(),
             #[cfg(feature = "work-execution")]
             work: None,
             dir: Some(dir.clone()),
@@ -241,6 +245,8 @@ impl Hub {
         configure(&meta)?;
         migrations::apply(&mut meta, migrations::META)?;
         Ok(Self {
+            work_runtime_session: zephium_core::work::WorkRuntimeSessionId::generate(),
+            work_runtime_epoch: std::time::Instant::now(),
             #[cfg(feature = "work-execution")]
             work: None,
             dir: None,

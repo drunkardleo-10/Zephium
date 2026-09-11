@@ -13,7 +13,7 @@ pub struct AgentBrowserVerifiedTransition {
 }
 
 pub(crate) enum AgentBrowserVerifiedState {
-    Accounted(SemanticActionResult),
+    Accounted(Box<SemanticActionResult>),
     #[cfg(feature = "probe-harness")]
     ProbeDiff(Box<SemanticDiff>),
 }
@@ -55,7 +55,7 @@ impl AgentBrowserVerifiedTransition {
         }
         Some((
             self.continuation,
-            AgentBrowserVerifiedState::Accounted(self.terminal?.into_final_state()?),
+            AgentBrowserVerifiedState::Accounted(Box::new(self.terminal?.into_final_state()?)),
         ))
     }
 }
@@ -84,8 +84,8 @@ pub struct AgentBrowserActionProposal {
 }
 
 pub(crate) enum AgentBrowserActionBinding {
-    Prepared(AgentBrowserActionProposal),
-    Refused(AgentProviderActionRefusal),
+    Prepared(Box<AgentBrowserActionProposal>),
+    Refused(Box<AgentProviderActionRefusal>),
 }
 
 /// Original refused proposal, including its non-replayable continuation. Only
@@ -123,7 +123,7 @@ impl AgentBrowserActionProposal {
         let (batch, continuation) = match turn.resolve_action(batch, observation, frames, config) {
             Ok(AgentProviderActionResolution::Bound(batch, continuation)) => (batch, continuation),
             Ok(AgentProviderActionResolution::Refused(refusal)) => {
-                return Ok(AgentBrowserActionBinding::Refused(refusal));
+                return Ok(AgentBrowserActionBinding::Refused(Box::new(refusal)));
             }
             Err(AgentProviderActionResolutionError::Binding(error)) => {
                 return Err(AgentBrowserActionError::Binding(error));
@@ -170,11 +170,11 @@ impl AgentBrowserActionProposal {
         if action.settle_budget().millis() < MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS {
             return Err(AgentBrowserActionError::SettleBudget);
         }
-        Ok(AgentBrowserActionBinding::Prepared(Self {
+        Ok(AgentBrowserActionBinding::Prepared(Box::new(Self {
             action,
             continuation,
             batch,
-        }))
+        })))
     }
 
     /// The exact prepared action for a trusted effect classifier.

@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "work": "00000000000000000000000002",
+  "expected_revision": "2",
+  "command": "00000000000000000000000006",
+  "intent": {
+    "kind": "approve",
+    "spec": {
+      "plan_revision": "2",
+      "limits": {
+        "model_tokens": 8000,
+        "cost_micro_usd": 10000,
+        "operations": 32,
+        "timeout_seconds": 300,
+        "max_workers": 1
+      },
+      "nodes": [
+        {
+          "node": "00000000000000000000000004",
+          "parent": null,
+          "capability": {
+            "kind": "synthesize"
+          },
+          "limits": {
+            "model_tokens": 8000,
+            "cost_micro_usd": 10000,
+            "operations": 32,
+            "timeout_seconds": 300,
+            "max_workers": 1
+          }
+        }
+      ]
+    }
+  }
+}

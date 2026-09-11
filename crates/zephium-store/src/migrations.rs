@@ -1928,6 +1928,10 @@ pub static PROFILE: &[Migration] = &[
         version: 15,
         up: crate::work_migration_v2::migrate,
     },
+    Migration {
+        version: 16,
+        up: |tx| tx.execute_batch(include_str!("work_runtime_schema_v1.sql")),
+    },
 ];
 
 #[cfg(test)]
@@ -3054,7 +3058,7 @@ mod tests {
                 .unwrap(),
             14
         );
-        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(15));
+        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(16));
     }
 
     #[test]

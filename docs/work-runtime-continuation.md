@@ -4,6 +4,10 @@ Status: current implementation handoff and delivery direction
 Backend baseline: `c88e6d1` (`Close bounded navigation grounding gaps`)  
 Prepared: 2026-09-11
 
+For the frontend agent working in parallel, see
+[`work-frontend-context.md`](work-frontend-context.md). It records the initial
+runtime-owned types and current limits without handing off this implementation.
+
 ## 0. Purpose and authority
 
 This is the starting document for the next Zephium implementation phase. It
@@ -205,12 +209,12 @@ starts no worker or model, owns no durable plan aggregate, is not wired through
 application admission to browser/service workers, and intentionally cannot
 rehydrate execution authority from a checkpoint.
 
-Current Work persistence is also narrower than the product requires. It proves
+The handoff baseline's Work persistence was narrower than the product requires. It proved
 durable admission/terminal CAS behavior, recovery classification, audit
 delivery, and optional atomic storage of a bounded source-mapped extraction. It
-does **not** yet persist the complete Work, plan, task/resource graph, questions,
-approvals, view-independent outcomes, or orchestration state required by the
-product.
+did **not** persist the complete Work, plan, task/resource graph, questions,
+approvals, view-independent outcomes, or orchestration state. The extensions
+below close some of those gaps; the complete runtime remains the target.
 
 ### Product authoring slice after the handoff baseline
 
@@ -233,16 +237,119 @@ strict proposal validation. No browser observation, manifest, or approval is
 manufactured to admit planning. See the planning section of
 `agent-work-persistence.md` for the contract and qualification boundary.
 
-Trusted scope resolution, approval compilation, execution settlement into this
-aggregate, resources/artifacts/tasks, generated IPC, and frontend integration
-remain to be built. Planning usage is returned to the caller, including final
+Planning usage is returned to the caller, including final
 CAS failures, but a durable planning-attempt/accounting ledger and restart
 reconciliation are still needed before autonomous scheduling or product-wide
 budget enforcement. `plan_ready` remains descriptive and cannot authorize
 execution. Dropped/uncertain generation is never automatically retried.
 
-The browser actor and its qualification baseline remain unchanged. The checked-in
-frame is the earlier browser frontend, not the separate Work design-system stream.
+The checked-in frame is the earlier browser frontend, not the separate Work
+design-system stream. No frontend implementation is part of this phase.
+
+### Durable execution and browser adapter extension
+
+Profile migration 16 adds execution facts and idempotency receipts on the same
+profile connection and Work revision sequence as authoring. Approval binds an
+exact immutable plan revision plus explicit typed scopes and per-node/global
+budgets. One active execution is allowed per Work; approved plans survive
+compaction. User command replay returns its original receipt plus current facts,
+never another execution. Active execution blocks authoring changes and deletion;
+explicit cancellation is distinct from worker settlement. Dropped attempts retain
+unknown usage rather than receiving a zero-cost refund. The Store incarnation
+and its original monotonic epoch govern deadlines; persisted wall timestamps
+cannot renew them, and a new incarnation cannot resume an old attempt.
+
+`zephium-app/work-runtime` adds dormant `WorkRuntimeService` and move-only
+`WorkNodeAttempt` ownership. Original Begin acknowledgement is required before a
+worker is exposed. Host-only settlement stays pinned to its admitted regular
+profile even when window focus changes; user projections still check the current
+surface. Store independently checks attempt identity, dependencies, concurrency,
+budget, output contract and revision. Definitive CAS conflicts can retry only
+settlement; an uncertain callback never reruns the adapter. A lightweight observer
+retains one replaceable `WorkSignalV1`, with no worker, timer or native authority.
+An attempt also receives at most 6 KiB of typed artifacts from its approved direct
+dependencies in the same execution. Sibling outputs and provider transcripts are
+excluded. The browser treats these as untrusted research context and must source
+its own result from original page evidence.
+
+`zephium-work-composition/durable-runtime` consumes that live attempt into the
+existing model-directed Public browser controller. Scope and budgets compile
+through the original manifest/navigation admission; there is no scripted route,
+selector, generic JavaScript or shell port. The original Work identity reaches
+the resource owner. Persistent extraction is read through its original handle,
+source IDs are resolved in that exact archive, and explicit native resource
+closure must be acknowledged before semantic result publication. Terminal task
+state alone is insufficient for closure. Browser accounting currently retains
+the approved conservative ceiling, explicitly labelled, rather than claiming
+exact totals from transient progress events.
+
+Core provides bounded `WorkArtifactV1` data for documents, tables, comparisons,
+charts, checklists, evidence collections and browser previews. Presentation hints
+are separate and contain no canvas geometry or executable markup. The current
+browser adapter produces source-mapped documents requiring review; the other
+kinds are validated contracts, not separately qualified model adapters. IPC
+exports `WorkProjectionV1`, `WorkCommandV1`, `WorkSignalV1`, Specta types and JSON
+fixtures. The execution command vocabulary currently covers approval,
+cancellation and interruption acknowledgement. Authoring still uses its existing
+Rust intent API; no complete frontend command bridge is claimed.
+`Handle::work_evidence` resolves a citation on demand only after verifying its
+membership in that Work and profile. The original extraction's digest and source
+identity are checked before returning a bounded historical quote. This read does
+not claim the execution fence or restore any native/action authority.
+
+Remaining integration is substantial: primary-agent scheduling, original
+`AgentWorkOrchestration` ownership joined to actual child workers, compact
+selected decision/resource packages and structured parent handoffs, consequential
+effect approval/settlement, user result acceptance, and durable planning/model
+attempt accounting. `parent` relationships in the execution specification are
+descriptive validated topology, not an implemented model-driven delegation path.
+Standalone Begin refuses child nodes because it cannot present the original live
+parent admission. A persisted edge never substitutes for that owner.
+Do not present this slice as the full runtime or frontend-ready delivery. The
+existing controller's per-run supervisor, audit and policy accounting must not
+be silently replaced by an unrelated scheduler or reconstructed from checkpoints.
+
+The opt-in `macos-terra-agentic-probe --live-public-durable-work` entry (feature
+`durable-runtime`) exercises one requested Public SQLite-documentation note from
+a real Luna plan, through explicit bounded qualification approval and native
+browsing, to artifact closure, Store reopen and historical citation reads. The
+minimal native application host dispatches ordinary Shell bootstrap and forwards
+native policy events; it does not substitute its own ready profile policy. It
+presents a foreground qualification window and pumps ordinary AppKit lifecycle
+events. Shipping observation ownership checks still apply; changing the focused
+application can legitimately refuse observation. The qualifier accepts
+up to four model-proposed responsibilities and runs their approved dependency
+order sequentially, dividing its fixed reservation between them. This loop is
+qualification dispatch, not the production primary/child scheduler.
+It uses the fixed development
+Keychain credential, at most $0.10 planning reservation and $0.50 browser
+reservation. A successful run writes a public semantic report under
+`target/work-runtime-proof/`; the existence of the runner alone is not evidence
+that it passed. Real parent/child and consequential-action qualification remain
+required.
+
+On 2026-09-11 this native durable workflow passed with a real Luna plan and
+model-selected public route: one source-mapped note, acknowledged original
+resource closure, Store reopen, identical durable projection, and successful
+historical source reads. The local report is
+`target/work-runtime-proof/public-research.json`; the run log is
+`/tmp/zephium-durable-funded-live.log`. Its status is `NeedsReview`, not factual
+certification or user acceptance. The saved note explains the WAL shared-memory
+limitation and its stored evidence includes the matching official SQLite passage.
+This qualifies the public browser adapter vertical only; it is not parent/child
+execution or consequential-effect approval evidence.
+
+Earlier native failures are not all attributable to focus changes. An unchanged
+scope reproduced `RequestPolicy(Budget)` after eleven decisions under the old
+100,000-token/$0.20 approval. The successful qualification uses a fixed
+400,000-token/$0.50 ceiling, 24 model calls and the same 120-second execution
+deadline. Policy and request-contract refusals now preserve their closed cause
+instead of collapsing into generic `Authority`. No budget is automatically
+renewed. The budget-denied native run also ended in retained recovery; that
+failure-path cleanup still needs qualification. The adapter allows at most 30
+seconds from a close request for cleanup and never reports unknown closure as
+success. Public provider trace storage is an explicit qualification-only opt-in;
+normal product calls remain stateless.
 
 ### 3.4 Frontend foundation
 

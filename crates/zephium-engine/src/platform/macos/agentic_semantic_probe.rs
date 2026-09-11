@@ -3301,7 +3301,7 @@ pub(crate) fn run_work_actor(
         Arc<dyn zephium_agentic::AgentBrowserPort>,
     ) -> Result<crate::MacosAgentWorkProbePoll, &'static str>,
 ) -> Result<(), &'static str> {
-    run_work_host(profile, WorkProbeTeardown::Host, move |engine| {
+    run_work_host(profile, WorkProbeTeardown::Host, None, move |engine| {
         let port = engine
             .take_agent_browser_port(sink)
             .ok_or("actor_port_taken")?;
@@ -3317,7 +3317,22 @@ pub(crate) fn run_work_application(
         Arc<crate::WebviewEngine>,
     ) -> Result<crate::MacosAgentWorkProbePoll, &'static str>,
 ) -> Result<(), &'static str> {
-    run_work_host(profile, WorkProbeTeardown::Application, start)
+    run_work_host(profile, WorkProbeTeardown::Application, None, start)
+}
+
+pub(crate) fn run_work_application_with_events(
+    profile: ProfileId,
+    events: impl Fn(crate::EngineEvent) + Send + Sync + 'static,
+    start: impl FnOnce(
+        Arc<crate::WebviewEngine>,
+    ) -> Result<crate::MacosAgentWorkProbePoll, &'static str>,
+) -> Result<(), &'static str> {
+    run_work_host(
+        profile,
+        WorkProbeTeardown::Application,
+        Some(Arc::new(events)),
+        start,
+    )
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -3344,18 +3359,58 @@ fn work_probe_teardown_keeps_exactly_one_success_owner_and_failure_cleanup() {
 fn run_work_host(
     profile: ProfileId,
     teardown: WorkProbeTeardown,
+    events: Option<Arc<dyn Fn(crate::EngineEvent) + Send + Sync>>,
     start: impl FnOnce(
         Arc<crate::WebviewEngine>,
     ) -> Result<crate::MacosAgentWorkProbePoll, &'static str>,
 ) -> Result<(), &'static str> {
     use zephium_core::ports::engine::Engine as _;
+    let application_policy = events.is_some();
     let mtm = MainThreadMarker::new().ok_or("actor_main_thread")?;
     let app = NSApplication::sharedApplication(mtm);
-    if !app.setActivationPolicy(NSApplicationActivationPolicy::Accessory) {
+    let activation = if application_policy {
+        NSApplicationActivationPolicy::Regular
+    } else {
+        NSApplicationActivationPolicy::Accessory
+    };
+    if !app.setActivationPolicy(activation) {
         return Err("actor_activation_policy");
     }
     app.finishLaunching();
-    let window = new_window(mtm)?;
+    let mut application_events = 0_u32;
+    let window = if application_policy {
+        // This explicit live product qualifier supplies the normal foreground
+        // host required by shipping observation presentation. Legacy hidden
+        // port probes keep their original focus-isolation contract.
+        // SAFETY: AppKit main-thread marker owns construction and close below.
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                NSRect::new(NSPoint::new(80.0, 80.0), NSSize::new(760.0, 640.0)),
+                NSWindowStyleMask::Titled,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        // SAFETY: the retained host is explicitly closed exactly once below.
+        unsafe { window.setReleasedWhenClosed(false) };
+        window.setTitle(&NSString::from_str("Zephium Work qualification"));
+        app.activate();
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
+        window.makeKeyAndOrderFront(None);
+        window.makeMainWindow();
+        let until = Instant::now() + Duration::from_secs(5);
+        while !(app.isActive() && window.isKeyWindow() && window.isMainWindow())
+            && Instant::now() < until
+        {
+            pump_once(&NSRunLoop::currentRunLoop(), None);
+            pump_work_application_event(&app, &mut application_events)?;
+        }
+        window
+    } else {
+        new_window(mtm)?
+    };
     let view = window.contentView().ok_or("actor_host_view")?;
     let parent = RawWindowHandle::AppKit(AppKitWindowHandle::new(
         NonNull::from(&*view).cast::<c_void>(),
@@ -3386,9 +3441,9 @@ fn run_work_host(
                     profile: settled,
                     requested,
                     settlement,
-                } = event
+                } = &event
                 {
-                    if settled == profile && requested == generation {
+                    if *settled == profile && *requested == generation {
                         policy_sink.store(
                             if matches!(
                                 settlement,
@@ -3401,6 +3456,9 @@ fn run_work_host(
                             Ordering::Release,
                         );
                     }
+                }
+                if let Some(events) = &events {
+                    events(event);
                 }
             },
             move |reason| {
@@ -3415,32 +3473,37 @@ fn run_work_host(
     let main = window.isMainWindow();
     let run_loop = NSRunLoop::currentRunLoop();
     let result = (|| {
-        if engine.install_content_rules(
-            profile,
-            generation,
-            zephium_core::blocker::ContentRules::allow_all(
-                zephium_core::blocker::ContentRuleDigest::from_bytes([0; 32]),
-            ),
-        ) != zephium_core::ports::engine::NativeDispatch::Scheduled
-        {
-            return Err("actor_profile_policy_dispatch");
-        }
-        let policy_deadline = Instant::now() + Duration::from_secs(5);
-        while policy.load(Ordering::Acquire) == 0 && Instant::now() < policy_deadline {
-            for _ in 0..256 {
-                let Ok(operation) = receiver.try_recv() else {
-                    break;
-                };
-                run_work_operation(operation);
+        if !application_policy {
+            if engine.install_content_rules(
+                profile,
+                generation,
+                zephium_core::blocker::ContentRules::allow_all(
+                    zephium_core::blocker::ContentRuleDigest::from_bytes([0; 32]),
+                ),
+            ) != zephium_core::ports::engine::NativeDispatch::Scheduled
+            {
+                return Err("actor_profile_policy_dispatch");
             }
-            pump_once(&run_loop, None);
-        }
-        if policy.load(Ordering::Acquire) != 1 {
-            return Err("actor_profile_policy");
+            let policy_deadline = Instant::now() + Duration::from_secs(5);
+            while policy.load(Ordering::Acquire) == 0 && Instant::now() < policy_deadline {
+                for _ in 0..256 {
+                    let Ok(operation) = receiver.try_recv() else {
+                        break;
+                    };
+                    run_work_operation(operation);
+                }
+                pump_once(&run_loop, None);
+            }
+            if policy.load(Ordering::Acquire) != 1 {
+                return Err("actor_profile_policy");
+            }
         }
         let mut poll = start(engine.clone())?;
         let deadline = Instant::now() + Duration::from_secs(180);
         loop {
+            if application_policy {
+                pump_work_application_event(&app, &mut application_events)?;
+            }
             for _ in 0..256 {
                 let Ok(operation) = receiver.try_recv() else {
                     break;
@@ -3451,10 +3514,14 @@ fn run_work_host(
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let failure = failure.or_else(|| {
-                (window.isVisible()
-                    || window.isKeyWindow()
-                    || window.isMainWindow() != main
-                    || app.isActive() != active)
+                // Hidden port probes must never acquire foreground. The full
+                // application host permits normal focus changes; each shipping
+                // observation independently enforces exact foreground ownership.
+                (!application_policy
+                    && (window.isVisible()
+                        || window.isKeyWindow()
+                        || window.isMainWindow() != main
+                        || app.isActive() != active))
                     .then_some("actor_focus_isolation")
             });
             if let Some(result) = poll(failure.is_some()) {
@@ -3480,6 +3547,9 @@ fn run_work_host(
     }));
     let deadline = Instant::now() + TEARDOWN_TIMEOUT;
     while shutdown.load(Ordering::Acquire) == 0 && Instant::now() < deadline {
+        if application_policy {
+            let _ = pump_work_application_event(&app, &mut application_events);
+        }
         for _ in 0..256 {
             let Ok(operation) = receiver.try_recv() else {
                 break;
@@ -3493,6 +3563,27 @@ fn run_work_host(
     if shutdown.load(Ordering::Acquire) != 1 {
         return Err("actor_host_teardown");
     }
+    Ok(())
+}
+
+fn pump_work_application_event(app: &NSApplication, count: &mut u32) -> Result<(), &'static str> {
+    // NSRunLoop does not deliver NSApplication's queued lifecycle events.
+    // Service one existing AppKit event per slice, as the normal application
+    // event loop does. Never synthesize or dequeue keyboard/mouse input.
+    if *count >= 8192 {
+        return Err("actor_application_event_capacity");
+    }
+    objc2::rc::autoreleasepool(|_| {
+        if let Some(event) = app.nextEventMatchingMask_untilDate_inMode_dequeue(
+            objc2_app_kit::NSEventMask::AppKitDefined,
+            None,
+            objc2_foundation::ns_string!("NSDefaultRunLoopMode"),
+            true,
+        ) {
+            *count += 1;
+            app.sendEvent(&event);
+        }
+    });
     Ok(())
 }
 
