@@ -71,6 +71,8 @@ fn main() {
         [argument] if argument == "--live-public-coordinated-work" => {
             work_durable::run_coordinated()
         }
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-public-cancelled-work" => work_durable::run_cancelled(),
         [argument] if argument == "--live-public-luna-work-application-inspectable" => {
             work_application::run()
         }

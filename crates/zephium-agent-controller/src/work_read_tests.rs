@@ -7,6 +7,7 @@ pub(super) enum ReadFault {
     LocateMiss,
     LocateMissCeiling,
     Extraction,
+    LongExtraction,
     AfterActionExtraction,
     Disabled,
     Subtree,
@@ -22,6 +23,7 @@ pub(super) enum ReadFault {
 impl ReadFault {
     pub(super) fn requests(self) -> u8 {
         match self {
+            Self::LongExtraction => 48,
             Self::AfterActionExtraction => 8,
             Self::Disabled | Self::Subtree => 2,
             Self::Ceiling | Self::LocateMissCeiling => 16,
@@ -46,6 +48,21 @@ impl ReadFault {
             )
     }
     pub(super) fn stream(self, turn: u8) -> String {
+        if self == Self::LongExtraction {
+            return if turn < 23 {
+                named_tool_stream(turn, "read", r#"{\"scope\":{\"kind\":\"initial\"}}"#)
+            } else if turn == 23 {
+                named_tool_stream(
+                    turn,
+                    "extract",
+                    r#"{\"scope\":{\"kind\":\"initial\"},\"schema_id\":1}"#,
+                )
+            } else {
+                extraction_stream(ExtractionFault::None)
+                    .replace("resp_2", &format!("resp_{turn}"))
+                    .replace("msg_2", &format!("msg_{turn}"))
+            };
+        }
         if self == Self::LocateMissCeiling || (self == Self::LocateMiss && turn == 1) {
             return named_tool_stream(
                 turn,
@@ -141,7 +158,9 @@ impl ReadTask {
                 fault: CombinedFault::None,
                 ready: None,
             }),
-            ReadFault::Extraction => Box::new(extraction().with_baseline_read()),
+            ReadFault::Extraction | ReadFault::LongExtraction => {
+                Box::new(extraction().with_baseline_read())
+            }
             _ => Box::new(form),
         };
         Self {
@@ -195,6 +214,14 @@ impl AgentWorkTask for ReadTask {
 }
 
 #[test]
+fn long_read_workflow_closes_original_accounting_after_mid_run_audit_delivery() {
+    let _serial = lock(&SERIAL);
+    // Match the production 24-call ceiling, forcing acknowledged audit
+    // delivery during the run before its final extraction and metric closure.
+    provider_fixture(ProviderFault::Read(ReadFault::LongExtraction));
+}
+
+#[test]
 fn read_continuations_preserve_baseline_budget_stop_and_cleanup_ownership() {
     let _serial = lock(&SERIAL);
     for fault in [
@@ -226,14 +253,21 @@ pub(super) fn assert_outcome(
 ) {
     if matches!(
         fault,
-        ReadFault::Extraction | ReadFault::AfterActionExtraction
+        ReadFault::Extraction | ReadFault::AfterActionExtraction | ReadFault::LongExtraction
     ) {
         let AgentWorkOutcome::Succeeded(mut success) = outcome else {
             panic!("{fault:?}: {outcome:?}")
         };
         let actions = u32::from(fault == ReadFault::AfterActionExtraction);
         assert_eq!(success.closure().effects(), actions);
-        assert_eq!(success.closure().model_calls(), 3 + actions);
+        assert_eq!(
+            success.closure().model_calls(),
+            if fault == ReadFault::LongExtraction {
+                24
+            } else {
+                3 + actions
+            }
+        );
         let result = success.take_extraction().unwrap();
         if actions == 1 {
             assert_ne!(result.observation(), SemanticObservationId::new(1).unwrap());

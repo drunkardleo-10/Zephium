@@ -24,16 +24,33 @@ use zephium_work_composition::{durable_runtime::WorkBrowserAdapterSettings, Maco
 const OBJECTIVE: &str = "Find SQLite's official explanation of why WAL mode does not work when clients on different machines share a database over a network filesystem. Produce one concise source-backed note as a single plan responsibility. Use only public documentation at sqlite.org or www.sqlite.org. No account, writes, installations, or external communication are needed. Every factual output needs source-mapped human review.";
 const COORDINATED_OBJECTIVE: &str = "Explain SQLite's official reason that WAL mode does not work when clients on different machines share a database over a network filesystem. Use exactly two plan responsibilities: a delegated public-documentation research worker with one source-backed findings output, then a primary agent that depends on those findings and produces one concise source-backed explanation. Both outputs require source_mapped_needs_review. Use only sqlite.org or www.sqlite.org. No accounts, writes, installations or external communication are needed.";
 
+struct WorkflowResult {
+    state: WorkRuntimeProjection,
+    failure: Option<&'static str>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Mode {
+    Public,
+    Coordinated,
+    CancelCoordinated,
+}
+
 pub(super) fn run() -> Result<(), super::ProbeFailure> {
-    run_mode(false)
+    run_mode(Mode::Public)
 }
 
 pub(super) fn run_coordinated() -> Result<(), super::ProbeFailure> {
-    run_mode(true)
+    run_mode(Mode::Coordinated)
 }
 
-fn run_mode(coordinated: bool) -> Result<(), super::ProbeFailure> {
+pub(super) fn run_cancelled() -> Result<(), super::ProbeFailure> {
+    run_mode(Mode::CancelCoordinated)
+}
+
+fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     use super::ProbeFailure as Error;
+    let coordinated = mode != Mode::Public;
     let data = tempfile::Builder::new()
         .prefix("zephium-durable-work-")
         .tempdir()
@@ -135,7 +152,7 @@ fn run_mode(coordinated: bool) -> Result<(), super::ProbeFailure> {
                                         profile,
                                         planning_key,
                                         browser_keys,
-                                        coordinated,
+                                        mode,
                                     ),
                                 )
                                 .await
@@ -194,7 +211,7 @@ fn run_mode(coordinated: bool) -> Result<(), super::ProbeFailure> {
         );
         Error::Runtime
     })?;
-    let state = result_rx
+    let WorkflowResult { state, failure } = result_rx
         .recv_timeout(Duration::from_secs(1))
         .map_err(|_| Error::Runtime)?
         .map_err(|reason| {
@@ -223,8 +240,71 @@ fn run_mode(coordinated: bool) -> Result<(), super::ProbeFailure> {
     else {
         return Err(Error::Runtime);
     };
-    if *restored != state
-        || state.executions[0].status != WorkExecutionStatus::NeedsReview
+    if *restored != state {
+        return Err(Error::Runtime);
+    }
+    if mode == Mode::CancelCoordinated {
+        let execution = state.executions.first().ok_or(Error::Runtime)?;
+        if failure != Some("child_execution")
+            || execution.status != WorkExecutionStatus::Cancelled
+            || execution.attempts.len() != 2
+            || !execution.artifacts.is_empty()
+            || execution.attempts.iter().any(|attempt| {
+                !matches!(
+                    attempt.status,
+                    WorkAttemptStatus::Failed | WorkAttemptStatus::Cancelled
+                ) || attempt.usage.is_none()
+            })
+            || !execution
+                .attempts
+                .iter()
+                .any(|attempt| attempt.status == WorkAttemptStatus::Cancelled)
+        {
+            return Err(Error::Runtime);
+        }
+        if reopened.shutdown_until(Instant::now() + Duration::from_secs(5))
+            != zephium_core::ports::store::StoreShutdownOutcome::Clean
+        {
+            return Err(Error::Runtime);
+        }
+        std::fs::write(
+            "target/work-runtime-proof/coordinated-cancelled.json",
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "cancelled_after_native_model_admission": true,
+                "host_shutdown_clean": true,
+                "reopened": true,
+                "projection": state,
+            }))
+            .map_err(|_| Error::Output)?,
+        )
+        .map_err(|_| Error::Output)?;
+        writeln!(std::io::stdout().lock(), "durable-work: cancellation=true; original_child_settled=true; primary_synthesis=false; resource_closed=true; reopened=true; content=redacted").map_err(|_| Error::Output)?;
+        return Ok(());
+    }
+    if let Some(failure) = failure {
+        // Reopening failed facts is useful evidence, but never a successful
+        // research report. Native host shutdown has already acknowledged its
+        // original owners; unknown attempt outcomes remain unknown in Store.
+        if reopened.shutdown_until(Instant::now() + Duration::from_secs(5))
+            != zephium_core::ports::store::StoreShutdownOutcome::Clean
+        {
+            return Err(Error::Runtime);
+        }
+        std::fs::write(
+            "target/work-runtime-proof/coordinated-failure.json",
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "failure": failure,
+                "host_shutdown_clean": true,
+                "reopened": true,
+                "projection": state,
+            }))
+            .map_err(|_| Error::Output)?,
+        )
+        .map_err(|_| Error::Output)?;
+        let _ = writeln!(std::io::stdout().lock(), "durable-work: failure={failure}; host_shutdown_clean=true; reopened=true; content=redacted");
+        return Err(Error::Runtime);
+    }
+    if state.executions[0].status != WorkExecutionStatus::NeedsReview
         || state.executions[0].artifacts.is_empty()
     {
         return Err(Error::Runtime);
@@ -287,8 +367,9 @@ async fn workflow(
     profile: ProfileId,
     planning_key: zephium_agentic::AgentProviderCredential,
     mut browser_keys: Vec<zephium_agentic::AgentProviderCredential>,
-    coordinated: bool,
-) -> Result<WorkRuntimeProjection, &'static str> {
+    mode: Mode,
+) -> Result<WorkflowResult, &'static str> {
+    let coordinated = mode != Mode::Public;
     let binding = loop {
         let selected = handle.work_profile_binding();
         let answer = loop {
@@ -513,13 +594,49 @@ async fn workflow(
         let credential = browser_keys.next().ok_or("child_key")?;
         let child_result = coordinator
             .execute_child(child, |attempt| async {
-                composition
-                    .execute_public_node_owned(
-                        &handle.callback_handle(),
-                        attempt,
-                        browser_settings(binding, credential),
-                    )
-                    .await
+                let observer = attempt.observer();
+                let callback = handle.callback_handle();
+                let operation = composition.execute_public_node_owned(
+                    &callback,
+                    attempt,
+                    browser_settings(binding, credential),
+                );
+                if mode != Mode::CancelCoordinated {
+                    return operation.await;
+                }
+                tokio::pin!(operation);
+                loop {
+                    tokio::select! {
+                        result = &mut operation => return result,
+                        _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                    }
+                    if observer.latest().is_some_and(|signal| {
+                        signal.activity == zephium_ipc::work::WorkActivityV1::Planning
+                    }) {
+                        let WorkReply::Runtime(current) =
+                            handle.work_projection(profile, work)?.await?.reply
+                        else {
+                            return Err(WorkError::Invalid);
+                        };
+                        handle
+                            .work_command(
+                                profile,
+                                zephium_ipc::work::WorkCommandV1 {
+                                    version: 1,
+                                    work,
+                                    expected_revision: current.work.revision,
+                                    command: WorkCommandId::generate(),
+                                    intent: WorkRuntimeIntent::Cancel {
+                                        execution: receipt.execution,
+                                    },
+                                },
+                            )?
+                            .await?;
+                        // Keep polling the original adapter to settle native,
+                        // provider and Store ownership after durable stop intent.
+                        return operation.await;
+                    }
+                }
             })
             .await
             .map_err(|error| {
@@ -543,12 +660,23 @@ async fn workflow(
             serde_json::to_vec_pretty(&state).map_err(|_| "primary_report")?,
         )
         .map_err(|_| "primary_report")?;
-        child_result?;
+        if let Err(failure) = child_result {
+            return Ok(WorkflowResult {
+                state,
+                failure: Some(failure),
+            });
+        }
         if state.executions[0].attempts.len() != 2 || state.executions[0].artifacts.len() != 2 {
-            return Err("primary_publication");
+            return Ok(WorkflowResult {
+                state,
+                failure: Some("primary_publication"),
+            });
         }
         writeln!(std::io::stdout().lock(), "durable-work: original_parent=true; original_child=true; structured_handoff=true; primary_synthesis=true; content=redacted").map_err(|_| "primary_progress")?;
-        return Ok(state);
+        return Ok(WorkflowResult {
+            state,
+            failure: None,
+        });
     }
     // Bounded sequential qualification dispatch of the model's exact DAG.
     // This does not claim primary/child model delegation or a production scheduler.
@@ -594,7 +722,10 @@ async fn workflow(
         }
         completed.push(node);
     }
-    Ok(state)
+    Ok(WorkflowResult {
+        state,
+        failure: None,
+    })
 }
 
 fn browser_settings(

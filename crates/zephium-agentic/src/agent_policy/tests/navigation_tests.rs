@@ -1537,6 +1537,161 @@ fn route_locate_replay_revalidates_progress_before_new_policy_reservation() {
 }
 
 #[test]
+fn production_discovery_closes_all_navigation_receipts_after_success_or_refusal() {
+    for (hops, refused) in [(3_u64, false), (6, false), (4, true)] {
+        let (mut f, mut registry, mut current) = production_navigation_fixture();
+        let root = AgentPlanNodeId::from_raw(1);
+        let mut supervisor = AgentRunSupervisor::new(
+            AgentSupervisorId::new(1).unwrap(),
+            AgentDelegationTopology::try_new(
+                f.policy.manifest(),
+                vec![AgentDelegationSpec::new(root, None)],
+            )
+            .unwrap(),
+        );
+        let mut accounting =
+            crate::AgentRunAccountingMetrics::try_new(f.policy.manifest(), &supervisor).unwrap();
+        let mut progress =
+            crate::AgentRunProgressMetrics::try_new(f.policy.manifest(), &supervisor).unwrap();
+        let mut audit = crate::AgentAuditLedger::try_new(f.policy.manifest(), &supervisor).unwrap();
+        let actions =
+            crate::AgentRunActionPerformanceMetrics::try_new(f.policy.manifest(), &supervisor)
+                .unwrap();
+        let inputs =
+            crate::AgentRunProviderInputMetrics::try_new(f.policy.manifest(), &supervisor).unwrap();
+        let mut event_id = 0;
+        let mut record = |supervisor: &AgentRunSupervisor,
+                          progress: &mut crate::AgentRunProgressMetrics| {
+            event_id += 1;
+            progress
+                .record_event(
+                    audit
+                        .record_current(
+                            supervisor,
+                            root,
+                            crate::AgentAuditEventId::new(event_id).unwrap(),
+                            AgentPolicyInstant::from_millis(NOW + event_id),
+                        )
+                        .unwrap(),
+                )
+                .unwrap();
+        };
+        record(&supervisor, &mut progress);
+        let execution = supervisor
+            .start(root, crate::AgentSupervisorAttemptId::new(1).unwrap())
+            .unwrap();
+        record(&supervisor, &mut progress);
+        for hop in 0..hops {
+            let destination = ContextNavigationTarget::parse(&if hop == 0 {
+                "https://docs.example.test/guide/result?q=rust#details".into()
+            } else {
+                format!("https://docs.example.test/guide/{hop}")
+            })
+            .unwrap();
+            let binding = account(
+                current.request().context(),
+                if hop == 0 { NOW - 1 } else { NOW },
+            );
+            if hop > 0 {
+                commit_observation_to_model(&mut f.policy, f.lease, hop + 1, binding, &current);
+            }
+            let permit = f
+                .policy
+                .authorize_navigation(
+                    route_request(&f, &registry, &current, binding),
+                    &current,
+                    &baseline(&current),
+                    &destination,
+                )
+                .unwrap();
+            let operation = registry
+                .begin_navigation(
+                    current.request().context().identity().id(),
+                    ContextOperationId::new(hop + 2).unwrap(),
+                )
+                .unwrap();
+            let active = f
+                .policy
+                .dispatch_navigation(permit, operation, AgentPolicyInstant::from_millis(NOW))
+                .unwrap();
+            supervisor
+                .record_active_navigation(&execution, &active)
+                .unwrap();
+            record(&supervisor, &mut progress);
+            let receipt = f
+                .policy
+                .settle_navigation(
+                    &active,
+                    &ContextNavigationSettlement::try_new(operation, Ok(destination)).unwrap(),
+                    AgentPolicyInstant::from_millis(NOW),
+                )
+                .unwrap();
+            supervisor
+                .record_navigation_result(&execution, receipt)
+                .unwrap();
+            record(&supervisor, &mut progress);
+            accounting.record_navigation_receipt(receipt).unwrap();
+            assert_eq!(accounting.snapshot().navigations(), hop as u32 + 1);
+            registry
+                .settle_navigation(
+                    operation.context().identity().id(),
+                    operation,
+                    ContextSettlement::Applied,
+                )
+                .unwrap();
+            registry
+                .acknowledge_observation(operation.context().identity().id(), operation.context())
+                .unwrap();
+            current = observation(
+                operation.context(),
+                origin("docs"),
+                hop + 2,
+                vec![
+                    json!({"k":1,"r":"link","n":"Next","u":format!("https://docs.example.test/guide/{}", hop + 1)}),
+                ],
+            );
+        }
+        let completion = if refused {
+            let binding = account(current.request().context(), NOW);
+            commit_observation_to_model(&mut f.policy, f.lease, hops + 1, binding, &current);
+            assert!(f
+                .policy
+                .authorize_navigation(
+                    route_request(&f, &registry, &current, binding),
+                    &current,
+                    &baseline(&current),
+                    &ContextNavigationTarget::parse("https://outside.example.test/").unwrap(),
+                )
+                .is_err());
+            crate::AgentSupervisorCompletion::Failed(crate::AgentSupervisorFailure::PolicyDenied)
+        } else {
+            crate::AgentSupervisorCompletion::Succeeded
+        };
+        supervisor.complete(execution, completion).unwrap();
+        record(&supervisor, &mut progress);
+        let closure = crate::AgentRunMetricClosure::try_close(
+            f.policy.manifest(),
+            &supervisor,
+            &accounting,
+            &progress,
+            &actions,
+            &inputs,
+        )
+        .unwrap();
+        assert_eq!(closure.navigations(), hops as u32);
+        assert_eq!(closure.operations(), hops as u32);
+        assert_eq!(
+            closure.outcome(),
+            if refused {
+                crate::AgentRunProgressOutcome::Failed(crate::AgentSupervisorFailure::PolicyDenied)
+            } else {
+                crate::AgentRunProgressOutcome::Succeeded
+            }
+        );
+    }
+}
+
+#[test]
 fn finite_navigation_route_metrics_require_two_distinct_ordered_exact_terminals() {
     for fault in 0..4 {
         let (f, terminals) = committed_route();

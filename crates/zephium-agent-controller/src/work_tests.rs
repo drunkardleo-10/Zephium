@@ -1364,7 +1364,7 @@ fn drive_with_control(
     Vec<u8>,
     Vec<AgentWorkEvent>,
 ) {
-    drive_with_schedule(controller, handle, fault, control, None)
+    drive_with_schedule(controller, handle, fault, control, false, None)
 }
 
 fn drive_with_schedule(
@@ -1372,6 +1372,7 @@ fn drive_with_schedule(
     mut handle: AgentWorkHandle,
     fault: Fault,
     control: Arc<Mutex<Option<AgentRuntimeHandle>>>,
+    drain_live: bool,
     #[cfg(feature = "probe-harness")] navigation_schedule: Option<
         Arc<navigation_tests::NavigationSchedule>,
     >,
@@ -1404,9 +1405,8 @@ fn drive_with_schedule(
     let wait_deadline = Instant::now() + Duration::from_secs(12);
     let mut events = Vec::new();
     #[cfg(feature = "probe-harness")]
-    let drain_live = matches!(fault, Fault::Navigation(NavigationFault::DiscoveryBudget(limit, ..)) if limit > 8);
-    #[cfg(not(feature = "probe-harness"))]
-    let drain_live = false;
+    let drain_live = drain_live
+        || matches!(fault, Fault::Navigation(NavigationFault::DiscoveryBudget(limit, ..)) if limit > 8);
     let outcome = loop {
         if drain_live {
             events.extend(std::iter::from_fn(|| handle.take_event()));
@@ -2366,7 +2366,9 @@ fn provider_fixture_with_discovery_account(
     } else if matches!(
         fault,
         ProviderFault::Ceiling
-            | ProviderFault::Read(ReadFault::Ceiling | ReadFault::LocateMissCeiling)
+            | ProviderFault::Read(
+                ReadFault::Ceiling | ReadFault::LocateMissCeiling | ReadFault::LongExtraction
+            )
             | ProviderFault::Scoped(ScopedFault::Ceiling)
             | ProviderFault::Combined(CombinedFault::Ceiling)
     ) {
@@ -2389,6 +2391,9 @@ fn provider_fixture_with_discovery_account(
     } else {
         input()
     };
+    if fault == ProviderFault::Read(ReadFault::LongExtraction) {
+        approved.settings = approved.settings.with_max_model_calls(24).unwrap();
+    }
     let navigation_schedule = if let ProviderFault::Navigation(fault) = fault {
         if matches!(fault, NavigationFault::DiscoveryScopeRefusal(case) if case != 3)
             || matches!(fault, NavigationFault::DiscoveryActionRefusal(_))
@@ -2617,6 +2622,7 @@ fn provider_fixture_with_discovery_account(
         handle,
         native_fault,
         control,
+        fault == ProviderFault::Read(ReadFault::LongExtraction),
         navigation_schedule,
     );
     if let ProviderFault::Navigation(fault) = fault {

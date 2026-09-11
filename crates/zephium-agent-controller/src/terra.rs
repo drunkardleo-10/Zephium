@@ -2957,9 +2957,13 @@ impl AgentBrowserSession {
     fn record_model_receipts(&mut self) -> Result<(), AgentBrowserProviderError> {
         if let Some(journal) = self.journal.as_mut() {
             for &(receipt, input) in &self.model_receipts[self.journal_receipts..] {
-                journal
-                    .model_settled(receipt, input)
-                    .map_err(|_| AgentBrowserProviderError::Journal)?;
+                if let Err(failure) = journal.model_settled(receipt, input) {
+                    // Keep the first cause: terminal drain may encounter the
+                    // same partially recorded receipt, but cannot erase why
+                    // its original join failed.
+                    journal.failure.get_or_insert(failure);
+                    return Err(AgentBrowserProviderError::Journal);
+                }
                 self.journal_receipts += 1;
             }
         }

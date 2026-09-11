@@ -1249,6 +1249,18 @@ enum WorkTerminalIntent {
 }
 
 impl WorkState {
+    fn record_failure(&mut self, failure: AgentWorkFailure) {
+        let failure = if failure == AgentWorkFailure::Browser(AgentBrowserProviderError::Journal) {
+            self.journal_mut()
+                .ok()
+                .and_then(|journal| journal.failure)
+                .unwrap_or(failure)
+        } else {
+            failure
+        };
+        self.failure = Some(failure);
+    }
+
     fn navigation_length(&self) -> usize {
         if let Some(scope) = &self.navigation_discovery {
             return scope.max_hops();
@@ -1750,7 +1762,7 @@ impl AgentRuntimeController for AgentWorkController {
             let mut controller = *self;
             if let Err(failure) = controller.execute(&mut worker, &browser).await {
                 if let Some(state) = controller.state.as_mut() {
-                    state.failure = Some(failure);
+                    state.record_failure(failure);
                     let _ = state.native.revoke(&browser);
                     if let Some(session) = state.session.as_ref() {
                         session.cancel();
@@ -3565,7 +3577,7 @@ impl AgentWorkController {
         journal
             .supervisor
             .complete(execution, completion)
-            .map_err(|_| AgentWorkFailure::Accounting)?;
+            .map_err(AgentWorkFailure::Supervisor)?;
         journal.record()?;
         journal
             .audit
@@ -3695,7 +3707,7 @@ impl AgentWorkController {
             &journal.actions,
             &journal.inputs,
         )
-        .map_err(|_| AgentWorkFailure::Accounting)?;
+        .map_err(AgentWorkFailure::MetricClosure)?;
         // A clean success is claimed only as the ordinary terminal it proved.
         // If control arrived after its intent was frozen but before the claim,
         // the runtime must refuse that claim and retain recovery ownership;
@@ -3756,11 +3768,12 @@ impl AgentWorkController {
             match policy.settle_metric_closure(closure, &journal.accounting, journal.audit) {
                 Ok(settlement) => settlement,
                 Err(refusal) => {
+                    let cause = refusal.error();
                     let (policy, audit) = refusal.into_parts();
                     drained.policy = Some(policy);
                     journal.audit = audit;
                     drained.journal = Some(journal);
-                    return Err(AgentWorkFailure::Accounting);
+                    return Err(AgentWorkFailure::PolicySettlement(cause));
                 }
             };
         let provider = drained.provider.take().ok_or(AgentWorkFailure::Shutdown)?;
@@ -4218,6 +4231,18 @@ pub enum AgentWorkFailure {
     Browser(AgentBrowserProviderError),
     /// A progress/receipt/metric join was refused.
     Accounting,
+    /// Exact content-free coverage refusal from the original metric reducers.
+    MetricClosure(AgentRunMetricClosureError),
+    /// Exact terminal policy/audit refusal; the original owners are retained.
+    PolicySettlement(AgentRunPolicySettlementError),
+    /// Exact model-receipt accounting refusal, with no provider content.
+    ModelAccounting(AgentMetricError),
+    /// Exact committed-input coverage refusal, with no disclosed input.
+    InputAccounting(AgentProviderInputMetricError),
+    /// Exact progress-reducer refusal, with no page or model content.
+    ProgressAccounting(AgentProgressMetricError),
+    /// Exact original supervisor refusal.
+    Supervisor(AgentSupervisorRuntimeError),
     /// Durable audit delivery or acknowledgement was refused.
     Audit,
     /// Native or provider resources could not prove terminal drain.
@@ -4288,6 +4313,7 @@ pub(super) fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
 /// The exact supervisor, receipt reducers and durable ledger for one run.
 /// It remains inside the session while provider/native authorities are live.
 pub(crate) struct WorkJournal {
+    pub(super) failure: Option<AgentWorkFailure>,
     model_started: Option<Instant>,
     pub(super) supervisor: AgentRunSupervisor,
     pub(super) execution: Option<AgentNodeExecution>,
@@ -4329,6 +4355,7 @@ impl WorkJournal {
             .map_err(|_| AgentWorkFailure::Accounting)?;
         Ok(Self {
             supervisor,
+            failure: None,
             model_started: None,
             execution: None,
             cancellation,
@@ -4366,7 +4393,7 @@ impl WorkJournal {
         self.last_at = now;
         self.progress
             .record_event(event)
-            .map_err(|_| AgentWorkFailure::Accounting)
+            .map_err(AgentWorkFailure::ProgressAccounting)
     }
 
     pub(super) fn start(
@@ -4421,16 +4448,16 @@ impl WorkJournal {
     ) -> Result<(), AgentWorkFailure> {
         self.accounting
             .record_model_receipt(receipt)
-            .map_err(|_| AgentWorkFailure::Accounting)?;
+            .map_err(AgentWorkFailure::ModelAccounting)?;
         self.inputs
             .record(input)
-            .map_err(|_| AgentWorkFailure::Accounting)?;
+            .map_err(AgentWorkFailure::InputAccounting)?;
         self.supervisor
             .record_model_call_result(
                 self.execution.as_ref().ok_or(AgentWorkFailure::Contract)?,
                 receipt,
             )
-            .map_err(|_| AgentWorkFailure::Accounting)?;
+            .map_err(AgentWorkFailure::Supervisor)?;
         self.record()?;
         let elapsed_millis = u64::try_from(
             self.model_started

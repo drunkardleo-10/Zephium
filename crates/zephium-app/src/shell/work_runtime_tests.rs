@@ -60,6 +60,68 @@ impl zephium_core::work::synthesis::WorkSynthesisProvider for SynthesisFixture {
 }
 
 #[tokio::test]
+async fn owned_evidence_reads_reach_store_without_bypassing_profile_or_link_checks() {
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store.clone());
+    let create = handle
+        .work_document(WorkIntent::Create {
+            objective: "Review worker evidence".into(),
+        })
+        .unwrap();
+    let work = create.work_id().unwrap();
+    drive(&mut shell, &queue, create).await.unwrap();
+    let evidence = WorkRequest::ReadEvidence {
+        id: work,
+        link: WorkEvidenceLink {
+            extraction_id: WorkArtifactId::generate(),
+            source_id: 1,
+        },
+    };
+    let request = handle
+        .submit_owned_work_runtime(evidence.clone(), profile)
+        .expect("original runtime can request historical evidence from its pinned profile");
+    assert!(
+        matches!(
+            drive(&mut shell, &queue, request).await,
+            Err(WorkError::NotFound)
+        ),
+        "Store must still require an artifact-linked source in this exact Work"
+    );
+
+    // Pinned reads remain subject to current profile eligibility. Their owner
+    // selection cannot turn a private profile into a model disclosure source.
+    let mut private = shell.profiles.remove(profile).unwrap();
+    private.kind = zephium_core::profiles::ProfileKind::Incognito;
+    assert!(shell.profiles.insert(private));
+    let request = handle.submit_owned_work_runtime(evidence, profile).unwrap();
+    assert!(matches!(
+        drive(&mut shell, &queue, request).await,
+        Err(WorkError::ProfileUnavailable)
+    ));
+    assert!(
+        matches!(
+            handle.submit_owned_work_runtime(
+                WorkRequest::RuntimeCommand {
+                    id: work,
+                    expected: WorkRevision::INITIAL,
+                    command: WorkCommandId::generate(),
+                    intent: WorkRuntimeIntent::Cancel {
+                        execution: WorkExecutionId::generate()
+                    },
+                },
+                profile
+            ),
+            Err(WorkError::Invalid)
+        ),
+        "historical reads do not admit user intents through the owned runtime lane"
+    );
+    assert_eq!(
+        store.shutdown_until(Instant::now() + Duration::from_secs(5)),
+        zephium_core::ports::store::StoreShutdownOutcome::Clean
+    );
+}
+
+#[tokio::test]
 async fn synthesis_adapter_persists_review_artifacts_and_honest_failed_or_unknown_usage() {
     for mode in 0..6 {
         synthesis_case(mode, None).await;

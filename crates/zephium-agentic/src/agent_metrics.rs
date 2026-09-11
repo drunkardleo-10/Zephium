@@ -600,7 +600,13 @@ impl AgentRunAccountingSnapshot {
 
     /// Terminal native document-navigation attempt count, never action count.
     pub const fn navigations(self) -> u32 {
-        self.navigation[0].is_some() as u32 + self.navigation[1].is_some() as u32
+        let mut count = 0;
+        let mut index = 0;
+        while index < self.navigation.len() {
+            count += self.navigation[index].is_some() as u32;
+            index += 1;
+        }
+        count
     }
 }
 

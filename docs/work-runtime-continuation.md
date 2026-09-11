@@ -1,7 +1,10 @@
 # Zephium Work runtime continuation brief
 
 Status: current implementation handoff and delivery direction  
-Backend baseline: `c88e6d1` (`Close bounded navigation grounding gaps`)  
+Browser foundation baseline: `c88e6d1` (`Close bounded navigation grounding gaps`)
+
+Durable runtime baseline: `68d28d51`; subsequent fixes and live evidence are in section 3.3.
+
 Prepared: 2026-09-11
 
 For the frontend agent working in parallel, see
@@ -109,6 +112,16 @@ projection.
 Once those contracts exist as a coherent vertical system, the product
 integration agent can connect the frontend foundation and the runtime without
 making the canvas authoritative or wrapping the browser actor in ad hoc IPC.
+
+The latest direct-child research/synthesis and cancellation proofs close concrete
+runtime blockers, but do not make the full product ready for wiring. The next
+integration gates are the versioned authoring/planning/result-review command and
+reply boundary, selected decisions/resources in bounded assignments and primary
+dispatch, and an exact consequential-action approval workflow with honest effect
+settlement. Exercise those through the same product command boundary before
+combining the frontend stream. Additional providers, broad service integrations
+and arbitrary-depth parallel execution are not prerequisites for that first
+coherent integration.
 
 ## 3. Current implementation checkpoint
 
@@ -396,9 +409,85 @@ A second fresh run (`/tmp/zephium-coordinated-native-second.log`) reached a nati
 `Accounting` refusal and again failed to drain shutdown. Its attempt report
 verifies the corrected failure settlement: primary `Failed` with exact zero usage
 (no synthesis dispatched), child `OutcomeUnknown` with missing usage and retained
-reservation, execution `Interrupted`, no artifacts. Native accounting/cleanup
-needs diagnosis before this combined path can be called qualified. Do not widen
-limits, reconstruct owners or relabel these results to obtain a green report.
+reservation, execution `Interrupted`, no artifacts.
+
+The follow-up investigation found a concrete accounting defect: the receipt
+array supports production discovery, but `AgentRunAccountingSnapshot::navigations`
+still counted only its first two entries. A third committed hop made terminal
+metric closure refuse `Invariant`, including during otherwise settled failure
+cleanup. The regression reproduced the old result of two after three real
+policy-accounted navigations. The fixed reducer counts the whole bounded array;
+tests cover successful closure after three/six hops and refusal after four.
+Closed accounting causes now survive controller diagnostics, including the first
+journal refusal. Navigation, visit, token, deadline and resource limits were not
+widened.
+
+Native failure and cancellation now have independent qualification reports.
+`/tmp/zephium-coordinated-fixed-qualified.log` records a refused, unobserved search
+URL, original resource/Shell closure and identical failed facts after Store
+reopen (`target/work-runtime-proof/coordinated-failure.json`). The new
+`--live-public-cancelled-work` mode submits the normal durable cancellation
+command after native model admission, continues polling the original adapter,
+and requires acknowledged child cancellation, no primary synthesis or artifacts,
+clean resource/Shell shutdown and identical reopened facts. It passed in
+`/tmp/zephium-coordinated-cancelled-live.log`; its report is
+`target/work-runtime-proof/coordinated-cancelled.json`. The stopped primary has
+exact zero usage; the child retains its explicit conservative reservation.
+
+Stored public traces also showed that the model treated an initial viewport
+capture of a long document list as a whole-document inventory. Browser
+instructions now explain initial capture coverage and expansion through a
+current observed container; no site-specific route is supplied. The next native
+run successfully produced the cited WAL findings, then exposed a separate
+primary-synthesis admission defect: the owned runtime request lane omitted
+`ReadEvidence`. That read now uses the original pinned profile and existing
+Store checks for artifact membership in the exact Work. Private-profile and
+unlinked-evidence refusal remain enforced. The partial run is recorded in
+`/tmp/zephium-coordinated-coverage-live.log`; it is not a successful combined
+qualification.
+
+The corrected combined workflow passed on 2026-09-11 in
+`/tmp/zephium-coordinated-evidence-qualified.log`. A fresh model-authored plan
+created the original primary and browser child; the child chose its route and
+published cited WAL findings, and the primary consumed those findings and
+published its own explanation. Both attempts succeeded, both artifacts require
+source-mapped review, native resource/Shell shutdown completed, and the identical
+projection and historical citations reopened from Store. The report is
+`target/work-runtime-proof/coordinated-research.json`, Work
+`01M291H9MYJTTPGW56P6ZX11QD`. The primary used 1,276 tokens and a 521-microUSD
+conservative charge; browser accounting still explicitly reserves the approved
+ceiling rather than pretending to have exact aggregate usage.
+
+The stored primary response is
+`https://platform.openai.com/logs/resp_0c14813b09248e6b006aa460a0f16087d2a26389b5f2409e7b`.
+Its retrieved input contains one compact responsibility/output contract, one
+child document and two historical evidence previews with local keys. It contains
+no child browsing transcript, durable authority IDs or live resource handles.
+This proves the original direct-child publication-to-synthesis join; dispatch
+order and topology are still host-selected from the approved plan, not a dynamic
+primary scheduling policy. Consequential approval and complete product authoring
+remain separate gates before full frontend integration.
+
+The follow-up regression checkpoint passed 619 core tests, 75 controller tests,
+and 12 application Work tests (two explicit live qualifications ignored),
+including the pinned evidence-read boundary and original coordinator joins.
+Strict Clippy passed for core/controller/application libraries and tests, and
+workspace formatting and diff checks passed. Logs:
+`/tmp/zephium-runtime-closure-final-tests.log`,
+`/tmp/zephium-controller-closure-final-tests.log`,
+`/tmp/zephium-work-app-final-tests.log`, and
+`/tmp/zephium-runtime-closure-final-clippy.log`.
+
+The IPC fixture set now also contains the live research, cancelled and failed
+projections plus the research evidence previews under
+`crates/zephium-ipc/fixtures/work-{research,cancelled,failed}-v1.json` and
+`work-research-evidence-v1.json`. They preserve original terminal facts, usage
+qualifiers and citation relationships without serializing execution authority.
+All three Work IPC tests and strict IPC Clippy passed
+(`/tmp/zephium-work-live-fixtures-tests.log` and
+`/tmp/zephium-work-live-fixtures-clippy.log`). They validate the fixtures against
+Rust domain invariants; this is not a complete fixture set for every artifact
+kind or recovery state.
 
 The extension's deterministic regression checkpoint passed 1,149 tests across
 application, core, IPC, Store and composition (four explicit qualifications

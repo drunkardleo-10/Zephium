@@ -624,7 +624,7 @@ impl zephium_agent_runtime::AgentRuntimeScopedController for AgentWorkRetainedCo
             };
             if let Err(failure) = result {
                 if let Some(state) = controller.state.as_mut() {
-                    state.failure = Some(failure);
+                    state.record_failure(failure);
                     let _ = state.native.revoke(&WorkBrowser::Retained);
                     if let Some(session) = &state.session {
                         session.cancel();

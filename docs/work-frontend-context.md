@@ -7,12 +7,12 @@ or a declaration that Work is ready for integration.
 ## Coordination and immediate answer
 
 **Yes: initial V1 Rust-owned Work projection, execution command, signal, artifact,
-and evidence types exist, with two JSON fixtures.** They are in the runtime
+and evidence types exist, with six JSON fixtures.** They are in the runtime
 working tree at `/Users/crynta/Dev/Zephium`. At the time of this note, that tree is
 on `main`. Commit `fd2d43d` (`Add durable Work execution and native browser
-artifacts`) contains the initial contracts. The following synthesis and direct
-primary/child extension is being verified in the runtime working tree. There is
-no handoff branch to pull yet.
+artifacts`) contains the initial contracts. Commit `68d28d51` contains the
+synthesis and direct primary/child extension. The following runtime fixes and
+live qualification are described below; there is no handoff branch to pull yet.
 
 Continue frontend foundation and Work presentation work in your existing stream.
 The runtime agent will keep implementing here. The user will push the frontend
@@ -45,6 +45,10 @@ Paths below are relative to `/Users/crynta/Dev/Zephium`:
 | `crates/zephium-app/src/work_runtime.rs` | Live attempt ownership and transient observer; host implementation, not a renderer API |
 | `crates/zephium-ipc/fixtures/work-approved-v1.json` | Complete example of a projection with an approved execution |
 | `crates/zephium-ipc/fixtures/work-approve-command-v1.json` | Matching approval command example |
+| `crates/zephium-ipc/fixtures/work-research-v1.json` | Real completed child/primary research, two documents requiring review |
+| `crates/zephium-ipc/fixtures/work-research-evidence-v1.json` | Historical evidence previews matching both research artifacts |
+| `crates/zephium-ipc/fixtures/work-cancelled-v1.json` | Real cancellation after native model admission, no artifacts |
+| `crates/zephium-ipc/fixtures/work-failed-v1.json` | Real refused native navigation with settled failed attempts |
 
 Rust/Serde definitions and their validators are authoritative. The IPC tests
 deserialize these fixtures, validate their contracts, reject worker settlement
@@ -420,11 +424,14 @@ transport adapter:
 6. Component fixtures based on these shapes. Keep locally constructed fixtures
    explicitly provisional until validated against the integrated Rust contract.
 
-Only the two approval fixtures listed above exist in the runtime tree today.
-They are not a complete lifecycle/artifact fixture suite. A future integration
-fixture set should cover all artifact kinds and the failure/recovery states,
-with coherent plan/execution/attempt/output relationships. Do not treat a UI
-fixture as proof that the corresponding runtime capability is implemented.
+The approval examples and four files derived from real public native runs are
+listed above. Rust tests validate their plan/execution/attempt/output
+relationships and match the research artifacts to their historical evidence.
+These are renderer data, never restored live authority. The cancelled fixture
+preserves a failed primary with zero usage and a cancelled child with conservative
+usage; it must not appear as successful output. The research fixture retains
+`needs_review` even though both attempts succeeded. More artifact kinds and
+recovery cases remain to be added; this is not a complete fixture suite.
 
 Keep unavailable actions behind the adapter/capability boundary rather than
 pretending they persisted. Avoid designing a second scheduler, policy engine,
@@ -445,8 +452,9 @@ qualification approval, model-directed native SQLite documentation research,
 source-mapped document publication after original resource closure, Store reopen,
 and successful historical citation reads. It ended in `needs_review`. This
 proves that public-browser vertical only. The local ignored report is
-`target/work-runtime-proof/public-research.json`; it is not a committed frontend
-fixture or a release qualification of the whole runtime.
+`target/work-runtime-proof/public-research.json`; that single-worker report is
+not a release qualification of the whole runtime. The newer combined run has a
+committed projection fixture listed above.
 
 The runtime tree also implements direct primary/child ownership through the
 existing orchestration core, exact fresh publication joins, bounded dependency
@@ -458,19 +466,29 @@ its artifact from Store (`target/work-runtime-proof/synthesis.json`). Public
 qualification explicitly enables provider response storage; normal requests use
 `store: false`.
 
+The combined native worker/primary synthesis workflow now passes. It exposed and
+fixed two runtime defects: navigation accounting counted only the first two
+hops, and the pinned runtime read lane omitted historical evidence reads. The
+browser also receives explicit guidance about expanding its initial viewport
+capture. A fresh run published the child's cited findings and the primary's own
+explanation, closed original native resources and reopened both artifacts and
+citations from Store. The report is
+`target/work-runtime-proof/coordinated-research.json`; output remains
+`needs_review`. The stored primary input contains its responsibility, the child
+document and bounded historical source previews, without a browser transcript.
+Separate real cancellation and refused-navigation runs also closed resources and
+reopened their durable facts; see the continuation document for exact reports.
+
 Remaining runtime work includes dynamic primary decisions, selected decision and
 resource assignments, deeper/parallel worker execution, consequential-effect
-approval and settlement, user acceptance/editing, durable planning/model-call
-accounting, and native failure-path qualification. The native browser path
-requires original foreground ownership and should not be presented as background
-multi-browser execution. The combined native worker/primary synthesis qualifier
-is under verification. Its first run hit the existing browser visit limit and
-then failed to drain native recovery; no combined success is claimed. The
-standalone successes do not establish that path. A second run preserved an
-accounting failure as `interrupted`: primary failed without a model call, child
-outcome unknown, no artifacts. The complete runtime regression checkpoint passed
-1,149 tests (four opt-in qualifications ignored), plus nine provider boundary
-tests; native accounting and failure cleanup remain separate qualification gaps.
+approval and settlement, user acceptance/editing, and durable planning/model-call
+accounting. The native browser path requires original foreground ownership and
+should not be presented as background multi-browser execution. The combined
+success proves the direct-child join with host-selected dispatch, not a complete
+primary scheduling policy or arbitrary-site reliability. The previous complete
+runtime regression checkpoint passed 1,149 tests (four opt-in qualifications
+ignored), plus nine provider boundary tests. The follow-up fixes passed 619 core,
+75 controller and 12 application Work tests, plus strict runtime Clippy.
 
 At integration, we will reconcile the frontend stream with the then-current Rust
 contracts, generate the Work TypeScript types, finish versioned authoring and

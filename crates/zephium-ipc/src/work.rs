@@ -78,6 +78,56 @@ mod tests {
             serde_json::from_str(include_str!("../fixtures/work-approve-command-v1.json")).unwrap();
         command.into_request().unwrap().validate().unwrap();
     }
+
+    #[test]
+    fn live_work_fixtures_preserve_terminal_facts_and_linked_evidence() {
+        let evidence: Vec<WorkEvidencePreviewV1> =
+            serde_json::from_str(include_str!("../fixtures/work-research-evidence-v1.json"))
+                .unwrap();
+        for (json, status, artifacts) in [
+            (
+                include_str!("../fixtures/work-research-v1.json"),
+                WorkExecutionStatus::NeedsReview,
+                2,
+            ),
+            (
+                include_str!("../fixtures/work-cancelled-v1.json"),
+                WorkExecutionStatus::Cancelled,
+                0,
+            ),
+            (
+                include_str!("../fixtures/work-failed-v1.json"),
+                WorkExecutionStatus::Failed,
+                0,
+            ),
+        ] {
+            let state: WorkProjectionV1 = serde_json::from_str(json).unwrap();
+            assert_eq!(state.version, 1);
+            state.work.validate().unwrap();
+            assert_eq!(state.executions.len(), 1);
+            let execution = &state.executions[0];
+            execution
+                .validate(state.work.plan.as_ref().unwrap(), state.work.revision)
+                .unwrap();
+            assert_eq!(execution.status, status);
+            assert_eq!(execution.attempts.len(), 2);
+            assert!(execution.attempts.iter().all(|a| a.usage.is_some()));
+            assert_eq!(execution.artifacts.len(), artifacts);
+            for artifact in &execution.artifacts {
+                assert_eq!(artifact.review, WorkOutputReview::SourceMappedNeedsReview);
+                assert!(!artifact.evidence.is_empty());
+                for link in &artifact.evidence {
+                    assert_eq!(evidence.iter().filter(|e| e.link == *link).count(), 1);
+                }
+            }
+        }
+        for preview in evidence {
+            assert_eq!(preview.version, 1);
+            assert!(!preview.truncated);
+            assert_eq!(preview.source_bytes, preview.text.len().to_string());
+        }
+    }
+
     #[test]
     fn wire_cannot_submit_worker_settlement_or_authority() {
         let id = WorkId::from(1).to_string();

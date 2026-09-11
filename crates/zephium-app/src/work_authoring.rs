@@ -151,6 +151,7 @@ impl WorkDocumentSubmission {
         if !matches!(
             request,
             WorkRequest::RuntimeRead { .. }
+                | WorkRequest::ReadEvidence { .. }
                 | WorkRequest::RuntimeUpdate { .. }
                 | WorkRequest::RuntimeAbandon { .. }
         ) {

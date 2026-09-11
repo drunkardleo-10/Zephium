@@ -1,0 +1,153 @@
+{
+  "executions": [
+    {
+      "approved_revision": "3",
+      "artifacts": [],
+      "attempts": [
+        {
+          "id": "01M290FHRK7YRS7FE34256Q96C",
+          "node": "01M290FHRDETFS8MPSM96EQGP3",
+          "status": "failed",
+          "usage": {
+            "accounting": "exact",
+            "cost_micro_usd": 0,
+            "model_tokens": 0,
+            "operations": 0
+          }
+        },
+        {
+          "id": "01M290FHRS0V22TJ23EKTTY4MA",
+          "node": "01M290FHRDW2P97J9TFY0SET6V",
+          "status": "cancelled",
+          "usage": {
+            "accounting": "conservative_reservation",
+            "cost_micro_usd": 500000,
+            "model_tokens": 400000,
+            "operations": 48
+          }
+        }
+      ],
+      "id": "01M290FHRHWXC3986MWW758ZVS",
+      "spec": {
+        "limits": {
+          "cost_micro_usd": 1000000,
+          "max_workers": 2,
+          "model_tokens": 800000,
+          "operations": 96,
+          "timeout_seconds": 180
+        },
+        "nodes": [
+          {
+            "capability": {
+              "kind": "public_browse",
+              "scope": {
+                "max_hops": 8,
+                "routes": [
+                  {
+                    "origin": "https://sqlite.org",
+                    "path_prefix": "/"
+                  },
+                  {
+                    "origin": "https://www.sqlite.org",
+                    "path_prefix": "/"
+                  }
+                ],
+                "start_url": "https://sqlite.org/docs.html"
+              }
+            },
+            "limits": {
+              "cost_micro_usd": 500000,
+              "max_workers": 1,
+              "model_tokens": 400000,
+              "operations": 48,
+              "timeout_seconds": 180
+            },
+            "node": "01M290FHRDW2P97J9TFY0SET6V",
+            "parent": "01M290FHRDETFS8MPSM96EQGP3"
+          },
+          {
+            "capability": {
+              "kind": "coordinate",
+              "scope": {
+                "max_hops": 8,
+                "routes": [
+                  {
+                    "origin": "https://sqlite.org",
+                    "path_prefix": "/"
+                  },
+                  {
+                    "origin": "https://www.sqlite.org",
+                    "path_prefix": "/"
+                  }
+                ],
+                "start_url": "https://sqlite.org/docs.html"
+              }
+            },
+            "limits": {
+              "cost_micro_usd": 500000,
+              "max_workers": 2,
+              "model_tokens": 400000,
+              "operations": 48,
+              "timeout_seconds": 180
+            },
+            "node": "01M290FHRDETFS8MPSM96EQGP3",
+            "parent": null
+          }
+        ],
+        "plan_revision": "2"
+      },
+      "status": "cancelled"
+    }
+  ],
+  "interrupted": [],
+  "version": 1,
+  "work": {
+    "context_revision": "1",
+    "id": "01M290FCH8ZREVTQNCEJBBH752",
+    "lifecycle": "active",
+    "objective": "Explain SQLite's official reason that WAL mode does not work when clients on different machines share a database over a network filesystem. Use exactly two plan responsibilities: a delegated public-documentation research worker with one source-backed findings output, then a primary agent that depends on those findings and produces one concise source-backed explanation. Both outputs require source_mapped_needs_review. Use only sqlite.org or www.sqlite.org. No accounts, writes, installations or external communication are needed.",
+    "objective_author": "user",
+    "objective_revision": "1",
+    "plan": {
+      "author": "primary_agent",
+      "basis_revision": "1",
+      "draft": {
+        "id": "01M290FHRD27KW0TMRY3EMHJEQ",
+        "nodes": [
+          {
+            "dependencies": [],
+            "id": "01M290FHRDW2P97J9TFY0SET6V",
+            "objective": "Delegate research of SQLite’s official public documentation, using only sqlite.org or www.sqlite.org, to identify and accurately summarize the documented reason WAL mode does not work when clients on different machines share a database over a network filesystem. Do not access accounts, write data, install software, or communicate externally.",
+            "outputs": [
+              {
+                "description": "A source-backed findings brief identifying the relevant official SQLite documentation and the documented technical reason, with precise source links or quotations sufficient for review.",
+                "name": "sqlite_wal_network_filesystem_findings",
+                "review": "source_mapped_needs_review"
+              }
+            ]
+          },
+          {
+            "dependencies": [
+              "01M290FHRDW2P97J9TFY0SET6V"
+            ],
+            "id": "01M290FHRDETFS8MPSM96EQGP3",
+            "objective": "Using the delegated findings, prepare a concise explanation of SQLite’s official reason that WAL mode does not work for clients on different machines sharing a database over a network filesystem. Use only sqlite.org or www.sqlite.org sources and distinguish documented facts from any necessary interpretation.",
+            "outputs": [
+              {
+                "description": "One concise, source-backed explanation with source links or quotations mapped to the claims, ready for review.",
+                "name": "sqlite_wal_network_filesystem_explanation",
+                "review": "source_mapped_needs_review"
+              }
+            ]
+          }
+        ]
+      },
+      "revision": "2"
+    },
+    "profile": "01M290FCCAE05AVNPBNKMWFM0G",
+    "questions": [],
+    "revision": "8",
+    "schema_version": 2,
+    "status": "plan_ready"
+  }
+}
