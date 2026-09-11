@@ -7,6 +7,310 @@ use std::{
 use zephium_core::work::{artifact::*, port::*, proposal::*, runtime::*, *};
 use zephium_ipc::work::WorkCommandV1;
 
+pub(super) struct SynthesisFixture(
+    pub(super) u8,
+    pub(super) Option<(crate::Handle, zephium_core::ids::ProfileId, WorkCommandV1)>,
+);
+impl zephium_core::work::synthesis::WorkSynthesisProvider for SynthesisFixture {
+    fn produce<'a>(
+        &'a self,
+        input: &'a zephium_core::work::synthesis::WorkSynthesisDisclosure,
+    ) -> zephium_core::work::synthesis::WorkSynthesisFuture<'a> {
+        use zephium_core::work::synthesis::*;
+        Box::pin(async move {
+            assert!(input.context().sources.is_empty());
+            assert_eq!(input.context().outputs[0].name, "checklist");
+            if self.0 == 2 {
+                return Err(WorkSynthesisError::OutcomeUnknown);
+            }
+            if self.0 == 3 {
+                return Err(WorkSynthesisError::NotDispatched(WorkError::Capacity));
+            }
+            if let Some((handle, profile, command)) = &self.1 {
+                // The model future stays pending after durable cancellation;
+                // only the adapter's original cancellation loop can finish it.
+                handle
+                    .work_command(*profile, command.clone())
+                    .unwrap()
+                    .await
+                    .unwrap();
+                return std::future::pending().await;
+            }
+            Ok(WorkSynthesisResult {
+                outputs: vec![WorkSynthesisOutput {
+                    output: if self.0 == 1 { 1 } else { 0 },
+                    title: "Suggested tasks".into(),
+                    data: WorkArtifactDataV1::Checklist {
+                        items: vec![WorkChecklistItem {
+                            text: "Review changes".into(),
+                            completed: false,
+                        }],
+                    },
+                    evidence: vec![],
+                }],
+                usage: WorkUsage {
+                    model_tokens: if self.0 == 4 { 9000 } else { 300 },
+                    cost_micro_usd: 50,
+                    operations: 1,
+                    accounting: WorkUsageAccounting::ConservativeReservation,
+                },
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn synthesis_adapter_persists_review_artifacts_and_honest_failed_or_unknown_usage() {
+    for mode in 0..6 {
+        synthesis_case(mode, None).await;
+    }
+}
+
+async fn synthesis_case(
+    mode: u8,
+    external: Option<&dyn zephium_core::work::synthesis::WorkSynthesisProvider>,
+) -> WorkRuntimeProjection {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(zephium_store::SqliteStore::open(dir.path()).unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store.clone());
+    let create = handle
+        .work_document(WorkIntent::Create {
+            objective: "Prepare a release checklist".into(),
+        })
+        .unwrap();
+    let work = create.work_id().unwrap();
+    drive(&mut shell, &queue, create).await.unwrap();
+    let edit = handle
+        .work_document(WorkIntent::Edit {
+            id: work,
+            expected: WorkRevision::INITIAL,
+            edit: WorkUserEdit::ReplaceDraft {
+                proposal: WorkPlanProposal {
+                    nodes: vec![WorkNodeProposal {
+                        key: 0,
+                        objective: if mode == 6 { "Suggest at least three actionable software release checks. Produce a checklist with all items initially incomplete.".into() } else { "Suggest release checks".into() },
+                        dependencies: vec![],
+                        outputs: vec![WorkExpectedOutput {
+                            name: "checklist".into(),
+                            description: "Suggested checks for user review".into(),
+                            review: WorkOutputReview::UserAcceptance,
+                        }],
+                    }],
+                },
+            },
+        })
+        .unwrap();
+    let WorkReply::Snapshot(planned) = drive(&mut shell, &queue, edit).await.unwrap().reply else {
+        panic!()
+    };
+    let plan = planned.plan.as_ref().unwrap();
+    let node = plan.draft.nodes[0].id;
+    let limits = WorkExecutionLimits {
+        model_tokens: 8000,
+        cost_micro_usd: 10000,
+        operations: 2,
+        timeout_seconds: 60,
+        max_workers: 1,
+    };
+    let approve = handle
+        .work_command(
+            profile,
+            WorkCommandV1 {
+                version: 1,
+                work,
+                expected_revision: planned.revision,
+                command: WorkCommandId::generate(),
+                intent: WorkRuntimeIntent::Approve {
+                    spec: WorkExecutionSpec {
+                        plan_revision: plan.revision,
+                        limits,
+                        nodes: vec![WorkNodeExecutionSpec {
+                            node,
+                            parent: None,
+                            capability: WorkCapability::Synthesize,
+                            limits,
+                        }],
+                    },
+                },
+            },
+        )
+        .unwrap();
+    let WorkReply::RuntimeCommand {
+        projection,
+        receipt,
+    } = drive(&mut shell, &queue, approve).await.unwrap().reply
+    else {
+        panic!()
+    };
+    let runtime = WorkRuntimeService::new(handle.clone());
+    let attempt = drive(
+        &mut shell,
+        &queue,
+        runtime.begin_node(
+            profile,
+            work,
+            projection.work.revision,
+            receipt.execution,
+            node,
+        ),
+    )
+    .await
+    .unwrap();
+    let observer = attempt.observer();
+    let model = SynthesisFixture(
+        mode,
+        (mode == 5).then(|| {
+            (
+                handle.clone(),
+                profile,
+                WorkCommandV1 {
+                    version: 1,
+                    work,
+                    expected_revision: projection.work.revision.next().unwrap(),
+                    command: WorkCommandId::generate(),
+                    intent: WorkRuntimeIntent::Cancel {
+                        execution: receipt.execution,
+                    },
+                },
+            )
+        }),
+    );
+    let state = drive(
+        &mut shell,
+        &queue,
+        attempt.synthesize_owned(external.unwrap_or(&model)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(state.profile(), profile);
+    assert_eq!(state.work(), work);
+    assert_eq!(state.node(), node);
+    assert_eq!(state.execution(), receipt.execution);
+    let state = state.into_projection();
+    if mode == 6 {
+        let report = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/work-runtime-proof/synthesis.json");
+        std::fs::create_dir_all(report.parent().unwrap()).unwrap();
+        std::fs::write(report, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+    }
+    assert!(observer.latest().is_none());
+    let execution = &state.executions[0];
+    let attempt = &execution.attempts[0];
+    match mode {
+        0 | 6 => {
+            assert_eq!(execution.status, WorkExecutionStatus::NeedsReview);
+            assert_eq!(execution.artifacts.len(), 1);
+            assert_eq!(
+                execution.artifacts[0].review,
+                WorkOutputReview::UserAcceptance
+            );
+            assert_eq!(attempt.status, WorkAttemptStatus::Succeeded);
+            if mode == 0 {
+                assert_eq!(attempt.usage.unwrap().model_tokens, 300);
+            } else {
+                assert!(attempt.usage.unwrap().model_tokens > 0);
+                assert!(
+                    matches!(&execution.artifacts[0].data, WorkArtifactDataV1::Checklist { items } if items.len() >= 3 && items.iter().all(|item| !item.completed)),
+                    "Live artifact did not fulfill the objective: {}",
+                    serde_json::to_string(&execution.artifacts[0].data).unwrap()
+                );
+            }
+        }
+        1 => {
+            assert_eq!(execution.status, WorkExecutionStatus::Failed);
+            assert!(execution.artifacts.is_empty());
+            assert_eq!(attempt.usage.unwrap().model_tokens, 300);
+        }
+        2 | 4 | 5 => {
+            assert_eq!(execution.status, WorkExecutionStatus::Interrupted);
+            assert_eq!(attempt.status, WorkAttemptStatus::OutcomeUnknown);
+            assert!(attempt.usage.is_none());
+            assert!(execution.artifacts.is_empty());
+        }
+        3 => {
+            assert_eq!(execution.status, WorkExecutionStatus::Failed);
+            assert_eq!(attempt.usage, Some(WorkUsage::default()));
+        }
+        _ => unreachable!(),
+    }
+    let WorkReply::Runtime(read) = drive(
+        &mut shell,
+        &queue,
+        handle.work_projection(profile, work).unwrap(),
+    )
+    .await
+    .unwrap()
+    .reply
+    else {
+        panic!()
+    };
+    assert_eq!(state, *read);
+    assert!(store.flush());
+    drop(model);
+    drop(runtime);
+    drop(handle);
+    drop(shell);
+    assert_eq!(
+        store.shutdown_until(Instant::now() + Duration::from_secs(5)),
+        zephium_core::ports::store::StoreShutdownOutcome::Clean
+    );
+    drop(store);
+    let store = Arc::new(zephium_store::SqliteStore::open(dir.path()).unwrap());
+    let (mut shell, queue, handle, _) = fixture(store.clone());
+    let WorkReply::Runtime(reopened) = drive(
+        &mut shell,
+        &queue,
+        handle.work_projection(profile, work).unwrap(),
+    )
+    .await
+    .unwrap()
+    .reply
+    else {
+        panic!()
+    };
+    assert_eq!(*reopened, state);
+    drop(handle);
+    drop(shell);
+    assert_eq!(
+        store.shutdown_until(Instant::now() + Duration::from_secs(5)),
+        zephium_core::ports::store::StoreShutdownOutcome::Clean
+    );
+    state
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "explicit development OpenAI credential and at most $0.01 generation"]
+async fn live_public_synthesis_publishes_review_artifact_and_reopens_store() {
+    use zephium_agentic::{
+        AgentProviderTransport, AgentProviderTransportConfig, OpenAiWorkSynthesizer,
+        WorkPlanningConfig,
+    };
+    // Load the development key and networking libraries before the approved
+    // attempt deadline starts. Nothing secret enters the Work or report.
+    let credential = zephium_agentic::load_macos_development_openai_credential().unwrap();
+    let transport =
+        AgentProviderTransport::try_new(AgentProviderTransportConfig::STANDARD).unwrap();
+    let model = OpenAiWorkSynthesizer::try_new(
+        transport,
+        credential,
+        WorkPlanningConfig::try_new(
+            zephium_agent_model_catalog::try_luna_provider_exact_call_config(2048).unwrap(),
+            8192,
+            10_000,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    #[cfg(feature = "work-synthesis-probe")]
+    let model = model.with_public_response_retention();
+    let result = synthesis_case(6, Some(&model)).await;
+    let report = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/work-runtime-proof/synthesis.json");
+    std::fs::create_dir_all(report.parent().unwrap()).unwrap();
+    std::fs::write(report, serde_json::to_vec_pretty(&result).unwrap()).unwrap();
+}
+
 #[tokio::test]
 async fn runtime_application_approves_exact_plan_settles_artifact_and_recovers_dropped_attempt() {
     let dir = tempfile::tempdir().unwrap();

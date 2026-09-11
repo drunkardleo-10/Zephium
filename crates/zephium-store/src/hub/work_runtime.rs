@@ -18,6 +18,27 @@ struct Row {
     approved_tick: i64,
     expires_tick: i64,
 }
+fn descendant(
+    spec: &WorkExecutionSpec,
+    mut node: WorkPlanNodeId,
+    ancestor: WorkPlanNodeId,
+) -> bool {
+    for _ in 0..spec.nodes.len() {
+        let Some(parent) = spec
+            .nodes
+            .iter()
+            .find(|entry| entry.node == node)
+            .and_then(|entry| entry.parent)
+        else {
+            return false;
+        };
+        if parent == ancestor {
+            return true;
+        }
+        node = parent;
+    }
+    false
+}
 fn rows(conn: &Connection, id: WorkId) -> Result<Vec<Row>, WorkError> {
     let mut statement = conn.prepare("SELECT execution_id, plan_revision, owner_session, approved_unix_ms, expires_unix_ms, CASE WHEN length(CAST(body AS BLOB)) <= 524288 THEN body END, approved_tick_ms, expires_tick_ms FROM work_executions WHERE work_id = ?1 ORDER BY execution_id LIMIT 17").map_err(db)?;
     let rows = statement
@@ -272,6 +293,7 @@ pub(super) fn update(
     }
     let execution = match &update {
         WorkRuntimeUpdate::Begin { execution, .. }
+        | WorkRuntimeUpdate::BeginChild { execution, .. }
         | WorkRuntimeUpdate::Settle { execution, .. }
         | WorkRuntimeUpdate::FinishCancellation { execution } => *execution,
     };
@@ -285,20 +307,32 @@ pub(super) fn update(
     let plan = read_plan(tx, id, row.fact.spec.plan_revision)?;
     row.fact.validate(&plan, current.revision)?;
     let mut remaining_millis = None;
+    let parent_attempt = match &update {
+        WorkRuntimeUpdate::BeginChild { parent, .. } => Some(*parent),
+        _ => None,
+    };
     match update {
-        WorkRuntimeUpdate::Begin { attempt, node, .. } => {
-            // A direct child needs its live parent's orchestration admission.
-            // The standalone node adapter cannot substitute a persisted edge
-            // for that move-only owner. Keep it closed until that join exists.
-            if row
+        WorkRuntimeUpdate::Begin { attempt, node, .. }
+        | WorkRuntimeUpdate::BeginChild { attempt, node, .. } => {
+            let spec = row
                 .fact
                 .spec
                 .nodes
                 .iter()
                 .find(|entry| entry.node == node)
-                .is_some_and(|entry| entry.parent.is_some())
-            {
-                return Err(WorkError::Unavailable);
+                .ok_or(WorkError::Invalid)?;
+            match (spec.parent, parent_attempt) {
+                (None, None) => {}
+                (Some(parent_node), Some(parent))
+                    if row.fact.attempts.iter().any(|entry| {
+                        entry.id == parent
+                            && entry.node == parent_node
+                            && entry.status == WorkAttemptStatus::Running
+                    }) && row.fact.spec.nodes.iter().any(|entry| {
+                        entry.node == parent_node
+                            && matches!(entry.capability, WorkCapability::Coordinate { .. })
+                    }) => {}
+                _ => return Err(WorkError::Unavailable),
             }
             let now = session.tick_ms;
             if !matches!(
@@ -340,6 +374,8 @@ pub(super) fn update(
                     .attempts
                     .iter()
                     .any(|a| a.node == *dependency && a.status == WorkAttemptStatus::Succeeded)
+                    || (matches!(spec.capability, WorkCapability::Coordinate { .. })
+                        && descendant(&row.fact.spec, *dependency, node))
             }) {
                 return Err(WorkError::Conflict);
             }
@@ -365,12 +401,13 @@ pub(super) fn update(
             {
                 return Err(WorkError::Invalid);
             }
-            let fact = row
+            let index = row
                 .fact
                 .attempts
-                .iter_mut()
-                .find(|a| a.id == attempt)
+                .iter()
+                .position(|a| a.id == attempt)
                 .ok_or(WorkError::NotFound)?;
+            let fact = &row.fact.attempts[index];
             if fact.status != WorkAttemptStatus::Running {
                 return Err(WorkError::Conflict);
             }
@@ -387,6 +424,24 @@ pub(super) fn update(
                     .iter()
                     .find(|n| n.id == fact.node)
                     .ok_or(WorkError::Invalid)?;
+                // A coordinator can start to delegate its prerequisites, but
+                // neither it nor a worker may publish before their success.
+                let succeeded = |id| {
+                    row.fact
+                        .attempts
+                        .iter()
+                        .any(|a| a.node == id && a.status == WorkAttemptStatus::Succeeded)
+                };
+                if !node.dependencies.iter().all(|id| succeeded(*id))
+                    || row
+                        .fact
+                        .spec
+                        .nodes
+                        .iter()
+                        .any(|entry| entry.parent == Some(fact.node) && !succeeded(entry.node))
+                {
+                    return Err(WorkError::Conflict);
+                }
                 if artifacts.len() != node.outputs.len()
                     || !node
                         .outputs
@@ -396,8 +451,8 @@ pub(super) fn update(
                     return Err(WorkError::Invalid);
                 }
             }
-            fact.status = status;
-            fact.usage = usage;
+            row.fact.attempts[index].status = status;
+            row.fact.attempts[index].usage = usage;
             row.fact.artifacts.extend(artifacts);
             let running = row
                 .fact

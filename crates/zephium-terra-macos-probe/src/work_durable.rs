@@ -7,7 +7,7 @@ use std::{
 };
 use zephium_agentic::{
     load_macos_development_openai_credential, AgentProviderTransport, AgentProviderTransportConfig,
-    OpenAiWorkPlanner, WorkPlanningConfig,
+    OpenAiWorkPlanner, OpenAiWorkSynthesizer, WorkPlanningConfig,
 };
 use zephium_app::{
     work_planning::WorkPlanningService, work_runtime::WorkRuntimeService, WorkIntent,
@@ -22,8 +22,17 @@ use zephium_core::{
 use zephium_work_composition::{durable_runtime::WorkBrowserAdapterSettings, MacosWorkComposition};
 
 const OBJECTIVE: &str = "Find SQLite's official explanation of why WAL mode does not work when clients on different machines share a database over a network filesystem. Produce one concise source-backed note as a single plan responsibility. Use only public documentation at sqlite.org or www.sqlite.org. No account, writes, installations, or external communication are needed. Every factual output needs source-mapped human review.";
+const COORDINATED_OBJECTIVE: &str = "Explain SQLite's official reason that WAL mode does not work when clients on different machines share a database over a network filesystem. Use exactly two plan responsibilities: a delegated public-documentation research worker with one source-backed findings output, then a primary agent that depends on those findings and produces one concise source-backed explanation. Both outputs require source_mapped_needs_review. Use only sqlite.org or www.sqlite.org. No accounts, writes, installations or external communication are needed.";
 
 pub(super) fn run() -> Result<(), super::ProbeFailure> {
+    run_mode(false)
+}
+
+pub(super) fn run_coordinated() -> Result<(), super::ProbeFailure> {
+    run_mode(true)
+}
+
+fn run_mode(coordinated: bool) -> Result<(), super::ProbeFailure> {
     use super::ProbeFailure as Error;
     let data = tempfile::Builder::new()
         .prefix("zephium-durable-work-")
@@ -119,13 +128,14 @@ pub(super) fn run() -> Result<(), super::ProbeFailure> {
                         .and_then(|runtime| {
                             runtime.block_on(async {
                                 tokio::time::timeout(
-                                    Duration::from_secs(160),
+                                    Duration::from_secs(if coordinated { 240 } else { 160 }),
                                     workflow(
                                         &worker_handle,
                                         &composition,
                                         profile,
                                         planning_key,
                                         browser_keys,
+                                        coordinated,
                                     ),
                                 )
                                 .await
@@ -250,7 +260,11 @@ pub(super) fn run() -> Result<(), super::ProbeFailure> {
     let output = std::path::Path::new("target/work-runtime-proof");
     std::fs::create_dir_all(output).map_err(|_| Error::Output)?;
     std::fs::write(
-        output.join("public-research.json"),
+        output.join(if coordinated {
+            "coordinated-research.json"
+        } else {
+            "public-research.json"
+        }),
         serde_json::to_vec_pretty(&serde_json::json!({
             "projection": state,
             "historical_evidence": evidence,
@@ -272,7 +286,8 @@ async fn workflow(
     composition: &MacosWorkComposition,
     profile: ProfileId,
     planning_key: zephium_agentic::AgentProviderCredential,
-    browser_keys: Vec<zephium_agentic::AgentProviderCredential>,
+    mut browser_keys: Vec<zephium_agentic::AgentProviderCredential>,
+    coordinated: bool,
 ) -> Result<WorkRuntimeProjection, &'static str> {
     let binding = loop {
         let selected = handle.work_profile_binding();
@@ -303,13 +318,37 @@ async fn workflow(
     };
     let request = handle
         .work_document(WorkIntent::Create {
-            objective: OBJECTIVE.into(),
+            objective: if coordinated {
+                COORDINATED_OBJECTIVE
+            } else {
+                OBJECTIVE
+            }
+            .into(),
         })
         .map_err(|_| "create_admission")?;
     let work = request.work_id().ok_or("create_identity")?;
     request.await.map_err(|_| "create_persistence")?;
     let transport = AgentProviderTransport::try_new(AgentProviderTransportConfig::STANDARD)
         .map_err(|_| "planning_transport")?;
+    let synthesis = if coordinated {
+        Some(
+            OpenAiWorkSynthesizer::try_new(
+                transport.clone(),
+                browser_keys.pop().ok_or("synthesis_key")?,
+                WorkPlanningConfig::try_new(
+                    zephium_agent_model_catalog::try_luna_provider_exact_call_config(4096)
+                        .map_err(|_| "synthesis_model")?,
+                    8192,
+                    10_000,
+                )
+                .map_err(|_| "synthesis_limits")?,
+            )
+            .map_err(|_| "synthesis_provider")?
+            .with_public_response_retention(),
+        )
+    } else {
+        None
+    };
     let planner = OpenAiWorkPlanner::try_new(
         transport,
         planning_key,
@@ -333,13 +372,37 @@ async fn workflow(
     let plan = planned.plan.as_ref().ok_or("clarification_required")?;
     std::fs::create_dir_all("target/work-runtime-proof").map_err(|_| "plan_report")?;
     std::fs::write(
-        "target/work-runtime-proof/public-plan.json",
+        if coordinated {
+            "target/work-runtime-proof/coordinated-plan.json"
+        } else {
+            "target/work-runtime-proof/public-plan.json"
+        },
         serde_json::to_vec_pretty(&planned).map_err(|_| "plan_report")?,
     )
     .map_err(|_| "plan_report")?;
     if plan.draft.nodes.len() > browser_keys.len() {
         return Err("qualification_node_limit");
     }
+    let primary = if coordinated {
+        if plan.draft.nodes.len() != 2
+            || plan.draft.nodes.iter().any(|n| {
+                n.outputs.len() != 1
+                    || n.outputs[0].review != WorkOutputReview::SourceMappedNeedsReview
+            })
+        {
+            return Err("qualification_primary_shape");
+        }
+        Some(
+            plan.draft
+                .nodes
+                .iter()
+                .find(|n| n.dependencies.len() == 1)
+                .ok_or("qualification_primary_dependency")?
+                .id,
+        )
+    } else {
+        None
+    };
     let count = plan.draft.nodes.len() as u32;
     let limits = WorkExecutionLimits {
         model_tokens: 400_000,
@@ -347,6 +410,17 @@ async fn workflow(
         operations: 48,
         timeout_seconds: 120,
         max_workers: 1,
+    };
+    let limits = if coordinated {
+        WorkExecutionLimits {
+            model_tokens: 800_000,
+            cost_micro_usd: 1_000_000,
+            operations: 96,
+            timeout_seconds: 180,
+            max_workers: 2,
+        }
+    } else {
+        limits
     };
     let spec = WorkExecutionSpec {
         plan_revision: plan.revision,
@@ -357,9 +431,9 @@ async fn workflow(
             .iter()
             .map(|node| WorkNodeExecutionSpec {
                 node: node.id,
-                parent: None,
-                capability: WorkCapability::PublicBrowse {
-                    scope: WorkBrowseScope {
+                parent: primary.filter(|id| *id != node.id),
+                capability: {
+                    let scope = WorkBrowseScope {
                         start_url: "https://sqlite.org/docs.html".into(),
                         routes: ["https://sqlite.org", "https://www.sqlite.org"]
                             .into_iter()
@@ -369,12 +443,22 @@ async fn workflow(
                             })
                             .collect(),
                         max_hops: 8,
-                    },
+                    };
+                    if primary == Some(node.id) {
+                        WorkCapability::Coordinate { scope }
+                    } else {
+                        WorkCapability::PublicBrowse { scope }
+                    }
                 },
                 limits: WorkExecutionLimits {
                     model_tokens: limits.model_tokens / count,
                     cost_micro_usd: limits.cost_micro_usd / count,
                     operations: limits.operations / count,
+                    max_workers: if primary == Some(node.id) {
+                        limits.max_workers
+                    } else {
+                        1
+                    },
                     ..limits
                 },
             })
@@ -404,6 +488,68 @@ async fn workflow(
     let mut state = *approved;
     let mut completed = Vec::new();
     let mut browser_keys = browser_keys.into_iter();
+    if let Some(primary) = primary {
+        let attempt = WorkRuntimeService::new(handle.clone())
+            .begin_node(
+                profile,
+                work,
+                state.work.revision,
+                receipt.execution,
+                primary,
+            )
+            .await
+            .map_err(|_| "primary_admission")?;
+        let mut coordinator = attempt
+            .coordinate()
+            .await
+            .map_err(|_| "primary_ownership")?;
+        let child = plan
+            .draft
+            .nodes
+            .iter()
+            .find(|n| n.id != primary)
+            .ok_or("child_node")?
+            .id;
+        let credential = browser_keys.next().ok_or("child_key")?;
+        let child_result = coordinator
+            .execute_child(child, |attempt| async {
+                composition
+                    .execute_public_node_owned(
+                        &handle.callback_handle(),
+                        attempt,
+                        browser_settings(binding, credential),
+                    )
+                    .await
+            })
+            .await
+            .map_err(|error| {
+                let _ = writeln!(
+                    std::io::stdout().lock(),
+                    "durable-work: child_error={error:?}; content=redacted"
+                );
+                "child_execution"
+            });
+        let state = coordinator
+            .finish(synthesis.as_ref().ok_or("primary_model")?)
+            .await
+            .map_err(|_| "primary_synthesis")?
+            .into_projection();
+        // Keep failed qualification facts too. This snapshot does not claim
+        // native closure or Store reopen; only the final report below does.
+        // Finish consumes the poisoned original coordinator without another
+        // model call when a child fails, retaining any unknown child charge.
+        std::fs::write(
+            "target/work-runtime-proof/coordinated-attempt.json",
+            serde_json::to_vec_pretty(&state).map_err(|_| "primary_report")?,
+        )
+        .map_err(|_| "primary_report")?;
+        child_result?;
+        if state.executions[0].attempts.len() != 2 || state.executions[0].artifacts.len() != 2 {
+            return Err("primary_publication");
+        }
+        writeln!(std::io::stdout().lock(), "durable-work: original_parent=true; original_child=true; structured_handoff=true; primary_synthesis=true; content=redacted").map_err(|_| "primary_progress")?;
+        return Ok(state);
+    }
     // Bounded sequential qualification dispatch of the model's exact DAG.
     // This does not claim primary/child model delegation or a production scheduler.
     while completed.len() < plan.draft.nodes.len() {
@@ -426,24 +572,10 @@ async fn workflow(
             .execute_public_node(
                 &handle.callback_handle(),
                 attempt,
-                WorkBrowserAdapterSettings {
-                    retain_public_responses: true,
-                    resource_diagnostic: Some(|cause| {
-                        let _ = writeln!(std::io::stdout().lock(), "durable-work: resource_failure={cause:?}; content=redacted");
-                    }),
-                    diagnostic: Some(|snapshot| {
-                        let _ = writeln!(std::io::stdout().lock(),
-                            "durable-work: native_phase={:?}; failure={:?}; persistence={:?}; content=redacted",
-                            snapshot.phase, snapshot.failure, snapshot.persistence_failure);
-                    }),
-                    profile: binding,
-                    model: zephium_agent_controller::AgentBrowserModel::Luna,
-                    config: zephium_app::AgentWorkApplicationConfig::new(
-                        zephium_agent_runtime::AgentRuntimeConfig::STANDARD,
-                        AgentProviderTransportConfig::STANDARD,
-                    ),
-                    credential: browser_keys.next().ok_or("qualification_key_limit")?,
-                },
+                browser_settings(
+                    binding,
+                    browser_keys.next().ok_or("qualification_key_limit")?,
+                ),
             )
             .await
             .map_err(|error| {
@@ -463,4 +595,35 @@ async fn workflow(
         completed.push(node);
     }
     Ok(state)
+}
+
+fn browser_settings(
+    profile: zephium_app::AgentWorkProfileBinding,
+    credential: zephium_agentic::AgentProviderCredential,
+) -> WorkBrowserAdapterSettings {
+    WorkBrowserAdapterSettings {
+        retain_public_responses: true,
+        resource_diagnostic: Some(|cause| {
+            let _ = writeln!(
+                std::io::stdout().lock(),
+                "durable-work: resource_failure={cause:?}; content=redacted"
+            );
+        }),
+        diagnostic: Some(|snapshot| {
+            let _ = writeln!(
+                std::io::stdout().lock(),
+                "durable-work: native_phase={:?}; failure={:?}; persistence={:?}; content=redacted",
+                snapshot.phase,
+                snapshot.failure,
+                snapshot.persistence_failure
+            );
+        }),
+        profile,
+        model: zephium_agent_controller::AgentBrowserModel::Luna,
+        config: zephium_app::AgentWorkApplicationConfig::new(
+            zephium_agent_runtime::AgentRuntimeConfig::STANDARD,
+            AgentProviderTransportConfig::STANDARD,
+        ),
+        credential,
+    }
 }

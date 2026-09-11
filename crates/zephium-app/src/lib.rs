@@ -85,7 +85,11 @@ mod work_authoring_intent;
 pub use work_authoring::{WorkDocumentProjection, WorkDocumentRequest, WorkDocumentSubmission};
 pub use work_authoring_intent::{WorkIntent, WorkUserEdit};
 
+#[cfg(feature = "work-runtime")]
+pub mod work_coordination;
 #[cfg(feature = "work-planning")]
 pub mod work_planning;
 #[cfg(feature = "work-runtime")]
 pub mod work_runtime;
+#[cfg(feature = "work-runtime")]
+mod work_synthesis;

@@ -1373,6 +1373,9 @@ fn attach_semantic_runtime_epoch(
 ) -> Result<(), ()> {
     let _mtm = MainThreadMarker::new().ok_or(())?;
     let protocol_handler = objc2::runtime::ProtocolObject::from_ref(&*epoch.handler);
+    // SAFETY: main-thread access is proven above; all controller, handler,
+    // content-world and script references remain alive across these calls.
+    // Objective-C exceptions are contained by this catch boundary.
     let attached = objc2::exception::catch(AssertUnwindSafe(|| unsafe {
         controller.addScriptMessageHandlerWithReply_contentWorld_name(
             protocol_handler,

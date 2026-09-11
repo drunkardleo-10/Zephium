@@ -287,7 +287,8 @@ Core provides bounded `WorkArtifactV1` data for documents, tables, comparisons,
 charts, checklists, evidence collections and browser previews. Presentation hints
 are separate and contain no canvas geometry or executable markup. The current
 browser adapter produces source-mapped documents requiring review; the other
-kinds are validated contracts, not separately qualified model adapters. IPC
+kinds have bounded synthesis support; only the explicitly recorded live artifact
+kinds are qualified. IPC
 exports `WorkProjectionV1`, `WorkCommandV1`, `WorkSignalV1`, Specta types and JSON
 fixtures. The execution command vocabulary currently covers approval,
 cancellation and interruption acknowledgement. Authoring still uses its existing
@@ -297,17 +298,44 @@ membership in that Work and profile. The original extraction's digest and source
 identity are checked before returning a bounded historical quote. This read does
 not claim the execution fence or restore any native/action authority.
 
-Remaining integration is substantial: primary-agent scheduling, original
-`AgentWorkOrchestration` ownership joined to actual child workers, compact
-selected decision/resource packages and structured parent handoffs, consequential
-effect approval/settlement, user result acceptance, and durable planning/model
-attempt accounting. `parent` relationships in the execution specification are
-descriptive validated topology, not an implemented model-driven delegation path.
-Standalone Begin refuses child nodes because it cannot present the original live
-parent admission. A persisted edge never substitutes for that owner.
-Do not present this slice as the full runtime or frontend-ready delivery. The
-existing controller's per-run supervisor, audit and policy accounting must not
-be silently replaced by an unrelated scheduler or reconstructed from checkpoints.
+The direct primary/child extension now joins a fresh `Coordinate` primary to the
+existing `AgentWorkOrchestration` owner. Only this owner can admit a direct child
+through the original parent attempt. A private move-only `WorkNodeSettlement`
+joins the child's original Store acknowledgement to the supervisor's one-shot
+recipient delivery. Loading projections cannot recreate it. Combined dependency
+and parent-completion cycles, widening scopes/budgets, premature parent success,
+foreign receipts and duplicate child dispatch are refused. Unknown child outcomes
+retain their reservation; missing children cannot trigger primary model work.
+Cancellation permits the original adapter's bounded cleanup without renewing its
+execution deadline. The first application driver supports one primary and direct
+children in host-selected approved order; deeper trees fail closed.
+
+`WorkSynthesisDisclosure` selects bounded typed dependency artifacts and historical
+quotes with local evidence keys. The fixed-endpoint OpenAI adapter shares the
+planner's exact input counting, admission, budget, cancellation and unknown-outcome
+transport ownership. Rust resolves returned local citations to original evidence,
+enforces output contracts and persists usage before presenting review artifacts.
+The primary uses this adapter only after its children return. Structured output
+uses an internal adjacent `kind`/`value` encoding so the discriminator precedes
+its content; durable/IPC artifacts retain their existing flat data representation.
+Normal requests use `store: false`; public qualification can explicitly opt into
+storage through `probe-harness`, which optimized builds reject.
+
+The real standalone synthesis qualification passed on 2026-09-11: five actionable,
+incomplete release-checklist items, 959 reported model tokens, conservative price
+accounting, `NeedsReview`, and identical artifact data after Store reopen. The
+report is `target/work-runtime-proof/synthesis.json`; the passing log is
+`/tmp/zephium-synthesis-live-qualified.log`. Earlier flat-schema responses were
+valid documents but failed the requested checklist quality assertion; these were
+not counted as successful qualifications. This run qualifies checklist synthesis,
+not every artifact kind or primary/child native execution.
+
+Remaining integration includes dynamic primary decisions, compact selected
+resources/decisions, deeper and parallel workers, consequential-effect approval
+and settlement, user result acceptance/editing, durable planning/model-call
+accounting and the complete frontend transport. Standalone Begin still refuses
+children: a persisted edge never substitutes for original live parent admission.
+Do not present this slice as the complete runtime or frontend-ready delivery.
 
 The opt-in `macos-terra-agentic-probe --live-public-durable-work` entry (feature
 `durable-runtime`) exercises one requested Public SQLite-documentation note from
@@ -350,6 +378,39 @@ failure-path cleanup still needs qualification. The adapter allows at most 30
 seconds from a close request for cleanup and never reports unknown closure as
 success. Public provider trace storage is an explicit qualification-only opt-in;
 normal product calls remain stateless.
+
+The coordinated qualifier (`--live-public-coordinated-work`, same probe feature)
+adds a real model-authored two-node plan, original primary and native child,
+structured publication handoff, and primary synthesis. Its first live run on
+2026-09-11 did not pass: the worker alternated between SQLite's documentation
+index and list, then proposed another visit to the list after the visit ceiling.
+The original policy refused `Browser(Navigation(Navigation))`. Native recovery
+and Shell shutdown did not settle cleanly; no primary artifact or reopen success
+was claimed. The failure log is `/tmp/zephium-coordinated-native-live.log`.
+The stored public input confirms four completed hops and repeated list visits;
+this failure is not evidence of a focus problem. The qualifier now finishes the
+original poisoned coordinator and records `coordinated-attempt.json` before
+shutdown, retaining unknown child accounting and avoiding a primary model call.
+That attempt report is diagnostic state, not resource-closure or reopen proof.
+A second fresh run (`/tmp/zephium-coordinated-native-second.log`) reached a native
+`Accounting` refusal and again failed to drain shutdown. Its attempt report
+verifies the corrected failure settlement: primary `Failed` with exact zero usage
+(no synthesis dispatched), child `OutcomeUnknown` with missing usage and retained
+reservation, execution `Interrupted`, no artifacts. Native accounting/cleanup
+needs diagnosis before this combined path can be called qualified. Do not widen
+limits, reconstruct owners or relabel these results to obtain a green report.
+
+The extension's deterministic regression checkpoint passed 1,149 tests across
+application, core, IPC, Store and composition (four explicit qualifications
+ignored), plus nine shared planning/synthesis provider boundary tests. This
+includes the `durable-runtime` composition feature. Logs:
+`/tmp/zephium-runtime-final-regressions.log` and
+`/tmp/zephium-provider-final-regressions.log`. Strict Clippy passed for those
+runtime libraries/tests plus the provider with `-D warnings`
+(`/tmp/zephium-work-runtime-clippy-final.log`); the native qualifier builds.
+An additional all-targets probe lint run encountered four pre-existing diagnostic
+probe lints in the native accessibility/responder/trusted-edit/owned-surface
+fixtures; that broader graph is not claimed lint-clean.
 
 ### 3.4 Frontend foundation
 
@@ -425,17 +486,17 @@ correct authority boundary for executing a known task, but it is not yet the
 general system that turns a user's goal into editable Work state and approved
 execution.
 
-The product still needs:
+The implemented authoring, durable execution, direct-child and synthesis slices
+are described in section 3. The remaining product scope includes:
 
-- a durable `Work` aggregate and versioned domain model for objectives, plans,
-  nodes, tasks, resources, actors, questions, approvals, evidence, artifacts,
-  and result state;
+- extending the durable Work model with selected resources/decisions,
+  consequential approvals and user result acceptance;
 - general intent clarification and plan authoring without making model text an
   authority or requiring a hand-written Rust task predicate for every goal;
 - compilation of one exact approved plan revision into manifests, leases,
   effect/data/account scopes, budgets, expected outputs, and executable nodes;
-- a production scheduler that wires the existing orchestration core to actual
-  agent/model/browser/service workers and emits stable semantic progress;
+- extending the direct-child orchestration adapter with dynamic primary decisions,
+  nested/parallel workers and complete product progress delivery;
 - a clean separation between factual/model-mapped completion, native effect
   verification, user acceptance, and durable execution success;
 - persistent questions, approvals, unfinished work, results, and safe

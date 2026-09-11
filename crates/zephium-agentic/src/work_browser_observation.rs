@@ -282,6 +282,7 @@ impl WorkBrowserResources {
 
     /// Admits one acknowledged expansion under the same immutable disclosure
     /// capability as its run's initial observation.
+    #[allow(clippy::too_many_arguments)] // Explicit ownership, scope, and clock operands.
     pub fn observe_expansion_with_capability(
         &mut self,
         lease: &WorkBrowserExecutionLease,

@@ -304,23 +304,23 @@ impl WorkNativeResource {
         let stage = pending.stage;
         let outcome = if erased || !self.guard.is_healthy() {
             Some(Err(ContextPortFailure::NativeRefused))
-        } else if Instant::now() >= pending.deadline {
-            Some(Err(ContextPortFailure::TimedOut))
-        } else if work_browser_monotonic_now().is_none_or(|now| {
-            request_coordinates
-                .as_ref()
-                .is_none_or(|(lease, operation)| {
-                    now >= lease.deadline()
-                        || !(match stage {
-                            WorkNavigationStage::Parking => self
-                                .guard
-                                .navigation_dispatch_current(lease, *operation, now),
-                            WorkNavigationStage::Navigating => self
-                                .guard
-                                .navigation_completion_current(lease, *operation, now),
-                        })
-                })
-        }) {
+        } else if Instant::now() >= pending.deadline
+            || work_browser_monotonic_now().is_none_or(|now| {
+                request_coordinates
+                    .as_ref()
+                    .is_none_or(|(lease, operation)| {
+                        now >= lease.deadline()
+                            || !(match stage {
+                                WorkNavigationStage::Parking => self
+                                    .guard
+                                    .navigation_dispatch_current(lease, *operation, now),
+                                WorkNavigationStage::Navigating => self
+                                    .guard
+                                    .navigation_completion_current(lease, *operation, now),
+                            })
+                    })
+            })
+        {
             Some(Err(ContextPortFailure::TimedOut))
         } else if pending.stage == WorkNavigationStage::Parking {
             if !self

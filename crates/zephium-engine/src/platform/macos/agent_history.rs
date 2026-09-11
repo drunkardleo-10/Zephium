@@ -65,22 +65,12 @@ impl AgentHistoryBackTicket {
 }
 
 /// Bounded successful-history projection for one owned page/run lease.
+#[derive(Default)]
 pub(super) struct AgentHistoryLedger {
     entries: Vec<AgentHistoryEntry>,
     cursor: Option<usize>,
     attempts: u16,
     pending: Option<AgentHistoryBackTicket>,
-}
-
-impl Default for AgentHistoryLedger {
-    fn default() -> Self {
-        Self {
-            entries: Vec::new(),
-            cursor: None,
-            attempts: 0,
-            pending: None,
-        }
-    }
 }
 
 impl AgentHistoryLedger {

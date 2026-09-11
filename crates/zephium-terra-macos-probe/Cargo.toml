@@ -8,7 +8,7 @@ build = false
 
 [features]
 default = []
-durable-runtime = ["live-probe", "zephium-work-composition/durable-runtime", "zephium-work-composition/retained-lifetime-diagnostic", "dep:zephium-agent-model-catalog"]
+durable-runtime = ["live-probe", "zephium-agentic/probe-harness", "zephium-work-composition/durable-runtime", "zephium-work-composition/retained-lifetime-diagnostic", "dep:zephium-agent-model-catalog"]
 live-probe = [
     "dep:zephium-app",
     "zephium-agent-controller/probe-harness",

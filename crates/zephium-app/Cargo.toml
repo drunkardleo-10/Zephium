@@ -10,6 +10,8 @@ license.workspace = true
 # and its full platform qualification are integrated.
 work-planning = ["dep:tokio", "dep:zephium-agentic", "zephium-agentic/provider-transport"]
 work-runtime = ["work-planning", "dep:serde_json"]
+# Explicit public synthesis diagnostics; agentic refuses probe-harness in optimized builds.
+work-synthesis-probe = ["work-runtime", "zephium-agentic/probe-harness"]
 agentic-browser = ["dep:zephium-agentic"]
 work-execution = ["agentic-browser", "dep:zephium-agent-controller", "dep:zephium-agent-runtime", "dep:zephium-agent-provider-transport"]
 # Explicit public-data qualification only; dependencies independently refuse release.

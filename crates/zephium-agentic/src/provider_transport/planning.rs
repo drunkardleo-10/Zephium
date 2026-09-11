@@ -69,6 +69,22 @@ impl OpenAiWorkPlanner {
         input: WorkPlanningDisclosure,
     ) -> Result<WorkPlanningResult, WorkPlanningError> {
         let body = self.request(&input)?;
+        self.run_bounded(body, None, decode).await
+    }
+    pub(super) async fn run_bounded<T>(
+        &self,
+        body: Value,
+        limits: Option<zephium_core::work::runtime::WorkExecutionLimits>,
+        decode: impl Fn(&[u8], u32, &WorkPlanningConfig) -> Option<Result<T, WorkPlanningUsage>>
+            + Send
+            + Sync,
+    ) -> Result<T, WorkPlanningError> {
+        if let Some(limits) = limits {
+            limits.validate().map_err(WorkPlanningError::Store)?;
+            if self.config.call.max_output_tokens() >= limits.model_tokens {
+                return Err(WorkPlanningError::Capacity);
+            }
+        }
         let mut count = body.clone();
         let object = count.as_object_mut().ok_or(WorkPlanningError::Invalid)?;
         for field in [
@@ -120,6 +136,16 @@ impl OpenAiWorkPlanner {
                     .call
                     .planning_cost_ceiling(tokens, self.config.call.max_output_tokens())
                     .is_none_or(|cost| cost > self.config.max_cost)
+                || limits.is_some_and(|limits| {
+                    tokens
+                        .checked_add(self.config.call.max_output_tokens())
+                        .is_none_or(|total| total > limits.model_tokens)
+                        || self
+                            .config
+                            .call
+                            .planning_cost_ceiling(tokens, self.config.call.max_output_tokens())
+                            .is_none_or(|cost| cost > u64::from(limits.cost_micro_usd))
+                })
             {
                 return Err(WorkPlanningError::Capacity);
             }
@@ -141,7 +167,9 @@ impl OpenAiWorkPlanner {
                 .post(self.transport.endpoints.openai.clone(), body, MAX_BODY)
                 .await
                 .map_err(|_| WorkPlanningError::ProviderOutcomeUnknown)?;
-            let result = self.decode(&response, tokens);
+            let result = decode(&response, tokens, &self.config)
+                .ok_or(WorkPlanningError::ProviderOutcomeUnknown)?
+                .map_err(WorkPlanningError::ProviderRefused);
             if result.is_ok() || matches!(result, Err(WorkPlanningError::ProviderRefused(_))) {
                 slot.mark_completed();
             }
@@ -166,6 +194,15 @@ impl OpenAiWorkPlanner {
     fn request(&self, input: &WorkPlanningDisclosure) -> Result<Value, WorkPlanningError> {
         let context =
             serde_json::to_value(input.context()).map_err(|_| WorkPlanningError::Invalid)?;
+        self.structured_request(context, INSTRUCTIONS, "work_planning", schema())
+    }
+    pub(super) fn structured_request(
+        &self,
+        context: Value,
+        instructions: &'static str,
+        name: &'static str,
+        schema: Value,
+    ) -> Result<Value, WorkPlanningError> {
         if contains_secret(&context) {
             return Err(WorkPlanningError::Privacy);
         }
@@ -174,9 +211,9 @@ impl OpenAiWorkPlanner {
             return Err(WorkPlanningError::Capacity);
         }
         Ok(json!({
-            "model": self.config.call.model().as_str(), "instructions": INSTRUCTIONS,
+            "model": self.config.call.model().as_str(), "instructions": instructions,
             "input": [{"role":"user", "content": content}],
-            "text":{"format":{"type":"json_schema","name":"work_planning","strict":true,"schema":schema()}},
+            "text":{"format":{"type":"json_schema","name":name,"strict":true,"schema":schema}},
             "tools":[], "tool_choice":"none", "parallel_tool_calls":false,
             "truncation":"disabled", "stream":false,"store":false,"service_tier":"default",
             "reasoning":{"effort":self.config.call.reasoning_effort().as_openai_str()},
@@ -219,15 +256,6 @@ impl OpenAiWorkPlanner {
         }
         Ok(bytes)
     }
-    fn decode(
-        &self,
-        bytes: &[u8],
-        reserved_input: u32,
-    ) -> Result<WorkPlanningResult, WorkPlanningError> {
-        decode(bytes, reserved_input, &self.config)
-            .ok_or(WorkPlanningError::ProviderOutcomeUnknown)?
-            .map_err(WorkPlanningError::ProviderRefused)
-    }
 }
 impl WorkPlanningProvider for OpenAiWorkPlanner {
     fn propose(&self, input: WorkPlanningDisclosure) -> WorkPlanningFuture<'_> {
@@ -249,7 +277,7 @@ fn contains_secret(value: &Value) -> bool {
         _ => false,
     }
 }
-fn object(properties: Value) -> Value {
+pub(super) fn object(properties: Value) -> Value {
     let required: Vec<_> = properties
         .as_object()
         .into_iter()
@@ -331,6 +359,22 @@ fn decode(
     reserved: u32,
     config: &WorkPlanningConfig,
 ) -> Option<Result<WorkPlanningResult, WorkPlanningUsage>> {
+    let (text, usage) = match decode_response(bytes, reserved, config)? {
+        Ok(result) => result,
+        Err(usage) => return Some(Err(usage)),
+    };
+    let envelope: Envelope = serde_json::from_str(&text).ok()?;
+    envelope.proposal.validate().ok()?;
+    Some(Ok(WorkPlanningResult {
+        proposal: envelope.proposal,
+        usage,
+    }))
+}
+pub(super) fn decode_response(
+    bytes: &[u8],
+    reserved: u32,
+    config: &WorkPlanningConfig,
+) -> Option<Result<(String, WorkPlanningUsage), WorkPlanningUsage>> {
     if bytes.len() > MAX_BODY as usize {
         return None;
     }
@@ -407,12 +451,7 @@ fn decode(
     if refused {
         return Some(Err(usage));
     }
-    let envelope: Envelope = serde_json::from_str(&text?).ok()?;
-    envelope.proposal.validate().ok()?;
-    Some(Ok(WorkPlanningResult {
-        proposal: envelope.proposal,
-        usage,
-    }))
+    Some(Ok((text?, usage)))
 }
 
 #[cfg(test)]

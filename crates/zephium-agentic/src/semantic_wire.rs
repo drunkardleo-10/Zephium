@@ -779,7 +779,7 @@ impl PageDialogSample {
         }
         for keys in [&self.before, &self.after] {
             if keys.len() > 16
-                || keys.iter().any(|key| *key == 0)
+                || keys.contains(&0)
                 || keys.iter().copied().collect::<BTreeSet<_>>().len() != keys.len()
             {
                 return Err(SemanticDecodeError::NodeIdentity);

@@ -5457,7 +5457,9 @@ static NAVIGATION_ACTIONS_EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolD
             {
                 "click" => string_enum(&["read", "local_write"]),
                 "fill" | "select" => string_enum(&["local_write"]),
-                _ => unreachable!("fixed snapshot action kinds"),
+                // Refuse the whole tool profile if a future schema adds an
+                // action whose effect contract has not been reviewed here.
+                _ => return Vec::new(),
             };
         }
         tools.push(BrowserToolDefinition {

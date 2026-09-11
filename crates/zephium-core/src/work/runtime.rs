@@ -60,6 +60,11 @@ pub enum WorkCapability {
     PublicBrowse {
         scope: WorkBrowseScope,
     },
+    /// A primary agent may assign pre-approved children within this envelope
+    /// and synthesize their results. This is not a direct browser/action port.
+    Coordinate {
+        scope: WorkBrowseScope,
+    },
     /// Structured handoffs from completed plan dependencies only.
     Synthesize,
 }
@@ -126,11 +131,13 @@ impl WorkExecutionSpec {
                     .find(|n| n.node == parent)
                     .ok_or(WorkError::Invalid)?;
                 if parent.node == node.node
+                    || !matches!(parent.capability, WorkCapability::Coordinate { .. })
                     || !node.capability.is_subset_of(&parent.capability)
                     || node.limits.model_tokens > parent.limits.model_tokens
                     || node.limits.cost_micro_usd > parent.limits.cost_micro_usd
                     || node.limits.operations > parent.limits.operations
                     || node.limits.timeout_seconds > parent.limits.timeout_seconds
+                    || node.limits.max_workers > parent.limits.max_workers
                 {
                     return Err(WorkError::Invalid);
                 }
@@ -161,12 +168,35 @@ impl WorkExecutionSpec {
                 return Err(WorkError::Invalid);
             }
         }
-        Ok(())
+        // Completion waits for both data dependencies and delegated children.
+        // Validate their combined graph, including cross-branch deadlocks that
+        // neither independently acyclic graph would reveal.
+        let mut complete = BTreeSet::new();
+        loop {
+            let before = complete.len();
+            for node in &plan.draft.nodes {
+                if node.dependencies.iter().all(|id| complete.contains(id))
+                    && self
+                        .nodes
+                        .iter()
+                        .filter(|entry| entry.parent == Some(node.id))
+                        .all(|child| complete.contains(&child.node))
+                {
+                    complete.insert(node.id);
+                }
+            }
+            if complete.len() == self.nodes.len() {
+                return Ok(());
+            }
+            if before == complete.len() {
+                return Err(WorkError::Invalid);
+            }
+        }
     }
 }
 impl WorkCapability {
     pub fn validate(&self) -> Result<(), WorkError> {
-        if let Self::PublicBrowse { scope } = self {
+        if let Self::PublicBrowse { scope } | Self::Coordinate { scope } = self {
             let start = validate_public_url(&scope.start_url)?;
             if scope.routes.is_empty()
                 || scope.routes.len() > 8
@@ -201,8 +231,12 @@ impl WorkCapability {
     }
     pub fn is_subset_of(&self, parent: &Self) -> bool {
         match (self, parent) {
-            (Self::Synthesize, Self::Synthesize) => true,
-            (Self::PublicBrowse { scope: child }, Self::PublicBrowse { scope: parent }) => {
+            (Self::Synthesize, Self::Synthesize | Self::Coordinate { .. }) => true,
+            (
+                Self::PublicBrowse { scope: child },
+                Self::PublicBrowse { scope: parent } | Self::Coordinate { scope: parent },
+            )
+            | (Self::Coordinate { scope: child }, Self::Coordinate { scope: parent }) => {
                 child.max_hops <= parent.max_hops
                     && child.routes.iter().all(|route| {
                         parent.routes.iter().any(|p| {
@@ -352,6 +386,9 @@ impl WorkExecutionFact {
             // execution; it never silently renews the approved node allocation.
             if !attempts.insert(attempt.id)
                 || !nodes.insert(attempt.node)
+                || node
+                    .parent
+                    .is_some_and(|parent| !self.attempts.iter().any(|a| a.node == parent))
                 || attempt.usage.is_some_and(|u| !u.within(node.limits))
                 || matches!(
                     attempt.status,
@@ -367,11 +404,23 @@ impl WorkExecutionFact {
                     .iter()
                     .find(|node| node.id == attempt.node)
                     .ok_or(WorkError::Invalid)?;
-                if !node_plan.outputs.iter().all(|output| {
-                    self.artifacts.iter().any(|artifact| {
-                        artifact.attempt == attempt.id && artifact.output == output.name
+                let succeeded = |id| {
+                    self.attempts
+                        .iter()
+                        .any(|a| a.node == id && a.status == WorkAttemptStatus::Succeeded)
+                };
+                if !node_plan.dependencies.iter().all(|id| succeeded(*id))
+                    || self
+                        .spec
+                        .nodes
+                        .iter()
+                        .any(|entry| entry.parent == Some(attempt.node) && !succeeded(entry.node))
+                    || !node_plan.outputs.iter().all(|output| {
+                        self.artifacts.iter().any(|artifact| {
+                            artifact.attempt == attempt.id && artifact.output == output.name
+                        })
                     })
-                }) {
+                {
                     return Err(WorkError::Invalid);
                 }
             }
@@ -470,6 +519,14 @@ pub enum WorkRuntimeUpdate {
         execution: WorkExecutionId,
         attempt: WorkAttemptId,
         node: WorkPlanNodeId,
+    },
+    /// Host-only join to an original live parent attempt. The application also
+    /// requires its move-only supervisor turn; IPC cannot construct this intent.
+    BeginChild {
+        execution: WorkExecutionId,
+        attempt: WorkAttemptId,
+        node: WorkPlanNodeId,
+        parent: WorkAttemptId,
     },
     Settle {
         execution: WorkExecutionId,

@@ -1,5 +1,79 @@
 use super::*;
 
+#[test]
+fn coordination_rejects_combined_completion_deadlocks_and_scope_widening() {
+    use super::runtime::*;
+    let mut graph = draft();
+    graph.nodes = (1..=4)
+        .map(|id| {
+            let mut node = graph.nodes[0].clone();
+            node.id = id.into();
+            node
+        })
+        .collect();
+    let planned = work()
+        .apply(
+            WorkRevision::INITIAL,
+            WorkEdit::ReplaceDraft { draft: graph },
+            WorkAuthor::User,
+        )
+        .unwrap()
+        .0;
+    let mut plan = planned.plan.unwrap();
+    let limits = WorkExecutionLimits {
+        model_tokens: 1000,
+        cost_micro_usd: 1000,
+        operations: 2,
+        timeout_seconds: 60,
+        max_workers: 2,
+    };
+    let scope = WorkBrowseScope {
+        start_url: "https://example.test/".into(),
+        routes: vec![WorkBrowseRoute {
+            origin: "https://example.test".into(),
+            path_prefix: "/".into(),
+        }],
+        max_hops: 1,
+    };
+    let mut spec = WorkExecutionSpec {
+        plan_revision: plan.revision,
+        limits: WorkExecutionLimits {
+            model_tokens: 4000,
+            cost_micro_usd: 4000,
+            operations: 8,
+            ..limits
+        },
+        nodes: (1..=4)
+            .map(|id| WorkNodeExecutionSpec {
+                node: id.into(),
+                parent: match id {
+                    2 => Some(1.into()),
+                    4 => Some(3.into()),
+                    _ => None,
+                },
+                capability: WorkCapability::Coordinate {
+                    scope: scope.clone(),
+                },
+                limits,
+            })
+            .collect(),
+    };
+    assert!(spec.validate(&plan).is_ok());
+    plan.draft.nodes[1].dependencies = vec![3.into()];
+    plan.draft.nodes[3].dependencies = vec![1.into()];
+    assert!(plan.draft.validate().is_ok());
+    assert_eq!(spec.validate(&plan), Err(WorkError::Invalid));
+    plan.draft.nodes[1].dependencies.clear();
+    plan.draft.nodes[3].dependencies.clear();
+    spec.nodes[1].capability = WorkCapability::PublicBrowse {
+        scope: WorkBrowseScope {
+            max_hops: 2,
+            ..scope
+        },
+    };
+    assert_eq!(spec.validate(&plan), Err(WorkError::Invalid));
+}
+
 fn draft() -> WorkPlanDraft {
     WorkPlanDraft {
         id: 2.into(),

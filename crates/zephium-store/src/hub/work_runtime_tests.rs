@@ -1,6 +1,179 @@
 use super::super::tests::{create, draft, edit, session};
 use super::*;
 
+#[test]
+fn coordination_requires_exact_live_parent_and_complete_children() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&session()).unwrap();
+    let initial = create(&mut hub);
+    let mut graph = draft();
+    graph.nodes[0].outputs[0].review = WorkOutputReview::UserAcceptance;
+    let root = graph.nodes[0].id;
+    let mut child = graph.nodes[0].clone();
+    child.id = 13.into();
+    graph.nodes[0].dependencies = vec![child.id];
+    graph.nodes.push(child);
+    let planned = edit(&mut hub, &initial, WorkEdit::ReplaceDraft { draft: graph }).unwrap();
+    let mut execution_spec = spec(planned.plan.as_ref().unwrap());
+    execution_spec.limits.max_workers = 2;
+    execution_spec.limits.model_tokens *= 2;
+    execution_spec.limits.cost_micro_usd *= 2;
+    execution_spec.limits.operations *= 2;
+    execution_spec.nodes[0].capability = WorkCapability::Coordinate {
+        scope: WorkBrowseScope {
+            start_url: "https://example.test/".into(),
+            routes: vec![WorkBrowseRoute {
+                origin: "https://example.test".into(),
+                path_prefix: "/".into(),
+            }],
+            max_hops: 1,
+        },
+    };
+    execution_spec.nodes[1].parent = Some(root);
+    let WorkReply::RuntimeCommand { receipt, .. } = hub
+        .work_document(
+            planned.profile,
+            WorkRequest::RuntimeCommand {
+                id: planned.id,
+                expected: planned.revision,
+                command: 100.into(),
+                intent: WorkRuntimeIntent::Approve {
+                    spec: execution_spec,
+                },
+            },
+        )
+        .unwrap()
+    else {
+        panic!()
+    };
+    let execution = receipt.execution;
+    let update = |hub: &mut Hub, update| {
+        let state = read_runtime(hub, &planned);
+        hub.work_document(
+            planned.profile,
+            WorkRequest::RuntimeUpdate {
+                id: planned.id,
+                expected: state.work.revision,
+                update,
+            },
+        )
+    };
+    // Neither matching metadata nor a child-only Begin admits a child.
+    assert!(matches!(
+        update(
+            &mut hub,
+            WorkRuntimeUpdate::BeginChild {
+                execution,
+                attempt: 501.into(),
+                node: 13.into(),
+                parent: 500.into()
+            }
+        ),
+        Err(WorkError::Unavailable)
+    ));
+    assert!(matches!(
+        update(
+            &mut hub,
+            WorkRuntimeUpdate::Begin {
+                execution,
+                attempt: 501.into(),
+                node: 13.into()
+            }
+        ),
+        Err(WorkError::Unavailable)
+    ));
+    update(
+        &mut hub,
+        WorkRuntimeUpdate::Begin {
+            execution,
+            attempt: 500.into(),
+            node: root,
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        update(
+            &mut hub,
+            WorkRuntimeUpdate::BeginChild {
+                execution,
+                attempt: 501.into(),
+                node: 13.into(),
+                parent: 999.into()
+            }
+        ),
+        Err(WorkError::Unavailable)
+    ));
+    let artifact = |node, attempt| artifact::WorkArtifactV1 {
+        version: 1,
+        id: WorkArtifactId::generate(),
+        execution,
+        node,
+        attempt,
+        output: "sources".into(),
+        title: "Proposed checks".into(),
+        data: artifact::WorkArtifactDataV1::Document {
+            paragraphs: vec!["Review release changes".into()],
+        },
+        evidence: vec![],
+        review: WorkOutputReview::UserAcceptance,
+        presentation: artifact::WorkArtifactPresentationV1::Automatic,
+    };
+    assert!(matches!(
+        update(
+            &mut hub,
+            WorkRuntimeUpdate::Settle {
+                execution,
+                attempt: 500.into(),
+                status: WorkAttemptStatus::Succeeded,
+                usage: Some(WorkUsage::default()),
+                artifacts: vec![artifact(root, 500.into())]
+            }
+        ),
+        Err(WorkError::Conflict)
+    ));
+    update(
+        &mut hub,
+        WorkRuntimeUpdate::BeginChild {
+            execution,
+            attempt: 501.into(),
+            node: 13.into(),
+            parent: 500.into(),
+        },
+    )
+    .unwrap();
+    update(
+        &mut hub,
+        WorkRuntimeUpdate::Settle {
+            execution,
+            attempt: 501.into(),
+            status: WorkAttemptStatus::Succeeded,
+            usage: Some(WorkUsage::default()),
+            artifacts: vec![artifact(13.into(), 501.into())],
+        },
+    )
+    .unwrap();
+    update(
+        &mut hub,
+        WorkRuntimeUpdate::Settle {
+            execution,
+            attempt: 500.into(),
+            status: WorkAttemptStatus::Succeeded,
+            usage: Some(WorkUsage::default()),
+            artifacts: vec![artifact(root, 500.into())],
+        },
+    )
+    .unwrap();
+    let state = read_runtime(&mut hub, &planned);
+    assert_eq!(state.executions[0].status, WorkExecutionStatus::NeedsReview);
+    // Durable decoding independently refuses an impossible parent success.
+    let mut forged = state.executions[0].clone();
+    forged.attempts.pop();
+    forged.artifacts.retain(|a| a.node == root);
+    assert!(forged
+        .validate(planned.plan.as_ref().unwrap(), state.work.revision)
+        .is_err());
+}
+
 fn spec(plan: &WorkPlanRevision) -> WorkExecutionSpec {
     let limits = WorkExecutionLimits {
         model_tokens: 8000,

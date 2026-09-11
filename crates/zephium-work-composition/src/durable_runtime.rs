@@ -51,6 +51,19 @@ impl MacosWorkComposition {
         attempt: WorkNodeAttempt,
         settings: WorkBrowserAdapterSettings,
     ) -> Result<WorkRuntimeProjection, WorkError> {
+        self.execute_public_node_owned(shell, attempt, settings)
+            .await
+            .map(WorkNodeSettlement::into_projection)
+    }
+
+    /// Returns the original publication receipt to an owning orchestration
+    /// parent; loading a historical projection cannot create this receipt.
+    pub async fn execute_public_node_owned(
+        &self,
+        shell: &CallbackHandle,
+        attempt: WorkNodeAttempt,
+        settings: WorkBrowserAdapterSettings,
+    ) -> Result<WorkNodeSettlement, WorkError> {
         #[cfg(feature = "public-qualification")]
         let diagnostic = settings.diagnostic;
         #[cfg(feature = "public-qualification")]
@@ -127,7 +140,7 @@ impl MacosWorkComposition {
             match snapshot.phase {
                 RetainedWorkPhase::Refused => {
                     return attempt
-                        .settle(WorkAdapterResult {
+                        .settle_owned(WorkAdapterResult {
                             status: WorkAttemptStatus::Failed,
                             usage: Some(WorkUsage::default()),
                             artifacts: vec![],
@@ -195,7 +208,7 @@ impl MacosWorkComposition {
                     _ => return Err(WorkError::OutcomeUnknown),
                 };
                 return attempt
-                    .settle(WorkAdapterResult {
+                    .settle_owned(WorkAdapterResult {
                         status,
                         usage,
                         artifacts,

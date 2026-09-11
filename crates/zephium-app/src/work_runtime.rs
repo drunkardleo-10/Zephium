@@ -49,6 +49,53 @@ pub struct WorkNodeAttempt {
     _permit: Permit,
 }
 impl WorkNodeAttempt {
+    pub(crate) async fn runtime_projection(&self) -> Result<WorkRuntimeProjection, WorkError> {
+        read(&self.handle, self.profile, self.work).await
+    }
+
+    pub(crate) async fn begin_child(
+        &self,
+        node: WorkPlanNodeId,
+    ) -> Result<WorkNodeAttempt, WorkError> {
+        if self.cancellation_requested().await? || Instant::now() >= self.deadline {
+            return Err(WorkError::Unavailable);
+        }
+        let state = self.runtime_projection().await?;
+        WorkRuntimeService::new(self.handle.clone())
+            .begin(
+                self.profile,
+                self.work,
+                state.work.revision,
+                self.execution,
+                node,
+                Some((self.attempt, self.deadline)),
+            )
+            .await
+    }
+
+    pub(crate) fn retain_child_artifacts(
+        &mut self,
+        artifacts: Vec<WorkArtifactV1>,
+    ) -> Result<(), WorkError> {
+        let mut combined = self.dependencies.clone();
+        for artifact in artifacts {
+            if self.node.dependencies.contains(&artifact.node) {
+                if combined.iter().any(|a| a.id == artifact.id) {
+                    return Err(WorkError::Invalid);
+                }
+                combined.push(artifact);
+            }
+        }
+        if serde_json::to_vec(&combined)
+            .map_err(|_| WorkError::Invalid)?
+            .len()
+            > 6 * 1024
+        {
+            return Err(WorkError::Capacity);
+        }
+        self.dependencies = combined;
+        Ok(())
+    }
     /// Pure observation; retains neither the attempt nor a browser/resource.
     pub fn observer(&self) -> WorkAttemptObserver {
         WorkAttemptObserver(self.progress.clone())
@@ -94,6 +141,25 @@ impl WorkNodeAttempt {
         self.deadline
     }
 
+    pub(crate) async fn read_evidence(
+        &self,
+        link: WorkEvidenceLink,
+    ) -> Result<WorkEvidencePreviewV1, WorkError> {
+        match request(
+            &self.handle,
+            self.profile,
+            WorkRequest::ReadEvidence {
+                id: self.work,
+                link,
+            },
+        )
+        .await?
+        {
+            WorkReply::Evidence(preview) => Ok(preview),
+            _ => Err(WorkError::Invalid),
+        }
+    }
+
     /// Authoritative cancellation comes from durable intent. Delayed transient
     /// signals cannot cancel or restart an attempt. Owner changes fail closed.
     pub async fn cancellation_requested(&self) -> Result<bool, WorkError> {
@@ -105,16 +171,33 @@ impl WorkNodeAttempt {
             .ok_or(WorkError::NotFound)?;
         Ok(state.interrupted.contains(&self.execution)
             || execution.status == WorkExecutionStatus::CancelRequested
-            || execution.status.terminal())
+            || execution.status.terminal()
+            || execution.attempts.iter().any(|attempt| {
+                !matches!(
+                    attempt.status,
+                    WorkAttemptStatus::Running | WorkAttemptStatus::Succeeded
+                )
+            }))
     }
 
     /// Called by a trusted typed adapter only after its original worker and
     /// required resource ownership have settled. Unknown outcomes have no
     /// apparent zero-cost refund. User IPC cannot call this operation.
     pub async fn settle(
-        mut self,
+        self,
         result: WorkAdapterResult,
     ) -> Result<WorkRuntimeProjection, WorkError> {
+        self.settle_owned(result)
+            .await
+            .map(WorkNodeSettlement::into_projection)
+    }
+
+    /// Preserve the original acknowledged publication for an owning parent.
+    /// Reads and decoded projections cannot construct this move-only receipt.
+    pub async fn settle_owned(
+        mut self,
+        result: WorkAdapterResult,
+    ) -> Result<WorkNodeSettlement, WorkError> {
         if result.status == WorkAttemptStatus::Running {
             return Err(WorkError::Invalid);
         }
@@ -169,7 +252,14 @@ impl WorkNodeAttempt {
             {
                 Ok(WorkReply::Runtime(state)) => {
                     self.settled = true;
-                    return Ok(*state);
+                    return Ok(WorkNodeSettlement {
+                        profile: self.profile,
+                        work: self.work,
+                        execution: self.execution,
+                        attempt: self.attempt,
+                        node: self.node.id,
+                        projection: *state,
+                    });
                 }
                 Err(WorkError::Conflict) => continue,
                 Err(error) => return Err(error),
@@ -177,6 +267,42 @@ impl WorkNodeAttempt {
             }
         }
         Err(WorkError::Conflict)
+    }
+}
+
+/// Fresh result of the original attempt's Store settlement callback. This is
+/// not an execution capability, and serialization of its projection loses the
+/// publication ownership required by the orchestration handoff.
+#[must_use]
+pub struct WorkNodeSettlement {
+    profile: ProfileId,
+    work: WorkId,
+    execution: WorkExecutionId,
+    attempt: WorkAttemptId,
+    node: WorkPlanNodeId,
+    projection: WorkRuntimeProjection,
+}
+impl WorkNodeSettlement {
+    pub fn profile(&self) -> ProfileId {
+        self.profile
+    }
+    pub fn work(&self) -> WorkId {
+        self.work
+    }
+    pub fn execution(&self) -> WorkExecutionId {
+        self.execution
+    }
+    pub fn attempt(&self) -> WorkAttemptId {
+        self.attempt
+    }
+    pub fn node(&self) -> WorkPlanNodeId {
+        self.node
+    }
+    pub fn projection(&self) -> &WorkRuntimeProjection {
+        &self.projection
+    }
+    pub fn into_projection(self) -> WorkRuntimeProjection {
+        self.projection
     }
 }
 #[derive(Clone)]
@@ -261,6 +387,20 @@ impl WorkRuntimeService {
         execution: WorkExecutionId,
         node: WorkPlanNodeId,
     ) -> Result<WorkNodeAttempt, WorkError> {
+        self.begin(profile, work, expected, execution, node, None)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn begin(
+        &self,
+        profile: ProfileId,
+        work: WorkId,
+        expected: WorkRevision,
+        execution: WorkExecutionId,
+        node: WorkPlanNodeId,
+        parent: Option<(WorkAttemptId, Instant)>,
+    ) -> Result<WorkNodeAttempt, WorkError> {
         let permit = Permit::acquire((profile, work, node))?;
         let attempt = WorkAttemptId::generate();
         let mut pending = PendingBegin {
@@ -278,10 +418,18 @@ impl WorkRuntimeService {
             WorkRequest::RuntimeUpdate {
                 id: work,
                 expected,
-                update: WorkRuntimeUpdate::Begin {
-                    execution,
-                    attempt,
-                    node,
+                update: match parent {
+                    Some((parent, _)) => WorkRuntimeUpdate::BeginChild {
+                        execution,
+                        attempt,
+                        node,
+                        parent,
+                    },
+                    None => WorkRuntimeUpdate::Begin {
+                        execution,
+                        attempt,
+                        node,
+                    },
                 },
             },
         )
@@ -330,6 +478,9 @@ impl WorkRuntimeService {
         let deadline = submitted
             + Duration::from_millis(u64::from(remaining_millis))
                 .min(Duration::from_secs(u64::from(spec.limits.timeout_seconds)));
+        let deadline = parent.map_or(deadline, |(_, parent_deadline)| {
+            deadline.min(parent_deadline)
+        });
         let owned = WorkNodeAttempt {
             basis_revision: projection.work.revision,
             progress: Arc::new(Mutex::new(None)),

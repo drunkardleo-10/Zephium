@@ -8,6 +8,7 @@ pub mod planning;
 pub mod port;
 pub mod proposal;
 pub mod runtime;
+pub mod synthesis;
 #[cfg(test)]
 mod tests;
 use crate::ids::ProfileId;

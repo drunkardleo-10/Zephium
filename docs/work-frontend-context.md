@@ -9,9 +9,10 @@ or a declaration that Work is ready for integration.
 **Yes: initial V1 Rust-owned Work projection, execution command, signal, artifact,
 and evidence types exist, with two JSON fixtures.** They are in the runtime
 working tree at `/Users/crynta/Dev/Zephium`. At the time of this note, that tree is
-on `main`, HEAD `1588591` (`Add bounded model planning to durable Work`), with the
-new execution implementation still uncommitted. That HEAD alone does not contain
-the new contracts. There is no handoff branch to pull yet.
+on `main`. Commit `fd2d43d` (`Add durable Work execution and native browser
+artifacts`) contains the initial contracts. The following synthesis and direct
+primary/child extension is being verified in the runtime working tree. There is
+no handoff branch to pull yet.
 
 Continue frontend foundation and Work presentation work in your existing stream.
 The runtime agent will keep implementing here. The user will push the frontend
@@ -263,6 +264,11 @@ Capabilities currently have these wire forms:
     max_hops
 } }
 { kind: "synthesize" }
+{ kind: "coordinate", scope: {
+    start_url,
+    routes: [{ origin, path_prefix }],
+    max_hops
+} }
 ```
 
 Public browsing scopes use exact HTTPS origins and bounded path prefixes.
@@ -271,11 +277,20 @@ scope and limits; it must not infer permissions from the objective or URLs in
 artifacts. Rust validates coverage, bounds, and non-widening relationships.
 
 The `parent` field describes a direct delegation relationship independently of
-dependencies. Its structure is validated, but actual parent/child execution is
-still under implementation: the current standalone Begin path refuses child
-nodes. Likewise, `synthesize` is a declared capability without a general model
-executor yet. The checked-in approval fixture uses `synthesize` to exercise the
-contract; it does not demonstrate a working synthesis workflow.
+dependencies. A parent must have `coordinate` capability. Its children cannot
+widen its approved scope or limits. Rust validates the combined dependency and
+parent-completion graph to reject cycles. The original live coordinator can
+admit direct children; standalone Begin still refuses them. A persisted parent
+ID never creates live authority. The current application driver supports one
+primary and direct children, with host-selected approved dispatch order.
+
+`synthesize` now has a bounded model executor that produces typed artifacts from
+approved dependency data. A real checklist run passed artifact validation and
+Store reopen. The coordinator uses the same executor for the primary's final
+output after original child publication receipts arrive. These move-only
+receipts are private runtime ownership, not renderer values or restart tokens.
+The provider's internal structured-output encoding does not change the flat
+`data: { kind, ... }` artifact contract below.
 
 ## Semantic artifacts
 
@@ -433,13 +448,29 @@ proves that public-browser vertical only. The local ignored report is
 `target/work-runtime-proof/public-research.json`; it is not a committed frontend
 fixture or a release qualification of the whole runtime.
 
-Runtime work continues on genuine primary/child orchestration and cancellation,
-compact selected decision/resource assignments and structured handoffs, general
-synthesis/artifact production, consequential-effect approval and settlement,
-user acceptance/editing contracts, durable planning/model accounting, and broader
-failure-path verification. The native browser path currently requires original
-foreground ownership and should not be presented as background multi-browser
-worker execution. The broader regression checkpoint is not fully green yet.
+The runtime tree also implements direct primary/child ownership through the
+existing orchestration core, exact fresh publication joins, bounded dependency
+handoffs, and model synthesis. Deterministic tests cover successful child-to-primary
+production and Store reopen, missing/unknown children, receipt substitution,
+duplicate dispatch and cancellation. A real standalone synthesis run produced
+five incomplete release-checklist items, retained conservative usage, and reopened
+its artifact from Store (`target/work-runtime-proof/synthesis.json`). Public
+qualification explicitly enables provider response storage; normal requests use
+`store: false`.
+
+Remaining runtime work includes dynamic primary decisions, selected decision and
+resource assignments, deeper/parallel worker execution, consequential-effect
+approval and settlement, user acceptance/editing, durable planning/model-call
+accounting, and native failure-path qualification. The native browser path
+requires original foreground ownership and should not be presented as background
+multi-browser execution. The combined native worker/primary synthesis qualifier
+is under verification. Its first run hit the existing browser visit limit and
+then failed to drain native recovery; no combined success is claimed. The
+standalone successes do not establish that path. A second run preserved an
+accounting failure as `interrupted`: primary failed without a model call, child
+outcome unknown, no artifacts. The complete runtime regression checkpoint passed
+1,149 tests (four opt-in qualifications ignored), plus nine provider boundary
+tests; native accounting and failure cleanup remain separate qualification gaps.
 
 At integration, we will reconcile the frontend stream with the then-current Rust
 contracts, generate the Work TypeScript types, finish versioned authoring and

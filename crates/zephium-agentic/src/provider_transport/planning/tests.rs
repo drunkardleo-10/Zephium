@@ -208,6 +208,111 @@ fn planner(transport: AgentProviderTransport) -> OpenAiWorkPlanner {
     )
     .unwrap()
 }
+
+fn synthesis_disclosure(tokens: u32) -> zephium_core::work::synthesis::WorkSynthesisDisclosure {
+    use zephium_core::work::{runtime::*, synthesis::*, *};
+    WorkSynthesisDisclosure::try_new(
+        &WorkPlanNode {
+            id: 1.into(),
+            objective: "Prepare a release checklist for review".into(),
+            dependencies: vec![],
+            outputs: vec![WorkExpectedOutput {
+                name: "checklist".into(),
+                description: "Suggested release checks".into(),
+                review: WorkOutputReview::UserAcceptance,
+            }],
+        },
+        &[],
+        &[],
+        WorkExecutionLimits {
+            model_tokens: tokens,
+            cost_micro_usd: 100_000,
+            operations: 2,
+            timeout_seconds: 170,
+            max_workers: 1,
+        },
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn synthesis_transport_counts_exact_context_and_returns_semantic_artifacts_without_authority()
+{
+    use zephium_core::work::{artifact::*, synthesis::*};
+    let mut terminal = response();
+    terminal["output"][1]["content"][0]["text"] = json!(
+        r#"{"artifacts":[{"output":0,"title":"Release checks","data":{"kind":"checklist","value":{"items":[{"text":"Review release notes","completed":false}]}},"evidence":[]}]}"#
+    );
+    let server = Server::new(vec![
+        br#"{"object":"response.input_tokens","input_tokens":100}"#.to_vec(),
+        serde_json::to_vec(&terminal).unwrap(),
+    ]);
+    let transport = server.transport();
+    let model = crate::OpenAiWorkSynthesizer::try_new(
+        transport.clone(),
+        AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "fixture-only-key".into(),
+        )
+        .unwrap(),
+        config(),
+    )
+    .unwrap();
+    let input = synthesis_disclosure(8000);
+    let result = model.produce(&input).await.unwrap();
+    assert_eq!(result.usage.model_tokens, 300);
+    assert_eq!(result.usage.operations, 1);
+    let artifacts = input.resolve(result.outputs).unwrap();
+    assert_eq!(artifacts[0].output, "checklist");
+    assert!(
+        matches!(&artifacts[0].data, WorkArtifactDataV1::Checklist { items } if items.len() == 1 && !items[0].completed)
+    );
+    let captured = server.thread.join().unwrap();
+    assert_eq!(captured.len(), 2);
+    assert!(captured[0].0.contains("/responses/input_tokens"));
+    let mut generation = captured[1].1.clone();
+    assert_eq!(generation["text"]["format"]["name"], "work_synthesis");
+    assert_eq!(generation["tools"], json!([]));
+    assert_eq!(generation["store"], false);
+    for field in [
+        "max_output_tokens",
+        "reasoning",
+        "service_tier",
+        "stream",
+        "store",
+    ] {
+        generation.as_object_mut().unwrap().remove(field);
+    }
+    assert_eq!(captured[0].1, generation);
+    assert_eq!(transport.snapshot().unwrap().active_attempts(), 0);
+    assert!(!transport.snapshot().unwrap().is_sealed());
+}
+
+#[tokio::test]
+async fn synthesis_counts_before_refusing_an_insufficient_original_node_budget() {
+    use zephium_core::work::{synthesis::*, WorkError};
+    let server = Server::new(vec![
+        br#"{"object":"response.input_tokens","input_tokens":100}"#.to_vec(),
+    ]);
+    let transport = server.transport();
+    let model = crate::OpenAiWorkSynthesizer::try_new(
+        transport.clone(),
+        AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "fixture-only-key".into(),
+        )
+        .unwrap(),
+        config(),
+    )
+    .unwrap();
+    assert!(matches!(
+        model.produce(&synthesis_disclosure(4100)).await,
+        Err(WorkSynthesisError::NotDispatched(WorkError::Capacity))
+    ));
+    assert_eq!(server.thread.join().unwrap().len(), 1);
+    assert_eq!(transport.snapshot().unwrap().active_attempts(), 0);
+    assert!(!transport.snapshot().unwrap().is_sealed());
+}
 #[tokio::test]
 async fn planning_transport_counts_identical_input_before_one_generation_and_drains() {
     let server = Server::new(vec![

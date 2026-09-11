@@ -1,0 +1,376 @@
+//! Bounded semantic production from explicitly selected dependency artifacts.
+//! Model-facing keys are local to one disclosure, never durable identities or
+//! permission to retrieve another source. Publication remains host-owned.
+use super::{artifact::*, runtime::*, *};
+use std::{future::Future, pin::Pin};
+
+pub const MAX_SYNTHESIS_CONTEXT_BYTES: usize = 32 * 1024;
+pub const MAX_SYNTHESIS_OUTPUT_BYTES: usize = 128 * 1024;
+
+#[derive(Serialize)]
+pub struct WorkSynthesisSource {
+    pub key: u16,
+    pub title: String,
+    pub data: WorkArtifactDataV1,
+    pub evidence: Vec<u16>,
+}
+#[derive(Serialize)]
+pub struct WorkSynthesisEvidence {
+    pub key: u16,
+    pub origin: String,
+    pub role: String,
+    pub text: String,
+    pub truncated: bool,
+}
+#[derive(Serialize)]
+pub struct WorkSynthesisContext {
+    pub objective: String,
+    pub outputs: Vec<WorkExpectedOutput>,
+    pub sources: Vec<WorkSynthesisSource>,
+    pub evidence: Vec<WorkSynthesisEvidence>,
+}
+
+/// Disclosure data, never an execution token. The application admits the exact
+/// dependency set and resolves historical evidence before calling this builder.
+pub struct WorkSynthesisDisclosure {
+    context: WorkSynthesisContext,
+    links: Vec<WorkEvidenceLink>,
+    limits: WorkExecutionLimits,
+}
+impl WorkSynthesisDisclosure {
+    pub fn try_new(
+        node: &WorkPlanNode,
+        sources: &[WorkArtifactV1],
+        previews: &[WorkEvidencePreviewV1],
+        limits: WorkExecutionLimits,
+    ) -> Result<Self, WorkError> {
+        limits.validate()?;
+        validate_text(&node.objective, MAX_WORK_TEXT_BYTES)?;
+        if sources.len() > MAX_WORK_ARTIFACTS || previews.len() > 64 {
+            return Err(WorkError::Capacity);
+        }
+        // Structural validation is not a semantic verification oracle. A model
+        // adapter cannot satisfy a mechanically verified completion contract.
+        if node.outputs.is_empty()
+            || node.outputs.len() > 8
+            || node
+                .outputs
+                .iter()
+                .any(|o| o.review == WorkOutputReview::Mechanical)
+        {
+            return Err(WorkError::Invalid);
+        }
+        let mut names = BTreeSet::new();
+        for output in &node.outputs {
+            validate_text(&output.name, 128)?;
+            validate_text(&output.description, MAX_WORK_TEXT_BYTES)?;
+            if !names.insert(&output.name) {
+                return Err(WorkError::Invalid);
+            }
+        }
+        let mut links = Vec::new();
+        let mut evidence = Vec::new();
+        for preview in previews {
+            if preview.version != 1
+                || preview.link.source_id == 0
+                || links.contains(&preview.link)
+                || !sources
+                    .iter()
+                    .any(|source| source.evidence.contains(&preview.link))
+            {
+                return Err(WorkError::Invalid);
+            }
+            validate_text(&preview.origin, 4096)?;
+            validate_text(&preview.role, 512)?;
+            validate_text(&preview.text, 8192)?;
+            links.push(preview.link.clone());
+            evidence.push(WorkSynthesisEvidence {
+                key: evidence.len() as u16,
+                origin: preview.origin.clone(),
+                role: preview.role.clone(),
+                text: preview.text.clone(),
+                truncated: preview.truncated,
+            });
+        }
+        let mut selected = Vec::new();
+        let mut identities = BTreeSet::new();
+        for source in sources {
+            source.validate()?;
+            if !identities.insert(source.id) {
+                return Err(WorkError::Invalid);
+            }
+            let citations = source
+                .evidence
+                .iter()
+                .map(|link| {
+                    links
+                        .iter()
+                        .position(|candidate| candidate == link)
+                        .map(|index| index as u16)
+                        .ok_or(WorkError::Invalid)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            selected.push(WorkSynthesisSource {
+                key: selected.len() as u16,
+                title: source.title.clone(),
+                data: source.data.clone(),
+                evidence: citations,
+            });
+        }
+        let context = WorkSynthesisContext {
+            objective: node.objective.clone(),
+            outputs: node.outputs.clone(),
+            sources: selected,
+            evidence,
+        };
+        let bytes = serde_json::to_vec(&context).map_err(|_| WorkError::Invalid)?;
+        if bytes.len() > MAX_SYNTHESIS_CONTEXT_BYTES {
+            return Err(WorkError::Capacity);
+        }
+        Ok(Self {
+            context,
+            links,
+            limits,
+        })
+    }
+    pub fn context(&self) -> &WorkSynthesisContext {
+        &self.context
+    }
+    pub fn limits(&self) -> WorkExecutionLimits {
+        self.limits
+    }
+    /// Resolve only exact local citation keys after the complete output contract
+    /// validates. No partial publication or model-chosen review state.
+    pub fn resolve(
+        &self,
+        outputs: Vec<WorkSynthesisOutput>,
+    ) -> Result<Vec<WorkSynthesisArtifact>, WorkError> {
+        if outputs.len() != self.context.outputs.len() {
+            return Err(WorkError::Invalid);
+        }
+        let mut used = BTreeSet::new();
+        let mut resolved = Vec::new();
+        let mut bytes = 0;
+        for output in outputs {
+            let expected = self
+                .context
+                .outputs
+                .get(usize::from(output.output))
+                .ok_or(WorkError::Invalid)?;
+            if !used.insert(output.output) || output.evidence.len() > 64 {
+                return Err(WorkError::Invalid);
+            }
+            validate_text(&output.title, 512)?;
+            output.data.validate()?;
+            bytes += serde_json::to_vec(&output)
+                .map_err(|_| WorkError::Invalid)?
+                .len();
+            if bytes > MAX_SYNTHESIS_OUTPUT_BYTES {
+                return Err(WorkError::Capacity);
+            }
+            let mut cited = BTreeSet::new();
+            let evidence = output
+                .evidence
+                .into_iter()
+                .map(|key| {
+                    if !cited.insert(key) {
+                        return Err(WorkError::Invalid);
+                    }
+                    self.links
+                        .get(usize::from(key))
+                        .cloned()
+                        .ok_or(WorkError::Invalid)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if expected.review == WorkOutputReview::SourceMappedNeedsReview && evidence.is_empty() {
+                return Err(WorkError::Invalid);
+            }
+            resolved.push(WorkSynthesisArtifact {
+                output: expected.name.clone(),
+                title: output.title,
+                data: output.data,
+                evidence,
+            });
+        }
+        Ok(resolved)
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkSynthesisOutput {
+    pub output: u8,
+    pub title: String,
+    pub data: WorkArtifactDataV1,
+    pub evidence: Vec<u16>,
+}
+pub struct WorkSynthesisArtifact {
+    pub output: String,
+    pub title: String,
+    pub data: WorkArtifactDataV1,
+    pub evidence: Vec<WorkEvidenceLink>,
+}
+pub struct WorkSynthesisResult {
+    pub outputs: Vec<WorkSynthesisOutput>,
+    pub usage: WorkUsage,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkSynthesisError {
+    /// No generation was dispatched.
+    NotDispatched(WorkError),
+    /// A provider terminal and its conservative charge were independently read.
+    Rejected(WorkUsage),
+    /// An accepted call may have been billed; never refund or auto-retry.
+    OutcomeUnknown,
+}
+pub type WorkSynthesisFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<WorkSynthesisResult, WorkSynthesisError>> + Send + 'a>>;
+pub trait WorkSynthesisProvider: Send + Sync {
+    fn produce<'a>(&'a self, input: &'a WorkSynthesisDisclosure) -> WorkSynthesisFuture<'a>;
+}
+impl std::fmt::Debug for WorkSynthesisDisclosure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WorkSynthesisDisclosure([redacted])")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn fixture() -> (
+        WorkPlanNode,
+        WorkArtifactV1,
+        WorkEvidencePreviewV1,
+        WorkExecutionLimits,
+    ) {
+        let link = WorkEvidenceLink {
+            extraction_id: 55.into(),
+            source_id: 3,
+        };
+        let node = WorkPlanNode {
+            id: 1.into(),
+            objective: "Summarize the dependency's evidence".into(),
+            dependencies: vec![2.into()],
+            outputs: vec![WorkExpectedOutput {
+                name: "summary".into(),
+                description: "A cited comparison".into(),
+                review: WorkOutputReview::SourceMappedNeedsReview,
+            }],
+        };
+        let source = WorkArtifactV1 {
+            version: 1,
+            id: 4.into(),
+            execution: 5.into(),
+            node: 2.into(),
+            attempt: 6.into(),
+            output: "research".into(),
+            title: "Original finding".into(),
+            data: WorkArtifactDataV1::Document {
+                paragraphs: vec!["A database uses shared memory.".into()],
+            },
+            evidence: vec![link.clone()],
+            review: WorkOutputReview::SourceMappedNeedsReview,
+            presentation: WorkArtifactPresentationV1::Automatic,
+        };
+        let preview = WorkEvidencePreviewV1 {
+            version: 1,
+            link,
+            origin: "https://sqlite.org".into(),
+            role: "paragraph".into(),
+            text: "Processes must be on the same host.".into(),
+            truncated: false,
+            source_bytes: "35".into(),
+        };
+        let limits = WorkExecutionLimits {
+            model_tokens: 8000,
+            cost_micro_usd: 10000,
+            operations: 2,
+            timeout_seconds: 60,
+            max_workers: 1,
+        };
+        (node, source, preview, limits)
+    }
+    fn output() -> WorkSynthesisOutput {
+        WorkSynthesisOutput {
+            output: 0,
+            title: "Summary".into(),
+            data: WorkArtifactDataV1::Document {
+                paragraphs: vec!["Shared memory requires the same host.".into()],
+            },
+            evidence: vec![0],
+        }
+    }
+    #[test]
+    fn synthesis_discloses_local_keys_and_resolves_only_original_sources() {
+        let (node, source, preview, limits) = fixture();
+        let input = WorkSynthesisDisclosure::try_new(
+            &node,
+            std::slice::from_ref(&source),
+            std::slice::from_ref(&preview),
+            limits,
+        )
+        .unwrap();
+        let wire = serde_json::to_string(input.context()).unwrap();
+        for id in [
+            source.id.to_string(),
+            source.execution.to_string(),
+            source.attempt.to_string(),
+            preview.link.extraction_id.to_string(),
+        ] {
+            assert!(!wire.contains(&id));
+        }
+        let resolved = input.resolve(vec![output()]).unwrap();
+        assert_eq!(resolved[0].output, "summary");
+        assert_eq!(resolved[0].evidence, vec![preview.link]);
+        for citations in [vec![], vec![1], vec![0, 0]] {
+            let mut invalid = output();
+            invalid.evidence = citations;
+            assert!(matches!(
+                input.resolve(vec![invalid]),
+                Err(WorkError::Invalid)
+            ));
+        }
+        assert!(matches!(
+            input.resolve(vec![output(), output()]),
+            Err(WorkError::Invalid)
+        ));
+        let mut invalid = output();
+        invalid.output = 1;
+        assert!(matches!(
+            input.resolve(vec![invalid]),
+            Err(WorkError::Invalid)
+        ));
+    }
+    #[test]
+    fn synthesis_rejects_unjoined_evidence_and_mechanical_verification() {
+        let (mut node, source, mut preview, limits) = fixture();
+        assert!(matches!(
+            WorkSynthesisDisclosure::try_new(&node, std::slice::from_ref(&source), &[], limits),
+            Err(WorkError::Invalid)
+        ));
+        preview.link.source_id = 4;
+        assert!(matches!(
+            WorkSynthesisDisclosure::try_new(&node, &[source], &[preview], limits),
+            Err(WorkError::Invalid)
+        ));
+        node.outputs[0].review = WorkOutputReview::Mechanical;
+        assert!(matches!(
+            WorkSynthesisDisclosure::try_new(&node, &[], &[], limits),
+            Err(WorkError::Invalid)
+        ));
+    }
+    #[test]
+    fn synthesis_rejects_renderer_code_as_an_extra_model_field() {
+        let mut value = serde_json::to_value(output()).unwrap();
+        value["html"] = serde_json::json!("<script>run()</script>");
+        assert!(serde_json::from_value::<WorkSynthesisOutput>(value).is_err());
+        let (node, mut source, preview, limits) = fixture();
+        source.data = WorkArtifactDataV1::Document {
+            paragraphs: vec!["\\".repeat(20_000)],
+        };
+        assert!(matches!(
+            WorkSynthesisDisclosure::try_new(&node, &[source], &[preview], limits),
+            Err(WorkError::Capacity)
+        ));
+    }
+}

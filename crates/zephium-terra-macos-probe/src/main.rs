@@ -67,6 +67,10 @@ fn main() {
         [argument] if argument == "--live-public-luna-work-actor-inspectable" => work_actor::run(),
         #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-public-durable-work" => work_durable::run(),
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-public-coordinated-work" => {
+            work_durable::run_coordinated()
+        }
         [argument] if argument == "--live-public-luna-work-application-inspectable" => {
             work_application::run()
         }

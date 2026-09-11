@@ -16,6 +16,8 @@
 
 /// Bounded objective/context planning over the shared fixed-endpoint transport.
 pub mod planning;
+/// Bounded semantic artifacts from admitted dependency context.
+pub mod synthesis;
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
