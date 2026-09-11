@@ -78,7 +78,7 @@ fn topology(manifest: &AgentRunManifest) -> AgentDelegationTopology {
 fn setup(count: u128) -> (AgentWorkOrchestration, AgentRunManifest) {
     let manifest = manifest(count, 100);
     let owner = AgentWorkOrchestration::try_new(
-        WorkId::from_raw(7),
+        WorkId::from(7),
         profile(),
         AgentSupervisorId::new(1).unwrap(),
         &manifest,
@@ -100,7 +100,7 @@ fn artifact(manifest: &AgentRunManifest, id: u128) -> AgentWorkOutputReference {
 
 fn evidence(manifest: &AgentRunManifest) -> AgentWorkOutputReference {
     AgentWorkOutputReference::Evidence(crate::agent_work_evidence::descriptor_for_test(
-        WorkId::from_raw(7),
+        WorkId::from(7),
         profile(),
         manifest.run(),
     ))
@@ -143,7 +143,7 @@ fn original_topology_and_single_profile_are_required_before_admission() {
     let changed = manifest(3, 101);
     assert!(matches!(
         AgentWorkOrchestration::try_new(
-            WorkId::from_raw(7),
+            WorkId::from(7),
             profile(),
             AgentSupervisorId::new(1).unwrap(),
             &changed,
@@ -153,7 +153,7 @@ fn original_topology_and_single_profile_are_required_before_admission() {
     ));
     assert!(matches!(
         AgentWorkOrchestration::try_new(
-            WorkId::from_raw(7),
+            WorkId::from(7),
             AgentWorkProfileId::from(2_u128),
             AgentSupervisorId::new(1).unwrap(),
             &good,
@@ -193,7 +193,7 @@ fn successful_child_output_is_exact_immutable_and_one_shot() {
         AgentSupervisorRuntimeError::DelegationMismatch.into()
     );
     let delivery = owner.take_child_output(&parent, node(2), tick(11)).unwrap();
-    assert_eq!(delivery.work(), WorkId::from_raw(7));
+    assert_eq!(delivery.work(), WorkId::from(7));
     assert_eq!(delivery.profile(), profile());
     assert_eq!(delivery.run(), manifest.run());
     assert_eq!(delivery.manifest(), manifest.id());
@@ -539,13 +539,13 @@ fn evidence_handoff_requires_original_work_profile_and_native_run() {
     let mut child = owner.start(node(2), attempt(2), tick(10)).unwrap();
     let descriptor = crate::agent_work_evidence::descriptor_for_test;
     for foreign in [
-        descriptor(WorkId::from_raw(8), profile(), manifest.run()),
+        descriptor(WorkId::from(8), profile(), manifest.run()),
         descriptor(
-            WorkId::from_raw(7),
+            WorkId::from(7),
             AgentWorkProfileId::from(2_u128),
             manifest.run(),
         ),
-        descriptor(WorkId::from_raw(7), profile(), ContextRunId::from_raw(9)),
+        descriptor(WorkId::from(7), profile(), ContextRunId::from_raw(9)),
     ] {
         let refusal = owner
             .complete(
@@ -562,7 +562,7 @@ fn evidence_handoff_requires_original_work_profile_and_native_run() {
         child = refusal.into_execution();
         assert_eq!(owner.checkpoint().unwrap().output_count(), 0);
     }
-    let evidence = descriptor(WorkId::from_raw(7), profile(), manifest.run());
+    let evidence = descriptor(WorkId::from(7), profile(), manifest.run());
     owner
         .complete(
             child,
@@ -591,7 +591,7 @@ fn evidence_handoff_requires_original_work_profile_and_native_run() {
 fn token_cannot_cross_work_owners_even_with_same_descriptive_supervisor_ids() {
     let (mut original, manifest) = setup(2);
     let mut other = AgentWorkOrchestration::try_new(
-        WorkId::from_raw(8),
+        WorkId::from(8),
         profile(),
         AgentSupervisorId::new(1).unwrap(),
         &manifest,
@@ -631,7 +631,7 @@ fn token_cannot_cross_work_owners_even_with_same_descriptive_supervisor_ids() {
 fn legacy_artifact_cannot_be_relabelled_under_two_work_owners_of_one_manifest() {
     let (mut first, manifest) = setup(2);
     let mut second = AgentWorkOrchestration::try_new(
-        WorkId::from_raw(8),
+        WorkId::from(8),
         profile(),
         AgentSupervisorId::new(2).unwrap(),
         &manifest,
@@ -640,8 +640,8 @@ fn legacy_artifact_cannot_be_relabelled_under_two_work_owners_of_one_manifest() 
     .unwrap();
     let unbound = artifact(&manifest, 1);
     for (owner, work) in [
-        (&mut first, WorkId::from_raw(7)),
-        (&mut second, WorkId::from_raw(8)),
+        (&mut first, WorkId::from(7)),
+        (&mut second, WorkId::from(8)),
     ] {
         let parent = owner.start(node(1), attempt(1), tick(10)).unwrap();
         owner.delegate(&parent, node(2), tick(10)).unwrap();

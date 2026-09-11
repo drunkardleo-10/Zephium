@@ -1620,7 +1620,7 @@ mod tests {
             ContextShutdownDispatch::AuditScheduled
         );
         let mut resources =
-            crate::WorkBrowserResources::new(crate::WorkId::from_raw(99), ProfileId::from(9));
+            crate::WorkBrowserResources::new(crate::WorkId::from(99), ProfileId::from(9));
         let resource_request = resources
             .construct(
                 crate::WorkBrowserResourceId::from_raw(100),

@@ -19,7 +19,7 @@ use crate::{
     MAX_PENDING_NATIVE_CONTEXT_TASKS,
 };
 
-crate::context::durable_id!(WorkId, "Durable identity of one profile-owned Work.");
+pub use zephium_core::ids::WorkId;
 crate::context::durable_id!(
     WorkBrowserResourceId,
     "Durable identity of one browser resource, independent of every actor run."

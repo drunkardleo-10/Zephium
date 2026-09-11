@@ -623,6 +623,17 @@ pub enum StoreShutdownOutcome {
 }
 
 pub trait Store {
+    /// Dormant product Work authoring lane. The application selects the profile;
+    /// Store independently rejects unregistered/private/deleting profiles.
+    fn work_document(
+        &self,
+        _profile: ProfileId,
+        _request: crate::work::port::WorkRequest,
+        _completion: crate::work::port::WorkCompletion,
+    ) -> Result<(), crate::work::WorkError> {
+        Err(crate::work::WorkError::Unavailable)
+    }
+
     fn save_session(&self, session: SessionState);
     /// Ordered session-durability barrier for shutdown and other process
     /// boundaries. Returns only after the latest session snapshot queued

@@ -177,7 +177,7 @@ fn health_consume_acquires_coalesced_publication_or_preserves_a_successor_wake()
     }
 }
 fn registry() -> WorkBrowserResources {
-    WorkBrowserResources::new(WorkId::from_raw(1), ProfileId::from(2))
+    WorkBrowserResources::new(WorkId::from(1), ProfileId::from(2))
 }
 
 #[test]
