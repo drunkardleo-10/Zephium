@@ -767,3 +767,152 @@ fn legacy_work_fixture() -> Connection {
     }
     conn
 }
+
+#[test]
+fn authoring_commands_survive_lost_replies_restart_and_deletion_without_reminting() {
+    use zephium_core::work::authoring::*;
+    let dir = tempfile::tempdir().unwrap();
+    let mut hub = Hub::open(dir.path().into()).unwrap();
+    hub.save(&session()).unwrap();
+    let create = WorkRequest::AuthoringCommand {
+        command: 700.into(),
+        intent: WorkAuthoringIntent::Create {
+            objective: "Research an implementation".into(),
+        },
+    };
+    LOSE_COMMIT_ACK.with(|fault| fault.set(true));
+    assert!(matches!(
+        hub.work_document(1.into(), create.clone()),
+        Err(WorkError::OutcomeUnknown)
+    ));
+    let WorkReply::AuthoringCommand(created) = hub.work_document(1.into(), create.clone()).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(created.applied_revision, WorkRevision::INITIAL);
+    assert!(matches!(
+        hub.work_document(
+            1.into(),
+            WorkRequest::AuthoringCommand {
+                command: created.command,
+                intent: WorkAuthoringIntent::Create {
+                    objective: "Changed replay".into()
+                }
+            }
+        ),
+        Err(WorkError::Conflict)
+    ));
+    let question = WorkRequest::AuthoringCommand {
+        command: 701.into(),
+        intent: WorkAuthoringIntent::Edit {
+            work: created.work,
+            expected_revision: created.applied_revision,
+            edit: WorkUserEdit::OpenQuestion {
+                prompt: "Which deployment?".into(),
+                options: vec!["Desktop".into()],
+            },
+        },
+    };
+    let WorkReply::AuthoringCommand(questioned) =
+        hub.work_document(1.into(), question.clone()).unwrap()
+    else {
+        panic!()
+    };
+    let WorkReply::Snapshot(snapshot) = hub
+        .work_document(1.into(), WorkRequest::Read { id: created.work })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(snapshot.questions.len(), 1);
+    assert_eq!(snapshot.questions[0].author, WorkAuthor::User);
+    drop(hub);
+    let mut hub = Hub::open(dir.path().into()).unwrap();
+    let WorkReply::AuthoringCommand(replayed) =
+        hub.work_document(1.into(), question.clone()).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(replayed, questioned);
+    let WorkReply::Snapshot(restored) = hub
+        .work_document(1.into(), WorkRequest::Read { id: created.work })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(restored, snapshot);
+    assert!(matches!(
+        hub.work_document(2.into(), question),
+        Err(WorkError::NotFound)
+    ));
+    let delete = WorkRequest::AuthoringCommand {
+        command: 702.into(),
+        intent: WorkAuthoringIntent::Delete {
+            work: created.work,
+            expected_revision: questioned.applied_revision,
+        },
+    };
+    let WorkReply::AuthoringCommand(deleted) = hub.work_document(1.into(), delete.clone()).unwrap()
+    else {
+        panic!()
+    };
+    assert!(deleted.deleted);
+    let WorkReply::AuthoringCommand(replayed) =
+        hub.work_document(1.into(), create.clone()).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(replayed, created);
+    assert!(matches!(
+        hub.work_document(1.into(), WorkRequest::Read { id: created.work }),
+        Err(WorkError::NotFound)
+    ));
+    let WorkReply::AuthoringCommand(replayed) = hub.work_document(1.into(), delete).unwrap() else {
+        panic!()
+    };
+    assert_eq!(replayed, deleted);
+    let WorkReply::AuthoringCommand(other_profile) = hub.work_document(2.into(), create).unwrap()
+    else {
+        panic!()
+    };
+    assert_ne!(other_profile.work, created.work);
+}
+
+#[test]
+fn authoring_receipt_capacity_refusal_rolls_back_the_edit() {
+    use zephium_core::work::authoring::*;
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&session()).unwrap();
+    let work = create(&mut hub);
+    let conn = hub.profile_conn(work.profile).unwrap();
+    conn.execute_batch("CREATE TRIGGER refuse_test_receipt BEFORE INSERT ON work_authoring_commands BEGIN SELECT RAISE(ABORT, 'Work authoring command capacity exceeded'); END;").unwrap();
+    let request = WorkRequest::AuthoringCommand {
+        command: 700.into(),
+        intent: WorkAuthoringIntent::Edit {
+            work: work.id,
+            expected_revision: work.revision,
+            edit: WorkUserEdit::SetObjective {
+                objective: "Must roll back".into(),
+            },
+        },
+    };
+    assert!(matches!(
+        hub.work_document(work.profile, request.clone()),
+        Err(WorkError::Capacity)
+    ));
+    let WorkReply::Snapshot(unchanged) = hub
+        .work_document(work.profile, WorkRequest::Read { id: work.id })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(*unchanged, work);
+    hub.profile_conn(work.profile)
+        .unwrap()
+        .execute_batch("DROP TRIGGER refuse_test_receipt")
+        .unwrap();
+    assert!(matches!(
+        hub.work_document(work.profile, request),
+        Ok(WorkReply::AuthoringCommand(_))
+    ));
+}

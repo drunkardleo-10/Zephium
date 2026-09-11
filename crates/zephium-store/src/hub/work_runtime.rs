@@ -199,6 +199,77 @@ pub(super) fn command(
     }
     let all = rows(tx, id)?;
     let execution = match intent {
+        intent @ (WorkRuntimeIntent::ReviewArtifact { .. }
+        | WorkRuntimeIntent::EditArtifact { .. }) => {
+            let (execution, artifact) = match &intent {
+                WorkRuntimeIntent::ReviewArtifact {
+                    execution,
+                    artifact,
+                    ..
+                }
+                | WorkRuntimeIntent::EditArtifact {
+                    execution,
+                    artifact,
+                    ..
+                } => (*execution, *artifact),
+                _ => unreachable!(),
+            };
+            let mut row = all
+                .into_iter()
+                .find(|r| r.fact.id == execution)
+                .ok_or(WorkError::NotFound)?;
+            if !matches!(
+                row.fact.status,
+                WorkExecutionStatus::NeedsReview | WorkExecutionStatus::Completed
+            ) {
+                return Err(WorkError::Conflict);
+            }
+            if !row.fact.artifacts.iter().any(|a| a.id == artifact) {
+                return Err(WorkError::NotFound);
+            }
+            let index = match row
+                .fact
+                .user_artifacts
+                .iter()
+                .position(|a| a.artifact == artifact)
+            {
+                Some(index) => index,
+                None => {
+                    row.fact.user_artifacts.push(WorkArtifactUserState {
+                        artifact,
+                        revision: expected.next()?,
+                        decision: None,
+                        edited_data: None,
+                        evidence: vec![],
+                    });
+                    row.fact.user_artifacts.len() - 1
+                }
+            };
+            let edited = &mut row.fact.user_artifacts[index];
+            edited.revision = expected.next()?;
+            match intent {
+                WorkRuntimeIntent::ReviewArtifact { decision, .. } => {
+                    edited.decision = Some(decision)
+                }
+                WorkRuntimeIntent::EditArtifact { data, evidence, .. } => {
+                    edited.edited_data = Some(data);
+                    edited.evidence = evidence;
+                    edited.decision = None;
+                }
+                _ => unreachable!(),
+            }
+            row.fact.status = if row.fact.needs_review() {
+                WorkExecutionStatus::NeedsReview
+            } else {
+                WorkExecutionStatus::Completed
+            };
+            row.fact.validate(
+                &read_plan(tx, id, row.fact.spec.plan_revision)?,
+                expected.next()?,
+            )?;
+            write(tx, id, &row.fact)?;
+            execution
+        }
         WorkRuntimeIntent::Approve { spec } => {
             require_idle(tx, id, current.revision)?;
             let plan = current.plan.as_ref().ok_or(WorkError::Conflict)?;
@@ -219,6 +290,7 @@ pub(super) fn command(
                 status: WorkExecutionStatus::Approved,
                 attempts: vec![],
                 artifacts: vec![],
+                user_artifacts: vec![],
             };
             fact.validate(plan, expected.next()?)?;
             tx.execute("INSERT INTO work_executions(work_id, execution_id, plan_revision, owner_session, approved_unix_ms, expires_unix_ms, body, approved_tick_ms, expires_tick_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", params![id.to_string(), id_execution.to_string(), fact.spec.plan_revision.get() as i64, session.session.to_string(), now, expires, body(&fact)?, session.tick_ms, expires_tick]).map_err(db)?;

@@ -3,11 +3,13 @@
 use super::*;
 use std::collections::BTreeMap;
 
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkPlanProposal {
     pub nodes: Vec<WorkNodeProposal>,
 }
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkNodeProposal {

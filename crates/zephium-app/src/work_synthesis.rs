@@ -141,8 +141,10 @@ impl WorkNodeAttempt {
                 previews.push(preview);
             }
         }
+        let mut disclosure_node = self.node().clone();
+        disclosure_node.objective = self.disclosure_objective()?;
         WorkSynthesisDisclosure::try_new(
-            self.node(),
+            &disclosure_node,
             self.dependency_artifacts(),
             &previews,
             self.specification().limits,

@@ -40,6 +40,74 @@ pub struct WorkPlanningCompletion {
     pub persistence: Result<crate::WorkDocumentProjection, WorkError>,
 }
 impl WorkPlanningService {
+    pub async fn plan_request(
+        &self,
+        profile: ProfileId,
+        request: zephium_ipc::work::WorkPlanRequestV1,
+    ) -> zephium_ipc::work::WorkPlanningResponseV1 {
+        use zephium_ipc::work::*;
+        let result = if request.version == 1 {
+            self.plan(profile, request.work, request.expected_revision)
+                .await
+        } else {
+            Err(WorkPlanningError::Invalid)
+        };
+        let usage_view = |usage: WorkPlanningUsage| WorkPlanningUsageV1 {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cost_ceiling_micro_usd: usage.cost_ceiling_micro_usd.to_string(),
+        };
+        let (usage, outcome) = match result {
+            Ok(completion) => {
+                let persistence = completion.persistence.and_then(|p| {
+                    if p.profile == profile {
+                        Ok(p.reply)
+                    } else {
+                        Err(WorkError::ProfileUnavailable)
+                    }
+                });
+                (
+                    Some(usage_view(completion.usage)),
+                    WorkPlanningOutcomeV1::Settled {
+                        response: WorkResponseV1::from_result(profile, persistence),
+                    },
+                )
+            }
+            Err(error) => {
+                let usage = if let WorkPlanningError::ProviderRefused(usage) = error {
+                    Some(usage_view(usage))
+                } else {
+                    None
+                };
+                let reason = match error {
+                    WorkPlanningError::Invalid => WorkPlanningFailureV1::Invalid,
+                    WorkPlanningError::Capacity => WorkPlanningFailureV1::Capacity,
+                    WorkPlanningError::Unavailable => WorkPlanningFailureV1::Unavailable,
+                    WorkPlanningError::Cancelled => WorkPlanningFailureV1::Cancelled,
+                    WorkPlanningError::Timeout => WorkPlanningFailureV1::Timeout,
+                    WorkPlanningError::Stale => WorkPlanningFailureV1::Stale,
+                    WorkPlanningError::NeedsInput => WorkPlanningFailureV1::NeedsInput,
+                    WorkPlanningError::Privacy => WorkPlanningFailureV1::Privacy,
+                    WorkPlanningError::ProviderOutcomeUnknown => {
+                        WorkPlanningFailureV1::ProviderOutcomeUnknown
+                    }
+                    WorkPlanningError::ProviderRefused(_) => WorkPlanningFailureV1::ProviderRefused,
+                    WorkPlanningError::Store(error) => WorkPlanningFailureV1::Store {
+                        error: error.into(),
+                    },
+                };
+                (usage, WorkPlanningOutcomeV1::Refused { reason })
+            }
+        };
+        WorkPlanningResponseV1 {
+            version: 1,
+            profile: profile.to_string(),
+            work: request.work,
+            basis_revision: request.expected_revision,
+            usage,
+            outcome,
+        }
+    }
     pub fn new(handle: crate::Handle, provider: Arc<dyn WorkPlanningProvider>) -> Self {
         Self { handle, provider }
     }

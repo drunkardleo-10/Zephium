@@ -11,3 +11,5 @@ specta.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+specta-typescript.workspace = true
+specta-serde = "0.0.12"

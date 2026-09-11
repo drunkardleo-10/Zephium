@@ -8,6 +8,8 @@ use zephium_core::{
 };
 
 const MAX_BODY_BYTES: usize = 131072;
+#[path = "work_authoring_commands.rs"]
+mod authoring_store;
 #[path = "work_runtime.rs"]
 mod runtime_store;
 const _: [(); 512] = [(); MAX_WORKS_PER_PROFILE];
@@ -52,197 +54,17 @@ impl Hub {
             {
                 return Err(WorkError::NotFound);
             }
+            #[cfg(feature = "work-execution")]
             return super::agent_work::read_work_evidence(&self.meta, profile, link.clone())
                 .map(WorkReply::Evidence);
+            #[cfg(not(feature = "work-execution"))]
+            return Err(WorkError::Unavailable);
         }
         let conn = self
             .profile_conn(profile)
             .map_err(|_| WorkError::Unavailable)?;
         let tx = conn.transaction().map_err(|_| WorkError::Unavailable)?;
-        let (reply, write) = match request {
-            WorkRequest::ReadEvidence { .. } => return Err(WorkError::Invalid),
-            WorkRequest::RuntimeAbandon {
-                id,
-                execution,
-                attempt,
-            } => {
-                let expected = read(&tx, profile, id)?.revision;
-                runtime_store::update(
-                    &tx,
-                    profile,
-                    runtime_session,
-                    id,
-                    expected,
-                    runtime::WorkRuntimeUpdate::Settle {
-                        execution,
-                        attempt,
-                        status: runtime::WorkAttemptStatus::OutcomeUnknown,
-                        usage: None,
-                        artifacts: vec![],
-                    },
-                )?
-            }
-            WorkRequest::RuntimeRead { id } => (
-                WorkReply::Runtime(Box::new(runtime_store::projection(
-                    &tx,
-                    profile,
-                    id,
-                    runtime_session,
-                )?)),
-                false,
-            ),
-            WorkRequest::RuntimeCommand {
-                id,
-                expected,
-                command,
-                intent,
-            } => runtime_store::command(
-                &tx,
-                profile,
-                runtime_session,
-                id,
-                expected,
-                command,
-                intent,
-            )?,
-            WorkRequest::RuntimeUpdate {
-                id,
-                expected,
-                update,
-            } => runtime_store::update(&tx, profile, runtime_session, id, expected, update)?,
-            WorkRequest::Create {
-                id,
-                objective,
-                author,
-            } => {
-                let exists: bool = tx
-                    .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM works WHERE id = ?1)",
-                        [id.to_string()],
-                        |r| r.get(0),
-                    )
-                    .map_err(db)?;
-                if exists {
-                    return Err(WorkError::Conflict);
-                }
-                let count: usize = tx
-                    .query_row("SELECT count(*) FROM works", [], |r| r.get(0))
-                    .map_err(db)?;
-                if count >= MAX_WORKS_PER_PROFILE {
-                    return Err(WorkError::Capacity);
-                }
-                let mut snapshot = WorkSnapshot::create(id, profile, objective)?;
-                snapshot.objective_author = author;
-                tx.execute("INSERT INTO works(id, schema_version, revision, status, objective, created_unix_ms, updated_unix_ms, lifecycle, objective_revision, context_revision, objective_author) VALUES (?1, 2, 1, 'draft', ?2, ?3, ?3, 'active', 1, 1, ?4)", params![id.to_string(), snapshot.objective, timestamp()?, author_name(author)]).map_err(db)?;
-                append_event(&tx, id, snapshot.revision, WorkEventKind::Created, author)?;
-                (WorkReply::Snapshot(Box::new(snapshot)), true)
-            }
-            WorkRequest::Delete { id, expected } => {
-                let current = read(&tx, profile, id)?;
-                runtime_store::require_idle(&tx, id, current.revision)?;
-                if current.revision != expected {
-                    return Err(WorkError::Conflict);
-                }
-                tx.execute(
-                    "DELETE FROM works WHERE id = ?1 AND revision = ?2",
-                    params![id.to_string(), expected.get() as i64],
-                )
-                .map_err(db)?;
-                (WorkReply::Deleted { id }, true)
-            }
-            WorkRequest::Read { id } => (
-                WorkReply::Snapshot(Box::new(read(&tx, profile, id)?)),
-                false,
-            ),
-            WorkRequest::ListPlans { id } => {
-                let current = read(&tx, profile, id)?;
-                let mut query = tx.prepare("SELECT revision FROM work_plans WHERE work_id = ?1 ORDER BY revision LIMIT 33").map_err(db)?;
-                let rows = query
-                    .query_map([id.to_string()], |r| r.get::<_, i64>(0))
-                    .map_err(db)?;
-                let mut revisions = Vec::new();
-                for row in rows {
-                    let revision = revision(row.map_err(db)?)?;
-                    if revisions.len() >= MAX_WORK_PLAN_REVISIONS
-                        || revision.get() < 2
-                        || revision > current.revision
-                    {
-                        return Err(WorkError::Invalid);
-                    }
-                    revisions.push(revision);
-                }
-                (WorkReply::PlanHistory { revisions }, false)
-            }
-            WorkRequest::ReadPlan { id, revision } => {
-                // Revalidate owner/current facts before exposing historical content.
-                read(&tx, profile, id)?;
-                (WorkReply::Plan(read_plan(&tx, id, revision)?), false)
-            }
-            WorkRequest::List { after, limit } => (list(&tx, after, limit)?, false),
-            WorkRequest::Edit {
-                id,
-                expected,
-                edit,
-                author,
-            } => {
-                let current = read(&tx, profile, id)?;
-                if !matches!(edit, WorkEdit::CompactHistory) {
-                    runtime_store::require_idle(&tx, id, current.revision)?;
-                }
-                let (next, event) = current.apply(expected, edit, author)?;
-                if event == WorkEventKind::HistoryCompacted {
-                    // Explicit user action. Current plan and active clarification
-                    // provenance survive; only obsolete authoring content is removed.
-                    tx.execute("DELETE FROM work_plans WHERE work_id = ?1 AND revision != coalesce((SELECT current_plan FROM works WHERE id = ?1), -1) AND NOT EXISTS (SELECT 1 FROM work_executions e WHERE e.work_id = ?1 AND e.plan_revision = work_plans.revision)", [id.to_string()]).map_err(db)?;
-                    tx.execute(
-                        "DELETE FROM work_questions WHERE work_id = ?1",
-                        [id.to_string()],
-                    )
-                    .map_err(db)?;
-                    let floor = current.revision.get().saturating_sub(63).max(1);
-                    tx.execute(
-                        "DELETE FROM work_events WHERE work_id = ?1 AND revision < ?2",
-                        params![id.to_string(), floor as i64],
-                    )
-                    .map_err(db)?;
-                    tx.execute(
-                        "UPDATE works SET event_floor = max(event_floor, ?2) WHERE id = ?1",
-                        params![id.to_string(), floor as i64],
-                    )
-                    .map_err(db)?;
-                }
-                if event == WorkEventKind::DraftReplaced {
-                    let count: usize = tx
-                        .query_row(
-                            "SELECT count(*) FROM work_plans WHERE work_id = ?1",
-                            [id.to_string()],
-                            |r| r.get(0),
-                        )
-                        .map_err(db)?;
-                    if count >= MAX_WORK_PLAN_REVISIONS {
-                        return Err(WorkError::Capacity);
-                    }
-                    write_plan(&tx, id, next.plan.as_ref().ok_or(WorkError::Invalid)?)?;
-                }
-                let changed = tx.execute("UPDATE works SET revision = ?3, status = ?4, objective = ?5, current_plan = ?6, updated_unix_ms = max(updated_unix_ms, ?7), lifecycle = ?8, objective_revision = ?9, context_revision = ?10, objective_author = ?11 WHERE id = ?1 AND revision = ?2",
-                    params![id.to_string(), expected.get() as i64, next.revision.get() as i64, status(next.status), next.objective, next.plan.as_ref().map(|p| p.revision.get() as i64), timestamp()?, lifecycle_name(next.lifecycle), next.objective_revision.get() as i64, next.context_revision.get() as i64, author_name(next.objective_author)]).map_err(db)?;
-                if changed != 1 {
-                    return Err(WorkError::Conflict);
-                }
-                for (position, question) in next.questions.iter().enumerate() {
-                    if event != WorkEventKind::HistoryCompacted
-                        && current.questions.get(position) == Some(question)
-                    {
-                        continue;
-                    }
-                    let body = encode(question)?;
-                    tx.execute("INSERT INTO work_questions(work_id, question_id, position, body) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(work_id, question_id) DO UPDATE SET body = excluded.body",
-                        params![id.to_string(), question.id.to_string(), position as i64, body]).map_err(db)?;
-                }
-                append_event(&tx, id, next.revision, event, author)?;
-                (WorkReply::Snapshot(Box::new(next)), true)
-            }
-        };
+        let (reply, write) = apply(&tx, profile, runtime_session, request)?;
         tx.commit().map_err(|_| {
             if write {
                 WorkError::OutcomeUnknown
@@ -256,6 +78,194 @@ impl Hub {
         }
         Ok(reply)
     }
+}
+fn apply(
+    tx: &Transaction<'_>,
+    profile: ProfileId,
+    runtime_session: runtime_store::RuntimeClock,
+    request: WorkRequest,
+) -> Result<(WorkReply, bool), WorkError> {
+    let result = match request {
+        WorkRequest::AuthoringCommand { command, intent } => {
+            authoring_store::command(tx, profile, runtime_session, command, intent)?
+        }
+        WorkRequest::ReadEvidence { .. } => return Err(WorkError::Invalid),
+        WorkRequest::RuntimeAbandon {
+            id,
+            execution,
+            attempt,
+        } => {
+            let expected = read(tx, profile, id)?.revision;
+            runtime_store::update(
+                tx,
+                profile,
+                runtime_session,
+                id,
+                expected,
+                runtime::WorkRuntimeUpdate::Settle {
+                    execution,
+                    attempt,
+                    status: runtime::WorkAttemptStatus::OutcomeUnknown,
+                    usage: None,
+                    artifacts: vec![],
+                },
+            )?
+        }
+        WorkRequest::RuntimeRead { id } => (
+            WorkReply::Runtime(Box::new(runtime_store::projection(
+                tx,
+                profile,
+                id,
+                runtime_session,
+            )?)),
+            false,
+        ),
+        WorkRequest::RuntimeCommand {
+            id,
+            expected,
+            command,
+            intent,
+        } => runtime_store::command(tx, profile, runtime_session, id, expected, command, intent)?,
+        WorkRequest::RuntimeUpdate {
+            id,
+            expected,
+            update,
+        } => runtime_store::update(tx, profile, runtime_session, id, expected, update)?,
+        WorkRequest::Create {
+            id,
+            objective,
+            author,
+        } => {
+            let exists: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM works WHERE id = ?1)",
+                    [id.to_string()],
+                    |r| r.get(0),
+                )
+                .map_err(db)?;
+            if exists {
+                return Err(WorkError::Conflict);
+            }
+            let count: usize = tx
+                .query_row("SELECT count(*) FROM works", [], |r| r.get(0))
+                .map_err(db)?;
+            if count >= MAX_WORKS_PER_PROFILE {
+                return Err(WorkError::Capacity);
+            }
+            let mut snapshot = WorkSnapshot::create(id, profile, objective)?;
+            snapshot.objective_author = author;
+            tx.execute("INSERT INTO works(id, schema_version, revision, status, objective, created_unix_ms, updated_unix_ms, lifecycle, objective_revision, context_revision, objective_author) VALUES (?1, 2, 1, 'draft', ?2, ?3, ?3, 'active', 1, 1, ?4)", params![id.to_string(), snapshot.objective, timestamp()?, author_name(author)]).map_err(db)?;
+            append_event(tx, id, snapshot.revision, WorkEventKind::Created, author)?;
+            (WorkReply::Snapshot(Box::new(snapshot)), true)
+        }
+        WorkRequest::Delete { id, expected } => {
+            let current = read(tx, profile, id)?;
+            runtime_store::require_idle(tx, id, current.revision)?;
+            if current.revision != expected {
+                return Err(WorkError::Conflict);
+            }
+            tx.execute(
+                "DELETE FROM works WHERE id = ?1 AND revision = ?2",
+                params![id.to_string(), expected.get() as i64],
+            )
+            .map_err(db)?;
+            (WorkReply::Deleted { id }, true)
+        }
+        WorkRequest::Read { id } => (WorkReply::Snapshot(Box::new(read(tx, profile, id)?)), false),
+        WorkRequest::ListPlans { id } => {
+            let current = read(tx, profile, id)?;
+            let mut query = tx
+                .prepare(
+                    "SELECT revision FROM work_plans WHERE work_id = ?1 ORDER BY revision LIMIT 33",
+                )
+                .map_err(db)?;
+            let rows = query
+                .query_map([id.to_string()], |r| r.get::<_, i64>(0))
+                .map_err(db)?;
+            let mut revisions = Vec::new();
+            for row in rows {
+                let revision = revision(row.map_err(db)?)?;
+                if revisions.len() >= MAX_WORK_PLAN_REVISIONS
+                    || revision.get() < 2
+                    || revision > current.revision
+                {
+                    return Err(WorkError::Invalid);
+                }
+                revisions.push(revision);
+            }
+            (WorkReply::PlanHistory { revisions }, false)
+        }
+        WorkRequest::ReadPlan { id, revision } => {
+            // Revalidate owner/current facts before exposing historical content.
+            read(tx, profile, id)?;
+            (WorkReply::Plan(read_plan(tx, id, revision)?), false)
+        }
+        WorkRequest::List { after, limit } => (list(tx, after, limit)?, false),
+        WorkRequest::Edit {
+            id,
+            expected,
+            edit,
+            author,
+        } => {
+            let current = read(tx, profile, id)?;
+            if !matches!(edit, WorkEdit::CompactHistory) {
+                runtime_store::require_idle(tx, id, current.revision)?;
+            }
+            let (next, event) = current.apply(expected, edit, author)?;
+            if event == WorkEventKind::HistoryCompacted {
+                // Explicit user action. Current plan and active clarification
+                // provenance survive; only obsolete authoring content is removed.
+                tx.execute("DELETE FROM work_plans WHERE work_id = ?1 AND revision != coalesce((SELECT current_plan FROM works WHERE id = ?1), -1) AND NOT EXISTS (SELECT 1 FROM work_executions e WHERE e.work_id = ?1 AND e.plan_revision = work_plans.revision)", [id.to_string()]).map_err(db)?;
+                tx.execute(
+                    "DELETE FROM work_questions WHERE work_id = ?1",
+                    [id.to_string()],
+                )
+                .map_err(db)?;
+                let floor = current.revision.get().saturating_sub(63).max(1);
+                tx.execute(
+                    "DELETE FROM work_events WHERE work_id = ?1 AND revision < ?2",
+                    params![id.to_string(), floor as i64],
+                )
+                .map_err(db)?;
+                tx.execute(
+                    "UPDATE works SET event_floor = max(event_floor, ?2) WHERE id = ?1",
+                    params![id.to_string(), floor as i64],
+                )
+                .map_err(db)?;
+            }
+            if event == WorkEventKind::DraftReplaced {
+                let count: usize = tx
+                    .query_row(
+                        "SELECT count(*) FROM work_plans WHERE work_id = ?1",
+                        [id.to_string()],
+                        |r| r.get(0),
+                    )
+                    .map_err(db)?;
+                if count >= MAX_WORK_PLAN_REVISIONS {
+                    return Err(WorkError::Capacity);
+                }
+                write_plan(tx, id, next.plan.as_ref().ok_or(WorkError::Invalid)?)?;
+            }
+            let changed = tx.execute("UPDATE works SET revision = ?3, status = ?4, objective = ?5, current_plan = ?6, updated_unix_ms = max(updated_unix_ms, ?7), lifecycle = ?8, objective_revision = ?9, context_revision = ?10, objective_author = ?11 WHERE id = ?1 AND revision = ?2",
+                    params![id.to_string(), expected.get() as i64, next.revision.get() as i64, status(next.status), next.objective, next.plan.as_ref().map(|p| p.revision.get() as i64), timestamp()?, lifecycle_name(next.lifecycle), next.objective_revision.get() as i64, next.context_revision.get() as i64, author_name(next.objective_author)]).map_err(db)?;
+            if changed != 1 {
+                return Err(WorkError::Conflict);
+            }
+            for (position, question) in next.questions.iter().enumerate() {
+                if event != WorkEventKind::HistoryCompacted
+                    && current.questions.get(position) == Some(question)
+                {
+                    continue;
+                }
+                let body = encode(question)?;
+                tx.execute("INSERT INTO work_questions(work_id, question_id, position, body) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(work_id, question_id) DO UPDATE SET body = excluded.body",
+                        params![id.to_string(), question.id.to_string(), position as i64, body]).map_err(db)?;
+            }
+            append_event(tx, id, next.revision, event, author)?;
+            (WorkReply::Snapshot(Box::new(next)), true)
+        }
+    };
+    Ok(result)
 }
 fn timestamp() -> Result<i64, WorkError> {
     std::time::SystemTime::now()
@@ -275,6 +285,7 @@ fn db(error: rusqlite::Error) -> WorkError {
                 | "Work plan capacity exceeded"
                 | "Work execution capacity exceeded"
                 | "Work command capacity exceeded"
+                | "Work authoring command capacity exceeded"
         ) {
             return WorkError::Capacity;
         }

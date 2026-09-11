@@ -256,6 +256,12 @@ impl WorkArtifactDataV1 {
         Ok(())
     }
 }
+
+impl std::fmt::Debug for WorkArtifactDataV1 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WorkArtifactDataV1([content redacted])")
+    }
+}
 fn bounded(len: usize, max: usize) -> Result<(), WorkError> {
     if len == 0 || len > max {
         Err(WorkError::Invalid)

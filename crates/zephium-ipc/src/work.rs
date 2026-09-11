@@ -5,9 +5,267 @@ use specta::Type;
 use zephium_core::work::{runtime::*, *};
 
 pub type WorkProjectionV1 = WorkRuntimeProjection;
+/// One non-replayable provider operation. After a lost result, refresh Work;
+/// never automatically repeat generation or interpret missing usage as zero.
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(deny_unknown_fields)]
+pub struct WorkPlanRequestV1 {
+    pub version: u16,
+    pub work: WorkId,
+    pub expected_revision: WorkRevision,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(deny_unknown_fields)]
+pub struct WorkStartRequestV1 {
+    pub version: u16,
+    pub work: WorkId,
+    pub expected_revision: WorkRevision,
+    pub execution: WorkExecutionId,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(deny_unknown_fields)]
+pub struct WorkApprovalRequestV1 {
+    pub version: u16,
+    pub work: WorkId,
+    pub expected_revision: WorkRevision,
+    pub limits: WorkExecutionLimits,
+    pub scope: WorkBrowseScope,
+    pub primary: Option<WorkPlanNodeId>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(deny_unknown_fields)]
+pub struct WorkPlanningResponseV1 {
+    pub version: u16,
+    pub profile: String,
+    pub work: WorkId,
+    pub basis_revision: WorkRevision,
+    pub usage: Option<WorkPlanningUsageV1>,
+    pub outcome: WorkPlanningOutcomeV1,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(deny_unknown_fields)]
+pub struct WorkPlanningUsageV1 {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub cost_ceiling_micro_usd: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkPlanningOutcomeV1 {
+    Settled { response: WorkResponseV1 },
+    Refused { reason: WorkPlanningFailureV1 },
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkPlanningFailureV1 {
+    Invalid,
+    Capacity,
+    Unavailable,
+    Cancelled,
+    Timeout,
+    Stale,
+    NeedsInput,
+    Privacy,
+    ProviderOutcomeUnknown,
+    ProviderRefused,
+    Store { error: WorkFailureV1 },
+}
 pub use zephium_core::work::artifact::{
     WorkArtifactDataV1, WorkArtifactV1, WorkEvidenceLink, WorkEvidencePreviewV1,
 };
+pub use zephium_core::work::authoring::{WorkAuthoringIntent, WorkAuthoringReceipt, WorkUserEdit};
+
+/// The command ID is profile-scoped and survives lost replies and restart.
+/// New Work, question and plan identities are minted by Rust exactly once.
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(deny_unknown_fields)]
+pub struct WorkAuthoringCommandV1 {
+    pub version: u16,
+    pub command: WorkCommandId,
+    pub intent: WorkAuthoringIntent,
+}
+impl WorkAuthoringCommandV1 {
+    pub fn into_request(self) -> Result<port::WorkRequest, WorkError> {
+        if self.version != 1 {
+            return Err(WorkError::Invalid);
+        }
+        let request = port::WorkRequest::AuthoringCommand {
+            command: self.command,
+            intent: self.intent,
+        };
+        request.validate()?;
+        Ok(request)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(deny_unknown_fields)]
+pub struct WorkQueryV1 {
+    pub version: u16,
+    pub query: WorkQueryKindV1,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkQueryKindV1 {
+    Projection {
+        work: WorkId,
+    },
+    List {
+        after: Option<WorkId>,
+        limit: u16,
+    },
+    PlanHistory {
+        work: WorkId,
+    },
+    Plan {
+        work: WorkId,
+        revision: WorkRevision,
+    },
+    Evidence {
+        work: WorkId,
+        link: WorkEvidenceLink,
+    },
+}
+impl WorkQueryV1 {
+    pub fn into_request(self) -> Result<port::WorkRequest, WorkError> {
+        if self.version != 1 {
+            return Err(WorkError::Invalid);
+        }
+        let request = match self.query {
+            WorkQueryKindV1::Projection { work } => port::WorkRequest::RuntimeRead { id: work },
+            WorkQueryKindV1::List { after, limit } => port::WorkRequest::List {
+                after,
+                limit: usize::from(limit),
+            },
+            WorkQueryKindV1::PlanHistory { work } => port::WorkRequest::ListPlans { id: work },
+            WorkQueryKindV1::Plan { work, revision } => {
+                port::WorkRequest::ReadPlan { id: work, revision }
+            }
+            WorkQueryKindV1::Evidence { work, link } => {
+                port::WorkRequest::ReadEvidence { id: work, link }
+            }
+        };
+        request.validate()?;
+        Ok(request)
+    }
+}
+
+/// Closed product reply grammar: the host-only RuntimeStarted reply cannot
+/// cross this conversion, so a read or JSON round trip cannot mint an attempt.
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(deny_unknown_fields)]
+pub struct WorkResponseV1 {
+    pub version: u16,
+    pub profile: String,
+    pub reply: WorkReplyV1,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkReplyV1 {
+    ApprovalDraft {
+        work: WorkId,
+        expected_revision: WorkRevision,
+        spec: WorkExecutionSpec,
+    },
+    Projection {
+        projection: Box<WorkProjectionV1>,
+    },
+    AuthoringApplied {
+        receipt: WorkAuthoringReceipt,
+    },
+    ExecutionApplied {
+        projection: Box<WorkProjectionV1>,
+        receipt: WorkCommandReceipt,
+    },
+    Evidence {
+        evidence: WorkEvidencePreviewV1,
+    },
+    Snapshot {
+        snapshot: Box<WorkSnapshot>,
+    },
+    Plan {
+        plan: WorkPlanRevision,
+    },
+    PlanHistory {
+        revisions: Vec<WorkRevision>,
+    },
+    Page {
+        works: Vec<port::WorkSummary>,
+        next: Option<WorkId>,
+    },
+    Error {
+        error: WorkFailureV1,
+    },
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkFailureV1 {
+    Invalid,
+    Capacity,
+    Conflict,
+    NotFound,
+    ProfileUnavailable,
+    Unavailable,
+    Shutdown,
+    OutcomeUnknown,
+}
+impl From<WorkError> for WorkFailureV1 {
+    fn from(value: WorkError) -> Self {
+        match value {
+            WorkError::Invalid => Self::Invalid,
+            WorkError::Capacity => Self::Capacity,
+            WorkError::Conflict => Self::Conflict,
+            WorkError::NotFound => Self::NotFound,
+            WorkError::ProfileUnavailable => Self::ProfileUnavailable,
+            WorkError::Unavailable => Self::Unavailable,
+            WorkError::Shutdown => Self::Shutdown,
+            WorkError::OutcomeUnknown => Self::OutcomeUnknown,
+        }
+    }
+}
+impl WorkResponseV1 {
+    pub fn from_result(
+        profile: zephium_core::ids::ProfileId,
+        result: Result<port::WorkReply, WorkError>,
+    ) -> Self {
+        let reply = match result {
+            Ok(port::WorkReply::Runtime(projection)) => WorkReplyV1::Projection { projection },
+            Ok(port::WorkReply::AuthoringCommand(receipt)) => {
+                WorkReplyV1::AuthoringApplied { receipt }
+            }
+            Ok(port::WorkReply::RuntimeCommand {
+                projection,
+                receipt,
+            }) => WorkReplyV1::ExecutionApplied {
+                projection,
+                receipt,
+            },
+            Ok(port::WorkReply::Evidence(evidence)) => WorkReplyV1::Evidence { evidence },
+            Ok(port::WorkReply::Snapshot(snapshot)) => WorkReplyV1::Snapshot { snapshot },
+            Ok(port::WorkReply::Plan(plan)) => WorkReplyV1::Plan { plan },
+            Ok(port::WorkReply::PlanHistory { revisions }) => {
+                WorkReplyV1::PlanHistory { revisions }
+            }
+            Ok(port::WorkReply::Page { works, next }) => WorkReplyV1::Page { works, next },
+            Ok(port::WorkReply::RuntimeStarted { .. } | port::WorkReply::Deleted { .. }) => {
+                WorkReplyV1::Error {
+                    error: WorkFailureV1::Invalid,
+                }
+            }
+            Err(error) => WorkReplyV1::Error {
+                error: error.into(),
+            },
+        };
+        Self {
+            version: 1,
+            profile: profile.to_string(),
+            reply,
+        }
+    }
+}
 
 /// Retry the same command and expected revision after a lost reply. The Store
 /// returns its original receipt plus current facts. Reusing an ID with changed

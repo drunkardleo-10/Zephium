@@ -634,6 +634,7 @@ fn scrub_profile_database(path: &Path) -> rusqlite::Result<()> {
     let tx = conn.transaction()?;
     tx.execute_batch(
         "INSERT INTO history_fts(history_fts, rank) VALUES('secure-delete', 1);
+         DELETE FROM work_authoring_commands;
          DELETE FROM works;
          DELETE FROM work_payload_usage;
          DELETE FROM extension_profile_site_denials;
@@ -871,6 +872,7 @@ mod tests {
         conn.execute("INSERT INTO work_plans(work_id, revision, plan_id, author, basis_revision) VALUES ('00000000000000000000000001', 2, '00000000000000000000000002', 'user', 1)", []).unwrap();
         conn.execute("INSERT INTO work_executions(work_id, execution_id, plan_revision, owner_session, approved_unix_ms, expires_unix_ms, body) VALUES ('00000000000000000000000001', '00000000000000000000000003', 2, '00000000000000000000000004', 1, 2, ?1)", [PROFILE_SCRUB_MARKER]).unwrap();
         conn.execute("INSERT INTO work_commands(work_id, command_id, request_digest, body) VALUES ('00000000000000000000000001', '00000000000000000000000005', zeroblob(32), ?1)", [PROFILE_SCRUB_MARKER]).unwrap();
+        conn.execute("INSERT INTO work_authoring_commands(command_id, request_digest, body) VALUES ('00000000000000000000000006', zeroblob(32), ?1)", [PROFILE_SCRUB_MARKER]).unwrap();
         drop(conn);
 
         scrub_profile_database(&path).unwrap();
@@ -913,6 +915,7 @@ mod tests {
             "sqlite_sequence",
             "userscript_catalog",
             "userscripts",
+            "work_authoring_commands",
             "work_commands",
             "work_events",
             "work_executions",
@@ -954,6 +957,7 @@ mod tests {
             "work_questions",
             "work_events",
             "work_executions",
+            "work_authoring_commands",
             "work_commands",
         ] {
             let count: i64 = conn

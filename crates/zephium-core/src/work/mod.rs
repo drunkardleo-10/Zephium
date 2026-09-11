@@ -3,6 +3,7 @@
 //! An editable plan describes desired work; compilation is a separate boundary.
 
 pub mod artifact;
+pub mod authoring;
 mod ids;
 pub mod planning;
 pub mod port;

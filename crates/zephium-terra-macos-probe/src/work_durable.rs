@@ -10,7 +10,8 @@ use zephium_agentic::{
     OpenAiWorkPlanner, OpenAiWorkSynthesizer, WorkPlanningConfig,
 };
 use zephium_app::{
-    work_planning::WorkPlanningService, work_runtime::WorkRuntimeService, WorkIntent,
+    work_execution::WorkExecutionService, work_planning::WorkPlanningService,
+    work_runtime::WorkRuntimeService,
 };
 use zephium_core::{
     ids::{ProfileId, SpaceId},
@@ -19,6 +20,7 @@ use zephium_core::{
     session::{PersistedProfile, PersistedSpace, SessionState},
     work::{port::*, runtime::*, *},
 };
+use zephium_ipc::work::*;
 use zephium_work_composition::{durable_runtime::WorkBrowserAdapterSettings, MacosWorkComposition};
 
 const OBJECTIVE: &str = "Find SQLite's official explanation of why WAL mode does not work when clients on different machines share a database over a network filesystem. Produce one concise source-backed note as a single plan responsibility. Use only public documentation at sqlite.org or www.sqlite.org. No account, writes, installations, or external communication are needed. Every factual output needs source-mapped human review.";
@@ -34,6 +36,7 @@ enum Mode {
     Public,
     Coordinated,
     CancelCoordinated,
+    ProductIntegration,
 }
 
 pub(super) fn run() -> Result<(), super::ProbeFailure> {
@@ -42,6 +45,10 @@ pub(super) fn run() -> Result<(), super::ProbeFailure> {
 
 pub(super) fn run_coordinated() -> Result<(), super::ProbeFailure> {
     run_mode(Mode::Coordinated)
+}
+
+pub(super) fn run_product() -> Result<(), super::ProbeFailure> {
+    run_mode(Mode::ProductIntegration)
 }
 
 pub(super) fn run_cancelled() -> Result<(), super::ProbeFailure> {
@@ -304,9 +311,12 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         let _ = writeln!(std::io::stdout().lock(), "durable-work: failure={failure}; host_shutdown_clean=true; reopened=true; content=redacted");
         return Err(Error::Runtime);
     }
-    if state.executions[0].status != WorkExecutionStatus::NeedsReview
-        || state.executions[0].artifacts.is_empty()
-    {
+    let expected_status = if mode == Mode::ProductIntegration {
+        WorkExecutionStatus::Completed
+    } else {
+        WorkExecutionStatus::NeedsReview
+    };
+    if state.executions[0].status != expected_status || state.executions[0].artifacts.is_empty() {
         return Err(Error::Runtime);
     }
     let mut evidence = Vec::new();
@@ -340,7 +350,9 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     let output = std::path::Path::new("target/work-runtime-proof");
     std::fs::create_dir_all(output).map_err(|_| Error::Output)?;
     std::fs::write(
-        output.join(if coordinated {
+        output.join(if mode == Mode::ProductIntegration {
+            "product-integration.json"
+        } else if coordinated {
             "coordinated-research.json"
         } else {
             "public-research.json"
@@ -357,7 +369,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     {
         return Err(Error::Runtime);
     }
-    writeln!(std::io::stdout().lock(), "durable-work: model_plan=true; exact_approval=true; native_browser=true; artifacts={}; resource_closed=true; reopened=true; semantic_review=required; content=redacted", state.executions[0].artifacts.len()).map_err(|_| Error::Output)?;
+    writeln!(std::io::stdout().lock(), "durable-work: model_plan=true; exact_approval=true; native_browser=true; artifacts={}; resource_closed=true; reopened=true; semantic_status={:?}; content=redacted", state.executions[0].artifacts.len(), state.executions[0].status).map_err(|_| Error::Output)?;
     Ok(())
 }
 
@@ -397,18 +409,29 @@ async fn workflow(
             _ => return Err("profile_not_ready"),
         }
     };
-    let request = handle
-        .work_document(WorkIntent::Create {
-            objective: if coordinated {
-                COORDINATED_OBJECTIVE
-            } else {
-                OBJECTIVE
-            }
-            .into(),
-        })
-        .map_err(|_| "create_admission")?;
-    let work = request.work_id().ok_or("create_identity")?;
-    request.await.map_err(|_| "create_persistence")?;
+    let created = handle
+        .work_authoring_command(
+            profile,
+            WorkAuthoringCommandV1 {
+                version: 1,
+                command: WorkCommandId::generate(),
+                intent: WorkAuthoringIntent::Create {
+                    objective: if coordinated {
+                        COORDINATED_OBJECTIVE
+                    } else {
+                        OBJECTIVE
+                    }
+                    .into(),
+                },
+            },
+        )
+        .map_err(|_| "create_admission")?
+        .response(profile)
+        .await;
+    let WorkReplyV1::AuthoringApplied { receipt: created } = created.reply else {
+        return Err("create_persistence");
+    };
+    let work = created.work;
     let transport = AgentProviderTransport::try_new(AgentProviderTransportConfig::STANDARD)
         .map_err(|_| "planning_transport")?;
     let synthesis = if coordinated {
@@ -443,12 +466,20 @@ async fn workflow(
     )
     .map_err(|_| "planner")?;
     let result = WorkPlanningService::new(handle.clone(), Arc::new(planner))
-        .plan(profile, work, WorkRevision::INITIAL)
-        .await
-        .map_err(|_| "planning")?;
-    let WorkReply::Snapshot(planned) = result.persistence.map_err(|_| "plan_persistence")?.reply
-    else {
-        return Err("plan_reply");
+        .plan_request(
+            profile,
+            WorkPlanRequestV1 {
+                version: 1,
+                work,
+                expected_revision: created.applied_revision,
+            },
+        )
+        .await;
+    let WorkPlanningOutcomeV1::Settled { response } = result.outcome else {
+        return Err("planning");
+    };
+    let WorkReplyV1::Snapshot { snapshot: planned } = response.reply else {
+        return Err("plan_persistence");
     };
     let plan = planned.plan.as_ref().ok_or("clarification_required")?;
     std::fs::create_dir_all("target/work-runtime-proof").map_err(|_| "plan_report")?;
@@ -484,7 +515,6 @@ async fn workflow(
     } else {
         None
     };
-    let count = plan.draft.nodes.len() as u32;
     let limits = WorkExecutionLimits {
         model_tokens: 400_000,
         cost_micro_usd: 500_000,
@@ -503,47 +533,33 @@ async fn workflow(
     } else {
         limits
     };
-    let spec = WorkExecutionSpec {
-        plan_revision: plan.revision,
-        limits,
-        nodes: plan
-            .draft
-            .nodes
-            .iter()
-            .map(|node| WorkNodeExecutionSpec {
-                node: node.id,
-                parent: primary.filter(|id| *id != node.id),
-                capability: {
-                    let scope = WorkBrowseScope {
-                        start_url: "https://sqlite.org/docs.html".into(),
-                        routes: ["https://sqlite.org", "https://www.sqlite.org"]
-                            .into_iter()
-                            .map(|origin| WorkBrowseRoute {
-                                origin: origin.into(),
-                                path_prefix: "/".into(),
-                            })
-                            .collect(),
-                        max_hops: 8,
-                    };
-                    if primary == Some(node.id) {
-                        WorkCapability::Coordinate { scope }
-                    } else {
-                        WorkCapability::PublicBrowse { scope }
-                    }
+    let driver = WorkExecutionService::new(handle.clone());
+    let preview = driver
+        .prepare_public_approval(
+            profile,
+            WorkApprovalRequestV1 {
+                version: 1,
+                work,
+                expected_revision: planned.revision,
+                limits,
+                primary,
+                scope: WorkBrowseScope {
+                    start_url: "https://sqlite.org/docs.html".into(),
+                    routes: ["https://sqlite.org", "https://www.sqlite.org"]
+                        .into_iter()
+                        .map(|origin| WorkBrowseRoute {
+                            origin: origin.into(),
+                            path_prefix: "/".into(),
+                        })
+                        .collect(),
+                    max_hops: 8,
                 },
-                limits: WorkExecutionLimits {
-                    model_tokens: limits.model_tokens / count,
-                    cost_micro_usd: limits.cost_micro_usd / count,
-                    operations: limits.operations / count,
-                    max_workers: if primary == Some(node.id) {
-                        limits.max_workers
-                    } else {
-                        1
-                    },
-                    ..limits
-                },
-            })
-            .collect(),
+            },
+        )
+        .await
+        .map_err(|_| "approval_preview")?;
+    let WorkReplyV1::ApprovalDraft { spec, .. } = preview.reply else {
+        return Err("approval_preview_reply");
     };
     // Explicit qualification approval of this exact model-produced revision,
     // limited to the public scope and budget requested above. No remote writes.
@@ -569,6 +585,56 @@ async fn workflow(
     let mut state = *approved;
     let mut completed = Vec::new();
     let mut browser_keys = browser_keys.into_iter();
+    if matches!(mode, Mode::Coordinated | Mode::ProductIntegration) {
+        state = driver
+            .execute_request(
+                profile,
+                WorkStartRequestV1 {
+                    version: 1,
+                    work,
+                    expected_revision: state.work.revision,
+                    execution: receipt.execution,
+                },
+                synthesis.as_ref().ok_or("primary_model")?,
+                |attempt| {
+                    let key = browser_keys.next();
+                    async move {
+                        let key = key.ok_or(WorkError::Capacity)?;
+                        composition
+                            .execute_public_node_owned(
+                                &handle.callback_handle(),
+                                attempt,
+                                browser_settings(binding, key),
+                            )
+                            .await
+                    }
+                },
+                |_| {},
+            )
+            .await
+            .map_err(|_| "product_execution")?;
+        std::fs::write(
+            "target/work-runtime-proof/coordinated-attempt.json",
+            serde_json::to_vec_pretty(&state).map_err(|_| "primary_report")?,
+        )
+        .map_err(|_| "primary_report")?;
+        if state.executions[0].status != WorkExecutionStatus::NeedsReview
+            || state.executions[0].artifacts.len() != 2
+        {
+            return Ok(WorkflowResult {
+                state,
+                failure: Some("product_execution"),
+            });
+        }
+        if mode == Mode::ProductIntegration {
+            state = review_product_results(handle, profile, state).await?;
+        }
+        writeln!(std::io::stdout().lock(), "durable-work: product_driver=true; original_parent=true; original_child=true; structured_handoff=true; primary_synthesis=true; content=redacted").map_err(|_| "primary_progress")?;
+        return Ok(WorkflowResult {
+            state,
+            failure: None,
+        });
+    }
     if let Some(primary) = primary {
         let attempt = WorkRuntimeService::new(handle.clone())
             .begin_node(
@@ -726,6 +792,112 @@ async fn workflow(
         state,
         failure: None,
     })
+}
+
+async fn review_product_results(
+    handle: &zephium_app::Handle,
+    profile: ProfileId,
+    mut state: WorkRuntimeProjection,
+) -> Result<WorkRuntimeProjection, &'static str> {
+    let original = state.executions[0].artifacts.clone();
+    let execution = state.executions[0].id;
+    let work = state.work.id;
+    let apply = |command| async move {
+        let reply = handle
+            .work_command(profile, command)
+            .map_err(|_| "review_admission")?
+            .response(profile)
+            .await;
+        let WorkReplyV1::ExecutionApplied { projection, .. } = reply.reply else {
+            return Err("review_persistence");
+        };
+        Ok::<_, &'static str>(*projection)
+    };
+    for artifact in &original {
+        let command = WorkCommandV1 {
+            version: 1,
+            work,
+            expected_revision: state.work.revision,
+            command: WorkCommandId::generate(),
+            intent: WorkRuntimeIntent::ReviewArtifact {
+                execution,
+                artifact: artifact.id,
+                decision: WorkArtifactDecision::Accepted,
+            },
+        };
+        state = apply(command.clone()).await?;
+        if apply(command).await? != state {
+            return Err("review_replay");
+        }
+    }
+    if state.executions[0].status != WorkExecutionStatus::Completed {
+        return Err("review_completion");
+    }
+    let primary = original.last().ok_or("review_artifact")?;
+    let WorkArtifactDataV1::Document { paragraphs } = &primary.data else {
+        return Err("review_document");
+    };
+    let mut paragraphs = paragraphs.clone();
+    paragraphs.push("Review note: preserve the cited sources and any stated evidence limitations when using this result.".into());
+    let previous_revision = state.work.revision;
+    state = apply(WorkCommandV1 {
+        version: 1,
+        work,
+        expected_revision: previous_revision,
+        command: WorkCommandId::generate(),
+        intent: WorkRuntimeIntent::EditArtifact {
+            execution,
+            artifact: primary.id,
+            data: WorkArtifactDataV1::Document { paragraphs },
+            evidence: primary.evidence.clone(),
+        },
+    })
+    .await?;
+    if state.executions[0].status != WorkExecutionStatus::NeedsReview {
+        return Err("edit_review_reset");
+    }
+    let review = WorkRuntimeIntent::ReviewArtifact {
+        execution,
+        artifact: primary.id,
+        decision: WorkArtifactDecision::Accepted,
+    };
+    let stale = handle
+        .work_command(
+            profile,
+            WorkCommandV1 {
+                version: 1,
+                work,
+                expected_revision: previous_revision,
+                command: WorkCommandId::generate(),
+                intent: review.clone(),
+            },
+        )
+        .map_err(|_| "stale_review_admission")?
+        .response(profile)
+        .await;
+    if !matches!(
+        stale.reply,
+        WorkReplyV1::Error {
+            error: WorkFailureV1::Conflict
+        }
+    ) {
+        return Err("stale_review_not_refused");
+    }
+    state = apply(WorkCommandV1 {
+        version: 1,
+        work,
+        expected_revision: state.work.revision,
+        command: WorkCommandId::generate(),
+        intent: review,
+    })
+    .await?;
+    if state.executions[0].status != WorkExecutionStatus::Completed
+        || state.executions[0].artifacts != original
+    {
+        return Err("review_original_changed");
+    }
+    writeln!(std::io::stdout().lock(), "durable-work: product_commands=true; accepted=true; edited=true; original_artifact_immutable=true; stale_review_refused=true; replay_idempotent=true; content=redacted").map_err(|_| "review_report")?;
+    Ok(state)
 }
 
 fn browser_settings(

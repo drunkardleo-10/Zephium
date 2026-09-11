@@ -4,6 +4,32 @@ Prepared 2026-09-11. This is context for the frontend agent while the runtime
 agent continues implementation. It is not a runtime delivery, a branch handoff,
 or a declaration that Work is ready for integration.
 
+## Current integration checkpoint
+
+The first **macOS read-only Work flow is now ready to connect**. This checkpoint
+supersedes the older transport and result-editing gaps described below. Import
+the generated contract from `crates/zephium-ipc/bindings/work-v1.ts`; regenerate
+with `cargo run -p zephium-ipc --example export_work -- <output.ts>`.
+
+Use `Handle::work_authoring_command`, `work_query`, `work_command`, and
+`WorkDocumentRequest::response(profile)` for profile-bound V1 requests/replies.
+`WorkPlanningService::plan_request` performs one non-replayable generation:
+refresh after a lost reply, never automatically repeat it. Authoring commands
+have durable, profile-scoped replay receipts, including create/delete.
+`WorkExecutionService::prepare_public_approval` only prepares the exact scope
+and budget; approval remains an explicit command. `execute_request` drives the
+original standalone or direct-child attempts through host-supplied adapters.
+
+`review_artifact` and `edit_artifact` now persist user decisions/semantic edits.
+Render `execution.user_artifacts ?? []` over immutable original artifacts.
+Editing clears acceptance and its citation list is explicit; accepting all
+required outputs permits `completed`, which is not factual certification.
+Native product execution, edits/review, stale refusal, replay and Store reopen
+passed. This run retained an honest insufficient-evidence result; it proves the
+product lifecycle, not a new successful research answer. Consequential tools
+remain unavailable. Desktop transport, view wiring and further real-use-case
+iteration belong to integration; do not build a second scheduler in Svelte.
+
 ## Coordination and immediate answer
 
 **Yes: initial V1 Rust-owned Work projection, execution command, signal, artifact,

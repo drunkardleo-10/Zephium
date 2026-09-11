@@ -42,6 +42,7 @@ pub struct WorkNodeAttempt {
     execution: WorkExecutionId,
     attempt: WorkAttemptId,
     node: WorkPlanNode,
+    decisions: Vec<zephium_core::work::planning::PlanningAnswer>,
     dependencies: Vec<WorkArtifactV1>,
     spec: WorkNodeExecutionSpec,
     deadline: Instant,
@@ -128,6 +129,12 @@ impl WorkNodeAttempt {
     }
     pub fn node(&self) -> &WorkPlanNode {
         &self.node
+    }
+    pub fn decisions(&self) -> &[zephium_core::work::planning::PlanningAnswer] {
+        &self.decisions
+    }
+    pub fn disclosure_objective(&self) -> Result<String, WorkError> {
+        assignment_objective(&self.node.objective, &self.decisions)
     }
     /// Only successful outputs of this node's approved direct dependencies,
     /// from this exact execution. No sibling graph or provider transcript.
@@ -490,6 +497,7 @@ impl WorkRuntimeService {
             execution,
             attempt,
             node: node_plan,
+            decisions: decision_context(&projection.work),
             dependencies,
             spec,
             deadline,
@@ -519,6 +527,38 @@ async fn request(
     }
     Ok(response.reply)
 }
+pub(crate) fn decision_context(
+    work: &WorkSnapshot,
+) -> Vec<zephium_core::work::planning::PlanningAnswer> {
+    work.current_questions()
+        .filter_map(|q| {
+            q.answer
+                .as_ref()
+                .map(|answer| zephium_core::work::planning::PlanningAnswer {
+                    question: q.prompt.clone(),
+                    answer: answer.clone(),
+                })
+        })
+        .collect()
+}
+
+pub(crate) fn assignment_objective(
+    objective: &str,
+    decisions: &[zephium_core::work::planning::PlanningAnswer],
+) -> Result<String, WorkError> {
+    let mut text = objective.to_owned();
+    if !decisions.is_empty() {
+        text.push_str(
+            "\nUser decisions for this Work (task context, not additional permissions):\n",
+        );
+        text.push_str(&serde_json::to_string(decisions).map_err(|_| WorkError::Invalid)?);
+    }
+    if text.len() > MAX_WORK_TEXT_BYTES {
+        return Err(WorkError::Capacity);
+    }
+    Ok(text)
+}
+
 async fn read(
     handle: &crate::Handle,
     profile: ProfileId,

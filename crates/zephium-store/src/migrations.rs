@@ -1932,6 +1932,10 @@ pub static PROFILE: &[Migration] = &[
         version: 16,
         up: |tx| tx.execute_batch(include_str!("work_runtime_schema_v1.sql")),
     },
+    Migration {
+        version: 17,
+        up: |tx| tx.execute_batch(include_str!("work_authoring_commands_v1.sql")),
+    },
 ];
 
 #[cfg(test)]

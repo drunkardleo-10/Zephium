@@ -89,6 +89,65 @@ pub struct WorkExecutionSpec {
     pub nodes: Vec<WorkNodeExecutionSpec>,
 }
 impl WorkExecutionSpec {
+    /// First product adapter: explicit public browsing scope, optionally with
+    /// one synthesizing primary. This only prepares an approval draft; it grants
+    /// nothing and never increases the supplied aggregate budget.
+    pub fn public_research(
+        plan: &WorkPlanRevision,
+        limits: WorkExecutionLimits,
+        scope: WorkBrowseScope,
+        primary: Option<WorkPlanNodeId>,
+    ) -> Result<Self, WorkError> {
+        plan.draft.validate()?;
+        limits.validate()?;
+        if primary.is_some_and(|id| !plan.draft.nodes.iter().any(|n| n.id == id))
+            || (primary.is_some() && plan.draft.nodes.len() > 1 && limits.max_workers < 2)
+            || plan
+                .draft
+                .nodes
+                .iter()
+                .flat_map(|n| &n.outputs)
+                .any(|o| o.review == WorkOutputReview::Mechanical)
+        {
+            return Err(WorkError::Invalid);
+        }
+        let count = plan.draft.nodes.len() as u32;
+        let spec = Self {
+            plan_revision: plan.revision,
+            limits,
+            nodes: plan
+                .draft
+                .nodes
+                .iter()
+                .map(|node| WorkNodeExecutionSpec {
+                    node: node.id,
+                    parent: primary.filter(|id| *id != node.id),
+                    capability: if primary == Some(node.id) {
+                        WorkCapability::Coordinate {
+                            scope: scope.clone(),
+                        }
+                    } else {
+                        WorkCapability::PublicBrowse {
+                            scope: scope.clone(),
+                        }
+                    },
+                    limits: WorkExecutionLimits {
+                        model_tokens: limits.model_tokens / count,
+                        cost_micro_usd: limits.cost_micro_usd / count,
+                        operations: limits.operations / count,
+                        max_workers: if primary == Some(node.id) {
+                            limits.max_workers
+                        } else {
+                            1
+                        },
+                        ..limits
+                    },
+                })
+                .collect(),
+        };
+        spec.validate(plan)?;
+        Ok(spec)
+    }
     pub fn validate_bounds(&self) -> Result<(), WorkError> {
         self.limits.validate()?;
         if self.nodes.is_empty() || self.nodes.len() > MAX_WORK_NODES {
@@ -349,14 +408,83 @@ pub struct WorkExecutionFact {
     pub status: WorkExecutionStatus,
     pub attempts: Vec<WorkAttemptFact>,
     pub artifacts: Vec<WorkArtifactV1>,
+    /// User edits and decisions never overwrite the original agent output.
+    #[serde(default)]
+    pub user_artifacts: Vec<WorkArtifactUserState>,
 }
+
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkArtifactUserState {
+    pub artifact: WorkArtifactId,
+    pub revision: WorkRevision,
+    pub decision: Option<WorkArtifactDecision>,
+    pub edited_data: Option<WorkArtifactDataV1>,
+    /// Citations for edited content. Original citations remain on the artifact.
+    pub evidence: Vec<WorkEvidenceLink>,
+}
+
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkArtifactDecision {
+    Accepted,
+    Rejected,
+}
+
 impl WorkExecutionFact {
+    pub fn needs_review(&self) -> bool {
+        self.artifacts.iter().any(|artifact| {
+            let edit = self
+                .user_artifacts
+                .iter()
+                .find(|u| u.artifact == artifact.id);
+            match edit.and_then(|u| u.decision) {
+                Some(WorkArtifactDecision::Accepted) => false,
+                Some(WorkArtifactDecision::Rejected) => true,
+                None => {
+                    artifact.review != WorkOutputReview::Mechanical
+                        || edit.is_some_and(|u| u.edited_data.is_some())
+                }
+            }
+        })
+    }
     pub fn validate(
         &self,
         plan: &WorkPlanRevision,
         revision: WorkRevision,
     ) -> Result<(), WorkError> {
         self.spec.validate(plan)?;
+        if self.user_artifacts.len() > self.artifacts.len() {
+            return Err(WorkError::Invalid);
+        }
+        let mut reviewed = BTreeSet::new();
+        for edit in &self.user_artifacts {
+            if !reviewed.insert(edit.artifact)
+                || !self.artifacts.iter().any(|a| a.id == edit.artifact)
+                || edit.revision <= self.approved_revision
+                || edit.revision > revision
+                || edit.evidence.len() > 64
+                || (edit.edited_data.is_none() && !edit.evidence.is_empty())
+                || edit.evidence.iter().any(|link| {
+                    !self
+                        .artifacts
+                        .iter()
+                        .flat_map(|a| &a.evidence)
+                        .any(|original| original == link)
+                })
+                || !matches!(
+                    self.status,
+                    WorkExecutionStatus::Completed | WorkExecutionStatus::NeedsReview
+                )
+            {
+                return Err(WorkError::Invalid);
+            }
+            if let Some(data) = &edit.edited_data {
+                data.validate()?;
+            }
+        }
         if self.approved_revision <= plan.revision
             || self.approved_revision > revision
             || self.attempts.len() > MAX_WORK_ATTEMPTS
@@ -467,10 +595,7 @@ impl WorkExecutionFact {
                         .any(|a| a.node == node.id && a.output == output.name)
                 })
             });
-        let review = self
-            .artifacts
-            .iter()
-            .any(|a| a.review != WorkOutputReview::Mechanical);
+        let review = self.needs_review();
         let valid_status = match self.status {
             WorkExecutionStatus::Approved => self.attempts.is_empty() && self.artifacts.is_empty(),
             WorkExecutionStatus::Running => !self.attempts.is_empty() && !complete,
@@ -501,6 +626,17 @@ impl WorkExecutionFact {
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkRuntimeIntent {
+    ReviewArtifact {
+        execution: WorkExecutionId,
+        artifact: WorkArtifactId,
+        decision: WorkArtifactDecision,
+    },
+    EditArtifact {
+        execution: WorkExecutionId,
+        artifact: WorkArtifactId,
+        data: WorkArtifactDataV1,
+        evidence: Vec<WorkEvidenceLink>,
+    },
     Approve {
         spec: WorkExecutionSpec,
     },

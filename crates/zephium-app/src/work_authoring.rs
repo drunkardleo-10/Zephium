@@ -36,6 +36,14 @@ pub struct WorkDocumentRequest {
     wake: Wake,
 }
 impl WorkDocumentRequest {
+    pub async fn response(self, profile: ProfileId) -> zephium_ipc::work::WorkResponseV1 {
+        let result = match self.await {
+            Ok(value) if value.profile == profile => Ok(value.reply),
+            Ok(_) => Err(WorkError::ProfileUnavailable),
+            Err(error) => Err(error),
+        };
+        zephium_ipc::work::WorkResponseV1::from_result(profile, result)
+    }
     /// Selected by Shell before Store dispatch, including when the final
     /// callback is lost. Reconcile under this owner, not the newly focused tab.
     pub fn profile(&self) -> Option<ProfileId> {
@@ -178,6 +186,7 @@ impl WorkDocumentSubmission {
     ) -> Result<(Self, WorkDocumentRequest), WorkError> {
         request.validate()?;
         let work_id = match &request {
+            WorkRequest::AuthoringCommand { intent, .. } => intent.work(),
             WorkRequest::Create { id, .. }
             | WorkRequest::ReadEvidence { id, .. }
             | WorkRequest::RuntimeAbandon { id, .. }

@@ -1,6 +1,6 @@
 //! User-facing authoring grammar. New durable identities and attribution are
 //! selected by Rust, while existing identities are references checked by Store.
-use zephium_core::work::{port::WorkRequest, proposal::WorkPlanProposal, *};
+use zephium_core::work::{port::WorkRequest, *};
 
 #[derive(Clone)]
 pub enum WorkIntent {
@@ -31,29 +31,7 @@ pub enum WorkIntent {
         edit: WorkUserEdit,
     },
 }
-#[derive(Clone)]
-pub enum WorkUserEdit {
-    SetObjective {
-        objective: String,
-    },
-    OpenQuestion {
-        prompt: String,
-        options: Vec<String>,
-    },
-    AnswerQuestion {
-        id: WorkQuestionId,
-        answer: String,
-    },
-    DismissQuestion {
-        id: WorkQuestionId,
-    },
-    ReplaceDraft {
-        proposal: WorkPlanProposal,
-    },
-    Archive,
-    Restore,
-    CompactHistory,
-}
+pub use zephium_core::work::authoring::WorkUserEdit;
 impl WorkIntent {
     pub(crate) fn into_request(self) -> Result<WorkRequest, WorkError> {
         let author = WorkAuthor::User;
@@ -72,26 +50,7 @@ impl WorkIntent {
                 id,
                 expected,
                 author,
-                edit: match edit {
-                    WorkUserEdit::SetObjective { objective } => {
-                        WorkEdit::SetObjective { objective }
-                    }
-                    WorkUserEdit::OpenQuestion { prompt, options } => WorkEdit::OpenQuestion {
-                        id: WorkQuestionId::generate(),
-                        prompt,
-                        options,
-                    },
-                    WorkUserEdit::AnswerQuestion { id, answer } => {
-                        WorkEdit::AnswerQuestion { id, answer }
-                    }
-                    WorkUserEdit::DismissQuestion { id } => WorkEdit::DismissQuestion { id },
-                    WorkUserEdit::ReplaceDraft { proposal } => WorkEdit::ReplaceDraft {
-                        draft: proposal.mint()?,
-                    },
-                    WorkUserEdit::Archive => WorkEdit::Archive,
-                    WorkUserEdit::Restore => WorkEdit::Restore,
-                    WorkUserEdit::CompactHistory => WorkEdit::CompactHistory,
-                },
+                edit: edit.into_edit()?,
             },
         };
         request.validate()?;
@@ -103,16 +62,11 @@ impl std::fmt::Debug for WorkIntent {
         f.write_str("WorkIntent([redacted])")
     }
 }
-impl std::fmt::Debug for WorkUserEdit {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("WorkUserEdit([redacted])")
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zephium_core::work::proposal::WorkNodeProposal;
+    use zephium_core::work::proposal::{WorkNodeProposal, WorkPlanProposal};
 
     #[test]
     fn work_document_intents_mint_new_identity_graphs_and_fix_user_attribution() {

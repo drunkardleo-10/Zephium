@@ -5,6 +5,10 @@ use super::*;
 
 #[derive(Clone)]
 pub enum WorkRequest {
+    AuthoringCommand {
+        command: WorkCommandId,
+        intent: authoring::WorkAuthoringIntent,
+    },
     /// On-demand historical evidence linked by this Work; never live authority.
     ReadEvidence {
         id: WorkId,
@@ -67,6 +71,16 @@ pub enum WorkRequest {
 impl WorkRequest {
     pub fn validate(&self) -> Result<(), WorkError> {
         match self {
+            Self::AuthoringCommand { intent, .. } => intent.validate(),
+            Self::RuntimeCommand {
+                intent: runtime::WorkRuntimeIntent::EditArtifact { data, evidence, .. },
+                ..
+            } => {
+                if evidence.len() > 64 {
+                    return Err(WorkError::Capacity);
+                }
+                data.validate()
+            }
             Self::RuntimeCommand {
                 intent: runtime::WorkRuntimeIntent::Approve { spec },
                 ..
@@ -93,6 +107,7 @@ impl WorkRequest {
     }
 }
 
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkSummary {
@@ -118,6 +133,7 @@ impl std::fmt::Debug for WorkSummary {
 }
 #[derive(Clone, Debug)]
 pub enum WorkReply {
+    AuthoringCommand(authoring::WorkAuthoringReceipt),
     Evidence(artifact::WorkEvidencePreviewV1),
     /// Returned only to the original successful Begin observer, never by read
     /// or command replay. This is data; the application owns the live attempt.

@@ -769,6 +769,22 @@ impl Drop for Handle {
 }
 
 impl Handle {
+    pub fn work_authoring_command(
+        &self,
+        profile: zephium_core::ids::ProfileId,
+        command: zephium_ipc::work::WorkAuthoringCommandV1,
+    ) -> Result<crate::WorkDocumentRequest, zephium_core::work::WorkError> {
+        self.submit_work_document(command.into_request()?, Some(profile))
+    }
+
+    pub fn work_query(
+        &self,
+        profile: zephium_core::ids::ProfileId,
+        query: zephium_ipc::work::WorkQueryV1,
+    ) -> Result<crate::WorkDocumentRequest, zephium_core::work::WorkError> {
+        self.submit_work_document(query.into_request()?, Some(profile))
+    }
+
     /// Revision-checked runtime user intent, bound to the displayed profile.
     /// Store reconciliation never returns a live worker capability.
     pub fn work_command(

@@ -1496,4 +1496,6 @@ mod work_coordination_tests;
 #[cfg(all(test, feature = "work-planning"))]
 mod work_planning_tests;
 #[cfg(all(test, feature = "work-runtime"))]
+mod work_product_tests;
+#[cfg(all(test, feature = "work-runtime"))]
 mod work_runtime_tests;

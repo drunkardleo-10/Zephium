@@ -7,6 +7,23 @@ Durable runtime baseline: `68d28d51`; subsequent fixes and live evidence are in 
 
 Prepared: 2026-09-11
 
+Latest checkpoint: the first macOS read-only Work flow is ready for frontend
+integration. Versioned authoring/query/planning/review interfaces, durable
+authoring replay, immutable originals with user edits/acceptance, bounded current
+answers in assignments, public approval preparation and reusable execution
+dispatch now exist. Generated types: `crates/zephium-ipc/bindings/work-v1.ts`.
+The product qualifier `--live-public-work-product` passed original browser/child
+and primary execution, explicit test review/edit commands, stale refusal,
+idempotent replay, clean shutdown and Store reopen
+(`/tmp/zephium-product-native-live.log`,
+`target/work-runtime-proof/product-integration.json`). Its research content was
+honestly inconclusive; this is lifecycle proof, not factual certification.
+Consequential actions stay unavailable, and planning generations remain
+non-replayable rather than pretending to have a durable call ledger. Those
+limits supersede the older blanket integration gates below; finish further
+product behavior with the frontend connected instead of indefinitely extending
+the isolated runtime.
+
 For the frontend agent working in parallel, see
 [`work-frontend-context.md`](work-frontend-context.md). It records the initial
 runtime-owned types and current limits without handing off this implementation.

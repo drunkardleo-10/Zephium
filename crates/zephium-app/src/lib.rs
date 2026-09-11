@@ -87,6 +87,8 @@ pub use work_authoring_intent::{WorkIntent, WorkUserEdit};
 
 #[cfg(feature = "work-runtime")]
 pub mod work_coordination;
+#[cfg(feature = "work-runtime")]
+pub mod work_execution;
 #[cfg(feature = "work-planning")]
 pub mod work_planning;
 #[cfg(feature = "work-runtime")]
