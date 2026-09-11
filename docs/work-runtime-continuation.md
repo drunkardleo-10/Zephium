@@ -514,6 +514,39 @@ The final integration should reuse the separate frontend design system and
 units after verifying their actual contracts. Do not throw them away, and do
 not bend Rust semantics merely to match a provisional component API.
 
+The frontend foundation is a Svelte 5 projection organized around app,
+feature, session, domain, and shared boundaries. Domain stores mirror typed
+Rust projections; features own presentation and local interaction state; the
+session layer may retain transient frame state; and the privileged frame sends
+typed intent rather than mutating product facts. Work is lazy chrome-hosted
+presentation over this foundation, while live page interaction remains in
+budgeted native browser surfaces. The runtime phase should not reimplement or
+reshape that frontend. It should supply the authoritative contracts the
+frontend will consume.
+
+Before the streams join, make their thin contract explicit:
+
+- the primary surface distinguishes Browse, an internal page, and a Work
+  identified by `WorkId` and a Rust-owned revision; the hosting mechanism is
+  not the Work identity;
+- Work projections use stable IDs, versioned envelopes, ordered revisions, and
+  a bounded full-resynchronization path;
+- durable Work semantics remain separate from recoverable, debounced
+  `WorkView` state and from disposable gesture state;
+- `NoteDocument` is constrained versioned ProseMirror data,
+  `ArtifactBlockSpec` is typed agent-visible output, and system memory remains
+  private retrieval context; shared rendering does not collapse their storage
+  schemas, and a durable Task is not an execution-plan node;
+- high-frequency gestures may render an optimistic preview, but native
+  geometry is applied by Rust and settled state reconciles to its projection;
+- mount/unmount, draft preservation, cleanup, stale revisions, recovery, and
+  typed failure states are contract behavior rather than component accidents.
+
+Localization and command presentation remain a shared native/frontend
+foundation concern, not Work-runtime semantics. Stable command identities and
+one generated catalog should serve both Rust native menus and Svelte; finalized
+English labels should not become the IPC contract.
+
 ### 6.8 Model modes and hosted seam
 
 Local endpoints, BYOK providers, and the Zephium-hosted gateway are transports
@@ -651,17 +684,30 @@ implementation.
 
 The requested collaboration pattern is:
 
-- The Astra main agent owns reasoning, decomposition, architectural decisions,
-  integration, review, verification strategy, and final quality.
-- For substantial code implementation and tests, delegate a concrete bounded
-  work package to GPT-5.6 Sol at high reasoning. Give it the objective, relevant
-  context, constraints, and acceptance boundary—not a line-by-line solution.
-- For fast read-only exploration, repository inventory, targeted information
-  gathering, or low-risk mechanical investigation that does not edit code, use
-  GPT-5.6 Luna at max reasoning when delegation saves real time.
+- The GPT-6 Astra high-reasoning main agent owns reasoning, decomposition,
+  architecture, tightly coupled vertical implementation, integration, review,
+  verification strategy, and final quality. Continuous context is the default;
+  delegation is an optimization, not a required ceremony.
+- Keep work in the main agent when architecture and implementation are still
+  co-evolving, when a task is sequential, or when explaining enough context to
+  a delegate would cost more than doing it directly.
+- For a substantial bounded implementation or test package whose contract is
+  already stable, delegate to GPT-5.6 Sol at high reasoning when this saves
+  time. Give it the objective, relevant context, constraints, ownership area,
+  and acceptance boundary—not a line-by-line solution.
+- For an independent high-judgment implementation or audit that materially
+  benefits from parallelism, another GPT-6 Astra agent at medium or high
+  reasoning is appropriate. Do not substitute a cheaper model merely because
+  the work contains code.
+- Use GPT-5.6 Luna only for bounded read-only exploration, repository
+  inventory, evidence collection, or other mechanically checkable work that
+  can run independently. High reasoning is normally sufficient; max is
+  reserved for unusually broad read-only synthesis. Architectural or security
+  interpretation stays with the Astra main agent.
 - The main agent may make small, obvious, tightly scoped edits itself. Do not
-  spawn an agent reflexively when local work is faster, and do not use an
-  exploration agent for production code changes.
+  spawn an agent for a lookup that `rg`, the compiler, or a focused primary
+  source answers faster, and do not use an exploration agent for production
+  code changes.
 - Parallelize only independent work packages. Agents share the worktree, so
   assign non-overlapping files/boundaries or coordinate before edits. The main
   agent reviews every delegated diff and owns integration; a sub-agent's success
