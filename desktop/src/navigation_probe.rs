@@ -26,6 +26,10 @@ use zephium_work_composition::navigation_qualification::{
 use zephium_work_composition::retained_action_qualification::{
     self as qualifier, ApplicationObserver, ApplicationReport,
 };
+#[cfg(feature = "macos-work-retained-back-probe")]
+use zephium_work_composition::retained_back_qualification::{
+    self as qualifier, ApplicationObserver, ApplicationReport,
+};
 #[cfg(feature = "macos-work-retained-notion-probe")]
 use zephium_work_composition::retained_notion_qualification::{
     self as qualifier, ApplicationObserver, ApplicationReport,
@@ -37,6 +41,7 @@ use zephium_work_composition::retained_notion_write_qualification::{
 #[cfg(all(
     feature = "macos-work-retained-product-probe",
     not(feature = "macos-work-retained-action-probe"),
+    not(feature = "macos-work-retained-back-probe"),
     not(feature = "macos-work-retained-notion-probe"),
     not(feature = "macos-work-retained-notion-write-probe")
 ))]

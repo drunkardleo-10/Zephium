@@ -18,6 +18,11 @@ macos-work-retained-product-probe = ["macos-work-navigation-probe", "zephium-wor
 # Same retained owners, rendering and limits; selects the open commerce objective.
 macos-work-retained-commerce-probe = ["macos-work-retained-product-probe", "zephium-work-composition/retained-commerce-qualification"]
 macos-work-retained-action-probe = ["macos-work-retained-product-probe", "zephium-work-composition/retained-action-qualification"]
+# Controlled open-objective native Back witness through the retained product path.
+macos-work-retained-back-probe = [
+    "macos-work-retained-product-probe",
+    "zephium-work-composition/retained-back-qualification",
+]
 # Same deliberately enrolled isolated profile, one authenticated synthetic
 # Notion page, and the shipping retained read-only Work entry.
 macos-work-retained-notion-probe = [

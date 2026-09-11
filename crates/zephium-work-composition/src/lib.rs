@@ -54,6 +54,9 @@ mod qualification;
 #[cfg(feature = "retained-action-qualification")]
 #[doc(hidden)]
 pub mod retained_action_qualification;
+#[cfg(feature = "retained-back-qualification")]
+#[doc(hidden)]
+pub mod retained_back_qualification;
 #[cfg(feature = "retained-notion-qualification")]
 #[doc(hidden)]
 pub mod retained_notion_qualification;
