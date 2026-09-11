@@ -22,7 +22,11 @@ fn work() -> WorkSnapshot {
 fn work_authoring_questions_invalidate_plans_and_stale_edits_leave_facts_unchanged() {
     let original = work();
     let (planned, _) = original
-        .apply(original.revision, WorkEdit::ReplaceDraft { draft: draft() })
+        .apply(
+            original.revision,
+            WorkEdit::ReplaceDraft { draft: draft() },
+            WorkAuthor::User,
+        )
         .unwrap();
     assert_eq!(planned.status, WorkAuthoringStatus::PlanReady);
     assert_eq!(
@@ -37,18 +41,24 @@ fn work_authoring_questions_invalidate_plans_and_stale_edits_leave_facts_unchang
                 prompt: "Which constraints matter?".into(),
                 options: vec![],
             },
+            WorkAuthor::User,
         )
         .unwrap();
     assert!(questioned.plan.is_none());
     assert_eq!(questioned.status, WorkAuthoringStatus::NeedsInput);
     assert_eq!(
-        questioned.apply(planned.revision, WorkEdit::ReplaceDraft { draft: draft() }),
+        questioned.apply(
+            planned.revision,
+            WorkEdit::ReplaceDraft { draft: draft() },
+            WorkAuthor::User
+        ),
         Err(WorkError::Conflict)
     );
     assert_eq!(
         questioned.apply(
             questioned.revision,
-            WorkEdit::ReplaceDraft { draft: draft() }
+            WorkEdit::ReplaceDraft { draft: draft() },
+            WorkAuthor::User
         ),
         Err(WorkError::Conflict)
     );
@@ -59,6 +69,7 @@ fn work_authoring_questions_invalidate_plans_and_stale_edits_leave_facts_unchang
                 id: 9.into(),
                 answer: "Local processing".into(),
             },
+            WorkAuthor::User,
         )
         .unwrap();
     assert_eq!(answered.status, WorkAuthoringStatus::Draft);
@@ -97,15 +108,16 @@ fn work_authoring_refuses_invalid_and_exhausted_values_without_wrapping() {
     );
     assert!(WorkRevision::new(0).is_none());
     let mut invalid = work();
-    invalid.schema_version = 2;
+    invalid.schema_version = WORK_SCHEMA_VERSION + 1;
     assert_eq!(invalid.validate(), Err(WorkError::Invalid));
     let (mut invalid, _) = work()
         .apply(
             WorkRevision::INITIAL,
             WorkEdit::ReplaceDraft { draft: draft() },
+            WorkAuthor::User,
         )
         .unwrap();
-    invalid.revision = invalid.revision.next().unwrap();
+    invalid.context_revision = invalid.revision;
     assert_eq!(invalid.validate(), Err(WorkError::Invalid));
 }
 #[test]
@@ -118,9 +130,143 @@ fn work_identity_preserves_canonical_wire_and_debug_redaction() {
     assert!(!format!(
         "{:?}",
         port::WorkRequest::Create {
+            author: WorkAuthor::User,
             id,
             objective: "private".into()
         }
     )
     .contains("private"));
+}
+
+#[test]
+fn work_authoring_supersedes_context_and_preserves_attribution_without_reactivating_answers() {
+    let first = work();
+    let (asked, _) = first
+        .apply(
+            first.revision,
+            WorkEdit::OpenQuestion {
+                id: 90.into(),
+                prompt: "Travel budget?".into(),
+                options: vec![],
+            },
+            WorkAuthor::PrimaryAgent,
+        )
+        .unwrap();
+    assert_eq!(asked.questions[0].basis_revision, Some(first.revision));
+    let (answered, _) = asked
+        .apply(
+            asked.revision,
+            WorkEdit::AnswerQuestion {
+                id: 90.into(),
+                answer: "2000".into(),
+            },
+            WorkAuthor::User,
+        )
+        .unwrap();
+    let (changed, _) = answered
+        .apply(
+            answered.revision,
+            WorkEdit::SetObjective {
+                objective: "Research database indexes".into(),
+            },
+            WorkAuthor::User,
+        )
+        .unwrap();
+    assert_eq!(changed.status, WorkAuthoringStatus::Draft);
+    assert_eq!(changed.current_questions().count(), 0);
+    assert_eq!(changed.questions[0].state, WorkQuestionState::Superseded);
+    assert_eq!(changed.questions[0].answer.as_deref(), Some("2000"));
+    assert_eq!(changed.questions[0].author, WorkAuthor::PrimaryAgent);
+    assert_eq!(changed.questions[0].answer_author, Some(WorkAuthor::User));
+    assert_eq!(
+        changed.apply(
+            changed.revision,
+            WorkEdit::AnswerQuestion {
+                id: 90.into(),
+                answer: "Stale response".into(),
+            },
+            WorkAuthor::User
+        ),
+        Err(WorkError::Conflict)
+    );
+    let (fresh, _) = changed
+        .apply(
+            changed.revision,
+            WorkEdit::OpenQuestion {
+                id: 91.into(),
+                prompt: "Which database?".into(),
+                options: vec![],
+            },
+            WorkAuthor::PrimaryAgent,
+        )
+        .unwrap();
+    let (dismissed, _) = fresh
+        .apply(
+            fresh.revision,
+            WorkEdit::DismissQuestion { id: 91.into() },
+            WorkAuthor::User,
+        )
+        .unwrap();
+    let (planned, _) = dismissed
+        .apply(
+            dismissed.revision,
+            WorkEdit::ReplaceDraft { draft: draft() },
+            WorkAuthor::PrimaryAgent,
+        )
+        .unwrap();
+    assert_eq!(
+        planned.plan.as_ref().unwrap().author,
+        WorkAuthor::PrimaryAgent
+    );
+    let (archived, _) = planned
+        .apply(planned.revision, WorkEdit::Archive, WorkAuthor::User)
+        .unwrap();
+    assert_eq!(archived.plan, planned.plan);
+    assert_eq!(
+        archived.apply(
+            archived.revision,
+            WorkEdit::SetObjective {
+                objective: "Cannot edit archive".into()
+            },
+            WorkAuthor::User
+        ),
+        Err(WorkError::Conflict)
+    );
+    let (compacted, _) = archived
+        .apply(
+            archived.revision,
+            WorkEdit::CompactHistory,
+            WorkAuthor::User,
+        )
+        .unwrap();
+    assert!(compacted.questions.is_empty());
+    assert_eq!(compacted.plan, planned.plan);
+    assert!(compacted
+        .apply(compacted.revision, WorkEdit::Restore, WorkAuthor::User)
+        .is_ok());
+}
+
+#[test]
+fn work_proposals_have_temporary_keys_and_cannot_smuggle_durable_identity_or_authority() {
+    use proposal::*;
+    let mut proposed = WorkPlanProposal {
+        nodes: vec![WorkNodeProposal {
+            key: 1,
+            objective: "Read evidence".into(),
+            dependencies: vec![],
+            outputs: draft().nodes.remove(0).outputs,
+        }],
+    };
+    let one = proposed.mint().unwrap();
+    let two = proposed.mint().unwrap();
+    assert_ne!(one.id, two.id);
+    assert_ne!(one.nodes[0].id, two.nodes[0].id);
+    proposed.nodes[0].dependencies = vec![2];
+    assert_eq!(proposed.validate(), Err(WorkError::Invalid));
+    proposed.nodes[0].dependencies = vec![1];
+    assert_eq!(proposed.validate(), Err(WorkError::Invalid));
+    proposed.nodes[0].dependencies.clear();
+    let mut wire = serde_json::to_value(proposed).unwrap();
+    wire["author"] = serde_json::json!("user");
+    assert!(serde_json::from_value::<WorkPlanProposal>(wire).is_err());
 }

@@ -181,7 +181,7 @@ persisted facts deliberately cannot automatically resume execution. No new UI,
 site tools, platform suspend support or battery qualification is included.
 
 
-## Product Work authoring (profile schema 14)
+## Product Work authoring (profile schema 15)
 
 The product aggregate now starts at `zephium_core::work::WorkSnapshot`, separate
 from the content-free execution journal above. The existing agentic `WorkId`
@@ -189,7 +189,14 @@ is re-exported from Core with the same canonical ULID encoding and redacted
 Debug representation. Browser resources and orchestration still use that same
 identity, not a second product label.
 
-`Handle::work_document` admits a bounded, one-shot typed Rust request to Shell.
+`Handle::work_document` accepts `WorkIntent`, a bounded, one-shot user intent.
+Rust mints new Work, question, plan, and node identities and assigns user
+attribution before queue admission. Plan proposals use bounded temporary node
+keys; neither a model proposal nor the application caller chooses new durable
+identities or authorship. Internal Store requests carry the minted IDs and
+explicit descriptive provenance. The request receipt retains its Work ID and
+the profile selected before Store dispatch even if creation loses its reply, so reconciliation never needs blind
+recreation or guessing the owner from the newly focused window.
 Shell selects its focused regular profile and refuses private or quarantined
 profiles. Store independently checks the current durable registry and degraded
 profile state. This Rust-only entry point is not exposed through desktop IPC;
@@ -198,15 +205,22 @@ to it yet. Reply ownership includes the selected profile, which presentation
 must recheck before rendering a delayed result.
 
 The supported vertical is create from plain objective, read/list, edit objective,
-open/answer clarification questions, replace a structured draft, and read a prior
-plan revision. Draft validation checks unique node/output identities, a bounded
+open/answer clarification questions, replace a structured draft, list retained
+plan revisions, and read a prior plan revision. Draft validation checks unique
+node/output identities, a bounded
 acyclic dependency graph, nonempty output contracts, and content bounds. Output
 review requirements distinguish mechanical verification, source-mapped material
 needing review, and user acceptance; these are requests, never proof of success.
 Every edit is a Work-revision CAS. Changes to objective or clarification context
-clear the current draft; unanswered questions prevent accepting a replacement
-draft. Revisions serialize as canonical decimal strings to avoid JavaScript
-rounding. Unknown payload fields and versions are refused, never repaired.
+clear the current draft; active unanswered questions prevent accepting a
+replacement draft. Questions record their exact basis and objective revision,
+plus active/answered/superseded/dismissed state. Objective replacement supersedes
+all current clarifications without destroying their answers. Dismissal is an
+explicit edit. Only `current_questions()` participates in future planning.
+Objective, question, answer, plan, and event attribution distinguishes the user,
+primary agent, other agent, and unknown legacy origin. Attribution grants no
+authority and does not claim factual correctness. Revisions serialize as
+canonical decimal strings to avoid JavaScript rounding. Unknown payload fields and versions are refused, never repaired.
 
 ### Persistence decision and recovery
 
@@ -227,7 +241,15 @@ The selected boundary keeps all three independent. Revisit the storage split
 when cross-profile export or large immutable artifact publication is implemented;
 those require explicit migration and ownership joins.
 
-Profile migration 14 is forward-only. Older binaries reject the newer schema.
+Profile migrations 14 and 15 are forward-only. Older binaries reject the newer
+schema. Migration 15 validates and retains legacy Work, plan, question, and
+event content, with unknown legacy provenance. Because v1 did not record a
+question's objective basis, migrated questions are explicitly superseded with
+unknown basis; their former current plan remains readable as history and must
+be replaced before further planning. Works without legacy questions retain their
+current plan. The migration uses a fixed v1 reader and v2 writer, independent
+of the evolving Work domain structs. The conversion and payload accounting are atomic; malformed
+legacy content is preserved by refusing the migration.
 Failed transactions roll back state, nodes, byte accounting, and audit together;
 a failed commit or lost callback is uncertain and requires read/reconciliation
 of the same Work/revision. Replaying an old revision cannot overwrite later
@@ -241,13 +263,28 @@ scrubs these tables through the existing crash-resumable erasure path.
 Admission allows four retained application submissions and four Store commands;
 cloned Shell commands share a single consumable payload. Idle authoring creates
 no worker, timer, polling loop, provider session, or native browser context.
-Each profile supports 256 Works and 32 MiB of content payload. Transactional
+Each profile supports 256 active Works, 512 total active/archived Works, and
+40 MiB of content payload. The extra 8 MiB accommodates v1 provenance metadata
+migration even when the former 32 MiB budget was full. Transactional
 SQLite triggers maintain the payload counter without scanning historical bodies
 on each edit; normalized metadata is separately bounded by row limits. Each
-Work retains at most 32 plan revisions, 64 nodes per plan, 32 questions, and 2,048
-semantic transitions. Exhaustion refuses the edit and retains existing facts;
-there is no automatic history eviction. Lists use stable ID keyset pagination
-with at most 32 summaries, not a cross-page snapshot guarantee. Full Work reads
+Work retains at most 32 plan revisions, 64 nodes per plan, 32 questions, and
+2,048 semantic events. Exhaustion refuses the edit and retains existing facts.
+Archive releases an active slot, restore checks active capacity, and explicit
+CAS deletion releases that Work's retained rows and content quota. Archived Works are
+readable and refuse content edits until restored.
+
+Explicit `CompactHistory` removes superseded drafts and inactive questions,
+keeps the current plan and current clarification provenance, and retains the
+latest 64 prior events plus its own event. It works even at the event limit.
+Revisions never reset; the persisted audit floor defines a contiguous retained
+suffix. Plan/question/event deletion, byte accounting, and the compaction event
+commit together. No history is silently evicted. All current plans are
+unapproved authoring drafts: the future approval compiler must add durable
+retention references before approval/execution is exposed, and compaction and
+Work deletion must respect those references. This operation must never be
+reused to erase an approved/executed revision merely because it is no longer
+current. Lists use stable ID keyset pagination with at most 32 summaries, not a cross-page snapshot guarantee. Full Work reads
 are bounded by those aggregate limits. Normal text fields are at most 8 KiB.
 
 Core, Store, and application tests cover graph validation, exact revisions,
@@ -257,8 +294,8 @@ corrupt payload preservation, migration/rollback refusal, deletion, and bounded
 mailbox ownership. This is deterministic authoring evidence, not qualification
 of model planning or the full intent-to-execution Work product.
 
-Verification on 2026-09-11: the Core (354), application (315), and agentic
-(618) unit suites passed. The final Store run with `work-execution` enabled
+Initial-slice verification on 2026-09-11: the Core (354), application (315), and
+agentic (618) unit suites passed. The final Store run with `work-execution` enabled
 passed 277 tests and four documentation tests, with one existing ignored test.
 The application one-shot settlement regression also passed after its final edit.
 The full dependency-inclusive strict Clippy command is not green: it reports
@@ -267,3 +304,15 @@ unchanged agentic code. These findings are not waived by the authoring evidence.
 The scoped `--no-deps` strict Clippy run also found a pre-existing
 `nonminimal_bool` expression in `work_resources_application.rs`; it reported no
 authoring-code lint findings. Formatting and diff whitespace checks passed.
+
+Follow-up verification on 2026-09-11: Core passed 356 unit tests, application
+passed 317, and the final Store run with `work-execution` passed 282, with one
+existing ignored test. All four Store documentation tests passed. These suites
+include 26 focused authoring tests covering the intent, lifecycle, recovery,
+retention, provenance, and migration boundaries. The profile-erasure fixture was
+updated for v2's required fields before the final full Store rerun.
+`cargo clippy --no-deps -p zephium-core -p zephium-store -p zephium-app
+--all-targets --offline -- -D warnings` passed for the default authoring build;
+this does not supersede the earlier findings in the optional execution build.
+Formatting and diff whitespace checks passed. No provider calls or GUI
+qualification were used for this authoring follow-up.

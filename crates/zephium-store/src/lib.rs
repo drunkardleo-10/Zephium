@@ -14,3 +14,5 @@ pub use actor::{
     ExtensionServiceStoreAuthority, ExtensionServiceStoreAuthorityClaimError,
     ExtensionServiceStoreCallOutcome, ExtensionServiceStoreStartupRequirement, SqliteStore,
 };
+
+mod work_migration_v2;

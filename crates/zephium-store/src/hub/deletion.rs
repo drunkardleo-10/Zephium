@@ -867,7 +867,7 @@ mod tests {
             ],
         )
         .unwrap();
-        conn.execute("INSERT INTO works(id, schema_version, revision, status, objective, created_unix_ms, updated_unix_ms) VALUES ('00000000000000000000000001', 1, 1, 'draft', ?1, 1, 1)", [PROFILE_SCRUB_MARKER]).unwrap();
+        conn.execute("INSERT INTO works(id, schema_version, revision, status, objective, created_unix_ms, updated_unix_ms, lifecycle, objective_revision, context_revision, objective_author) VALUES ('00000000000000000000000001', 2, 1, 'draft', ?1, 1, 1, 'active', 1, 1, 'user')", [PROFILE_SCRUB_MARKER]).unwrap();
         drop(conn);
 
         scrub_profile_database(&path).unwrap();

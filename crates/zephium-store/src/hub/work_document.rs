@@ -8,12 +8,13 @@ use zephium_core::{
 };
 
 const MAX_BODY_BYTES: usize = 131072;
-const _: [(); 256] = [(); MAX_WORKS_PER_PROFILE];
+const _: [(); 512] = [(); MAX_WORKS_PER_PROFILE];
+const _: [(); 256] = [(); MAX_ACTIVE_WORKS_PER_PROFILE];
 const _: [(); 32] = [(); MAX_WORK_PLAN_REVISIONS];
 const _: [(); 64] = [(); MAX_WORK_NODES];
 const _: [(); 32] = [(); MAX_WORK_QUESTIONS];
 const _: [(); 2048] = [(); MAX_WORK_EVENTS];
-const _: [(); 33554432] = [(); MAX_WORK_PROFILE_BYTES];
+const _: [(); 41943040] = [(); MAX_WORK_PROFILE_BYTES];
 
 impl Hub {
     pub(crate) fn work_document(
@@ -33,7 +34,11 @@ impl Hub {
             .map_err(|_| WorkError::Unavailable)?;
         let tx = conn.transaction().map_err(|_| WorkError::Unavailable)?;
         let (reply, write) = match request {
-            WorkRequest::Create { id, objective } => {
+            WorkRequest::Create {
+                id,
+                objective,
+                author,
+            } => {
                 let exists: bool = tx
                     .query_row(
                         "SELECT EXISTS(SELECT 1 FROM works WHERE id = ?1)",
@@ -50,27 +55,82 @@ impl Hub {
                 if count >= MAX_WORKS_PER_PROFILE {
                     return Err(WorkError::Capacity);
                 }
-                let snapshot = WorkSnapshot::create(id, profile, objective)?;
-                tx.execute("INSERT INTO works(id, schema_version, revision, status, objective, created_unix_ms, updated_unix_ms) VALUES (?1, 1, 1, 'draft', ?2, ?3, ?3)", params![id.to_string(), snapshot.objective, timestamp()?]).map_err(db)?;
-                append_event(&tx, id, snapshot.revision, WorkEventKind::Created)?;
+                let mut snapshot = WorkSnapshot::create(id, profile, objective)?;
+                snapshot.objective_author = author;
+                tx.execute("INSERT INTO works(id, schema_version, revision, status, objective, created_unix_ms, updated_unix_ms, lifecycle, objective_revision, context_revision, objective_author) VALUES (?1, 2, 1, 'draft', ?2, ?3, ?3, 'active', 1, 1, ?4)", params![id.to_string(), snapshot.objective, timestamp()?, author_name(author)]).map_err(db)?;
+                append_event(&tx, id, snapshot.revision, WorkEventKind::Created, author)?;
                 (WorkReply::Snapshot(Box::new(snapshot)), true)
+            }
+            WorkRequest::Delete { id, expected } => {
+                let current = read(&tx, profile, id)?;
+                if current.revision != expected {
+                    return Err(WorkError::Conflict);
+                }
+                tx.execute(
+                    "DELETE FROM works WHERE id = ?1 AND revision = ?2",
+                    params![id.to_string(), expected.get() as i64],
+                )
+                .map_err(db)?;
+                (WorkReply::Deleted { id }, true)
             }
             WorkRequest::Read { id } => (
                 WorkReply::Snapshot(Box::new(read(&tx, profile, id)?)),
                 false,
             ),
+            WorkRequest::ListPlans { id } => {
+                let current = read(&tx, profile, id)?;
+                let mut query = tx.prepare("SELECT revision FROM work_plans WHERE work_id = ?1 ORDER BY revision LIMIT 33").map_err(db)?;
+                let rows = query
+                    .query_map([id.to_string()], |r| r.get::<_, i64>(0))
+                    .map_err(db)?;
+                let mut revisions = Vec::new();
+                for row in rows {
+                    let revision = revision(row.map_err(db)?)?;
+                    if revisions.len() >= MAX_WORK_PLAN_REVISIONS
+                        || revision.get() < 2
+                        || revision > current.revision
+                    {
+                        return Err(WorkError::Invalid);
+                    }
+                    revisions.push(revision);
+                }
+                (WorkReply::PlanHistory { revisions }, false)
+            }
             WorkRequest::ReadPlan { id, revision } => {
                 // Revalidate owner/current facts before exposing historical content.
                 read(&tx, profile, id)?;
                 (WorkReply::Plan(read_plan(&tx, id, revision)?), false)
             }
             WorkRequest::List { after, limit } => (list(&tx, after, limit)?, false),
-            WorkRequest::Edit { id, expected, edit } => {
+            WorkRequest::Edit {
+                id,
+                expected,
+                edit,
+                author,
+            } => {
                 let current = read(&tx, profile, id)?;
-                if current.revision.get() >= MAX_WORK_EVENTS as u64 {
-                    return Err(WorkError::Capacity);
+                let (next, event) = current.apply(expected, edit, author)?;
+                if event == WorkEventKind::HistoryCompacted {
+                    // Explicit user action. Current plan and active clarification
+                    // provenance survive; only obsolete authoring content is removed.
+                    tx.execute("DELETE FROM work_plans WHERE work_id = ?1 AND revision != coalesce((SELECT current_plan FROM works WHERE id = ?1), -1)", [id.to_string()]).map_err(db)?;
+                    tx.execute(
+                        "DELETE FROM work_questions WHERE work_id = ?1",
+                        [id.to_string()],
+                    )
+                    .map_err(db)?;
+                    let floor = current.revision.get().saturating_sub(63).max(1);
+                    tx.execute(
+                        "DELETE FROM work_events WHERE work_id = ?1 AND revision < ?2",
+                        params![id.to_string(), floor as i64],
+                    )
+                    .map_err(db)?;
+                    tx.execute(
+                        "UPDATE works SET event_floor = max(event_floor, ?2) WHERE id = ?1",
+                        params![id.to_string(), floor as i64],
+                    )
+                    .map_err(db)?;
                 }
-                let (next, event) = current.apply(expected, edit)?;
                 if event == WorkEventKind::DraftReplaced {
                     let count: usize = tx
                         .query_row(
@@ -84,17 +144,22 @@ impl Hub {
                     }
                     write_plan(&tx, id, next.plan.as_ref().ok_or(WorkError::Invalid)?)?;
                 }
-                let changed = tx.execute("UPDATE works SET revision = ?3, status = ?4, objective = ?5, current_plan = ?6, updated_unix_ms = max(updated_unix_ms, ?7) WHERE id = ?1 AND revision = ?2",
-                    params![id.to_string(), expected.get() as i64, next.revision.get() as i64, status(next.status), next.objective, next.plan.as_ref().map(|p| p.revision.get() as i64), timestamp()?]).map_err(db)?;
+                let changed = tx.execute("UPDATE works SET revision = ?3, status = ?4, objective = ?5, current_plan = ?6, updated_unix_ms = max(updated_unix_ms, ?7), lifecycle = ?8, objective_revision = ?9, context_revision = ?10, objective_author = ?11 WHERE id = ?1 AND revision = ?2",
+                    params![id.to_string(), expected.get() as i64, next.revision.get() as i64, status(next.status), next.objective, next.plan.as_ref().map(|p| p.revision.get() as i64), timestamp()?, lifecycle_name(next.lifecycle), next.objective_revision.get() as i64, next.context_revision.get() as i64, author_name(next.objective_author)]).map_err(db)?;
                 if changed != 1 {
                     return Err(WorkError::Conflict);
                 }
                 for (position, question) in next.questions.iter().enumerate() {
+                    if event != WorkEventKind::HistoryCompacted
+                        && current.questions.get(position) == Some(question)
+                    {
+                        continue;
+                    }
                     let body = encode(question)?;
                     tx.execute("INSERT INTO work_questions(work_id, question_id, position, body) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(work_id, question_id) DO UPDATE SET body = excluded.body",
                         params![id.to_string(), question.id.to_string(), position as i64, body]).map_err(db)?;
                 }
-                append_event(&tx, id, next.revision, event)?;
+                append_event(&tx, id, next.revision, event, author)?;
                 (WorkReply::Snapshot(Box::new(next)), true)
             }
         };
@@ -121,11 +186,48 @@ fn timestamp() -> Result<i64, WorkError> {
 }
 fn db(error: rusqlite::Error) -> WorkError {
     if let rusqlite::Error::SqliteFailure(_, Some(message)) = &error {
-        if message == "CHECK constraint failed: work_payload_budget" {
+        if matches!(
+            message.as_str(),
+            "CHECK constraint failed: work_payload_budget"
+                | "Active Work capacity exceeded"
+                | "Work capacity exceeded"
+                | "Work event capacity exceeded"
+                | "Work plan capacity exceeded"
+        ) {
             return WorkError::Capacity;
         }
     }
     WorkError::Unavailable
+}
+fn author_name(value: WorkAuthor) -> &'static str {
+    match value {
+        WorkAuthor::User => "user",
+        WorkAuthor::PrimaryAgent => "primary_agent",
+        WorkAuthor::OtherAgent => "other_agent",
+        WorkAuthor::LegacyUnknown => "legacy_unknown",
+    }
+}
+fn parse_author(value: &str) -> Result<WorkAuthor, WorkError> {
+    match value {
+        "user" => Ok(WorkAuthor::User),
+        "primary_agent" => Ok(WorkAuthor::PrimaryAgent),
+        "other_agent" => Ok(WorkAuthor::OtherAgent),
+        "legacy_unknown" => Ok(WorkAuthor::LegacyUnknown),
+        _ => Err(WorkError::Invalid),
+    }
+}
+fn lifecycle_name(value: WorkLifecycle) -> &'static str {
+    match value {
+        WorkLifecycle::Active => "active",
+        WorkLifecycle::Archived => "archived",
+    }
+}
+fn parse_lifecycle(value: &str) -> Result<WorkLifecycle, WorkError> {
+    match value {
+        "active" => Ok(WorkLifecycle::Active),
+        "archived" => Ok(WorkLifecycle::Archived),
+        _ => Err(WorkError::Invalid),
+    }
 }
 fn status(value: WorkAuthoringStatus) -> &'static str {
     match value {
@@ -167,15 +269,20 @@ fn append_event(
     id: WorkId,
     revision: WorkRevision,
     event: WorkEventKind,
+    author: WorkAuthor,
 ) -> Result<(), WorkError> {
     let kind = match event {
+        WorkEventKind::Archived => "archived",
+        WorkEventKind::Restored => "restored",
+        WorkEventKind::HistoryCompacted => "history_compacted",
+        WorkEventKind::QuestionDismissed => "question_dismissed",
         WorkEventKind::Created => "created",
         WorkEventKind::ObjectiveEdited => "objective_edited",
         WorkEventKind::QuestionOpened => "question_opened",
         WorkEventKind::QuestionAnswered => "question_answered",
         WorkEventKind::DraftReplaced => "draft_replaced",
     };
-    tx.execute("INSERT INTO work_events(work_id, revision, kind, recorded_unix_ms) VALUES (?1, ?2, ?3, (SELECT updated_unix_ms FROM works WHERE id = ?1))", params![id.to_string(), revision.get() as i64, kind]).map_err(db)?;
+    tx.execute("INSERT INTO work_events(work_id, revision, kind, recorded_unix_ms, author) VALUES (?1, ?2, ?3, (SELECT updated_unix_ms FROM works WHERE id = ?1), ?4)", params![id.to_string(), revision.get() as i64, kind, author_name(author)]).map_err(db)?;
     Ok(())
 }
 fn read(conn: &Connection, profile: ProfileId, id: WorkId) -> Result<WorkSnapshot, WorkError> {
@@ -184,7 +291,7 @@ fn read(conn: &Connection, profile: ProfileId, id: WorkId) -> Result<WorkSnapsho
             "SELECT schema_version, revision,
         CASE WHEN length(CAST(status AS BLOB)) <= 16 THEN status END,
         CASE WHEN length(CAST(objective AS BLOB)) <= 8192 THEN objective END,
-        current_plan FROM works WHERE id = ?1",
+        current_plan, CASE WHEN length(CAST(lifecycle AS BLOB)) <= 16 THEN lifecycle END, objective_revision, context_revision, CASE WHEN length(CAST(objective_author AS BLOB)) <= 32 THEN objective_author END, event_floor FROM works WHERE id = ?1",
             [id.to_string()],
             |r| {
                 Ok((
@@ -193,6 +300,11 @@ fn read(conn: &Connection, profile: ProfileId, id: WorkId) -> Result<WorkSnapsho
                     r.get::<_, Option<String>>(2)?,
                     r.get::<_, Option<String>>(3)?,
                     r.get::<_, Option<i64>>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, i64>(7)?,
+                    r.get::<_, String>(8)?,
+                    r.get::<_, i64>(9)?,
                 ))
             },
         )
@@ -224,6 +336,10 @@ fn read(conn: &Connection, profile: ProfileId, id: WorkId) -> Result<WorkSnapsho
         questions.push(question);
     }
     let snapshot = WorkSnapshot {
+        lifecycle: parse_lifecycle(&row.5)?,
+        objective_revision: revision(row.6)?,
+        context_revision: revision(row.7)?,
+        objective_author: parse_author(&row.8)?,
         schema_version: row.0,
         id,
         profile,
@@ -238,14 +354,19 @@ fn read(conn: &Connection, profile: ProfileId, id: WorkId) -> Result<WorkSnapsho
     };
     snapshot.validate()?;
     // Missing audit rows are corruption, not an opportunity to repair facts.
-    let (count, max): (i64, Option<i64>) = conn
+    let (count, min, max): (i64, Option<i64>, Option<i64>) = conn
         .query_row(
-            "SELECT count(*), max(revision) FROM work_events WHERE work_id = ?1",
+            "SELECT count(*), min(revision), max(revision) FROM work_events WHERE work_id = ?1",
             [id.to_string()],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .map_err(db)?;
-    if count != rev.get() as i64 || max != Some(count) {
+    if row.9 < 1
+        || count > MAX_WORK_EVENTS as i64
+        || min != Some(row.9)
+        || count != rev.get() as i64 - row.9 + 1
+        || max != Some(rev.get() as i64)
+    {
         return Err(WorkError::Invalid);
     }
     Ok(snapshot)
@@ -255,11 +376,11 @@ fn read_plan(
     id: WorkId,
     rev: WorkRevision,
 ) -> Result<WorkPlanRevision, WorkError> {
-    let (plan_id, basis): (String, i64) = conn
+    let (plan_id, basis, author): (String, i64, String) = conn
         .query_row(
-            "SELECT CASE WHEN length(CAST(plan_id AS BLOB)) = 26 THEN plan_id END, basis_revision FROM work_plans WHERE work_id = ?1 AND revision = ?2",
+            "SELECT CASE WHEN length(CAST(plan_id AS BLOB)) = 26 THEN plan_id END, basis_revision, CASE WHEN length(CAST(author AS BLOB)) <= 32 THEN author END FROM work_plans WHERE work_id = ?1 AND revision = ?2",
             params![id.to_string(), rev.get() as i64],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()
         .map_err(db)?
@@ -287,6 +408,7 @@ fn read_plan(
         nodes.push(node);
     }
     let plan = WorkPlanRevision {
+        author: parse_author(&author)?,
         revision: rev,
         basis_revision: revision(basis)?,
         draft: WorkPlanDraft {
@@ -301,14 +423,14 @@ fn read_plan(
     Ok(plan)
 }
 fn write_plan(tx: &Transaction<'_>, id: WorkId, plan: &WorkPlanRevision) -> Result<(), WorkError> {
-    tx.execute("INSERT INTO work_plans(work_id, revision, plan_id, basis_revision) VALUES (?1, ?2, ?3, ?4)", params![id.to_string(), plan.revision.get() as i64, plan.draft.id.to_string(), plan.basis_revision.get() as i64]).map_err(db)?;
+    tx.execute("INSERT INTO work_plans(work_id, revision, plan_id, basis_revision, author) VALUES (?1, ?2, ?3, ?4, ?5)", params![id.to_string(), plan.revision.get() as i64, plan.draft.id.to_string(), plan.basis_revision.get() as i64, author_name(plan.author)]).map_err(db)?;
     for (position, node) in plan.draft.nodes.iter().enumerate() {
         tx.execute("INSERT INTO work_plan_nodes(work_id, plan_revision, node_id, position, body) VALUES (?1, ?2, ?3, ?4, ?5)", params![id.to_string(), plan.revision.get() as i64, node.id.to_string(), position as i64, encode(node)?]).map_err(db)?;
     }
     Ok(())
 }
 fn list(conn: &Connection, after: Option<WorkId>, limit: usize) -> Result<WorkReply, WorkError> {
-    let mut statement = conn.prepare("SELECT CASE WHEN length(CAST(id AS BLOB)) = 26 THEN id END, revision, CASE WHEN length(CAST(status AS BLOB)) <= 16 THEN status END, CASE WHEN length(CAST(objective AS BLOB)) <= 8192 THEN objective END, schema_version FROM works WHERE (?1 IS NULL OR id > ?1) ORDER BY id LIMIT ?2").map_err(db)?;
+    let mut statement = conn.prepare("SELECT CASE WHEN length(CAST(id AS BLOB)) = 26 THEN id END, revision, CASE WHEN length(CAST(status AS BLOB)) <= 16 THEN status END, CASE WHEN length(CAST(objective AS BLOB)) <= 8192 THEN objective END, schema_version, CASE WHEN length(CAST(lifecycle AS BLOB)) <= 16 THEN lifecycle END FROM works WHERE (?1 IS NULL OR id > ?1) ORDER BY id LIMIT ?2").map_err(db)?;
     let rows = statement
         .query_map(
             params![after.map(|id| id.to_string()), (limit + 1) as i64],
@@ -319,14 +441,16 @@ fn list(conn: &Connection, after: Option<WorkId>, limit: usize) -> Result<WorkRe
                     r.get::<_, String>(2)?,
                     r.get::<_, Option<String>>(3)?,
                     r.get::<_, u16>(4)?,
+                    r.get::<_, String>(5)?,
                 ))
             },
         )
         .map_err(db)?;
     let mut works = Vec::new();
     for row in rows {
-        let (id, rev, state, objective, schema_version) = row.map_err(db)?;
+        let (id, rev, state, objective, schema_version, lifecycle) = row.map_err(db)?;
         let summary = WorkSummary {
+            lifecycle: parse_lifecycle(&lifecycle)?,
             schema_version,
             id: WorkId::parse(&id).ok_or(WorkError::Invalid)?,
             revision: revision(rev)?,

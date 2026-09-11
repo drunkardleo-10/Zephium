@@ -5,7 +5,12 @@ use super::*;
 
 #[derive(Clone)]
 pub enum WorkRequest {
+    Delete {
+        id: WorkId,
+        expected: WorkRevision,
+    },
     Create {
+        author: WorkAuthor,
         id: WorkId,
         objective: String,
     },
@@ -13,9 +18,13 @@ pub enum WorkRequest {
         id: WorkId,
     },
     Edit {
+        author: WorkAuthor,
         id: WorkId,
         expected: WorkRevision,
         edit: WorkEdit,
+    },
+    ListPlans {
+        id: WorkId,
     },
     ReadPlan {
         id: WorkId,
@@ -44,6 +53,7 @@ impl WorkRequest {
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkSummary {
+    pub lifecycle: WorkLifecycle,
     pub schema_version: u16,
     pub id: WorkId,
     pub revision: WorkRevision,
@@ -65,8 +75,14 @@ impl std::fmt::Debug for WorkSummary {
 }
 #[derive(Clone, Debug)]
 pub enum WorkReply {
+    Deleted {
+        id: WorkId,
+    },
     Snapshot(Box<WorkSnapshot>),
     Plan(WorkPlanRevision),
+    PlanHistory {
+        revisions: Vec<WorkRevision>,
+    },
     Page {
         works: Vec<WorkSummary>,
         next: Option<WorkId>,

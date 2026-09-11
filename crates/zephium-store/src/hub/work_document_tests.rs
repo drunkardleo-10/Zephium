@@ -23,6 +23,7 @@ fn create(hub: &mut Hub) -> WorkSnapshot {
         .work_document(
             1.into(),
             WorkRequest::Create {
+                author: zephium_core::work::WorkAuthor::User,
                 id: 10.into(),
                 objective: "Compare implementation choices".into(),
             },
@@ -52,6 +53,7 @@ fn edit(hub: &mut Hub, work: &WorkSnapshot, edit: WorkEdit) -> Result<WorkSnapsh
     match hub.work_document(
         work.profile,
         WorkRequest::Edit {
+            author: WorkAuthor::User,
             id: work.id,
             expected: work.revision,
             edit,
@@ -157,6 +159,7 @@ fn work_document_cas_profile_isolation_and_private_refusal() {
         hub.work_document(
             999.into(),
             WorkRequest::Create {
+                author: zephium_core::work::WorkAuthor::User,
                 id: 44.into(),
                 objective: "Private".into()
             }
@@ -232,6 +235,7 @@ fn work_document_pagination_and_plan_capacity_are_bounded() {
     hub.work_document(
         1.into(),
         WorkRequest::Create {
+            author: zephium_core::work::WorkAuthor::User,
             id: 20.into(),
             objective: "Second".into(),
         },
@@ -338,7 +342,7 @@ fn work_document_payload_budget_is_atomic_and_does_not_scan_history() {
         .query_row("SELECT bytes FROM work_payload_usage", [], |r| r.get(0))
         .unwrap();
     assert_eq!(bytes, initial.objective.len());
-    conn.execute("UPDATE work_payload_usage SET bytes = 33554432", [])
+    conn.execute("UPDATE work_payload_usage SET bytes = 41943040", [])
         .unwrap();
     assert_eq!(
         edit(
@@ -440,7 +444,7 @@ fn work_document_listing_refuses_unknown_versions_and_invalid_content() {
         ),
         Err(WorkError::Invalid)
     ));
-    hub.profile_conn(1.into()).unwrap().execute_batch("UPDATE works SET schema_version = 1, objective = ' '; PRAGMA ignore_check_constraints = OFF;").unwrap();
+    hub.profile_conn(1.into()).unwrap().execute_batch("UPDATE works SET schema_version = 2, objective = ' '; PRAGMA ignore_check_constraints = OFF;").unwrap();
     assert!(matches!(
         hub.work_document(
             1.into(),
@@ -451,4 +455,311 @@ fn work_document_listing_refuses_unknown_versions_and_invalid_content() {
         ),
         Err(WorkError::Invalid)
     ));
+}
+
+#[test]
+fn work_document_archive_delete_and_restore_recover_active_capacity() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&session()).unwrap();
+    let initial = create(&mut hub);
+    for n in 1..MAX_ACTIVE_WORKS_PER_PROFILE {
+        hub.work_document(
+            1.into(),
+            WorkRequest::Create {
+                id: (1000 + n as u128).into(),
+                objective: "Another objective".into(),
+                author: WorkAuthor::User,
+            },
+        )
+        .unwrap();
+    }
+    let extra = || WorkRequest::Create {
+        id: 9999.into(),
+        objective: "New objective".into(),
+        author: WorkAuthor::User,
+    };
+    assert!(matches!(
+        hub.work_document(1.into(), extra()),
+        Err(WorkError::Capacity)
+    ));
+    let archived = edit(&mut hub, &initial, WorkEdit::Archive).unwrap();
+    hub.work_document(1.into(), extra()).unwrap();
+    assert_eq!(
+        edit(&mut hub, &archived, WorkEdit::Restore),
+        Err(WorkError::Capacity)
+    );
+    assert!(matches!(
+        hub.work_document(
+            1.into(),
+            WorkRequest::Delete {
+                id: archived.id,
+                expected: initial.revision
+            }
+        ),
+        Err(WorkError::Conflict)
+    ));
+    hub.work_document(
+        1.into(),
+        WorkRequest::Delete {
+            id: 9999.into(),
+            expected: WorkRevision::INITIAL,
+        },
+    )
+    .unwrap();
+    let restored = edit(&mut hub, &archived, WorkEdit::Restore).unwrap();
+    assert_eq!(restored.lifecycle, WorkLifecycle::Active);
+    let planned = edit(
+        &mut hub,
+        &restored,
+        WorkEdit::ReplaceDraft { draft: draft() },
+    )
+    .unwrap();
+    hub.work_document(
+        1.into(),
+        WorkRequest::Delete {
+            id: planned.id,
+            expected: planned.revision,
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        hub.work_document(1.into(), WorkRequest::Read { id: planned.id }),
+        Err(WorkError::NotFound)
+    ));
+    let conn = hub.profile_conn(1.into()).unwrap();
+    for table in [
+        "work_plans",
+        "work_plan_nodes",
+        "work_questions",
+        "work_events",
+    ] {
+        let count: usize = conn
+            .query_row(
+                &format!("SELECT count(*) FROM {table} WHERE work_id = ?1"),
+                [planned.id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+}
+
+#[test]
+fn work_document_compaction_recovers_plan_question_and_event_limits_without_resetting_cas() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut hub = Hub::open(dir.path().into()).unwrap();
+    hub.save(&session()).unwrap();
+    let mut work = create(&mut hub);
+    for n in 0..MAX_WORK_QUESTIONS {
+        work = edit(
+            &mut hub,
+            &work,
+            WorkEdit::OpenQuestion {
+                id: (200 + n as u128).into(),
+                prompt: "Old context".into(),
+                options: vec![],
+            },
+        )
+        .unwrap();
+    }
+    work = edit(
+        &mut hub,
+        &work,
+        WorkEdit::SetObjective {
+            objective: "Current context".into(),
+        },
+    )
+    .unwrap();
+    for _ in 0..MAX_WORK_PLAN_REVISIONS {
+        work = edit(&mut hub, &work, WorkEdit::ReplaceDraft { draft: draft() }).unwrap();
+    }
+    assert_eq!(
+        edit(&mut hub, &work, WorkEdit::ReplaceDraft { draft: draft() }),
+        Err(WorkError::Capacity)
+    );
+    // Fill the content-free event budget using legitimate transitions. Identity
+    // revisions remain monotonic after explicit retention maintenance.
+    while work.revision.get() < MAX_WORK_EVENTS as u64 {
+        let action = if work.lifecycle == WorkLifecycle::Active {
+            WorkEdit::Archive
+        } else {
+            WorkEdit::Restore
+        };
+        work = edit(&mut hub, &work, action).unwrap();
+    }
+    assert_eq!(
+        edit(&mut hub, &work, WorkEdit::Archive),
+        Err(WorkError::Capacity)
+    );
+    let WorkReply::PlanHistory { revisions } = hub
+        .work_document(work.profile, WorkRequest::ListPlans { id: work.id })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(revisions.len(), MAX_WORK_PLAN_REVISIONS);
+    let current_plan = work.plan.clone();
+    let before = work.revision;
+    work = edit(&mut hub, &work, WorkEdit::CompactHistory).unwrap();
+    assert!(work.revision > before);
+    assert_eq!(work.plan, current_plan);
+    assert!(work.questions.is_empty());
+    let conn = hub.profile_conn(1.into()).unwrap();
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM work_plans", [], |r| r
+            .get::<_, usize>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM work_events", [], |r| r
+            .get::<_, usize>(0))
+            .unwrap(),
+        65
+    );
+    if work.lifecycle == WorkLifecycle::Archived {
+        work = edit(&mut hub, &work, WorkEdit::Restore).unwrap();
+    }
+    work = edit(&mut hub, &work, WorkEdit::ReplaceDraft { draft: draft() }).unwrap();
+    drop(hub);
+    let mut hub = Hub::open(dir.path().into()).unwrap();
+    let WorkReply::Snapshot(restored) = hub
+        .work_document(1.into(), WorkRequest::Read { id: work.id })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(*restored, work);
+    assert!(matches!(
+        hub.work_document(
+            1.into(),
+            WorkRequest::Edit {
+                id: work.id,
+                expected: before,
+                edit: WorkEdit::CompactHistory,
+                author: WorkAuthor::User
+            }
+        ),
+        Err(WorkError::Conflict)
+    ));
+}
+
+#[test]
+fn work_document_compaction_failure_rolls_back_history_and_accounting() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&session()).unwrap();
+    let initial = create(&mut hub);
+    let old = edit(
+        &mut hub,
+        &initial,
+        WorkEdit::ReplaceDraft { draft: draft() },
+    )
+    .unwrap();
+    let current = edit(&mut hub, &old, WorkEdit::ReplaceDraft { draft: draft() }).unwrap();
+    let conn = hub.profile_conn(1.into()).unwrap();
+    let bytes: i64 = conn
+        .query_row("SELECT bytes FROM work_payload_usage", [], |r| r.get(0))
+        .unwrap();
+    conn.execute_batch("CREATE TRIGGER refuse_compaction BEFORE INSERT ON work_events WHEN NEW.kind = 'history_compacted' BEGIN SELECT RAISE(ABORT, 'injected'); END;").unwrap();
+    assert!(edit(&mut hub, &current, WorkEdit::CompactHistory).is_err());
+    let conn = hub.profile_conn(1.into()).unwrap();
+    assert_eq!(
+        conn.query_row("SELECT bytes FROM work_payload_usage", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        bytes
+    );
+    assert_eq!(read(conn, initial.profile, initial.id).unwrap(), current);
+    assert_eq!(
+        read_plan(conn, initial.id, old.revision).unwrap(),
+        old.plan.unwrap()
+    );
+}
+
+#[test]
+fn work_document_v15_migration_preserves_history_with_explicit_unknown_legacy_provenance() {
+    let mut conn = legacy_work_fixture();
+    crate::migrations::apply(&mut conn, crate::migrations::PROFILE).unwrap();
+    let migrated = read(&conn, 1.into(), 10.into()).unwrap();
+    assert_eq!(migrated.schema_version, 2);
+    assert_eq!(migrated.objective, "Legacy objective");
+    assert_eq!(migrated.objective_author, WorkAuthor::LegacyUnknown);
+    assert_eq!(
+        migrated.questions[0].answer.as_deref(),
+        Some("Legacy answer")
+    );
+    assert_eq!(migrated.questions[0].basis_revision, None);
+    assert_eq!(migrated.questions[0].state, WorkQuestionState::Superseded);
+    assert_eq!(migrated.current_questions().count(), 0);
+    assert!(migrated.plan.is_none());
+    let old = read_plan(&conn, migrated.id, WorkRevision::new(4).unwrap()).unwrap();
+    assert_eq!(old.author, WorkAuthor::LegacyUnknown);
+    assert_eq!(old.draft, draft());
+    assert!(crate::migrations::apply(&mut conn, &crate::migrations::PROFILE[..14]).is_err());
+    let actual: i64 = conn.query_row("SELECT (SELECT sum(length(CAST(objective AS BLOB))) FROM works) + (SELECT sum(length(CAST(body AS BLOB))) FROM work_questions) + (SELECT sum(length(CAST(body AS BLOB))) FROM work_plan_nodes)", [], |r| r.get(0)).unwrap();
+    assert_eq!(
+        conn.query_row("SELECT bytes FROM work_payload_usage", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        actual
+    );
+}
+
+#[test]
+fn work_document_v15_migration_refuses_corruption_atomically() {
+    let mut conn = legacy_work_fixture();
+    conn.execute(
+        "UPDATE work_questions SET body = '{\"unexpected\":true}'",
+        [],
+    )
+    .unwrap();
+    assert!(crate::migrations::apply(&mut conn, crate::migrations::PROFILE).is_err());
+    assert_eq!(
+        conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        14
+    );
+    assert_eq!(
+        conn.query_row("SELECT body FROM work_questions", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "{\"unexpected\":true}"
+    );
+    crate::migrations::validate_current(&conn, &crate::migrations::PROFILE[..14]).unwrap();
+}
+
+fn legacy_work_fixture() -> Connection {
+    let mut conn = Connection::open_in_memory().unwrap();
+    crate::hub::filesystem::configure(&conn).unwrap();
+    crate::migrations::apply(&mut conn, &crate::migrations::PROFILE[..14]).unwrap();
+    let id = WorkId::from(10).to_string();
+    conn.execute("INSERT INTO works(id, schema_version, revision, status, objective, created_unix_ms, updated_unix_ms) VALUES (?1, 1, 4, 'plan_ready', 'Legacy objective', 0, 0)", [&id]).unwrap();
+    conn.execute(
+        "INSERT INTO work_plans(work_id, revision, plan_id, basis_revision) VALUES (?1, 4, ?2, 3)",
+        params![id, draft().id.to_string()],
+    )
+    .unwrap();
+    let node = draft().nodes.remove(0);
+    conn.execute("INSERT INTO work_plan_nodes(work_id, plan_revision, node_id, position, body) VALUES (?1, 4, ?2, 0, ?3)", params![id, node.id.to_string(), encode(&node).unwrap()]).unwrap();
+    conn.execute("UPDATE works SET current_plan = 4", [])
+        .unwrap();
+    let question = WorkQuestionId::from(77);
+    let body = serde_json::json!({ "id": question, "prompt": "Legacy question", "options": [], "answer": "Legacy answer" }).to_string();
+    conn.execute(
+        "INSERT INTO work_questions(work_id, question_id, position, body) VALUES (?1, ?2, 0, ?3)",
+        params![id, question.to_string(), body],
+    )
+    .unwrap();
+    for (n, kind) in [
+        "created",
+        "question_opened",
+        "question_answered",
+        "draft_replaced",
+    ]
+    .iter()
+    .enumerate()
+    {
+        conn.execute("INSERT INTO work_events(work_id, revision, recorded_unix_ms, kind) VALUES (?1, ?2, 0, ?3)", params![id, n as i64 + 1, kind]).unwrap();
+    }
+    conn
 }

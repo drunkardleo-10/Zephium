@@ -4,6 +4,7 @@ impl crate::Shell {
     pub(crate) fn work_document(&self, submission: WorkDocumentSubmission) {
         let Some(crate::work_authoring::Payload {
             request,
+            owner,
             reply,
             permit,
         }) = submission.take()
@@ -21,6 +22,7 @@ impl crate::Shell {
             let _ = reply.try_send(Err(WorkError::ProfileUnavailable));
             return;
         };
+        let _ = owner.set(profile);
         let refused = reply.clone();
         let result = self.store.work_document(
             profile,
@@ -40,7 +42,7 @@ impl crate::Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Command, Shell};
+    use crate::{Command, Shell, WorkIntent, WorkUserEdit};
     use std::{
         sync::Arc,
         time::{Duration, Instant},
@@ -61,13 +63,12 @@ mod tests {
         let profile = shell.windows.focused().unwrap().profile;
         let queue = crate::actor::CommandQueue::new();
         let handle = crate::actor::Handle::new(queue.clone());
-        let id = WorkId::generate();
         let request = handle
-            .work_document(WorkRequest::Create {
-                id,
+            .work_document(WorkIntent::Create {
                 objective: "Compare local model deployment options".into(),
             })
             .unwrap();
+        let minted_id = request.work_id().unwrap();
         let command = queue.try_recv().unwrap();
         let duplicate = command.clone();
         shell.handle(command);
@@ -78,19 +79,20 @@ mod tests {
             "a known outcome cannot become uncertain later"
         );
         assert_eq!(projection.profile, profile);
+        assert_eq!(request.profile(), Some(profile));
         let WorkReply::Snapshot(work) = projection.reply else {
             panic!()
         };
-        assert_eq!(work.id, id);
+        let id = work.id;
+        assert_eq!(id, minted_id);
+        assert_eq!(work.objective_author, WorkAuthor::User);
         assert_eq!(work.status, WorkAuthoringStatus::Draft);
         assert!(work.plan.is_none());
-        let question_id = WorkQuestionId::generate();
         let request = handle
-            .work_document(WorkRequest::Edit {
+            .work_document(WorkIntent::Edit {
                 id,
                 expected: work.revision,
-                edit: WorkEdit::OpenQuestion {
-                    id: question_id,
+                edit: WorkUserEdit::OpenQuestion {
                     prompt: "Which hardware?".into(),
                     options: vec![],
                 },
@@ -105,7 +107,7 @@ mod tests {
         let mut private = shell.profiles.remove(profile).unwrap();
         private.kind = zephium_core::profiles::ProfileKind::Incognito;
         assert!(shell.profiles.insert(private));
-        let request = handle.work_document(WorkRequest::Read { id }).unwrap();
+        let request = handle.work_document(WorkIntent::Read { id }).unwrap();
         shell.handle(queue.try_recv().unwrap());
         assert!(matches!(wait(&request), Err(WorkError::ProfileUnavailable)));
         assert_eq!(

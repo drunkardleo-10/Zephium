@@ -4,6 +4,7 @@
 
 mod ids;
 pub mod port;
+pub mod proposal;
 #[cfg(test)]
 mod tests;
 use crate::ids::ProfileId;
@@ -11,8 +12,9 @@ pub use ids::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub const WORK_SCHEMA_VERSION: u16 = 1;
-pub const MAX_WORKS_PER_PROFILE: usize = 256;
+pub const WORK_SCHEMA_VERSION: u16 = 2;
+pub const MAX_ACTIVE_WORKS_PER_PROFILE: usize = 256;
+pub const MAX_WORKS_PER_PROFILE: usize = 512;
 pub const MAX_WORK_PLAN_REVISIONS: usize = 32;
 pub const MAX_WORK_NODES: usize = 64;
 pub const MAX_WORK_QUESTIONS: usize = 32;
@@ -20,7 +22,7 @@ pub const MAX_WORK_EVENTS: usize = 2048;
 pub const MAX_WORK_TEXT_BYTES: usize = 8192;
 pub const MAX_WORK_NODE_BYTES: usize = 16384;
 pub const MAX_WORK_REQUEST_BYTES: usize = 262144;
-pub const MAX_WORK_PROFILE_BYTES: usize = 33554432;
+pub const MAX_WORK_PROFILE_BYTES: usize = 41943040;
 pub const MAX_WORK_PAGE_SIZE: usize = 32;
 
 /// SQLite- and JavaScript-safe ordered revision. The wire representation is a
@@ -77,6 +79,33 @@ pub enum WorkAuthoringStatus {
     PlanReady,
 }
 
+/// Attribution is descriptive history, never authorization. Legacy content has
+/// unknown attribution; application callers cannot impersonate agent authors.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkAuthor {
+    User,
+    PrimaryAgent,
+    OtherAgent,
+    LegacyUnknown,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkLifecycle {
+    Active,
+    Archived,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkQuestionState {
+    Active,
+    Answered,
+    Superseded,
+    Dismissed,
+}
+
 /// Requested output review level, never evidence that a requirement was met.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -131,20 +160,7 @@ impl WorkPlanDraft {
             {
                 return Err(WorkError::Invalid);
             }
-            let mut names = BTreeSet::new();
-            let mut node_bytes = node.objective.len();
-            for output in &node.outputs {
-                validate_text(&output.name, 128)?;
-                validate_text(&output.description, 2048)?;
-                if !names.insert(&output.name) {
-                    return Err(WorkError::Invalid);
-                }
-                node_bytes += output.name.len() + output.description.len();
-            }
-            if node_bytes > MAX_WORK_NODE_BYTES {
-                return Err(WorkError::Capacity);
-            }
-            bytes += node_bytes;
+            bytes += validate_node_content(&node.objective, &node.outputs)?;
         }
         if bytes > MAX_WORK_REQUEST_BYTES / 2 {
             return Err(WorkError::Capacity);
@@ -171,6 +187,7 @@ impl WorkPlanDraft {
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkPlanRevision {
+    pub author: WorkAuthor,
     pub revision: WorkRevision,
     /// Exact Work context from which the proposal was accepted.
     pub basis_revision: WorkRevision,
@@ -180,13 +197,34 @@ pub struct WorkPlanRevision {
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkQuestion {
+    pub basis_revision: Option<WorkRevision>,
+    pub objective_revision: Option<WorkRevision>,
+    pub state: WorkQuestionState,
+    pub author: WorkAuthor,
+    pub answer_author: Option<WorkAuthor>,
     pub id: WorkQuestionId,
     pub prompt: String,
     pub options: Vec<String>,
     pub answer: Option<String>,
 }
 impl WorkQuestion {
+    pub fn is_current(&self) -> bool {
+        matches!(
+            self.state,
+            WorkQuestionState::Active | WorkQuestionState::Answered
+        )
+    }
     pub fn validate(&self) -> Result<(), WorkError> {
+        if self.basis_revision.is_none() != self.objective_revision.is_none()
+            || (self.basis_revision.is_none()
+                && (self.is_current() || self.author != WorkAuthor::LegacyUnknown))
+            || self.objective_revision > self.basis_revision
+            || self.answer.is_some() != self.answer_author.is_some()
+            || (self.state == WorkQuestionState::Active && self.answer.is_some())
+            || (self.state == WorkQuestionState::Answered && self.answer.is_none())
+        {
+            return Err(WorkError::Invalid);
+        }
         validate_text(&self.prompt, MAX_WORK_TEXT_BYTES)?;
         if self.options.len() > 8 {
             return Err(WorkError::Invalid);
@@ -209,6 +247,10 @@ impl WorkQuestion {
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkSnapshot {
+    pub lifecycle: WorkLifecycle,
+    pub objective_revision: WorkRevision,
+    pub context_revision: WorkRevision,
+    pub objective_author: WorkAuthor,
     pub schema_version: u16,
     pub id: WorkId,
     pub profile: ProfileId,
@@ -222,6 +264,10 @@ impl WorkSnapshot {
     pub fn create(id: WorkId, profile: ProfileId, objective: String) -> Result<Self, WorkError> {
         validate_text(&objective, MAX_WORK_TEXT_BYTES)?;
         Ok(Self {
+            lifecycle: WorkLifecycle::Active,
+            objective_revision: WorkRevision::INITIAL,
+            context_revision: WorkRevision::INITIAL,
+            objective_author: WorkAuthor::User,
             schema_version: WORK_SCHEMA_VERSION,
             id,
             profile,
@@ -233,22 +279,36 @@ impl WorkSnapshot {
         })
     }
     pub fn validate(&self) -> Result<(), WorkError> {
-        if self.schema_version != WORK_SCHEMA_VERSION || self.questions.len() > MAX_WORK_QUESTIONS {
+        if self.schema_version != WORK_SCHEMA_VERSION
+            || self.questions.len() > MAX_WORK_QUESTIONS
+            || self.objective_revision > self.context_revision
+            || self.context_revision > self.revision
+        {
             return Err(WorkError::Invalid);
         }
         validate_text(&self.objective, MAX_WORK_TEXT_BYTES)?;
         let mut ids = BTreeSet::new();
         for question in &self.questions {
             question.validate()?;
-            if !ids.insert(question.id) {
+            if !ids.insert(question.id)
+                || question
+                    .basis_revision
+                    .is_some_and(|basis| basis >= self.revision)
+                || (question.is_current()
+                    && question.objective_revision != Some(self.objective_revision))
+            {
                 return Err(WorkError::Invalid);
             }
         }
         if let Some(plan) = &self.plan {
             plan.draft.validate()?;
-            if plan.revision != self.revision
+            if plan.revision > self.revision
+                || plan.basis_revision < self.context_revision
                 || plan.basis_revision.next()? != plan.revision
-                || self.questions.iter().any(|q| q.answer.is_none())
+                || self
+                    .questions
+                    .iter()
+                    .any(|q| q.state == WorkQuestionState::Active)
             {
                 return Err(WorkError::Invalid);
             }
@@ -259,7 +319,11 @@ impl WorkSnapshot {
         Ok(())
     }
     fn derived_status(&self) -> WorkAuthoringStatus {
-        if self.questions.iter().any(|q| q.answer.is_none()) {
+        if self
+            .questions
+            .iter()
+            .any(|q| q.state == WorkQuestionState::Active)
+        {
             WorkAuthoringStatus::NeedsInput
         } else if self.plan.is_some() {
             WorkAuthoringStatus::PlanReady
@@ -267,22 +331,39 @@ impl WorkSnapshot {
             WorkAuthoringStatus::Draft
         }
     }
+    /// Only this explicit set is eligible for a future planning request.
+    pub fn current_questions(&self) -> impl Iterator<Item = &WorkQuestion> {
+        self.questions.iter().filter(|q| q.is_current())
+    }
     /// Pure compare-and-set transition. Refusal leaves the original untouched.
     pub fn apply(
         &self,
         expected: WorkRevision,
         edit: WorkEdit,
+        author: WorkAuthor,
     ) -> Result<(Self, WorkEventKind), WorkError> {
         self.validate()?;
         if self.revision != expected {
             return Err(WorkError::Conflict);
         }
         edit.validate()?;
+        if self.lifecycle == WorkLifecycle::Archived
+            && !matches!(edit, WorkEdit::Restore | WorkEdit::CompactHistory)
+        {
+            return Err(WorkError::Conflict);
+        }
         let mut next = self.clone();
         next.revision = self.revision.next()?;
         let event = match edit {
             WorkEdit::SetObjective { objective } => {
                 next.objective = objective;
+                next.objective_author = author;
+                next.objective_revision = next.revision;
+                for question in &mut next.questions {
+                    if question.is_current() {
+                        question.state = WorkQuestionState::Superseded;
+                    }
+                }
                 next.plan = None;
                 WorkEventKind::ObjectiveEdited
             }
@@ -298,6 +379,11 @@ impl WorkSnapshot {
                     return Err(WorkError::Conflict);
                 }
                 next.questions.push(WorkQuestion {
+                    basis_revision: Some(self.revision),
+                    objective_revision: Some(self.objective_revision),
+                    state: WorkQuestionState::Active,
+                    author,
+                    answer_author: None,
                     id,
                     prompt,
                     options,
@@ -312,22 +398,69 @@ impl WorkSnapshot {
                     .iter_mut()
                     .find(|q| q.id == id)
                     .ok_or(WorkError::NotFound)?;
+                if !question.is_current() {
+                    return Err(WorkError::Conflict);
+                }
                 question.answer = Some(answer);
+                question.answer_author = Some(author);
+                question.state = WorkQuestionState::Answered;
                 next.plan = None;
                 WorkEventKind::QuestionAnswered
             }
             WorkEdit::ReplaceDraft { draft } => {
-                if next.questions.iter().any(|q| q.answer.is_none()) {
+                if next
+                    .questions
+                    .iter()
+                    .any(|q| q.state == WorkQuestionState::Active)
+                {
                     return Err(WorkError::Conflict);
                 }
                 next.plan = Some(WorkPlanRevision {
+                    author,
                     revision: next.revision,
                     basis_revision: self.revision,
                     draft,
                 });
                 WorkEventKind::DraftReplaced
             }
+            WorkEdit::DismissQuestion { id } => {
+                let question = next
+                    .questions
+                    .iter_mut()
+                    .find(|q| q.id == id)
+                    .ok_or(WorkError::NotFound)?;
+                if !question.is_current() {
+                    return Err(WorkError::Conflict);
+                }
+                question.state = WorkQuestionState::Dismissed;
+                next.plan = None;
+                WorkEventKind::QuestionDismissed
+            }
+            WorkEdit::Archive => {
+                next.lifecycle = WorkLifecycle::Archived;
+                WorkEventKind::Archived
+            }
+            WorkEdit::Restore => {
+                if self.lifecycle != WorkLifecycle::Archived {
+                    return Err(WorkError::Conflict);
+                }
+                next.lifecycle = WorkLifecycle::Active;
+                WorkEventKind::Restored
+            }
+            WorkEdit::CompactHistory => {
+                next.questions.retain(WorkQuestion::is_current);
+                WorkEventKind::HistoryCompacted
+            }
         };
+        if matches!(
+            event,
+            WorkEventKind::ObjectiveEdited
+                | WorkEventKind::QuestionOpened
+                | WorkEventKind::QuestionAnswered
+                | WorkEventKind::QuestionDismissed
+        ) {
+            next.context_revision = next.revision;
+        }
         next.status = next.derived_status();
         next.validate()?;
         Ok((next, event))
@@ -337,6 +470,12 @@ impl WorkSnapshot {
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkEdit {
+    Archive,
+    Restore,
+    CompactHistory,
+    DismissQuestion {
+        id: WorkQuestionId,
+    },
     SetObjective {
         objective: String,
     },
@@ -375,6 +514,9 @@ impl WorkEdit {
             }
             Self::AnswerQuestion { answer, .. } => validate_text(answer, MAX_WORK_TEXT_BYTES),
             Self::ReplaceDraft { draft } => draft.validate(),
+            Self::Archive | Self::Restore | Self::CompactHistory | Self::DismissQuestion { .. } => {
+                Ok(())
+            }
         }
     }
 }
@@ -382,11 +524,39 @@ impl WorkEdit {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkEventKind {
+    Archived,
+    Restored,
+    HistoryCompacted,
+    QuestionDismissed,
     Created,
     ObjectiveEdited,
     QuestionOpened,
     QuestionAnswered,
     DraftReplaced,
+}
+
+fn validate_node_content(
+    objective: &str,
+    outputs: &[WorkExpectedOutput],
+) -> Result<usize, WorkError> {
+    validate_text(objective, MAX_WORK_TEXT_BYTES)?;
+    if outputs.is_empty() || outputs.len() > 8 {
+        return Err(WorkError::Invalid);
+    }
+    let mut names = BTreeSet::new();
+    let mut bytes = objective.len();
+    for output in outputs {
+        validate_text(&output.name, 128)?;
+        validate_text(&output.description, 2048)?;
+        if !names.insert(&output.name) {
+            return Err(WorkError::Invalid);
+        }
+        bytes += output.name.len() + output.description.len();
+    }
+    if bytes > MAX_WORK_NODE_BYTES {
+        return Err(WorkError::Capacity);
+    }
+    Ok(bytes)
 }
 
 pub(crate) fn validate_text(text: &str, max: usize) -> Result<(), WorkError> {

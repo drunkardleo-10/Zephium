@@ -773,10 +773,10 @@ impl Handle {
     /// is a typed Rust intent seam, not a raw manifest or execution endpoint.
     pub fn work_document(
         &self,
-        request: zephium_core::work::port::WorkRequest,
+        intent: crate::WorkIntent,
     ) -> Result<crate::WorkDocumentRequest, zephium_core::work::WorkError> {
         let (submission, receiver) =
-            crate::work_authoring::WorkDocumentSubmission::prepare(request)?;
+            crate::work_authoring::WorkDocumentSubmission::prepare(intent.into_request()?)?;
         match self.queue.try_push(Command::WorkDocument(submission)) {
             Ok(()) => Ok(receiver),
             Err(TryPushError::Full(_)) => Err(zephium_core::work::WorkError::Capacity),

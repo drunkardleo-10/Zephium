@@ -15,5 +15,6 @@ sha2 = "=0.10.9"
 winreg = "0.55"
 
 [dev-dependencies]
+serde_json.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
