@@ -4243,34 +4243,7 @@ fn encode_openai_observation_body_with_action_targets(
     let definitions = constrained
         .as_deref()
         .unwrap_or_else(|| browser_tool_definitions_for(config));
-    let tools = definitions
-        .iter()
-        .chain(config.adds_baseline_read().then(|| &*BASELINE_READ_TOOL))
-        .chain(
-            config
-                .adds_progressive_observation()
-                .then(|| &*PROGRESSIVE_OBSERVATION_TOOL),
-        )
-        .chain(
-            config
-                .adds_viewport_screenshot()
-                .then(|| &*VIEWPORT_SCREENSHOT_TOOL),
-        )
-        .chain(
-            config
-                .adds_standalone_wait()
-                .then(|| &*STANDALONE_WAIT_TOOL),
-        )
-        .chain(config.adds_human_request().then(|| &*HUMAN_REQUEST_TOOL))
-        .filter(|tool| config.permits_tool(tool.kind))
-        .map(|tool| OpenAiToolWire {
-            r#type: "function",
-            name: tool.kind.as_str(),
-            description: tool.description,
-            parameters: &tool.parameters,
-            strict: true,
-        })
-        .collect();
+    let tools = openai_tool_wires(config, definitions);
     let mut input = vec![
         openai_text_message("user", objective),
         openai_text_message("user", semantic),
@@ -4368,34 +4341,7 @@ pub(in crate::agent_provider) fn encode_openai_continuation_body(
     let definitions = constrained
         .as_deref()
         .unwrap_or_else(|| browser_tool_definitions_for(config));
-    let tools = definitions
-        .iter()
-        .chain(config.adds_baseline_read().then(|| &*BASELINE_READ_TOOL))
-        .chain(
-            config
-                .adds_progressive_observation()
-                .then(|| &*PROGRESSIVE_OBSERVATION_TOOL),
-        )
-        .chain(
-            config
-                .adds_viewport_screenshot()
-                .then(|| &*VIEWPORT_SCREENSHOT_TOOL),
-        )
-        .chain(
-            config
-                .adds_standalone_wait()
-                .then(|| &*STANDALONE_WAIT_TOOL),
-        )
-        .chain(config.adds_human_request().then(|| &*HUMAN_REQUEST_TOOL))
-        .filter(|tool| config.permits_tool(tool.kind))
-        .map(|tool| OpenAiToolWire {
-            r#type: "function",
-            name: tool.kind.as_str(),
-            description: tool.description,
-            parameters: &tool.parameters,
-            strict: true,
-        })
-        .collect();
+    let tools = openai_tool_wires(config, definitions);
     let wire = OpenAiContinuationRequestWire {
         model: config.model().as_str(),
         instructions: AGENT_BROWSER_INSTRUCTIONS_V1,
@@ -4588,34 +4534,7 @@ fn encode_openai_screenshot_continuation_body(
     let definitions = constrained
         .as_deref()
         .unwrap_or_else(|| browser_tool_definitions_for(config));
-    let tools = definitions
-        .iter()
-        .chain(config.adds_baseline_read().then(|| &*BASELINE_READ_TOOL))
-        .chain(
-            config
-                .adds_progressive_observation()
-                .then(|| &*PROGRESSIVE_OBSERVATION_TOOL),
-        )
-        .chain(
-            config
-                .adds_viewport_screenshot()
-                .then(|| &*VIEWPORT_SCREENSHOT_TOOL),
-        )
-        .chain(
-            config
-                .adds_standalone_wait()
-                .then(|| &*STANDALONE_WAIT_TOOL),
-        )
-        .chain(config.adds_human_request().then(|| &*HUMAN_REQUEST_TOOL))
-        .filter(|tool| config.permits_tool(tool.kind))
-        .map(|tool| OpenAiToolWire {
-            r#type: "function",
-            name: tool.kind.as_str(),
-            description: tool.description,
-            parameters: &tool.parameters,
-            strict: true,
-        })
-        .collect();
+    let tools = openai_tool_wires(config, definitions);
     let wire = OpenAiContinuationRequestWire {
         model: config.model().as_str(),
         instructions: AGENT_BROWSER_INSTRUCTIONS_V1,
@@ -4664,49 +4583,7 @@ fn encode_anthropic_body_with_action_targets(
     let definitions = projected
         .as_deref()
         .unwrap_or_else(|| anthropic_browser_tool_definitions(config));
-    validate_anthropic_tool_definitions(
-        definitions,
-        config.adds_baseline_read(),
-        config.adds_progressive_observation(),
-        config.adds_viewport_screenshot(),
-        config.adds_standalone_wait(),
-        config.adds_human_request(),
-    )?;
-    let tools = definitions
-        .iter()
-        .chain(
-            config
-                .adds_baseline_read()
-                .then(|| &*ANTHROPIC_BASELINE_READ_TOOL),
-        )
-        .chain(
-            config
-                .adds_progressive_observation()
-                .then(|| &*ANTHROPIC_PROGRESSIVE_OBSERVATION_TOOL),
-        )
-        .chain(
-            config
-                .adds_viewport_screenshot()
-                .then(|| &*ANTHROPIC_VIEWPORT_SCREENSHOT_TOOL),
-        )
-        .chain(
-            config
-                .adds_standalone_wait()
-                .then(|| &*ANTHROPIC_STANDALONE_WAIT_TOOL),
-        )
-        .chain(
-            config
-                .adds_human_request()
-                .then(|| &*ANTHROPIC_HUMAN_REQUEST_TOOL),
-        )
-        .filter(|tool| config.permits_tool(tool.kind))
-        .map(|tool| AnthropicToolWire {
-            name: tool.kind.as_str(),
-            description: tool.description,
-            input_schema: &tool.input_schema,
-            strict: true,
-        })
-        .collect();
+    let tools = anthropic_tool_wires(config, definitions)?;
     let wire = AnthropicRequestWire {
         model: config.model().as_str(),
         max_tokens: config.max_output_tokens(),
@@ -4756,14 +4633,6 @@ fn encode_anthropic_continuation_body(
     let definitions = projected
         .as_deref()
         .unwrap_or_else(|| anthropic_browser_tool_definitions(config));
-    validate_anthropic_tool_definitions(
-        definitions,
-        config.adds_baseline_read(),
-        config.adds_progressive_observation(),
-        config.adds_viewport_screenshot(),
-        config.adds_standalone_wait(),
-        config.adds_human_request(),
-    )?;
     let message_count = 1_usize
         .checked_add(
             transcript
@@ -4822,41 +4691,7 @@ fn encode_anthropic_continuation_body(
         });
     }
     debug_assert_eq!(messages.len(), message_count);
-    let tools = definitions
-        .iter()
-        .chain(
-            config
-                .adds_baseline_read()
-                .then(|| &*ANTHROPIC_BASELINE_READ_TOOL),
-        )
-        .chain(
-            config
-                .adds_progressive_observation()
-                .then(|| &*ANTHROPIC_PROGRESSIVE_OBSERVATION_TOOL),
-        )
-        .chain(
-            config
-                .adds_viewport_screenshot()
-                .then(|| &*ANTHROPIC_VIEWPORT_SCREENSHOT_TOOL),
-        )
-        .chain(
-            config
-                .adds_standalone_wait()
-                .then(|| &*ANTHROPIC_STANDALONE_WAIT_TOOL),
-        )
-        .chain(
-            config
-                .adds_human_request()
-                .then(|| &*ANTHROPIC_HUMAN_REQUEST_TOOL),
-        )
-        .filter(|tool| config.permits_tool(tool.kind))
-        .map(|tool| AnthropicToolWire {
-            name: tool.kind.as_str(),
-            description: tool.description,
-            input_schema: &tool.input_schema,
-            strict: true,
-        })
-        .collect();
+    let tools = anthropic_tool_wires(config, definitions)?;
     let wire = AnthropicContinuationRequestWire {
         model: config.model().as_str(),
         max_tokens: config.max_output_tokens(),
@@ -4985,14 +4820,6 @@ fn encode_anthropic_screenshot_continuation_body(
     let definitions = projected
         .as_deref()
         .unwrap_or_else(|| anthropic_browser_tool_definitions(config));
-    validate_anthropic_tool_definitions(
-        definitions,
-        config.adds_baseline_read(),
-        config.adds_progressive_observation(),
-        config.adds_viewport_screenshot(),
-        config.adds_standalone_wait(),
-        config.adds_human_request(),
-    )?;
     if transcript.navigation_checkpoint().is_some() {
         return Err(AgentProviderRequestError::Encoding);
     }
@@ -5096,41 +4923,7 @@ fn encode_anthropic_screenshot_continuation_body(
         )],
     });
     debug_assert_eq!(messages.len(), message_count);
-    let tools = definitions
-        .iter()
-        .chain(
-            config
-                .adds_baseline_read()
-                .then(|| &*ANTHROPIC_BASELINE_READ_TOOL),
-        )
-        .chain(
-            config
-                .adds_progressive_observation()
-                .then(|| &*ANTHROPIC_PROGRESSIVE_OBSERVATION_TOOL),
-        )
-        .chain(
-            config
-                .adds_viewport_screenshot()
-                .then(|| &*ANTHROPIC_VIEWPORT_SCREENSHOT_TOOL),
-        )
-        .chain(
-            config
-                .adds_standalone_wait()
-                .then(|| &*ANTHROPIC_STANDALONE_WAIT_TOOL),
-        )
-        .chain(
-            config
-                .adds_human_request()
-                .then(|| &*ANTHROPIC_HUMAN_REQUEST_TOOL),
-        )
-        .filter(|tool| config.permits_tool(tool.kind))
-        .map(|tool| AnthropicToolWire {
-            name: tool.kind.as_str(),
-            description: tool.description,
-            input_schema: &tool.input_schema,
-            strict: true,
-        })
-        .collect();
+    let tools = anthropic_tool_wires(config, definitions)?;
     let wire = AnthropicContinuationRequestWire {
         model: config.model().as_str(),
         max_tokens: config.max_output_tokens(),
@@ -5188,8 +4981,133 @@ fn encode_png_base64_with_prefix(
     Ok(encoded)
 }
 
+/// Returns Back only when current trusted runtime state permits it and the
+/// immutable profile did not already contain it. Navigation profiles keep a
+/// small static vocabulary, while history availability changes after every
+/// successful traversal; projecting it here keeps the provider wire truthful
+/// without duplicating Back in the Full profile.
+fn supplemental_back_tool(
+    config: &AgentProviderCallConfig,
+    definitions: &[BrowserToolDefinition],
+) -> Option<&'static BrowserToolDefinition> {
+    (config.permits_tool(AgentBrowserToolKind::Back)
+        && definitions
+            .iter()
+            .all(|tool| tool.kind != AgentBrowserToolKind::Back))
+    .then(|| {
+        browser_tool_definitions()
+            .iter()
+            .find(|tool| tool.kind == AgentBrowserToolKind::Back)
+            .expect("complete browser tool vocabulary contains Back")
+    })
+}
+
+fn openai_tool_wires<'a>(
+    config: &AgentProviderCallConfig,
+    definitions: &'a [BrowserToolDefinition],
+) -> Vec<OpenAiToolWire<'a>> {
+    definitions
+        .iter()
+        .chain(supplemental_back_tool(config, definitions))
+        .chain(config.adds_baseline_read().then(|| &*BASELINE_READ_TOOL))
+        .chain(
+            config
+                .adds_progressive_observation()
+                .then(|| &*PROGRESSIVE_OBSERVATION_TOOL),
+        )
+        .chain(
+            config
+                .adds_viewport_screenshot()
+                .then(|| &*VIEWPORT_SCREENSHOT_TOOL),
+        )
+        .chain(
+            config
+                .adds_standalone_wait()
+                .then(|| &*STANDALONE_WAIT_TOOL),
+        )
+        .chain(config.adds_human_request().then(|| &*HUMAN_REQUEST_TOOL))
+        .filter(|tool| config.permits_tool(tool.kind))
+        .map(|tool| OpenAiToolWire {
+            r#type: "function",
+            name: tool.kind.as_str(),
+            description: tool.description,
+            parameters: &tool.parameters,
+            strict: true,
+        })
+        .collect()
+}
+
+fn supplemental_anthropic_back_tool(
+    config: &AgentProviderCallConfig,
+    definitions: &[AnthropicBrowserToolDefinition],
+) -> Option<&'static AnthropicBrowserToolDefinition> {
+    (config.permits_tool(AgentBrowserToolKind::Back)
+        && definitions
+            .iter()
+            .all(|tool| tool.kind != AgentBrowserToolKind::Back))
+    .then(|| {
+        ANTHROPIC_BROWSER_TOOL_DEFINITIONS
+            .iter()
+            .find(|tool| tool.kind == AgentBrowserToolKind::Back)
+            .expect("complete Anthropic tool vocabulary contains Back")
+    })
+}
+
+fn anthropic_tool_wires<'a>(
+    config: &AgentProviderCallConfig,
+    definitions: &'a [AnthropicBrowserToolDefinition],
+) -> Result<Vec<AnthropicToolWire<'a>>, AgentProviderRequestError> {
+    let supplemental_back = supplemental_anthropic_back_tool(config, definitions);
+    validate_anthropic_tool_definitions(
+        definitions,
+        supplemental_back.is_some(),
+        config.adds_baseline_read(),
+        config.adds_progressive_observation(),
+        config.adds_viewport_screenshot(),
+        config.adds_standalone_wait(),
+        config.adds_human_request(),
+    )?;
+    Ok(definitions
+        .iter()
+        .chain(supplemental_back)
+        .chain(
+            config
+                .adds_baseline_read()
+                .then(|| &*ANTHROPIC_BASELINE_READ_TOOL),
+        )
+        .chain(
+            config
+                .adds_progressive_observation()
+                .then(|| &*ANTHROPIC_PROGRESSIVE_OBSERVATION_TOOL),
+        )
+        .chain(
+            config
+                .adds_viewport_screenshot()
+                .then(|| &*ANTHROPIC_VIEWPORT_SCREENSHOT_TOOL),
+        )
+        .chain(
+            config
+                .adds_standalone_wait()
+                .then(|| &*ANTHROPIC_STANDALONE_WAIT_TOOL),
+        )
+        .chain(
+            config
+                .adds_human_request()
+                .then(|| &*ANTHROPIC_HUMAN_REQUEST_TOOL),
+        )
+        .filter(|tool| config.permits_tool(tool.kind))
+        .map(|tool| AnthropicToolWire {
+            name: tool.kind.as_str(),
+            description: tool.description,
+            input_schema: &tool.input_schema,
+            strict: true,
+        })
+        .collect())
+}
+
 fn validate_anthropic_tool_definitions(
     definitions: &[AnthropicBrowserToolDefinition],
+    supplemental_back: bool,
     baseline_read: bool,
     progressive_observation: bool,
     viewport_screenshot: bool,
@@ -5198,6 +5116,12 @@ fn validate_anthropic_tool_definitions(
 ) -> Result<(), AgentProviderRequestError> {
     let union_parameters = definitions
         .iter()
+        .chain(supplemental_back.then(|| {
+            ANTHROPIC_BROWSER_TOOL_DEFINITIONS
+                .iter()
+                .find(|tool| tool.kind == AgentBrowserToolKind::Back)
+                .expect("complete Anthropic tool vocabulary contains Back")
+        }))
         .chain(baseline_read.then(|| &*ANTHROPIC_BASELINE_READ_TOOL))
         .chain(progressive_observation.then(|| &*ANTHROPIC_PROGRESSIVE_OBSERVATION_TOOL))
         .chain(viewport_screenshot.then(|| &*ANTHROPIC_VIEWPORT_SCREENSHOT_TOOL))
@@ -5207,6 +5131,7 @@ fn validate_anthropic_tool_definitions(
             total.checked_add(count_schema_unions(&tool.input_schema))
         });
     if definitions.len()
+        + usize::from(supplemental_back)
         + usize::from(baseline_read)
         + usize::from(progressive_observation)
         + usize::from(viewport_screenshot)
@@ -6515,6 +6440,182 @@ mod tests {
             call: crate::AgentModelCallId::new(1).expect("call"),
             lease: crate::AgentPlanLeaseId::from_raw(1),
             node: crate::AgentPlanNodeId::from_raw(1),
+        }
+    }
+
+    fn provider_config(provider: AgentProviderKind) -> AgentProviderCallConfig {
+        let (model, reasoning) = match provider {
+            AgentProviderKind::OpenAiResponses => (
+                "gpt-test-v1",
+                super::super::AgentProviderReasoningEffort::Medium,
+            ),
+            AgentProviderKind::AnthropicMessages => (
+                "claude-test-v1",
+                super::super::AgentProviderReasoningEffort::None,
+            ),
+        };
+        AgentProviderCallConfig::try_for_test(
+            provider,
+            super::super::AgentProviderModelRevision::try_new(model.to_owned()).expect("model"),
+            reasoning,
+            revision(&format!("{model}:tokenizer-v1")),
+            super::super::AgentProviderPricingProfile::try_new(
+                super::super::AgentProviderPricingRevision::new(1).expect("pricing revision"),
+                16_384,
+            )
+            .expect("pricing profile"),
+            512,
+            1_024,
+            super::super::AgentProviderStreamBudget::STANDARD,
+        )
+        .expect("provider config")
+    }
+
+    fn bound_tool_result_transcript(
+        provider: AgentProviderKind,
+        name: &str,
+        arguments: &str,
+    ) -> AgentProviderBoundTranscript {
+        let call = match provider {
+            AgentProviderKind::OpenAiResponses => {
+                super::super::AgentBrowserToolCall::decode_openai(
+                    provider_call_identity(),
+                    format!("fc_{name}_1"),
+                    format!("call_{name}_1"),
+                    name,
+                    arguments.to_owned(),
+                )
+            }
+            AgentProviderKind::AnthropicMessages => super::super::AgentBrowserToolCall::decode(
+                provider_call_identity(),
+                format!("call_{name}_1"),
+                name,
+                arguments.to_owned(),
+            ),
+        }
+        .expect("tool correlation");
+        AgentProviderTranscript::try_initial(
+            Arc::from("verify the hidden release code"),
+            "ZSEM1\ncontent=untrusted".to_owned(),
+        )
+        .expect("transcript")
+        .try_bind_for_test(
+            call.into_continuation_parts_for_test().0,
+            r#"{"status":"verified","observation":"bounded"}"#.to_owned(),
+        )
+        .expect("bound transcript")
+    }
+
+    fn encode_continuation_for_test(
+        provider: AgentProviderKind,
+        config: &AgentProviderCallConfig,
+        transcript: &AgentProviderBoundTranscript,
+    ) -> Vec<u8> {
+        match provider {
+            AgentProviderKind::OpenAiResponses => {
+                encode_openai_continuation_body(config, transcript)
+            }
+            AgentProviderKind::AnthropicMessages => {
+                encode_anthropic_continuation_body(config, transcript)
+            }
+        }
+        .expect("continuation wire")
+    }
+
+    fn wire_tool_names(body: &[u8]) -> Vec<String> {
+        let wire: Value = serde_json::from_slice(body).expect("provider wire");
+        wire["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name").to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn navigation_history_back_projects_exactly_across_provider_continuations() {
+        for provider in [
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderKind::AnthropicMessages,
+        ] {
+            let at_root = provider_config(provider)
+                .restrict_to_navigation_and_extraction()
+                .with_baseline_read()
+                .with_progressive_observation()
+                .with_viewport_screenshot()
+                .with_standalone_wait()
+                .with_human_request()
+                .with_history_back()
+                .with_history_back_available(false);
+            assert!(at_root.permits_tool(AgentBrowserToolKind::Navigate));
+            assert!(!at_root.permits_tool(AgentBrowserToolKind::Back));
+            let initial = match provider {
+                AgentProviderKind::OpenAiResponses => {
+                    encode_openai_body(&at_root, "objective", "observation")
+                }
+                AgentProviderKind::AnthropicMessages => {
+                    encode_anthropic_body(&at_root, "objective", "observation")
+                }
+            }
+            .expect("initial wire");
+            assert_eq!(
+                wire_tool_names(&initial)
+                    .into_iter()
+                    .filter(|name| name.as_str() == "back")
+                    .count(),
+                0
+            );
+
+            let after_load = at_root.clone().with_history_back_available(true);
+            assert!(after_load.permits_tool(AgentBrowserToolKind::Back));
+            let load = bound_tool_result_transcript(
+                provider,
+                "navigate",
+                r#"{"url":"https://example.test/register"}"#,
+            );
+            let post_load = encode_continuation_for_test(provider, &after_load, &load);
+            let post_load_names = wire_tool_names(&post_load);
+            assert_eq!(
+                post_load_names
+                    .iter()
+                    .filter(|name| name.as_str() == "back")
+                    .count(),
+                1
+            );
+            assert!(post_load_names.iter().any(|name| name == "navigate"));
+            assert!(post_load_names.iter().any(|name| name == "extract"));
+
+            let back = bound_tool_result_transcript(provider, "back", "{}");
+            let post_back = encode_continuation_for_test(provider, &at_root, &back);
+            assert_eq!(
+                wire_tool_names(&post_back)
+                    .into_iter()
+                    .filter(|name| name.as_str() == "back")
+                    .count(),
+                0
+            );
+
+            // The full immutable profile already contains Back; dynamic
+            // projection must never duplicate it when availability changes.
+            let full = provider_config(provider)
+                .with_history_back()
+                .with_history_back_available(true);
+            let full_body = match provider {
+                AgentProviderKind::OpenAiResponses => {
+                    encode_openai_body(&full, "objective", "observation")
+                }
+                AgentProviderKind::AnthropicMessages => {
+                    encode_anthropic_body(&full, "objective", "observation")
+                }
+            }
+            .expect("full wire");
+            assert_eq!(
+                wire_tool_names(&full_body)
+                    .into_iter()
+                    .filter(|name| name.as_str() == "back")
+                    .count(),
+                1
+            );
         }
     }
 

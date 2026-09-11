@@ -534,6 +534,15 @@ impl AgentProviderTranscript {
     }
 
     #[cfg(test)]
+    pub(super) fn try_bind_for_test(
+        self,
+        correlation: AgentProviderToolCallCorrelation,
+        tool_result: String,
+    ) -> Result<AgentProviderBoundTranscript, AgentProviderContinuationError> {
+        self.try_bind(correlation, tool_result)
+    }
+
+    #[cfg(test)]
     fn try_append(
         self,
         correlation: AgentProviderToolCallCorrelation,
