@@ -623,3 +623,6 @@ pub use sign_in_handoff::{
     ContextSignInHandoffError, ContextSignInHandoffId, ContextSignInHandoffPlatform,
     ContextSignInHandoffState,
 };
+
+#[cfg(feature = "provider-transport")]
+pub use provider_transport::planning::{OpenAiWorkPlanner, WorkPlanningConfig};

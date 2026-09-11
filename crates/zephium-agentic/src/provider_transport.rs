@@ -14,6 +14,9 @@
     deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)
 )]
 
+/// Bounded objective/context planning over the shared fixed-endpoint transport.
+pub mod planning;
+
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -611,7 +614,7 @@ fn exact_loopback_path(path: &str) -> bool {
 
 struct TransportState {
     sealed: bool,
-    active: Vec<AgentProviderCallIdentity>,
+    active: Vec<TransportSlotKey>,
 }
 
 struct SharedTransportState {
@@ -1051,6 +1054,9 @@ impl AgentProviderTransport {
     }
 
     fn reserve(&self, call: AgentProviderCallIdentity) -> Result<AgentProviderSlot, ReserveError> {
+        self.reserve_key(TransportSlotKey::Browser(call))
+    }
+    fn reserve_key(&self, call: TransportSlotKey) -> Result<AgentProviderSlot, ReserveError> {
         let mut state = match self.shared.state.lock() {
             Ok(state) => state,
             Err(poisoned) => {
@@ -1120,9 +1126,15 @@ impl From<ReserveError> for AgentProviderAdmissionError {
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum TransportSlotKey {
+    Browser(AgentProviderCallIdentity),
+    Planning(ulid::Ulid),
+}
+
 struct AgentProviderSlot {
     shared: Arc<SharedTransportState>,
-    call: AgentProviderCallIdentity,
+    call: TransportSlotKey,
     committed: bool,
     completed: bool,
 }

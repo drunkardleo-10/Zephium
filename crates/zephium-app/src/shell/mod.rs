@@ -1487,3 +1487,6 @@ impl Shell {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(all(test, feature = "work-planning"))]
+mod work_planning_tests;

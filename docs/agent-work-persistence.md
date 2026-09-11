@@ -216,7 +216,7 @@ clear the current draft; active unanswered questions prevent accepting a
 replacement draft. Questions record their exact basis and objective revision,
 plus active/answered/superseded/dismissed state. Objective replacement supersedes
 all current clarifications without destroying their answers. Dismissal is an
-explicit edit. Only `current_questions()` participates in future planning.
+explicit edit. Only `current_questions()` participates in planning.
 Objective, question, answer, plan, and event attribution distinguishes the user,
 primary agent, other agent, and unknown legacy origin. Attribution grants no
 authority and does not claim factual correctness. Revisions serialize as
@@ -316,3 +316,98 @@ updated for v2's required fields before the final full Store rerun.
 this does not supersede the earlier findings in the optional execution build.
 Formatting and diff whitespace checks passed. No provider calls or GUI
 qualification were used for this authoring follow-up.
+
+
+## On-demand model-backed planning
+
+`zephium-app/work-planning` adds `WorkPlanningService::plan(profile, id,
+expected_revision)`. The service uses the existing Handle/Shell/Store boundary
+for both its read and its final write. Shell checks the selected regular,
+non-quarantined profile against the caller's displayed owner each time. Store
+independently enforces profile eligibility and revision CAS. A newer edit,
+archive, deletion, or changed/private owner prevents a delayed proposal from
+replacing current facts. The persisted question or draft is attributed to
+`PrimaryAgent`; Rust generates its durable IDs.
+
+Core's provider-neutral disclosure selects the objective, current answered
+questions, and optional current draft. It excludes historical questions,
+profile/Work/question/plan/node IDs, audit events, tabs, files, accounts, and
+credentials. Existing draft references become temporary positional keys. Active
+unanswered questions and archived Work refuse generation. Text selection is
+bounded to 32 KiB before copying; the provider additionally bounds serialized
+context and the complete request. Overflow is explicit, never truncation.
+
+The OpenAI adapter owns one nonstreaming Responses call, with `store:false`,
+no tools, disabled truncation, and a strict JSON-schema proposal: one clarification
+or one bounded DAG. Completion, model/route identity, usage totals/subsets,
+output size, graph references, and all domain limits must validate before
+minting IDs or submitting a write. Refusals carry usage but no proposal.
+Reasoning and raw provider bodies are neither returned nor persisted. Secret
+shape screening reuses the existing heuristic; it is not comprehensive DLP.
+The wire contract follows the official [Structured Outputs guide](https://developers.openai.com/api/docs/guides/structured-outputs).
+
+The adapter reuses the existing redirect-free fixed endpoints, credential
+handling, response-header limits, four-slot transport registry, and shutdown
+root. Planning slot identities are separate from browser execution identities.
+The exact input/schema projection is sent to `/v1/responses/input_tokens` before
+generation. Its count must fit the configured input range and cost reservation.
+The conservative cost uses the catalog's highest input rate, including cache
+writes, and its output rate. Maximum accepted configuration is 32K input tokens,
+8K output tokens and $1 per call; actual composition normally chooses less.
+The live fixture uses the existing Luna catalog and a $0.10 ceiling; its rates
+were checked against the official [Luna model page](https://developers.openai.com/api/docs/models/gpt-5.6-luna).
+
+The application admits at most two concurrent planning operations, with one
+per profile/Work. Request futures use callback wakeups, with no polling worker.
+Construction and idle ownership create no tasks, sockets or timers. The caller
+owns the async runtime and can drop the future to stop local provider I/O.
+Dispatched generation that loses its outcome seals the shared transport and
+returns unknown billing when it can return at all; no automatic retry or refund
+is inferred. Before generation, cancellation leaves no proposal. Once the final
+Store edit is queued, it may commit even if the caller disappears. Lost write
+acknowledgement remains `OutcomeUnknown` and requires a fresh read under the
+same owner, not replay. Provider usage remains available on final CAS failure.
+
+This is a Rust backend vertical, not frontend or execution qualification. It
+introduces no database schema change, executable approval, browser authority,
+autonomous loop, or persistent model transcript. Planning-attempt accounting is
+currently a returned receipt and a process-local fail-stop boundary; durable
+attempt/restart reconciliation must precede autonomous scheduling or aggregate
+budget claims. The separate Work frontend and approval compiler remain open.
+
+Live qualification on 2026-09-11: the explicitly invoked
+`planning_live_openai_through_application_and_reopened_store` test passed using
+`gpt-5.6-luna`, medium reasoning, an 8,192-input / 4,096-output token limit, and
+a 100,000-micro-USD reservation ceiling. The provider returned 423 input and
+580 output tokens; conservative usage pricing was 802 micro-USD ($0.000802).
+The five-node draft passed domain validation, persisted as `PrimaryAgent`
+through the actual application Handle/Shell/Store path, and matched after
+closing and reopening the temporary database. Keychain access required the
+user to accept the macOS prompt. The browser engine was a test double; this
+qualifies model planning and durable application integration, not native
+browser execution, frontend behavior, or general planning quality.
+
+The live test is ignored by default and uses only a public comparison objective.
+Run it explicitly with `cargo test -p zephium-app --features work-planning
+planning_live_openai_through_application_and_reopened_store --offline --
+--ignored --nocapture`. It reads the existing fixed development Keychain item;
+it does not accept credential strings through frontend input or log secrets.
+
+Final regression verification: 680 agentic, 321 application, 358 Core, and
+282 Store unit tests passed (1,641 total). All 36 documentation tests also
+passed, along with formatting and diff whitespace checks. The default run leaves the explicit
+live planning test and the pre-existing Store test ignored; the live planning
+test passed separately as recorded above. Thirteen focused new deterministic
+tests cover disclosure selection, response validation, counting/budgets,
+shared admission, cancellation, observer cleanup, profile/revision protection,
+provenance, and database reopen. Local HTTP fixtures require loopback-listener
+permission; their accepted sockets explicitly use blocking reads independently
+of listener polling mode.
+
+Strict scoped Clippy passed for Core and application with `work-planning`
+enabled (`--no-deps --all-targets -- -D warnings`). The broader command including
+agentic still reports three pre-existing findings in unchanged code:
+`agent_provider/request.rs` (`unreachable!`), `work_browser_observation.rs`
+(`too_many_arguments`), and `semantic_wire.rs` (`manual_contains`). No lint
+allowances were added to bypass them. The earlier optional execution-only
+application finding remains outside this planning feature's qualification.

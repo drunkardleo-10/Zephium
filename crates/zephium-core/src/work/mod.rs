@@ -3,6 +3,7 @@
 //! An editable plan describes desired work; compilation is a separate boundary.
 
 mod ids;
+pub mod planning;
 pub mod port;
 pub mod proposal;
 #[cfg(test)]

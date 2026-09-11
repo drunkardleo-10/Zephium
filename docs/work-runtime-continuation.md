@@ -225,17 +225,22 @@ proposals, clarification supersession and dismissal, and author provenance.
 See the product-authoring section of `agent-work-persistence.md` for the contract,
 limits, migration decision, and tests.
 
-This advances the authoring/persistence boundary only. Model planning, trusted
-scope resolution, approval compilation, execution settlement into this aggregate,
-resources/artifacts/tasks, generated IPC, and frontend integration remain to be
-built. `plan_ready` is descriptive draft state and cannot authorize execution.
+The optional `zephium-app/work-planning` service now connects an explicit
+profile/Work/revision to one model-backed clarification or draft and one Store
+CAS. The OpenAI adapter uses a separate bounded objective/context disclosure,
+shared fixed-endpoint transport, provider input counting, catalog pricing, and
+strict proposal validation. No browser observation, manifest, or approval is
+manufactured to admit planning. See the planning section of
+`agent-work-persistence.md` for the contract and qualification boundary.
 
-The existing provider transport admits only browser observation/diff/read/
-extraction/screenshot commitments under execution policy. Planning therefore
-needs a separate, bounded objective/context disclosure contract before it can
-reuse the fixed endpoints, credential handling, accounting, and cancellation
-lifecycle. Do not manufacture a browser observation or an execution approval
-merely to get a draft-generation request through that interface.
+Trusted scope resolution, approval compilation, execution settlement into this
+aggregate, resources/artifacts/tasks, generated IPC, and frontend integration
+remain to be built. Planning usage is returned to the caller, including final
+CAS failures, but a durable planning-attempt/accounting ledger and restart
+reconciliation are still needed before autonomous scheduling or product-wide
+budget enforcement. `plan_ready` remains descriptive and cannot authorize
+execution. Dropped/uncertain generation is never automatically retried.
+
 The browser actor and its qualification baseline remain unchanged. The checked-in
 frame is the earlier browser frontend, not the separate Work design-system stream.
 

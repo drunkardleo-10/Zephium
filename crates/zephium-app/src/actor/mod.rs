@@ -775,8 +775,16 @@ impl Handle {
         &self,
         intent: crate::WorkIntent,
     ) -> Result<crate::WorkDocumentRequest, zephium_core::work::WorkError> {
+        self.submit_work_document(intent.into_request()?, None)
+    }
+
+    pub(crate) fn submit_work_document(
+        &self,
+        request: zephium_core::work::port::WorkRequest,
+        owner: Option<zephium_core::ids::ProfileId>,
+    ) -> Result<crate::WorkDocumentRequest, zephium_core::work::WorkError> {
         let (submission, receiver) =
-            crate::work_authoring::WorkDocumentSubmission::prepare(intent.into_request()?)?;
+            crate::work_authoring::WorkDocumentSubmission::prepare_bound(request, owner)?;
         match self.queue.try_push(Command::WorkDocument(submission)) {
             Ok(()) => Ok(receiver),
             Err(TryPushError::Full(_)) => Err(zephium_core::work::WorkError::Capacity),

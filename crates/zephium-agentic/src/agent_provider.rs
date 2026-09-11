@@ -1139,6 +1139,22 @@ impl AgentProviderCallConfig {
         self.catalog.provider()
     }
 
+    #[cfg(feature = "provider-transport")]
+    pub(crate) fn planning_cost_ceiling(&self, input: u32, output: u32) -> Option<u64> {
+        let rates = self.catalog.rates();
+        let input_rate = rates
+            .uncached_input()
+            .max(rates.cached_input())
+            .max(rates.cache_write_input());
+        let numerator = u128::from(input) * u128::from(input_rate)
+            + u128::from(output) * u128::from(rates.output());
+        u64::try_from(numerator.div_ceil(1_000_000)).ok()
+    }
+    #[cfg(feature = "provider-transport")]
+    pub(crate) fn planning_identity_matches(&self, model: &str, tier: &str) -> bool {
+        self.catalog.allows_response_identity(model, tier, None)
+    }
+
     /// Exact billing mode encoded into and required from the provider call.
     pub fn billing_class(&self) -> AgentProviderBillingClass {
         self.catalog.response_route().billing_class()

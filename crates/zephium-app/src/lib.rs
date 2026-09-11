@@ -84,3 +84,6 @@ mod work_authoring;
 mod work_authoring_intent;
 pub use work_authoring::{WorkDocumentProjection, WorkDocumentRequest, WorkDocumentSubmission};
 pub use work_authoring_intent::{WorkIntent, WorkUserEdit};
+
+#[cfg(feature = "work-planning")]
+pub mod work_planning;

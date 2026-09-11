@@ -4,6 +4,7 @@ impl crate::Shell {
     pub(crate) fn work_document(&self, submission: WorkDocumentSubmission) {
         let Some(crate::work_authoring::Payload {
             request,
+            expected_owner,
             owner,
             reply,
             permit,
@@ -19,9 +20,13 @@ impl crate::Shell {
             .filter(|p| !self.profile_deletion_quarantines(p.id))
             .map(|p| p.id);
         let Some(profile) = profile else {
-            let _ = reply.try_send(Err(WorkError::ProfileUnavailable));
+            reply.try_send(Err(WorkError::ProfileUnavailable));
             return;
         };
+        if expected_owner.is_some_and(|expected| expected != profile) {
+            reply.try_send(Err(WorkError::ProfileUnavailable));
+            return;
+        }
         let _ = owner.set(profile);
         let refused = reply.clone();
         let result = self.store.work_document(
@@ -29,12 +34,11 @@ impl crate::Shell {
             request,
             Box::new(move |result| {
                 let _permit = permit;
-                let _ =
-                    reply.try_send(result.map(|reply| WorkDocumentProjection { profile, reply }));
+                reply.try_send(result.map(|reply| WorkDocumentProjection { profile, reply }));
             }),
         );
         if let Err(error) = result {
-            let _ = refused.try_send(Err(error));
+            refused.try_send(Err(error));
         }
     }
 }
