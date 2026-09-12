@@ -10,6 +10,7 @@
 @source not "../**/*.test.ts";
 @source not "../**/tests";
 @source not "../shared/testing";
+@source not "../features/notes";
 @source not "../domain/resources";
 
 /*

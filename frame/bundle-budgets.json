@@ -98,5 +98,13 @@
   "lazy:features/tools/components/ToolSlot.svelte": {
     "js": 93684,
     "css": 353
+  },
+  "lazy:features/notes/components/Notes.svelte": {
+    "js": 135000,
+    "css": 12000
+  },
+  "lazy:features/notes/components/NotesEditor.svelte": {
+    "js": 440000,
+    "css": 10000
   }
 }

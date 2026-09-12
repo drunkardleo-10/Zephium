@@ -764,5 +764,18 @@
   "resource_load_saved": "Load saved version",
   "resource_keep_draft": "Keep my draft",
   "resource_overwrite_explanation": "Replace the newer saved version with your current draft?",
-  "resource_confirm_replace": "Replace saved version"
+  "resource_confirm_replace": "Replace saved version",
+  "note_untitled": "Untitled note",
+  "note_formatting": "Formatting",
+  "note_bold": "Bold",
+  "note_italic": "Italic",
+  "note_heading": "Heading",
+  "note_bullets": "Bullets",
+  "note_numbered": "Numbered list",
+  "note_quote": "Quote",
+  "note_code": "Code",
+  "note_link": "Link a note",
+  "note_find": "Find a note",
+  "note_linked_note": "Linked note",
+  "note_unavailable_link": "Unavailable note"
 }
