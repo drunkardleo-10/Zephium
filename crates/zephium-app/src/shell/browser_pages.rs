@@ -1,6 +1,13 @@
 //! Browser-owned pages borrow chrome's full-window presentation, never a page bridge.
 use super::*;
 
+pub(super) struct PendingBrowserReturn {
+    revision: u64,
+    window: WindowId,
+    items: ItemsState,
+    splits: Option<Pane>,
+}
+
 impl Shell {
     pub(super) fn active_browser_page(&self) -> Option<crate::BrowserPage> {
         let window = self.windows.focused()?.id;
@@ -57,14 +64,20 @@ impl Shell {
         let Some(items) = self.items_snapshot() else {
             return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
         };
-        let Some(window) = self.windows.focused().map(|w| w.id) else {
+        let Some((window, splits)) = self.windows.focused().map(|w| (w.id, w.splits.clone()))
+        else {
             return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
         };
         let Some(revision) = self.browser_return_revision.checked_add(1) else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         };
         self.browser_return_revision = revision;
-        self.browser_return = Some((revision, window, items.clone()));
+        self.browser_return = Some(PendingBrowserReturn {
+            revision,
+            window,
+            items: items.clone(),
+            splits,
+        });
         let callback = self.self_queue.as_ref().map(|queue| CallbackHandle {
             queue: Arc::downgrade(&queue.inner),
         });
@@ -89,7 +102,13 @@ impl Shell {
     }
 
     pub(super) fn browser_chrome_restored(&mut self, revision: u64, applied: bool) {
-        let Some((expected, window, items)) = self.browser_return.as_ref() else {
+        let Some(PendingBrowserReturn {
+            revision: expected,
+            window,
+            items,
+            splits,
+        }) = self.browser_return.as_ref()
+        else {
             return;
         };
         if *expected != revision {
@@ -111,15 +130,9 @@ impl Shell {
                                 && tab.url.as_ref().map(|url| url.as_str()) == old.url.as_deref()
                         })
                 })
-                && current.splits.as_ref().map(|tree| {
-                    tree.tabs()
-                        .iter()
-                        .map(|id| id.to_string())
-                        .collect::<Vec<_>>()
-                }) == items
-                    .split_group
-                    .as_ref()
-                    .map(|group| group.members.clone())
+                // Compare native state with its native snapshot. The public
+                // projection intentionally omits retained single-leaf trees.
+                && &current.splits == splits
         });
         self.browser_return = None;
         if !applied || !exact {

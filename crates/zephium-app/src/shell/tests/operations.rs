@@ -215,6 +215,21 @@ fn browser_page_hides_native_content_and_restores_exact_tab() {
 }
 
 #[test]
+fn browser_page_return_accepts_a_retained_single_leaf_split() {
+    let (mut shell, _, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "settings-return.example");
+    // Removing one side of a split can retain its remaining leaf. The
+    // projection correctly represents that as no visible split group.
+    shell.windows.focused_mut().unwrap().splits = Some(zephium_core::split::Pane::leaf(id));
+    shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Settings)));
+    shell.handle_operation(Command::ShowBrowserPage(None));
+    assert_eq!(shell.active_browser_page(), None);
+    assert_eq!(active_id(&screen), id);
+}
+
+#[test]
 fn browser_page_rejected_native_layout_retains_previous_destination() {
     let (mut shell, engine, _) = setup();
     shell.handle(Command::Bootstrap);

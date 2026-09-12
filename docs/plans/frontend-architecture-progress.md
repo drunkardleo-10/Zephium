@@ -49,18 +49,18 @@ moved unchanged to `frame/public/zephium-logo.png`; visual placement is still la
 
 ## Verification
 
-| Check | Result |
-| --- | --- |
-| `pnpm -C frame check` | Passed: types, ESLint, Stylelint, formatting, Knip; 108 unit tests in 29 files |
-| `pnpm -C frame test:component` | Passed: 4 tests in 3 files, Playwright WebKit on macOS |
-| `pnpm -C frame build` | Passed, including emitted graph and fixture guards |
-| `cargo xtask check-frame-styles` | Passed against emitted CSS |
-| `cargo test -p zephium-desktop --lib` | Passed: 103 tests, 2 ignored |
-| Dependency audit | No known vulnerabilities after the Vitest 4.1.11 patch |
-| Rust formatting and dependency peers | Passed; no peer conflicts |
-| Full `cargo xtask ci` | Blocked before frontend checks by the existing runtime acquisition source-inventory gate |
-| Windows component/native execution | Not run locally; component job added to CI |
-| Native visual, interaction and resource qualification | Pending |
+| Check                                                 | Result                                                                                   |
+| ----------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `pnpm -C frame check`                                 | Passed: types, ESLint, Stylelint, formatting, Knip; 108 unit tests in 29 files           |
+| `pnpm -C frame test:component`                        | Passed: 4 tests in 3 files, Playwright WebKit on macOS                                   |
+| `pnpm -C frame build`                                 | Passed, including emitted graph and fixture guards                                       |
+| `cargo xtask check-frame-styles`                      | Passed against emitted CSS                                                               |
+| `cargo test -p zephium-desktop --lib`                 | Passed: 103 tests, 2 ignored                                                             |
+| Dependency audit                                      | No known vulnerabilities after the Vitest 4.1.11 patch                                   |
+| Rust formatting and dependency peers                  | Passed; no peer conflicts                                                                |
+| Full `cargo xtask ci`                                 | Blocked before frontend checks by the existing runtime acquisition source-inventory gate |
+| Windows component/native execution                    | Not run locally; component job added to CI                                               |
+| Native visual, interaction and resource qualification | Pending                                                                                  |
 
 The full workspace gate fails with:
 
@@ -130,3 +130,34 @@ Rust contracts, commits or pushes were changed by this pass.
 Next nonvisual work remains the typed Browse projection/confirmed-preference and
 surface/layout contracts. Work components, blocks and final composition are deferred
 until the design and nonvisual tracks are ready to meet, per the owner's instruction.
+
+## Browser interaction corrections — 2026-09-12
+
+- The local six-commit checkpoint was rebuilt into 36 concern-based commits using
+  an alternate Git index. The replacement tip has exactly the same Git tree as
+  the previous tip; every working file and the normal index were verified unchanged.
+  The original history remains at `backup/ui-before-split-20260912`. No push occurred.
+  This is a source-preserving history repair, not a claim that every intermediate
+  commit independently builds. The copied Work contract remains untracked.
+- `tab_drag_over` now accepts paired null coordinates as an explicit indicator
+  clear. Ordinary clicks do not send a reset, and reset rejection is handled without
+  leaking a failure into a subsequent gesture. Generated bindings were regenerated
+  and already described nullable coordinates; the native signature was inconsistent.
+- A reproduced Settings-return rejection compared a retained native single-leaf
+  split with a public projection that intentionally omits it. Return now compares
+  the native split tree with the captured native tree, retaining exact-state checks.
+  A regression failed before the correction and passes afterward. A WebKit component
+  test also verifies synchronous Settings-to-Browse tab/address restoration.
+- Validation: 326 application tests and 103 desktop tests passed (2 desktop tests
+  ignored); 13 WebKit component tests passed. This does not establish that the
+  user's currently running binary contains these changes or qualify Windows behavior.
+- The browser and Settings graphs that include drag state grow by 69 JavaScript
+  bytes for the reset rejection/generation guard. Their limits receive 128 bytes
+  of explicitly reviewed allowance; CSS limits and unrelated graphs stay unchanged.
+  The production build passes with these limits.
+- The deferred TanStack experiment was removed, retaining the existing lightweight
+  table. The uncommitted XYFlow canvas remains a draft; its unused entry and the
+  not-yet-used LayerChart dependency prevent the aggregate Knip check from passing.
+  Finish the development entry, interaction tests, viewport restoration and measured
+  lazy graph before treating that foundation as ready for handoff. Do not silence
+  those findings through permanent exceptions or connect the draft to Browse.

@@ -1,6 +1,6 @@
 {
   "browser": {
-    "js": 287326,
+    "js": 287454,
     "css": 81052
   },
   "panel": {
@@ -8,11 +8,11 @@
     "css": 26345
   },
   "lazy:features/settings/components/sections/AboutPage.svelte": {
-    "js": 420304,
+    "js": 420432,
     "css": 90326
   },
   "lazy:features/settings/components/sections/AccountPage.svelte": {
-    "js": 340664,
+    "js": 340792,
     "css": 83598
   },
   "lazy:features/tools/components/previews/ChatView.svelte": {
@@ -20,7 +20,7 @@
     "css": 6463
   },
   "lazy:features/settings/components/sections/DeveloperPage.svelte": {
-    "js": 295268,
+    "js": 295396,
     "css": 84290
   },
   "lazy:features/settings/components/sections/DocumentationPage.svelte": {
@@ -28,7 +28,7 @@
     "css": 3491
   },
   "lazy:features/settings/components/sections/DownloadsPage.svelte": {
-    "js": 411889,
+    "js": 412017,
     "css": 89781
   },
   "lazy:features/tools/components/previews/DownloadsView.svelte": {
@@ -36,11 +36,11 @@
     "css": 6463
   },
   "lazy:features/settings/components/sections/FocusPage.svelte": {
-    "js": 414729,
+    "js": 414857,
     "css": 89781
   },
   "lazy:features/settings/components/sections/GeneralPage.svelte": {
-    "js": 426632,
+    "js": 426760,
     "css": 91622
   },
   "lazy:features/tools/components/previews/HistoryView.svelte": {
@@ -48,11 +48,11 @@
     "css": 6463
   },
   "lazy:features/settings/components/sections/KeyboardPage.svelte": {
-    "js": 416316,
+    "js": 416444,
     "css": 89781
   },
   "lazy:features/settings/components/sections/LanguagesPage.svelte": {
-    "js": 421642,
+    "js": 421770,
     "css": 90326
   },
   "lazy:features/tools/components/previews/NotesView.svelte": {
@@ -60,31 +60,31 @@
     "css": 12558
   },
   "lazy:features/settings/components/sections/PasswordsPage.svelte": {
-    "js": 348903,
+    "js": 349031,
     "css": 85586
   },
   "lazy:features/settings/components/sections/PerformancePage.svelte": {
-    "js": 414961,
+    "js": 415089,
     "css": 89781
   },
   "lazy:features/settings/components/sections/PrivacyPage.svelte": {
-    "js": 424928,
+    "js": 425056,
     "css": 91622
   },
   "lazy:features/settings/components/sections/ProfilesPage.svelte": {
-    "js": 412777,
+    "js": 412905,
     "css": 90431
   },
   "lazy:features/settings/components/sections/SearchPage.svelte": {
-    "js": 414836,
+    "js": 414964,
     "css": 89781
   },
   "lazy:features/settings/components/Settings.svelte": {
-    "js": 416836,
+    "js": 416964,
     "css": 90882
   },
   "lazy:features/settings/components/sections/TabsPage.svelte": {
-    "js": 400910,
+    "js": 401038,
     "css": 91172
   },
   "lazy:features/tools/components/previews/TasksView.svelte": {

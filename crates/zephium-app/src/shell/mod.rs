@@ -203,7 +203,7 @@ pub struct Shell {
     browser_page: Option<(WindowId, crate::BrowserPage)>,
     browser_return_revision: u64,
     browser_after_return: Option<Box<Command>>,
-    browser_return: Option<(u64, WindowId, ItemsState)>,
+    browser_return: Option<browser_pages::PendingBrowserReturn>,
     runtime_restart_required: bool,
     user_content_status: user_content_status::UserContentStatus,
     crash: CrashState,
@@ -748,9 +748,11 @@ impl Shell {
                 }
                 let _ = self.relayout();
             }
-            Command::DragOver { x, y } => {
+            Command::DragOver { point } => {
                 if let Some(win) = self.windows.focused().map(|w| w.id) {
-                    let zone = self.resolve_drop(x, y).map(|d| d.zone);
+                    let zone = point
+                        .and_then(|(x, y)| self.resolve_drop(x, y))
+                        .map(|d| d.zone);
                     let _ = self.engine.set_drop_indicator(win, zone);
                 }
             }

@@ -413,8 +413,7 @@ pub enum Command {
         applied: bool,
     },
     DragOver {
-        x: f64,
-        y: f64,
+        point: Option<(f64, f64)>,
     },
     DropTab {
         id: ItemId,

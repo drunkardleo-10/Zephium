@@ -3715,14 +3715,19 @@ fn sidebar_set_width(caller: WebviewWindow, shell: State<'_, Handle>, width: f64
 
 #[tauri::command]
 #[specta::specta]
-fn tab_drag_over(caller: WebviewWindow, shell: State<'_, Handle>, x: f64, y: f64) {
+fn tab_drag_over(caller: WebviewWindow, shell: State<'_, Handle>, x: Option<f64>, y: Option<f64>) {
     if !authorize(&caller, CallerPolicy::Main, "tab_drag_over") {
         return;
     }
-    let Some((x, y)) = window_point(x, y) else {
-        return;
+    let point = match (x, y) {
+        (None, None) => None,
+        (Some(x), Some(y)) => match window_point(x, y) {
+            Some(point) => Some(point),
+            None => return,
+        },
+        _ => return,
     };
-    shell.dispatch(Command::DragOver { x, y });
+    shell.dispatch(Command::DragOver { point });
 }
 
 #[tauri::command]
