@@ -365,6 +365,11 @@ impl BrowserPage {
 
 #[derive(Clone, Debug)]
 pub enum Command {
+    ResourceCall {
+        expected_profile: ProfileId,
+        call: Arc<zephium_core::resources::ResourceCall>,
+        done: ResourceCompletion,
+    },
     #[cfg(feature = "work-execution")]
     AttachWork(crate::work::WorkAttachment),
     #[cfg(feature = "work-execution")]
@@ -707,4 +712,29 @@ pub enum Command {
         deadline: std::time::Instant,
         ack: SyncSender<ShutdownOutcome>,
     },
+}
+
+#[derive(Clone)]
+pub struct ResourceCompletion(
+    Arc<Mutex<Option<Box<dyn FnOnce(zephium_core::resources::ResourceReply) + Send>>>>,
+);
+impl ResourceCompletion {
+    pub fn new(done: impl FnOnce(zephium_core::resources::ResourceReply) + Send + 'static) -> Self {
+        Self(Arc::new(Mutex::new(Some(Box::new(done)))))
+    }
+    pub fn finish(self, reply: zephium_core::resources::ResourceReply) {
+        let done = self
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(done) = done {
+            done(reply);
+        }
+    }
+}
+impl fmt::Debug for ResourceCompletion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ResourceCompletion")
+    }
 }

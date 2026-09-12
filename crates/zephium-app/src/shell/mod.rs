@@ -748,6 +748,37 @@ impl Shell {
                 }
                 let _ = self.relayout();
             }
+            Command::ResourceCall {
+                expected_profile,
+                call,
+                done,
+            } => {
+                use zephium_core::resources::{ResourceError, ResourceReply, ResourceResponse};
+                if let Some(profile) = self
+                    .windows
+                    .focused()
+                    .map(|window| window.profile)
+                    .filter(|profile| *profile == expected_profile)
+                {
+                    self.store.resource_call(
+                        profile,
+                        Arc::unwrap_or_clone(call),
+                        Box::new(move |response| {
+                            done.finish(ResourceReply {
+                                profile: Some(profile.to_string()),
+                                response,
+                            })
+                        }),
+                    );
+                } else {
+                    done.finish(ResourceReply {
+                        profile: None,
+                        response: ResourceResponse::Error {
+                            error: ResourceError::Unavailable,
+                        },
+                    });
+                }
+            }
             Command::DragOver { point } => {
                 if let Some(win) = self.windows.focused().map(|w| w.id) {
                     let zone = point

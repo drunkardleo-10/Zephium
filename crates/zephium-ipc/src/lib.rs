@@ -1033,3 +1033,6 @@ mod blocker_status_tests {
         assert_eq!(status.retries_remaining, 0);
     }
 }
+
+/// Shared Rust-owned Notes/Tasks wire model.
+pub use zephium_core::resources::{ResourceCall, ResourceReply, ResourceResponse};

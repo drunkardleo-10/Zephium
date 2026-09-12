@@ -6,6 +6,8 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+# Isolated user-resource UI verification; never a shipping application.
+resource-ui-qa = ["tauri/custom-protocol"]
 # Same release-excluded retained path, one closed real-public product-brief task.
 macos-work-retained-public-probe = [
     "macos-work-retained-controller-probe",
@@ -91,6 +93,7 @@ serde_json.workspace = true
 specta.workspace = true
 specta-typescript.workspace = true
 tauri-specta.workspace = true
+tauri-plugin-dialog = "2"
 
 [dev-dependencies]
 async-io = "=2.6.0"

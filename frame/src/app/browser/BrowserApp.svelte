@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { installCloseService } from "$shared/lib/close";
   import "@fontsource-variable/inter";
   import "$styles/global.css";
   import { onMount } from "svelte";
@@ -95,6 +96,7 @@
     }
   }
 
+  onMount(installCloseService);
   onMount(() => {
     let disposed = false;
 

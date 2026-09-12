@@ -60,3 +60,5 @@ pub use shell::Shell;
 
 #[doc(hidden)]
 pub use store_reads::StoreReadResult;
+
+pub use api::ResourceCompletion;

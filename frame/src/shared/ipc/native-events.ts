@@ -1,5 +1,6 @@
 import type {
   PanelState,
+  ResourceChanged,
   BlockerStatusChanged,
   BrowserCredentialCapabilityChanged,
   ExtensionActionFailed,
@@ -38,6 +39,9 @@ function scopedEvent<T>(name: string) {
 // target, which would let the launcher panel subscribe to main-window state.
 export const nativeEventNames = {
   panelState: "zephium:panel-state",
+  resourceChanged: "zephium:resource-changed",
+  resourceClose: "zephium:resource-close",
+  resourceCloseCancelled: "zephium:resource-close-cancelled",
   browserCredentialCapabilityChanged: "zephium:browser-credential-capability",
   itemsChanged: "zephium:items",
   tabChanged: "zephium:tab",
@@ -60,6 +64,9 @@ export const nativeEventNames = {
 } as const;
 
 export const events = {
+  resourceClose: scopedEvent<string>(nativeEventNames.resourceClose),
+  resourceCloseCancelled: scopedEvent<string>(nativeEventNames.resourceCloseCancelled),
+  resourceChanged: scopedEvent<ResourceChanged>(nativeEventNames.resourceChanged),
   panelState: scopedEvent<PanelState>(nativeEventNames.panelState),
   browserCredentialCapabilityChanged: scopedEvent<BrowserCredentialCapabilityChanged>(
     nativeEventNames.browserCredentialCapabilityChanged,

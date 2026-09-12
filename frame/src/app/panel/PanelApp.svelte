@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { installCloseService } from "$shared/lib/close";
   import LazyView from "$shared/ui/LazyView";
   import RenderBoundary from "$shared/ui/RenderBoundary";
   import { loadToolSlot } from "$features/tools";
@@ -46,6 +47,7 @@
     event.preventDefault();
     void intent({ type: presentation?.route.type === "tool" ? "back" : "dismiss" });
   }
+  onMount(installCloseService);
   onMount(() => {
     let disposed = false;
     let stop: (() => void) | undefined;

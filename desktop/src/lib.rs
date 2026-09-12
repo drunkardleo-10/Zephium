@@ -2,6 +2,12 @@
 //! (window -> chrome positioning, engine, shell) and the command surface.
 
 #[cfg(all(
+    feature = "resource-ui-qa",
+    any(not(debug_assertions), not(target_os = "macos"))
+))]
+compile_error!("resource UI QA is macOS debug-only");
+
+#[cfg(all(
     feature = "macos-work-rendering-probe",
     any(not(debug_assertions), not(target_os = "macos"))
 ))]
@@ -44,6 +50,7 @@ mod panel;
 mod platform;
 #[cfg(target_os = "windows")]
 mod privileged_runtime_windows;
+mod resource_close;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
@@ -761,6 +768,8 @@ impl ShutdownCoordinator {
 
     fn request(&self, app: tauri::AppHandle, shell: Handle) {
         self.mark_terminal_start();
+        #[cfg(target_os = "linux")]
+        linux_global_shortcuts::shutdown(&app);
         if self.started.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -1274,6 +1283,13 @@ fn request_unrecoverable_native_failure(app: &tauri::AppHandle, reason: &str) {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct ResourceChanged {
+    profile: String,
+    id: String,
+    revision: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct ItemsChanged(zephium_ipc::ItemsState);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
@@ -1552,6 +1568,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             launcher_run,
             sidebar_set_width,
             tab_drag_over,
+            resource_call,
+            resource_close_ready,
             tab_drop,
             divider_grab,
             divider_drag,
@@ -1559,6 +1577,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         ])
         .events(collect_events![
             ItemsChanged,
+            ResourceChanged,
             TabChanged,
             ExtensionActionsChanged,
             ExtensionActionFailed,
@@ -3524,6 +3543,72 @@ fn add_menu_popup(
 
 #[tauri::command]
 #[specta::specta]
+fn resource_close_ready(caller: WebviewWindow, token: String, success: bool) -> bool {
+    authorize(&caller, CallerPolicy::Both, "resource_close_ready")
+        && resource_close::complete(caller.label(), &token, success)
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn resource_call(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    expected_profile: String,
+    call: zephium_ipc::ResourceCall,
+) -> zephium_ipc::ResourceReply {
+    use zephium_core::resources::{ResourceError, ResourceReply, ResourceResponse};
+    let failed = |error| ResourceReply {
+        profile: None,
+        response: ResourceResponse::Error { error },
+    };
+    if !authorize(&caller, CallerPolicy::Both, "resource_call") || shutdown_started(&app) {
+        return failed(ResourceError::Unavailable);
+    }
+    if !call.validate() || serde_json::to_vec(&call).map_or(true, |bytes| bytes.len() > 524288) {
+        return failed(ResourceError::Invalid);
+    }
+    resource_close::touch(caller.label());
+    let Some(expected_profile) =
+        ProfileId::parse(&expected_profile).filter(|id| id.to_string() == expected_profile)
+    else {
+        return failed(ResourceError::Invalid);
+    };
+    let shell = app.state::<Handle>().inner().clone();
+    static RESOURCE_ADMISSION: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+    let Ok(permit) = RESOURCE_ADMISSION.try_acquire() else {
+        return failed(ResourceError::Capacity);
+    };
+    let (send, receive) = tokio::sync::oneshot::channel();
+    if !shell.dispatch(Command::ResourceCall {
+        expected_profile,
+        call: Arc::new(call),
+        done: zephium_app::ResourceCompletion::new(move |reply| {
+            let _permit = permit;
+            if let (Some(profile), ResourceResponse::Applied { record, .. }) =
+                (&reply.profile, &reply.response)
+            {
+                let event = ResourceChanged {
+                    profile: profile.clone(),
+                    id: record.id.clone(),
+                    revision: record.revision.clone(),
+                };
+                for label in [MAIN_LABEL, overlay::PANEL_LABEL] {
+                    emit_to_privileged(&app, label, "zephium:resource-changed", &event);
+                }
+            }
+            let _ = send.send(reply);
+        }),
+    }) {
+        return failed(ResourceError::Unavailable);
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(8), receive).await {
+        Ok(Ok(reply)) => reply,
+        _ => failed(ResourceError::OutcomeUnknown),
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
 fn setting_get(caller: WebviewWindow, key: String) -> Option<String> {
     if !authorize(&caller, CallerPolicy::Both, "setting_get") {
         return None;
@@ -4068,10 +4153,7 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
         return;
     }
     #[cfg(target_os = "linux")]
-    if matches!(
-        &event,
-        tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }
-    ) {
+    if matches!(&event, tauri::RunEvent::Exit) {
         linux_global_shortcuts::shutdown(app);
     }
     let tauri::RunEvent::ExitRequested { code, api, .. } = event else {
@@ -4118,7 +4200,10 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
     }
     api.prevent_exit();
     if let Some(shell) = app.try_state::<Handle>() {
-        coordinator.request(app.clone(), shell.inner().clone());
+        let owner = coordinator.inner().clone();
+        let exit_app = app.clone();
+        let handle = shell.inner().clone();
+        resource_close::request(app.clone(), move || owner.request(exit_app, handle));
     } else {
         write_diagnostic(format_args!("shutdown: exit requested before shell setup"));
         let extension_owner = app
@@ -4195,6 +4280,7 @@ pub fn run() {
         // Every Tauri-managed webview is zone 2. It may load only the bundled
         // application origin (or the exact Vite origin in debug builds).
         .plugin(navigation_lock())
+        .plugin(tauri_plugin_dialog::init())
         // Must register first: a second launch (file association, dock, a
         // stale instance holding the global hotkey and the profile dbs)
         // focuses the running window and exits.
@@ -4940,7 +5026,10 @@ pub fn run() {
                     // shell command queued before close has been snapshotted.
                     tauri::WindowEvent::CloseRequested { api, .. } => {
                         api.prevent_close();
-                        window_shutdown.request(exit_handle.clone(), resize_shell.clone());
+                        let owner=window_shutdown.clone();
+                        let app=exit_handle.clone();
+                        let shell=resize_shell.clone();
+                        resource_close::request(exit_handle.clone(),move ||owner.request(app,shell));
                     }
                     // Fallback for platform/programmatic destruction paths
                     // that do not emit a preventable close request first.
