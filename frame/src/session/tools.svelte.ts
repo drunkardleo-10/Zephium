@@ -1,0 +1,96 @@
+import { transition, cancel } from "./motion.svelte";
+import { surface as browser } from "$domain/surface";
+import { setPanelExtent } from "./sidebar-mode.svelte";
+import { events } from "$shared/ipc/native-events";
+export type ToolKind = "notes" | "tasks" | "ai" | "time" | "history" | "downloads";
+let tool = $state<ToolKind | null>(null);
+let queued: ToolKind | null = null;
+let stop: (() => void) | null = null;
+let generation = 0;
+let request = 0;
+let initialized = false;
+let initializing: Promise<void> | null = null;
+export const activeTool = () => tool;
+export function open(kind: ToolKind) {
+  const action = ++request;
+  const owner = generation;
+  if (browser.currentPage() !== null) {
+    queued = kind;
+    void browser.open(null);
+    return;
+  }
+  if (tool !== null) {
+    tool = kind;
+    return;
+  }
+  transition(() => {
+    if (owner !== generation || action !== request) return;
+    tool = kind;
+    setPanelExtent(336);
+  });
+}
+export function close() {
+  queued = null;
+  const action = ++request;
+  const owner = generation;
+  transition(() => {
+    if (owner !== generation || action !== request) return;
+    tool = null;
+    setPanelExtent(0);
+  });
+}
+async function initialize(owner: number) {
+  const unsubscribe = await events.uiCommand.listen(({ payload }) => {
+    if (owner !== generation) return;
+    const kind = payload.slice(5);
+    if (
+      payload.startsWith("tool.") &&
+      ["notes", "tasks", "ai", "time", "history", "downloads"].includes(kind)
+    )
+      open(kind as ToolKind);
+    if (payload === "browser.return" && queued) {
+      const next = queued;
+      queued = null;
+      open(next);
+    }
+    if (payload === "browser.return-failed") queued = null;
+    if (["browser.settings", "browser.history", "browser.downloads"].includes(payload)) {
+      request++;
+      cancel();
+      tool = null;
+      setPanelExtent(0);
+      queued = null;
+    }
+  });
+  if (owner !== generation) unsubscribe();
+  else {
+    stop = unsubscribe;
+    initialized = true;
+  }
+}
+
+export function init(): Promise<void> {
+  if (initializing) return initializing;
+  if (initialized) return Promise.resolve();
+  const task = initialize(++generation);
+  initializing = task;
+  void task.then(
+    () => {
+      if (initializing === task) initializing = null;
+    },
+    () => {
+      if (initializing === task) initializing = null;
+    },
+  );
+  return task;
+}
+export function dispose() {
+  generation++;
+  request++;
+  initialized = false;
+  initializing = null;
+  queued = null;
+  stop?.();
+  stop = null;
+  tool = null;
+}
