@@ -12,7 +12,9 @@ use zephium_core::geometry::Size;
 use zephium_core::ports::chrome::{Chrome, ChromeFrame};
 use zephium_engine::MainThreadDispatch;
 
-static MATERIAL: AtomicBool = AtomicBool::new(false);
+static MATERIALS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, crate::material::Material>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 const PAGE_URL_UTF16_LIMIT: usize = 8 * 1_024;
 const PAGE_URL_UTF8_LIMIT: usize = 8 * 1_024;
@@ -111,7 +113,7 @@ pub fn init(
 ) -> bool {
     round_corners(window);
     let hardened = harden_privileged(window, expected_user_data_folder, on_runtime_update);
-    MATERIAL.store(apply_material(window, true), Ordering::SeqCst);
+    apply_material(window, true);
     hardened
 }
 
@@ -406,11 +408,40 @@ pub fn apply_material(window: &WebviewWindow, dark: bool) -> bool {
     if let Err(e) = &result {
         crate::write_diagnostic(format_args!("material: window effects unavailable: {e}"));
     }
+    let material = if result.is_ok() {
+        crate::material::Material::Acrylic
+    } else {
+        crate::material::Material::None
+    };
+    let first = MATERIALS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(window.label().to_owned(), material)
+        .is_none();
+    if first {
+        let label = window.label().to_owned();
+        window.on_window_event(move |event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                MATERIALS
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&label);
+            }
+        });
+    }
+    if let Ok(value) = serde_json::to_string(&material) {
+        let _ = window.eval(format!("window.dispatchEvent(new CustomEvent('zephium:ui-command',{{detail:'material.'+{value}}}))"));
+    }
     result.is_ok()
 }
 
-pub fn material() -> bool {
-    MATERIAL.load(Ordering::SeqCst)
+pub fn material(label: &str) -> crate::material::Material {
+    MATERIALS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(label)
+        .copied()
+        .unwrap_or_default()
 }
 
 // Full-window chrome: client coords already are window coords.
@@ -438,6 +469,15 @@ impl Chrome for ChromeAdapter {
 }
 
 impl PresentationChrome for ChromeAdapter {
+    fn restore_browser_chrome(
+        &self,
+        revision: u64,
+        items: zephium_ipc::ItemsState,
+        done: ChromePresentationCallback,
+    ) -> ChromePresentationDispatch {
+        crate::restore_browser_chrome(&self.window, revision, items, done)
+    }
+
     fn apply_tab_for_presentation(
         &self,
         presentation: ChromePresentation,
