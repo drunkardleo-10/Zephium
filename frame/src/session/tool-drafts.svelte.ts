@@ -10,6 +10,7 @@ export type ToolViewState = {
   scrollTop: number;
 };
 export type ToolHostProps = {
+  profile: string;
   tool: ToolKind;
   state: Readonly<ToolViewState>;
   edit: (patch: Partial<ToolViewState>) => void;

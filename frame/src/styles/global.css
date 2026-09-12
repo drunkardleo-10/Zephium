@@ -8,7 +8,9 @@
 @import "./controls.css";
 @import "./browser.css";
 @source not "../**/*.test.ts";
+@source not "../**/tests";
 @source not "../shared/testing";
+@source not "../domain/resources";
 
 /*
  * Zephium's chrome is tonal. Surfaces step by luminance, not by outline;

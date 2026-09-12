@@ -55,6 +55,7 @@
 
 {#if view && session}{@const View = view}<View
     {tool}
+    {profile}
     state={session}
     {host}
     {profileName}

@@ -39,6 +39,13 @@ export const architecture = {
         default: "disallow",
         policies: [
           ...downward,
+          // The existing utility host composes real entity views through public APIs.
+          {
+            from: { element: { type: "features", captured: { module: "tools" } } },
+            allow: {
+              to: { element: { type: "features", captured: { module: ["notes", "tasks"] } } },
+            },
+          },
           {
             from: { file: { categories: "entry" } },
             allow: { to: element(["app", "shared", "styles"]) },
