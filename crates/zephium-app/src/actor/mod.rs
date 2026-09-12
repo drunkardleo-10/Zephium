@@ -945,6 +945,8 @@ fn tracked_operation_command(command: &Command) -> bool {
     matches!(
         command,
         Command::Open
+            | Command::ShowBrowserPage(_)
+            | Command::SetTabEssential { .. }
             | Command::Activate(_)
             | Command::Close(_)
             | Command::Navigate { .. }
@@ -956,6 +958,7 @@ fn tracked_operation_command(command: &Command) -> bool {
             | Command::DropTab { .. }
             | Command::DividerRelease { .. }
             | Command::Run(_)
+            | Command::RunSearchAction { .. }
             | Command::InvokeExtensionAction { .. }
             | Command::InstallFocusedExtension { .. }
             | Command::ApproveFocusedExtensionUpdate { .. }

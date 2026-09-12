@@ -50,8 +50,8 @@ pub use actor::{spawn_agentic, spawn_agentic_suspended, AgenticLifecycles, Agent
 #[cfg(feature = "agentic-browser")]
 pub use api::AgentLifecycle;
 pub use api::{
-    AcquiredExtensionCatalogSubmission, AcquiredExtensionPackageSubmission, ChromePresentation,
-    ChromePresentationCallback, ChromePresentationDispatch, Command,
+    AcquiredExtensionCatalogSubmission, AcquiredExtensionPackageSubmission, BrowserPage,
+    ChromePresentation, ChromePresentationCallback, ChromePresentationDispatch, Command,
     ContentPolicyStatusQueryOutcome, EmitFn, ExtensionLifecycle, PagePermissionPromptDecision,
     PresentationChrome, SharedBlocker, SharedChrome, SharedEngine, SharedStore,
     ShellTerminalFailure, ShellTerminalFailureCallback, ShutdownOutcome,
