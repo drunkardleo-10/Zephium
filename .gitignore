@@ -16,3 +16,5 @@ __pycache__/
 /frame/project.inlang/cache/
 
 /frame/.vitest-attachments/
+
+/frame/dist-work-preview/

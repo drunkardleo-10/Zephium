@@ -161,3 +161,48 @@ until the design and nonvisual tracks are ready to meet, per the owner's instruc
   Finish the development entry, interaction tests, viewport restoration and measured
   lazy graph before treating that foundation as ready for handoff. Do not silence
   those findings through permanent exceptions or connect the draft to Browse.
+
+## Work presentation foundation — 2026-09-12
+
+The earlier uncommitted canvas draft is now an implemented, independently testable
+presentation foundation. The current module map and runtime responsibilities are in
+[the Work handoff](frontend-module-work-foundation.md); it replaces the old proposal
+and its obsolete `model/pages/adapters` vocabulary.
+
+- Added bounded XYFlow canvas/list presentation, stable node identity, saved viewport
+  validation, non-overlapping placement of newly added cards, settled geometry
+  callbacks, keyboard inspection, inspector focus handling and hidden-surface cleanup.
+- Added seven artifact presentations, original-decimal chart values through lazy
+  LayerChart SVG, an inert evidence inspector and a constrained lazy Tiptap editor.
+  No model-generated HTML/CSS/JavaScript, remote image decoding, native WebView
+  ownership or executable Work model was introduced.
+- Added host-controlled request states, explicit confirmation tied to the displayed
+  view, opaque-key clarification drafts and bounded async observation. Unknown
+  outcomes cannot be silently retried or treated as cancellation/completion.
+- Added three deterministic presentation scenarios in a separate `dev/` entry and
+  build. No fixture/schema or native transport is imported by the desktop build.
+  Production startup guards reject Work/XYFlow/LayerChart/Tiptap dependencies in
+  Browse and panel entry graphs. No Rust source or native route changed in this pass.
+- Validation: frame check passed (147 unit tests), WebKit component suite passed
+  (28 tests), production and separate Work builds passed, and emitted native-frame
+  CSS checks passed. The preview was interacted with in dark/light appearance and
+  at normal/800px window width, including clarification rejection and artifact/chart
+  inspection. This is not native macOS/Windows runtime integration qualification.
+- A 500-item restored-viewport WebKit sample initially renders/measures all nodes;
+  offscreen culling then retains 4. The observed settled sample was about 130–175ms,
+  including the test's wait for culling. This is not a comparative cold-start
+  benchmark, percentile, frame-rate guarantee or native GPU measurement.
+- Measured uncompressed static graphs (shared dependencies included): preview
+  73,262 JS / 21,064 CSS bytes; Work surface 98,156 / 26,965; canvas 237,873 / 34,919;
+  chart 421,950 / 27,822; document editor 363,151 / 21,634. Total emitted preview JS
+  is 1,059,054 bytes. These have explicit separate budgets with modest headroom;
+  the native desktop budgets were not raised for this work.
+- Remaining integration: generated live runtime definitions and fixture validation,
+  exact command/projection/evidence transport, plan amendments and artifact edits,
+  persisted drafts/view state, native browser promotion and safe previews, and real
+  cancellation/restart/uncertain-effect/platform workflows. The older Browse/native
+  migration items remain separately tracked; this pass does not mark them complete.
+
+The copied runtime Work contract remains untracked and unmodified. The frontend
+build does not depend on it, so it can be reconciled without a competing committed
+schema when the runtime stream is integrated.

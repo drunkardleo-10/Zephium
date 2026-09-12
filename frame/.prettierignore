@@ -4,3 +4,5 @@ src/vite-env.d.ts
 
 src/shared/i18n
 project.inlang/cache
+
+dist-work-preview/

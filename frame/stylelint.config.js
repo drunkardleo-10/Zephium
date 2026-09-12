@@ -16,6 +16,8 @@ export default {
     },
   ],
   rules: {
+    // Tailwind source() imports must use its supported string syntax.
+    "import-notation": "string",
     "declaration-property-value-disallowed-list": {
       "/.*/": ["/#[0-9a-f]{3,8}\\b/i", "/\\b(?:rgb|rgba|hsl|hsla|oklch|oklab)\\(/i"],
     },

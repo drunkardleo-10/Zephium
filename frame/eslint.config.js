@@ -9,6 +9,7 @@ export default tseslint.config(
   {
     ignores: [
       "dist/**",
+      "dist-work-preview/**",
       "project.inlang/cache/**",
       "src/shared/i18n/**",
       "src/shared/ipc/bindings.ts",

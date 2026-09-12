@@ -7,6 +7,7 @@ export default {
   // Public primitive modules form the copy-owned UI library; only explicit imports enter production.
   entry: [
     "src/entries/*.ts",
+    "dev/main.ts",
     "src/shared/ui/*/index.ts",
     "src/shared/ui/data/*/index.ts",
     "src/**/*.test.ts",
@@ -15,7 +16,12 @@ export default {
     "bootstrap-report.ts",
   ],
   ignoreIssues: migrationIssues,
-  project: ["src/**/*.{ts,svelte,css}", "*.{js,ts}", "scripts/**/*.mjs"],
+  project: [
+    "dev/**/*.{ts,svelte,css}",
+    "src/**/*.{ts,svelte,css}",
+    "*.{js,ts}",
+    "scripts/**/*.mjs",
+  ],
   ignore: ["src/shared/ipc/bindings.ts"],
   // Compile the template too: extracting only <script> imports misclassifies
   // domain namespace members used by markup as unused exports.

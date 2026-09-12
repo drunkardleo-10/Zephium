@@ -14,6 +14,7 @@ export function bootstrapReport(): Plugin {
         for (const id of Object.keys(item.modules)) {
           if (
             /\/src\/(shared\/testing|gallery)\//u.test(id) ||
+            /\/frame\/dev\//u.test(id) ||
             (/\/(tests|fixtures)\//u.test(id) && id.includes("/src/")) ||
             /\.test\.[jt]s$/u.test(id)
           )
@@ -60,6 +61,11 @@ export function bootstrapReport(): Plugin {
           const item = bundle[file];
           if (!item || item.type !== "chunk") return;
           for (const id of Object.keys(item.modules)) {
+            if (
+              root.surface &&
+              (/\/features\/work\//u.test(id) || /\/(?:@xyflow|layerchart|@tiptap)\//u.test(id))
+            )
+              this.error(`Work code in ${name} startup: ${id}`);
             const at = id.indexOf("/src/");
             if (at >= 0) modules.add(id.slice(at + 1));
           }

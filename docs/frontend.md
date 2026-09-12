@@ -1,12 +1,10 @@
 # Frame (frontend) handoff
 
-Implementation status (2026-09-11): the tooling and module migration are in place.
-The remaining typed IPC, unified navigation, scoped-style migration and multi-entry
-work is tracked in [the foundation progress](plans/frontend-architecture-progress.md).
-
-Next architecture review: [module conventions and Work UI foundation](plans/frontend-module-work-foundation.md)
-proposes responsibility-based feature internals and module-local test directories.
-It is a documentation-only proposal; the placement and test-runner migration has not landed.
+Implementation status (2026-09-12): the module migration, separate native entry
+points and Work presentation foundation are implemented. Remaining Browse/native
+migrations and qualification are tracked in [foundation progress](plans/frontend-architecture-progress.md).
+The [Work handoff](plans/frontend-module-work-foundation.md) documents current
+module conventions, the isolated preview and the live runtime integration boundary.
 
 Read this before touching `frame/`. It is the working contract for UI work;
 `architecture.md` covers the system and `security-model.md` the trust rules.
@@ -17,8 +15,8 @@ Read this before touching `frame/`. It is the working contract for UI work;
 - Tailwind CSS v4, token-first. Bits UI supplies narrowly adopted accessible
   behavior; Zephium owns every visual component.
 - Icons come only from the MIT/free packages `@hugeicons/svelte` and
-  `@hugeicons/core-free-icons`, wrapped by `src/shared/ui/Icon.svelte`.
-- Geist Variable and Geist Mono Variable are bundled through Fontsource and
+  `@hugeicons/core-free-icons`, wrapped by `src/shared/ui/Icon`.
+- Inter Variable are bundled through Fontsource and
   imported by the separate main and panel app roots.
 - ESLint with the Svelte and TypeScript configs, plus Prettier with the Svelte
   and Tailwind plugins. `pnpm run check` is the frame gate: Svelte/TypeScript
@@ -63,8 +61,8 @@ the required behavior. Popovers must remain inside their owning chrome WebView.
    are native. A DOM popover is allowed only when fully contained in the
    sidebar; do not portal one across a WebView boundary.
 3. **`src/shared/ipc/bindings.ts` is generated** by `cargo test -p zephium-desktop
-   export_typescript_bindings`. Never edit it by hand.
-4. **Favicons stay fixed raster.** `shared/ui/FavIcon.svelte` accepts only the bounded
+export_typescript_bindings`. Never edit it by hand.
+4. **Favicons stay fixed raster.** `shared/ui/FavIcon` accepts only the bounded
    `rgba32:` payload produced by Rust and paints a 32 × 32 `ImageData` canvas.
    Never replace this with `<img>`, a data URL, a custom protocol, or a
    privileged image-format decoder.
@@ -87,7 +85,7 @@ security boundary, not a rendering optimization.
 - `domain/tabs/tabs.svelte.ts` installs all three scoped projection listeners before
   its first `await`, admits revisions through the framework-free
   `TabProjectionModel`, and publishes a presentation inside `flushSync`.
-- `src/main.ts` calls `flushSync()` immediately after Svelte `mount()` so
+- `src/entries/browser.ts` calls `flushSync()` immediately after Svelte `mount()` so
   initial DOM and subscription work exist before bootstrap returns. Do not add
   an application re-entrancy guard; Svelte 5 supports nested synchronous
   flushing and a guard could reject a valid newer presentation.
@@ -110,10 +108,9 @@ security boundary, not a rendering optimization.
 
 ## Startup and surface lifecycle
 
-- `main.ts` selects the native window label before dynamically importing either
-  `app/App.svelte` (browser) or `app/PanelApp.svelte` (launcher). Mount and
-  `flushSync()` remain synchronous after that import. The panel calls its narrow
-  `panelReady()` gate, never the main browser's `uiReady()`.
+- `browser.html` and `panel.html` load their own `src/entries/` modules. Each
+  validates its native window label, mounts its composition root and calls
+  `flushSync()` synchronously. The panel uses `panelReady()`, never `uiReady()`.
 - See `design/launcher.md` for the shared floating host, lazy tool boundary,
   native lifecycle, and verification status. Production builds emit and enforce
   `dist/bootstrap-report.json`; do not add browser features to panel startup.
@@ -121,7 +118,7 @@ security boundary, not a rendering optimization.
   before its first native query. The main surface installs projection listeners,
   resolves theme/material, synchronously forces style/layout, and only then
   calls `commands.uiReady()`.
-- Keep the opaque bootstrap colors in `index.html` byte-exact with the native
+- Keep the opaque bootstrap colors in `browser.html` byte-exact with the native
   presentation background (`#1a1b20` dark, `#f3f3f6` light). A hidden WebView
   may suspend `requestAnimationFrame`; startup must not depend on one. Native's
   15-second watchdog intentionally fails closed instead of revealing partial
@@ -154,7 +151,7 @@ points. Cross-module imports use `$app`, `$features`, `$session`, `$domain`,
 Every consumed feature/domain module exports its public API through `index.ts`.
 Lazy surfaces expose loader functions so the public API does not turn navigation
 into eager loading. `Sidebar` owns its frame, header, footer and resize handle;
-`app/Shell.svelte` supplies its product bodies. New Tab receives Settings preview
+`app/browser/Shell.svelte` supplies its product bodies. New Tab receives Settings preview
 values as props; it never imports the Settings feature.
 
 Rust owns persistent state, security decisions, native geometry, operation outcomes,
@@ -194,10 +191,10 @@ Notes or Work implementations. No placeholder entity directories are created.
 
 ## Tests and migration gates
 
-Tests live beside the source they exercise. Pure models and runes stores run in the
-Vitest `unit` project; component tests run in `component`. The configuration classifies
-component tests by the actual `.svelte` source sibling, not by an ambiguous filename
-glob. Feature scenarios may use one feature-level test file.
+Features use `components/`, `lib/` and module-local `tests/`, with only `index.ts`
+at the root. Domain slices keep focused source files and `tests/`. Do not create
+empty role directories. Browser tests use `.component.test.ts`; other `.test.ts`
+files run in the unit project. App scenarios stay with their composition root.
 
 `shared/testing` provides typed binding mocks, scoped event emission and fixtures.
 Unexpected native commands fail tests. Production builds reject testing and gallery
@@ -218,7 +215,7 @@ component-scoped CSS will remain covered. Bootstrap-paint and presentation-senti
 contracts still have independent Rust tests.
 
 Global shortcuts remain native. The small set consumed by the chrome WebView is
-matched in `App.svelte` and dispatched through the Rust Commands registry.
+matched in `app/browser/BrowserApp.svelte` and dispatched through the Rust Commands registry.
 Theme/material attributes are currently owned by `domain/appearance/theme.ts`; appearance remains
 persisted and allowlisted on the Rust side.
 
@@ -237,3 +234,16 @@ it for the existing wordmark or change its pixels.
 scoped `material.*` UI-command transport until typed appearance projections land.
 Preserve startup-query versus live-update ordering. Svelte never implements glass
 with CSS blur.
+
+## Work presentation foundation
+
+Use `features/work` through its lazy loaders. Shared semantic renderers live in
+`shared/ui/data`; their display types are not Work IPC contracts. XYFlow, SVG
+LayerChart and the constrained Tiptap editor load on demand. Tables remain lightweight.
+See the [Work handoff](plans/frontend-module-work-foundation.md) for input limits,
+request states, view/draft lifetimes and exact integration responsibilities.
+
+Run `pnpm -C frame dev:work` to inspect authored scenarios at
+`http://localhost:1421/work-preview.html`. The preview uses actual presentation
+components, owns no native transport and builds separately from the desktop frame.
+The copied runtime contract remains untracked and is not a frontend build dependency.

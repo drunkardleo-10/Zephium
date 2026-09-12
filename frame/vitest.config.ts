@@ -21,6 +21,16 @@ export default defineConfig({
       {
         resolve: { alias },
         plugins: [svelte()],
+        optimizeDeps: {
+          include: [
+            "layerchart/svg",
+            "@xyflow/svelte",
+            "@tiptap/core",
+            "@tiptap/extension-document",
+            "@tiptap/extension-paragraph",
+            "@tiptap/extension-text",
+          ],
+        },
         test: {
           name: "component",
           include: ["src/**/*.component.test.ts"],
