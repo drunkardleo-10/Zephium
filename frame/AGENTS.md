@@ -1,7 +1,7 @@
 # Frontend implementation rules
 
-Read `docs/frontend.md` from the repository root. The architecture progress document
-records incomplete work and qualification; do not infer completion from this tree.
+Read `docs/frontend.md` from the repository root. `docs/frontend-handoff.md`
+records current capabilities, incomplete work and qualification; do not infer completion from this tree.
 
 - Features expose a small `index.ts`. Put rendered UI and component composition in
   `components/`, supporting behavior/state/selectors in `lib/`, and verification in

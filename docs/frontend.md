@@ -1,10 +1,6 @@
-# Frame (frontend) handoff
+# Frontend architecture and conventions
 
-Implementation status (2026-09-12): the module migration, separate native entry
-points and Work presentation foundation are implemented. Remaining Browse/native
-migrations and qualification are tracked in [foundation progress](plans/frontend-architecture-progress.md).
-The [Work handoff](plans/frontend-module-work-foundation.md) documents current
-module conventions, the isolated preview and the live runtime integration boundary.
+Current capabilities and qualification are recorded in [the frontend handoff](frontend-handoff.md).
 
 Read this before touching `frame/`. It is the working contract for UI work;
 `architecture.md` covers the system and `security-model.md` the trust rules.
@@ -133,17 +129,18 @@ security boundary, not a rendering optimization.
 src/
   app/            composition roots, assembling independent features through snippets
   features/       product slices: sidebar, tabs, essentials, address, spaces,
-                  extensions, blocker, permissions, launcher, newtab, settings, tools, library, split
+                  extensions, blocker, permissions, launcher, newtab, settings, tools, library, split, notes, tasks, work
   session/        shared transient state with one WebView-document lifetime
   domain/         Rust projections and typed intent: tabs, layout, surface,
-                  preferences, appearance, operations, runtime, permissions, credentials, extensions, blocker
+                  preferences, appearance, operations, runtime, permissions, credentials, extensions, blocker, resources
   shared/         IPC transport, UI primitives, pure helpers, platform traits, testing
   styles/         semantic tokens and the global styles being migrated to component ownership
 ```
 
-Imports flow `app -> features -> session -> domain -> shared`. Features never
-import sibling features. The future Work host has the single documented exception:
-it may consume top-level entity public APIs; entity features never depend on Work.
+Imports flow `app -> features -> session -> domain -> shared`. Features generally do not
+import sibling features. Explicit composition exceptions in `architecture.config.js`
+allow the utility host to load Notes/Tasks and a Work host to consume entity public
+APIs. Entity features never depend on Work.
 ESLint resolves TypeScript aliases and enforces these directions and public entry
 points. Cross-module imports use `$app`, `$features`, `$session`, `$domain`,
 `$shared`, or `$styles`; imports within a module stay relative.
@@ -185,9 +182,36 @@ specified in `work-runtime-context.md`; do not route Work command IDs through th
 Browse operation-ID parser.
 
 The session sidebar/tools modules and the string UI-command transport are transitional
-until steps 4a and 5 of the architecture plan. Do not use them as patterns for new
+while the unified typed surface migration remains incomplete. Do not use them as patterns for new
 product state. Placeholder tool views stay in `features/tools`; they are not Tasks,
 Notes or Work implementations. No placeholder entity directories are created.
+
+## Notes and Tasks host behavior
+
+The Notes/Tasks root is both a flex item and an inline-size query container. Give
+it an explicit width, flex growth and a zero minimum width; size containment
+otherwise collapses it inside the native sidebar. Test both ToolSlot hosts with
+production sidebar CSS, including list/detail navigation and launcher return.
+
+Resource drafts autosave after one second of inactivity. Background saves remain
+single-flight and defer edits made during a write to the next idle interval;
+explicit navigation and normal app close drain pending edits. Native change events
+and write replies coalesce their metadata refresh. Routine save feedback reserves
+space and only shows Saving after an 800 ms wait; conflicts, uncertain outcomes
+and failures remain explicit. Hidden features stop observation and timers while
+retaining their transient draft. This does not promise crash recovery for edits
+that have not reached Rust.
+
+The note editor projects immutable ProseMirror nodes through an editor-lifetime
+WeakMap. Unchanged branches reuse canonical payloads and size/reference summaries;
+validation does not serialize the full document on every keystroke. The resulting
+payload still passes independent Rust validation. Reference labels use inert node
+views and resolve only when reference IDs or their metadata revision change.
+Hidden hosts release list metadata and fully saved bodies, retaining the selected
+ID for fresh native reads on reopening. Unresolved drafts retain their bodies.
+Editor teardown releases its history and cache.
+The 1,800-paragraph projection test is a local CPU sample, not native latency or
+process-memory qualification.
 
 ## Tests and migration gates
 
@@ -205,8 +229,8 @@ modules from every emitted JavaScript chunk, including lazy chunks.
 `pnpm -C frame build` enforces the startup graph; `cargo xtask check-frame-styles`
 checks emitted CSS after a build. The local unit gate does not replace native QA.
 
-Knip and Stylelint migration exceptions list exact existing files and their removal
-step in `knip-migration.ts` and `stylelint-migration.js`. They are temporary debt,
+Knip and Stylelint migration exceptions list exact existing files in
+`knip-migration.ts` and `stylelint-migration.js`. They are temporary debt,
 not permission to add new exceptions. Remove each with the corresponding migration.
 
 Rust markup contracts reference `desktop/src/frame_sources.rs`; update its anchor
@@ -240,10 +264,14 @@ with CSS blur.
 Use `features/work` through its lazy loaders. Shared semantic renderers live in
 `shared/ui/data`; their display types are not Work IPC contracts. XYFlow, SVG
 LayerChart and the constrained Tiptap editor load on demand. Tables remain lightweight.
-See the [Work handoff](plans/frontend-module-work-foundation.md) for input limits,
+See the [Work handoff](frontend-handoff.md) for input limits,
 request states, view/draft lifetimes and exact integration responsibilities.
 
-Run `pnpm -C frame dev:work` to inspect authored scenarios at
-`http://localhost:1421/work-preview.html`. The preview uses actual presentation
-components, owns no native transport and builds separately from the desktop frame.
-The copied runtime contract remains untracked and is not a frontend build dependency.
+Open Work using the browser sidebar mode switch. Rust admits the internal surface
+and suppresses native page WebViews; returning to Browse uses the existing verified
+chrome-restoration handshake. `app/browser/WorkWorkspace.svelte` mounts only an empty canvas foundation. It loads
+no Notes/Tasks stores and makes no decisions about the final Work product layout.
+There is no standalone Work demo or production fixture transport. Agent execution
+is unavailable until runtime integration. Deterministic scenarios remain tests only.
+The copied runtime contract was removed; the frontend does not depend on a local
+Work wire-schema copy. Runtime-owned definitions remain with the runtime stream.
