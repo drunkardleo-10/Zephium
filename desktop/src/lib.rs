@@ -37,6 +37,7 @@ mod linux_shortcut;
 mod linux_shortcut_portal;
 #[cfg(any(target_os = "linux", test))]
 mod linux_x11_shortcut;
+mod material;
 mod overlay;
 #[cfg(target_os = "macos")]
 mod panel;
@@ -1503,6 +1504,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tabs_open,
             tabs_activate,
             tabs_close,
+            tabs_set_essential,
             tabs_navigate,
             tabs_reload,
             tabs_back,
@@ -1534,6 +1536,9 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             operation_acknowledge,
             run_command,
             panel_hide,
+            panel_ready,
+            panel_intent,
+            panel_drag,
             setting_get,
             setting_set,
             ui_info,
@@ -1623,7 +1628,9 @@ fn resolve_privileged_target(
     configured: &tauri::WebviewUrl,
 ) -> std::io::Result<tauri::Url> {
     let target = match configured {
-        tauri::WebviewUrl::App(path) if path.to_str() == Some("index.html") => base.clone(),
+        tauri::WebviewUrl::App(path) if path.to_str() == Some("index.html") => base
+            .join("browser.html")
+            .map_err(|error| std::io::Error::other(error.to_string()))?,
         tauri::WebviewUrl::App(path) => base
             .join(&path.to_string_lossy())
             .map_err(|error| std::io::Error::other(error.to_string()))?,
@@ -1766,6 +1773,7 @@ pub(crate) fn apply_chrome_presentation(
     let Ok(serialized_nonce) = serde_json::to_string(&nonce) else {
         return ChromePresentationDispatch::Rejected;
     };
+    let settings_visible = presentation.settings_visible;
     let script = format!(
         r#"(() => {{
   "use strict";
@@ -1774,6 +1782,11 @@ pub(crate) fn apply_chrome_presentation(
     const tab = {payload};
     const active = {active};
     window.dispatchEvent(new CustomEvent({event}, {{ detail: {{ tab, active }} }}));
+    if ({settings_visible}) {{
+      const shell = document.querySelector("[data-zephium-active-tab]");
+      if (shell?.dataset.zephiumSurface !== "settings" || shell.dataset.zephiumActiveTab !== (active ?? "")) return rejected;
+      return {serialized_nonce};
+    }}
     let row = null;
     for (const candidate of document.querySelectorAll("[data-zephium-tab-id]")) {{
       if (candidate.dataset.zephiumTabId === tab.id) {{ row = candidate; break; }}
@@ -1822,6 +1835,67 @@ pub(crate) fn apply_chrome_presentation(
             diagnostic!("projection: privileged presentation evaluation was not admitted");
             ChromePresentationDispatch::Rejected
         }
+    }
+}
+
+/// Restores the complete snapshot and checks visible browser identity before
+/// the actor is allowed to reattach raw native content.
+pub(crate) fn restore_browser_chrome(
+    window: &WebviewWindow,
+    revision: u64,
+    items: zephium_ipc::ItemsState,
+    done: ChromePresentationCallback,
+) -> ChromePresentationDispatch {
+    let Ok(payload) = serde_json::to_string(&items) else {
+        return ChromePresentationDispatch::Rejected;
+    };
+    let nonce = format!("zephium-browser-return:{revision}");
+    let Ok(expected) = serde_json::to_string(&nonce) else {
+        return ChromePresentationDispatch::Rejected;
+    };
+    let script = format!(
+        r#"(() => {{
+      const items = {payload};
+      window.dispatchEvent(new CustomEvent('zephium:browser-return', {{ detail: items }}));
+      const shell = document.querySelector('[data-zephium-active-tab]');
+      if (!shell || shell.dataset.zephiumSurface !== 'browse' || shell.dataset.zephiumActiveTab !== (items.active ?? '')) return '';
+      const active = items.tabs.find(tab => tab.id === items.active);
+      if (active) {{
+        const rows = [...document.querySelectorAll('[data-zephium-tab-id]')].filter(row => row.dataset.zephiumTabId === active.id);
+        if (rows.length !== 1) return '';
+        const row = rows[0];
+        if (row.dataset.zephiumTabUrl !== (active.url ?? '') || row.dataset.zephiumProjectionRevision !== active.projection_revision || row.querySelector('[data-zephium-tab-label]')?.textContent !== active.title) return '';
+        const address = document.querySelector('[data-zephium-address]');
+        if (!(address instanceof HTMLInputElement)) return '';
+        const host = active.url ? new URL(active.url).host : '';
+        if (address.value !== host) {{ address.value = host; address.dispatchEvent(new Event('input', {{ bubbles: true }})); }}
+        if (address.value !== host) return '';
+        if (!!document.querySelector('[data-zephium-new-tab]') !== !active.url) return '';
+      }}
+      void document.documentElement.getBoundingClientRect();
+      return {expected};
+    }})()"#
+    );
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let sender = Arc::new(Mutex::new(Some(sender)));
+    match window.eval_with_callback(script, move |result| {
+        if let Some(sender) = sender.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = sender
+                .send(serde_json::from_str::<String>(&result).is_ok_and(|value| value == nonce));
+        }
+    }) {
+        Ok(()) => {
+            tauri::async_runtime::spawn(async move {
+                let applied = tokio::time::timeout(std::time::Duration::from_secs(5), receiver)
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .unwrap_or(false);
+                done(applied);
+            });
+            ChromePresentationDispatch::Scheduled
+        }
+        Err(_) => ChromePresentationDispatch::Rejected,
     }
 }
 
@@ -2013,11 +2087,7 @@ fn sidebar_width_in_bounds(width: f64) -> bool {
 }
 
 fn setting_value_allowed(key: &str, value: &str) -> bool {
-    match key {
-        "appearance" => matches!(value, "system" | "light" | "dark"),
-        "sidebar.mode" => matches!(value, "default" | "compact"),
-        _ => false,
-    }
+    zephium_core::preferences::value_allowed(key, value)
 }
 
 fn search_action_in_bounds(action: &zephium_ipc::SearchAction) -> bool {
@@ -2227,6 +2297,42 @@ fn tabs_close(
         return rejected_operation();
     }
     dispatch_with_id(caller.app_handle(), &shell, &id, Command::Close)
+}
+
+#[tauri::command]
+#[specta::specta]
+fn tabs_set_essential(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    id: String,
+    essential: bool,
+    before: Option<String>,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "tabs_set_essential")
+        || !bounded(&id, MAX_ITEM_ID_BYTES)
+    {
+        return rejected_operation();
+    }
+    let Some(id) = ItemId::parse(&id) else {
+        return rejected_operation();
+    };
+    let before = match before {
+        Some(value) if bounded(&value, MAX_ITEM_ID_BYTES) => match ItemId::parse(&value) {
+            Some(id) => Some(id),
+            None => return rejected_operation(),
+        },
+        Some(_) => return rejected_operation(),
+        None => None,
+    };
+    dispatch_operation(
+        caller.app_handle(),
+        &shell,
+        Command::SetTabEssential {
+            id,
+            essential,
+            before,
+        },
+    )
 }
 
 #[tauri::command]
@@ -2925,7 +3031,7 @@ fn operation_acknowledge(
         .is_some_and(|ledger| ledger.acknowledge(&operation_id))
 }
 
-const SETTING_KEYS: &[&str] = &["appearance", "sidebar.mode"];
+const SETTING_KEYS: &[&str] = zephium_core::preferences::KEYS;
 
 // "CmdOrCtrl+T" style accelerators become native VK shortcuts for platforms
 // where the engine intercepts keys itself (Windows content webviews).
@@ -3056,6 +3162,75 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
     if shutdown_started(app) {
         return rejected_operation();
     }
+    if matches!(
+        id,
+        "settings.profiles" | "settings.account" | "settings.newtab"
+    ) {
+        let section = id.replacen("settings.", "settings.section.", 1);
+        let _ = try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &section);
+        return execute_command(app, "browser.settings");
+    }
+    if id == "mode.choose" {
+        use tauri::menu::{Menu, MenuItemBuilder};
+        let menu = (|| -> tauri::Result<_> {
+            let browse = MenuItemBuilder::with_id("mode.browse", "Browse").build(app)?;
+            let work = MenuItemBuilder::with_id("mode.work", "Work")
+                .enabled(false)
+                .build(app)?;
+            Menu::with_items(app, &[&browse, &work])
+        })();
+        return match (app.get_webview_window(MAIN_LABEL), menu) {
+            (Some(window), Ok(menu)) if window.popup_menu(&menu).is_ok() => accepted_ui_operation(),
+            _ => rejected_operation(),
+        };
+    }
+    if matches!(
+        id,
+        "tool.notes"
+            | "tool.tasks"
+            | "tool.ai"
+            | "tool.time"
+            | "tool.history"
+            | "tool.downloads"
+            | "extensions.manage"
+    ) {
+        if let Some(panel) = app.try_state::<overlay::Overlay>() {
+            if panel.always_floating() {
+                let tool = match id {
+                    "tool.notes" => Some(zephium_ipc::ToolKind::Notes),
+                    "tool.tasks" => Some(zephium_ipc::ToolKind::Tasks),
+                    "tool.ai" => Some(zephium_ipc::ToolKind::Ai),
+                    "tool.time" => Some(zephium_ipc::ToolKind::Time),
+                    "tool.history" => Some(zephium_ipc::ToolKind::History),
+                    "tool.downloads" => Some(zephium_ipc::ToolKind::Downloads),
+                    _ => None,
+                };
+                if let Some(tool) = tool {
+                    panel.intent(zephium_ipc::PanelIntent::Tool { tool });
+                    return accepted_ui_operation();
+                }
+            }
+        }
+        return if try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id) {
+            accepted_ui_operation()
+        } else {
+            rejected_operation()
+        };
+    }
+    if let Some(destination) = id.strip_prefix("browser.") {
+        let page = match destination {
+            "settings" => Some(zephium_app::BrowserPage::Settings),
+            "history" => Some(zephium_app::BrowserPage::History),
+            "downloads" => Some(zephium_app::BrowserPage::Downloads),
+            "return" => None,
+            _ => return rejected_operation(),
+        };
+        return app
+            .try_state::<Handle>()
+            .map_or_else(rejected_operation, |shell| {
+                dispatch_operation(app, &shell, Command::ShowBrowserPage(page))
+            });
+    }
     if id == "launcher.toggle" {
         if let Some(overlay) = app.try_state::<overlay::Overlay>() {
             overlay.toggle();
@@ -3163,13 +3338,28 @@ fn run_command(
 
 #[tauri::command]
 #[specta::specta]
-fn launcher_search(caller: WebviewWindow, shell: State<'_, Handle>, query: String) {
+fn launcher_search(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    shell: State<'_, Handle>,
+    query: String,
+    request_id: String,
+) -> bool {
     if !authorize(&caller, CallerPolicy::Panel, "launcher_search")
         || !bounded(&query, MAX_LAUNCHER_QUERY_BYTES)
     {
-        return;
+        return false;
     }
-    shell.dispatch(Command::Search(query));
+    let Some(context) = app
+        .try_state::<overlay::Overlay>()
+        .and_then(|overlay| overlay.search_context(&request_id))
+    else {
+        return false;
+    };
+    shell.dispatch(Command::SearchScoped {
+        query,
+        context: Box::new(context),
+    })
 }
 
 #[tauri::command]
@@ -3178,46 +3368,64 @@ fn launcher_run(
     caller: WebviewWindow,
     app: tauri::AppHandle,
     action: zephium_ipc::SearchAction,
+    context: zephium_ipc::SearchContext,
 ) -> zephium_ipc::OperationAdmission {
-    use zephium_ipc::SearchAction;
-
     if !authorize(&caller, CallerPolicy::Panel, "launcher_run") || !search_action_in_bounds(&action)
     {
         return rejected_operation();
     }
-    let Some(shell) = app.try_state::<Handle>() else {
+    let (Some(shell), Some(overlay), Some(ledger)) = (
+        app.try_state::<Handle>(),
+        app.try_state::<overlay::Overlay>(),
+        app.try_state::<OperationLedger>(),
+    ) else {
         return rejected_operation();
     };
-    let admission = match action {
-        SearchAction::ActivateTab { id } => dispatch_with_id(&app, &shell, &id, Command::Activate),
-        SearchAction::OpenUrl { url } => dispatch_operation(&app, &shell, Command::OpenUrl(url)),
-        SearchAction::RunCommand { id } => execute_command(&app, &id),
+    let Ok(sequence) = NEXT_OPERATION_ID
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+    else {
+        return rejected_operation();
     };
-    if admission.accepted {
-        if let Some(overlay) = app.try_state::<overlay::Overlay>() {
-            overlay.hide();
-        }
-        if let Some(main) = app.get_webview_window("main") {
-            let _ = main.set_focus();
-        }
+    let operation_id = format!("{sequence:016x}");
+    if !ledger.reserve(&operation_id) {
+        return rejected_operation();
     }
-    admission
+    if !overlay.arm_action(&operation_id, &context) {
+        return finish_operation_admission(&ledger, operation_id, false);
+    }
+    let accepted = shell.dispatch_operation(
+        operation_id.clone(),
+        Command::RunSearchAction {
+            context: Box::new(context),
+            action,
+        },
+    );
+    if !accepted {
+        overlay.action_rejected(&operation_id);
+    }
+    finish_operation_admission(&ledger, operation_id, accepted)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
 struct UiInfo {
-    material: bool,
+    material: material::Material,
 }
 
 #[tauri::command]
 #[specta::specta]
 fn ui_info(caller: WebviewWindow) -> UiInfo {
     if !authorize(&caller, CallerPolicy::Both, "ui_info") {
-        return UiInfo { material: false };
+        return UiInfo {
+            material: material::Material::None,
+        };
     }
-    UiInfo {
-        material: platform::imp::material(),
-    }
+    #[cfg(target_os = "macos")]
+    let material = material::current(caller.label());
+    #[cfg(target_os = "windows")]
+    let material = platform::imp::material(caller.label());
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let material = material::Material::None;
+    UiInfo { material }
 }
 
 #[tauri::command]
@@ -3466,6 +3674,36 @@ fn panel_hide(caller: WebviewWindow, app: tauri::AppHandle) {
 
 #[tauri::command]
 #[specta::specta]
+fn panel_ready(
+    caller: WebviewWindow,
+    overlay: State<'_, overlay::Overlay>,
+) -> Option<zephium_ipc::PanelState> {
+    authorize(&caller, CallerPolicy::Panel, "panel_ready").then(|| overlay.ready())
+}
+#[tauri::command]
+#[specta::specta]
+fn panel_intent(
+    caller: WebviewWindow,
+    overlay: State<'_, overlay::Overlay>,
+    intent: zephium_ipc::PanelIntent,
+) -> bool {
+    if !authorize(&caller, CallerPolicy::Both, "panel_intent") {
+        return false;
+    }
+    overlay.intent(intent);
+    true
+}
+#[tauri::command]
+#[specta::specta]
+fn panel_drag(caller: WebviewWindow) -> bool {
+    if !authorize(&caller, CallerPolicy::Panel, "panel_drag") {
+        return false;
+    }
+    caller.start_dragging().is_ok()
+}
+
+#[tauri::command]
+#[specta::specta]
 fn sidebar_set_width(caller: WebviewWindow, shell: State<'_, Handle>, width: f64) {
     if !authorize(&caller, CallerPolicy::Main, "sidebar_set_width")
         || !sidebar_width_in_bounds(width)
@@ -3607,13 +3845,18 @@ fn build_menu(
     handle: &tauri::AppHandle,
     overrides: &std::collections::HashMap<String, String>,
 ) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
-    use tauri::menu::{Menu, SubmenuBuilder};
+    use tauri::menu::{Menu, MenuItemBuilder, SubmenuBuilder};
 
     let resolved = zephium_core::commands::resolve(overrides);
     let item = |id: &str| build_command_menu_item(handle, &resolved, id);
 
+    let settings = MenuItemBuilder::with_id("browser.settings", "Settings…")
+        .accelerator("CmdOrCtrl+,")
+        .build(handle)?;
     let app_menu = SubmenuBuilder::new(handle, "Zephium")
         .about(None)
+        .separator()
+        .item(&settings)
         .separator()
         .services()
         .separator()
@@ -3767,36 +4010,51 @@ fn build_tab_menu(
     Menu::with_items(handle, &[&reload, &copy_link, &split, &separator, &close])
 }
 
-/// The profile chip is identity first. On macOS the real menu bar already
-/// carries browsing commands, so the chip stays a short appearance and
-/// lifecycle menu; elsewhere it is also the application menu.
-#[cfg(not(target_os = "macos"))]
+/// Identity and browser destinations use a native menu at every sidebar width.
 fn build_profile_menu(
     handle: &tauri::AppHandle,
-    overrides: &std::collections::HashMap<String, String>,
+    _overrides: &std::collections::HashMap<String, String>,
 ) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
-    build_menu(handle, overrides)
-}
-
-#[cfg(target_os = "macos")]
-fn build_profile_menu(
-    handle: &tauri::AppHandle,
-    overrides: &std::collections::HashMap<String, String>,
-) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
-    use tauri::menu::{Menu, PredefinedMenuItem, SubmenuBuilder};
-
-    let resolved = zephium_core::commands::resolve(overrides);
-    let item = |id: &str| build_command_menu_item(handle, &resolved, id);
-
-    let appearance = SubmenuBuilder::new(handle, "Appearance")
-        .item(&item("theme.system")?)
-        .item(&item("theme.light")?)
-        .item(&item("theme.dark")?)
-        .build()?;
-    let separator = PredefinedMenuItem::separator(handle)?;
+    use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem};
+    let profile = MenuItemBuilder::with_id("settings.profiles", "Profile…").build(handle)?;
+    let account = MenuItemBuilder::with_id("settings.account", "Account…").build(handle)?;
+    let first = PredefinedMenuItem::separator(handle)?;
+    let new_tab = MenuItemBuilder::with_id("tab.new", "New Tab").build(handle)?;
+    let split = MenuItemBuilder::with_id("split.choose", "Split View…").build(handle)?;
+    let second = PredefinedMenuItem::separator(handle)?;
+    let notes = MenuItemBuilder::with_id("tool.notes", "Notes").build(handle)?;
+    let tasks = MenuItemBuilder::with_id("tool.tasks", "Tasks").build(handle)?;
+    let ai = MenuItemBuilder::with_id("tool.ai", "AI Chat").build(handle)?;
+    let time = MenuItemBuilder::with_id("tool.time", "Time").build(handle)?;
+    let history = MenuItemBuilder::with_id("tool.history", "History").build(handle)?;
+    let downloads = MenuItemBuilder::with_id("tool.downloads", "Downloads").build(handle)?;
+    let extensions = MenuItemBuilder::with_id("extensions.manage", "Extensions…").build(handle)?;
+    let third = PredefinedMenuItem::separator(handle)?;
+    let settings = MenuItemBuilder::with_id("browser.settings", "Settings…")
+        .accelerator("CmdOrCtrl+,")
+        .build(handle)?;
     let quit = PredefinedMenuItem::quit(handle, None)?;
-
-    Menu::with_items(handle, &[&appearance, &separator, &quit])
+    Menu::with_items(
+        handle,
+        &[
+            &profile,
+            &account,
+            &first,
+            &new_tab,
+            &split,
+            &second,
+            &notes,
+            &tasks,
+            &ai,
+            &time,
+            &history,
+            &downloads,
+            &extensions,
+            &third,
+            &settings,
+            &quit,
+        ],
+    )
 }
 
 fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
@@ -3814,6 +4072,9 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
     let tauri::RunEvent::ExitRequested { code, api, .. } = event else {
         return;
     };
+    if let Some(panel) = app.try_state::<overlay::Overlay>() {
+        panel.flush();
+    }
     let Some(coordinator) = app.try_state::<ShutdownCoordinator>() else {
         write_diagnostic(format_args!(
             "shutdown: exit requested before coordinator setup"
@@ -4291,9 +4552,11 @@ pub fn run() {
                 });
             }
 
+            app.manage(overlay::ContextCache::default());
             let emit_handle = handle.clone();
             let disposition_ledger = operation_ledger.clone();
             let emit: EmitFn = Box::new(move |projection| match projection {
+                Projection::PanelOwner(owner) => overlay::update_context(&emit_handle, &owner),
                 Projection::Items(state) => {
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_ITEMS, &state)
                 }
@@ -4349,6 +4612,9 @@ pub fn run() {
                     &prompt,
                 ),
                 Projection::UiCommand(id) => {
+                    if let Some(value)=id.strip_prefix("preference.tools.presentation=") {
+                        if let Some(panel)=emit_handle.try_state::<overlay::Overlay>() {panel.preference(value=="floating");}
+                    }
                     if let Some(mode) = id.strip_prefix("theme.") {
                         if matches!(mode, "system" | "light" | "dark") {
                             apply_native_theme(&emit_handle, mode);
@@ -4369,21 +4635,14 @@ pub fn run() {
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_BLOCKER_STATUS, &status)
                 }
                 Projection::OperationProcessed(disposition) => {
-                    if !record_and_deliver_operation(
-                        &disposition_ledger,
-                        disposition,
-                        |disposition| {
-                            try_emit_to_privileged(
-                                &emit_handle,
-                                MAIN_LABEL,
-                                EVENT_OPERATION_PROCESSED,
-                                disposition,
-                            )
-                        },
-                    ) {
+                    let panel_result=disposition.clone();
+                    if record_and_deliver_operation(&disposition_ledger,disposition,|disposition|try_emit_to_privileged(&emit_handle,MAIN_LABEL,EVENT_OPERATION_PROCESSED,disposition)) {
+                        if let Some(panel)=emit_handle.try_state::<overlay::Overlay>() {panel.operation(panel_result);}
+                    } else {
                         diagnostic!("operation: rejected duplicate or unreserved actor disposition");
                     }
                 }
+
             });
 
             let chrome: SharedChrome = platform::imp::make_chrome(&window, dispatch.clone());
@@ -4755,25 +5014,22 @@ pub fn run() {
                 .transparent(true)
                 .always_on_top(true)
                 .skip_taskbar(true)
-                .resizable(false)
+                .resizable(true)
+                .maximizable(false)
+                .fullscreen(false)
+                .shadow(true)
                 .visible(false)
                 .build()?;
 
             #[cfg(target_os = "macos")]
             {
-                use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
                 if !platform::imp::harden_privileged(&panel_window) {
                     return Err(std::io::Error::other(
                         "required privileged panel WKWebView hardening failed",
                     )
                     .into());
                 }
-                let _ = apply_vibrancy(
-                    &panel_window,
-                    NSVisualEffectMaterial::HudWindow,
-                    None,
-                    Some(16.0),
-                );
+                material::install(&panel_window, true);
             }
             #[cfg(target_os = "windows")]
             {
@@ -4820,9 +5076,16 @@ pub fn run() {
             }
 
             let overlay = overlay::Overlay::new(panel_window.clone());
+            let main_focus_overlay = overlay.clone();
+            window.on_window_event(move |event| { if matches!(event, tauri::WindowEvent::Focused(_)) { main_focus_overlay.focus_changed(); } });
             let blur_overlay = overlay.clone();
-            panel_window.on_window_event(move |event| match event {
-                tauri::WindowEvent::Focused(false) => blur_overlay.hide(),
+            panel_window.on_window_event(move |event| {
+                if matches!(event,tauri::WindowEvent::Destroyed){blur_overlay.destroyed();}
+                match event {
+                tauri::WindowEvent::Focused(_) => blur_overlay.focus_changed(),
+                tauri::WindowEvent::ScaleFactorChanged { .. } => blur_overlay.display_changed(),
+                tauri::WindowEvent::CloseRequested { api, .. } if !shutdown_started(blur_overlay.window_app()) => { api.prevent_close(); blur_overlay.hide(); },
+                tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => blur_overlay.geometry_changed(),
                 #[cfg(target_os = "windows")]
                 tauri::WindowEvent::Destroyed
                     if !platform::imp::remove_privileged_version_observer(overlay::PANEL_LABEL) =>
@@ -4830,7 +5093,7 @@ pub fn run() {
                     diagnostic!("runtime: panel WebView2 update observer removal was reentrant");
                 }
                 _ => {}
-            });
+            }});
             app.manage(overlay);
 
             #[cfg(not(target_os = "linux"))]
@@ -4899,7 +5162,8 @@ pub fn run() {
                 )
                 .into());
             }
-            panel_window.navigate(app_url.clone())?;
+            let panel_url = privileged_app_url(app, &tauri::WebviewUrl::App("panel.html".into()))?;
+            panel_window.navigate(panel_url)?;
             if shutdown.terminal_started() {
                 return Err(std::io::Error::other(
                     "terminal shutdown overtook privileged panel navigation",
@@ -4962,6 +5226,9 @@ pub fn run() {
     #[cfg(not(target_os = "windows"))]
     app.run(handle_run_event);
 }
+
+#[cfg(test)]
+mod frame_sources;
 
 #[cfg(test)]
 mod tests {
@@ -5390,22 +5657,56 @@ mod tests {
 
     #[test]
     fn svelte_sidebar_routes_add_and_split_selection_through_trusted_native_state() {
-        let sidebar = include_str!("../../frame/src/features/sidebar/Sidebar.svelte");
-        let footer = include_str!("../../frame/src/features/sidebar/footer/SidebarFooter.svelte");
+        let sidebar = crate::frame_sources::SRC_APP_SHELL_SVELTE;
+        let footer = crate::frame_sources::SRC_FEATURES_SIDEBAR_FOOTER_SIDEBARFOOTER_SVELTE;
 
-        assert!(footer.contains("haspopup"));
-        assert!(footer
-            .contains("commands.addMenuPopup(anchor.left, anchor.top, tabs.canSplitActive())"));
-        assert!(footer.contains("commands.profileMenuPopup(anchor.left, anchor.top)"));
+        // The avatar is the single native menu entry point at either width.
+        // Its actions still return through the trusted command dispatcher.
+        assert!(footer.contains(r#"aria-haspopup="menu""#));
+        assert!(footer.contains("profileMenuPopup"));
+        assert!(!footer.contains("tabs.split("));
+        assert!(!footer.contains("addMenuPopup"));
+        let native_menu = include_str!("lib.rs")
+            .split("fn build_profile_menu(")
+            .nth(1)
+            .unwrap()
+            .split("fn handle_run_event")
+            .next()
+            .unwrap();
+        assert!(native_menu.contains(r#"with_id("split.choose", "Split View…")"#));
+        assert!(native_menu.contains(r#"with_id("tab.new", "New Tab")"#));
         assert!(sidebar.contains(r#"command.id === "split.choose""#));
         assert!(sidebar.contains("splitting = true"));
         assert!(!sidebar.contains("onclick={tabs.open}"));
     }
 
     #[test]
+    fn bootstrap_paint_matches_the_canvas_token() {
+        let tokens = crate::frame_sources::SRC_STYLES_TOKENS_CSS;
+        let bootstrap = crate::frame_sources::INDEX_HTML;
+
+        let canvas = |block: &str| -> String {
+            let rest = &tokens[tokens.find(block).expect("theme block")..];
+            let at = rest.find("--color-canvas:").expect("canvas token") + "--color-canvas:".len();
+            rest[at..].trim_start()[..7].to_owned()
+        };
+        let paints: Vec<&str> = bootstrap
+            .match_indices("background: #")
+            .map(|(at, found)| &bootstrap[at + found.len() - 1..at + found.len() + 6])
+            .collect();
+        assert_eq!(
+            paints,
+            [
+                canvas("@theme static {"),
+                canvas("[data-theme=\"light\"] {")
+            ]
+        );
+    }
+
+    #[test]
     fn runtime_advisory_listener_precedes_bootstrap_and_stays_in_the_sidebar() {
-        let app = include_str!("../../frame/src/app/App.svelte");
-        let footer = include_str!("../../frame/src/features/sidebar/footer/SidebarFooter.svelte");
+        let app = crate::frame_sources::SRC_APP_APP_SVELTE;
+        let footer = crate::frame_sources::SRC_FEATURES_SIDEBAR_FOOTER_SIDEBARFOOTER_SVELTE;
         let runtime_listener = app
             .find("const runtimeReady = runtime.init()")
             .expect("runtime projection listener");
@@ -5420,17 +5721,17 @@ mod tests {
         assert!(footer.contains(r#"aria-modal="true""#));
         assert!(footer.contains(r#"event.key === "Tab""#));
         assert!(footer.contains("closeNotifications(true)"));
-        assert!(footer.contains(r#"label="New tab and split options""#));
+        assert!(footer.contains("profileMenuPopup"));
         assert!(!footer.contains("http://"));
         assert!(!footer.contains("https://"));
     }
 
     #[test]
     fn the_compact_sidebar_keeps_the_presentation_barrier_reachable() {
-        let address = include_str!("../../frame/src/features/sidebar/address/AddressField.svelte");
-        let rail = include_str!("../../frame/src/features/sidebar/tabs/TabRail.svelte");
+        let address = crate::frame_sources::SRC_FEATURES_SIDEBAR_ADDRESS_ADDRESSFIELD_SVELTE;
+        let rail = crate::frame_sources::SRC_FEATURES_SIDEBAR_TABS_TABRAIL_SVELTE;
         let essentials =
-            include_str!("../../frame/src/features/sidebar/essentials/EssentialsRail.svelte");
+            crate::frame_sources::SRC_FEATURES_SIDEBAR_ESSENTIALS_ESSENTIALSRAIL_SVELTE;
 
         // The barrier commits and verifies the authoritative host through the
         // address input whenever the active tab presents. Rail width must hide
@@ -5495,8 +5796,8 @@ mod tests {
 
     #[test]
     fn svelte_tab_rows_open_a_native_context_menu_rather_than_a_dom_one() {
-        let list = include_str!("../../frame/src/features/sidebar/tabs/TabList.svelte");
-        let state = include_str!("../../frame/src/domain/tabs/tabs.svelte.ts");
+        let list = crate::frame_sources::SRC_FEATURES_SIDEBAR_TABS_TABLIST_SVELTE;
+        let state = crate::frame_sources::SRC_DOMAIN_TABS_TABS_SVELTE_TS;
 
         // A DOM menu cannot paint over a content WebView, so the tab menu must
         // stay native and must carry the exact tab it was opened for.
@@ -5759,14 +6060,13 @@ mod tests {
 
     #[test]
     fn svelte_chrome_keeps_the_synchronous_presentation_contract() {
-        let entry = include_str!("../../frame/src/main.ts");
-        let shell = include_str!("../../frame/src/app/Shell.svelte");
-        let list = include_str!("../../frame/src/features/sidebar/tabs/TabList.svelte");
-        let row = include_str!("../../frame/src/features/sidebar/tabs/TabRow.svelte");
-        let split_group =
-            include_str!("../../frame/src/features/sidebar/tabs/SplitGroupRow.svelte");
-        let address = include_str!("../../frame/src/features/sidebar/address/AddressField.svelte");
-        let tabs = include_str!("../../frame/src/domain/tabs/tabs.svelte.ts");
+        let entry = crate::frame_sources::SRC_MAIN_TS;
+        let shell = crate::frame_sources::SRC_APP_SHELL_SVELTE;
+        let list = crate::frame_sources::SRC_FEATURES_SIDEBAR_TABS_TABLIST_SVELTE;
+        let row = crate::frame_sources::SRC_FEATURES_SIDEBAR_TABS_TABROW_SVELTE;
+        let split_group = crate::frame_sources::SRC_FEATURES_SIDEBAR_TABS_SPLITGROUPROW_SVELTE;
+        let address = crate::frame_sources::SRC_FEATURES_SIDEBAR_ADDRESS_ADDRESSFIELD_SVELTE;
+        let tabs = crate::frame_sources::SRC_DOMAIN_TABS_TABS_SVELTE_TS;
 
         let mount = entry.find("mount(App, { target })").expect("Svelte mount");
         let initial_flush = entry
@@ -5777,7 +6077,10 @@ mod tests {
         assert_eq!(shell.matches("data-zephium-active-tab").count(), 1);
         assert!(shell.contains(r#"data-zephium-active-tab={tabs.activeId() ?? ""}"#));
         assert_eq!(shell.matches("data-zephium-new-tab").count(), 1);
-        assert!(shell.contains("{#if !tabs.activeTab()?.url}"));
+        assert!(
+            shell.contains("{#if !tabs.activeTab()?.url && browserPage.currentPage() === null}")
+        );
+        assert!(shell.contains("data-zephium-surface="));
         assert!(!shell.contains("transition:"));
         assert!(!shell.contains("out:"));
 
@@ -5796,7 +6099,7 @@ mod tests {
         assert!(row.contains("data-zephium-tab-id={tab.id}"));
         assert!(row.contains(r#"data-zephium-tab-url={tab.url ?? ""}"#));
         assert!(row.contains("data-zephium-projection-revision={tab.projection_revision}"));
-        assert!(list.contains("{#each displayUnits as unit (unit.key)}"));
+        assert!(list.contains("{#each displayUnits as unit, index (unit.key)}"));
         assert!(list.contains("<SplitGroupRow"));
         assert!(split_group.contains("<TabRow"));
         for sentinel in [
@@ -6155,7 +6458,7 @@ mod tests {
             .find("terminal shutdown started before trusted application navigation")
             .expect("pre-navigation terminal gate");
         let panel_navigation = setup
-            .find("panel_window.navigate(app_url.clone())?")
+            .find("panel_window.navigate(panel_url)?")
             .expect("hardened panel navigation");
         let post_panel_navigation_terminal_gate = setup
             .find("terminal shutdown overtook privileged panel navigation")
@@ -6767,7 +7070,7 @@ mod tests {
         let index =
             super::resolve_privileged_target(&base, &tauri::WebviewUrl::App("index.html".into()))
                 .unwrap();
-        assert_eq!(index, base);
+        assert_eq!(index.path(), "/browser.html");
 
         let nested = super::resolve_privileged_target(
             &base,
