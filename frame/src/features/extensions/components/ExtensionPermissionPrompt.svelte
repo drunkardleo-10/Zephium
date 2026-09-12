@@ -1,13 +1,11 @@
 <script lang="ts">
   import { Shield01Icon } from "@hugeicons/core-free-icons";
   import { onMount } from "svelte";
-  import type { ExtensionRuntimeGrantPromptEntryView } from "../../shared/ipc/bindings";
-  import * as extensions from "../../domain/extensions/extensions.svelte";
-  import {
-    apiPermissionLabel,
-    hostPermissionLabel,
-  } from "../../domain/extensions/permission-labels";
-  import Icon from "../../shared/ui/Icon.svelte";
+  import type { ExtensionRuntimeGrantPromptEntryView } from "$shared/ipc/bindings";
+  import { extensions } from "$domain/extensions";
+  import { apiPermissionLabel, hostPermissionLabel } from "$domain/extensions";
+  import Icon from "$shared/ui/Icon";
+  import Button from "$shared/ui/Button";
 
   let { prompt }: { prompt: ExtensionRuntimeGrantPromptEntryView } = $props();
   let denyButton = $state<HTMLButtonElement>();
@@ -111,24 +109,24 @@
     {/if}
 
     <div class="mt-4 flex justify-end gap-2">
-      <button
-        bind:this={denyButton}
-        type="button"
+      <Button
+        bind:ref={denyButton}
+        variant="secondary"
         disabled={busy}
-        class="h-8 rounded-md border border-border-strong bg-fill px-3 text-[11.5px] font-medium text-text outline-none hover:bg-fill-hover focus-visible:shadow-[var(--shadow-focus)] disabled:cursor-default disabled:opacity-45"
+        aria-busy={busy || undefined}
         onclick={() => respond(false)}
       >
         Deny
-      </button>
-      <button
-        bind:this={allowButton}
-        type="button"
+      </Button>
+      <Button
+        bind:ref={allowButton}
+        variant="primary"
         disabled={busy}
-        class="h-8 rounded-md bg-accent px-3 text-[11.5px] font-medium text-white outline-none hover:brightness-105 focus-visible:shadow-[var(--shadow-focus)] disabled:cursor-default disabled:opacity-45"
+        aria-busy={busy || undefined}
         onclick={() => respond(true)}
       >
         Allow
-      </button>
+      </Button>
     </div>
   </div>
 </div>
