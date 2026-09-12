@@ -23,3 +23,6 @@ pub mod userscripts;
 pub mod webkitgtk;
 pub mod webview2;
 pub mod windows;
+
+/// Allowlisted application appearance preferences.
+pub mod preferences;
