@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { IconSvgElement } from "@hugeicons/svelte";
-  import Icon from "./Icon.svelte";
+  import Icon from "../Icon/Icon.svelte";
 
   const PREFIX = "rgba32:";
   const SIDE = 32;
