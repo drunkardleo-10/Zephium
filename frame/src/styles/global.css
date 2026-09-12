@@ -11,6 +11,7 @@
 @source not "../**/tests";
 @source not "../shared/testing";
 @source not "../features/notes";
+@source not "../features/tasks";
 @source not "../domain/resources";
 
 /*

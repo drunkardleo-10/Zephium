@@ -777,5 +777,10 @@
   "note_link": "Link a note",
   "note_find": "Find a note",
   "note_linked_note": "Linked note",
-  "note_unavailable_link": "Unavailable note"
+  "note_unavailable_link": "Unavailable note",
+  "task_untitled": "New task",
+  "task_open": "Open",
+  "task_complete": "Completed",
+  "task_description": "Description",
+  "task_due": "Due date"
 }

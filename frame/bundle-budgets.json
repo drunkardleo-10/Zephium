@@ -106,5 +106,9 @@
   "lazy:features/notes/components/NotesEditor.svelte": {
     "js": 440000,
     "css": 10000
+  },
+  "lazy:features/tasks/components/Tasks.svelte": {
+    "js": 105000,
+    "css": 12000
   }
 }
