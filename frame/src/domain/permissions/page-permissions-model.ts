@@ -1,5 +1,5 @@
-import type { PagePermissionPromptView } from "../../shared/ipc/bindings";
-import { ZERO_PROJECTION_REVISION } from "../tabs/tabs-model";
+import type { PagePermissionPromptView } from "$shared/ipc/bindings";
+import { ZERO_PROJECTION_REVISION } from "$domain/tabs";
 
 export function initialPagePermissionPrompt(): PagePermissionPromptView {
   return {

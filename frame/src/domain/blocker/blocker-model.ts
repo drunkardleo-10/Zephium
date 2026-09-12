@@ -1,4 +1,4 @@
-import type { BlockerProtection, BlockerStatusView } from "../../shared/ipc/bindings";
+import type { BlockerProtection, BlockerStatusView } from "$shared/ipc/bindings";
 
 export const BLOCKER_ZERO_REVISION = "00000000000000000000000000000000";
 const PROJECTION_REVISION = /^[0-9a-f]{32}$/;

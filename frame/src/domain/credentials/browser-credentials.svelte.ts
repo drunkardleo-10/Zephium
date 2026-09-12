@@ -1,6 +1,6 @@
-import type { BrowserCredentialCapabilityView } from "../../shared/ipc/bindings";
-import { commands } from "../../shared/ipc/bindings";
-import { events } from "../../shared/ipc/native-events";
+import type { BrowserCredentialCapabilityView } from "$shared/ipc/bindings";
+import { commands } from "$shared/ipc/bindings";
+import { events } from "$shared/ipc/native-events";
 
 let capability = $state.raw<BrowserCredentialCapabilityView | null>(null);
 let requestBusy = $state(false);
