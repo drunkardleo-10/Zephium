@@ -1,7 +1,15 @@
 import { expect, test, vi } from "vitest";
 import { userEvent } from "vitest/browser";
 import { render } from "vitest-browser-svelte";
-import { loadWorkSurface, loadWorkCanvas, type CanvasView, type WorkSurfaceView } from "../index";
+import {
+  loadWorkSurface,
+  loadWorkCanvas,
+  type CanvasView,
+  type WorkSurfaceView,
+  type WorkSurfaceIntent,
+  type WorkRequestView,
+} from "../index";
+const ready: WorkRequestView = { state: "ready", message: "Ready" };
 const view: WorkSurfaceView = {
   key: "work-1",
   title: "Research",
@@ -53,10 +61,10 @@ test("canvas restores a bounded viewport and provides keyboard inspection", asyn
 });
 test("requires explicit confirmation and blocks unknown-outcome resubmission", async () => {
   const { default: Work } = await loadWorkSurface();
-  const onintent = vi.fn();
+  const onintent = vi.fn<(intent: WorkSurfaceIntent) => void>();
   const screen = await render(Work, {
     view,
-    request: { state: "ready", message: "Ready" },
+    request: ready,
     onintent,
   });
   await screen.getByRole("button", { name: "Review plan", exact: true }).click();
@@ -74,10 +82,10 @@ test("requires explicit confirmation and blocks unknown-outcome resubmission", a
 
 test("invalidates open confirmations when the presentation changes", async () => {
   const { default: Work } = await loadWorkSurface();
-  const onintent = vi.fn();
+  const onintent = vi.fn<(intent: WorkSurfaceIntent) => void>();
   const screen = await render(Work, {
     view,
-    request: { state: "ready", message: "Ready" },
+    request: ready,
     onintent,
   });
   await screen.getByRole("button", { name: "Review plan", exact: true }).click();
@@ -94,7 +102,7 @@ test("contains asynchronous dispatch failure and requires reconciliation", async
   const onintent = vi.fn().mockRejectedValue(new Error("transport disconnected"));
   const screen = await render(Work, {
     view,
-    request: { state: "ready", message: "Ready" },
+    request: ready,
     onintent,
     onrefresh: vi.fn(),
   });
@@ -112,11 +120,11 @@ test("contains asynchronous dispatch failure and requires reconciliation", async
 
 test("empty Work accepts an objective intent and keeps drafts across hide/show", async () => {
   const { default: Work } = await loadWorkSurface();
-  const onintent = vi.fn();
+  const onintent = vi.fn<(intent: WorkSurfaceIntent) => void>();
   const empty: WorkSurfaceView = { ...view, objective: "", items: [], actions: [] };
   const screen = await render(Work, {
     view: empty,
-    request: { state: "ready", message: "Ready" },
+    request: ready,
     onintent,
   });
   await screen
@@ -163,13 +171,13 @@ test("bounds offscreen rendering for a 500-item restored workspace", async () =>
 
 test("clarification options and typed answers react for opaque question keys", async () => {
   const { default: Work } = await loadWorkSurface();
-  const onintent = vi.fn();
+  const onintent = vi.fn<(intent: WorkSurfaceIntent) => void>();
   const screen = await render(Work, {
     view: {
       ...view,
       questions: [{ key: "__proto__", prompt: "Choose a budget", options: ["Under 150"] }],
     },
-    request: { state: "ready", message: "Ready" },
+    request: ready,
     onintent,
   });
   await screen.getByRole("button", { name: "Under 150", exact: true }).click();
@@ -189,7 +197,7 @@ test("hidden Work releases pending observation without treating the effect as ca
   const { default: Work } = await loadWorkSurface();
   const screen = await render(Work, {
     view,
-    request: { state: "ready", message: "Ready" },
+    request: ready,
     onintent: () => new Promise<void>(() => {}),
     onrefresh: vi.fn(),
   });

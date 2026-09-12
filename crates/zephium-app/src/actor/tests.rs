@@ -968,6 +968,7 @@ fn browser_pages_cross_the_tracked_operation_admission_boundary() {
         Some(crate::BrowserPage::Settings),
         Some(crate::BrowserPage::History),
         Some(crate::BrowserPage::Downloads),
+        Some(crate::BrowserPage::Work),
         None,
     ]
     .into_iter()

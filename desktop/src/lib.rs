@@ -3189,13 +3189,17 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
         let _ = try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &section);
         return execute_command(app, "browser.settings");
     }
+    if id == "mode.work" {
+        return execute_command(app, "browser.work");
+    }
+    if id == "mode.browse" {
+        return execute_command(app, "browser.return");
+    }
     if id == "mode.choose" {
         use tauri::menu::{Menu, MenuItemBuilder};
         let menu = (|| -> tauri::Result<_> {
             let browse = MenuItemBuilder::with_id("mode.browse", "Browse").build(app)?;
-            let work = MenuItemBuilder::with_id("mode.work", "Work")
-                .enabled(false)
-                .build(app)?;
+            let work = MenuItemBuilder::with_id("mode.work", "Work").build(app)?;
             Menu::with_items(app, &[&browse, &work])
         })();
         return match (app.get_webview_window(MAIN_LABEL), menu) {
@@ -3238,6 +3242,7 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
     }
     if let Some(destination) = id.strip_prefix("browser.") {
         let page = match destination {
+            "work" => Some(zephium_app::BrowserPage::Work),
             "settings" => Some(zephium_app::BrowserPage::Settings),
             "history" => Some(zephium_app::BrowserPage::History),
             "downloads" => Some(zephium_app::BrowserPage::Downloads),

@@ -9,6 +9,7 @@
 @import "./browser.css";
 @source not "../**/*.test.ts";
 @source not "../**/tests";
+@source not "../features/work";
 @source not "../shared/testing";
 @source not "../features/notes";
 @source not "../features/tasks";

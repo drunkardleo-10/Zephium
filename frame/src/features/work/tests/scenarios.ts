@@ -1,4 +1,4 @@
-import type { WorkSurfaceView } from "$features/work";
+import type { WorkSurfaceView } from "../lib/work-surface";
 import type { ArtifactView } from "$shared/ui/data/Artifact";
 
 /** Deterministic presentation fixtures, not a runtime store or contract fixture suite. */

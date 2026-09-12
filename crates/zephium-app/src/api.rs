@@ -348,6 +348,7 @@ pub enum ContentPolicyStatusQueryOutcome {
 /// A bounded browser-owned destination rendered by the existing chrome view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BrowserPage {
+    Work,
     Settings,
     History,
     Downloads,
@@ -356,6 +357,7 @@ pub enum BrowserPage {
 impl BrowserPage {
     pub fn command_id(self) -> &'static str {
         match self {
+            Self::Work => "browser.work",
             Self::Settings => "browser.settings",
             Self::History => "browser.history",
             Self::Downloads => "browser.downloads",

@@ -110,5 +110,13 @@
   "lazy:features/tasks/components/Tasks.svelte": {
     "js": 105000,
     "css": 12000
+  },
+  "lazy:app/browser/WorkWorkspace.svelte": {
+    "js": 325000,
+    "css": 88000
+  },
+  "lazy:features/work/components/WorkCanvas.svelte": {
+    "js": 470000,
+    "css": 96000
   }
 }

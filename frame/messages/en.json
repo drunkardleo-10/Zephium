@@ -539,7 +539,7 @@
   "ntp_greeting_named": "{greeting}, {name}",
   "settings_search_row": "Open this preference",
   "settings_profile_access": "Profile & account",
-  "ui_mode_work_hint": "Work is not available in this build",
+  "ui_mode_work_hint": "Switch between Browse and Work",
   "essential_drop_hint": "Drop here to keep in Essentials",
   "essential_move_failed": "Could not move this tab. Try again.",
   "section_models": "Models",
@@ -777,10 +777,10 @@
   "note_link": "Link a note",
   "note_find": "Find a note",
   "note_linked_note": "Linked note",
-  "note_unavailable_link": "Unavailable note",
   "task_untitled": "New task",
   "task_open": "Open",
   "task_complete": "Completed",
   "task_description": "Description",
-  "task_due": "Due date"
+  "task_due": "Due date",
+  "note_unavailable_link": "Unavailable note"
 }

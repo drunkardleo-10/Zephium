@@ -4,7 +4,7 @@ import { commands } from "$shared/ipc/bindings";
 import { settle } from "$domain/operations";
 import { events } from "$shared/ipc/native-events";
 
-export type BrowserPage = "settings" | "history" | "downloads";
+export type BrowserPage = "settings" | "history" | "downloads" | "work";
 let page = $state<BrowserPage | null>(null);
 let error = $state(false);
 let generation = 0;
@@ -33,13 +33,15 @@ async function initialize(epoch: number) {
       const confirmed =
         payload === "browser.return"
           ? null
-          : payload === "browser.settings"
-            ? "settings"
-            : payload === "browser.history"
-              ? "history"
-              : payload === "browser.downloads"
-                ? "downloads"
-                : undefined;
+          : payload === "browser.work"
+            ? "work"
+            : payload === "browser.settings"
+              ? "settings"
+              : payload === "browser.history"
+                ? "history"
+                : payload === "browser.downloads"
+                  ? "downloads"
+                  : undefined;
       if (confirmed !== undefined) {
         navigationEpoch++;
         flushSync(() => {

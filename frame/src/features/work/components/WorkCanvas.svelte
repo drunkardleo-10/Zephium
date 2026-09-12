@@ -71,13 +71,13 @@
 </script>
 
 <div class="work-canvas" aria-label={m.work_canvas_label()}>
-  {#if valid && items.length}
+  {#if valid}
     <SvelteFlow
       bind:nodes
       {edges}
       {nodeTypes}
       bind:viewport
-      fitView={!restoredViewport}
+      fitView={items.length > 0 && !restoredViewport}
       minZoom={0.2}
       maxZoom={2}
       nodeExtent={[

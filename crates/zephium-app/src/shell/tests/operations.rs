@@ -174,44 +174,39 @@ fn layout_and_zoom_report_rejection_and_roll_back_unapplied_zoom() {
 
 #[test]
 fn browser_page_hides_native_content_and_restores_exact_tab() {
-    let (mut shell, engine, screen) = setup();
-    shell.handle(Command::Bootstrap);
-    let id = active_id(&screen);
-    navigate_and_commit(&mut shell, id, "settings-return.example");
-    let window = shell.windows.focused().unwrap().id;
-    let opened =
-        shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Settings)));
-    assert_eq!(opened.outcome, OperationOutcome::Deferred);
-    assert_eq!(
-        shell.active_browser_page(),
-        Some(crate::BrowserPage::Settings)
-    );
-    assert_eq!(
-        engine
-            .calls()
-            .iter()
-            .rev()
-            .find(|call| call.starts_with("layout@")),
-        Some(&format!("layout@{window} "))
-    );
-    assert_eq!(active_id(&screen), id);
-    assert!(shell.locate_divider(300.0, 200.0).is_none());
-    shell.handle(Command::Bootstrap);
-    assert_eq!(
-        shell.active_browser_page(),
-        Some(crate::BrowserPage::Settings)
-    );
-    shell.handle_operation(Command::ShowBrowserPage(None));
-    assert_eq!(shell.active_browser_page(), None);
-    assert_eq!(
-        engine
-            .calls()
-            .iter()
-            .rev()
-            .find(|call| call.starts_with("layout@")),
-        Some(&format!("layout@{window} {id}"))
-    );
-    assert_eq!(active_id(&screen), id);
+    for page in [crate::BrowserPage::Settings, crate::BrowserPage::Work] {
+        let (mut shell, engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        let id = active_id(&screen);
+        navigate_and_commit(&mut shell, id, "settings-return.example");
+        let window = shell.windows.focused().unwrap().id;
+        let opened = shell.handle_operation(Command::ShowBrowserPage(Some(page)));
+        assert_eq!(opened.outcome, OperationOutcome::Deferred);
+        assert_eq!(shell.active_browser_page(), Some(page));
+        assert_eq!(
+            engine
+                .calls()
+                .iter()
+                .rev()
+                .find(|call| call.starts_with("layout@")),
+            Some(&format!("layout@{window} "))
+        );
+        assert_eq!(active_id(&screen), id);
+        assert!(shell.locate_divider(300.0, 200.0).is_none());
+        shell.handle(Command::Bootstrap);
+        assert_eq!(shell.active_browser_page(), Some(page));
+        shell.handle_operation(Command::ShowBrowserPage(None));
+        assert_eq!(shell.active_browser_page(), None);
+        assert_eq!(
+            engine
+                .calls()
+                .iter()
+                .rev()
+                .find(|call| call.starts_with("layout@")),
+            Some(&format!("layout@{window} {id}"))
+        );
+        assert_eq!(active_id(&screen), id);
+    }
 }
 
 #[test]

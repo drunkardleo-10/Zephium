@@ -26,5 +26,5 @@
       "$styles/*": ["./src/styles/*"]
     }
   },
-  "include": ["src/**/*.ts", "src/**/*.svelte", "dev/**/*.ts", "dev/**/*.svelte"]
+  "include": ["src/**/*.ts", "src/**/*.svelte"]
 }

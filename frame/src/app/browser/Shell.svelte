@@ -1,4 +1,5 @@
 <script lang="ts">
+  const loadWorkWorkspace = () => import("./WorkWorkspace.svelte");
   import { theme } from "$domain/appearance";
   import LazyView from "$shared/ui/LazyView";
   import RenderBoundary from "$shared/ui/RenderBoundary";
@@ -172,6 +173,13 @@
             failureLabel={m.surface_render_failed()}
             retryLabel={m.surface_retry()}>{#snippet children(View)}<View />{/snippet}</LazyView
           >
+        {:else if browserPage.currentPage() === "work"}
+          {#key tabs.profile()?.id}<LazyView
+              loader={loadWorkWorkspace}
+              loadingLabel={m.surface_loading()}
+              failureLabel={m.surface_render_failed()}
+              retryLabel={m.surface_retry()}>{#snippet children(View)}<View />{/snippet}</LazyView
+            >{/key}
         {:else}<LibraryPage
             kind={browserPage.currentPage() === "history" ? "history" : "downloads"}
           />{/if}

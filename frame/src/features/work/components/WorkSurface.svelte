@@ -1,6 +1,6 @@
 <script lang="ts">
   import { SvelteMap } from "svelte/reactivity";
-  import { untrack } from "svelte";
+  import { untrack, type Snippet } from "svelte";
   import { observe } from "$shared/lib/observe";
   import Button from "$shared/ui/Button";
   import Artifact, { type EvidenceReference } from "$shared/ui/data/Artifact";
@@ -22,7 +22,9 @@
     onrefresh,
     onviewchange,
     onevidence,
+    resources,
   }: {
+    resources?: Snippet;
     view: WorkSurfaceView;
     active?: boolean;
     request: WorkRequestView;
@@ -191,41 +193,46 @@
           >
         </div>
       </div>
-      <div class="workspace" class:inspecting={!!selectedItem}>
-        <div class="workspace-main">
-          {#if spatial}<LazyView
-              loader={loadCanvas}
-              loadingLabel={m.surface_loading()}
-              failureLabel={m.surface_render_failed()}
-              retryLabel={m.surface_retry()}
-              >{#snippet children(Canvas)}<Canvas
-                  items={view.items}
-                  links={view.links}
-                  initialView={arrangement}
-                  oninspect={inspect}
-                  onviewchange={saveView}
-                />{/snippet}</LazyView
-            >
-          {:else}<ul class="work-list">
-              {#each view.items as item (item.id)}<li>
-                  <button
-                    type="button"
-                    aria-pressed={selected === item.id}
-                    onclick={() => inspect(item.id)}
-                    ><span class="eyebrow">{item.kind}</span><strong>{item.title}</strong><span
-                      >{item.detail}</span
-                    ><small>{item.status}</small></button
-                  >
-                </li>{:else}<li>{m.work_canvas_empty()}</li>{/each}
-            </ul>{/if}
+      <div class="work-resource-layout" class:has-resources={!!resources}>
+        {#if resources}<aside class="work-resources">{@render resources()}</aside>{/if}
+        <div class="workspace" class:inspecting={!!selectedItem}>
+          <div class="workspace-main">
+            {#if spatial}<LazyView
+                loader={loadCanvas}
+                loadingLabel={m.surface_loading()}
+                failureLabel={m.surface_render_failed()}
+                retryLabel={m.surface_retry()}
+                >{#snippet children(Canvas)}<Canvas
+                    items={view.items}
+                    links={view.links}
+                    initialView={arrangement}
+                    oninspect={inspect}
+                    onviewchange={saveView}
+                  />{/snippet}</LazyView
+              >
+            {:else}<ul class="work-list">
+                {#each view.items as item (item.id)}<li>
+                    <button
+                      type="button"
+                      aria-pressed={selected === item.id}
+                      onclick={() => inspect(item.id)}
+                      ><span class="eyebrow">{item.kind}</span><strong>{item.title}</strong><span
+                        >{item.detail}</span
+                      ><small>{item.status}</small></button
+                    >
+                  </li>{:else}<li>{m.work_canvas_empty()}</li>{/each}
+              </ul>{/if}
+          </div>
+          {#if selectedItem}<aside class="inspector" aria-label={m.work_inspector()}>
+              <Button bind:ref={inspectorFocus} size="compact" onclick={closeInspector}
+                >{m.work_close_inspector()}</Button
+              >{#if artifact}<Artifact {artifact} {onevidence} />{:else}<h2>
+                  {selectedItem.title}
+                </h2>
+                <p>{selectedItem.detail}</p>
+                <p>{selectedItem.status}</p>{/if}
+            </aside>{/if}
         </div>
-        {#if selectedItem}<aside class="inspector" aria-label={m.work_inspector()}>
-            <Button bind:ref={inspectorFocus} size="compact" onclick={closeInspector}
-              >{m.work_close_inspector()}</Button
-            >{#if artifact}<Artifact {artifact} {onevidence} />{:else}<h2>{selectedItem.title}</h2>
-              <p>{selectedItem.detail}</p>
-              <p>{selectedItem.status}</p>{/if}
-          </aside>{/if}
       </div>
       {#if view.actions.length}<footer class="actions" aria-label={m.work_actions()}>
           {#each view.actions as item (item.key)}<div>
@@ -371,6 +378,31 @@
     color: var(--color-muted);
     min-height: 24px;
     font-size: var(--text-caption);
+  }
+
+  .work-resource-layout {
+    display: grid;
+    min-height: 420px;
+    flex: 1 0 420px;
+  }
+
+  .work-resource-layout.has-resources {
+    grid-template-columns: 220px minmax(0, 1fr);
+    gap: 16px;
+  }
+
+  .work-resources {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    background: var(--color-surface);
+    overflow: auto;
+    max-height: 700px;
+  }
+
+  @media (width <= 900px) {
+    .work-resource-layout.has-resources {
+      grid-template-columns: minmax(0, 1fr);
+    }
   }
 
   .workspace {
