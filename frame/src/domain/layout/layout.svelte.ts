@@ -1,25 +1,23 @@
+import { createLifecycle } from "$shared/lib/lifecycle";
+import type { DividerView } from "$shared/ipc/bindings";
+import { commands } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
 
-type UiCommandState = { id: string; seq: number };
+let dividerState = $state.raw<DividerView[]>([]);
 
-let command = $state.raw<UiCommandState>({ id: "", seq: 0 });
-let seq = 0;
+export const dividers = () => dividerState;
 
-export const uiCommand = () => command;
-
-let lifecycle = 0;
+const lifecycle = createLifecycle();
 let initialized = false;
 let initializing: Promise<void> | null = null;
 let unlisten: (() => void) | null = null;
 
 async function initialize(generation: number) {
-  const stop = await events.uiCommand.listen((event) => {
-    if (generation !== lifecycle) return;
-    seq += 1;
-    command = { id: event.payload, seq };
+  const stop = await events.layoutChanged.listen((event) => {
+    if (lifecycle.isCurrent(generation)) dividerState = event.payload.dividers;
   });
 
-  if (generation !== lifecycle) {
+  if (!lifecycle.isCurrent(generation)) {
     stop();
     return;
   }
@@ -32,7 +30,7 @@ export function init(): Promise<void> {
   if (initializing !== null) return initializing;
   if (initialized) return Promise.resolve();
 
-  const generation = ++lifecycle;
+  const generation = lifecycle.begin();
   const task = initialize(generation);
   initializing = task;
   void task.then(
@@ -49,9 +47,13 @@ export function init(): Promise<void> {
 export function dispose() {
   if (!initialized && initializing === null && unlisten === null) return;
 
-  lifecycle += 1;
+  lifecycle.end();
   initialized = false;
   initializing = null;
   unlisten?.();
   unlisten = null;
 }
+
+export const grab = (x: number, y: number) => void commands.dividerGrab(x, y);
+export const drag = (x: number, y: number) => void commands.dividerDrag(x, y);
+export const release = (x: number | null, y: number | null) => void commands.dividerRelease(x, y);
