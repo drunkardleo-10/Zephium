@@ -145,3 +145,5 @@ mod tests {
         );
     }
 }
+
+ulid_id!(ResourceId);

@@ -26,3 +26,6 @@ pub mod windows;
 
 /// Allowlisted application appearance preferences.
 pub mod preferences;
+
+/// Durable user-authored resources shared by Browse and Work.
+pub mod resources;

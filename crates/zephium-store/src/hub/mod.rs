@@ -18,6 +18,7 @@ mod filesystem;
 mod history;
 mod native_ownership;
 mod page_permissions;
+mod resources;
 mod session;
 mod settings;
 mod userscripts;

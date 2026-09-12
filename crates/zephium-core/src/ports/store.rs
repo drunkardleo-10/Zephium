@@ -623,6 +623,17 @@ pub enum StoreShutdownOutcome {
 }
 
 pub trait Store {
+    /// Bounded asynchronous access to durable Notes/Tasks. Caller owns authorization.
+    fn resource_call(
+        &self,
+        _profile: ProfileId,
+        _call: crate::resources::ResourceCall,
+        done: crate::resources::ResourceDone,
+    ) {
+        done(crate::resources::ResourceResponse::Error {
+            error: crate::resources::ResourceError::Unavailable,
+        });
+    }
     fn save_session(&self, session: SessionState);
     /// Ordered session-durability barrier for shutdown and other process
     /// boundaries. Returns only after the latest session snapshot queued
