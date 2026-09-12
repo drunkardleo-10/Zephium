@@ -646,6 +646,9 @@ fn scrub_profile_database(path: &Path) -> rusqlite::Result<()> {
          DELETE FROM extension_install_catalog;
          DELETE FROM page_permission_grants;
          DELETE FROM page_permission_catalog;
+         DELETE FROM user_resource_receipts;
+         DELETE FROM user_resources;
+         DELETE FROM user_resource_usage;
          DELETE FROM userscripts;
          DELETE FROM userscript_catalog;
          DELETE FROM history;
@@ -873,6 +876,19 @@ mod tests {
         conn.execute("INSERT INTO work_executions(work_id, execution_id, plan_revision, owner_session, approved_unix_ms, expires_unix_ms, body) VALUES ('00000000000000000000000001', '00000000000000000000000003', 2, '00000000000000000000000004', 1, 2, ?1)", [PROFILE_SCRUB_MARKER]).unwrap();
         conn.execute("INSERT INTO work_commands(work_id, command_id, request_digest, body) VALUES ('00000000000000000000000001', '00000000000000000000000005', zeroblob(32), ?1)", [PROFILE_SCRUB_MARKER]).unwrap();
         conn.execute("INSERT INTO work_authoring_commands(command_id, request_digest, body) VALUES ('00000000000000000000000006', zeroblob(32), ?1)", [PROFILE_SCRUB_MARKER]).unwrap();
+        let body = serde_json::to_string(&zephium_core::resources::ResourceDraft {
+            title: PROFILE_SCRUB_MARKER.into(),
+            pinned: false,
+            related: vec![],
+            content: zephium_core::resources::ResourceContent::Task {
+                description: PROFILE_SCRUB_MARKER.into(),
+                completed: false,
+                due_date: None,
+            },
+        })
+        .unwrap();
+        conn.execute("INSERT INTO user_resources(id,kind,revision,title,pinned,trashed,created_at,updated_at,body,search_text,completed) VALUES('00000000000000000000000001','task',1,?1,0,0,1,1,?2,?1,0)",params![PROFILE_SCRUB_MARKER,body]).unwrap();
+        conn.execute("INSERT INTO user_resource_receipts(request_id,digest,resource_id,revision,retained) VALUES(?1,?2,'00000000000000000000000001',1,1)",params![PROFILE_SCRUB_MARKER,vec![1_u8;32]]).unwrap();
         drop(conn);
 
         scrub_profile_database(&path).unwrap();
@@ -913,6 +929,9 @@ mod tests {
             "settings",
             "spaces",
             "sqlite_sequence",
+            "user_resource_receipts",
+            "user_resource_usage",
+            "user_resources",
             "userscript_catalog",
             "userscripts",
             "work_authoring_commands",
@@ -932,6 +951,9 @@ mod tests {
         );
 
         for table in [
+            "user_resource_receipts",
+            "user_resources",
+            "user_resource_usage",
             "spaces",
             "items",
             "focus",

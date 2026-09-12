@@ -780,8 +780,13 @@ rejoins the request with the context/controller identity and the existing
 process-wide foreground-extension lease, builds the view from
 `WKWebExtensionContext.webViewConfiguration`, and publishes one bounded native
 window/tab pair back to that controller. Configuration shape, target window,
-append index, active/selected state and principal are revalidated before any
-view exists. Same-origin routing remains inside the extension document. Allowed
+append index, active state and principal are revalidated before any view exists.
+WebKit maps Chrome's ordinary `tabs.create({ url })` default to an active tab
+without adding it to an existing multi-selection; the dedicated extension
+window has exactly one tab, so both values of that inert selection flag are
+accepted without manufacturing selection semantics. Parent/opener, pinned,
+muted, reader-mode, and inactive requests remain refused. Same-origin routing
+remains inside the extension document. Allowed
 external links become ordinary Shell HTTP(S) tabs, and an allowed programmatic
 main-frame transition hands off to an ordinary tab before closing the
 privileged document; external subframes and all non-web schemes remain denied.
@@ -1250,7 +1255,7 @@ release dependency is finished.
 | Verified staging cohort | Revision 9 carries Vimium 2.4.2 and Dark Reader 4.9.129 with revisions 7/8 as immutable rollback; artifact bytes, classifications, and reissue evidence are exact | Add a publisher-supported authenticated cloud/security extension and define operational support windows |
 | API compatibility | The declaration table below is authoritative; live alarms work, while context-restart persistence is disclosed as degraded | Notifications, idle/system-lock, managed storage, offscreen, arbitrary native messaging, blocking request mutation, and broader browser APIs remain absent or degraded |
 | File/private contexts | File execution is negative-gated and the unavailable control cannot be forged; native private-store isolation is proven | No product file-access claim and no extension-enabled private-window claim until WebKit execution and a separate product runtime pass |
-| Password managers | Platform diagnostics, popup/content/background primitives, sandbox replacement primitive, explicit failure classifications, and a signed stock 1Password run now cover authenticated vault UI, inline fill, synthetic save, passkey registration, desktop-unlock recovery, forced background reload, and completed-profile restart | No password manager is Verified: saved-item update, passkey assertion, request-auth, longer endurance/resource budgets, and publisher/legal gates remain |
+| Password managers | Platform diagnostics, popup/content/background primitives, sandbox replacement primitive, explicit failure classifications, and a signed stock 1Password run now cover authenticated vault UI, inline fill, synthetic save, publisher-app item update plus browser-extension sync/refill, extension-mediated passkey registration, desktop-unlock recovery, forced background reload, completed-profile restart, and an explicit degraded HTTP Basic-auth contract | No password manager is Verified: browser-inline changed-password update, passkey assertion, Apple browser-passkey entitlement approval, longer endurance/resource budgets, and publisher/legal gates remain |
 | Performance/release evidence | Optimized product campaigns and a real process-family sampler are implemented; short release samples are recorded | Dedicated clean-runner budgets, maximum-cohort/tab pressure, energy calibration, sleep/wake, multi-profile, and 24-hour endurance |
 | External compatibility mode | Package-neutral offline transformation and authenticated acquisition primitives exist | Chrome Web Store/AMO/Safari/file/developer acquisition UX, legal adapters, diagnostics, and public compatibility policy are not shipped |
 
@@ -2314,8 +2319,42 @@ harness was approximately 1.2--1.3 seconds. The user separately confirmed that
 unlocking the installed 1Password desktop application unlocks its browser
 extension. A synthetic passkey registration completed through 1Password and
 remained visible in the vault after the package update and clean restart. No
-real credential or Apple Passwords item entered these gates. Saved-item update,
-passkey assertion, and HTTP request-authentication behavior remain separate.
+real credential or Apple Passwords item entered these gates. At that point,
+browser-inline saved-item update, passkey assertion, and HTTP
+request-authentication behavior remained separate.
+
+An August 30 follow-up separates two different update claims. Editing the
+original synthetic login in the publisher's desktop application advanced its
+durable modification time; the already-running Zephium extension synchronized
+that change, its isolated inline UI filled the exact replacement password on
+the public HTTPS test form, and 1Password auto-submitted the form. This closes
+publisher-app update through browser-extension sync/refill. It does not close
+browser-inline changed-password update: the inspected inline configuration had
+`inlineSavingEnabled=false`, matching the package's publisher default; its
+explicit Save action created a second synthetic item rather than replacing the
+existing one. The package's full settings application contains the publisher
+toggle for inline save behavior and opens it through ordinary
+`tabs.create({ url: runtime.getURL(...) })`.
+
+That workflow exposed one package-neutral configuration error in Zephium's
+already-authenticated extension-page boundary. WebKit presents Chrome's
+default active tab with `shouldAddToSelection=false`; Zephium incorrectly
+required that independent multi-selection flag to be true even though its
+dedicated extension window contains exactly one tab. Apple documents that an
+active tab is already selected. The boundary now accepts either inert
+multi-selection value while retaining every principal, URL, parent/opener,
+pinned, muted, reader-mode, active-state, index, window, resource-pool, and
+teardown check. Unit and signed-build gates cover the correction; a physical
+publisher-settings interaction remains required before browser-inline update
+is claimed.
+
+HTTP request authentication is resolved as an explicit degradation rather
+than an open workaround target. Public WebKit cannot enforce the blocking
+`onAuthRequired` response used by password managers, and the raw WKWebView
+delegate cancels every non-server-trust authentication challenge before native
+credential UI can bypass browser policy. The browser therefore discloses HTTP
+Basic-auth autofill as unavailable; it does not add a generic credential
+bridge, expose a native dialog, or retain credentials outside the publisher.
 
 That run also made the intermittent infinite-loading popup deterministic.
 After WebKit reloaded the nonpersistent document background, 1Password aborted
@@ -2367,6 +2406,20 @@ absolute browser baseline changed with page/process state. These observations
 prove reclamation and reject the transient 605 MB number as a steady-state
 budget; clean-runner energy, tab-pressure, sleep/wake, multi-profile, and
 24-hour gates still define release readiness.
+
+An August 30 same-process A/B on the signed optimized lab provides a newer
+lifecycle-labelled input. Both intervals used the same completed-onboarding
+profile, three restored resident tabs, closed Extensions Center, no Inspector,
+and 60 one-second coalition samples. With 1Password active, the run ended at
+11 processes and 394,060,152 physical-footprint bytes, used about 204 ms user
+plus 79 ms system CPU, and recorded 542 package-idle plus 1,912 interrupt
+wakeups. Pausing the profile removed one WebContent and one auxiliary process,
+ended at 9 processes and 212,949,880 bytes, used about 42 ms user plus 18 ms
+system CPU, and recorded 187 package-idle plus 606 interrupt wakeups. The exact
+terminal footprint difference was 181,110,272 bytes. This confirms prompt
+reclamation and a material publisher-extension cost on this machine; raw
+energy counters remain uncalibrated, and these observations are not release
+budgets or authority for a hidden keepalive.
 
 That gate also found and fixed two package-neutral lifecycle defects. WebKit
 delivers an extension's first `Port.postMessage` only after the delegate
@@ -2453,14 +2506,33 @@ with keychain and third-party credential managers](https://developer.apple.com/d
 Zephium now preserves that division explicitly. Password AutoFill remains
 entirely WebKit-owned. An on-demand AuthenticationServices boundary reads only
 the browser's passkey authorization state; it never enumerates credentials or
-relying parties, and a future native enum value fails closed as unknown. The
-Extensions Center starts that query only while visible and offers the platform
-authorization request only from a trusted user click. Rust authorizes the main
-caller, dispatches the request on the native main thread, admits one request at
-a time, and projects settlement only to the fixed main label. An installed,
-Developer-ID-signed lab build reported `notDetermined`, rendered the system
-Password AutoFill/passkey row, and exposed the explicit Enable passkeys action;
-the permission was not changed during automated verification. Physical
+relying parties, and a future native enum value fails closed as unknown. Before
+touching that manager it now reads the current task's exact signed
+[`com.apple.developer.web-browser.public-key-credential`](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.web-browser.public-key-credential)
+Boolean. Absence or false returns the distinct `EntitlementRequired` product
+state; an unexpected Core Foundation type, lookup failure, or native exception
+returns `Unavailable`; a request fails as `MissingEntitlement`. Apple restricts arbitrary relying-party registration and
+assertion to this reviewed managed capability, so adding a plist key without
+account approval is not an implementation. The Extensions Center starts the
+query only while visible and offers the platform authorization request only
+from a trusted user click in an entitled build. Rust authorizes the main caller,
+dispatches the request on the native main thread, admits one request at a time,
+and projects settlement only to the fixed main label.
+
+An earlier Developer-ID-signed lab build without the entitlement reported
+`notDetermined`; that platform value was not evidence that WebAuthn was usable.
+The exact signed-entitlement guard now reports that the build requires the
+managed capability instead of blaming the user's system. A
+self-authored `cargo xtask serve-password-manager-webauthn-qa` loopback gate
+uses random one-use challenges, exact Host/Origin checks, strict CSP, bounded
+HTTP/JSON, P-256 registration evidence, and server-side assertion-signature,
+relying-party, user-presence, and user-verification checks. The unentitled lab
+reached WebKit's `NotAllowedError` before provider UI, which is retained as a
+negative entitlement result rather than attributed to 1Password. Once Apple
+grants the managed capability, the same signed/notarized packaged gate must
+pass without Apple Passwords or real credentials. The earlier 1Password
+passkey-registration evidence remains extension-mediated evidence on a
+supported HTTPS site, not proof of the browser-native baseline. Physical
 password fill/save and passkey registration/assertion remain release gates.
 This native baseline is not a substitute for a manager's full popup, vault,
 save, inline-menu, settings, or desktop-integration workflows.

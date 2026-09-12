@@ -1,7 +1,8 @@
+import { listenAll } from "$shared/lib/lifecycle";
 import { flushSync } from "svelte";
-import type { ItemsState, TabView } from "../../shared/ipc/bindings";
-import { commands } from "../../shared/ipc/bindings";
-import { events } from "../../shared/ipc/native-events";
+import type { ItemsState, TabView } from "$shared/ipc/bindings";
+import { commands } from "$shared/ipc/bindings";
+import { events } from "$shared/ipc/native-events";
 import { TabProjectionModel } from "./tabs-model";
 
 const model = new TabProjectionModel();
@@ -28,34 +29,11 @@ function publishModelState() {
   state = model.value;
 }
 
-async function resolveListeners(promises: readonly Promise<Unlisten>[]): Promise<Unlisten[]> {
-  const results = await Promise.allSettled(promises);
-  const listeners: Unlisten[] = [];
-  let failed = false;
-  let failure: unknown;
-
-  for (const result of results) {
-    if (result.status === "fulfilled") {
-      listeners.push(result.value);
-    } else if (!failed) {
-      failed = true;
-      failure = result.reason;
-    }
-  }
-
-  if (failed) {
-    for (const stop of listeners) stop();
-    throw failure;
-  }
-
-  return listeners;
-}
-
 async function initialize(generation: number) {
   // These calls synchronously install their DOM listeners. Keep every scoped
   // listener registration before the first await so no privileged projection
   // can arrive in a gap during startup.
-  const listeners = await resolveListeners([
+  const listeners = await listenAll([
     events.itemsChanged.listen((event) => {
       if (generation !== lifecycle) return;
       if (model.applySnapshot(event.payload)) publishModelState();
@@ -63,6 +41,12 @@ async function initialize(generation: number) {
     events.tabChanged.listen((event) => {
       if (generation !== lifecycle) return;
       if (model.applyTab(event.payload)) publishModelState();
+    }),
+    events.browserReturn.listen((event) => {
+      if (generation !== lifecycle) return;
+      flushSync(() => {
+        if (model.applySnapshot(event.payload)) publishModelState();
+      });
     }),
     events.presentationTab.listen((event) => {
       if (generation !== lifecycle) return;

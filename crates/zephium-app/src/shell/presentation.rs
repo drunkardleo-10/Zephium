@@ -226,6 +226,8 @@ impl Shell {
             let synchronous_projection = projection.clone();
             let dispatch = self.chrome.apply_tab_for_presentation(
                 ChromePresentation {
+                    settings_visible: self.active_browser_page()
+                        == Some(crate::BrowserPage::Settings),
                     id,
                     navigation,
                     url: pending.url.clone(),
@@ -273,6 +275,7 @@ impl Shell {
         let synchronous_projection = projection.clone();
         let dispatch = self.chrome.apply_tab_for_presentation(
             ChromePresentation {
+                settings_visible: self.active_browser_page() == Some(crate::BrowserPage::Settings),
                 id,
                 navigation,
                 url: pending.url.clone(),

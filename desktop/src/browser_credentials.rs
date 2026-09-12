@@ -29,6 +29,7 @@ enum BrowserPasskeyAuthorizationView {
     Authorized,
     Denied,
     NotDetermined,
+    EntitlementRequired,
     Unknown,
     Unavailable,
     Unsupported,
@@ -59,6 +60,9 @@ fn capability_view_from_state(
         }
         zephium_engine::MacosPasskeyAuthorizationState::NotDetermined => {
             BrowserPasskeyAuthorizationView::NotDetermined
+        }
+        zephium_engine::MacosPasskeyAuthorizationState::EntitlementRequired => {
+            BrowserPasskeyAuthorizationView::EntitlementRequired
         }
         zephium_engine::MacosPasskeyAuthorizationState::Unknown => {
             BrowserPasskeyAuthorizationView::Unknown

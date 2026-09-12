@@ -9,8 +9,8 @@ import type {
   ExtensionManagementView,
   ExtensionRuntimeGrantPromptView,
   OperationDisposition,
-} from "../../shared/ipc/bindings";
-import { ZERO_PROJECTION_REVISION } from "../tabs/tabs-model";
+} from "$shared/ipc/bindings";
+import { ZERO_PROJECTION_REVISION } from "$domain/tabs";
 
 export function initialExtensionActions(): ExtensionActionsView {
   return {

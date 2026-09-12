@@ -15,11 +15,89 @@ pub(super) struct PendingSearch {
 
 #[derive(Default)]
 pub(super) struct SearchState {
+    pub(super) context: Option<zephium_ipc::SearchContext>,
+    pub(super) results: Vec<SearchResult>,
     pub(super) pending: Option<PendingSearch>,
     pub(super) generation: u64,
 }
 
 impl Shell {
+    fn publish_search(&mut self, mut results: SearchResults) {
+        let mut identities = std::collections::HashSet::new();
+        results.results.retain(|result| {
+            identities.insert(match &result.action {
+                SearchAction::ActivateTab { id } => format!("tab:{id}"),
+                SearchAction::OpenUrl { url } => format!("url:{url}"),
+                SearchAction::RunCommand { id } => format!("command:{id}"),
+            })
+        });
+        self.search.results = results.results.clone();
+        (self.emit)(Projection::Search(results));
+    }
+
+    pub(super) fn search_scoped(&mut self, query: &str, context: zephium_ipc::SearchContext) {
+        if !self.search_context_current(&context) {
+            return;
+        }
+        self.search.context = Some(context);
+        self.search(query);
+    }
+
+    fn search_context_current(&self, context: &zephium_ipc::SearchContext) -> bool {
+        self.windows.focused().is_some_and(|window| {
+            window.id.to_string() == context.window_id
+                && window.profile.to_string() == context.profile_id
+                && window.space.to_string() == context.space_id
+        })
+    }
+
+    pub(super) fn cancel_scoped_search(&mut self, session_id: &str) {
+        if self
+            .search
+            .context
+            .as_ref()
+            .is_some_and(|context| context.session_id == session_id)
+        {
+            self.search.pending = None;
+            self.search.context = None;
+            self.search.results.clear();
+        }
+    }
+
+    pub(super) fn operation_run_search_action(
+        &mut self,
+        context: zephium_ipc::SearchContext,
+        action: SearchAction,
+    ) -> OperationDisposition {
+        if !self.search_context_current(&context)
+            || self.search.context.as_ref() != Some(&context)
+            || !self
+                .search
+                .results
+                .iter()
+                .any(|result| result.action == action)
+        {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
+        }
+        match action {
+            SearchAction::ActivateTab { id } => ItemId::parse(&id).map_or_else(
+                || operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput),
+                |id| self.operation_activate(id),
+            ),
+            SearchAction::OpenUrl { url } => self.operation_open_url(url),
+            SearchAction::RunCommand { id } if id.starts_with("theme.") => {
+                self.operation_set_app_setting("appearance".into(), id[6..].into())
+            }
+            SearchAction::RunCommand { id }
+                if matches!(id.as_str(), "split.choose" | "sidebar.toggleCompact") =>
+            {
+                (self.emit)(Projection::UiCommand(id));
+                operation_result(OperationOutcome::Applied, OperationReason::MutationApplied)
+            }
+            SearchAction::RunCommand { id } => self.operation_run_command(&id),
+        }
+    }
+
     pub(super) fn search(&mut self, query: &str) {
         let Some((profile, space)) = self
             .windows
@@ -30,7 +108,28 @@ impl Shell {
         };
         let q = query.trim();
         let needle = q.to_lowercase();
-        let tabs = self.today_tabs(space);
+        let mut stack = Vec::new();
+        for placement in [
+            Placement::Favorites { profile },
+            Placement::Space {
+                space,
+                section: SpaceSection::Pinned,
+            },
+            Placement::Space {
+                space,
+                section: SpaceSection::Today,
+            },
+        ] {
+            stack.extend(self.items.roots(placement).iter().rev().copied());
+        }
+        let mut tabs = Vec::new();
+        while let Some(id) = stack.pop() {
+            if self.items.tab(id).is_some() && self.item_in_scope(id, profile, space) {
+                tabs.push(id);
+            }
+            stack.extend(self.items.children(id).iter().rev().copied());
+        }
+        tabs.sort_by_key(|id| std::cmp::Reverse(self.residency.last_focus.get(id).copied()));
         let mut results = Vec::new();
         self.search.generation = self.search.generation.wrapping_add(1);
         if self.search.generation == 0 {
@@ -47,7 +146,7 @@ impl Shell {
                             .tab(*id)
                             .map(|t| tab_result(*id, t, self.favicon_key(t, Some(profile))))
                     })
-                    .take(8),
+                    .take(4),
             );
         } else {
             let matched: Vec<(ItemId, &TabState)> = tabs
@@ -115,10 +214,11 @@ impl Shell {
             // Project local tab/URL/command matches immediately. History is
             // presentation-only and arrives asynchronously; the exact query
             // generation below prevents a slow old result replacing newer UI.
-            (self.emit)(Projection::Search(SearchResults {
+            self.publish_search(SearchResults {
+                context: self.search.context.clone(),
                 query: query.into(),
                 results: results.clone(),
-            }));
+            });
             if q.len() > MAX_ASYNC_SEARCH_QUERY_BYTES {
                 return;
             }
@@ -156,10 +256,11 @@ impl Shell {
             return;
         }
 
-        (self.emit)(Projection::Search(SearchResults {
+        self.publish_search(SearchResults {
+            context: self.search.context.clone(),
             query: query.into(),
             results,
-        }));
+        });
     }
 
     pub(super) fn on_history_read(
@@ -211,10 +312,11 @@ impl Shell {
             });
         }
         results.truncate(10);
-        (self.emit)(Projection::Search(SearchResults {
+        self.publish_search(SearchResults {
+            context: self.search.context.clone(),
             query: pending.display_query,
             results,
-        }));
+        });
     }
 }
 

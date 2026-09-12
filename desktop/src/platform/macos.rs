@@ -276,8 +276,7 @@ pub fn to_window(x: f64, y: f64) -> (f64, f64) {
 }
 
 pub fn init(window: &WebviewWindow) -> bool {
-    use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
-    let _ = apply_vibrancy(window, NSVisualEffectMaterial::Sidebar, None, Some(12.0));
+    crate::material::install(window, false);
     if !harden_privileged(window) {
         return false;
     }
@@ -408,10 +407,6 @@ fn clear_privileged_delegate(label: &str, generation: u64) {
     });
 }
 
-pub fn material() -> bool {
-    true
-}
-
 pub fn make_chrome(window: &WebviewWindow, dispatch: MainThreadDispatch) -> SharedChrome {
     Arc::new(ChromeAdapter {
         window: window.clone(),
@@ -486,6 +481,15 @@ impl Chrome for ChromeAdapter {
 }
 
 impl PresentationChrome for ChromeAdapter {
+    fn restore_browser_chrome(
+        &self,
+        revision: u64,
+        items: zephium_ipc::ItemsState,
+        done: ChromePresentationCallback,
+    ) -> ChromePresentationDispatch {
+        crate::restore_browser_chrome(&self.window, revision, items, done)
+    }
+
     fn apply_tab_for_presentation(
         &self,
         presentation: ChromePresentation,

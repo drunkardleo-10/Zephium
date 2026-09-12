@@ -1834,6 +1834,15 @@ impl GeometryChrome for FakeChrome {
     }
 }
 impl PresentationChrome for FakeChrome {
+    fn restore_browser_chrome(
+        &self,
+        _revision: u64,
+        _items: ItemsState,
+        _done: ChromePresentationCallback,
+    ) -> ChromePresentationDispatch {
+        ChromePresentationDispatch::Applied
+    }
+
     fn apply_tab_for_presentation(
         &self,
         _presentation: ChromePresentation,
@@ -1914,6 +1923,7 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         Projection::ExtensionDistribution(_) => {}
         Projection::ExtensionRuntimeGrantPrompt(_) => {}
         Projection::PagePermissionPrompt(_) => {}
+        Projection::PanelOwner(_) => {}
         Projection::UiCommand(_) => {}
         Projection::Search(_) => {}
         Projection::Layout(_) => {}

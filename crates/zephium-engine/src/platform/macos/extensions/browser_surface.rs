@@ -789,15 +789,17 @@ define_class!(
             }
             if let Some(url) = unsafe { configuration.url() } {
                 if self.ivars().extension_pages.accepts_url(context, &url) {
-                    let unsupported = unsafe {
-                        configuration.parentTab().is_some()
-                            || configuration.shouldBePinned()
-                            || configuration.shouldBeMuted()
-                            || configuration.shouldReaderModeBeActive()
-                            || !configuration.shouldBeActive()
-                            || !configuration.shouldAddToSelection()
+                    let supported = unsafe {
+                        extension_page_configuration_supported(
+                            configuration.parentTab().is_some(),
+                            configuration.shouldBePinned(),
+                            configuration.shouldBeMuted(),
+                            configuration.shouldReaderModeBeActive(),
+                            configuration.shouldBeActive(),
+                            configuration.shouldAddToSelection(),
+                        )
                     };
-                    if unsupported {
+                    if !supported {
                         product_probe_create_diagnostic(
                             "extension-page-unsupported-configuration",
                             configuration,
@@ -1737,6 +1739,24 @@ fn document_background_surface_ready(
     has_generation && tabs.into_iter().any(|(resident, bound)| resident && bound)
 }
 
+/// Accepts the only extension-page shape Zephium can represent exactly.
+///
+/// WebKit reports Chrome's ordinary `tabs.create({ url })` default as active
+/// without adding the tab to an existing multi-selection. A dedicated
+/// extension window contains exactly one tab, so either selection flag has the
+/// same truthful native result. Parent/opener, pinned, muted, reader-mode, and
+/// background-page requests still carry semantics this surface cannot honor.
+const fn extension_page_configuration_supported(
+    has_parent: bool,
+    pinned: bool,
+    muted: bool,
+    reader_mode: bool,
+    active: bool,
+    _add_to_selection: bool,
+) -> bool {
+    !has_parent && !pinned && !muted && !reader_mode && active
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1788,5 +1808,27 @@ mod tests {
             true,
             [(false, true), (true, true)]
         ));
+    }
+
+    #[test]
+    fn extension_page_accepts_chrome_default_without_inventing_selection() {
+        assert!(extension_page_configuration_supported(
+            false, false, false, false, true, false,
+        ));
+        assert!(extension_page_configuration_supported(
+            false, false, false, false, true, true,
+        ));
+
+        for rejected in [
+            (true, false, false, false, true, false),
+            (false, true, false, false, true, false),
+            (false, false, true, false, true, false),
+            (false, false, false, true, true, false),
+            (false, false, false, false, false, false),
+        ] {
+            assert!(!extension_page_configuration_supported(
+                rejected.0, rejected.1, rejected.2, rejected.3, rejected.4, rejected.5,
+            ));
+        }
     }
 }

@@ -182,6 +182,8 @@ impl AgentLifecycleOwner {
     }
 }
 
+mod browser_pages;
+
 pub struct Shell {
     #[cfg(feature = "work-execution")]
     work: Option<Box<crate::work::ApplicationWork>>,
@@ -201,6 +203,10 @@ pub struct Shell {
     residency: ResidencyState,
     last_visits: std::collections::HashMap<ItemId, (String, std::time::Instant)>,
     window_visible: bool,
+    browser_page: Option<(WindowId, crate::BrowserPage)>,
+    browser_return_revision: u64,
+    browser_after_return: Option<Box<Command>>,
+    browser_return: Option<browser_pages::PendingBrowserReturn>,
     runtime_restart_required: bool,
     user_content_status: user_content_status::UserContentStatus,
     crash: CrashState,
@@ -455,6 +461,10 @@ impl Shell {
             residency: ResidencyState::default(),
             last_visits: std::collections::HashMap::new(),
             window_visible: true,
+            browser_page: None,
+            browser_return_revision: 0,
+            browser_after_return: None,
+            browser_return: None,
             runtime_restart_required: false,
             user_content_status: user_content_status::UserContentStatus::default(),
             crash: CrashState::default(),
@@ -699,6 +709,13 @@ impl Shell {
             Command::Activate(id) => {
                 let _ = self.operation_activate(id);
             }
+            Command::SetTabEssential {
+                id,
+                essential,
+                before,
+            } => {
+                let _ = self.operation_set_tab_essential(id, essential, before);
+            }
             Command::Close(id) => {
                 let _ = self.operation_close(id);
             }
@@ -748,15 +765,54 @@ impl Shell {
                     self.maintain_views();
                 }
             }
+            Command::BrowserChromeRestored { revision, applied } => {
+                self.browser_chrome_restored(revision, applied)
+            }
+            Command::ShowBrowserPage(page) => {
+                let _ = self.operation_show_browser_page(page);
+            }
             Command::SetSidebarWidth(width) => {
                 if let Some(win) = self.windows.focused_mut() {
                     win.metrics.sidebar_width = zephium_core::layout::clamp_sidebar_width(width);
                 }
                 let _ = self.relayout();
             }
-            Command::DragOver { x, y } => {
+            Command::ResourceCall {
+                expected_profile,
+                call,
+                done,
+            } => {
+                use zephium_core::resources::{ResourceError, ResourceReply, ResourceResponse};
+                if let Some(profile) = self
+                    .windows
+                    .focused()
+                    .map(|window| window.profile)
+                    .filter(|profile| *profile == expected_profile)
+                {
+                    self.store.resource_call(
+                        profile,
+                        Arc::unwrap_or_clone(call),
+                        Box::new(move |response| {
+                            done.finish(ResourceReply {
+                                profile: Some(profile.to_string()),
+                                response,
+                            })
+                        }),
+                    );
+                } else {
+                    done.finish(ResourceReply {
+                        profile: None,
+                        response: ResourceResponse::Error {
+                            error: ResourceError::Unavailable,
+                        },
+                    });
+                }
+            }
+            Command::DragOver { point } => {
                 if let Some(win) = self.windows.focused().map(|w| w.id) {
-                    let zone = self.resolve_drop(x, y).map(|d| d.zone);
+                    let zone = point
+                        .and_then(|(x, y)| self.resolve_drop(x, y))
+                        .map(|d| d.zone);
                     let _ = self.engine.set_drop_indicator(win, zone);
                 }
             }
@@ -833,7 +889,15 @@ impl Shell {
             Command::ExtensionDistributionStatusChanged(status) => {
                 self.observe_extension_distribution_status(status)
             }
-            Command::Search(query) => self.search(&query),
+            Command::Search(query) => {
+                self.search.context = None;
+                self.search(&query);
+            }
+            Command::SearchScoped { query, context } => self.search_scoped(&query, *context),
+            Command::CancelSearch { session_id } => self.cancel_scoped_search(&session_id),
+            Command::RunSearchAction { context, action } => {
+                let _ = self.operation_run_search_action(*context, action);
+            }
             Command::OpenUrl(input) => {
                 let _ = self.operation_open_url(input);
             }

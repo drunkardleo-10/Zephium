@@ -1,6 +1,7 @@
-import type { OperationDisposition } from "../../shared/ipc/bindings";
-import { commands } from "../../shared/ipc/bindings";
-import { events } from "../../shared/ipc/native-events";
+import { observe, pause } from "$shared/lib/observe";
+import type { OperationDisposition } from "$shared/ipc/bindings";
+import { commands } from "$shared/ipc/bindings";
+import { events } from "$shared/ipc/native-events";
 
 // Rust retains every accepted operation in its bounded process-local ledger
 // until this privileged WebView acknowledges the actor's disposition. Keep a
@@ -23,27 +24,16 @@ const acknowledgementsInFlight = new Set<string>();
 const settlementSignals = new Map<string, Set<() => void>>();
 
 let lifecycle = 0;
+let observationLifetime = new AbortController();
 let initialized = false;
 let initializing: Promise<void> | null = null;
 let unlisten: (() => void) | null = null;
 let ackTimer: ReturnType<typeof setTimeout> | null = null;
 
-function delay(milliseconds: number) {
-  return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
-}
-
 async function boundedIpc<T>(request: Promise<T>, milliseconds: number): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      request,
-      new Promise<T>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error("bounded privileged IPC timeout")), milliseconds);
-      }),
-    ]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
+  const result = await observe(request, milliseconds, observationLifetime.signal);
+  if (result.state !== "received") throw new Error("native observation unavailable");
+  return result.value;
 }
 
 function remember(disposition: OperationDisposition) {
@@ -103,7 +93,8 @@ async function reconcile(generation: number) {
       for (const disposition of dispositions) remember(disposition);
       return;
     } catch {
-      await delay(RECONCILE_RETRY_MS);
+      if (generation !== lifecycle) return;
+      await pause(RECONCILE_RETRY_MS, observationLifetime.signal);
     }
   }
 }
@@ -126,6 +117,7 @@ export function init(): Promise<void> {
   if (initialized) return Promise.resolve();
   if (initializing !== null) return initializing;
   const generation = ++lifecycle;
+  if (observationLifetime.signal.aborted) observationLifetime = new AbortController();
   const task = initialize(generation);
   initializing = task;
   void task.then(
@@ -141,6 +133,7 @@ export function init(): Promise<void> {
 
 export function dispose() {
   lifecycle += 1;
+  observationLifetime.abort();
   initialized = false;
   initializing = null;
   unlisten?.();
@@ -160,13 +153,18 @@ export type OperationResolution =
   | { state: "pending"; operation_id: string }
   | { state: "unknown"; operation_id: string };
 
-function waitForSettlementSignal(operationId: string, milliseconds: number): Promise<void> {
+function waitForSettlementSignal(
+  operationId: string,
+  milliseconds: number,
+  signal?: AbortSignal,
+): Promise<void> {
   return new Promise((resolve) => {
     let settled = false;
     const finish = () => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", finish);
       const signals = settlementSignals.get(operationId);
       signals?.delete(finish);
       if (signals?.size === 0) settlementSignals.delete(operationId);
@@ -178,7 +176,8 @@ function waitForSettlementSignal(operationId: string, milliseconds: number): Pro
     settlementSignals.set(operationId, signals);
 
     // Close the event-before-subscription window without another native call.
-    if (recent.has(operationId)) finish();
+    signal?.addEventListener("abort", finish, { once: true });
+    if (signal?.aborted || recent.has(operationId)) finish();
   });
 }
 
@@ -190,6 +189,26 @@ function waitForSettlementSignal(operationId: string, milliseconds: number): Pro
 export async function waitForDisposition(
   operationId: string,
   timeoutMs = DEFAULT_SETTLEMENT_TIMEOUT_MS,
+  signal?: AbortSignal,
+): Promise<OperationResolution> {
+  const owner = observationLifetime.signal;
+  const local = new AbortController();
+  const abort = () => local.abort();
+  owner.addEventListener("abort", abort, { once: true });
+  signal?.addEventListener("abort", abort, { once: true });
+  if (owner.aborted || signal?.aborted) abort();
+  try {
+    return await observeDisposition(operationId, timeoutMs, local.signal);
+  } finally {
+    owner.removeEventListener("abort", abort);
+    signal?.removeEventListener("abort", abort);
+  }
+}
+
+async function observeDisposition(
+  operationId: string,
+  timeoutMs = DEFAULT_SETTLEMENT_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<OperationResolution> {
   if (!OPERATION_ID.test(operationId)) return { state: "unknown", operation_id: operationId };
 
@@ -197,23 +216,29 @@ export async function waitForDisposition(
   if (cached !== undefined) return { state: "processed", disposition: cached };
 
   const generation = lifecycle;
-  const boundedTimeout = Math.max(0, Math.min(timeoutMs, DEFAULT_SETTLEMENT_TIMEOUT_MS));
+  const boundedTimeout = Number.isFinite(timeoutMs)
+    ? Math.max(0, Math.min(timeoutMs, DEFAULT_SETTLEMENT_TIMEOUT_MS))
+    : 0;
   const deadline = Date.now() + boundedTimeout;
 
-  while (generation === lifecycle) {
+  while (generation === lifecycle && !signal?.aborted) {
     const remembered = recent.get(operationId);
     if (remembered !== undefined) return { state: "processed", disposition: remembered };
 
     try {
       const remainingBeforeQuery = deadline - Date.now();
       if (remainingBeforeQuery <= 0) break;
-      const status = await boundedIpc(
+      const observed = await observe(
         commands.operationStatus(operationId),
         Math.min(remainingBeforeQuery, IPC_ATTEMPT_TIMEOUT_MS),
+        signal,
       );
+      if (generation !== lifecycle || signal?.aborted) break;
+      if (observed.state !== "received") throw new Error("ledger observation unavailable");
+      const status = observed.value;
       const afterQuery = recent.get(operationId);
       if (afterQuery !== undefined) return { state: "processed", disposition: afterQuery };
-      if (status.state === "processed") {
+      if (status.state === "processed" && status.disposition.operation_id === operationId) {
         remember(status.disposition);
         return { state: "processed", disposition: status.disposition };
       }
@@ -223,9 +248,10 @@ export async function waitForDisposition(
       // query at a low fixed rate until the same bounded deadline.
     }
 
+    if (generation !== lifecycle || signal?.aborted) break;
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
-    await waitForSettlementSignal(operationId, Math.min(remaining, SETTLEMENT_POLL_MS));
+    await waitForSettlementSignal(operationId, Math.min(remaining, SETTLEMENT_POLL_MS), signal);
   }
 
   const final = recent.get(operationId);

@@ -607,12 +607,25 @@ fn retry_delay(failures: u32) -> Duration {
         .min(SAVE_RETRY_MAX)
 }
 
+struct ResourcePermit(Arc<AtomicUsize>);
+impl Drop for ResourcePermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 enum Cmd {
     WorkDocument(
         ProfileId,
         zephium_core::work::port::WorkRequest,
         work_document::Permit,
         zephium_core::work::port::WorkCompletion,
+    ),
+    ResourceCall(
+        ProfileId,
+        zephium_core::resources::ResourceCall,
+        zephium_core::resources::ResourceDone,
+        ResourcePermit,
     ),
     #[cfg(feature = "work-execution")]
     AgentWork(
@@ -1518,6 +1531,7 @@ fn observe_extension_service_store_call<T>(
 
 pub struct SqliteStore {
     work_document_admission: OnceLock<Arc<AtomicUsize>>,
+    resource_admission: Arc<AtomicUsize>,
     #[cfg(feature = "work-execution")]
     work_admission: OnceLock<Arc<AtomicUsize>>,
     tx: SyncSender<Cmd>,
@@ -1622,6 +1636,7 @@ impl SqliteStore {
                 )
             })?;
         Ok(Self {
+            resource_admission: Arc::new(AtomicUsize::new(0)),
             tx,
             work_document_admission: OnceLock::new(),
             #[cfg(feature = "work-execution")]
@@ -2405,6 +2420,48 @@ impl Store for SqliteStore {
         completion: zephium_core::work::port::WorkCompletion,
     ) -> Result<(), zephium_core::work::WorkError> {
         self.dispatch_work_document(profile, request, completion)
+    }
+
+    fn resource_call(
+        &self,
+        profile: ProfileId,
+        call: zephium_core::resources::ResourceCall,
+        done: zephium_core::resources::ResourceDone,
+    ) {
+        use zephium_core::resources::{ResourceError, ResourceResponse};
+        if !call.validate() {
+            done(ResourceResponse::Error {
+                error: ResourceError::Invalid,
+            });
+            return;
+        }
+        if self
+            .resource_admission
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < 4).then_some(n + 1)
+            })
+            .is_err()
+        {
+            done(ResourceResponse::Error {
+                error: ResourceError::Capacity,
+            });
+            return;
+        }
+        if let Err(error) = self.tx.try_send(Cmd::ResourceCall(
+            profile,
+            call,
+            done,
+            ResourcePermit(self.resource_admission.clone()),
+        )) {
+            let command = match error {
+                mpsc::TrySendError::Full(c) | mpsc::TrySendError::Disconnected(c) => c,
+            };
+            if let Cmd::ResourceCall(_, _, done, _) = command {
+                done(ResourceResponse::Error {
+                    error: ResourceError::Unavailable,
+                });
+            }
+        }
     }
 
     fn save_session(&self, session: SessionState) {
@@ -3513,6 +3570,17 @@ fn actor(
             }
             Some(Cmd::GetSetting(key, reply)) => {
                 let _ = reply.send(hub.app_setting(&key));
+            }
+            Some(Cmd::ResourceCall(profile, call, done, admission)) => {
+                let response = if !hub.knows(profile) && !flush(&mut hub, &mut pending) {
+                    zephium_core::resources::ResourceResponse::Error {
+                        error: zephium_core::resources::ResourceError::Unavailable,
+                    }
+                } else {
+                    hub.resource_call(profile, call)
+                };
+                drop(admission);
+                done(response);
             }
             Some(Cmd::SearchHistory(profile, query, limit, reply)) => {
                 let _ = reply.send(hub.search_history(profile, &query, limit));

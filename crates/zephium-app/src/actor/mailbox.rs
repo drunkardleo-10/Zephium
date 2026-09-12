@@ -1106,6 +1106,7 @@ fn command_is_critical(command: &Command) -> bool {
             | Command::PagePermissionCatalogLoaded { .. }
             | Command::PagePermissionCatalogMutated { .. }
             | Command::PagePermissionTimeout { .. }
+            | Command::BrowserChromeRestored { .. }
             | Command::ChromePresentationApplied { .. }
             | Command::Engine(
                 EngineEvent::UrlChanged { .. }
@@ -1153,7 +1154,7 @@ fn command_coalesced_key(command: &Command) -> Option<CoalescedKey> {
         Command::SetSidebarWidth(_) => Some(CoalescedKey::SidebarWidth),
         Command::DragOver { .. } => Some(CoalescedKey::DragOver),
         Command::DividerDrag { .. } => Some(CoalescedKey::DividerDrag),
-        Command::Search(_) => Some(CoalescedKey::Search),
+        Command::Search(_) | Command::SearchScoped { .. } => Some(CoalescedKey::Search),
         Command::ExtensionDistributionStatusChanged(_) => {
             Some(CoalescedKey::ExtensionDistributionStatus)
         }

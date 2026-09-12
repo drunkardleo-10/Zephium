@@ -16,7 +16,15 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
-    "types": ["svelte", "vite/client"]
+    "types": ["svelte", "vite/client"],
+    "paths": {
+      "$app/*": ["./src/app/*"],
+      "$features/*": ["./src/features/*"],
+      "$session/*": ["./src/session/*"],
+      "$domain/*": ["./src/domain/*"],
+      "$shared/*": ["./src/shared/*"],
+      "$styles/*": ["./src/styles/*"]
+    }
   },
-  "include": ["src/**/*.ts", "src/**/*.svelte", "tests/**/*.ts"]
+  "include": ["src/**/*.ts", "src/**/*.svelte"]
 }

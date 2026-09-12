@@ -13,11 +13,11 @@ import type {
   ExtensionRuntimeGrantPromptView,
   OperationAdmission,
   OperationDisposition,
-} from "../../shared/ipc/bindings";
+} from "$shared/ipc/bindings";
 import { SvelteSet } from "svelte/reactivity";
-import { commands } from "../../shared/ipc/bindings";
-import { events } from "../../shared/ipc/native-events";
-import * as operations from "../operations/operations";
+import { commands } from "$shared/ipc/bindings";
+import { events } from "$shared/ipc/native-events";
+import { operations } from "$domain/operations";
 import {
   ExtensionDistributionProjectionModel,
   ExtensionActionShortcutProjectionModel,

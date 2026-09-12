@@ -737,10 +737,6 @@ fn vk_keyval(vk: u32) -> Option<u32> {
     })
 }
 
-pub fn material() -> bool {
-    false
-}
-
 // Full-window chrome: client coords already are window coords.
 pub fn to_window(x: f64, y: f64) -> (f64, f64) {
     (x, y)
@@ -763,6 +759,15 @@ impl Chrome for ChromeAdapter {
 }
 
 impl PresentationChrome for ChromeAdapter {
+    fn restore_browser_chrome(
+        &self,
+        revision: u64,
+        items: zephium_ipc::ItemsState,
+        done: ChromePresentationCallback,
+    ) -> ChromePresentationDispatch {
+        crate::restore_browser_chrome(&self.window, revision, items, done)
+    }
+
     fn apply_tab_for_presentation(
         &self,
         presentation: ChromePresentation,

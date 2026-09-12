@@ -1,0 +1,39 @@
+/* The space tint replaces the accent only. Graphite (default) stays neutral. */
+:root[data-tint="sky"] {
+  --color-accent: var(--color-tint-sky);
+  --color-track-on: #3b82e6;
+  --color-accent-hover: #93c0f8;
+  --color-on-accent: #0e1b2e;
+}
+
+:root[data-tint="sage"] {
+  --color-accent: var(--color-tint-sage);
+  --color-track-on: #34a26e;
+  --color-accent-hover: #98d3b2;
+  --color-on-accent: #0f2118;
+}
+
+:root[data-tint="rose"] {
+  --color-accent: var(--color-tint-rose);
+  --color-track-on: #d9606a;
+  --color-accent-hover: #f2a1a6;
+  --color-on-accent: #2c1214;
+}
+
+:root[data-tint="sky"][data-theme="light"] {
+  --color-accent: var(--color-tint-sky);
+  --color-accent-hover: #4a8eea;
+  --color-on-accent: #fff;
+}
+
+:root[data-tint="sage"][data-theme="light"] {
+  --color-accent: var(--color-tint-sage);
+  --color-accent-hover: #37986a;
+  --color-on-accent: #fff;
+}
+
+:root[data-tint="rose"][data-theme="light"] {
+  --color-accent: var(--color-tint-rose);
+  --color-accent-hover: #d9646d;
+  --color-on-accent: #fff;
+}

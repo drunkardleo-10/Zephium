@@ -1,4 +1,6 @@
 import type {
+  PanelState,
+  ResourceChanged,
   BlockerStatusChanged,
   BrowserCredentialCapabilityChanged,
   ExtensionActionFailed,
@@ -35,37 +37,70 @@ function scopedEvent<T>(name: string) {
 // Rust delivers these directly into the intended WebView. Do not replace this
 // with @tauri-apps/api/event: its listen command accepts a caller-selected
 // target, which would let the launcher panel subscribe to main-window state.
+export const nativeEventNames = {
+  panelState: "zephium:panel-state",
+  resourceChanged: "zephium:resource-changed",
+  resourceClose: "zephium:resource-close",
+  resourceCloseCancelled: "zephium:resource-close-cancelled",
+  browserCredentialCapabilityChanged: "zephium:browser-credential-capability",
+  itemsChanged: "zephium:items",
+  tabChanged: "zephium:tab",
+  extensionActionsChanged: "zephium:extension-actions",
+  extensionActionFailed: "zephium:extension-action-failed",
+  extensionActionShortcut: "zephium:extension-action-shortcut",
+  extensionManagementAvailabilityChanged: "zephium:extension-management-availability",
+  extensionManagementChanged: "zephium:extension-management",
+  extensionDistributionChanged: "zephium:extension-distribution",
+  extensionRuntimeGrantPromptChanged: "zephium:extension-runtime-grant-prompt",
+  pagePermissionPromptChanged: "zephium:page-permission-prompt",
+  browserReturn: "zephium:browser-return",
+  presentationTab: "zephium:presentation-tab",
+  uiCommand: "zephium:ui-command",
+  searchChanged: "zephium:search",
+  layoutChanged: "zephium:layout",
+  operationProcessed: "zephium:operation-processed",
+  runtimeStatusChanged: "zephium:runtime-status",
+  blockerStatusChanged: "zephium:blocker-status",
+} as const;
+
 export const events = {
+  resourceClose: scopedEvent<string>(nativeEventNames.resourceClose),
+  resourceCloseCancelled: scopedEvent<string>(nativeEventNames.resourceCloseCancelled),
+  resourceChanged: scopedEvent<ResourceChanged>(nativeEventNames.resourceChanged),
+  panelState: scopedEvent<PanelState>(nativeEventNames.panelState),
   browserCredentialCapabilityChanged: scopedEvent<BrowserCredentialCapabilityChanged>(
-    "zephium:browser-credential-capability",
+    nativeEventNames.browserCredentialCapabilityChanged,
   ),
-  itemsChanged: scopedEvent<ItemsChanged>("zephium:items"),
-  tabChanged: scopedEvent<TabChanged>("zephium:tab"),
-  extensionActionsChanged: scopedEvent<ExtensionActionsChanged>("zephium:extension-actions"),
-  extensionActionFailed: scopedEvent<ExtensionActionFailed>("zephium:extension-action-failed"),
+  itemsChanged: scopedEvent<ItemsChanged>(nativeEventNames.itemsChanged),
+  tabChanged: scopedEvent<TabChanged>(nativeEventNames.tabChanged),
+  extensionActionsChanged: scopedEvent<ExtensionActionsChanged>(
+    nativeEventNames.extensionActionsChanged,
+  ),
+  extensionActionFailed: scopedEvent<ExtensionActionFailed>(nativeEventNames.extensionActionFailed),
   extensionActionShortcut: scopedEvent<ExtensionActionShortcut>(
-    "zephium:extension-action-shortcut",
+    nativeEventNames.extensionActionShortcut,
   ),
   extensionManagementAvailabilityChanged: scopedEvent<ExtensionManagementAvailabilityChanged>(
-    "zephium:extension-management-availability",
+    nativeEventNames.extensionManagementAvailabilityChanged,
   ),
   extensionManagementChanged: scopedEvent<ExtensionManagementChanged>(
-    "zephium:extension-management",
+    nativeEventNames.extensionManagementChanged,
   ),
   extensionDistributionChanged: scopedEvent<ExtensionDistributionChanged>(
-    "zephium:extension-distribution",
+    nativeEventNames.extensionDistributionChanged,
   ),
   extensionRuntimeGrantPromptChanged: scopedEvent<ExtensionRuntimeGrantPromptChanged>(
-    "zephium:extension-runtime-grant-prompt",
+    nativeEventNames.extensionRuntimeGrantPromptChanged,
   ),
   pagePermissionPromptChanged: scopedEvent<PagePermissionPromptChanged>(
-    "zephium:page-permission-prompt",
+    nativeEventNames.pagePermissionPromptChanged,
   ),
-  presentationTab: scopedEvent<PresentationTab>("zephium:presentation-tab"),
-  uiCommand: scopedEvent<UiCommand>("zephium:ui-command"),
-  searchChanged: scopedEvent<SearchChanged>("zephium:search"),
-  layoutChanged: scopedEvent<LayoutChanged>("zephium:layout"),
-  operationProcessed: scopedEvent<OperationProcessed>("zephium:operation-processed"),
-  runtimeStatusChanged: scopedEvent<RuntimeStatusChanged>("zephium:runtime-status"),
-  blockerStatusChanged: scopedEvent<BlockerStatusChanged>("zephium:blocker-status"),
+  browserReturn: scopedEvent<ItemsChanged>(nativeEventNames.browserReturn),
+  presentationTab: scopedEvent<PresentationTab>(nativeEventNames.presentationTab),
+  uiCommand: scopedEvent<UiCommand>(nativeEventNames.uiCommand),
+  searchChanged: scopedEvent<SearchChanged>(nativeEventNames.searchChanged),
+  layoutChanged: scopedEvent<LayoutChanged>(nativeEventNames.layoutChanged),
+  operationProcessed: scopedEvent<OperationProcessed>(nativeEventNames.operationProcessed),
+  runtimeStatusChanged: scopedEvent<RuntimeStatusChanged>(nativeEventNames.runtimeStatusChanged),
+  blockerStatusChanged: scopedEvent<BlockerStatusChanged>(nativeEventNames.blockerStatusChanged),
 };

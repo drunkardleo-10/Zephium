@@ -24,3 +24,9 @@ pub mod webkitgtk;
 pub mod webview2;
 pub mod windows;
 pub mod work;
+
+/// Allowlisted application appearance preferences.
+pub mod preferences;
+
+/// Durable user-authored resources shared by Browse and Work.
+pub mod resources;

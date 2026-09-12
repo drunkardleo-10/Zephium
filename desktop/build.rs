@@ -62,6 +62,7 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
     };
     let extensions_staging = env::var_os("CARGO_FEATURE_STAGING_EXTENSION_CATALOG").is_some();
     let extension_lab = env::var_os("CARGO_FEATURE_LOCAL_EXTENSION_LAB").is_some();
+    let resource_ui_qa = env::var_os("CARGO_FEATURE_RESOURCE_UI_QA").is_some();
     let rendering_probe = env::var_os("CARGO_FEATURE_MACOS_WORK_RENDERING_PROBE").is_some();
     let navigation_probe = env::var_os("CARGO_FEATURE_MACOS_WORK_NAVIGATION_PROBE").is_some();
     if env::var_os("CARGO_FEATURE_MACOS_WORK_RETAINED_PRODUCT_PROBE").is_some()
@@ -87,6 +88,31 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
                 .as_ref()
                 .ok_or("navigation qualification requires its isolated configuration override")?,
         )?;
+    }
+    if resource_ui_qa {
+        if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
+            || env::var("PROFILE").as_deref() != Ok("debug")
+            || extensions_staging
+            || extension_lab
+            || rendering_probe
+        {
+            return Err("resource UI QA requires an isolated macOS debug build".into());
+        }
+        let config = config_override
+            .as_ref()
+            .ok_or("resource UI QA requires an explicit isolated configuration")?;
+        if config.get("identifier").and_then(Value::as_str) != Some("app.zephium.resources-qa")
+            || config.get("productName").and_then(Value::as_str) != Some("Zephium Resources QA")
+            || config
+                .pointer("/app/windows/0/title")
+                .and_then(Value::as_str)
+                != Some("Zephium Resources QA")
+            || config.pointer("/build/devUrl") != Some(&Value::Null)
+        {
+            return Err(
+                "resource UI QA requires its exact isolated identity and bundled frontend".into(),
+            );
+        }
     }
     if rendering_probe {
         if env::var_os("CARGO_FEATURE_MACOS_WORK_RESOURCE_PROBE").is_some()
@@ -150,6 +176,7 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
                 && !extension_lab
                 && !rendering_probe
                 && !navigation_probe
+                && !resource_ui_qa
             {
                 validate_linux_identity("effective", &config, &root)?;
             }

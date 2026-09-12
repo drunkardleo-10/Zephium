@@ -3,10 +3,10 @@ import type {
   PagePermissionPromptDecisionInput,
   PagePermissionPromptEntryView,
   PagePermissionPromptView,
-} from "../../shared/ipc/bindings";
-import { commands } from "../../shared/ipc/bindings";
-import { events } from "../../shared/ipc/native-events";
-import * as operations from "../operations/operations";
+} from "$shared/ipc/bindings";
+import { commands } from "$shared/ipc/bindings";
+import { events } from "$shared/ipc/native-events";
+import { operations } from "$domain/operations";
 import {
   PagePermissionPromptProjectionModel,
   initialPagePermissionPrompt,

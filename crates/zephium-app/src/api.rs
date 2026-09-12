@@ -269,6 +269,7 @@ pub type EmitFn = Box<dyn Fn(Projection) + Send + Sync>;
 /// projection delivery and native content presentation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChromePresentation {
+    pub settings_visible: bool,
     pub id: ItemId,
     pub navigation: NavigationPresentationId,
     pub url: String,
@@ -293,6 +294,15 @@ pub type ChromePresentationCallback = Box<dyn FnOnce(bool) + Send>;
 /// Geometry plus the privileged DOM acknowledgement required by the raw-view
 /// anti-spoof boundary.
 pub trait PresentationChrome: GeometryChrome {
+    fn restore_browser_chrome(
+        &self,
+        _revision: u64,
+        _items: zephium_ipc::ItemsState,
+        _done: ChromePresentationCallback,
+    ) -> ChromePresentationDispatch {
+        ChromePresentationDispatch::Rejected
+    }
+
     fn apply_tab_for_presentation(
         &self,
         presentation: ChromePresentation,
@@ -335,11 +345,36 @@ pub enum ContentPolicyStatusQueryOutcome {
     Unavailable,
 }
 
+/// A bounded browser-owned destination rendered by the existing chrome view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrowserPage {
+    Work,
+    Settings,
+    History,
+    Downloads,
+}
+
+impl BrowserPage {
+    pub fn command_id(self) -> &'static str {
+        match self {
+            Self::Work => "browser.work",
+            Self::Settings => "browser.settings",
+            Self::History => "browser.history",
+            Self::Downloads => "browser.downloads",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Command {
     WorkDocument(crate::WorkDocumentSubmission),
     #[cfg(feature = "work-execution")]
     AttachRetainedWork(crate::work_resources::product::RetainedWorkAttachment),
+    ResourceCall {
+        expected_profile: ProfileId,
+        call: Arc<zephium_core::resources::ResourceCall>,
+        done: ResourceCompletion,
+    },
     #[cfg(feature = "work-execution")]
     AttachWork(crate::work::WorkAttachment),
     #[cfg(feature = "work-execution")]
@@ -359,6 +394,11 @@ pub enum Command {
     Open,
     Activate(ItemId),
     Close(ItemId),
+    SetTabEssential {
+        id: ItemId,
+        essential: bool,
+        before: Option<ItemId>,
+    },
     Navigate {
         id: ItemId,
         input: String,
@@ -377,9 +417,13 @@ pub enum Command {
     /// priority and, after the normal idle grace, suspend them.
     SetWindowVisible(bool),
     SetSidebarWidth(f64),
+    ShowBrowserPage(Option<BrowserPage>),
+    BrowserChromeRestored {
+        revision: u64,
+        applied: bool,
+    },
     DragOver {
-        x: f64,
-        y: f64,
+        point: Option<(f64, f64)>,
     },
     DropTab {
         id: ItemId,
@@ -543,6 +587,17 @@ pub enum Command {
     /// distribution worker. This is replaceable observation, not authority.
     ExtensionDistributionStatusChanged(ExtensionDistributionStatus),
     Search(String),
+    SearchScoped {
+        query: String,
+        context: Box<zephium_ipc::SearchContext>,
+    },
+    CancelSearch {
+        session_id: String,
+    },
+    RunSearchAction {
+        context: Box<zephium_ipc::SearchContext>,
+        action: zephium_ipc::SearchAction,
+    },
     OpenUrl(String),
     SetAppSetting {
         key: String,
@@ -667,4 +722,29 @@ pub enum Command {
         deadline: std::time::Instant,
         ack: SyncSender<ShutdownOutcome>,
     },
+}
+
+#[derive(Clone)]
+pub struct ResourceCompletion(
+    Arc<Mutex<Option<Box<dyn FnOnce(zephium_core::resources::ResourceReply) + Send>>>>,
+);
+impl ResourceCompletion {
+    pub fn new(done: impl FnOnce(zephium_core::resources::ResourceReply) + Send + 'static) -> Self {
+        Self(Arc::new(Mutex::new(Some(Box::new(done)))))
+    }
+    pub fn finish(self, reply: zephium_core::resources::ResourceReply) {
+        let done = self
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(done) = done {
+            done(reply);
+        }
+    }
+}
+impl fmt::Debug for ResourceCompletion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ResourceCompletion")
+    }
 }

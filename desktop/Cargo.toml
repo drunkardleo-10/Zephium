@@ -1,5 +1,6 @@
 [package]
 name = "zephium-desktop"
+default-run = "zephium-desktop"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -35,6 +36,8 @@ macos-work-retained-notion-write-probe = [
     "macos-work-retained-product-probe",
     "zephium-work-composition/retained-notion-write-qualification",
 ]
+# Isolated user-resource UI verification; never a shipping application.
+resource-ui-qa = ["tauri/custom-protocol"]
 # Same release-excluded retained path, one closed real-public product-brief task.
 macos-work-retained-public-probe = [
     "macos-work-retained-controller-probe",
@@ -116,6 +119,7 @@ serde_json.workspace = true
 json-patch = "3"
 
 [dependencies]
+tokio = { workspace = true, features = ["time"] }
 tauri.workspace = true
 zephium-core.workspace = true
 zephium-ipc.workspace = true
@@ -134,12 +138,13 @@ zephium-extension-updater = { workspace = true, optional = true }
 zephium-store.workspace = true
 zephium-blocker-service.workspace = true
 tauri-plugin-single-instance.workspace = true
-window-vibrancy = "0.7"
+window-vibrancy = "=0.8.0"
 serde.workspace = true
 serde_json.workspace = true
 specta.workspace = true
 specta-typescript.workspace = true
 tauri-specta.workspace = true
+tauri-plugin-dialog = "2"
 
 [dev-dependencies]
 async-io = "=2.6.0"

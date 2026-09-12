@@ -68,6 +68,7 @@ fn test_store_with_sender(tx: SyncSender<Cmd>) -> SqliteStore {
     let (_exit, exited) = mpsc::sync_channel(1);
     SqliteStore {
         work_document_admission: OnceLock::new(),
+        resource_admission: Arc::new(AtomicUsize::new(0)),
         #[cfg(feature = "work-execution")]
         work_admission: OnceLock::new(),
         tx,

@@ -1,4 +1,4 @@
-import type { RuntimeSecurityUpdateTarget, RuntimeStatus } from "../../shared/ipc/bindings";
+import type { RuntimeSecurityUpdateTarget, RuntimeStatus } from "$shared/ipc/bindings";
 
 export type RuntimeNotification = {
   id:

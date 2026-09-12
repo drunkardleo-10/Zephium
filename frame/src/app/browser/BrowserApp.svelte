@@ -1,0 +1,189 @@
+<script lang="ts">
+  import { installCloseService } from "$shared/lib/close";
+  import "@fontsource-variable/inter";
+  import "$styles/global.css";
+  import { onMount } from "svelte";
+  import { ExtensionPermissionPrompt } from "$features/extensions";
+  import { PagePermissionPrompt } from "$features/permissions";
+  import * as sidebar from "$session/sidebar-mode.svelte";
+  import { Dividers } from "$features/split";
+  import { commands } from "$shared/ipc/bindings";
+  import { IS_MAC } from "$shared/platform";
+  import { blocker } from "$domain/blocker";
+  import { extensions } from "$domain/extensions";
+  import { layout } from "$domain/layout";
+  import { operations } from "$domain/operations";
+  import { pagePermissions } from "$domain/permissions";
+  import { runtime } from "$domain/runtime";
+  import { tabs } from "$domain/tabs";
+  import { theme } from "$domain/appearance";
+  import { uiCommands as ui } from "$domain/ui-commands";
+  import { surface as browserPage } from "$domain/surface";
+  import * as motion from "$session/motion.svelte";
+  import * as tools from "$session/tools.svelte";
+  import { preferences } from "$domain/preferences";
+  import Shell from "./Shell.svelte";
+
+  $effect(() => {
+    const mode = preferences.value("sidebar.mode");
+    if (mode === "default" || mode === "compact") sidebar.adoptMode(mode);
+  });
+
+  $effect(() => {
+    theme.applyUiPreferences(
+      preferences.value("ui.accent"),
+      preferences.value("ui.reduce-motion") === "true",
+    );
+  });
+
+  let extensionPermissionPrompt = $derived(extensions.permissionPrompt());
+  let pagePermissionPrompt = $derived(pagePermissions.prompt());
+  let consentActive = $derived(extensionPermissionPrompt !== null || pagePermissionPrompt !== null);
+
+  type ChromeShortcut = {
+    matches: (event: KeyboardEvent) => boolean;
+    command: string;
+  };
+
+  const chromeShortcuts: ChromeShortcut[] = [
+    {
+      matches: (event) => event.ctrlKey && !event.shiftKey && event.key === "Tab",
+      command: "tab.next",
+    },
+    {
+      matches: (event) => event.ctrlKey && event.shiftKey && event.key === "Tab",
+      command: "tab.previous",
+    },
+  ];
+
+  if (!IS_MAC) {
+    const primaryShortcuts: ReadonlyArray<readonly [string, string]> = [
+      ["t", "tab.new"],
+      ["w", "tab.close"],
+      ["r", "nav.reload"],
+      ["l", "url.focus"],
+      ["=", "zoom.in"],
+      ["-", "zoom.out"],
+      ["0", "zoom.reset"],
+      ["[", "nav.back"],
+      ["]", "nav.forward"],
+      [".", "nav.stop"],
+    ];
+
+    for (const [key, command] of primaryShortcuts) {
+      chromeShortcuts.push({
+        matches: (event) =>
+          event.ctrlKey && !event.shiftKey && !event.altKey && event.key.toLowerCase() === key,
+        command,
+      });
+    }
+  }
+
+  function handleKeydown(event: KeyboardEvent) {
+    // The native content stage is suppressed while this browser-owned modal
+    // is active. Keep chrome shortcuts from mutating tabs behind it as well.
+    if (consentActive) return;
+    if ((event.metaKey || event.ctrlKey) && event.key === ",") {
+      event.preventDefault();
+      void browserPage.open("settings");
+      return;
+    }
+    for (const shortcut of chromeShortcuts) {
+      if (!shortcut.matches(event)) continue;
+      event.preventDefault();
+      void commands.runCommand(shortcut.command);
+      return;
+    }
+  }
+
+  onMount(installCloseService);
+  onMount(() => {
+    let disposed = false;
+
+    // Each async initializer performs its synchronous setup before its first
+    // await. In particular, tabs installs every scoped projection listener
+    // before bootstrap can ask native code for a snapshot.
+    const themeReady = theme.init();
+
+    // Runtime status is emitted by the same actor-ordered bootstrap that
+    // supplies tabs, so its listener must exist before tabs starts bootstrap.
+    const toolsReady = tools.init();
+    const browserPageReady = browserPage.init();
+    const preferencesReady = preferences.init();
+    const runtimeReady = runtime.init();
+    const extensionsReady = extensions.init();
+    const pagePermissionsReady = pagePermissions.init();
+    const tabsReady = tabs.init();
+    const sidebarReady = sidebar.init();
+    const uiEventsReady = ui.init();
+    void operations.init();
+    void blocker.init();
+    if (!IS_MAC) void layout.init();
+    document.addEventListener("keydown", handleKeydown);
+
+    void (async () => {
+      try {
+        await Promise.all([
+          toolsReady,
+          browserPageReady,
+          preferencesReady,
+          themeReady,
+          runtimeReady,
+          extensionsReady,
+          pagePermissionsReady,
+          tabsReady,
+          uiEventsReady,
+          sidebarReady,
+        ]);
+        if (disposed) return;
+
+        // A hidden native window can suspend animation frames indefinitely.
+        // Resolve style/layout synchronously before admitting native reveal.
+        void document.documentElement.getBoundingClientRect();
+        void getComputedStyle(document.body).backgroundColor;
+        if (!(await commands.uiReady())) {
+          throw new Error("native startup gate rejected UI");
+        }
+        motion.reveal();
+      } catch {
+        // Native owns the fail-closed watchdog. Keep attacker-controlled page
+        // data and native internals out of this static diagnostic.
+        console.error("trusted UI initialization failed");
+      }
+    })();
+
+    return () => {
+      disposed = true;
+      theme.dispose();
+      browserPage.dispose();
+      tools.dispose();
+      motion.dispose();
+      preferences.dispose();
+      operations.dispose();
+      blocker.dispose();
+      runtime.dispose();
+      extensions.dispose();
+      pagePermissions.dispose();
+      tabs.dispose();
+      ui.dispose();
+      if (!IS_MAC) layout.dispose();
+      document.removeEventListener("keydown", handleKeydown);
+    };
+  });
+</script>
+
+<div class="contents" inert={consentActive}>
+  <Shell />
+  {#if !IS_MAC}
+    <Dividers />
+  {/if}
+</div>
+{#if extensionPermissionPrompt !== null}
+  {#key `${extensionPermissionPrompt.runtime_generation}:${extensionPermissionPrompt.request_id}`}
+    <ExtensionPermissionPrompt prompt={extensionPermissionPrompt} />
+  {/key}
+{:else if pagePermissionPrompt !== null}
+  {#key `${pagePermissionPrompt.profile_id}:${pagePermissionPrompt.item_id}:${pagePermissionPrompt.request_id}`}
+    <PagePermissionPrompt prompt={pagePermissionPrompt} />
+  {/key}
+{/if}

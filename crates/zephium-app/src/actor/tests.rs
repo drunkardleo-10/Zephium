@@ -1010,3 +1010,98 @@ fn composition_shutdown_preserves_an_earlier_deadline_and_clamps_a_later_one() {
     let request = handle.shutdown_with_deadline(too_late);
     assert!(request.deadline() < too_late);
 }
+
+#[test]
+fn browser_pages_cross_the_tracked_operation_admission_boundary() {
+    let queue = CommandQueue::new();
+    let handle = Handle::new(queue.clone());
+    for (index, page) in [
+        Some(crate::BrowserPage::Settings),
+        Some(crate::BrowserPage::History),
+        Some(crate::BrowserPage::Downloads),
+        Some(crate::BrowserPage::Work),
+        None,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let operation_id = format!("{index:016x}");
+        assert!(handle.dispatch_operation(operation_id.clone(), Command::ShowBrowserPage(page)));
+        let Command::Operation {
+            operation_id: admitted,
+            command,
+        } = queue.try_recv().expect("admitted browser request")
+        else {
+            panic!("expected tracked operation");
+        };
+        assert_eq!(admitted, operation_id);
+        assert!(matches!(*command,Command::ShowBrowserPage(actual) if actual == page));
+    }
+    assert!(!handle.dispatch_operation(
+        "0000000000000004".into(),
+        Command::BrowserChromeRestored {
+            revision: 1,
+            applied: true
+        }
+    ));
+    assert!(queue.try_recv().is_none());
+}
+
+#[test]
+fn essentials_cross_the_tracked_operation_admission_boundary() {
+    let queue = CommandQueue::new();
+    let handle = Handle::new(queue.clone());
+    let id = ItemId::from(41_u128);
+    let before = Some(ItemId::from(42_u128));
+    for essential in [true, false] {
+        assert!(handle.dispatch_operation(
+            "0000000000000001".into(),
+            Command::SetTabEssential {
+                id,
+                essential,
+                before
+            }
+        ));
+        let Command::Operation { command, .. } = queue.try_recv().expect("admitted move") else {
+            panic!("expected tracked operation");
+        };
+        assert!(
+            matches!(*command,Command::SetTabEssential {id: actual,essential: actual_essential,before: actual_before} if actual == id && actual_essential == essential && actual_before == before)
+        );
+    }
+}
+
+#[test]
+fn scoped_launcher_actions_cross_the_real_operation_admission_boundary() {
+    let queue = CommandQueue::new();
+    let handle = Handle::new(queue.clone());
+    let context = zephium_ipc::SearchContext {
+        window_id: "window".into(),
+        session_id: "0000000000000001".into(),
+        request_id: "request-1".into(),
+        profile_id: "p".into(),
+        space_id: "s".into(),
+    };
+    let action = zephium_ipc::SearchAction::OpenUrl {
+        url: "https://example.com/".into(),
+    };
+    assert!(handle.dispatch_operation(
+        "0000000000000001".into(),
+        Command::RunSearchAction {
+            context: Box::new(context.clone()),
+            action: action.clone()
+        }
+    ));
+    let Command::Operation { command, .. } = queue.try_recv().unwrap() else {
+        panic!("tracked command required");
+    };
+    assert!(
+        matches!(*command,Command::RunSearchAction{context:actual,action:actual_action} if *actual==context&&actual_action==action)
+    );
+    assert!(!handle.dispatch_operation(
+        "0000000000000002".into(),
+        Command::CancelSearch {
+            session_id: context.session_id
+        }
+    ));
+}

@@ -1,8 +1,8 @@
-import type { BlockerStatusView, OperationAdmission } from "../../shared/ipc/bindings";
-import { commands } from "../../shared/ipc/bindings";
-import { events } from "../../shared/ipc/native-events";
+import type { BlockerStatusView, OperationAdmission } from "$shared/ipc/bindings";
+import { commands } from "$shared/ipc/bindings";
+import { events } from "$shared/ipc/native-events";
 import { BLOCKER_ZERO_REVISION, initialBlockerStatus, newestBlockerStatus } from "./blocker-model";
-import * as operations from "../operations/operations";
+import { operations } from "$domain/operations";
 
 let state = $state.raw<BlockerStatusView>(initialBlockerStatus());
 

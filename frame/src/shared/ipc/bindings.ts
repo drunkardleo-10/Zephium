@@ -9,6 +9,7 @@ export const commands = {
 	tabsOpen: () => __TAURI_INVOKE<OperationAdmission>("tabs_open"),
 	tabsActivate: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_activate", { id }),
 	tabsClose: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_close", { id }),
+	tabsSetEssential: (id: string, essential: boolean, before: string | null) => __TAURI_INVOKE<OperationAdmission>("tabs_set_essential", { id, essential, before }),
 	tabsNavigate: (id: string, input: string) => __TAURI_INVOKE<OperationAdmission>("tabs_navigate", { id, input }),
 	tabsReload: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_reload", { id }),
 	tabsBack: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_back", { id }),
@@ -80,6 +81,21 @@ export const commands = {
 	operationAcknowledge: (operationId: string) => __TAURI_INVOKE<boolean>("operation_acknowledge", { operationId }),
 	runCommand: (id: string) => __TAURI_INVOKE<OperationAdmission>("run_command", { id }),
 	panelHide: () => __TAURI_INVOKE<void>("panel_hide"),
+	panelReady: () => __TAURI_INVOKE<{
+	window_id: string | null,
+	revision: string,
+	session_id: string,
+	visible: boolean,
+	route: PanelRoute,
+	profile_id: string | null,
+	profile_name: string | null,
+	space_id: string | null,
+	error: boolean,
+	corner_radius: number,
+	position_restorable: boolean,
+} | null>("panel_ready"),
+	panelIntent: (intent: PanelIntent) => __TAURI_INVOKE<boolean>("panel_intent", { intent }),
+	panelDrag: () => __TAURI_INVOKE<boolean>("panel_drag"),
 	settingGet: (key: string) => __TAURI_INVOKE<string | null>("setting_get", { key }),
 	settingSet: (key: string, value: string) => __TAURI_INVOKE<OperationAdmission>("setting_set", { key, value }),
 	uiInfo: () => __TAURI_INVOKE<UiInfo>("ui_info"),
@@ -89,10 +105,12 @@ export const commands = {
 	tabMenuPopup: (id: string, x: number | null, y: number | null, canSplit: boolean) => __TAURI_INVOKE<boolean>("tab_menu_popup", { id, x, y, canSplit }),
 	profileMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("profile_menu_popup", { x, y }),
 	sidebarMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("sidebar_menu_popup", { x, y }),
-	launcherSearch: (query: string) => __TAURI_INVOKE<void>("launcher_search", { query }),
-	launcherRun: (action: SearchAction) => __TAURI_INVOKE<OperationAdmission>("launcher_run", { action }),
+	launcherSearch: (query: string, requestId: string) => __TAURI_INVOKE<boolean>("launcher_search", { query, requestId }),
+	launcherRun: (action: SearchAction, context: SearchContext) => __TAURI_INVOKE<OperationAdmission>("launcher_run", { action, context }),
 	sidebarSetWidth: (width: number | null) => __TAURI_INVOKE<void>("sidebar_set_width", { width }),
 	tabDragOver: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("tab_drag_over", { x, y }),
+	resourceCall: (expectedProfile: string, call: ResourceCall_Deserialize) => __TAURI_INVOKE<ResourceReply_Serialize>("resource_call", { expectedProfile, call }),
+	resourceCloseReady: (token: string, success: boolean) => __TAURI_INVOKE<boolean>("resource_close_ready", { token, success }),
 	tabDrop: (id: string, x: number | null, y: number | null) => __TAURI_INVOKE<OperationAdmission>("tab_drop", { id, x, y }),
 	dividerGrab: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("divider_grab", { x, y }),
 	dividerDrag: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("divider_drag", { x, y }),
@@ -114,6 +132,7 @@ export const events = {
 	layoutChanged: makeEvent<LayoutChanged>("layout-changed"),
 	operationProcessed: makeEvent<OperationProcessed>("operation-processed"),
 	pagePermissionPromptChanged: makeEvent<PagePermissionPromptChanged>("page-permission-prompt-changed"),
+	resourceChanged: makeEvent<ResourceChanged>("resource-changed"),
 	runtimeStatusChanged: makeEvent<RuntimeStatusChanged>("runtime-status-changed"),
 	searchChanged: makeEvent<SearchChanged>("search-changed"),
 	tabChanged: makeEvent<TabChanged>("tab-changed"),
@@ -269,7 +288,7 @@ export type BrowserCredentialCapabilityView = {
 	can_request_passkey_authorization: boolean,
 };
 
-export type BrowserPasskeyAuthorizationView = "authorized" | "denied" | "not_determined" | "unknown" | "unavailable" | "unsupported";
+export type BrowserPasskeyAuthorizationView = "authorized" | "denied" | "not_determined" | "entitlement_required" | "unknown" | "unavailable" | "unsupported";
 
 /**
  *  Split divider hit-strip in window logical coordinates; the chrome renders
@@ -281,6 +300,54 @@ export type DividerView = {
 	width: number | null,
 	height: number | null,
 	vertical: boolean,
+};
+
+export type DocumentAttrs = DocumentAttrs_Serialize | DocumentAttrs_Deserialize;
+
+export type DocumentAttrs_Deserialize = {
+	start?: number | null,
+	level?: number | null,
+	resource?: string | null,
+};
+
+export type DocumentAttrs_Serialize = {
+	start?: number | null,
+	level?: number | null,
+	resource?: string | null,
+};
+
+export type DocumentMark = {
+	type: string,
+};
+
+/**
+ *  Constrained ProseMirror JSON. Allowed node/mark/attribute combinations are
+ *  checked before persistence, independently from editor-side validation.
+ */
+export type DocumentNode = DocumentNode_Serialize | DocumentNode_Deserialize;
+
+/**
+ *  Constrained ProseMirror JSON. Allowed node/mark/attribute combinations are
+ *  checked before persistence, independently from editor-side validation.
+ */
+export type DocumentNode_Deserialize = {
+	type: string,
+	content?: DocumentNode_Deserialize[],
+	text?: string | null,
+	attrs?: DocumentAttrs_Deserialize | null,
+	marks?: DocumentMark[],
+};
+
+/**
+ *  Constrained ProseMirror JSON. Allowed node/mark/attribute combinations are
+ *  checked before persistence, independently from editor-side validation.
+ */
+export type DocumentNode_Serialize = {
+	type: string,
+	content?: DocumentNode_Serialize[],
+	text?: string | null,
+	attrs?: DocumentAttrs_Serialize | null,
+	marks?: DocumentMark[],
 };
 
 export type ExtensionActionFailed = ExtensionActionFailedView;
@@ -622,6 +689,20 @@ export type LayoutState = {
 	dividers: DividerView[],
 };
 
+export type Material = "none" | "vibrancy" | "liquid_glass" | "acrylic" | "mica";
+
+export type NoteDocument = NoteDocument_Serialize | NoteDocument_Deserialize;
+
+export type NoteDocument_Deserialize = {
+	version: number,
+	document: DocumentNode_Deserialize,
+};
+
+export type NoteDocument_Serialize = {
+	version: number,
+	document: DocumentNode_Serialize,
+};
+
 /**
  *  Immediate result returned by a privileged IPC command. `accepted` with an
  *  `operation_id` means the mutation was successfully and non-evictably
@@ -710,6 +791,24 @@ export type PagePermissionPromptView = {
 	prompt: PagePermissionPromptEntryView | null,
 };
 
+export type PanelIntent = { type: "search" } | { type: "back" } | { type: "dismiss" } | { type: "tool"; tool: ToolKind };
+
+export type PanelRoute = { type: "search" } | { type: "tool"; tool: ToolKind };
+
+export type PanelState = {
+	window_id: string | null,
+	revision: string,
+	session_id: string,
+	visible: boolean,
+	route: PanelRoute,
+	profile_id: string | null,
+	profile_name: string | null,
+	space_id: string | null,
+	error: boolean,
+	corner_radius: number,
+	position_restorable: boolean,
+};
+
 export type ProfileKindView = "default" | "named" | "incognito";
 
 /**
@@ -720,6 +819,125 @@ export type ProfileView = {
 	id: string,
 	name: string,
 	kind: ProfileKindView,
+};
+
+export type ResourceCall = ResourceCall_Serialize | ResourceCall_Deserialize;
+
+export type ResourceCall_Deserialize = ({ kind: "resolve_notes"; ids: string[] }) & { command?: never; id?: never; query?: never; request_id?: never } | ({ kind: "acknowledge"; request_id: string }) & { command?: never; id?: never; ids?: never; query?: never } | ({ kind: "list"; query: ResourceQuery }) & { command?: never; id?: never; ids?: never; request_id?: never } | ({ kind: "get"; id: string }) & { command?: never; ids?: never; query?: never; request_id?: never } | ({ kind: "mutate"; command: ResourceCommand_Deserialize }) & { id?: never; ids?: never; query?: never; request_id?: never };
+
+export type ResourceCall_Serialize = ({ kind: "resolve_notes"; ids: string[] }) & { command?: never; id?: never; query?: never; request_id?: never } | ({ kind: "acknowledge"; request_id: string }) & { command?: never; id?: never; ids?: never; query?: never } | ({ kind: "list"; query: ResourceQuery }) & { command?: never; id?: never; ids?: never; request_id?: never } | ({ kind: "get"; id: string }) & { command?: never; ids?: never; query?: never; request_id?: never } | ({ kind: "mutate"; command: ResourceCommand_Serialize }) & { id?: never; ids?: never; query?: never; request_id?: never };
+
+export type ResourceChanged = {
+	profile: string,
+	id: string,
+	revision: string,
+};
+
+export type ResourceCommand = ResourceCommand_Serialize | ResourceCommand_Deserialize;
+
+export type ResourceCommand_Deserialize = {
+	version: number,
+	request_id: string,
+	intent: ResourceIntent_Deserialize,
+};
+
+export type ResourceCommand_Serialize = {
+	version: number,
+	request_id: string,
+	intent: ResourceIntent_Serialize,
+};
+
+export type ResourceContent = ResourceContent_Serialize | ResourceContent_Deserialize;
+
+export type ResourceContent_Deserialize = ({ kind: "note"; document: NoteDocument_Deserialize }) & { completed?: never; description?: never; due_date?: never } | ({ kind: "task"; description: string; completed: boolean; due_date: string | null }) & { document?: never };
+
+export type ResourceContent_Serialize = ({ kind: "note"; document: NoteDocument_Serialize }) & { completed?: never; description?: never; due_date?: never } | ({ kind: "task"; description: string; completed: boolean; due_date: string | null }) & { document?: never };
+
+export type ResourceDraft = ResourceDraft_Serialize | ResourceDraft_Deserialize;
+
+export type ResourceDraft_Deserialize = {
+	title: string,
+	pinned: boolean,
+	content: ResourceContent_Deserialize,
+	/**  Same-profile resources, never permission grants or copied entities. */
+	related: string[],
+};
+
+export type ResourceDraft_Serialize = {
+	title: string,
+	pinned: boolean,
+	content: ResourceContent_Serialize,
+	/**  Same-profile resources, never permission grants or copied entities. */
+	related: string[],
+};
+
+export type ResourceError = "invalid" | "not_found" | "conflict" | "capacity" | "unavailable" | "outcome_unknown";
+
+export type ResourceIntent = ResourceIntent_Serialize | ResourceIntent_Deserialize;
+
+export type ResourceIntent_Deserialize = ({ kind: "create"; draft: ResourceDraft_Deserialize }) & { expected_revision?: never; id?: never } | { kind: "replace"; id: string; expected_revision: string; draft: ResourceDraft_Deserialize } | ({ kind: "trash"; id: string; expected_revision: string }) & { draft?: never } | ({ kind: "restore"; id: string; expected_revision: string }) & { draft?: never };
+
+export type ResourceIntent_Serialize = ({ kind: "create"; draft: ResourceDraft_Serialize }) & { expected_revision?: never; id?: never } | { kind: "replace"; id: string; expected_revision: string; draft: ResourceDraft_Serialize } | ({ kind: "trash"; id: string; expected_revision: string }) & { draft?: never } | ({ kind: "restore"; id: string; expected_revision: string }) & { draft?: never };
+
+export type ResourceKind = "note" | "task";
+
+export type ResourceQuery = {
+	completed?: boolean | null,
+	kind: ResourceKind,
+	search: string,
+	trashed: boolean,
+	after: string | null,
+	limit: number,
+};
+
+export type ResourceRecord = ResourceRecord_Serialize | ResourceRecord_Deserialize;
+
+export type ResourceRecord_Deserialize = {
+	id: string,
+	/**  Decimal string; never rounded through JavaScript's number type. */
+	revision: string,
+	created_at: string,
+	updated_at: string,
+	trashed: boolean,
+	draft: ResourceDraft_Deserialize,
+};
+
+export type ResourceRecord_Serialize = {
+	id: string,
+	/**  Decimal string; never rounded through JavaScript's number type. */
+	revision: string,
+	created_at: string,
+	updated_at: string,
+	trashed: boolean,
+	draft: ResourceDraft_Serialize,
+};
+
+export type ResourceReply = ResourceReply_Serialize | ResourceReply_Deserialize;
+
+export type ResourceReply_Deserialize = {
+	profile: string | null,
+	response: ResourceResponse_Deserialize,
+};
+
+export type ResourceReply_Serialize = {
+	profile: string | null,
+	response: ResourceResponse_Serialize,
+};
+
+export type ResourceResponse = ResourceResponse_Serialize | ResourceResponse_Deserialize;
+
+export type ResourceResponse_Deserialize = ({ kind: "acknowledged" }) & { applied_revision?: never; error?: never; items?: never; next?: never; record?: never; request_id?: never } | ({ kind: "record"; record: ResourceRecord_Deserialize }) & { applied_revision?: never; error?: never; items?: never; next?: never; request_id?: never } | ({ kind: "page"; items: ResourceSummary[]; next: string | null }) & { applied_revision?: never; error?: never; record?: never; request_id?: never } | ({ kind: "applied"; request_id: string; applied_revision: string; record: ResourceRecord_Deserialize }) & { error?: never; items?: never; next?: never } | ({ kind: "error"; error: ResourceError }) & { applied_revision?: never; items?: never; next?: never; record?: never; request_id?: never };
+
+export type ResourceResponse_Serialize = ({ kind: "acknowledged" }) & { applied_revision?: never; error?: never; items?: never; next?: never; record?: never; request_id?: never } | ({ kind: "record"; record: ResourceRecord_Serialize }) & { applied_revision?: never; error?: never; items?: never; next?: never; request_id?: never } | ({ kind: "page"; items: ResourceSummary[]; next: string | null }) & { applied_revision?: never; error?: never; record?: never; request_id?: never } | ({ kind: "applied"; request_id: string; applied_revision: string; record: ResourceRecord_Serialize }) & { error?: never; items?: never; next?: never } | ({ kind: "error"; error: ResourceError }) & { applied_revision?: never; items?: never; next?: never; record?: never; request_id?: never };
+
+export type ResourceSummary = {
+	id: string,
+	revision: string,
+	title: string,
+	pinned: boolean,
+	updated_at: string,
+	completed: boolean | null,
+	due_date: string | null,
 };
 
 /**  Sanitized advisory delivered only to privileged main chrome. */
@@ -768,6 +986,14 @@ export type SearchAction = { type: "ActivateTab"; id: string } | { type: "OpenUr
 
 export type SearchChanged = SearchResults;
 
+export type SearchContext = {
+	window_id: string,
+	session_id: string,
+	request_id: string,
+	profile_id: string,
+	space_id: string,
+};
+
 export type SearchResult = {
 	kind: string,
 	title: string,
@@ -777,6 +1003,7 @@ export type SearchResult = {
 };
 
 export type SearchResults = {
+	context: SearchContext | null,
 	query: string,
 	results: SearchResult[],
 };
@@ -840,10 +1067,12 @@ export type TabView = {
 	favicon: string | null,
 };
 
+export type ToolKind = "notes" | "tasks" | "ai" | "history" | "downloads" | "time";
+
 export type UiCommand = string;
 
 export type UiInfo = {
-	material: boolean,
+	material: Material,
 };
 
 /* Tauri Specta runtime */

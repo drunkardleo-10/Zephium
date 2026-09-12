@@ -1,4 +1,4 @@
-import { events } from "../../shared/ipc/native-events";
+import { events } from "$shared/ipc/native-events";
 
 type UiCommandState = { id: string; seq: number };
 
