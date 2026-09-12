@@ -9,6 +9,7 @@ export const commands = {
 	tabsOpen: () => __TAURI_INVOKE<OperationAdmission>("tabs_open"),
 	tabsActivate: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_activate", { id }),
 	tabsClose: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_close", { id }),
+	tabsSetEssential: (id: string, essential: boolean, before: string | null) => __TAURI_INVOKE<OperationAdmission>("tabs_set_essential", { id, essential, before }),
 	tabsNavigate: (id: string, input: string) => __TAURI_INVOKE<OperationAdmission>("tabs_navigate", { id, input }),
 	tabsReload: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_reload", { id }),
 	tabsBack: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_back", { id }),
@@ -80,6 +81,21 @@ export const commands = {
 	operationAcknowledge: (operationId: string) => __TAURI_INVOKE<boolean>("operation_acknowledge", { operationId }),
 	runCommand: (id: string) => __TAURI_INVOKE<OperationAdmission>("run_command", { id }),
 	panelHide: () => __TAURI_INVOKE<void>("panel_hide"),
+	panelReady: () => __TAURI_INVOKE<{
+	window_id: string | null,
+	revision: string,
+	session_id: string,
+	visible: boolean,
+	route: PanelRoute,
+	profile_id: string | null,
+	profile_name: string | null,
+	space_id: string | null,
+	error: boolean,
+	corner_radius: number,
+	position_restorable: boolean,
+} | null>("panel_ready"),
+	panelIntent: (intent: PanelIntent) => __TAURI_INVOKE<boolean>("panel_intent", { intent }),
+	panelDrag: () => __TAURI_INVOKE<boolean>("panel_drag"),
 	settingGet: (key: string) => __TAURI_INVOKE<string | null>("setting_get", { key }),
 	settingSet: (key: string, value: string) => __TAURI_INVOKE<OperationAdmission>("setting_set", { key, value }),
 	uiInfo: () => __TAURI_INVOKE<UiInfo>("ui_info"),
@@ -89,8 +105,8 @@ export const commands = {
 	tabMenuPopup: (id: string, x: number | null, y: number | null, canSplit: boolean) => __TAURI_INVOKE<boolean>("tab_menu_popup", { id, x, y, canSplit }),
 	profileMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("profile_menu_popup", { x, y }),
 	sidebarMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("sidebar_menu_popup", { x, y }),
-	launcherSearch: (query: string) => __TAURI_INVOKE<void>("launcher_search", { query }),
-	launcherRun: (action: SearchAction) => __TAURI_INVOKE<OperationAdmission>("launcher_run", { action }),
+	launcherSearch: (query: string, requestId: string) => __TAURI_INVOKE<boolean>("launcher_search", { query, requestId }),
+	launcherRun: (action: SearchAction, context: SearchContext) => __TAURI_INVOKE<OperationAdmission>("launcher_run", { action, context }),
 	sidebarSetWidth: (width: number | null) => __TAURI_INVOKE<void>("sidebar_set_width", { width }),
 	tabDragOver: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("tab_drag_over", { x, y }),
 	tabDrop: (id: string, x: number | null, y: number | null) => __TAURI_INVOKE<OperationAdmission>("tab_drop", { id, x, y }),
@@ -622,6 +638,8 @@ export type LayoutState = {
 	dividers: DividerView[],
 };
 
+export type Material = "none" | "vibrancy" | "liquid_glass" | "acrylic" | "mica";
+
 /**
  *  Immediate result returned by a privileged IPC command. `accepted` with an
  *  `operation_id` means the mutation was successfully and non-evictably
@@ -710,6 +728,24 @@ export type PagePermissionPromptView = {
 	prompt: PagePermissionPromptEntryView | null,
 };
 
+export type PanelIntent = { type: "search" } | { type: "back" } | { type: "dismiss" } | { type: "tool"; tool: ToolKind };
+
+export type PanelRoute = { type: "search" } | { type: "tool"; tool: ToolKind };
+
+export type PanelState = {
+	window_id: string | null,
+	revision: string,
+	session_id: string,
+	visible: boolean,
+	route: PanelRoute,
+	profile_id: string | null,
+	profile_name: string | null,
+	space_id: string | null,
+	error: boolean,
+	corner_radius: number,
+	position_restorable: boolean,
+};
+
 export type ProfileKindView = "default" | "named" | "incognito";
 
 /**
@@ -768,6 +804,14 @@ export type SearchAction = { type: "ActivateTab"; id: string } | { type: "OpenUr
 
 export type SearchChanged = SearchResults;
 
+export type SearchContext = {
+	window_id: string,
+	session_id: string,
+	request_id: string,
+	profile_id: string,
+	space_id: string,
+};
+
 export type SearchResult = {
 	kind: string,
 	title: string,
@@ -777,6 +821,7 @@ export type SearchResult = {
 };
 
 export type SearchResults = {
+	context: SearchContext | null,
 	query: string,
 	results: SearchResult[],
 };
@@ -840,10 +885,12 @@ export type TabView = {
 	favicon: string | null,
 };
 
+export type ToolKind = "notes" | "tasks" | "ai" | "history" | "downloads" | "time";
+
 export type UiCommand = string;
 
 export type UiInfo = {
-	material: boolean,
+	material: Material,
 };
 
 /* Tauri Specta runtime */

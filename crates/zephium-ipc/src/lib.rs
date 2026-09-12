@@ -513,6 +513,57 @@ pub enum SearchAction {
     RunCommand { id: String },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolKind {
+    Notes,
+    Tasks,
+    Ai,
+    History,
+    Downloads,
+    Time,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct SearchContext {
+    pub window_id: String,
+    pub session_id: String,
+    pub request_id: String,
+    pub profile_id: String,
+    pub space_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PanelRoute {
+    Search,
+    Tool { tool: ToolKind },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PanelIntent {
+    Search,
+    Back,
+    Dismiss,
+    Tool { tool: ToolKind },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct PanelState {
+    pub window_id: Option<String>,
+    pub revision: String,
+    pub session_id: String,
+    pub visible: bool,
+    pub route: PanelRoute,
+    pub profile_id: Option<String>,
+    pub profile_name: Option<String>,
+    pub space_id: Option<String>,
+    pub error: bool,
+    pub corner_radius: u16,
+    pub position_restorable: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 pub struct SearchResult {
     pub kind: String,
@@ -524,6 +575,7 @@ pub struct SearchResult {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 pub struct SearchResults {
+    pub context: Option<SearchContext>,
     pub query: String,
     pub results: Vec<SearchResult>,
 }
@@ -919,9 +971,18 @@ impl BlockerStatusView {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct PanelOwner {
+    pub window_id: String,
+    pub profile_id: String,
+    pub profile_name: String,
+    pub space_id: String,
+}
+
 /// Snapshots for structural changes, single-row deltas for per-tab churn.
 #[derive(Clone, Debug)]
 pub enum Projection {
+    PanelOwner(PanelOwner),
     Items(ItemsState),
     Tab(TabView),
     ExtensionActions(ExtensionActionsView),
