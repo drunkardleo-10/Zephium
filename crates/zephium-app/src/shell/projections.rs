@@ -476,20 +476,29 @@ impl Shell {
     }
 
     pub(super) fn project_items(&self) {
+        if let Some(window) = self.windows.focused() {
+            if let Some(profile) = self.profiles.get(window.profile) {
+                (self.emit)(Projection::PanelOwner(zephium_ipc::PanelOwner {
+                    window_id: window.id.to_string(),
+                    profile_id: profile.id.to_string(),
+                    profile_name: profile.name.clone(),
+                    space_id: window.space.to_string(),
+                }));
+            }
+        }
         self.project_blocker_status();
-        let Some(win) = self.windows.focused() else {
-            return;
-        };
-        let Some(profile) = self.profiles.get(win.profile) else {
-            return;
-        };
-        let Some(active_space) = self
+        if let Some(snapshot) = self.items_snapshot() {
+            (self.emit)(Projection::Items(snapshot));
+        }
+    }
+
+    pub(super) fn items_snapshot(&self) -> Option<ItemsState> {
+        let win = self.windows.focused()?;
+        let profile = self.profiles.get(win.profile)?;
+        let active_space = self
             .spaces
             .get(win.space)
-            .filter(|space| space.profile == profile.id)
-        else {
-            return;
-        };
+            .filter(|space| space.profile == profile.id)?;
 
         let profile_view = ProfileView {
             id: profile.id.to_string(),
@@ -554,7 +563,7 @@ impl Shell {
             })
         });
         self.record_tab_projection_revisions(&sidebar.tabs);
-        (self.emit)(Projection::Items(ItemsState {
+        Some(ItemsState {
             projection_revision: format!("{:032x}", self.next_projection_revision()),
             profile: Some(profile_view),
             spaces,
@@ -566,7 +575,7 @@ impl Shell {
                 .filter(|id| sidebar.tab_ids.contains(id))
                 .map(|id| id.to_string()),
             split_group,
-        }));
+        })
     }
 
     fn project_sidebar_node(

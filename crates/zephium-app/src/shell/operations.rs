@@ -5,9 +5,15 @@ use super::*;
 impl Shell {
     pub(super) fn handle_operation(&mut self, command: Command) -> OperationDisposition {
         match command {
+            Command::ShowBrowserPage(page) => self.operation_show_browser_page(page),
             Command::Open => self.operation_open(),
             Command::Activate(id) => self.operation_activate(id),
             Command::Close(id) => self.operation_close(id),
+            Command::SetTabEssential {
+                id,
+                essential,
+                before,
+            } => self.operation_set_tab_essential(id, essential, before),
             Command::Navigate { id, input } => self.operation_navigate(id, input),
             Command::Reload(id) => self.operation_reload(id),
             Command::GoBack(id) => self.operation_history(id, false),
@@ -17,6 +23,9 @@ impl Shell {
             Command::DropTab { id, x, y } => self.operation_drop_tab(id, x, y),
             Command::DividerRelease { x, y } => self.operation_divider_release(x.zip(y)),
             Command::Run(id) => self.operation_run_command(&id),
+            Command::RunSearchAction { context, action } => {
+                self.operation_run_search_action(*context, action)
+            }
             Command::InvokeExtensionAction {
                 runtime,
                 revision,
@@ -42,6 +51,37 @@ impl Shell {
                 OperationReason::UnsupportedCommand,
             ),
         }
+    }
+
+    pub(super) fn operation_set_tab_essential(
+        &mut self,
+        id: ItemId,
+        essential: bool,
+        before: Option<ItemId>,
+    ) -> OperationDisposition {
+        if !self.item_in_focused_scope(id) {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
+        }
+        let Some(window) = self.windows.focused() else {
+            return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
+        };
+        let placement = if essential {
+            Placement::Favorites {
+                profile: window.profile,
+            }
+        } else {
+            Placement::Space {
+                space: window.space,
+                section: SpaceSection::Today,
+            }
+        };
+        if before.is_some_and(|before| !self.item_in_focused_scope(before)) {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
+        }
+        if !self.items.move_tab_to_root(id, placement, before) {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
+        }
+        mutation_result(self.commit(Vec::new()))
     }
 
     fn operation_invoke_extension_action(
@@ -91,6 +131,11 @@ impl Shell {
     }
 
     pub(super) fn operation_open(&mut self) -> OperationDisposition {
+        if self.active_browser_page().is_some() {
+            self.browser_after_return = Some(Box::new(Command::Open));
+            return self.operation_show_browser_page(None);
+        }
+
         if self.windows.focused().is_none() {
             return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
         }
@@ -123,6 +168,11 @@ impl Shell {
     }
 
     pub(super) fn operation_activate(&mut self, id: ItemId) -> OperationDisposition {
+        if self.active_browser_page().is_some() {
+            self.browser_after_return = Some(Box::new(Command::Activate(id)));
+            return self.operation_show_browser_page(None);
+        }
+
         if !self.item_in_focused_scope(id) {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
@@ -168,6 +218,11 @@ impl Shell {
     }
 
     pub(super) fn operation_navigate(&mut self, id: ItemId, input: String) -> OperationDisposition {
+        if self.active_browser_page().is_some() {
+            self.browser_after_return = Some(Box::new(Command::Navigate { id, input }));
+            return self.operation_show_browser_page(None);
+        }
+
         if !self.item_in_focused_scope(id) {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
@@ -370,10 +425,10 @@ impl Shell {
         key: String,
         value: String,
     ) -> OperationDisposition {
-        if key != "appearance" || !matches!(value.as_str(), "system" | "light" | "dark") {
+        if !zephium_core::preferences::value_allowed(&key, &value) {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
         }
-        if !self.store.set_app_setting(key, value.clone()) {
+        if !self.store.set_app_setting(key.clone(), value.clone()) {
             return operation_result(
                 OperationOutcome::Rejected,
                 OperationReason::StoreAdmissionRejected,
@@ -382,7 +437,12 @@ impl Shell {
         // This projection is downstream of truthful store-queue admission.
         // The desktop composition root applies native theme state from this
         // signal, never optimistically from the IPC request itself.
-        (self.emit)(Projection::UiCommand(format!("theme.{value}")));
+        let command = if key == "appearance" {
+            format!("theme.{value}")
+        } else {
+            format!("preference.{key}={value}")
+        };
+        (self.emit)(Projection::UiCommand(command));
         operation_result(
             OperationOutcome::Deferred,
             OperationReason::StoreWorkPending,

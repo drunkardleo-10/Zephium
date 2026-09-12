@@ -181,6 +181,8 @@ impl AgentLifecycleOwner {
     }
 }
 
+mod browser_pages;
+
 pub struct Shell {
     #[cfg(feature = "work-execution")]
     work: Option<Box<crate::work::ApplicationWork>>,
@@ -198,6 +200,10 @@ pub struct Shell {
     residency: ResidencyState,
     last_visits: std::collections::HashMap<ItemId, (String, std::time::Instant)>,
     window_visible: bool,
+    browser_page: Option<(WindowId, crate::BrowserPage)>,
+    browser_return_revision: u64,
+    browser_after_return: Option<Box<Command>>,
+    browser_return: Option<(u64, WindowId, ItemsState)>,
     runtime_restart_required: bool,
     user_content_status: user_content_status::UserContentStatus,
     crash: CrashState,
@@ -452,6 +458,10 @@ impl Shell {
             residency: ResidencyState::default(),
             last_visits: std::collections::HashMap::new(),
             window_visible: true,
+            browser_page: None,
+            browser_return_revision: 0,
+            browser_after_return: None,
+            browser_return: None,
             runtime_restart_required: false,
             user_content_status: user_content_status::UserContentStatus::default(),
             crash: CrashState::default(),
@@ -670,6 +680,13 @@ impl Shell {
             Command::Activate(id) => {
                 let _ = self.operation_activate(id);
             }
+            Command::SetTabEssential {
+                id,
+                essential,
+                before,
+            } => {
+                let _ = self.operation_set_tab_essential(id, essential, before);
+            }
             Command::Close(id) => {
                 let _ = self.operation_close(id);
             }
@@ -718,6 +735,12 @@ impl Shell {
                     let _ = self.relayout();
                     self.maintain_views();
                 }
+            }
+            Command::BrowserChromeRestored { revision, applied } => {
+                self.browser_chrome_restored(revision, applied)
+            }
+            Command::ShowBrowserPage(page) => {
+                let _ = self.operation_show_browser_page(page);
             }
             Command::SetSidebarWidth(width) => {
                 if let Some(win) = self.windows.focused_mut() {
@@ -804,7 +827,15 @@ impl Shell {
             Command::ExtensionDistributionStatusChanged(status) => {
                 self.observe_extension_distribution_status(status)
             }
-            Command::Search(query) => self.search(&query),
+            Command::Search(query) => {
+                self.search.context = None;
+                self.search(&query);
+            }
+            Command::SearchScoped { query, context } => self.search_scoped(&query, *context),
+            Command::CancelSearch { session_id } => self.cancel_scoped_search(&session_id),
+            Command::RunSearchAction { context, action } => {
+                let _ = self.operation_run_search_action(*context, action);
+            }
             Command::OpenUrl(input) => {
                 let _ = self.operation_open_url(input);
             }

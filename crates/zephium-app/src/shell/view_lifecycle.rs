@@ -106,13 +106,14 @@ impl Shell {
         if self.windows.focused().is_none() {
             return false;
         }
-        let shown: std::collections::HashSet<ItemId> = if self.window_visible {
-            self.pane_tree()
-                .map(|t| t.tabs().into_iter().collect())
-                .unwrap_or_default()
-        } else {
-            std::collections::HashSet::new()
-        };
+        let shown: std::collections::HashSet<ItemId> =
+            if self.window_visible && self.active_browser_page().is_none() {
+                self.pane_tree()
+                    .map(|t| t.tabs().into_iter().collect())
+                    .unwrap_or_default()
+            } else {
+                std::collections::HashSet::new()
+            };
         self.residency
             .recent
             .retain(|id| self.items.tab(*id).is_some());

@@ -26,6 +26,7 @@ impl Shell {
         if self.windows.focused().is_some() {
             let _ = self.relayout();
             self.project_items();
+            self.project_browser_page();
             return;
         }
         let pending_deletions = match self.store.pending_profile_deletions() {

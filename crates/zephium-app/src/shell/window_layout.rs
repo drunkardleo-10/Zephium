@@ -11,6 +11,9 @@ pub(super) struct GrabbedDivider {
 
 impl Shell {
     pub(super) fn resolve_drop(&self, x: f64, y: f64) -> Option<split::Drop> {
+        if self.active_browser_page().is_some() {
+            return None;
+        }
         let win = self.windows.focused()?;
         let tree = self.pane_tree()?;
         let region =
@@ -39,7 +42,9 @@ impl Shell {
         // full window instead of the sidebar's narrow viewport. Native page
         // siblings are removed from the stage for the exact visible lifetime.
         let extension_center_active = self.extension_management.visible_profile().is_some();
-        let privileged_overlay_active = extension_consent_active || extension_center_active;
+        let privileged_overlay_active = extension_consent_active
+            || extension_center_active
+            || self.active_browser_page().is_some();
         // `Items` marks a prospective view resident before its CreateView
         // effect is dispatched. While the profile's first explicit native
         // policy is still compiling/installing, that effect is intentionally
@@ -98,6 +103,9 @@ impl Shell {
     }
 
     pub(super) fn locate_divider(&self, x: f64, y: f64) -> Option<GrabbedDivider> {
+        if self.active_browser_page().is_some() {
+            return None;
+        }
         let win = self.windows.focused()?;
         let tree = self.pane_tree()?;
         let region =
