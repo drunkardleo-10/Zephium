@@ -1,0 +1,268 @@
+/* Semantic tokens: the only names components may use. Dark is the base; the
+   light block below mirrors it by luminance. --color-canvas stays a literal
+   hex in both blocks because the native bootstrap paint is checked against it. */
+@theme static {
+  --color-canvas: #1a1b20;
+  --color-chrome: #141416;
+  --color-page: #151517;
+  --color-surface: #1f1f22;
+  --color-raised: #2a2a2e;
+  --color-menu: rgb(36 36 40 / 0.88);
+
+  --color-fill: var(--white-a6);
+  --color-fill-hover: rgb(255 255 255 / 0.09);
+  --color-fill-active: var(--white-a12);
+  --color-fill-pressed: var(--white-a14);
+  --color-fill-strong: var(--white-a18);
+  --color-card: rgb(255 255 255 / 0.055);
+
+  --color-border: rgb(255 255 255 / 0.08);
+  --color-border-strong: var(--white-a14);
+
+  --color-text: #f4f4f6;
+  --color-label-secondary: #d6d7dc;
+  --color-muted: rgb(244 244 246 / 0.68);
+  --color-faint: rgb(244 244 246 / 0.44);
+
+  /* Controls: a whisper of fill, a hairline ring, a catch of light on the top
+     edge and a one-pixel drop. Nothing in the chrome is brighter than this. */
+  --color-control: rgb(255 255 255 / 0.06);
+  --color-control-hover: rgb(255 255 255 / 0.09);
+  --color-control-pressed: rgb(255 255 255 / 0.12);
+  --color-on-control: rgb(251 251 251 / 0.8);
+  --color-on-control-strong: rgb(251 251 251 / 0.95);
+
+  /* Fields and tracks sit level with the surface and only ring when editing. */
+  --color-field: rgb(255 255 255 / 0.09);
+  --color-field-hover: rgb(255 255 255 / 0.12);
+  --color-field-ring: rgb(255 255 255 / 0.16);
+
+  /* A raised fill is the one lit shape: the filled part of a value slider,
+     a selected segment, a switch thumb. */
+  --color-raise: rgb(255 255 255 / 0.08);
+  --color-raise-active: rgb(255 255 255 / 0.12);
+  --color-thumb: #e4e4e9;
+  --color-track: rgb(255 255 255 / 0.14);
+  --color-track-on: #8e9298;
+  --color-switch-thumb: var(--gray-0);
+  --color-switch-thumb-off: #d9d9de;
+  --color-switch-glass: rgb(255 255 255 / 0.1);
+  --color-switch-rim: rgb(255 255 255 / 0.85);
+
+  /* Kept for the light-tile primary (near-white) and the checked checkbox. */
+  --color-primary-top: var(--gray-50);
+  --color-primary-bottom: var(--gray-150);
+  --color-on-primary: #15181e;
+
+  /* The accent follows the space tint. Graphite, the default, is near-white;
+     the other tints are selected in Settings. */
+  --color-accent: #e8edf6;
+  --color-accent-hover: #f5f7fb;
+  --color-on-accent: #15181e;
+  --color-accent-soft: color-mix(in srgb, var(--color-accent) 16%, transparent);
+  --color-ring: var(--white-a50);
+  --color-tint-graphite: var(--gray-400);
+  --color-tint-sky: #7fb3f5;
+  --color-tint-sage: #86c9a4;
+  --color-tint-rose: #ee8f95;
+  --color-danger: #ef8a8e;
+  --color-success: #7fcaa1;
+  --color-warning: #dcb977;
+  --color-info: #8fbcf7;
+
+  --radius-xs: 7px;
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-capsule: 999px;
+  --radius-control: 13px;
+  --radius-control-compact: 10px;
+  --radius-control-large: 16px;
+  --radius-field: 13px;
+  --radius-card: 20px;
+  --radius-panel: 24px;
+  --radius-menu: 20px;
+
+  /* Matches the native content view's layer radius, so the new tab pane and a
+     live page occupy the same shape. Changing one requires changing both. */
+  --content-radius: 12px;
+
+  /* Traffic lights sit at window (7, 22) and the chrome WebView starts at the
+     8px window padding, so within the chrome they span y 14..28 and end near
+     x 53. The header centres on that band and clears that extent. */
+  --titlebar-height: 32px;
+  --traffic-light-inset: 60px;
+
+  --shadow-control:
+    0 1px 1px 0 rgb(0 0 0 / 0.24), inset 0 0 0 1px rgb(255 255 255 / 0.08),
+    inset 0 1px 0 0 rgb(255 255 255 / 0.08);
+  --shadow-control-strong:
+    0 1px 2px 0 rgb(0 0 0 / 0.28), inset 0 0 0 1px rgb(255 255 255 / 0.12),
+    inset 0 1px 0 0 rgb(255 255 255 / 0.1);
+  --shadow-primary: 0 1px 1px 0 rgb(0 0 0 / 0.3), inset 0 1px 0 0 rgb(255 255 255 / 0.7);
+  --shadow-accent:
+    0 1px 3px 0 rgb(0 0 0 / 0.16),
+    inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 12%, transparent),
+    inset 0 -1px 0 0 rgb(0 0 0 / 0.18);
+  --shadow-field: inset 0 0 0 1px rgb(255 255 255 / 0.05);
+  --shadow-field-focus: inset 0 0 0 1px var(--color-field-ring);
+  --shadow-raise:
+    0 1px 3px 0 rgb(0 0 0 / 0.24), inset 0 0 0 1px rgb(255 255 255 / 0.04),
+    inset 0 -1px 0 0 rgb(0 0 0 / 0.2);
+  --shadow-thumb:
+    0 1px 2px rgb(0 0 0 / 0.3), 0 3px 8px rgb(0 0 0 / 0.28), 0 0 0 0.5px rgb(0 0 0 / 0.16);
+  --shadow-thumb-grab:
+    0 2px 4px rgb(0 0 0 / 0.32), 0 6px 16px rgb(0 0 0 / 0.3), 0 0 0 0.5px rgb(0 0 0 / 0.16);
+  --shadow-track: inset 0 1px 2px rgb(0 0 0 / 0.28), inset 0 0 0 1px rgb(255 255 255 / 0.05);
+  --shadow-raised: 0 0 0 0 rgb(0 0 0 / 0);
+  --shadow-float:
+    0 0 0 1px rgb(0 0 0 / 0.4), 0 2px 6px rgb(0 0 0 / 0.24), 0 8px 32px rgb(0 0 0 / 0.32),
+    inset 0 1px 0 0 rgb(255 255 255 / 0.06);
+  --shadow-popover:
+    inset 0 0 0 1px rgb(255 255 255 / 0.07), 0 0 0 1px rgb(0 0 0 / 0.22),
+    0 2px 6px rgb(0 0 0 / 0.18), 0 10px 32px rgb(0 0 0 / 0.26);
+  --shadow-overlay:
+    inset 0 1px 0 rgb(255 255 255 / 0.08), 0 20px 48px rgb(0 0 0 / 0.4), 0 2px 8px rgb(0 0 0 / 0.2);
+
+  /* Inter, with the platform face as the fallback chain. */
+  --font-sans:
+    "Inter Variable", -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI Variable Text",
+    "Segoe UI", "Noto Sans", "Cantarell", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "Menlo", "Consolas", monospace;
+
+  --text-caption: 11px;
+  --text-label: 12px;
+  --text-body: 13px;
+  --text-page-body: 13px;
+  --text-page-title: 14px;
+  --text-title: 22px;
+  --text-display: 36px;
+
+  --control-compact: 24px;
+  --control-regular: 30px;
+  --control-large: 34px;
+  --field-height: 30px;
+  --row-sidebar: 34px;
+  --row-page: 50px;
+
+  /* Motion. Presses land instantly and release softly; anything that moves a
+     thumb or an indicator gets a whisper of spring. */
+  --motion-instant: 80ms;
+  --motion-fast: 140ms;
+  --motion-base: 200ms;
+  --motion-slow: 300ms;
+  --motion-page: 380ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-smooth: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-spring: cubic-bezier(0.34, 1.25, 0.64, 1);
+  --ease-press: cubic-bezier(0.2, 0, 0, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+  --ease-out-quiet: var(--ease-out);
+  --ease-inout-quiet: var(--ease-in-out);
+  --ease-out-soft: var(--ease-out);
+
+  /* Favicon plate. Inactive rows desaturate so mixed-brightness site icons
+     stop competing with each other and with the surface. */
+  --favicon-rest-opacity: 0.82;
+  --favicon-rest-saturation: 0.85;
+}
+
+[data-theme="light"] {
+  --color-canvas: #f3f3f6;
+  --color-chrome: #e9e9ee;
+  --color-page: #f5f5f8;
+  --color-surface: var(--gray-0);
+  --color-raised: var(--gray-0);
+  --color-menu: rgb(252 252 253 / 0.82);
+
+  /* Light chrome gains elevation by getting brighter, not darker, so the
+     active state is a white pill rather than a heavier overlay. */
+  --color-fill: var(--ink-a5);
+  --color-fill-hover: rgb(20 22 30 / 0.08);
+  --color-fill-active: rgb(255 255 255 / 0.92);
+  --color-fill-pressed: rgb(20 22 30 / 0.11);
+  --color-fill-strong: var(--ink-a16);
+  --color-card: rgb(255 255 255 / 0.92);
+
+  --color-border: var(--ink-a7);
+  --color-border-strong: rgb(20 22 30 / 0.13);
+
+  --color-text: #1b1c21;
+  --color-label-secondary: #555862;
+  --color-muted: rgb(27 28 33 / 0.62);
+  --color-faint: rgb(27 28 33 / 0.42);
+
+  --color-control: #ffffff;
+  --color-control-hover: #f9f9f9;
+  --color-control-pressed: #f0f0f0;
+  --color-on-control: #17181c;
+  --color-on-control-strong: #17181c;
+
+  --color-field: rgb(228 228 231 / 0.7);
+  --color-field-hover: rgb(170 170 170 / 0.2);
+  --color-field-ring: rgb(0 0 0 / 0.14);
+
+  --color-raise: rgb(219 219 219 / 0.4);
+  --color-raise-active: rgb(219 219 219 / 0.6);
+  --color-thumb: #ffffff;
+  --color-track: #d6d6db;
+  --color-track-on: #6f737d;
+  --color-switch-thumb: var(--gray-0);
+  --color-switch-thumb-off: var(--gray-0);
+  --color-switch-glass: rgb(255 255 255 / 0.3);
+  --color-switch-rim: rgb(255 255 255 / 0.95);
+
+  --color-primary-top: #2a303d;
+  --color-primary-bottom: #1f2532;
+  --color-on-primary: var(--gray-0);
+
+  --color-accent: #1f2532;
+  --color-accent-hover: #2b3242;
+  --color-on-accent: var(--gray-0);
+  --color-ring: var(--ink-a40);
+  --color-tint-graphite: #5c606a;
+  --color-tint-sky: #3b82e6;
+  --color-tint-sage: #2f8a5e;
+  --color-tint-rose: #d2545e;
+  --color-danger: #c0474f;
+  --color-success: #2f7f5a;
+  --color-warning: #8c6a2a;
+  --color-info: #2f6fd6;
+
+  --shadow-control:
+    0 1px 3px 0 rgb(0 0 0 / 0.04), inset 0 0 0 1px rgb(0 0 0 / 0.06),
+    inset 0 -1px 0 0 rgb(0 0 0 / 0.1), inset 0 0 0 1px rgb(196 196 196 / 0.1);
+  --shadow-control-strong:
+    0 1px 3px 0 rgb(0 0 0 / 0.06), inset 0 0 0 1px rgb(0 0 0 / 0.08),
+    inset 0 -1px 0 0 rgb(0 0 0 / 0.12), inset 0 0 0 1px rgb(196 196 196 / 0.1);
+  --shadow-primary: 0 1px 2px rgb(20 22 30 / 0.22), inset 0 1px 0 0 rgb(255 255 255 / 0.16);
+  --shadow-accent:
+    0 1px 3px 0 rgb(4 41 117 / 0.08),
+    inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 10%, transparent),
+    inset 0 -1px 0 0 color-mix(in srgb, var(--color-accent) 15%, transparent);
+  --shadow-field: 0 0 0 0 rgb(0 0 0 / 0);
+  --shadow-field-focus:
+    inset 0 0 0 1px var(--color-field-ring), inset 0 0 0 0.5px rgb(255 255 255 / 0.06);
+  --shadow-raise:
+    0 1px 3px 0 rgb(0 0 0 / 0.06), inset 0 0 0 1px rgb(0 0 0 / 0.02),
+    inset 0 -1px 0 0 rgb(0 0 0 / 0.08), inset 0 0 0 1px rgb(191 191 191 / 0.1);
+  --shadow-thumb:
+    0 1px 2px rgb(20 22 30 / 0.18), 0 3px 8px rgb(20 22 30 / 0.14), 0 0 0 0.5px rgb(20 22 30 / 0.08);
+  --shadow-thumb-grab:
+    0 2px 4px rgb(20 22 30 / 0.18), 0 6px 16px rgb(20 22 30 / 0.16),
+    0 0 0 0.5px rgb(20 22 30 / 0.08);
+  --shadow-track: inset 0 1px 2px rgb(20 22 30 / 0.1), inset 0 0 0 1px rgb(20 22 30 / 0.04);
+  --shadow-raised: 0 1px 2px rgb(20 22 30 / 0.08), 0 0 0 1px rgb(20 22 30 / 0.04);
+  --shadow-float:
+    0 0 0 1px rgb(0 0 0 / 0.06), 0 2px 6px rgb(0 0 0 / 0.05), 0 8px 32px rgb(0 0 0 / 0.08);
+  --shadow-popover:
+    0 0 0 1px rgb(0 0 0 / 0.06), 0 2px 8px rgb(0 0 0 / 0.06), 0 16px 48px rgb(0 0 0 / 0.1);
+  --shadow-overlay:
+    inset 0 1px 0 rgb(255 255 255 / 0.9), 0 20px 48px rgb(28 28 34 / 0.16),
+    0 2px 8px rgb(28 28 34 / 0.08);
+
+  --favicon-rest-opacity: 0.9;
+  --favicon-rest-saturation: 0.92;
+}

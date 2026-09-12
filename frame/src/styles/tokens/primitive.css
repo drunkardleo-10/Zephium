@@ -1,0 +1,45 @@
+/* Raw material. Components never read these; semantic tokens do. */
+:root {
+  --gray-0: #fff;
+  --gray-50: #f8f9fb;
+  --gray-100: #eceef3;
+  --gray-150: #e4e6ec;
+  --gray-200: #d8dae1;
+  --gray-300: #c2c4cc;
+  --gray-400: #9a9ea8;
+  --gray-500: #6f737d;
+  --gray-600: #4a4d56;
+  --gray-700: #2d2e36;
+  --gray-750: #26272e;
+  --gray-800: #212229;
+  --gray-850: #1a1b20;
+  --gray-900: #16171c;
+  --gray-950: #101115;
+  --white-a4: rgb(255 255 255 / 4%);
+  --white-a6: rgb(255 255 255 / 6%);
+  --white-a8: rgb(255 255 255 / 8%);
+  --white-a10: rgb(255 255 255 / 10%);
+  --white-a12: rgb(255 255 255 / 12%);
+  --white-a14: rgb(255 255 255 / 14%);
+  --white-a18: rgb(255 255 255 / 18%);
+  --white-a24: rgb(255 255 255 / 24%);
+  --white-a40: rgb(255 255 255 / 40%);
+  --white-a50: rgb(255 255 255 / 50%);
+  --white-a70: rgb(255 255 255 / 70%);
+  --white-a85: rgb(255 255 255 / 85%);
+  --black-a6: rgb(0 0 0 / 6%);
+  --black-a10: rgb(0 0 0 / 10%);
+  --black-a14: rgb(0 0 0 / 14%);
+  --black-a18: rgb(0 0 0 / 18%);
+  --black-a22: rgb(0 0 0 / 22%);
+  --black-a28: rgb(0 0 0 / 28%);
+  --black-a35: rgb(0 0 0 / 35%);
+  --black-a45: rgb(0 0 0 / 45%);
+  --ink-a5: rgb(20 22 30 / 5%);
+  --ink-a7: rgb(20 22 30 / 7%);
+  --ink-a9: rgb(20 22 30 / 9%);
+  --ink-a12: rgb(20 22 30 / 12%);
+  --ink-a16: rgb(20 22 30 / 16%);
+  --ink-a22: rgb(20 22 30 / 22%);
+  --ink-a40: rgb(20 22 30 / 40%);
+}
