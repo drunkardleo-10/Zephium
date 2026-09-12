@@ -1,8 +1,8 @@
 <script lang="ts">
   import { Globe02Icon } from "@hugeicons/core-free-icons";
-  import * as tabs from "../../../domain/tabs/tabs.svelte";
-  import type { TabView } from "../../../shared/ipc/bindings";
-  import FavIcon from "../../../shared/ui/FavIcon.svelte";
+  import { tabs } from "$domain/tabs";
+  import type { TabView } from "$shared/ipc/bindings";
+  import FavIcon from "$shared/ui/FavIcon";
 
   let {
     entries,

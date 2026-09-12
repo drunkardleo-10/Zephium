@@ -1,4 +1,4 @@
-import type { SplitGroupView, TabView } from "../../../shared/ipc/bindings";
+import type { SplitGroupView, TabView } from "$shared/ipc/bindings";
 
 export type TabDisplayUnit =
   | {

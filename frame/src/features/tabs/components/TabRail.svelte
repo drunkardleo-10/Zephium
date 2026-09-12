@@ -1,8 +1,9 @@
 <script lang="ts">
-  import type { TabView } from "../../../shared/ipc/bindings";
-  import * as tabs from "../../../domain/tabs/tabs.svelte";
-  import FavIcon from "../../../shared/ui/FavIcon.svelte";
-  import { BrowserIcon, Globe02Icon } from "@hugeicons/core-free-icons";
+  import { rememberScroll } from "$shared/ui/scroll-memory";
+  import type { TabView } from "$shared/ipc/bindings";
+  import { tabs } from "$domain/tabs";
+  import FavIcon from "$shared/ui/FavIcon";
+  import { Globe02Icon } from "@hugeicons/core-free-icons";
 
   let {
     entries,
@@ -23,7 +24,10 @@
   tooltip, which is the only label that can appear outside the chrome
   WebView's rectangle.
 -->
-<div class="flex min-h-0 flex-1 flex-col justify-center overflow-y-auto overscroll-contain py-2">
+<div
+  use:rememberScroll={`${tabs.profile()?.id}/${tabs.activeSpaceId()}/rail`}
+  class="flex min-h-0 flex-1 flex-col justify-center overflow-y-auto overscroll-contain py-2"
+>
   <ul class="flex flex-col items-center gap-1" role="list" aria-label="Open tabs">
     {#each entries as tab (tab.id)}
       {@const active = tab.id === tabs.activeId()}
@@ -50,7 +54,7 @@
             loading={tab.loading}
             lit={active}
             size={20}
-            fallback={tab.url === null ? BrowserIcon : Globe02Icon}
+            fallback={Globe02Icon}
           />
           <span data-zephium-tab-label class="sr-only">{tab.title}</span>
         </button>

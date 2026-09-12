@@ -3,7 +3,7 @@ import type {
   SidebarSectionView,
   SplitGroupView,
   TabView,
-} from "../../../shared/ipc/bindings";
+} from "$shared/ipc/bindings";
 
 export type SidebarFolderEntry = {
   kind: "folder";
@@ -157,4 +157,34 @@ export function sidebarDisplayUnits(
     if (entry.kind !== "tab" || !ids.has(entry.tab.id)) output.push(entry);
   });
   return output;
+}
+
+/** Keep the real active tab visible even when its parent was folded. */
+export function collapsedSidebarUnits(
+  units: readonly SidebarDisplayUnit[],
+  folded: ReadonlySet<string>,
+  activeId: string | null,
+): Set<string> {
+  const hidden = new Set<string>();
+  const ancestors: number[] = [];
+  for (let index = 0; index < units.length; index++) {
+    const unit = units[index]!;
+    while (ancestors.length && ancestors[ancestors.length - 1]! >= unit.depth) ancestors.pop();
+    if (ancestors.length) hidden.add(unit.key);
+    if (unit.kind !== "folder" || !folded.has(unit.key)) continue;
+    let hasActive = false;
+    for (let childIndex = index + 1; childIndex < units.length; childIndex++) {
+      const child = units[childIndex]!;
+      if (child.depth <= unit.depth) break;
+      if (
+        (child.kind === "tab" && child.tab.id === activeId) ||
+        (child.kind === "split" && child.tabs.some((entry) => entry.tab.id === activeId))
+      ) {
+        hasActive = true;
+        break;
+      }
+    }
+    if (!hasActive) ancestors.push(unit.depth);
+  }
+  return hidden;
 }

@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import type { DividerView } from "../../shared/ipc/bindings";
-  import { commands } from "../../shared/ipc/bindings";
-  import * as layout from "./layout.svelte";
+  import type { DividerView } from "$shared/ipc/bindings";
+  import { commands } from "$shared/ipc/bindings";
+  import { layout } from "$domain/layout";
 
   const KEYBOARD_STEP = 12;
   const KEYBOARD_LARGE_STEP = 36;

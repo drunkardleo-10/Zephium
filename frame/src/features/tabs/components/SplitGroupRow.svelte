@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { TabView } from "../../../shared/ipc/bindings";
+  import type { TabView } from "$shared/ipc/bindings";
   import TabRow from "./TabRow.svelte";
 
   let {

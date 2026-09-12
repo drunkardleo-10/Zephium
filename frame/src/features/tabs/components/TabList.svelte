@@ -1,9 +1,16 @@
 <script lang="ts">
-  import type { SidebarSectionView, TabView } from "../../../shared/ipc/bindings";
-  import * as tabs from "../../../domain/tabs/tabs.svelte";
-  import EssentialTile from "../essentials/EssentialTile.svelte";
+  import * as tabDrag from "$session/tab-drag.svelte";
+  import { SvelteSet } from "svelte/reactivity";
+  import type { SidebarSectionView, TabView } from "$shared/ipc/bindings";
+  import { tabs } from "$domain/tabs";
+  import type { Snippet } from "svelte";
+  import type { TabTileProps } from "../lib/tab-tile";
   import FolderRow from "./FolderRow.svelte";
-  import { sidebarDisplayUnits, type SidebarEntry } from "./sidebar-model";
+  import {
+    sidebarDisplayUnits,
+    collapsedSidebarUnits,
+    type SidebarEntry,
+  } from "../lib/sidebar-model";
   import SplitGroupRow from "./SplitGroupRow.svelte";
   import TabRow from "./TabRow.svelte";
 
@@ -11,6 +18,7 @@
     entries,
     section,
     variant = "list",
+    essentialTile,
     label,
     splitting,
     onSelect,
@@ -18,6 +26,7 @@
     entries: SidebarEntry[];
     section: SidebarSectionView;
     variant?: "list" | "essentials";
+    essentialTile?: Snippet<[TabTileProps]>;
     label: string;
     splitting: boolean;
     onSelect: (id: string) => void;
@@ -32,6 +41,13 @@
   let frame = 0;
   let suppressClick = false;
   let displayUnits = $derived(sidebarDisplayUnits(section, entries, tabs.splitGroup()));
+  const folded = new SvelteSet<string>();
+  let hiddenUnits = $derived(collapsedSidebarUnits(displayUnits, folded, tabs.activeId()));
+
+  function toggleFolder(key: string) {
+    if (folded.has(key)) folded.delete(key);
+    else folded.add(key);
+  }
 
   function resetDrag() {
     if (frame !== 0) {
@@ -44,6 +60,7 @@
     dragging = false;
     ghost = null;
     document.body.style.cursor = "";
+    tabDrag.end();
   }
 
   function handlePointerDown(event: PointerEvent, tab: TabView) {
@@ -61,6 +78,7 @@
       const target = event.currentTarget;
       if (target instanceof HTMLElement) target.setPointerCapture(event.pointerId);
       dragging = true;
+      tabDrag.begin(dragId);
       document.body.style.cursor = "grabbing";
     }
     if (!dragging) return;
@@ -70,11 +88,17 @@
     frame = requestAnimationFrame(() => {
       frame = 0;
       ghost = { title: dragTitle, ...pendingPointer };
+      tabDrag.hover(pendingPointer.x, pendingPointer.y);
       tabs.dragOver(pendingPointer.x, pendingPointer.y);
     });
   }
 
   function handlePointerUp(event: PointerEvent) {
+    const droppedElement = document.elementFromPoint(event.clientX, event.clientY);
+    const essentialZone = droppedElement?.closest("[data-essentials-drop]");
+    const listZone = droppedElement?.closest("[data-tabs-drop]");
+    const before =
+      droppedElement?.closest<HTMLElement>("[data-zephium-tab-id]")?.dataset.zephiumTabId ?? null;
     const didDrag = dragging;
     const id = dragId;
     const target = event.currentTarget;
@@ -86,6 +110,14 @@
 
     if (!didDrag) return;
     suppressClick = true;
+    if (essentialZone) {
+      void tabDrag.move(id, true, before === id ? null : before);
+      return;
+    }
+    if (listZone && section === "favorites") {
+      void tabDrag.move(id, false, before === id ? null : before);
+      return;
+    }
 
     // Dropping onto another row in the sidebar pairs the two tabs, matching
     // the drop-onto-a-pane gesture over content. The shell splits the active
@@ -145,12 +177,23 @@
       class:gap-px={variant === "list"}
       role="list"
     >
-      {#each displayUnits as unit (unit.key)}
+      {#each displayUnits as unit, index (unit.key)}
         {#if unit.kind === "folder"}
           <FolderRow
+            expanded={!folded.has(unit.key) ||
+              displayUnits.some(
+                (child, index) =>
+                  index > displayUnits.indexOf(unit) &&
+                  child.depth > unit.depth &&
+                  !hiddenUnits.has(child.key),
+              )}
+            ontoggle={() => toggleFolder(unit.key)}
             name={unit.node.kind.name}
             depth={unit.depth}
-            class={variant === "essentials" ? "col-span-full" : ""}
+            class={[
+              variant === "essentials" ? "col-span-full" : "",
+              hiddenUnits.has(unit.key) ? "hidden" : "",
+            ].join(" ")}
           />
         {:else if unit.kind === "split"}
           <SplitGroupRow
@@ -158,7 +201,10 @@
             activeId={tabs.activeId()}
             {splitting}
             closable={section === "today"}
-            class={variant === "essentials" ? "col-span-full" : ""}
+            class={[
+              variant === "essentials" ? "col-span-full" : "",
+              hiddenUnits.has(unit.key) ? "hidden" : "",
+            ].join(" ")}
             onSelect={select}
             onClose={tabs.close}
             onContextMenu={handleContextMenu}
@@ -167,25 +213,29 @@
             onPointerUp={handlePointerUp}
             onPointerCancel={handlePointerCancel}
           />
-        {:else if variant === "essentials" && unit.depth === 0}
-          <EssentialTile
-            tab={unit.tab}
-            active={unit.tab.id === tabs.activeId()}
-            splitCandidate={splitting && unit.tab.id !== tabs.activeId()}
-            onSelect={select}
-            onContextMenu={handleContextMenu}
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerUp}
-            onPointerCancel={handlePointerCancel}
-          />
+        {:else if variant === "essentials" && unit.depth === 0 && essentialTile}
+          {@render essentialTile({
+            tab: unit.tab,
+            active: unit.tab.id === tabs.activeId(),
+            splitCandidate: splitting && unit.tab.id !== tabs.activeId(),
+            onSelect: select,
+            onContextMenu: handleContextMenu,
+            onPointerDown: handlePointerDown,
+            onPointerMove: handlePointerMove,
+            onPointerUp: handlePointerUp,
+            onPointerCancel: handlePointerCancel,
+          })}
         {:else}
           <TabRow
+            entranceIndex={index}
             tab={unit.tab}
             active={unit.tab.id === tabs.activeId()}
             depth={unit.depth}
             closable={section === "today"}
-            class={variant === "essentials" ? "col-span-full" : ""}
+            class={[
+              variant === "essentials" ? "col-span-full" : "",
+              hiddenUnits.has(unit.key) ? "hidden" : "",
+            ].join(" ")}
             splitCandidate={splitting && unit.tab.id !== tabs.activeId()}
             onSelect={select}
             onClose={tabs.close}

@@ -1,8 +1,9 @@
 <script lang="ts">
+  import { rememberScroll } from "$shared/ui/scroll-memory";
   import { Add01Icon } from "@hugeicons/core-free-icons";
-  import * as tabs from "../../../domain/tabs/tabs.svelte";
-  import Icon from "../../../shared/ui/Icon.svelte";
-  import type { SidebarEntry } from "./sidebar-model";
+  import { tabs } from "$domain/tabs";
+  import Icon from "$shared/ui/Icon";
+  import type { SidebarEntry } from "../lib/sidebar-model";
   import TabList from "./TabList.svelte";
 
   let {
@@ -22,7 +23,11 @@
   The only scrolling region in the chrome. Everything above it is pinned so a
   long tab list can never push a scrollbar up alongside the navigation row.
 -->
-<div class="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-1">
+<div
+  data-tabs-drop
+  use:rememberScroll={`${tabs.profile()?.id}/${tabs.activeSpaceId()}/tabs`}
+  class="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-1"
+>
   <TabList entries={pinned} section="pinned" label="Pinned tabs" {splitting} {onSelect} />
 
   {#if pinned.length > 0}
@@ -32,7 +37,7 @@
   <div class="px-1.5 pt-0.5">
     <button
       type="button"
-      class="flex h-[34px] w-full items-center gap-2.5 rounded-md px-2 text-start text-[13.5px] text-muted transition-[background-color,color] duration-[var(--motion-fast)] ease-[var(--ease-out-quiet)] outline-none hover:bg-fill-hover hover:text-text"
+      class="flex h-[34px] w-full items-center gap-2.5 rounded-md px-2 text-start text-[13.5px] text-text transition-[background-color,color] duration-[var(--motion-fast)] ease-[var(--ease-out-quiet)] outline-none hover:bg-fill-hover hover:text-text"
       onclick={tabs.open}
     >
       <Icon icon={Add01Icon} size={16} class="shrink-0" />

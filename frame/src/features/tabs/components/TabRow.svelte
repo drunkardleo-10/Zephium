@@ -1,10 +1,12 @@
 <script lang="ts">
-  import { BrowserIcon, Cancel01Icon, Globe02Icon } from "@hugeicons/core-free-icons";
-  import type { TabView } from "../../../shared/ipc/bindings";
-  import FavIcon from "../../../shared/ui/FavIcon.svelte";
-  import Icon from "../../../shared/ui/Icon.svelte";
+  import * as m from "$shared/i18n/messages";
+  import { Cancel01Icon, Globe02Icon } from "@hugeicons/core-free-icons";
+  import type { TabView } from "$shared/ipc/bindings";
+  import FavIcon from "$shared/ui/FavIcon";
+  import Icon from "$shared/ui/Icon";
 
   let {
+    entranceIndex = 6,
     tab,
     active,
     grouped = false,
@@ -20,6 +22,7 @@
     onPointerUp,
     onPointerCancel,
   }: {
+    entranceIndex?: number;
     tab: TabView;
     active: boolean;
     grouped?: boolean;
@@ -43,7 +46,7 @@
 
   // A tab with no page yet is a different thing from a page whose site simply
   // supplies no icon, and the row should say which.
-  let fallback = $derived(tab.url === null ? BrowserIcon : Globe02Icon);
+  let fallback = $derived(Globe02Icon);
 </script>
 
 <li
@@ -51,9 +54,12 @@
   data-zephium-tab-url={tab.url ?? ""}
   data-zephium-projection-revision={tab.projection_revision}
   class={[
-    "group relative flex h-[34px] items-center text-[13.5px] text-text transition-[background-color,box-shadow] duration-[var(--motion-fast)] ease-[var(--ease-out-quiet)]",
+    "browse-tab group relative flex h-[34px] items-center text-[13.5px] text-text transition-[background-color] duration-[var(--motion-fast)] ease-[var(--ease-out-quiet)]",
     className,
   ]}
+  data-selected={active}
+  data-entrance={entranceIndex < 6}
+  style:--entrance-delay={`${Math.min(entranceIndex, 5) * 16}ms`}
   class:rounded-md={!grouped}
   class:bg-fill-active={active}
   class:shadow-raised={active && !grouped}
@@ -68,7 +74,7 @@
     class:rounded-s-md={!grouped}
     style:padding-inline-start={`${grouped ? 8 : 8 + Math.min(depth, 8) * 13}px`}
     aria-current={active ? "page" : undefined}
-    aria-label={tab.title || "Untitled tab"}
+    aria-label={tab.title || m.untitled_tab()}
     oncontextmenu={(event) => onContextMenu(event, tab)}
     onpointerdown={(event) => onPointerDown(event, tab)}
     onpointermove={onPointerMove}
@@ -82,8 +88,8 @@
   {#if closable}
     <button
       type="button"
-      aria-label={`Close ${tab.title || "tab"}`}
-      title="Close tab"
+      aria-label={m.close_named_tab({ title: tab.title || m.untitled_tab() })}
+      title={m.close_tab()}
       class="me-1.5 flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-sm text-faint opacity-0 transition-[background-color,color,opacity] duration-[var(--motion-fast)] ease-[var(--ease-out-quiet)] outline-none group-hover:opacity-100 hover:bg-fill-pressed hover:text-text focus-visible:opacity-100"
       onclick={closeTab}
     >
