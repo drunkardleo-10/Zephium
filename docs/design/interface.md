@@ -1,5 +1,8 @@
 # Zephium interface design
 
+Architecture and implemented hosting follow [the frontend contract](../frontend.md).
+This document retains earlier visual proposals; use the current contract where they differ.
+
 The design record for the browser's chrome. `frontend.md` is the engineering
 contract, `architecture.md` the system. This file is why the interface is
 shaped the way it is; read it before proposing a layout change.
@@ -225,3 +228,11 @@ decorative color.
 - **Motion** is transform and opacity only, 120-220ms, and never animates
   browser geometry, startup, or anything the OS is also animating.
 - Every surface must hold up in dark, light, reduced motion and forced colors.
+
+## 12. Implemented component system
+
+The [frontend contract](../frontend.md) governs ownership, native boundaries,
+testing and migration status. [The interface system](system.md) records the shared
+visual language. Interface Studio and the unused Work fixture kit are removed;
+Settings is the current surface for inspecting controls. Liquid Glass is native
+window material, not an additional overlay surface.
