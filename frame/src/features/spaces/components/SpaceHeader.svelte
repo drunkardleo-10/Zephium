@@ -1,7 +1,7 @@
 <script lang="ts">
   import { Layers01Icon } from "@hugeicons/core-free-icons";
-  import * as tabs from "../../../domain/tabs/tabs.svelte";
-  import Icon from "../../../shared/ui/Icon.svelte";
+  import { tabs } from "$domain/tabs";
+  import Icon from "$shared/ui/Icon";
 
   let spaces = $derived(tabs.spaces());
   let active = $derived(spaces.find((space) => space.id === tabs.activeSpaceId()) ?? null);
@@ -15,7 +15,7 @@
 -->
 <div class="flex h-8 shrink-0 items-center gap-2 px-3" title={name}>
   <Icon icon={Layers01Icon} size={13} class="shrink-0 text-faint" />
-  <h2 class="min-w-0 flex-1 truncate text-[12.5px] font-medium tracking-[0.01em] text-muted">
+  <h2 class="min-w-0 flex-1 truncate text-[12.5px] font-medium tracking-[0.01em] text-text">
     {name}
   </h2>
   {#if spaces.length > 1}

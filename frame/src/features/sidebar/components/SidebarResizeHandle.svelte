@@ -4,7 +4,7 @@
     COMPACT_WIDTH,
     MAX_EXPANDED_WIDTH,
     MIN_EXPANDED_WIDTH,
-  } from "./sidebar-mode.svelte";
+  } from "$session/sidebar-mode.svelte";
 
   const minimum = COMPACT_WIDTH;
   const maximum = MAX_EXPANDED_WIDTH;

@@ -1,13 +1,14 @@
 <script lang="ts">
+  import * as m from "$shared/i18n/messages";
   import { Alert02Icon, LockIcon, Search01Icon } from "@hugeicons/core-free-icons";
-  import * as tabs from "../../../domain/tabs/tabs.svelte";
-  import * as ui from "../../../domain/ui-commands/ui-commands.svelte";
-  import { commands } from "../../../shared/ipc/bindings";
-  import Icon from "../../../shared/ui/Icon.svelte";
-  import { addressSecurity, editingAddress, restingAddress } from "./address-model";
-  import BlockerShield from "../shield/BlockerShield.svelte";
+  import { tabs } from "$domain/tabs";
+  import { uiCommands as ui } from "$domain/ui-commands";
+  import { commands } from "$shared/ipc/bindings";
+  import Icon from "$shared/ui/Icon";
+  import { addressSecurity, editingAddress, restingAddress } from "../lib/address-model";
+  import type { Snippet } from "svelte";
 
-  let { compact = false }: { compact?: boolean } = $props();
+  let { compact = false, shield }: { compact?: boolean; shield: Snippet } = $props();
 
   let input: HTMLInputElement;
   let editing = $state(false);
@@ -73,8 +74,8 @@
       <button
         type="button"
         class="chrome-button"
-        aria-label="Search or enter an address"
-        title="Search or enter an address"
+        aria-label={m.ui_search_or_enter_an_address()}
+        title={m.ui_search_or_enter_an_address()}
         onclick={() => void commands.runCommand("launcher.toggle")}
       >
         <Icon icon={Search01Icon} size={16} />
@@ -85,7 +86,7 @@
   <div
     class:sr-only={compact}
     class:flex={!compact}
-    class="h-[34px] items-center gap-2 rounded-md bg-fill ps-2.5 pe-2 shadow-field transition-[background-color,box-shadow] duration-[var(--motion-fast)] ease-[var(--ease-out-quiet)] focus-within:bg-fill-hover focus-within:shadow-focus hover:bg-fill-hover"
+    class="focus-within:shadow-focus h-[34px] items-center gap-2 rounded-md bg-fill ps-2.5 pe-2 shadow-field transition-[background-color,box-shadow] duration-[var(--motion-fast)] ease-[var(--ease-out-quiet)] focus-within:bg-fill-hover hover:bg-fill-hover"
   >
     {#if !compact}
       <span
@@ -104,11 +105,11 @@
       bind:this={input}
       data-zephium-address
       type="text"
-      aria-label="Address and search"
+      aria-label={m.ui_address_and_search()}
       autocomplete="off"
       autocapitalize="off"
       enterkeyhint="go"
-      placeholder="Search or enter an address"
+      placeholder={m.ui_search_or_enter_an_address()}
       spellcheck="false"
       {value}
       oninput={handleInput}
@@ -117,8 +118,8 @@
       class="min-w-0 flex-1 bg-transparent text-[13.5px] text-text outline-none placeholder:text-faint"
     />
 
-    {#if !compact}
-      <BlockerShield />
+    {#if !compact && activeUrl && security !== "none"}
+      {@render shield()}
     {/if}
   </div>
 </form>

@@ -1,19 +1,20 @@
 <script lang="ts">
+  import * as m from "$shared/i18n/messages";
   import {
-    Add01Icon,
     BellIcon,
     Cancel01Icon,
     IncognitoIcon,
-    UserCircleIcon,
+    MoreHorizontalIcon,
   } from "@hugeicons/core-free-icons";
-  import { commands } from "../../../shared/ipc/bindings";
-  import { runtimeNotifications } from "../../../domain/runtime/runtime-model";
-  import * as runtime from "../../../domain/runtime/runtime.svelte";
-  import * as tabs from "../../../domain/tabs/tabs.svelte";
-  import Icon from "../../../shared/ui/Icon.svelte";
-  import IconButton from "../../../shared/ui/IconButton.svelte";
+  import ModeSwitch from "./ModeSwitch.svelte";
+  import { commands } from "$shared/ipc/bindings";
+  import { runtimeNotifications } from "$domain/runtime";
+  import { runtime } from "$domain/runtime";
+  import { tabs } from "$domain/tabs";
+  import Icon from "$shared/ui/Icon";
+  import IconButton from "$shared/ui/IconButton";
 
-  let { compact = false }: { compact?: boolean } = $props();
+  let { compact = false, showMode = true }: { compact?: boolean; showMode?: boolean } = $props();
 
   let profile = $derived(tabs.profile());
   let name = $derived(profile?.name ?? "Personal");
@@ -28,24 +29,6 @@
   $effect(() => {
     if (notifications.length === 0) notificationsOpen = false;
   });
-
-  function anchorOf(event: MouseEvent): DOMRect | null {
-    const target = event.currentTarget;
-    if (!(target instanceof HTMLButtonElement)) return null;
-    return target.getBoundingClientRect();
-  }
-
-  function openProfileMenu(event: MouseEvent) {
-    notificationsOpen = false;
-    const anchor = anchorOf(event);
-    if (anchor !== null) void commands.profileMenuPopup(anchor.left, anchor.top);
-  }
-
-  function openAddMenu(event: MouseEvent) {
-    notificationsOpen = false;
-    const anchor = anchorOf(event);
-    if (anchor !== null) void commands.addMenuPopup(anchor.left, anchor.top, tabs.canSplitActive());
-  }
 
   function toggleNotifications() {
     notificationsOpen = !notificationsOpen;
@@ -87,16 +70,17 @@
 
 <!--
   The profile is a security boundary, so it reads as identity rather than as
-  another switcher chip. On Windows and Linux this menu is also the app menu.
+  another switcher chip. Its menu is everything that is yours: account,
+  profiles, your notes and tasks, appearance, settings.
 -->
-<footer bind:this={footer} class="relative shrink-0 border-t border-border px-1.5 pt-1.5 pb-1.5">
+<footer bind:this={footer} class="sidebar-footer" class:sidebar-footer-compact={compact}>
   {#if notificationsOpen && notifications.length > 0}
     <div
       id="runtime-notifications"
       role="dialog"
       aria-modal="true"
       aria-labelledby="runtime-notifications-title"
-      class="absolute right-1.5 bottom-full left-1.5 z-20 mb-1.5 rounded-lg border border-border-strong bg-raised p-2.5 shadow-[var(--shadow-overlay)]"
+      class="absolute right-1.5 bottom-full left-1.5 z-20 mb-1.5 rounded-lg bg-raised p-2.5 shadow-[var(--shadow-popover)]"
     >
       <div class="mb-1.5 flex items-center justify-between gap-2">
         <h2 id="runtime-notifications-title" class="text-[13px] font-medium text-text">
@@ -138,63 +122,40 @@
     </div>
   {/if}
 
-  <div
-    class="flex gap-1"
-    class:h-8={!compact}
-    class:items-center={!compact}
-    class:flex-col-reverse={compact}
-    class:items-center-safe={compact}
-  >
+  <div class="sidebar-footer-row">
     <button
       type="button"
-      aria-label={`Profile: ${name}`}
+      class="profile-menu-button browser-menu-button"
+      aria-label={m.browser_menu_profile({ profile: name })}
+      title={m.browser_menu_profile({ profile: name })}
       aria-haspopup="menu"
-      title={name}
-      class="flex h-[34px] min-w-0 items-center gap-2 rounded-md text-start text-[13.5px] text-muted transition-[background-color,color] duration-[var(--motion-fast)] ease-[var(--ease-out-quiet)] outline-none hover:bg-fill hover:text-text"
-      class:flex-1={!compact}
-      class:px-2={!compact}
-      class:w-9={compact}
-      class:justify-center={compact}
-      onclick={openProfileMenu}
+      onclick={(event) => {
+        const rect = event.currentTarget.getBoundingClientRect();
+        void commands.profileMenuPopup(rect.left, rect.top);
+      }}
     >
-      <span
-        class="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-full bg-fill"
-        class:text-accent={incognito}
-      >
-        <Icon icon={incognito ? IncognitoIcon : UserCircleIcon} size={15} />
-      </span>
-      {#if !compact}
-        <span class="min-w-0 flex-1 truncate">{name}</span>
-      {/if}
+      <Icon icon={incognito ? IncognitoIcon : MoreHorizontalIcon} size={20} />
     </button>
-
-    {#if notifications.length > 0 && !compact}
-      <span bind:this={bellAnchor} class="relative flex shrink-0">
-        <IconButton
-          icon={BellIcon}
-          label={`Notifications (${notifications.length})`}
-          size={17}
-          active={notificationsOpen}
-          haspopup="dialog"
-          expanded={notificationsOpen}
-          controls="runtime-notifications"
-          onclick={toggleNotifications}
-        />
-        <span
-          aria-hidden="true"
-          class="pointer-events-none absolute top-1 right-1 h-1.5 w-1.5 rounded-full ring-2 ring-chrome"
-          class:bg-warning={hasWarning}
-          class:bg-info={!hasWarning}
-        ></span>
-      </span>
-    {/if}
-
-    <IconButton
-      icon={Add01Icon}
-      label="New tab and split options"
-      size={18}
-      haspopup
-      onclick={openAddMenu}
-    />
+    {#if showMode}<ModeSwitch {compact} />{/if}
   </div>
+  {#if notifications.length > 0 && !compact}
+    <span bind:this={bellAnchor} class="sidebar-notification-anchor">
+      <IconButton
+        icon={BellIcon}
+        label={`Notifications (${notifications.length})`}
+        size={16}
+        active={notificationsOpen}
+        haspopup="dialog"
+        expanded={notificationsOpen}
+        controls="runtime-notifications"
+        onclick={toggleNotifications}
+      />
+      <span
+        aria-hidden="true"
+        class="pointer-events-none absolute top-1 right-1 h-1.5 w-1.5 rounded-full ring-2 ring-chrome"
+        class:bg-warning={hasWarning}
+        class:bg-info={!hasWarning}
+      ></span>
+    </span>
+  {/if}
 </footer>

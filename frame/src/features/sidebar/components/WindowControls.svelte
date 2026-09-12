@@ -1,7 +1,7 @@
 <script lang="ts">
   import { Cancel01Icon, Maximize01Icon, MinusSignIcon } from "@hugeicons/core-free-icons";
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import Icon from "../../../shared/ui/Icon.svelte";
+  import Icon from "$shared/ui/Icon";
 
   const window = getCurrentWindow();
 </script>
