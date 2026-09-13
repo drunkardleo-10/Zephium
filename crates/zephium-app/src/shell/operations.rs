@@ -152,6 +152,10 @@ impl Shell {
         if navigation::classify(&input).is_none() {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
         }
+        if self.active_browser_page().is_some() {
+            self.browser_after_return = Some(Box::new(Command::OpenUrl(input)));
+            return self.operation_show_browser_page(None);
+        }
         if self.windows.focused().is_none() {
             return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
         }

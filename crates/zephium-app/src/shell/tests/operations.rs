@@ -270,6 +270,49 @@ fn browser_page_tab_activation_restores_browsing_without_navigation() {
 }
 
 #[test]
+fn work_citation_navigation_restores_browse_and_preserves_existing_tab() {
+    for reject in [false, true] {
+        let (mut shell, engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        let original = active_id(&screen);
+        navigate_and_commit(&mut shell, original, "original.example");
+        shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Work)));
+        let before = shell.items_snapshot().unwrap().tabs.len();
+        engine
+            .reject_native_dispatch
+            .store(reject, std::sync::atomic::Ordering::Release);
+        let result = shell.handle_operation(Command::OpenUrl(
+            "https://github.com/sveltejs/svelte/issues/18096".into(),
+        ));
+        assert_eq!(result.outcome, OperationOutcome::Deferred);
+        assert_eq!(
+            shell
+                .items
+                .tab(original)
+                .unwrap()
+                .url
+                .as_ref()
+                .map(url::Url::as_str),
+            Some("https://original.example/")
+        );
+        if reject {
+            assert_eq!(shell.active_browser_page(), Some(crate::BrowserPage::Work));
+            assert_eq!(shell.items_snapshot().unwrap().tabs.len(), before);
+            assert_eq!(active_id(&screen), original);
+        } else {
+            assert_eq!(shell.active_browser_page(), None);
+            assert_eq!(shell.items_snapshot().unwrap().tabs.len(), before + 1);
+            let opened = active_id(&screen);
+            assert_ne!(opened, original);
+            assert!(engine.calls().iter().any(|call| call
+                == &format!(
+                    "create {opened} https://github.com/sveltejs/svelte/issues/18096 [default]"
+                )));
+        }
+    }
+}
+
+#[test]
 fn essential_move_preserves_the_active_native_tab_and_can_be_reversed() {
     let (mut shell, engine, screen) = setup();
     shell.handle(Command::Bootstrap);
