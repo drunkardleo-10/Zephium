@@ -60,6 +60,18 @@ pub struct WorkElementPlacement {
     pub height: u16,
 }
 
+/// Area geometry is presentation; membership stays on the element.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkAreaPlacement {
+    pub area: WorkAreaId,
+    pub x: i32,
+    pub y: i32,
+    pub width: u16,
+    pub height: u16,
+}
+
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -69,6 +81,8 @@ pub struct WorkEnvironmentView {
     pub y: i32,
     pub zoom_milli: u16,
     pub placements: Vec<WorkElementPlacement>,
+    #[serde(default)]
+    pub areas: Vec<WorkAreaPlacement>,
 }
 impl Default for WorkEnvironmentView {
     fn default() -> Self {
@@ -78,6 +92,7 @@ impl Default for WorkEnvironmentView {
             y: 0,
             zoom_milli: 1000,
             placements: vec![],
+            areas: vec![],
         }
     }
 }
@@ -88,6 +103,7 @@ impl WorkEnvironmentView {
             || !coordinate(self.y)
             || !(100..=4000).contains(&self.zoom_milli)
             || self.placements.len() > MAX_ENVIRONMENT_ELEMENTS
+            || self.areas.len() > MAX_ENVIRONMENT_AREAS
         {
             return Err(WorkError::Invalid);
         }
@@ -98,6 +114,17 @@ impl WorkEnvironmentView {
                 || !coordinate(p.y)
                 || !(120..=4096).contains(&p.width)
                 || !(80..=4096).contains(&p.height)
+            {
+                return Err(WorkError::Invalid);
+            }
+        }
+        let mut areas = BTreeSet::new();
+        for a in &self.areas {
+            if !areas.insert(a.area)
+                || !coordinate(a.x)
+                || !coordinate(a.y)
+                || !(240..=8192).contains(&a.width)
+                || !(160..=8192).contains(&a.height)
             {
                 return Err(WorkError::Invalid);
             }
@@ -173,6 +200,7 @@ impl WorkEnvironmentSnapshot {
             .placements
             .iter()
             .any(|p| !elements.contains(&p.element))
+            || self.view.areas.iter().any(|a| !areas.contains(&a.area))
         {
             return Err(WorkError::Invalid);
         }
@@ -240,6 +268,10 @@ impl WorkEnvironmentSnapshot {
                     if element.area == Some(area) {
                         element.area = None;
                     }
+                }
+                if next.view.areas.iter().any(|a| a.area == area) {
+                    next.view.areas.retain(|a| a.area != area);
+                    next.view.revision = next.view.revision.next()?;
                 }
             }
             WorkEnvironmentEdit::AssignArea { element, area } => {

@@ -27,12 +27,43 @@ export type CanvasLink = {
   kind: "dependency" | "reference";
 };
 export type CanvasPosition = { x: number; y: number };
+export type CanvasSize = { width: number; height: number };
+export type CanvasArea = { id: string; title: string };
 export type CanvasView = {
   positions: Record<string, CanvasPosition>;
-  sizes?: Record<string, { width: number; height: number }>;
+  sizes?: Record<string, CanvasSize>;
+  areas?: Record<string, CanvasPosition & CanvasSize>;
   viewport: { x: number; y: number; zoom: number };
 };
-export type WorkNode = Node<CanvasItem, "work">;
+export type AreaData = { title: string; count: number };
+export type WorkItemNode = Node<CanvasItem, "work">;
+export type WorkNode = WorkItemNode | Node<AreaData, "area">;
+export const AREA_PREFIX = "area:";
+export const areaNodeId = (id: string) => `${AREA_PREFIX}${id}`;
+export const isAreaNode = (node: WorkNode): node is Node<AreaData, "area"> => node.type === "area";
+const DEFAULT_AREA: CanvasSize = { width: 640, height: 420 };
+const validPosition = (p: CanvasPosition | undefined): p is CanvasPosition =>
+  !!p &&
+  Number.isFinite(p.x) &&
+  Number.isFinite(p.y) &&
+  Math.abs(p.x) <= 1_000_000 &&
+  Math.abs(p.y) <= 1_000_000;
+const validSize = (s: CanvasSize | undefined): s is CanvasSize =>
+  !!s &&
+  Number.isInteger(s.width) &&
+  Number.isInteger(s.height) &&
+  s.width >= 120 &&
+  s.width <= 4096 &&
+  s.height >= 80 &&
+  s.height <= 4096;
+const validAreaSize = (s: CanvasSize | undefined): s is CanvasSize =>
+  !!s &&
+  Number.isInteger(s.width) &&
+  Number.isInteger(s.height) &&
+  s.width >= 240 &&
+  s.width <= 8192 &&
+  s.height >= 160 &&
+  s.height <= 8192;
 const CANVAS_ITEM_LIMIT = 500;
 export function defaultSize(item: CanvasItem): { width: number; height: number } {
   if (item.artifact) {
@@ -96,17 +127,57 @@ export function validScene(items: readonly CanvasItem[], links: readonly CanvasL
   );
 }
 
+/** Absolute canvas position of a node, resolving one level of area parenting. */
+export function absolutePosition(node: WorkNode, nodes: readonly WorkNode[]): CanvasPosition {
+  if (!node.parentId) return { ...node.position };
+  const parent = nodes.find((candidate) => candidate.id === node.parentId);
+  return parent
+    ? { x: node.position.x + parent.position.x, y: node.position.y + parent.position.y }
+    : { ...node.position };
+}
+
 /** Position once. Subsequent projection changes preserve user arrangement and node identity. */
 export function reconcileNodes(
   previous: WorkNode[],
   items: readonly CanvasItem[],
   positions: Readonly<Record<string, CanvasPosition>> = {},
-  sizes: Readonly<Record<string, { width: number; height: number }>> = {},
+  sizes: Readonly<Record<string, CanvasSize>> = {},
+  areas: readonly CanvasArea[] = [],
+  areaPlacements: Readonly<Record<string, CanvasPosition & CanvasSize>> = {},
 ): WorkNode[] {
   const existing = new Map(previous.map((node) => [node.id, node]));
+  const areaNodes: Node<AreaData, "area">[] = areas.map((area, index) => {
+    const id = areaNodeId(area.id);
+    const count = items.filter((item) => item.area === area.id).length;
+    const node = existing.get(id);
+    if (node && isAreaNode(node)) {
+      return node.data.title === area.title && node.data.count === count
+        ? node
+        : { ...node, data: { title: area.title, count } };
+    }
+    const placement = areaPlacements[area.id];
+    const valid = placement && validPosition(placement) && validAreaSize(placement);
+    return {
+      id,
+      type: "area",
+      position: valid
+        ? { x: placement.x, y: placement.y }
+        : { x: 80 + index * 60, y: 80 + index * 60 },
+      width: valid ? placement.width : DEFAULT_AREA.width,
+      height: valid ? placement.height : DEFAULT_AREA.height,
+      data: { title: area.title, count },
+      dragHandle: ".area-title",
+      deletable: false,
+      connectable: false,
+      selectable: true,
+      zIndex: -1,
+      ariaLabel: area.title,
+    };
+  });
+  const areaById = new Map(areaNodes.map((node) => [node.id, node]));
   const occupied = items.flatMap((item) => {
     const node = existing.get(item.id);
-    return node ? [node.position] : [];
+    return node ? [absolutePosition(node, previous)] : [];
   });
   function nextPosition(index: number): CanvasPosition {
     let position: CanvasPosition;
@@ -120,10 +191,14 @@ export function reconcileNodes(
     );
     return position;
   }
-  const next = items.map((item, index): WorkNode => {
+  const next: WorkNode[] = items.map((item, index): WorkNode => {
     const node = existing.get(item.id);
-    if (node) {
+    const parentId = item.area ? areaNodeId(item.area) : undefined;
+    const parent = parentId ? areaById.get(parentId) : undefined;
+    if (node && !isAreaNode(node)) {
+      const reparented = (node.parentId ?? undefined) !== (parent ? parentId : undefined);
       const same =
+        !reparented &&
         node.data.title === item.title &&
         node.data.kind === item.kind &&
         node.data.type === item.type &&
@@ -136,18 +211,25 @@ export function reconcileNodes(
         node.data.layout === item.layout &&
         node.data.actionLabel === item.actionLabel &&
         JSON.stringify(node.data.responsibility) === JSON.stringify(item.responsibility);
-      return same ? node : { ...node, data: item, ariaLabel: `${item.title}. ${item.status}` };
+      if (same) return node;
+      if (!reparented) return { ...node, data: item, ariaLabel: `${item.title}. ${item.status}` };
+      const absolute = absolutePosition(node, previous);
+      return {
+        ...node,
+        data: item,
+        ariaLabel: `${item.title}. ${item.status}`,
+        parentId: parent ? parentId : undefined,
+        position: parent
+          ? { x: absolute.x - parent.position.x, y: absolute.y - parent.position.y }
+          : absolute,
+      };
     }
     const restored = Object.hasOwn(positions, item.id) ? positions[item.id] : undefined;
-    const position =
-      restored &&
-      Number.isFinite(restored.x) &&
-      Number.isFinite(restored.y) &&
-      Math.abs(restored.x) <= 1_000_000 &&
-      Math.abs(restored.y) <= 1_000_000
-        ? { ...restored }
-        : nextPosition(index);
-    occupied.push(position);
+    const absolute = validPosition(restored) ? { ...restored! } : nextPosition(index);
+    occupied.push(absolute);
+    const position = parent
+      ? { x: absolute.x - parent.position.x, y: absolute.y - parent.position.y }
+      : absolute;
     const size = sizes[item.id];
     const restoredSize =
       size &&
@@ -163,6 +245,7 @@ export function reconcileNodes(
       id: item.id,
       type: "work",
       position,
+      ...(parent ? { parentId } : {}),
       data: item,
       width: restoredSize?.width ?? defaultSize(item).width,
       height: restoredSize?.height ?? defaultSize(item).height,
@@ -172,25 +255,12 @@ export function reconcileNodes(
       ariaLabel: `${item.title}. ${item.status}`,
     };
   });
-  return next.length === previous.length && next.every((node, index) => node === previous[index])
+  const combined: WorkNode[] = [...areaNodes, ...next];
+  return combined.length === previous.length &&
+    combined.every((node, index) => node === previous[index])
     ? previous
-    : next;
+    : combined;
 }
-
-const validPosition = (p: CanvasPosition | undefined) =>
-  !!p &&
-  Number.isFinite(p.x) &&
-  Number.isFinite(p.y) &&
-  Math.abs(p.x) <= 1_000_000 &&
-  Math.abs(p.y) <= 1_000_000;
-const validSize = (s: { width: number; height: number } | undefined) =>
-  !!s &&
-  Number.isInteger(s.width) &&
-  Number.isInteger(s.height) &&
-  s.width >= 120 &&
-  s.width <= 4096 &&
-  s.height >= 80 &&
-  s.height <= 4096;
 
 /** Applies a remote view to existing nodes in place; dragging and derived nodes keep local geometry. */
 export function applyRemoteView(
@@ -199,24 +269,100 @@ export function applyRemoteView(
   authoritative: ReadonlySet<string>,
 ): WorkNode[] {
   let changed = false;
-  const next = previous.map((node) => {
-    if (!authoritative.has(node.id) || node.dragging) return node;
+  const areaMoves = new Map<string, CanvasPosition>();
+  const next = previous.map((node): WorkNode => {
+    if (node.dragging) return node;
+    if (isAreaNode(node)) {
+      const placement = view.areas?.[node.id.slice(AREA_PREFIX.length)];
+      if (!placement || !validPosition(placement) || !validAreaSize(placement)) return node;
+      if (
+        node.position.x === placement.x &&
+        node.position.y === placement.y &&
+        node.width === placement.width &&
+        node.height === placement.height
+      )
+        return node;
+      changed = true;
+      areaMoves.set(node.id, { x: placement.x, y: placement.y });
+      return {
+        ...node,
+        position: { x: placement.x, y: placement.y },
+        width: placement.width,
+        height: placement.height,
+      };
+    }
+    if (!authoritative.has(node.id)) return node;
     const position = view.positions[node.id];
     const size = view.sizes?.[node.id];
+    const parent = node.parentId
+      ? (areaMoves.get(node.parentId) ??
+        previous.find((candidate) => candidate.id === node.parentId)?.position)
+      : undefined;
+    const relative = validPosition(position)
+      ? parent
+        ? { x: position.x - parent.x, y: position.y - parent.y }
+        : { ...position }
+      : undefined;
     const samePosition =
-      !validPosition(position) ||
-      (node.position.x === position!.x && node.position.y === position!.y);
-    const sameSize =
-      !validSize(size) || (node.width === size!.width && node.height === size!.height);
+      !relative || (node.position.x === relative.x && node.position.y === relative.y);
+    const sameSize = !validSize(size) || (node.width === size.width && node.height === size.height);
     if (samePosition && sameSize) return node;
     changed = true;
     return {
       ...node,
-      ...(samePosition ? {} : { position: { ...position! } }),
+      ...(samePosition ? {} : { position: relative! }),
       ...(sameSize ? {} : { width: size!.width, height: size!.height }),
     };
   });
   return changed ? next : previous;
+}
+
+/** Area containing the node's centre, if any. */
+export function containingArea(node: WorkNode, nodes: readonly WorkNode[]): string | null {
+  if (isAreaNode(node)) return null;
+  const absolute = absolutePosition(node, nodes);
+  const cx = absolute.x + (node.width ?? 280) / 2;
+  const cy = absolute.y + (node.height ?? 160) / 2;
+  for (const candidate of nodes) {
+    if (!isAreaNode(candidate)) continue;
+    const w = candidate.width ?? DEFAULT_AREA.width;
+    const h = candidate.height ?? DEFAULT_AREA.height;
+    if (
+      cx >= candidate.position.x &&
+      cx <= candidate.position.x + w &&
+      cy >= candidate.position.y &&
+      cy <= candidate.position.y + h
+    )
+      return candidate.id.slice(AREA_PREFIX.length);
+  }
+  return null;
+}
+
+/** Bounds around the given nodes in absolute canvas coordinates. */
+export function nodesBounds(
+  ids: readonly string[],
+  nodes: readonly WorkNode[],
+  padding = 32,
+): (CanvasPosition & CanvasSize) | null {
+  const selected = nodes.filter((node) => ids.includes(node.id) && !isAreaNode(node));
+  if (!selected.length) return null;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const node of selected) {
+    const p = absolutePosition(node, nodes);
+    minX = Math.min(minX, p.x);
+    minY = Math.min(minY, p.y);
+    maxX = Math.max(maxX, p.x + (node.width ?? 280));
+    maxY = Math.max(maxY, p.y + (node.height ?? 160));
+  }
+  return {
+    x: Math.round(minX - padding),
+    y: Math.round(minY - padding - 36),
+    width: Math.max(240, Math.round(maxX - minX + padding * 2)),
+    height: Math.max(160, Math.round(maxY - minY + padding * 2 + 36)),
+  };
 }
 
 /** Invalid saved geometry never reaches XYFlow. User arrangement is view state only. */

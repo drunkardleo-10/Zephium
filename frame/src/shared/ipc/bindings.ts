@@ -5,311 +5,149 @@ import * as __TAURI_EVENT from "@tauri-apps/api/event";
 
 /** Commands */
 export const commands = {
-  workCall: (expectedProfile: string, call: WorkCallV1) =>
-    __TAURI_INVOKE<WorkResponseV1>("work_call", { expectedProfile, call }),
-  workOperation: (expectedProfile: string, operation: WorkCommandId, input: WorkOperationV1) =>
-    __TAURI_INVOKE<WorkOperationResponseV1>("work_operation", {
-      expectedProfile,
-      operation,
-      input,
-    }),
-  workOperationStatus: (
-    expectedProfile: string,
-    work: WorkId,
-    operation: WorkCommandId,
-    acknowledge: boolean,
-  ) =>
-    __TAURI_INVOKE<WorkOperationResponseV1>("work_operation_status", {
-      expectedProfile,
-      work,
-      operation,
-      acknowledge,
-    }),
-  workActivity: (expectedProfile: string, work: WorkId) =>
-    __TAURI_INVOKE<WorkActivityResponseV1>("work_activity", { expectedProfile, work }),
-  tabsBootstrap: () => __TAURI_INVOKE<void>("tabs_bootstrap"),
-  tabsOpen: () => __TAURI_INVOKE<OperationAdmission>("tabs_open"),
-  /**
-   *  Explicit trusted user navigation. A citation alone never calls this command
-   *  or allocates a Work browser resource.
-   */
-  tabsOpenUrl: (url: string) => __TAURI_INVOKE<OperationAdmission>("tabs_open_url", { url }),
-  tabsActivate: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_activate", { id }),
-  tabsClose: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_close", { id }),
-  tabsSetEssential: (id: string, essential: boolean, before: string | null) =>
-    __TAURI_INVOKE<OperationAdmission>("tabs_set_essential", { id, essential, before }),
-  tabsNavigate: (id: string, input: string) =>
-    __TAURI_INVOKE<OperationAdmission>("tabs_navigate", { id, input }),
-  tabsReload: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_reload", { id }),
-  tabsBack: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_back", { id }),
-  tabsForward: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_forward", { id }),
-  tabsSplit: (other: string) => __TAURI_INVOKE<OperationAdmission>("tabs_split", { other }),
-  tabsUnsplit: () => __TAURI_INVOKE<OperationAdmission>("tabs_unsplit"),
-  extensionActionInvoke: (
-    profileId: string,
-    installId: string,
-    runtimeGeneration: string,
-    actionRevision: string,
-    anchorX: number | null,
-    anchorY: number | null,
-    anchorWidth: number | null,
-    anchorHeight: number | null,
-  ) =>
-    __TAURI_INVOKE<OperationAdmission>("extension_action_invoke", {
-      profileId,
-      installId,
-      runtimeGeneration,
-      actionRevision,
-      anchorX,
-      anchorY,
-      anchorWidth,
-      anchorHeight,
-    }),
-  /**
-   *  Opens or closes the one focused-profile management subscription.
-   *  This is deliberately an explicit, non-polling visibility signal: the Shell
-   *  retains authenticated management metadata only while privileged chrome is
-   *  displaying it and performs no extension repository work at browser startup.
-   */
-  extensionManagementSetVisible: (visible: boolean) =>
-    __TAURI_INVOKE<boolean>("extension_management_set_visible", { visible }),
-  /**
-   *  Requests the one product-sealed extension catalog synchronization. The
-   *  caller supplies no URL, profile, package, runtime target, or selection;
-   *  those authorities were bound immutably before the worker was launched.
-   */
-  extensionDistributionRefresh: () =>
-    __TAURI_INVOKE<ExtensionDistributionRefreshAdmissionView>("extension_distribution_refresh"),
-  extensionManagementInstall: (
-    candidateIndex: number,
-    catalogRevision: string,
-    selection: ExtensionInstallGrantSelectionInput,
-  ) =>
-    __TAURI_INVOKE<OperationAdmission>("extension_management_install", {
-      candidateIndex,
-      catalogRevision,
-      selection,
-    }),
-  /**
-   *  Approves only the exact changed-authority replacement retained by Shell's
-   *  current focused-profile subscription. Package identity and permission names
-   *  never cross this IPC boundary.
-   */
-  extensionManagementApproveUpdate: (reviewId: string) =>
-    __TAURI_INVOKE<OperationAdmission>("extension_management_approve_update", { reviewId }),
-  extensionManagementSetEnabled: (
-    installId: string,
-    catalogRevision: string,
-    installRevision: string,
-    enabled: boolean,
-  ) =>
-    __TAURI_INVOKE<OperationAdmission>("extension_management_set_enabled", {
-      installId,
-      catalogRevision,
-      installRevision,
-      enabled,
-    }),
-  /**
-   *  Mutates only one bounded optional declaration from the exact installed
-   *  management projection. Permission text never crosses this IPC boundary.
-   */
-  extensionManagementEditOptionalGrant: (
-    installId: string,
-    catalogRevision: string,
-    installRevision: string,
-    grantRevision: string,
-    kind: ExtensionOptionalGrantKindInput,
-    index: number,
-    granted: boolean,
-  ) =>
-    __TAURI_INVOKE<OperationAdmission>("extension_management_edit_optional_grant", {
-      installId,
-      catalogRevision,
-      installRevision,
-      grantRevision,
-      kind,
-      index,
-      granted,
-    }),
-  extensionManagementSetProfilePaused: (policyRevision: string, paused: boolean) =>
-    __TAURI_INVOKE<OperationAdmission>("extension_management_set_profile_paused", {
-      policyRevision,
-      paused,
-    }),
-  extensionManagementSetCurrentSiteEnabled: (policyRevision: string, enabled: boolean) =>
-    __TAURI_INVOKE<OperationAdmission>("extension_management_set_current_site_enabled", {
-      policyRevision,
-      enabled,
-    }),
-  extensionManagementOpenOptions: (
-    installId: string,
-    catalogRevision: string,
-    installRevision: string,
-  ) =>
-    __TAURI_INVOKE<boolean>("extension_management_open_options", {
-      installId,
-      catalogRevision,
-      installRevision,
-    }),
-  extensionManagementUninstall: (
-    installId: string,
-    catalogRevision: string,
-    installRevision: string,
-  ) =>
-    __TAURI_INVOKE<OperationAdmission>("extension_management_uninstall", {
-      installId,
-      catalogRevision,
-      installRevision,
-    }),
-  /**
-   *  Answers only the exact Shell-projected native permission prompt. The four
-   *  identities are short-lived stale fences; permission names never cross this
-   *  command boundary and the actor remains the sole owner of the retained
-   *  request payload.
-   */
-  extensionRuntimeGrantRespond: (
-    profileId: string,
-    installId: string,
-    runtimeGeneration: string,
-    requestId: string,
-    allow: boolean,
-  ) =>
-    __TAURI_INVOKE<OperationAdmission>("extension_runtime_grant_respond", {
-      profileId,
-      installId,
-      runtimeGeneration,
-      requestId,
-      allow,
-    }),
-  /**
-   *  Reads only platform capability state. It never enumerates credentials,
-   *  relying parties, or extension-owned vault data and never opens native UI.
-   */
-  browserCredentialCapability: () =>
-    __TAURI_INVOKE<BrowserCredentialCapabilityView>("browser_credential_capability"),
-  /**
-   *  Admits one user-initiated AuthenticationServices request. Native
-   *  settlement is projected back only to privileged browser chrome, and a
-   *  second request cannot overlap the first.
-   */
-  browserPasskeyAuthorizationRequest: () =>
-    __TAURI_INVOKE<boolean>("browser_passkey_authorization_request"),
-  /**
-   *  Answers only the exact Shell-projected foreground page request. Origin and
-   *  capability names are intentionally absent: chrome can choose a disposition
-   *  but cannot mint or alter authority.
-   */
-  pagePermissionRespond: (
-    profileId: string,
-    itemId: string,
-    requestId: string,
-    decision: PagePermissionPromptDecisionInput,
-  ) =>
-    __TAURI_INVOKE<OperationAdmission>("page_permission_respond", {
-      profileId,
-      itemId,
-      requestId,
-      decision,
-    }),
-  blockerStatus: () => typedError<BlockerStatusView, null>(__TAURI_INVOKE("blocker_status")),
-  blockerSetEnabled: (enabled: boolean) =>
-    __TAURI_INVOKE<OperationAdmission>("blocker_set_enabled", { enabled }),
-  blockerRetry: (failedGeneration: string) =>
-    __TAURI_INVOKE<OperationAdmission>("blocker_retry", { failedGeneration }),
-  blockerRefreshSources: () => __TAURI_INVOKE<OperationAdmission>("blocker_refresh_sources"),
-  profilesDelete: (profile: string) =>
-    __TAURI_INVOKE<OperationAdmission>("profiles_delete", { profile }),
-  operationStatus: (operationId: string) =>
-    __TAURI_INVOKE<OperationStatus>("operation_status", { operationId }),
-  operationsReconcile: () => __TAURI_INVOKE<OperationDisposition[]>("operations_reconcile"),
-  operationAcknowledge: (operationId: string) =>
-    __TAURI_INVOKE<boolean>("operation_acknowledge", { operationId }),
-  runCommand: (id: string) => __TAURI_INVOKE<OperationAdmission>("run_command", { id }),
-  panelHide: () => __TAURI_INVOKE<void>("panel_hide"),
-  panelReady: () =>
-    __TAURI_INVOKE<{
-      window_id: string | null;
-      revision: string;
-      session_id: string;
-      visible: boolean;
-      route: PanelRoute;
-      profile_id: string | null;
-      profile_name: string | null;
-      space_id: string | null;
-      error: boolean;
-      corner_radius: number;
-      position_restorable: boolean;
-    } | null>("panel_ready"),
-  panelIntent: (intent: PanelIntent) => __TAURI_INVOKE<boolean>("panel_intent", { intent }),
-  panelDrag: () => __TAURI_INVOKE<boolean>("panel_drag"),
-  settingGet: (key: string) => __TAURI_INVOKE<string | null>("setting_get", { key }),
-  settingSet: (key: string, value: string) =>
-    __TAURI_INVOKE<OperationAdmission>("setting_set", { key, value }),
-  uiInfo: () => __TAURI_INVOKE<UiInfo>("ui_info"),
-  uiReady: () => __TAURI_INVOKE<boolean>("ui_ready"),
-  menuPopup: (x: number | null, y: number | null) =>
-    __TAURI_INVOKE<boolean>("menu_popup", { x, y }),
-  addMenuPopup: (x: number | null, y: number | null, canSplit: boolean) =>
-    __TAURI_INVOKE<boolean>("add_menu_popup", { x, y, canSplit }),
-  tabMenuPopup: (id: string, x: number | null, y: number | null, canSplit: boolean) =>
-    __TAURI_INVOKE<boolean>("tab_menu_popup", { id, x, y, canSplit }),
-  profileMenuPopup: (x: number | null, y: number | null) =>
-    __TAURI_INVOKE<boolean>("profile_menu_popup", { x, y }),
-  sidebarMenuPopup: (x: number | null, y: number | null) =>
-    __TAURI_INVOKE<boolean>("sidebar_menu_popup", { x, y }),
-  launcherSearch: (query: string, requestId: string) =>
-    __TAURI_INVOKE<boolean>("launcher_search", { query, requestId }),
-  launcherRun: (action: SearchAction, context: SearchContext) =>
-    __TAURI_INVOKE<OperationAdmission>("launcher_run", { action, context }),
-  sidebarSetWidth: (width: number | null) => __TAURI_INVOKE<void>("sidebar_set_width", { width }),
-  tabDragOver: (x: number | null, y: number | null) =>
-    __TAURI_INVOKE<void>("tab_drag_over", { x, y }),
-  resourceCall: (expectedProfile: string, call: ResourceCall_Deserialize) =>
-    __TAURI_INVOKE<ResourceReply_Serialize>("resource_call", { expectedProfile, call }),
-  resourceCloseReady: (token: string, success: boolean) =>
-    __TAURI_INVOKE<boolean>("resource_close_ready", { token, success }),
-  tabDrop: (id: string, x: number | null, y: number | null) =>
-    __TAURI_INVOKE<OperationAdmission>("tab_drop", { id, x, y }),
-  dividerGrab: (x: number | null, y: number | null) =>
-    __TAURI_INVOKE<void>("divider_grab", { x, y }),
-  dividerDrag: (x: number | null, y: number | null) =>
-    __TAURI_INVOKE<void>("divider_drag", { x, y }),
-  dividerRelease: (x: number | null, y: number | null) =>
-    __TAURI_INVOKE<OperationAdmission>("divider_release", { x, y }),
+	workCall: (expectedProfile: string, call: WorkCallV1) => __TAURI_INVOKE<WorkResponseV1>("work_call", { expectedProfile, call }),
+	workOperation: (expectedProfile: string, operation: WorkCommandId, input: WorkOperationV1) => __TAURI_INVOKE<WorkOperationResponseV1>("work_operation", { expectedProfile, operation, input }),
+	workOperationStatus: (expectedProfile: string, work: WorkId, operation: WorkCommandId, acknowledge: boolean) => __TAURI_INVOKE<WorkOperationResponseV1>("work_operation_status", { expectedProfile, work, operation, acknowledge }),
+	workActivity: (expectedProfile: string, work: WorkId) => __TAURI_INVOKE<WorkActivityResponseV1>("work_activity", { expectedProfile, work }),
+	tabsBootstrap: () => __TAURI_INVOKE<void>("tabs_bootstrap"),
+	tabsOpen: () => __TAURI_INVOKE<OperationAdmission>("tabs_open"),
+	/**
+	 *  Explicit trusted user navigation. A citation alone never calls this command
+	 *  or allocates a Work browser resource.
+	 */
+	tabsOpenUrl: (url: string) => __TAURI_INVOKE<OperationAdmission>("tabs_open_url", { url }),
+	tabsActivate: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_activate", { id }),
+	tabsClose: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_close", { id }),
+	tabsSetEssential: (id: string, essential: boolean, before: string | null) => __TAURI_INVOKE<OperationAdmission>("tabs_set_essential", { id, essential, before }),
+	tabsNavigate: (id: string, input: string) => __TAURI_INVOKE<OperationAdmission>("tabs_navigate", { id, input }),
+	tabsReload: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_reload", { id }),
+	tabsBack: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_back", { id }),
+	tabsForward: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_forward", { id }),
+	tabsSplit: (other: string) => __TAURI_INVOKE<OperationAdmission>("tabs_split", { other }),
+	tabsUnsplit: () => __TAURI_INVOKE<OperationAdmission>("tabs_unsplit"),
+	extensionActionInvoke: (profileId: string, installId: string, runtimeGeneration: string, actionRevision: string, anchorX: number | null, anchorY: number | null, anchorWidth: number | null, anchorHeight: number | null) => __TAURI_INVOKE<OperationAdmission>("extension_action_invoke", { profileId, installId, runtimeGeneration, actionRevision, anchorX, anchorY, anchorWidth, anchorHeight }),
+	/**
+	 *  Opens or closes the one focused-profile management subscription.
+	 *  This is deliberately an explicit, non-polling visibility signal: the Shell
+	 *  retains authenticated management metadata only while privileged chrome is
+	 *  displaying it and performs no extension repository work at browser startup.
+	 */
+	extensionManagementSetVisible: (visible: boolean) => __TAURI_INVOKE<boolean>("extension_management_set_visible", { visible }),
+	/**
+	 *  Requests the one product-sealed extension catalog synchronization. The
+	 *  caller supplies no URL, profile, package, runtime target, or selection;
+	 *  those authorities were bound immutably before the worker was launched.
+	 */
+	extensionDistributionRefresh: () => __TAURI_INVOKE<ExtensionDistributionRefreshAdmissionView>("extension_distribution_refresh"),
+	extensionManagementInstall: (candidateIndex: number, catalogRevision: string, selection: ExtensionInstallGrantSelectionInput) => __TAURI_INVOKE<OperationAdmission>("extension_management_install", { candidateIndex, catalogRevision, selection }),
+	/**
+	 *  Approves only the exact changed-authority replacement retained by Shell's
+	 *  current focused-profile subscription. Package identity and permission names
+	 *  never cross this IPC boundary.
+	 */
+	extensionManagementApproveUpdate: (reviewId: string) => __TAURI_INVOKE<OperationAdmission>("extension_management_approve_update", { reviewId }),
+	extensionManagementSetEnabled: (installId: string, catalogRevision: string, installRevision: string, enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_set_enabled", { installId, catalogRevision, installRevision, enabled }),
+	/**
+	 *  Mutates only one bounded optional declaration from the exact installed
+	 *  management projection. Permission text never crosses this IPC boundary.
+	 */
+	extensionManagementEditOptionalGrant: (installId: string, catalogRevision: string, installRevision: string, grantRevision: string, kind: ExtensionOptionalGrantKindInput, index: number, granted: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_edit_optional_grant", { installId, catalogRevision, installRevision, grantRevision, kind, index, granted }),
+	extensionManagementSetProfilePaused: (policyRevision: string, paused: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_set_profile_paused", { policyRevision, paused }),
+	extensionManagementSetCurrentSiteEnabled: (policyRevision: string, enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_set_current_site_enabled", { policyRevision, enabled }),
+	extensionManagementOpenOptions: (installId: string, catalogRevision: string, installRevision: string) => __TAURI_INVOKE<boolean>("extension_management_open_options", { installId, catalogRevision, installRevision }),
+	extensionManagementUninstall: (installId: string, catalogRevision: string, installRevision: string) => __TAURI_INVOKE<OperationAdmission>("extension_management_uninstall", { installId, catalogRevision, installRevision }),
+	/**
+	 *  Answers only the exact Shell-projected native permission prompt. The four
+	 *  identities are short-lived stale fences; permission names never cross this
+	 *  command boundary and the actor remains the sole owner of the retained
+	 *  request payload.
+	 */
+	extensionRuntimeGrantRespond: (profileId: string, installId: string, runtimeGeneration: string, requestId: string, allow: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_runtime_grant_respond", { profileId, installId, runtimeGeneration, requestId, allow }),
+	/**
+	 *  Reads only platform capability state. It never enumerates credentials,
+	 *  relying parties, or extension-owned vault data and never opens native UI.
+	 */
+	browserCredentialCapability: () => __TAURI_INVOKE<BrowserCredentialCapabilityView>("browser_credential_capability"),
+	/**
+	 *  Admits one user-initiated AuthenticationServices request. Native
+	 *  settlement is projected back only to privileged browser chrome, and a
+	 *  second request cannot overlap the first.
+	 */
+	browserPasskeyAuthorizationRequest: () => __TAURI_INVOKE<boolean>("browser_passkey_authorization_request"),
+	/**
+	 *  Answers only the exact Shell-projected foreground page request. Origin and
+	 *  capability names are intentionally absent: chrome can choose a disposition
+	 *  but cannot mint or alter authority.
+	 */
+	pagePermissionRespond: (profileId: string, itemId: string, requestId: string, decision: PagePermissionPromptDecisionInput) => __TAURI_INVOKE<OperationAdmission>("page_permission_respond", { profileId, itemId, requestId, decision }),
+	blockerStatus: () => typedError<BlockerStatusView, null>(__TAURI_INVOKE("blocker_status")),
+	blockerSetEnabled: (enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("blocker_set_enabled", { enabled }),
+	blockerRetry: (failedGeneration: string) => __TAURI_INVOKE<OperationAdmission>("blocker_retry", { failedGeneration }),
+	blockerRefreshSources: () => __TAURI_INVOKE<OperationAdmission>("blocker_refresh_sources"),
+	profilesDelete: (profile: string) => __TAURI_INVOKE<OperationAdmission>("profiles_delete", { profile }),
+	operationStatus: (operationId: string) => __TAURI_INVOKE<OperationStatus>("operation_status", { operationId }),
+	operationsReconcile: () => __TAURI_INVOKE<OperationDisposition[]>("operations_reconcile"),
+	operationAcknowledge: (operationId: string) => __TAURI_INVOKE<boolean>("operation_acknowledge", { operationId }),
+	runCommand: (id: string) => __TAURI_INVOKE<OperationAdmission>("run_command", { id }),
+	panelHide: () => __TAURI_INVOKE<void>("panel_hide"),
+	panelReady: () => __TAURI_INVOKE<{
+	window_id: string | null,
+	revision: string,
+	session_id: string,
+	visible: boolean,
+	route: PanelRoute,
+	profile_id: string | null,
+	profile_name: string | null,
+	space_id: string | null,
+	error: boolean,
+	corner_radius: number,
+	position_restorable: boolean,
+} | null>("panel_ready"),
+	panelIntent: (intent: PanelIntent) => __TAURI_INVOKE<boolean>("panel_intent", { intent }),
+	panelDrag: () => __TAURI_INVOKE<boolean>("panel_drag"),
+	settingGet: (key: string) => __TAURI_INVOKE<string | null>("setting_get", { key }),
+	settingSet: (key: string, value: string) => __TAURI_INVOKE<OperationAdmission>("setting_set", { key, value }),
+	uiInfo: () => __TAURI_INVOKE<UiInfo>("ui_info"),
+	uiReady: () => __TAURI_INVOKE<boolean>("ui_ready"),
+	menuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("menu_popup", { x, y }),
+	addMenuPopup: (x: number | null, y: number | null, canSplit: boolean) => __TAURI_INVOKE<boolean>("add_menu_popup", { x, y, canSplit }),
+	tabMenuPopup: (id: string, x: number | null, y: number | null, canSplit: boolean) => __TAURI_INVOKE<boolean>("tab_menu_popup", { id, x, y, canSplit }),
+	profileMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("profile_menu_popup", { x, y }),
+	sidebarMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("sidebar_menu_popup", { x, y }),
+	launcherSearch: (query: string, requestId: string) => __TAURI_INVOKE<boolean>("launcher_search", { query, requestId }),
+	launcherRun: (action: SearchAction, context: SearchContext) => __TAURI_INVOKE<OperationAdmission>("launcher_run", { action, context }),
+	sidebarSetWidth: (width: number | null) => __TAURI_INVOKE<void>("sidebar_set_width", { width }),
+	tabDragOver: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("tab_drag_over", { x, y }),
+	resourceCall: (expectedProfile: string, call: ResourceCall_Deserialize) => __TAURI_INVOKE<ResourceReply_Serialize>("resource_call", { expectedProfile, call }),
+	resourceCloseReady: (token: string, success: boolean) => __TAURI_INVOKE<boolean>("resource_close_ready", { token, success }),
+	tabDrop: (id: string, x: number | null, y: number | null) => __TAURI_INVOKE<OperationAdmission>("tab_drop", { id, x, y }),
+	dividerGrab: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("divider_grab", { x, y }),
+	dividerDrag: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("divider_drag", { x, y }),
+	dividerRelease: (x: number | null, y: number | null) => __TAURI_INVOKE<OperationAdmission>("divider_release", { x, y }),
 };
 
 /** Events */
 export const events = {
-  blockerStatusChanged: makeEvent<BlockerStatusChanged>("blocker-status-changed"),
-  browserCredentialCapabilityChanged: makeEvent<BrowserCredentialCapabilityChanged>(
-    "browser-credential-capability-changed",
-  ),
-  extensionActionFailed: makeEvent<ExtensionActionFailed>("extension-action-failed"),
-  extensionActionShortcut: makeEvent<ExtensionActionShortcut>("extension-action-shortcut"),
-  extensionActionsChanged: makeEvent<ExtensionActionsChanged>("extension-actions-changed"),
-  extensionDistributionChanged: makeEvent<ExtensionDistributionChanged>(
-    "extension-distribution-changed",
-  ),
-  extensionManagementAvailabilityChanged: makeEvent<ExtensionManagementAvailabilityChanged>(
-    "extension-management-availability-changed",
-  ),
-  extensionManagementChanged: makeEvent<ExtensionManagementChanged>("extension-management-changed"),
-  extensionRuntimeGrantPromptChanged: makeEvent<ExtensionRuntimeGrantPromptChanged>(
-    "extension-runtime-grant-prompt-changed",
-  ),
-  itemsChanged: makeEvent<ItemsChanged>("items-changed"),
-  layoutChanged: makeEvent<LayoutChanged>("layout-changed"),
-  operationProcessed: makeEvent<OperationProcessed>("operation-processed"),
-  pagePermissionPromptChanged: makeEvent<PagePermissionPromptChanged>(
-    "page-permission-prompt-changed",
-  ),
-  resourceChanged: makeEvent<ResourceChanged>("resource-changed"),
-  runtimeStatusChanged: makeEvent<RuntimeStatusChanged>("runtime-status-changed"),
-  searchChanged: makeEvent<SearchChanged>("search-changed"),
-  tabChanged: makeEvent<TabChanged>("tab-changed"),
-  uiCommand: makeEvent<UiCommand>("ui-command"),
-  workChanged: makeEvent<WorkChanged>("work-changed"),
-  workEnvironmentChanged: makeEvent<WorkEnvironmentChanged>("work-environment-changed"),
+	blockerStatusChanged: makeEvent<BlockerStatusChanged>("blocker-status-changed"),
+	browserCredentialCapabilityChanged: makeEvent<BrowserCredentialCapabilityChanged>("browser-credential-capability-changed"),
+	extensionActionFailed: makeEvent<ExtensionActionFailed>("extension-action-failed"),
+	extensionActionShortcut: makeEvent<ExtensionActionShortcut>("extension-action-shortcut"),
+	extensionActionsChanged: makeEvent<ExtensionActionsChanged>("extension-actions-changed"),
+	extensionDistributionChanged: makeEvent<ExtensionDistributionChanged>("extension-distribution-changed"),
+	extensionManagementAvailabilityChanged: makeEvent<ExtensionManagementAvailabilityChanged>("extension-management-availability-changed"),
+	extensionManagementChanged: makeEvent<ExtensionManagementChanged>("extension-management-changed"),
+	extensionRuntimeGrantPromptChanged: makeEvent<ExtensionRuntimeGrantPromptChanged>("extension-runtime-grant-prompt-changed"),
+	itemsChanged: makeEvent<ItemsChanged>("items-changed"),
+	layoutChanged: makeEvent<LayoutChanged>("layout-changed"),
+	operationProcessed: makeEvent<OperationProcessed>("operation-processed"),
+	pagePermissionPromptChanged: makeEvent<PagePermissionPromptChanged>("page-permission-prompt-changed"),
+	resourceChanged: makeEvent<ResourceChanged>("resource-changed"),
+	runtimeStatusChanged: makeEvent<RuntimeStatusChanged>("runtime-status-changed"),
+	searchChanged: makeEvent<SearchChanged>("search-changed"),
+	tabChanged: makeEvent<TabChanged>("tab-changed"),
+	uiCommand: makeEvent<UiCommand>("ui-command"),
+	workChanged: makeEvent<WorkChanged>("work-changed"),
+	workEnvironmentChanged: makeEvent<WorkEnvironmentChanged>("work-environment-changed"),
 };
 
 /* Types */
@@ -317,27 +155,9 @@ export const events = {
  *  Stable diagnostics classification. Native/parser text and filter content
  *  never cross the privileged IPC boundary.
  */
-export type BlockerFailure =
-  | "generation_exhausted"
-  | "compiler_dispatch_rejected"
-  | "compiler_unavailable"
-  | "compile_source_unavailable"
-  | "compile_invalid_source"
-  | "compile_resource_limit"
-  | "compile_internal"
-  | "compiled_artifact_mismatch"
-  | "native_dispatch_rejected"
-  | "native_unsupported"
-  | "native_unsupported_artifact"
-  | "native_invalid_artifact"
-  | "native_compilation"
-  | "native_installation"
-  | "native_cleanup"
-  | "native_superseded"
-  | "contradictory_native_settlement";
+export type BlockerFailure = "generation_exhausted" | "compiler_dispatch_rejected" | "compiler_unavailable" | "compile_source_unavailable" | "compile_invalid_source" | "compile_resource_limit" | "compile_internal" | "compiled_artifact_mismatch" | "native_dispatch_rejected" | "native_unsupported" | "native_unsupported_artifact" | "native_invalid_artifact" | "native_compilation" | "native_installation" | "native_cleanup" | "native_superseded" | "contradictory_native_settlement";
 
-export type BlockerPhase =
-  "unavailable" | "uninitialized" | "compiling" | "installing" | "ready" | "failed" | "retired";
+export type BlockerPhase = "unavailable" | "uninitialized" | "compiling" | "installing" | "ready" | "failed" | "retired";
 
 /**
  *  Authority of the focused profile's durable blocker preference.
@@ -361,15 +181,15 @@ export type BlockerProtection = "disabled" | "pending" | "active" | "degraded" |
  *  blocker compiler's hard rule limits.
  */
 export type BlockerRuleCoverage = {
-  source_rules: number;
-  accepted_rules: number;
-  rejected_rules: number;
-  platform_omitted_rules: number;
-  platform_approximated_rules: number;
-  platform_resource_approximated_rules: number;
-  platform_source_kind_approximated_rules: number;
-  platform_attribution_approximated_rules: number;
-  blocking_rule_entries: number;
+	source_rules: number,
+	accepted_rules: number,
+	rejected_rules: number,
+	platform_omitted_rules: number,
+	platform_approximated_rules: number,
+	platform_resource_approximated_rules: number,
+	platform_source_kind_approximated_rules: number,
+	platform_attribution_approximated_rules: number,
+	blocking_rule_entries: number,
 };
 
 /**
@@ -379,29 +199,19 @@ export type BlockerRuleCoverage = {
  *  origin, URL, profile, or rule identity.
  */
 export type BlockerRuntimeDiagnostics = {
-  total_decisions: string;
-  candidate_budget_exhausted: string;
-  matcher_unavailable: string;
-  matcher_unprepared: string;
-  attribution_unavailable: string;
-  evaluation_errors: string;
+	total_decisions: string,
+	candidate_budget_exhausted: string,
+	matcher_unavailable: string,
+	matcher_unprepared: string,
+	attribution_unavailable: string,
+	evaluation_errors: string,
 };
 
 /**
  *  Stable package-refresh failure category. Endpoint, parser, and native
  *  strings are intentionally never forwarded to privileged JavaScript.
  */
-export type BlockerSourceFailure =
-  | "transport"
-  | "metadata"
-  | "clock"
-  | "manifest"
-  | "target"
-  | "license"
-  | "rollback"
-  | "storage"
-  | "catalog"
-  | "internal";
+export type BlockerSourceFailure = "transport" | "metadata" | "clock" | "manifest" | "target" | "license" | "rollback" | "storage" | "catalog" | "internal";
 
 /**
  *  Exact authenticated identities for source-package transition diagnostics.
@@ -409,24 +219,14 @@ export type BlockerSourceFailure =
  *  inflate every application projection on the shell actor's hot path.
  */
 export type BlockerSourceIdentities = {
-  package_manifest_sha256: string | null;
-  candidate_revision: string | null;
-  candidate_manifest_sha256: string | null;
-  installed_manifest_sha256: string | null;
+	package_manifest_sha256: string | null,
+	candidate_revision: string | null,
+	candidate_manifest_sha256: string | null,
+	installed_manifest_sha256: string | null,
 };
 
 /**  Sanitized state of the authenticated filter-package supply chain. */
-export type BlockerSourcePhase =
-  | "not_configured"
-  | "durable_activation_unsupported"
-  | "storage_unavailable"
-  | "clock_unsafe"
-  | "idle"
-  | "fresh"
-  | "stale"
-  | "refreshing"
-  | "failed"
-  | "shutdown";
+export type BlockerSourcePhase = "not_configured" | "durable_activation_unsupported" | "storage_unavailable" | "clock_unsafe" | "idle" | "fresh" | "stale" | "refreshing" | "failed" | "shutdown";
 
 /**  Authority which admitted the displayed filter package. */
 export type BlockerSourceProvenance = "release_bundle" | "tuf_repository";
@@ -440,102 +240,95 @@ export type BlockerStatusChanged = BlockerStatusView;
  *  represented only by volatile aggregate counters.
  */
 export type BlockerStatusView = {
-  projection_revision: string;
-  protection: BlockerProtection;
-  phase: BlockerPhase;
-  preference: BlockerPreferenceState;
-  config_revision: string | null;
-  desired_enabled: boolean | null;
-  applied_enabled: boolean | null;
-  desired_generation: string | null;
-  retained_generation: string | null;
-  failure: BlockerFailure | null;
-  retryable: boolean;
-  retries_remaining: number;
-  /**
-   *  Boxed with the other diagnostic-only payloads so ordinary projection
-   *  queue entries do not carry the full coverage report inline.
-   */
-  applied_coverage: BlockerRuleCoverage | null;
-  /**
-   *  Boxed because the six decimal counters are diagnostic-only and should
-   *  not inflate every projection enum value on the actor/UI hot path.
-   */
-  runtime_diagnostics: BlockerRuntimeDiagnostics | null;
-  source_phase: BlockerSourcePhase;
-  source_failure: BlockerSourceFailure | null;
-  source_package_revision: string | null;
-  source_installed_revision: string | null;
-  source_package_provenance: BlockerSourceProvenance | null;
-  source_installed_provenance: BlockerSourceProvenance | null;
-  source_identities: BlockerSourceIdentities | null;
-  source_package_created_unix: string | null;
-  source_package_expires_unix: string | null;
-  source_package_stale: boolean | null;
-  /**
-   *  Advisory source update cadence. This never downgrades a healthy
-   *  release-bundled policy.
-   */
-  source_refresh_due: boolean;
-  source_count: number | null;
-  source_bytes: number | null;
-  source_activation_pending: boolean;
-  source_material_repair_pending: boolean;
-  source_material_repair_retry_pending: boolean;
-  source_repair_retry_pending: boolean;
-  source_last_refresh_attempt_unix: string | null;
-  source_refresh_operation: string | null;
-  /**  Authoritative source-policy capability for the focused profile. */
-  can_enable: boolean;
-  /**  Authoritative refresh admission capability for the active supply mode. */
-  can_refresh_sources: boolean;
+	projection_revision: string,
+	protection: BlockerProtection,
+	phase: BlockerPhase,
+	preference: BlockerPreferenceState,
+	config_revision: string | null,
+	desired_enabled: boolean | null,
+	applied_enabled: boolean | null,
+	desired_generation: string | null,
+	retained_generation: string | null,
+	failure: BlockerFailure | null,
+	retryable: boolean,
+	retries_remaining: number,
+	/**
+	 *  Boxed with the other diagnostic-only payloads so ordinary projection
+	 *  queue entries do not carry the full coverage report inline.
+	 */
+	applied_coverage: BlockerRuleCoverage | null,
+	/**
+	 *  Boxed because the six decimal counters are diagnostic-only and should
+	 *  not inflate every projection enum value on the actor/UI hot path.
+	 */
+	runtime_diagnostics: BlockerRuntimeDiagnostics | null,
+	source_phase: BlockerSourcePhase,
+	source_failure: BlockerSourceFailure | null,
+	source_package_revision: string | null,
+	source_installed_revision: string | null,
+	source_package_provenance: BlockerSourceProvenance | null,
+	source_installed_provenance: BlockerSourceProvenance | null,
+	source_identities: BlockerSourceIdentities | null,
+	source_package_created_unix: string | null,
+	source_package_expires_unix: string | null,
+	source_package_stale: boolean | null,
+	/**
+	 *  Advisory source update cadence. This never downgrades a healthy
+	 *  release-bundled policy.
+	 */
+	source_refresh_due: boolean,
+	source_count: number | null,
+	source_bytes: number | null,
+	source_activation_pending: boolean,
+	source_material_repair_pending: boolean,
+	source_material_repair_retry_pending: boolean,
+	source_repair_retry_pending: boolean,
+	source_last_refresh_attempt_unix: string | null,
+	source_refresh_operation: string | null,
+	/**  Authoritative source-policy capability for the focused profile. */
+	can_enable: boolean,
+	/**  Authoritative refresh admission capability for the active supply mode. */
+	can_refresh_sources: boolean,
 };
 
 export type BrowserCredentialCapabilityChanged = BrowserCredentialCapabilityView;
 
 export type BrowserCredentialCapabilityView = {
-  system_password_autofill: boolean;
-  passkey_authorization: BrowserPasskeyAuthorizationView;
-  can_request_passkey_authorization: boolean;
+	system_password_autofill: boolean,
+	passkey_authorization: BrowserPasskeyAuthorizationView,
+	can_request_passkey_authorization: boolean,
 };
 
-export type BrowserPasskeyAuthorizationView =
-  | "authorized"
-  | "denied"
-  | "not_determined"
-  | "entitlement_required"
-  | "unknown"
-  | "unavailable"
-  | "unsupported";
+export type BrowserPasskeyAuthorizationView = "authorized" | "denied" | "not_determined" | "entitlement_required" | "unknown" | "unavailable" | "unsupported";
 
 /**
  *  Split divider hit-strip in window logical coordinates; the chrome renders
  *  these as drag targets on platforms without native stage dividers.
  */
 export type DividerView = {
-  x: number | null;
-  y: number | null;
-  width: number | null;
-  height: number | null;
-  vertical: boolean;
+	x: number | null,
+	y: number | null,
+	width: number | null,
+	height: number | null,
+	vertical: boolean,
 };
 
 export type DocumentAttrs = DocumentAttrs_Serialize | DocumentAttrs_Deserialize;
 
 export type DocumentAttrs_Deserialize = {
-  start?: number | null;
-  level?: number | null;
-  resource?: string | null;
+	start?: number | null,
+	level?: number | null,
+	resource?: string | null,
 };
 
 export type DocumentAttrs_Serialize = {
-  start?: number | null;
-  level?: number | null;
-  resource?: string | null;
+	start?: number | null,
+	level?: number | null,
+	resource?: string | null,
 };
 
 export type DocumentMark = {
-  type: string;
+	type: string,
 };
 
 /**
@@ -549,11 +342,11 @@ export type DocumentNode = DocumentNode_Serialize | DocumentNode_Deserialize;
  *  checked before persistence, independently from editor-side validation.
  */
 export type DocumentNode_Deserialize = {
-  type: string;
-  content?: DocumentNode_Deserialize[];
-  text?: string | null;
-  attrs?: DocumentAttrs_Deserialize | null;
-  marks?: DocumentMark[];
+	type: string,
+	content?: DocumentNode_Deserialize[],
+	text?: string | null,
+	attrs?: DocumentAttrs_Deserialize | null,
+	marks?: DocumentMark[],
 };
 
 /**
@@ -561,11 +354,11 @@ export type DocumentNode_Deserialize = {
  *  checked before persistence, independently from editor-side validation.
  */
 export type DocumentNode_Serialize = {
-  type: string;
-  content?: DocumentNode_Serialize[];
-  text?: string | null;
-  attrs?: DocumentAttrs_Serialize | null;
-  marks?: DocumentMark[];
+	type: string,
+	content?: DocumentNode_Serialize[],
+	text?: string | null,
+	attrs?: DocumentAttrs_Serialize | null,
+	marks?: DocumentMark[],
 };
 
 export type ExtensionActionFailed = ExtensionActionFailedView;
@@ -577,10 +370,10 @@ export type ExtensionActionFailed = ExtensionActionFailedView;
  *  appearing after the user has switched context.
  */
 export type ExtensionActionFailedView = {
-  projection_revision: string;
-  profile_id: string;
-  tab_id: string;
-  reason: ExtensionActionFailure;
+	projection_revision: string,
+	profile_id: string,
+	tab_id: string,
+	reason: ExtensionActionFailure,
 };
 
 /**
@@ -588,20 +381,7 @@ export type ExtensionActionFailedView = {
  *  Native strings, extension content, URLs, and runtime identities are never
  *  forwarded through this transient user-notice channel.
  */
-export type ExtensionActionFailure =
-  | "invalid_request"
-  | "runtime_unavailable"
-  | "runtime_superseded"
-  | "tab_unavailable"
-  | "tab_discarded"
-  | "action_unavailable"
-  | "action_disabled"
-  | "capacity_exceeded"
-  | "popup_unavailable"
-  | "popup_capacity_exceeded"
-  | "native_admission_failed"
-  | "shutting_down"
-  | "unsupported_platform";
+export type ExtensionActionFailure = "invalid_request" | "runtime_unavailable" | "runtime_superseded" | "tab_unavailable" | "tab_discarded" | "action_unavailable" | "action_disabled" | "capacity_exceeded" | "popup_unavailable" | "popup_capacity_exceeded" | "native_admission_failed" | "shutting_down" | "unsupported_platform";
 
 /**
  *  Non-authorizing identity for one live extension runtime. Privileged chrome
@@ -610,12 +390,12 @@ export type ExtensionActionFailure =
  *  action revision before any native work is admitted.
  */
 export type ExtensionActionRuntimeView = {
-  install_id: string;
-  /**
-   *  Process-local nonzero generation, encoded as fixed-width hexadecimal
-   *  so JavaScript never rounds a Rust `u64`.
-   */
-  generation: string;
+	install_id: string,
+	/**
+	 *  Process-local nonzero generation, encoded as fixed-width hexadecimal
+	 *  so JavaScript never rounds a Rust `u64`.
+	 */
+	generation: string,
 };
 
 export type ExtensionActionShortcut = ExtensionActionShortcutView;
@@ -628,11 +408,11 @@ export type ExtensionActionShortcut = ExtensionActionShortcutView;
  *  path.
  */
 export type ExtensionActionShortcutView = {
-  projection_revision: string;
-  profile_id: string;
-  tab_id: string;
-  runtime: ExtensionActionRuntimeView;
-  action_revision: string;
+	projection_revision: string,
+	profile_id: string,
+	tab_id: string,
+	runtime: ExtensionActionRuntimeView,
+	action_revision: string,
 };
 
 /**
@@ -642,14 +422,14 @@ export type ExtensionActionShortcutView = {
  *  privileged chrome performs no extension-controlled image decoding.
  */
 export type ExtensionActionView = {
-  runtime: ExtensionActionRuntimeView;
-  revision: string;
-  label: string;
-  badge: string;
-  icon_rgba_base64: string | null;
-  enabled: boolean;
-  presents_popup: boolean;
-  unread_badge: boolean;
+	runtime: ExtensionActionRuntimeView,
+	revision: string,
+	label: string,
+	badge: string,
+	icon_rgba_base64: string | null,
+	enabled: boolean,
+	presents_popup: boolean,
+	unread_badge: boolean,
 };
 
 export type ExtensionActionsChanged = ExtensionActionsView;
@@ -661,10 +441,10 @@ export type ExtensionActionsChanged = ExtensionActionsView;
  *  reordering cannot expose a stale action after focus changes.
  */
 export type ExtensionActionsView = {
-  projection_revision: string;
-  profile_id: string;
-  tab_id: string | null;
-  actions: ExtensionActionView[];
+	projection_revision: string,
+	profile_id: string,
+	tab_id: string | null,
+	actions: ExtensionActionView[],
 };
 
 export type ExtensionDistributionChanged = ExtensionDistributionView;
@@ -673,62 +453,25 @@ export type ExtensionDistributionChanged = ExtensionDistributionView;
  *  Redacted product-distribution failure reason. Network and native error
  *  strings never cross the privileged IPC boundary.
  */
-export type ExtensionDistributionFailureReasonView =
-  | "acquisition"
-  | "busy"
-  | "service_unavailable"
-  | "service_rejected"
-  | "service_failed_closed"
-  | "settlement_timed_out"
-  | "settlement_lost"
-  | "submission_panicked"
-  | "outcome_unresolved"
-  | "activation_rejected"
-  | "accounting";
+export type ExtensionDistributionFailureReasonView = "acquisition" | "busy" | "service_unavailable" | "service_rejected" | "service_failed_closed" | "settlement_timed_out" | "settlement_lost" | "submission_panicked" | "outcome_unresolved" | "activation_rejected" | "accounting";
 
 /**  Stable distribution failure stage exposed only to privileged chrome. */
-export type ExtensionDistributionFailureStageView =
-  | { type: "catalog" }
-  | { type: "package_fetch"; index: number }
-  | { type: "package_provision"; index: number }
-  | { type: "catalog_activation" };
+export type ExtensionDistributionFailureStageView = { type: "catalog" } | { type: "package_fetch"; index: number } | { type: "package_provision"; index: number } | { type: "catalog_activation" };
 
 /**
  *  Closed response for the argument-free product update trigger. This is an
  *  admission result, not completion; authoritative progress and settlement
  *  continue to arrive through `ExtensionDistributionChanged`.
  */
-export type ExtensionDistributionRefreshAdmissionView =
-  "accepted" | "busy" | "quarantined" | "unavailable" | "shutting_down";
+export type ExtensionDistributionRefreshAdmissionView = "accepted" | "busy" | "quarantined" | "unavailable" | "shutting_down";
 
 /**  Exact replacement state for the dormant product distribution worker. */
-export type ExtensionDistributionStateView =
-  | { phase: "idle" }
-  | { phase: "synchronizing" }
-  | {
-      phase: "ready";
-      package_count: number;
-      materialized_packages: number;
-      reused_packages: number;
-      exact_retries: number;
-      newly_activated: boolean;
-    }
-  | {
-      phase: "failed";
-      stage: ExtensionDistributionFailureStageView;
-      reason: ExtensionDistributionFailureReasonView;
-    }
-  | {
-      phase: "quarantined";
-      stage: ExtensionDistributionFailureStageView;
-      reason: ExtensionDistributionFailureReasonView;
-    }
-  | { phase: "shutdown" };
+export type ExtensionDistributionStateView = { phase: "idle" } | { phase: "synchronizing" } | { phase: "ready"; package_count: number; materialized_packages: number; reused_packages: number; exact_retries: number; newly_activated: boolean } | { phase: "failed"; stage: ExtensionDistributionFailureStageView; reason: ExtensionDistributionFailureReasonView } | { phase: "quarantined"; stage: ExtensionDistributionFailureStageView; reason: ExtensionDistributionFailureReasonView } | { phase: "shutdown" };
 
 /**  Shell-revisioned product-distribution status for privileged extension UI. */
 export type ExtensionDistributionView = {
-  projection_revision: string;
-  state: ExtensionDistributionStateView;
+	projection_revision: string,
+	state: ExtensionDistributionStateView,
 };
 
 /**
@@ -738,29 +481,29 @@ export type ExtensionDistributionView = {
  *  it conveys no package, repository, profile, or permission authority.
  */
 export type ExtensionInstallCandidateView = {
-  candidate_index: number;
-  name: string;
-  description: string | null;
-  author: string | null;
-  version: string;
-  source: ExtensionManagementSourceView;
-  /**  Decimal Unix seconds of the authenticated Verified catalog release. */
-  verified_catalog_unix: string | null;
-  provenance: ExtensionManagementProvenanceView | null;
-  required_api: string[];
-  required_hosts: string[];
-  /**
-   *  Canonically ordered optional API grants. The frontend returns only
-   *  selected array indexes; Shell rejoins them to its retained candidate.
-   */
-  optional_api: string[];
-  /**  Canonically ordered optional host grants. */
-  optional_hosts: string[];
-  supports_file_access: boolean;
-  file_access_available: boolean;
-  private_access_available: boolean;
-  compatibility: ExtensionManagementCompatibilityView;
-  limitations: ExtensionManagementLimitationView[];
+	candidate_index: number,
+	name: string,
+	description: string | null,
+	author: string | null,
+	version: string,
+	source: ExtensionManagementSourceView,
+	/**  Decimal Unix seconds of the authenticated Verified catalog release. */
+	verified_catalog_unix: string | null,
+	provenance: ExtensionManagementProvenanceView | null,
+	required_api: string[],
+	required_hosts: string[],
+	/**
+	 *  Canonically ordered optional API grants. The frontend returns only
+	 *  selected array indexes; Shell rejoins them to its retained candidate.
+	 */
+	optional_api: string[],
+	/**  Canonically ordered optional host grants. */
+	optional_hosts: string[],
+	supports_file_access: boolean,
+	file_access_available: boolean,
+	private_access_available: boolean,
+	compatibility: ExtensionManagementCompatibilityView,
+	limitations: ExtensionManagementLimitationView[],
 };
 
 /**
@@ -769,18 +512,18 @@ export type ExtensionInstallCandidateView = {
  *  manifest declaration, or permission-name authority.
  */
 export type ExtensionInstallGrantSelectionInput = {
-  optional_api_indices: number[];
-  optional_host_indices: number[];
-  file_access: boolean;
-  private_access: boolean;
+	optional_api_indices: number[],
+	optional_host_indices: number[],
+	file_access: boolean,
+	private_access: boolean,
 };
 
 export type ExtensionManagementAvailabilityChanged = ExtensionManagementAvailabilityChangedView;
 
 /**  Actor-ordered projection of extension-management product availability. */
 export type ExtensionManagementAvailabilityChangedView = {
-  projection_revision: string;
-  availability: ExtensionManagementAvailabilityView;
+	projection_revision: string,
+	availability: ExtensionManagementAvailabilityView,
 };
 
 /**
@@ -797,88 +540,61 @@ export type ExtensionManagementCompatibilityView = "compatible" | "degraded";
 
 /**  One authenticated installed extension in browser-owned management UI. */
 export type ExtensionManagementEntryView = {
-  install_id: string;
-  install_revision: string;
-  name: string;
-  description: string | null;
-  author: string | null;
-  version: string;
-  has_options_page: boolean;
-  source: ExtensionManagementSourceView;
-  /**  Decimal Unix seconds of the authenticated Verified catalog release. */
-  verified_catalog_unix: string | null;
-  provenance: ExtensionManagementProvenanceView | null;
-  runtime: ExtensionManagementRuntimeView;
-  /**  Present only when `runtime` is `active`. */
-  runtime_generation: string | null;
-  grants: ExtensionManagementGrantView;
-  /**
-   *  Canonically ordered optional API declarations. Mutations return only
-   *  the array index plus the exact grant revision.
-   */
-  optional_api: string[];
-  /**  Canonically ordered optional host declarations. */
-  optional_hosts: string[];
-  compatibility: ExtensionManagementCompatibilityView;
-  limitations: ExtensionManagementLimitationView[];
+	install_id: string,
+	install_revision: string,
+	name: string,
+	description: string | null,
+	author: string | null,
+	version: string,
+	has_options_page: boolean,
+	source: ExtensionManagementSourceView,
+	/**  Decimal Unix seconds of the authenticated Verified catalog release. */
+	verified_catalog_unix: string | null,
+	provenance: ExtensionManagementProvenanceView | null,
+	runtime: ExtensionManagementRuntimeView,
+	/**  Present only when `runtime` is `active`. */
+	runtime_generation: string | null,
+	grants: ExtensionManagementGrantView,
+	/**
+	 *  Canonically ordered optional API declarations. Mutations return only
+	 *  the array index plus the exact grant revision.
+	 */
+	optional_api: string[],
+	/**  Canonically ordered optional host declarations. */
+	optional_hosts: string[],
+	compatibility: ExtensionManagementCompatibilityView,
+	limitations: ExtensionManagementLimitationView[],
 };
 
 /**  Non-authorizing summary of the atomic grant row joined to an install. */
 export type ExtensionManagementGrantView = {
-  initialized: boolean;
-  revision: string | null;
-  api_permissions: string[];
-  host_permissions: string[];
-  file_access: boolean;
-  private_access: boolean;
+	initialized: boolean,
+	revision: string | null,
+	api_permissions: string[],
+	host_permissions: string[],
+	file_access: boolean,
+	private_access: boolean,
 };
 
 /**  One browser-owned explanation for a reviewed platform degradation. */
-export type ExtensionManagementLimitationView =
-  | { type: "api_permission"; name: string }
-  | { type: "host_access" }
-  | { type: "background" }
-  | { type: "action" }
-  | { type: "offscreen" }
-  | { type: "native_messaging" }
-  | { type: "browser_override" }
-  | { type: "extension_pages_csp" }
-  | { type: "sandbox" }
-  | { type: "content_scripts" }
-  | { type: "web_accessible_resources" }
-  | { type: "minimum_browser_version" }
-  | { type: "commands" }
-  | { type: "side_panel" }
-  | { type: "managed_storage" }
-  | { type: "options_page" }
-  | { type: "declarative_net_request" };
+export type ExtensionManagementLimitationView = { type: "api_permission"; name: string } | { type: "host_access" } | { type: "background" } | { type: "action" } | { type: "offscreen" } | { type: "native_messaging" } | { type: "browser_override" } | { type: "extension_pages_csp" } | { type: "sandbox" } | { type: "content_scripts" } | { type: "web_accessible_resources" } | { type: "minimum_browser_version" } | { type: "commands" } | { type: "side_panel" } | { type: "managed_storage" } | { type: "options_page" } | { type: "declarative_net_request" };
 
 /**  Settlement of the focused profile's lazy installed-extension projection. */
-export type ExtensionManagementPhase =
-  | "loading"
-  | "ready"
-  | "not_configured"
-  | "catalog_not_synchronized"
-  | "update_consent_required"
-  | "unavailable"
-  | "rejected"
-  | "failed_closed";
+export type ExtensionManagementPhase = "loading" | "ready" | "not_configured" | "catalog_not_synchronized" | "update_consent_required" | "unavailable" | "rejected" | "failed_closed";
 
 /**  Browser-authenticated, inert upstream identity for extension management UI. */
 export type ExtensionManagementProvenanceView = {
-  source_url: string;
-  upstream_version: string;
-  license_expression: string;
-  attribution: string;
+	source_url: string,
+	upstream_version: string,
+	license_expression: string,
+	attribution: string,
 };
 
 /**  Process-local regular-runtime state for one installed extension. */
-export type ExtensionManagementRuntimeView =
-  "disabled" | "pending_activation" | "profile_paused" | "active";
+export type ExtensionManagementRuntimeView = "disabled" | "pending_activation" | "profile_paused" | "active";
 
 /**  Browser-authenticated acquisition/support lane for extension management UI. */
-export type ExtensionManagementSourceView =
-  "zephium_verified" | "external_compatibility" | "developer_local";
+export type ExtensionManagementSourceView = "zephium_verified" | "external_compatibility" | "developer_local";
 
 /**
  *  Exact replacement management cohort for the focused profile.
@@ -886,26 +602,26 @@ export type ExtensionManagementSourceView =
  *  delayed failure cannot leave stale selectors actionable in privileged UI.
  */
 export type ExtensionManagementView = {
-  projection_revision: string;
-  profile_id: string;
-  phase: ExtensionManagementPhase;
-  catalog_revision: string | null;
-  /**  Present only while `phase` is `ready`. */
-  profile_policy: ExtensionProfilePolicyView | null;
-  entries: ExtensionManagementEntryView[];
-  candidates: ExtensionInstallCandidateView[];
-  /**  Present only while `phase` is `update_consent_required`. */
-  pending_update: ExtensionUpdateConsentView | null;
+	projection_revision: string,
+	profile_id: string,
+	phase: ExtensionManagementPhase,
+	catalog_revision: string | null,
+	/**  Present only while `phase` is `ready`. */
+	profile_policy: ExtensionProfilePolicyView | null,
+	entries: ExtensionManagementEntryView[],
+	candidates: ExtensionInstallCandidateView[],
+	/**  Present only while `phase` is `update_consent_required`. */
+	pending_update: ExtensionUpdateConsentView | null,
 };
 
 export type ExtensionOptionalGrantKindInput = "api" | "host";
 
 export type ExtensionProfilePolicyView = {
-  revision: string;
-  paused: boolean;
-  denied_site_count: number;
-  current_site_available: boolean;
-  current_site_denied: boolean;
+	revision: string,
+	paused: boolean,
+	denied_site_count: number,
+	current_site_available: boolean,
+	current_site_denied: boolean,
 };
 
 export type ExtensionRuntimeGrantPromptChanged = ExtensionRuntimeGrantPromptView;
@@ -916,19 +632,19 @@ export type ExtensionRuntimeGrantPromptChanged = ExtensionRuntimeGrantPromptView
  *  request before a user response can reach the serialized grant service.
  */
 export type ExtensionRuntimeGrantPromptEntryView = {
-  profile_id: string;
-  install_id: string;
-  runtime_generation: string;
-  request_id: string;
-  extension_name: string;
-  api_permissions: string[];
-  host_permissions: string[];
-  private_context: boolean;
-  /**
-   *  True after an Allow gesture while the durable grant transaction is in
-   *  flight. Chrome must disable both response buttons until replacement.
-   */
-  processing: boolean;
+	profile_id: string,
+	install_id: string,
+	runtime_generation: string,
+	request_id: string,
+	extension_name: string,
+	api_permissions: string[],
+	host_permissions: string[],
+	private_context: boolean,
+	/**
+	 *  True after an Allow gesture while the durable grant transaction is in
+	 *  flight. Chrome must disable both response buttons until replacement.
+	 */
+	processing: boolean,
 };
 
 /**
@@ -937,8 +653,8 @@ export type ExtensionRuntimeGrantPromptEntryView = {
  *  frame never chooses request ordering.
  */
 export type ExtensionRuntimeGrantPromptView = {
-  projection_revision: string;
-  prompt: ExtensionRuntimeGrantPromptEntryView | null;
+	projection_revision: string,
+	prompt: ExtensionRuntimeGrantPromptEntryView | null,
 };
 
 /**
@@ -948,16 +664,16 @@ export type ExtensionRuntimeGrantPromptView = {
  *  accepted back from privileged chrome.
  */
 export type ExtensionUpdateConsentView = {
-  review_id: string;
-  name: string;
-  version: string;
-  source: ExtensionManagementSourceView;
-  verified_catalog_unix: string | null;
-  provenance: ExtensionManagementProvenanceView | null;
-  added_required_api: string[];
-  added_required_hosts: string[];
-  compatibility: ExtensionManagementCompatibilityView;
-  limitations: ExtensionManagementLimitationView[];
+	review_id: string,
+	name: string,
+	version: string,
+	source: ExtensionManagementSourceView,
+	verified_catalog_unix: string | null,
+	provenance: ExtensionManagementProvenanceView | null,
+	added_required_api: string[],
+	added_required_hosts: string[],
+	compatibility: ExtensionManagementCompatibilityView,
+	limitations: ExtensionManagementLimitationView[],
 };
 
 export type ItemId = string;
@@ -965,25 +681,25 @@ export type ItemId = string;
 export type ItemsChanged = ItemsState;
 
 export type ItemsState = {
-  projection_revision: string;
-  /**
-   *  `None` is reserved for the frame's cold pre-bootstrap state. Native
-   *  snapshots are emitted only with an exact focused profile and space.
-   */
-  profile: ProfileView | null;
-  spaces: SpaceView[];
-  active_space_id: string | null;
-  nodes: SidebarNodeView[];
-  /**  Every tab referenced by `nodes`, in the same pre-order traversal. */
-  tabs: TabView[];
-  active: string | null;
-  split_group: SplitGroupView | null;
+	projection_revision: string,
+	/**
+	 *  `None` is reserved for the frame's cold pre-bootstrap state. Native
+	 *  snapshots are emitted only with an exact focused profile and space.
+	 */
+	profile: ProfileView | null,
+	spaces: SpaceView[],
+	active_space_id: string | null,
+	nodes: SidebarNodeView[],
+	/**  Every tab referenced by `nodes`, in the same pre-order traversal. */
+	tabs: TabView[],
+	active: string | null,
+	split_group: SplitGroupView | null,
 };
 
 export type LayoutChanged = LayoutState;
 
 export type LayoutState = {
-  dividers: DividerView[];
+	dividers: DividerView[],
 };
 
 export type Material = "none" | "vibrancy" | "liquid_glass" | "acrylic" | "mica";
@@ -991,13 +707,13 @@ export type Material = "none" | "vibrancy" | "liquid_glass" | "acrylic" | "mica"
 export type NoteDocument = NoteDocument_Serialize | NoteDocument_Deserialize;
 
 export type NoteDocument_Deserialize = {
-  version: number;
-  document: DocumentNode_Deserialize;
+	version: number,
+	document: DocumentNode_Deserialize,
 };
 
 export type NoteDocument_Serialize = {
-  version: number;
-  document: DocumentNode_Serialize;
+	version: number,
+	document: DocumentNode_Serialize,
 };
 
 /**
@@ -1009,8 +725,8 @@ export type NoteDocument_Serialize = {
  *  such as toggling the launcher.
  */
 export type OperationAdmission = {
-  operation_id: string | null;
-  accepted: boolean;
+	operation_id: string | null,
+	accepted: boolean,
 };
 
 /**
@@ -1024,9 +740,9 @@ export type OperationAdmission = {
  *  state is never mislabeled as successfully applied.
  */
 export type OperationDisposition = {
-  operation_id: string;
-  outcome: OperationOutcome;
-  reason: OperationReason;
+	operation_id: string,
+	outcome: OperationOutcome,
+	reason: OperationReason,
 };
 
 /**
@@ -1036,8 +752,7 @@ export type OperationDisposition = {
  *  became indeterminate and entered explicit reconciliation; it never means a
  *  page load, renderer callback, or unknown store transaction succeeded.
  */
-export type OperationOutcome =
-  "applied" | "no_op" | "rejected" | "native_admission_failed" | "deferred";
+export type OperationOutcome = "applied" | "no_op" | "rejected" | "native_admission_failed" | "deferred";
 
 export type OperationProcessed = OperationDisposition;
 
@@ -1046,35 +761,7 @@ export type OperationProcessed = OperationDisposition;
  *  enum prevents native errors, URLs, or attacker-controlled strings from
  *  becoming an unbounded privileged IPC/logging surface.
  */
-export type OperationReason =
-  | "mutation_applied"
-  | "state_unchanged"
-  | "invalid_scope"
-  | "no_focused_window"
-  | "item_limit_reached"
-  | "invalid_input"
-  | "history_unavailable"
-  | "layout_unavailable"
-  | "unsupported_command"
-  | "native_dispatch_rejected"
-  | "native_work_pending"
-  | "discard_completion_pending"
-  | "store_work_pending"
-  | "store_admission_rejected"
-  | "store_conflict"
-  | "store_outcome_unknown"
-  | "store_reconciliation_failed"
-  | "extension_enablement_pending"
-  | "extension_activation_pending"
-  | "extension_restart_required"
-  | "content_policy_apply_failed"
-  | "content_policy_source_unavailable"
-  | "content_policy_source_refresh_pending"
-  | "content_policy_source_refresh_failed"
-  | "content_policy_sources_refreshed"
-  | "profile_deletion_policy_rejected"
-  | "profile_deletion_in_progress"
-  | "profile_deletion_completed";
+export type OperationReason = "mutation_applied" | "state_unchanged" | "invalid_scope" | "no_focused_window" | "item_limit_reached" | "invalid_input" | "history_unavailable" | "layout_unavailable" | "unsupported_command" | "native_dispatch_rejected" | "native_work_pending" | "discard_completion_pending" | "store_work_pending" | "store_admission_rejected" | "store_conflict" | "store_outcome_unknown" | "store_reconciliation_failed" | "extension_enablement_pending" | "extension_activation_pending" | "extension_restart_required" | "content_policy_apply_failed" | "content_policy_source_unavailable" | "content_policy_source_refresh_pending" | "content_policy_source_refresh_failed" | "content_policy_sources_refreshed" | "profile_deletion_policy_rejected" | "profile_deletion_in_progress" | "profile_deletion_completed";
 
 /**
  *  Process-local reconciliation state for an admitted mutation. Pending and
@@ -1083,10 +770,7 @@ export type OperationReason =
  *  them. `Unknown` means the id was never admitted in this process, was already
  *  acknowledged, or belongs to a previous process lifetime.
  */
-export type OperationStatus =
-  | { state: "unknown" }
-  | { state: "pending" }
-  | { state: "processed"; disposition: OperationDisposition };
+export type OperationStatus = { state: "unknown" } | { state: "pending" } | { state: "processed"; disposition: OperationDisposition };
 
 /**
  *  Closed page capability names rendered by browser-owned chrome. Native
@@ -1096,48 +780,46 @@ export type PagePermissionKindView = "camera" | "microphone";
 
 export type PagePermissionPromptChanged = PagePermissionPromptView;
 
-export type PagePermissionPromptDecisionInput =
-  "allow_once" | "always_allow" | "deny_once" | "always_deny";
+export type PagePermissionPromptDecisionInput = "allow_once" | "always_allow" | "deny_once" | "always_deny";
 
 /**
  *  One exact, foreground page-permission request. Every identity is an opaque
  *  stale fence: privileged chrome may only echo it back to the Shell.
  */
 export type PagePermissionPromptEntryView = {
-  profile_id: string;
-  item_id: string;
-  request_id: string;
-  origin: string;
-  kinds: PagePermissionKindView[];
-  /**  False for ephemeral profiles; chrome must not offer durable policy. */
-  rememberable: boolean;
-  /**  True while an exact durable remember-decision transaction is pending. */
-  processing: boolean;
+	profile_id: string,
+	item_id: string,
+	request_id: string,
+	origin: string,
+	kinds: PagePermissionKindView[],
+	/**  False for ephemeral profiles; chrome must not offer durable policy. */
+	rememberable: boolean,
+	/**  True while an exact durable remember-decision transaction is pending. */
+	processing: boolean,
 };
 
 /**  Exact replacement for the one process-wide page permission surface. */
 export type PagePermissionPromptView = {
-  projection_revision: string;
-  prompt: PagePermissionPromptEntryView | null;
+	projection_revision: string,
+	prompt: PagePermissionPromptEntryView | null,
 };
 
-export type PanelIntent =
-  { type: "search" } | { type: "back" } | { type: "dismiss" } | { type: "tool"; tool: ToolKind };
+export type PanelIntent = { type: "search" } | { type: "back" } | { type: "dismiss" } | { type: "tool"; tool: ToolKind };
 
 export type PanelRoute = { type: "search" } | { type: "tool"; tool: ToolKind };
 
 export type PanelState = {
-  window_id: string | null;
-  revision: string;
-  session_id: string;
-  visible: boolean;
-  route: PanelRoute;
-  profile_id: string | null;
-  profile_name: string | null;
-  space_id: string | null;
-  error: boolean;
-  corner_radius: number;
-  position_restorable: boolean;
+	window_id: string | null,
+	revision: string,
+	session_id: string,
+	visible: boolean,
+	route: PanelRoute,
+	profile_id: string | null,
+	profile_name: string | null,
+	space_id: string | null,
+	error: boolean,
+	corner_radius: number,
+	position_restorable: boolean,
 };
 
 export type ProfileId = string;
@@ -1149,300 +831,143 @@ export type ProfileKindView = "default" | "named" | "incognito";
  *  authority; this view is display-only.
  */
 export type ProfileView = {
-  id: string;
-  name: string;
-  kind: ProfileKindView;
+	id: string,
+	name: string,
+	kind: ProfileKindView,
 };
 
 export type ResourceCall = ResourceCall_Serialize | ResourceCall_Deserialize;
 
-export type ResourceCall_Deserialize =
-  | ({ kind: "resolve_notes"; ids: string[] } & {
-      command?: never;
-      id?: never;
-      query?: never;
-      request_id?: never;
-    })
-  | ({ kind: "acknowledge"; request_id: string } & {
-      command?: never;
-      id?: never;
-      ids?: never;
-      query?: never;
-    })
-  | ({ kind: "list"; query: ResourceQuery } & {
-      command?: never;
-      id?: never;
-      ids?: never;
-      request_id?: never;
-    })
-  | ({ kind: "get"; id: string } & {
-      command?: never;
-      ids?: never;
-      query?: never;
-      request_id?: never;
-    })
-  | ({ kind: "mutate"; command: ResourceCommand_Deserialize } & {
-      id?: never;
-      ids?: never;
-      query?: never;
-      request_id?: never;
-    });
+export type ResourceCall_Deserialize = ({ kind: "resolve_notes"; ids: string[] }) & { command?: never; id?: never; query?: never; request_id?: never } | ({ kind: "acknowledge"; request_id: string }) & { command?: never; id?: never; ids?: never; query?: never } | ({ kind: "list"; query: ResourceQuery }) & { command?: never; id?: never; ids?: never; request_id?: never } | ({ kind: "get"; id: string }) & { command?: never; ids?: never; query?: never; request_id?: never } | ({ kind: "mutate"; command: ResourceCommand_Deserialize }) & { id?: never; ids?: never; query?: never; request_id?: never };
 
-export type ResourceCall_Serialize =
-  | ({ kind: "resolve_notes"; ids: string[] } & {
-      command?: never;
-      id?: never;
-      query?: never;
-      request_id?: never;
-    })
-  | ({ kind: "acknowledge"; request_id: string } & {
-      command?: never;
-      id?: never;
-      ids?: never;
-      query?: never;
-    })
-  | ({ kind: "list"; query: ResourceQuery } & {
-      command?: never;
-      id?: never;
-      ids?: never;
-      request_id?: never;
-    })
-  | ({ kind: "get"; id: string } & {
-      command?: never;
-      ids?: never;
-      query?: never;
-      request_id?: never;
-    })
-  | ({ kind: "mutate"; command: ResourceCommand_Serialize } & {
-      id?: never;
-      ids?: never;
-      query?: never;
-      request_id?: never;
-    });
+export type ResourceCall_Serialize = ({ kind: "resolve_notes"; ids: string[] }) & { command?: never; id?: never; query?: never; request_id?: never } | ({ kind: "acknowledge"; request_id: string }) & { command?: never; id?: never; ids?: never; query?: never } | ({ kind: "list"; query: ResourceQuery }) & { command?: never; id?: never; ids?: never; request_id?: never } | ({ kind: "get"; id: string }) & { command?: never; ids?: never; query?: never; request_id?: never } | ({ kind: "mutate"; command: ResourceCommand_Serialize }) & { id?: never; ids?: never; query?: never; request_id?: never };
 
 export type ResourceChanged = {
-  profile: string;
-  id: string;
-  revision: string;
+	profile: string,
+	id: string,
+	revision: string,
 };
 
 export type ResourceCommand = ResourceCommand_Serialize | ResourceCommand_Deserialize;
 
 export type ResourceCommand_Deserialize = {
-  version: number;
-  request_id: string;
-  intent: ResourceIntent_Deserialize;
+	version: number,
+	request_id: string,
+	intent: ResourceIntent_Deserialize,
 };
 
 export type ResourceCommand_Serialize = {
-  version: number;
-  request_id: string;
-  intent: ResourceIntent_Serialize;
+	version: number,
+	request_id: string,
+	intent: ResourceIntent_Serialize,
 };
 
 export type ResourceContent = ResourceContent_Serialize | ResourceContent_Deserialize;
 
-export type ResourceContent_Deserialize =
-  | ({ kind: "note"; document: NoteDocument_Deserialize } & {
-      completed?: never;
-      description?: never;
-      due_date?: never;
-    })
-  | ({ kind: "task"; description: string; completed: boolean; due_date: string | null } & {
-      document?: never;
-    });
+export type ResourceContent_Deserialize = ({ kind: "note"; document: NoteDocument_Deserialize }) & { completed?: never; description?: never; due_date?: never } | ({ kind: "task"; description: string; completed: boolean; due_date: string | null }) & { document?: never };
 
-export type ResourceContent_Serialize =
-  | ({ kind: "note"; document: NoteDocument_Serialize } & {
-      completed?: never;
-      description?: never;
-      due_date?: never;
-    })
-  | ({ kind: "task"; description: string; completed: boolean; due_date: string | null } & {
-      document?: never;
-    });
+export type ResourceContent_Serialize = ({ kind: "note"; document: NoteDocument_Serialize }) & { completed?: never; description?: never; due_date?: never } | ({ kind: "task"; description: string; completed: boolean; due_date: string | null }) & { document?: never };
 
 export type ResourceDraft = ResourceDraft_Serialize | ResourceDraft_Deserialize;
 
 export type ResourceDraft_Deserialize = {
-  title: string;
-  pinned: boolean;
-  content: ResourceContent_Deserialize;
-  /**  Same-profile resources, never permission grants or copied entities. */
-  related: string[];
+	title: string,
+	pinned: boolean,
+	content: ResourceContent_Deserialize,
+	/**  Same-profile resources, never permission grants or copied entities. */
+	related: string[],
 };
 
 export type ResourceDraft_Serialize = {
-  title: string;
-  pinned: boolean;
-  content: ResourceContent_Serialize;
-  /**  Same-profile resources, never permission grants or copied entities. */
-  related: string[];
+	title: string,
+	pinned: boolean,
+	content: ResourceContent_Serialize,
+	/**  Same-profile resources, never permission grants or copied entities. */
+	related: string[],
 };
 
-export type ResourceError =
-  "invalid" | "not_found" | "conflict" | "capacity" | "unavailable" | "outcome_unknown";
+export type ResourceError = "invalid" | "not_found" | "conflict" | "capacity" | "unavailable" | "outcome_unknown";
 
 export type ResourceId = string;
 
 export type ResourceIntent = ResourceIntent_Serialize | ResourceIntent_Deserialize;
 
-export type ResourceIntent_Deserialize =
-  | ({ kind: "create"; draft: ResourceDraft_Deserialize } & {
-      expected_revision?: never;
-      id?: never;
-    })
-  | { kind: "replace"; id: string; expected_revision: string; draft: ResourceDraft_Deserialize }
-  | ({ kind: "trash"; id: string; expected_revision: string } & { draft?: never })
-  | ({ kind: "restore"; id: string; expected_revision: string } & { draft?: never });
+export type ResourceIntent_Deserialize = ({ kind: "create"; draft: ResourceDraft_Deserialize }) & { expected_revision?: never; id?: never } | { kind: "replace"; id: string; expected_revision: string; draft: ResourceDraft_Deserialize } | ({ kind: "trash"; id: string; expected_revision: string }) & { draft?: never } | ({ kind: "restore"; id: string; expected_revision: string }) & { draft?: never };
 
-export type ResourceIntent_Serialize =
-  | ({ kind: "create"; draft: ResourceDraft_Serialize } & { expected_revision?: never; id?: never })
-  | { kind: "replace"; id: string; expected_revision: string; draft: ResourceDraft_Serialize }
-  | ({ kind: "trash"; id: string; expected_revision: string } & { draft?: never })
-  | ({ kind: "restore"; id: string; expected_revision: string } & { draft?: never });
+export type ResourceIntent_Serialize = ({ kind: "create"; draft: ResourceDraft_Serialize }) & { expected_revision?: never; id?: never } | { kind: "replace"; id: string; expected_revision: string; draft: ResourceDraft_Serialize } | ({ kind: "trash"; id: string; expected_revision: string }) & { draft?: never } | ({ kind: "restore"; id: string; expected_revision: string }) & { draft?: never };
 
 export type ResourceKind = "note" | "task";
 
 export type ResourceQuery = {
-  completed?: boolean | null;
-  kind: ResourceKind;
-  search: string;
-  trashed: boolean;
-  after: string | null;
-  limit: number;
+	completed?: boolean | null,
+	kind: ResourceKind,
+	search: string,
+	trashed: boolean,
+	after: string | null,
+	limit: number,
 };
 
 export type ResourceRecord = ResourceRecord_Serialize | ResourceRecord_Deserialize;
 
 export type ResourceRecord_Deserialize = {
-  id: string;
-  /**  Decimal string; never rounded through JavaScript's number type. */
-  revision: string;
-  created_at: string;
-  updated_at: string;
-  trashed: boolean;
-  draft: ResourceDraft_Deserialize;
+	id: string,
+	/**  Decimal string; never rounded through JavaScript's number type. */
+	revision: string,
+	created_at: string,
+	updated_at: string,
+	trashed: boolean,
+	draft: ResourceDraft_Deserialize,
 };
 
 export type ResourceRecord_Serialize = {
-  id: string;
-  /**  Decimal string; never rounded through JavaScript's number type. */
-  revision: string;
-  created_at: string;
-  updated_at: string;
-  trashed: boolean;
-  draft: ResourceDraft_Serialize;
+	id: string,
+	/**  Decimal string; never rounded through JavaScript's number type. */
+	revision: string,
+	created_at: string,
+	updated_at: string,
+	trashed: boolean,
+	draft: ResourceDraft_Serialize,
 };
 
 export type ResourceReply = ResourceReply_Serialize | ResourceReply_Deserialize;
 
 export type ResourceReply_Deserialize = {
-  profile: string | null;
-  response: ResourceResponse_Deserialize;
+	profile: string | null,
+	response: ResourceResponse_Deserialize,
 };
 
 export type ResourceReply_Serialize = {
-  profile: string | null;
-  response: ResourceResponse_Serialize;
+	profile: string | null,
+	response: ResourceResponse_Serialize,
 };
 
 export type ResourceResponse = ResourceResponse_Serialize | ResourceResponse_Deserialize;
 
-export type ResourceResponse_Deserialize =
-  | ({ kind: "acknowledged" } & {
-      applied_revision?: never;
-      error?: never;
-      items?: never;
-      next?: never;
-      record?: never;
-      request_id?: never;
-    })
-  | ({ kind: "record"; record: ResourceRecord_Deserialize } & {
-      applied_revision?: never;
-      error?: never;
-      items?: never;
-      next?: never;
-      request_id?: never;
-    })
-  | ({ kind: "page"; items: ResourceSummary[]; next: string | null } & {
-      applied_revision?: never;
-      error?: never;
-      record?: never;
-      request_id?: never;
-    })
-  | ({
-      kind: "applied";
-      request_id: string;
-      applied_revision: string;
-      record: ResourceRecord_Deserialize;
-    } & { error?: never; items?: never; next?: never })
-  | ({ kind: "error"; error: ResourceError } & {
-      applied_revision?: never;
-      items?: never;
-      next?: never;
-      record?: never;
-      request_id?: never;
-    });
+export type ResourceResponse_Deserialize = ({ kind: "acknowledged" }) & { applied_revision?: never; error?: never; items?: never; next?: never; record?: never; request_id?: never } | ({ kind: "record"; record: ResourceRecord_Deserialize }) & { applied_revision?: never; error?: never; items?: never; next?: never; request_id?: never } | ({ kind: "page"; items: ResourceSummary[]; next: string | null }) & { applied_revision?: never; error?: never; record?: never; request_id?: never } | ({ kind: "applied"; request_id: string; applied_revision: string; record: ResourceRecord_Deserialize }) & { error?: never; items?: never; next?: never } | ({ kind: "error"; error: ResourceError }) & { applied_revision?: never; items?: never; next?: never; record?: never; request_id?: never };
 
-export type ResourceResponse_Serialize =
-  | ({ kind: "acknowledged" } & {
-      applied_revision?: never;
-      error?: never;
-      items?: never;
-      next?: never;
-      record?: never;
-      request_id?: never;
-    })
-  | ({ kind: "record"; record: ResourceRecord_Serialize } & {
-      applied_revision?: never;
-      error?: never;
-      items?: never;
-      next?: never;
-      request_id?: never;
-    })
-  | ({ kind: "page"; items: ResourceSummary[]; next: string | null } & {
-      applied_revision?: never;
-      error?: never;
-      record?: never;
-      request_id?: never;
-    })
-  | ({
-      kind: "applied";
-      request_id: string;
-      applied_revision: string;
-      record: ResourceRecord_Serialize;
-    } & { error?: never; items?: never; next?: never })
-  | ({ kind: "error"; error: ResourceError } & {
-      applied_revision?: never;
-      items?: never;
-      next?: never;
-      record?: never;
-      request_id?: never;
-    });
+export type ResourceResponse_Serialize = ({ kind: "acknowledged" }) & { applied_revision?: never; error?: never; items?: never; next?: never; record?: never; request_id?: never } | ({ kind: "record"; record: ResourceRecord_Serialize }) & { applied_revision?: never; error?: never; items?: never; next?: never; request_id?: never } | ({ kind: "page"; items: ResourceSummary[]; next: string | null }) & { applied_revision?: never; error?: never; record?: never; request_id?: never } | ({ kind: "applied"; request_id: string; applied_revision: string; record: ResourceRecord_Serialize }) & { error?: never; items?: never; next?: never } | ({ kind: "error"; error: ResourceError }) & { applied_revision?: never; items?: never; next?: never; record?: never; request_id?: never };
 
 export type ResourceSummary = {
-  id: string;
-  revision: string;
-  title: string;
-  pinned: boolean;
-  updated_at: string;
-  completed: boolean | null;
-  due_date: string | null;
+	id: string,
+	revision: string,
+	title: string,
+	pinned: boolean,
+	updated_at: string,
+	completed: boolean | null,
+	due_date: string | null,
 };
 
 /**  Sanitized advisory delivered only to privileged main chrome. */
 export type RuntimeSecurityAdvisory = {
-  kind: RuntimeSecurityAdvisoryKind;
-  update_target: RuntimeSecurityUpdateTarget;
+	kind: RuntimeSecurityAdvisoryKind,
+	update_target: RuntimeSecurityUpdateTarget,
 };
 
 /**
  *  Non-fatal, process-local classification produced before native WebView
  *  construction. Hard admission failures never reach privileged chrome.
  */
-export type RuntimeSecurityAdvisoryKind =
-  "review_overdue" | "update_recommended" | "unreviewed_runtime";
+export type RuntimeSecurityAdvisoryKind = "review_overdue" | "update_recommended" | "unreviewed_runtime";
 
 /**
  *  Fixed destination of the recommended maintenance action. No page or
@@ -1456,51 +981,48 @@ export type RuntimeSecurityUpdateTarget = "zephium" | "operating_system" | "brow
  *  user-content degradation is projected independently in the same snapshot.
  */
 export type RuntimeStatus = {
-  restart_required: boolean;
-  /**
-   *  Bounded fail-closed aggregate of ownership scopes whose latest native
-   *  user-content observation was not exactly applied. An impossible
-   *  over-capacity observation contributes at most one sentinel. No script,
-   *  extension, profile, or native failure identity crosses this privileged
-   *  projection.
-   */
-  user_content_degraded_scope_count: number;
-  /**
-   *  Canonically ordered closed-vocabulary set. Rust emits at most five
-   *  entries and privileged chrome must replace, never append, projections.
-   */
-  security_advisories: RuntimeSecurityAdvisory[];
+	restart_required: boolean,
+	/**
+	 *  Bounded fail-closed aggregate of ownership scopes whose latest native
+	 *  user-content observation was not exactly applied. An impossible
+	 *  over-capacity observation contributes at most one sentinel. No script,
+	 *  extension, profile, or native failure identity crosses this privileged
+	 *  projection.
+	 */
+	user_content_degraded_scope_count: number,
+	/**
+	 *  Canonically ordered closed-vocabulary set. Rust emits at most five
+	 *  entries and privileged chrome must replace, never append, projections.
+	 */
+	security_advisories: RuntimeSecurityAdvisory[],
 };
 
 export type RuntimeStatusChanged = RuntimeStatus;
 
-export type SearchAction =
-  | { type: "ActivateTab"; id: string }
-  | { type: "OpenUrl"; url: string }
-  | { type: "RunCommand"; id: string };
+export type SearchAction = { type: "ActivateTab"; id: string } | { type: "OpenUrl"; url: string } | { type: "RunCommand"; id: string };
 
 export type SearchChanged = SearchResults;
 
 export type SearchContext = {
-  window_id: string;
-  session_id: string;
-  request_id: string;
-  profile_id: string;
-  space_id: string;
+	window_id: string,
+	session_id: string,
+	request_id: string,
+	profile_id: string,
+	space_id: string,
 };
 
 export type SearchResult = {
-  kind: string;
-  title: string;
-  detail: string;
-  favicon: string | null;
-  action: SearchAction;
+	kind: string,
+	title: string,
+	detail: string,
+	favicon: string | null,
+	action: SearchAction,
 };
 
 export type SearchResults = {
-  context: SearchContext | null;
-  query: string;
-  results: SearchResult[];
+	context: SearchContext | null,
+	query: string,
+	results: SearchResult[],
 };
 
 /**
@@ -1508,8 +1030,7 @@ export type SearchResults = {
  *  into [`ItemsState::tabs`]. The node id and tab id intentionally match, but
  *  the explicit reference keeps consumers from inferring that invariant.
  */
-export type SidebarNodeKindView =
-  { type: "folder"; name: string } | { type: "tab"; tab_id: string };
+export type SidebarNodeKindView = { type: "folder"; name: string } | { type: "tab"; tab_id: string };
 
 /**
  *  One pre-order entry in the focused sidebar tree. Parents always precede
@@ -1517,10 +1038,10 @@ export type SidebarNodeKindView =
  *  `None` only for a section root.
  */
 export type SidebarNodeView = {
-  id: string;
-  parent_id: string | null;
-  section: SidebarSectionView;
-  kind: SidebarNodeKindView;
+	id: string,
+	parent_id: string | null,
+	section: SidebarSectionView,
+	kind: SidebarNodeKindView,
 };
 
 /**
@@ -1533,8 +1054,8 @@ export type SpaceId = string;
 
 /**  One ordered space owned by the focused profile. */
 export type SpaceView = {
-  id: string;
-  name: string;
+	id: string,
+	name: string,
 };
 
 /**
@@ -1543,26 +1064,26 @@ export type SpaceView = {
  *  order; geometry and mutable divider ratios remain native-only authority.
  */
 export type SplitGroupView = {
-  members: string[];
+	members: string[],
 };
 
 export type TabChanged = TabView;
 
 export type TabView = {
-  id: string;
-  /**
-   *  Process-local monotonically increasing projection revision, encoded as
-   *  fixed-width hexadecimal so JavaScript can compare it without losing
-   *  integer precision. Privileged chrome rejects an older per-tab delta
-   *  after a newer presentation barrier has applied.
-   */
-  projection_revision: string;
-  title: string;
-  url: string | null;
-  loading: boolean;
-  can_go_back: boolean;
-  can_go_forward: boolean;
-  favicon: string | null;
+	id: string,
+	/**
+	 *  Process-local monotonically increasing projection revision, encoded as
+	 *  fixed-width hexadecimal so JavaScript can compare it without losing
+	 *  integer precision. Privileged chrome rejects an older per-tab delta
+	 *  after a newer presentation barrier has applied.
+	 */
+	projection_revision: string,
+	title: string,
+	url: string | null,
+	loading: boolean,
+	can_go_back: boolean,
+	can_go_forward: boolean,
+	favicon: string | null,
 };
 
 export type ToolKind = "notes" | "tasks" | "ai" | "history" | "downloads" | "time";
@@ -1570,55 +1091,50 @@ export type ToolKind = "notes" | "tasks" | "ai" | "history" | "downloads" | "tim
 export type UiCommand = string;
 
 export type UiInfo = {
-  material: Material;
+	material: Material,
 };
 
 export type WorkActivityResponseV1 = {
-  version: number;
-  profile: string;
-  work: WorkId;
-  signals: WorkSignalV1[];
-  error: WorkFailureV1 | null;
+	version: number,
+	profile: string,
+	work: WorkId,
+	signals: WorkSignalV1[],
+	error: WorkFailureV1 | null,
 };
 
-export type WorkActivityV1 =
-  | "planning"
-  | "delegating"
-  | "reading"
-  | "comparing"
-  | "producing_artifact"
-  | "waiting_for_approval"
-  | "waiting_for_human"
-  | "cancelling"
-  | "finishing";
+export type WorkActivityV1 = "planning" | "delegating" | "reading" | "comparing" | "producing_artifact" | "waiting_for_approval" | "waiting_for_human" | "cancelling" | "finishing";
 
 export type WorkApprovalRequestV1 = {
-  version: number;
-  work: WorkId;
-  expected_revision: WorkRevision;
-  limits: WorkExecutionLimits;
-  scope: WorkBrowseScope;
-  primary: WorkPlanNodeId | null;
+	version: number,
+	work: WorkId,
+	expected_revision: WorkRevision,
+	limits: WorkExecutionLimits,
+	scope: WorkBrowseScope,
+	primary: WorkPlanNodeId | null,
 };
 
 export type WorkArea = {
-  id: WorkAreaId;
-  title: string;
+	id: WorkAreaId,
+	title: string,
 };
 
 /** Named spatial group, never execution authority. */
 export type WorkAreaId = string;
 
-export type WorkArtifactDataV1 =
-  | { kind: "document"; paragraphs: string[] }
-  | { kind: "table"; columns: string[]; rows: string[][] }
-  | { kind: "comparison"; criteria: string[]; alternatives: WorkComparisonAlternative[] }
-  /**  Decimal strings preserve values independently of renderer floating point. */
-  | { kind: "chart"; x_label: string; y_label: string; series: WorkChartSeries[] }
-  | { kind: "checklist"; items: WorkChecklistItem[] }
-  | { kind: "evidence_collection"; summary: string }
-  /**  A descriptive card, not an interactive native context or navigation grant. */
-  | { kind: "browser_resource_preview"; title: string; url: string; summary: string };
+/**  Area geometry is presentation; membership stays on the element. */
+export type WorkAreaPlacement = {
+	area: WorkAreaId,
+	x: number,
+	y: number,
+	width: number,
+	height: number,
+};
+
+export type WorkArtifactDataV1 = { kind: "document"; paragraphs: string[] } | { kind: "table"; columns: string[]; rows: string[][] } | { kind: "comparison"; criteria: string[]; alternatives: WorkComparisonAlternative[] } | 
+/**  Decimal strings preserve values independently of renderer floating point. */
+{ kind: "chart"; x_label: string; y_label: string; series: WorkChartSeries[] } | { kind: "checklist"; items: WorkChecklistItem[] } | { kind: "evidence_collection"; summary: string } | 
+/**  A descriptive card, not an interactive native context or navigation grant. */
+{ kind: "browser_resource_preview"; title: string; url: string; summary: string };
 
 export type WorkArtifactDecision = "accepted" | "rejected";
 
@@ -1628,44 +1144,43 @@ export type WorkArtifactId = string;
 export type WorkArtifactPresentationV1 = "automatic" | "compact" | "expanded";
 
 export type WorkArtifactUserState = {
-  artifact: WorkArtifactId;
-  revision: WorkRevision;
-  decision: WorkArtifactDecision | null;
-  edited_data: WorkArtifactDataV1 | null;
-  /**  Citations for edited content. Original citations remain on the artifact. */
-  evidence: WorkEvidenceLink[];
+	artifact: WorkArtifactId,
+	revision: WorkRevision,
+	decision: WorkArtifactDecision | null,
+	edited_data: WorkArtifactDataV1 | null,
+	/**  Citations for edited content. Original citations remain on the artifact. */
+	evidence: WorkEvidenceLink[],
 };
 
 export type WorkArtifactV1 = {
-  version: number;
-  id: WorkArtifactId;
-  execution: WorkExecutionId;
-  node: WorkPlanNodeId;
-  attempt: WorkAttemptId;
-  output: string;
-  title: string;
-  data: WorkArtifactDataV1;
-  evidence: WorkEvidenceLink[];
-  review: WorkOutputReview;
-  presentation: WorkArtifactPresentationV1;
+	version: number,
+	id: WorkArtifactId,
+	execution: WorkExecutionId,
+	node: WorkPlanNodeId,
+	attempt: WorkAttemptId,
+	output: string,
+	title: string,
+	data: WorkArtifactDataV1,
+	evidence: WorkEvidenceLink[],
+	review: WorkOutputReview,
+	presentation: WorkArtifactPresentationV1,
 };
 
 export type WorkAttemptFact = {
-  id: WorkAttemptId;
-  node: WorkPlanNodeId;
-  status: WorkAttemptStatus;
-  /**
-   *  Reservation is retained for unknown outcomes. Settled accounting names
-   *  exact usage or a conservative ceiling; missing means unknown, never zero.
-   */
-  usage: WorkUsage | null;
+	id: WorkAttemptId,
+	node: WorkPlanNodeId,
+	status: WorkAttemptStatus,
+	/**
+	 *  Reservation is retained for unknown outcomes. Settled accounting names
+	 *  exact usage or a conservative ceiling; missing means unknown, never zero.
+	 */
+	usage: WorkUsage | null,
 };
 
 /** Exact durable worker attempt identity. */
 export type WorkAttemptId = string;
 
-export type WorkAttemptStatus =
-  "running" | "succeeded" | "failed" | "cancelled" | "outcome_unknown";
+export type WorkAttemptStatus = "running" | "succeeded" | "failed" | "cancelled" | "outcome_unknown";
 
 /**
  *  Attribution is descriptive history, never authorization. Legacy content has
@@ -1678,75 +1193,62 @@ export type WorkAuthor = "user" | "primary_agent" | "other_agent" | "legacy_unkn
  *  New Work, question and plan identities are minted by Rust exactly once.
  */
 export type WorkAuthoringCommandV1 = {
-  version: number;
-  command: WorkCommandId;
-  intent: WorkAuthoringIntent;
+	version: number,
+	command: WorkCommandId,
+	intent: WorkAuthoringIntent,
 };
 
-export type WorkAuthoringIntent =
-  | { kind: "create"; objective: string }
-  | { kind: "edit"; work: WorkId; expected_revision: WorkRevision; edit: WorkUserEdit }
-  | { kind: "delete"; work: WorkId; expected_revision: WorkRevision };
+export type WorkAuthoringIntent = { kind: "create"; objective: string } | { kind: "edit"; work: WorkId; expected_revision: WorkRevision; edit: WorkUserEdit } | { kind: "delete"; work: WorkId; expected_revision: WorkRevision };
 
 export type WorkAuthoringReceipt = {
-  command: WorkCommandId;
-  work: WorkId;
-  applied_revision: WorkRevision;
-  deleted: boolean;
+	command: WorkCommandId,
+	work: WorkId,
+	applied_revision: WorkRevision,
+	deleted: boolean,
 };
 
 export type WorkAuthoringStatus = "draft" | "needs_input" | "plan_ready";
 
 export type WorkBrowseRoute = {
-  origin: string;
-  path_prefix: string;
+	origin: string,
+	path_prefix: string,
 };
 
 export type WorkBrowseScope = {
-  start_url: string;
-  /**
-   *  Exact HTTPS origins and path prefixes, interpreted by the browser
-   *  discovery compiler. Redirects do not implicitly extend this set.
-   */
-  routes: WorkBrowseRoute[];
-  max_hops: number;
+	start_url: string,
+	/**
+	 *  Exact HTTPS origins and path prefixes, interpreted by the browser
+	 *  discovery compiler. Redirects do not implicitly extend this set.
+	 */
+	routes: WorkBrowseRoute[],
+	max_hops: number,
 };
 
 /**
  *  Durable document operations share a bounded, profile-checked transport.
  *  Provider generation and worker admission have separate lifetimes.
  */
-export type WorkCallV1 =
-  | { kind: "environment"; version: number; request: WorkEnvironmentCall }
-  | { kind: "query"; request: WorkQueryV1 }
-  | { kind: "author"; command: WorkAuthoringCommandV1 }
-  | { kind: "execute"; command: WorkCommandV1 };
+export type WorkCallV1 = { kind: "environment"; version: number; request: WorkEnvironmentCall } | { kind: "query"; request: WorkQueryV1 } | { kind: "author"; command: WorkAuthoringCommandV1 } | { kind: "execute"; command: WorkCommandV1 };
 
-export type WorkCapability =
-  /**  One public provider search, without browser state or attached context. */
-  | { kind: "public_search"; scope: WorkPublicSearchScope }
-  /**
-   *  Direct children can search with this explicit model, browse anonymously,
-   *  or synthesize. Each child's exact query remains separately approved.
-   */
-  | {
-      kind: "coordinate_public_research";
-      provider: WorkSearchProvider;
-      model: string;
-      max_hops: number;
-    }
-  /**  Anonymous read-only discovery in a fresh per-resource cookie store. */
-  | { kind: "public_discovery"; scope: WorkPublicDiscoveryScope }
-  /**  Direct-child scheduling and compact synthesis within public discovery. */
-  | { kind: "coordinate_public_discovery"; max_hops: number }
-  | { kind: "public_browse"; scope: WorkBrowseScope }
-  /**
-   *  A primary agent may assign pre-approved children within this envelope
-   *  and synthesize their results. This is not a direct browser/action port.
-   */
-  | { kind: "coordinate"; scope: WorkBrowseScope }
-  /**  Structured handoffs from completed plan dependencies only. */
-  | { kind: "synthesize" };
+export type WorkCapability = 
+/**  One public provider search, without browser state or attached context. */
+{ kind: "public_search"; scope: WorkPublicSearchScope } | 
+/**
+ *  Direct children can search with this explicit model, browse anonymously,
+ *  or synthesize. Each child's exact query remains separately approved.
+ */
+{ kind: "coordinate_public_research"; provider: WorkSearchProvider; model: string; max_hops: number } | 
+/**  Anonymous read-only discovery in a fresh per-resource cookie store. */
+{ kind: "public_discovery"; scope: WorkPublicDiscoveryScope } | 
+/**  Direct-child scheduling and compact synthesis within public discovery. */
+{ kind: "coordinate_public_discovery"; max_hops: number } | { kind: "public_browse"; scope: WorkBrowseScope } | 
+/**
+ *  A primary agent may assign pre-approved children within this envelope
+ *  and synthesize their results. This is not a direct browser/action port.
+ */
+{ kind: "coordinate"; scope: WorkBrowseScope } | 
+/**  Structured handoffs from completed plan dependencies only. */
+{ kind: "synthesize" };
 
 export type WorkChanged = WorkChangedV1;
 
@@ -1755,32 +1257,32 @@ export type WorkChanged = WorkChangedV1;
  *  and is neither an ordered event log nor proof that a command succeeded.
  */
 export type WorkChangedV1 = {
-  profile: string;
-  work: WorkId;
+	profile: string,
+	work: WorkId,
 };
 
 export type WorkChartPoint = {
-  label: string;
-  value: string;
+	label: string,
+	value: string,
 };
 
 export type WorkChartSeries = {
-  name: string;
-  points: WorkChartPoint[];
+	name: string,
+	points: WorkChartPoint[],
 };
 
 export type WorkChecklistItem = {
-  text: string;
-  completed: boolean;
+	text: string,
+	completed: boolean,
 };
 
 /** Idempotency correlation only, never an entity capability. */
 export type WorkCommandId = string;
 
 export type WorkCommandReceipt = {
-  command: WorkCommandId;
-  applied_revision: WorkRevision;
-  execution: WorkExecutionId;
+	command: WorkCommandId,
+	applied_revision: WorkRevision,
+	execution: WorkExecutionId,
 };
 
 /**
@@ -1789,16 +1291,16 @@ export type WorkCommandReceipt = {
  *  operands is a conflict. Receipt eviction is never automatic.
  */
 export type WorkCommandV1 = {
-  version: number;
-  work: WorkId;
-  expected_revision: WorkRevision;
-  command: WorkCommandId;
-  intent: WorkRuntimeIntent;
+	version: number,
+	work: WorkId,
+	expected_revision: WorkRevision,
+	command: WorkCommandId,
+	intent: WorkRuntimeIntent,
 };
 
 export type WorkComparisonAlternative = {
-  name: string;
-  values: string[];
+	name: string,
+	values: string[],
 };
 
 /** One resource representation in a Work environment. */
@@ -1809,122 +1311,85 @@ export type WorkElementId = string;
  *  They are descriptive geometry, never native-page geometry or authority.
  */
 export type WorkElementPlacement = {
-  element: WorkElementId;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
+	element: WorkElementId,
+	x: number,
+	y: number,
+	width: number,
+	height: number,
 };
 
-export type WorkEnvironmentCall =
-  /**  Revision-scoped presentation save; stale identities never execute again. */
-  | { kind: "checkpoint"; id: WorkEnvironmentId; expected: WorkRevision; view: WorkEnvironmentView }
-  /**  Idempotent user selection; updates only the Space's last-opened Work. */
-  | { kind: "open"; id: WorkEnvironmentId }
-  | { kind: "read"; id: WorkEnvironmentId }
-  | { kind: "list"; space: SpaceId; after: WorkEnvironmentId | null; limit: number }
-  | { kind: "command"; command: WorkCommandId; intent: WorkEnvironmentIntent };
+export type WorkEnvironmentCall = 
+/**  Revision-scoped presentation save; stale identities never execute again. */
+{ kind: "checkpoint"; id: WorkEnvironmentId; expected: WorkRevision; view: WorkEnvironmentView } | 
+/**  Idempotent user selection; updates only the Space's last-opened Work. */
+{ kind: "open"; id: WorkEnvironmentId } | { kind: "read"; id: WorkEnvironmentId } | { kind: "list"; space: SpaceId; after: WorkEnvironmentId | null; limit: number } | { kind: "command"; command: WorkCommandId; intent: WorkEnvironmentIntent };
 
 export type WorkEnvironmentChanged = WorkEnvironmentChangedV1;
 
 export type WorkEnvironmentChangedV1 = {
-  profile: string;
-  environment: WorkEnvironmentId;
+	profile: string,
+	environment: WorkEnvironmentId,
 };
 
-export type WorkEnvironmentEdit =
-  | { kind: "rename"; title: string }
-  | { kind: "set_lifecycle"; lifecycle: WorkLifecycle }
-  | { kind: "add"; reference: WorkEnvironmentReference; area: WorkAreaId | null }
-  | { kind: "remove"; element: WorkElementId }
-  | { kind: "create_area"; title: string }
-  | { kind: "rename_area"; area: WorkAreaId; title: string }
-  | { kind: "remove_area"; area: WorkAreaId }
-  | { kind: "assign_area"; element: WorkElementId; area: WorkAreaId | null };
+export type WorkEnvironmentEdit = { kind: "rename"; title: string } | { kind: "set_lifecycle"; lifecycle: WorkLifecycle } | { kind: "add"; reference: WorkEnvironmentReference; area: WorkAreaId | null } | { kind: "remove"; element: WorkElementId } | { kind: "create_area"; title: string } | { kind: "rename_area"; area: WorkAreaId; title: string } | { kind: "remove_area"; area: WorkAreaId } | { kind: "assign_area"; element: WorkElementId; area: WorkAreaId | null };
 
 export type WorkEnvironmentElement = {
-  id: WorkElementId;
-  reference: WorkEnvironmentReference;
-  area: WorkAreaId | null;
+	id: WorkElementId,
+	reference: WorkEnvironmentReference,
+	area: WorkAreaId | null,
 };
 
 /** Persistent working environment, independent of objective execution. */
 export type WorkEnvironmentId = string;
 
-export type WorkEnvironmentIntent =
-  | { kind: "create"; space: SpaceId; title: string }
-  | { kind: "edit"; id: WorkEnvironmentId; expected: WorkRevision; edit: WorkEnvironmentEdit };
+export type WorkEnvironmentIntent = { kind: "create"; space: SpaceId; title: string } | { kind: "edit"; id: WorkEnvironmentId; expected: WorkRevision; edit: WorkEnvironmentEdit };
 
-export type WorkEnvironmentReference =
-  | { kind: "browser"; tab: ItemId }
-  | { kind: "resource"; resource: ResourceId }
-  | { kind: "objective"; objective: WorkId }
-  /**
-   *  A retained result from one historical execution, not a mutable copy or
-   *  a capability to rerun its producer.
-   */
-  | { kind: "artifact"; objective: WorkId; execution: WorkExecutionId; artifact: WorkArtifactId };
+export type WorkEnvironmentReference = { kind: "browser"; tab: ItemId } | { kind: "resource"; resource: ResourceId } | { kind: "objective"; objective: WorkId } | 
+/**
+ *  A retained result from one historical execution, not a mutable copy or
+ *  a capability to rerun its producer.
+ */
+{ kind: "artifact"; objective: WorkId; execution: WorkExecutionId; artifact: WorkArtifactId };
 
-export type WorkEnvironmentReply =
-  | {
-      kind: "checkpointed";
-      expected: WorkRevision;
-      applied_view_revision: WorkRevision;
-      replayed: boolean;
-      snapshot: WorkEnvironmentSnapshot;
-    }
-  | { kind: "snapshot"; snapshot: WorkEnvironmentSnapshot }
-  | {
-      kind: "applied";
-      command: WorkCommandId;
-      applied_revision: WorkRevision;
-      applied_view_revision: WorkRevision;
-      replayed: boolean;
-      snapshot: WorkEnvironmentSnapshot;
-    }
-  | {
-      kind: "page";
-      works: WorkEnvironmentSummary[];
-      next: WorkEnvironmentId | null;
-      selected: WorkEnvironmentId | null;
-    };
+export type WorkEnvironmentReply = { kind: "checkpointed"; expected: WorkRevision; applied_view_revision: WorkRevision; replayed: boolean; snapshot: WorkEnvironmentSnapshot } | { kind: "snapshot"; snapshot: WorkEnvironmentSnapshot } | { kind: "applied"; command: WorkCommandId; applied_revision: WorkRevision; applied_view_revision: WorkRevision; replayed: boolean; snapshot: WorkEnvironmentSnapshot } | { kind: "page"; works: WorkEnvironmentSummary[]; next: WorkEnvironmentId | null; selected: WorkEnvironmentId | null };
 
 export type WorkEnvironmentSnapshot = {
-  version: number;
-  id: WorkEnvironmentId;
-  profile: ProfileId;
-  space: SpaceId;
-  title: string;
-  lifecycle: WorkLifecycle;
-  revision: WorkRevision;
-  elements: WorkEnvironmentElement[];
-  areas: WorkArea[];
-  view: WorkEnvironmentView;
+	version: number,
+	id: WorkEnvironmentId,
+	profile: ProfileId,
+	space: SpaceId,
+	title: string,
+	lifecycle: WorkLifecycle,
+	revision: WorkRevision,
+	elements: WorkEnvironmentElement[],
+	areas: WorkArea[],
+	view: WorkEnvironmentView,
 };
 
 export type WorkEnvironmentSummary = {
-  id: WorkEnvironmentId;
-  space: SpaceId;
-  title: string;
-  lifecycle: WorkLifecycle;
-  revision: WorkRevision;
+	id: WorkEnvironmentId,
+	space: SpaceId,
+	title: string,
+	lifecycle: WorkLifecycle,
+	revision: WorkRevision,
 };
 
 export type WorkEnvironmentView = {
-  revision: WorkRevision;
-  x: number;
-  y: number;
-  zoom_milli: number;
-  placements: WorkElementPlacement[];
+	revision: WorkRevision,
+	x: number,
+	y: number,
+	zoom_milli: number,
+	placements: WorkElementPlacement[],
+	areas?: WorkAreaPlacement[],
 };
 
 export type WorkEvidenceLink = {
-  /**
-   *  Reference to a source in the original persisted extraction, never a URL
-   *  invented by an artifact-producing model.
-   */
-  extraction_id: WorkArtifactId;
-  source_id: number;
+	/**
+	 *  Reference to a source in the original persisted extraction, never a URL
+	 *  invented by an artifact-producing model.
+	 */
+	extraction_id: WorkArtifactId,
+	source_id: number,
 };
 
 /**
@@ -1932,92 +1397,66 @@ export type WorkEvidenceLink = {
  *  action reference, or execution authority. It remains untrusted source data.
  */
 export type WorkEvidencePreviewV1 = {
-  version: number;
-  link: WorkEvidenceLink;
-  origin: string;
-  role: string;
-  text: string;
-  truncated: boolean;
-  /**  Decimal byte count avoids JavaScript integer precision loss. */
-  source_bytes: string;
-  source?: WorkEvidenceSourceV1;
+	version: number,
+	link: WorkEvidenceLink,
+	origin: string,
+	role: string,
+	text: string,
+	truncated: boolean,
+	/**  Decimal byte count avoids JavaScript integer precision loss. */
+	source_bytes: string,
+	source?: WorkEvidenceSourceV1,
 };
 
-export type WorkEvidenceSourceV1 =
-  | { kind: "native_extraction" }
-  | {
-      kind: "provider_search";
-      provider: WorkSearchProvider;
-      model: string;
-      url: string;
-      title: string;
-      response_id: string;
-      search_call_id: string;
-    };
+export type WorkEvidenceSourceV1 = { kind: "native_extraction" } | { kind: "provider_search"; provider: WorkSearchProvider; model: string; url: string; title: string; response_id: string; search_call_id: string };
 
 export type WorkExecutionAuthorization = "reviewed_plan" | "user_directed_public_read";
 
 export type WorkExecutionFact = {
-  authorization?: WorkExecutionAuthorization;
-  id: WorkExecutionId;
-  approved_revision: WorkRevision;
-  spec: WorkExecutionSpec;
-  status: WorkExecutionStatus;
-  attempts: WorkAttemptFact[];
-  artifacts: WorkArtifactV1[];
-  provider_evidence?: WorkProviderSearchRecordV1[];
-  /**  User edits and decisions never overwrite the original agent output. */
-  user_artifacts?: WorkArtifactUserState[];
+	authorization?: WorkExecutionAuthorization,
+	id: WorkExecutionId,
+	approved_revision: WorkRevision,
+	spec: WorkExecutionSpec,
+	status: WorkExecutionStatus,
+	attempts: WorkAttemptFact[],
+	artifacts: WorkArtifactV1[],
+	provider_evidence?: WorkProviderSearchRecordV1[],
+	/**  User edits and decisions never overwrite the original agent output. */
+	user_artifacts?: WorkArtifactUserState[],
 };
 
 /** Durable execution identity, never a live admission. */
 export type WorkExecutionId = string;
 
 export type WorkExecutionLimits = {
-  model_tokens: number;
-  cost_micro_usd: number;
-  operations: number;
-  timeout_seconds: number;
-  max_workers: number;
+	model_tokens: number,
+	cost_micro_usd: number,
+	operations: number,
+	timeout_seconds: number,
+	max_workers: number,
 };
 
 export type WorkExecutionOwnership = {
-  execution: WorkExecutionId;
-  /**  Observation identity only. Never a worker token or restart authority. */
-  owner: WorkRuntimeSessionId;
+	execution: WorkExecutionId,
+	/**  Observation identity only. Never a worker token or restart authority. */
+	owner: WorkRuntimeSessionId,
 };
 
 export type WorkExecutionSpec = {
-  plan_revision: WorkRevision;
-  limits: WorkExecutionLimits;
-  nodes: WorkNodeExecutionSpec[];
+	plan_revision: WorkRevision,
+	limits: WorkExecutionLimits,
+	nodes: WorkNodeExecutionSpec[],
 };
 
-export type WorkExecutionStatus =
-  | "approved"
-  | "running"
-  | "cancel_requested"
-  | "completed"
-  | "needs_review"
-  | "cancelled"
-  | "failed"
-  | "interrupted";
+export type WorkExecutionStatus = "approved" | "running" | "cancel_requested" | "completed" | "needs_review" | "cancelled" | "failed" | "interrupted";
 
 export type WorkExpectedOutput = {
-  name: string;
-  description: string;
-  review: WorkOutputReview;
+	name: string,
+	description: string,
+	review: WorkOutputReview,
 };
 
-export type WorkFailureV1 =
-  | "invalid"
-  | "capacity"
-  | "conflict"
-  | "not_found"
-  | "profile_unavailable"
-  | "unavailable"
-  | "shutdown"
-  | "outcome_unknown";
+export type WorkFailureV1 = "invalid" | "capacity" | "conflict" | "not_found" | "profile_unavailable" | "unavailable" | "shutdown" | "outcome_unknown";
 
 /** Durable profile-owned Work identity; never an execution capability. */
 export type WorkId = string;
@@ -2025,75 +1464,66 @@ export type WorkId = string;
 export type WorkLifecycle = "active" | "archived";
 
 export type WorkNodeExecutionSpec = {
-  node: WorkPlanNodeId;
-  /**
-   *  A direct delegation edge, independent from data dependencies. Its
-   *  authority must be contained in its parent's approved capability.
-   */
-  parent: WorkPlanNodeId | null;
-  capability: WorkCapability;
-  limits: WorkExecutionLimits;
+	node: WorkPlanNodeId,
+	/**
+	 *  A direct delegation edge, independent from data dependencies. Its
+	 *  authority must be contained in its parent's approved capability.
+	 */
+	parent: WorkPlanNodeId | null,
+	capability: WorkCapability,
+	limits: WorkExecutionLimits,
 };
 
 export type WorkNodeProposal = {
-  key: number;
-  objective: string;
-  dependencies: number[];
-  outputs: WorkExpectedOutput[];
+	key: number,
+	objective: string,
+	dependencies: number[],
+	outputs: WorkExpectedOutput[],
 };
 
 export type WorkOperationResponseV1 = {
-  version: number;
-  profile: string;
-  operation: WorkCommandId;
-  state: WorkOperationStateV1;
+	version: number,
+	profile: string,
+	operation: WorkCommandId,
+	state: WorkOperationStateV1,
 };
 
-export type WorkOperationStateV1 =
-  /**
-   *  No retained observation. Reconcile durable Work; do not replay a model
-   *  call or reconstruct an execution from this state after a restart.
-   */
-  | { kind: "unknown" }
-  | { kind: "pending"; work: WorkId }
-  | { kind: "planned"; response: WorkPlanningResponseV1 }
-  | { kind: "settled"; response: WorkResponseV1 }
-  | { kind: "refused"; error: WorkFailureV1 };
+export type WorkOperationStateV1 = 
+/**
+ *  No retained observation. Reconcile durable Work; do not replay a model
+ *  call or reconstruct an execution from this state after a restart.
+ */
+{ kind: "unknown" } | { kind: "pending"; work: WorkId } | { kind: "planned"; response: WorkPlanningResponseV1 } | { kind: "settled"; response: WorkResponseV1 } | { kind: "refused"; error: WorkFailureV1 };
 
 /**
  *  On-demand operations have an application lifetime independent of a view.
  *  Their correlation IDs do not constitute durable commands or worker handles.
  */
-export type WorkOperationV1 =
-  | { kind: "read_public"; command: WorkCommandV1 }
-  | { kind: "plan"; request: WorkPlanRequestV1 }
-  | { kind: "prepare_plan"; request: WorkPlanRequestV1 }
-  | { kind: "prepare"; request: WorkApprovalRequestV1 }
-  | { kind: "start"; request: WorkStartRequestV1 };
+export type WorkOperationV1 = { kind: "read_public"; command: WorkCommandV1 } | { kind: "plan"; request: WorkPlanRequestV1 } | { kind: "prepare_plan"; request: WorkPlanRequestV1 } | { kind: "prepare"; request: WorkApprovalRequestV1 } | { kind: "start"; request: WorkStartRequestV1 };
 
 /**  Requested output review level, never evidence that a requirement was met. */
 export type WorkOutputReview = "mechanical" | "source_mapped_needs_review" | "user_acceptance";
 
 export type WorkPlanDraft = {
-  id: WorkPlanId;
-  nodes: WorkPlanNode[];
+	id: WorkPlanId,
+	nodes: WorkPlanNode[],
 };
 
 /** Durable plan identity, independent of its immutable revisions. */
 export type WorkPlanId = string;
 
 export type WorkPlanNode = {
-  id: WorkPlanNodeId;
-  objective: string;
-  dependencies: WorkPlanNodeId[];
-  outputs: WorkExpectedOutput[];
+	id: WorkPlanNodeId,
+	objective: string,
+	dependencies: WorkPlanNodeId[],
+	outputs: WorkExpectedOutput[],
 };
 
 /** Durable responsibility in a draft; not an execution lease or a Task. */
 export type WorkPlanNodeId = string;
 
 export type WorkPlanProposal = {
-  nodes: WorkNodeProposal[];
+	nodes: WorkNodeProposal[],
 };
 
 /**
@@ -2101,71 +1531,58 @@ export type WorkPlanProposal = {
  *  never automatically repeat generation or interpret missing usage as zero.
  */
 export type WorkPlanRequestV1 = {
-  version: number;
-  work: WorkId;
-  expected_revision: WorkRevision;
+	version: number,
+	work: WorkId,
+	expected_revision: WorkRevision,
 };
 
 export type WorkPlanRevision = {
-  author: WorkAuthor;
-  revision: WorkRevision;
-  /**  Exact Work context from which the proposal was accepted. */
-  basis_revision: WorkRevision;
-  draft: WorkPlanDraft;
+	author: WorkAuthor,
+	revision: WorkRevision,
+	/**  Exact Work context from which the proposal was accepted. */
+	basis_revision: WorkRevision,
+	draft: WorkPlanDraft,
 };
 
-export type WorkPlanningFailureV1 =
-  | { kind: "invalid" }
-  | { kind: "capacity" }
-  | { kind: "unavailable" }
-  | { kind: "cancelled" }
-  | { kind: "timeout" }
-  | { kind: "stale" }
-  | { kind: "needs_input" }
-  | { kind: "privacy" }
-  | { kind: "provider_outcome_unknown" }
-  | { kind: "provider_refused" }
-  | { kind: "store"; error: WorkFailureV1 };
+export type WorkPlanningFailureV1 = { kind: "invalid" } | { kind: "capacity" } | { kind: "unavailable" } | { kind: "cancelled" } | { kind: "timeout" } | { kind: "stale" } | { kind: "needs_input" } | { kind: "privacy" } | { kind: "provider_outcome_unknown" } | { kind: "provider_refused" } | { kind: "store"; error: WorkFailureV1 };
 
-export type WorkPlanningOutcomeV1 =
-  | { kind: "settled"; response: WorkResponseV1 }
-  | { kind: "refused"; reason: WorkPlanningFailureV1 };
+export type WorkPlanningOutcomeV1 = { kind: "settled"; response: WorkResponseV1 } | { kind: "refused"; reason: WorkPlanningFailureV1 };
 
 export type WorkPlanningResponseV1 = {
-  version: number;
-  profile: string;
-  work: WorkId;
-  basis_revision: WorkRevision;
-  usage: WorkPlanningUsageV1 | null;
-  outcome: WorkPlanningOutcomeV1;
+	version: number,
+	profile: string,
+	work: WorkId,
+	basis_revision: WorkRevision,
+	usage: WorkPlanningUsageV1 | null,
+	outcome: WorkPlanningOutcomeV1,
 };
 
 export type WorkPlanningUsageV1 = {
-  input_tokens: number;
-  output_tokens: number;
-  cost_ceiling_micro_usd: string;
+	input_tokens: number,
+	output_tokens: number,
+	cost_ceiling_micro_usd: string,
 };
 
 export type WorkProviderSearchCitation = {
-  url: string;
-  title: string;
-  start_index: number;
-  end_index: number;
+	url: string,
+	title: string,
+	start_index: number,
+	end_index: number,
 };
 
 export type WorkProviderSearchEvidenceV1 = {
-  version: number;
-  provider: WorkSearchProvider;
-  model: string;
-  /**  Catalog-validated actual snapshot returned by the provider. */
-  response_model: string;
-  response_id: string;
-  search_call_id: string;
-  answer: string;
-  citations: WorkProviderSearchCitation[];
-  /**  Provider-reported usage, distinct from fixed billed search-content units. */
-  actual_input_tokens: number;
-  actual_output_tokens: number;
+	version: number,
+	provider: WorkSearchProvider,
+	model: string,
+	/**  Catalog-validated actual snapshot returned by the provider. */
+	response_model: string,
+	response_id: string,
+	search_call_id: string,
+	answer: string,
+	citations: WorkProviderSearchCitation[],
+	/**  Provider-reported usage, distinct from fixed billed search-content units. */
+	actual_input_tokens: number,
+	actual_output_tokens: number,
 };
 
 /**
@@ -2173,46 +1590,41 @@ export type WorkProviderSearchEvidenceV1 = {
  *  carries no native browser reference or authority to open its source URLs.
  */
 export type WorkProviderSearchRecordV1 = {
-  id: WorkArtifactId;
-  node: WorkPlanNodeId;
-  attempt: WorkAttemptId;
-  evidence: WorkProviderSearchEvidenceV1;
+	id: WorkArtifactId,
+	node: WorkPlanNodeId,
+	attempt: WorkAttemptId,
+	evidence: WorkProviderSearchEvidenceV1,
 };
 
 export type WorkPublicDiscoveryScope = {
-  /**  Exact initial public search disclosure reviewed before execution. */
-  search_query: string;
-  max_hops: number;
+	/**  Exact initial public search disclosure reviewed before execution. */
+	search_query: string,
+	max_hops: number,
 };
 
 export type WorkPublicSearchScope = {
-  provider: WorkSearchProvider;
-  model: string;
-  query: string;
+	provider: WorkSearchProvider,
+	model: string,
+	query: string,
 };
 
-export type WorkQueryKindV1 =
-  | { kind: "projection"; work: WorkId }
-  | { kind: "list"; after: WorkId | null; limit: number }
-  | { kind: "plan_history"; work: WorkId }
-  | { kind: "plan"; work: WorkId; revision: WorkRevision }
-  | { kind: "evidence"; work: WorkId; link: WorkEvidenceLink };
+export type WorkQueryKindV1 = { kind: "projection"; work: WorkId } | { kind: "list"; after: WorkId | null; limit: number } | { kind: "plan_history"; work: WorkId } | { kind: "plan"; work: WorkId; revision: WorkRevision } | { kind: "evidence"; work: WorkId; link: WorkEvidenceLink };
 
 export type WorkQueryV1 = {
-  version: number;
-  query: WorkQueryKindV1;
+	version: number,
+	query: WorkQueryKindV1,
 };
 
 export type WorkQuestion = {
-  basis_revision: WorkRevision | null;
-  objective_revision: WorkRevision | null;
-  state: WorkQuestionState;
-  author: WorkAuthor;
-  answer_author: WorkAuthor | null;
-  id: WorkQuestionId;
-  prompt: string;
-  options: string[];
-  answer: string | null;
+	basis_revision: WorkRevision | null,
+	objective_revision: WorkRevision | null,
+	state: WorkQuestionState,
+	author: WorkAuthor,
+	answer_author: WorkAuthor | null,
+	id: WorkQuestionId,
+	prompt: string,
+	options: string[],
+	answer: string | null,
 };
 
 /** Durable clarification question identity. */
@@ -2220,38 +1632,16 @@ export type WorkQuestionId = string;
 
 export type WorkQuestionState = "active" | "answered" | "superseded" | "dismissed";
 
-export type WorkReplyV1 =
-  | {
-      kind: "public_read_admitted";
-      projection: WorkRuntimeProjection;
-      receipt: WorkCommandReceipt;
-      replayed: boolean;
-    }
-  | { kind: "environment"; reply: WorkEnvironmentReply }
-  | {
-      kind: "approval_draft";
-      work: WorkId;
-      expected_revision: WorkRevision;
-      spec: WorkExecutionSpec;
-    }
-  | { kind: "projection"; projection: WorkRuntimeProjection }
-  | { kind: "authoring_applied"; receipt: WorkAuthoringReceipt }
-  | { kind: "execution_applied"; projection: WorkRuntimeProjection; receipt: WorkCommandReceipt }
-  | { kind: "evidence"; evidence: WorkEvidencePreviewV1 }
-  | { kind: "snapshot"; snapshot: WorkSnapshot }
-  | { kind: "plan"; plan: WorkPlanRevision }
-  | { kind: "plan_history"; revisions: WorkRevision[] }
-  | { kind: "page"; works: WorkSummary[]; next: WorkId | null }
-  | { kind: "error"; error: WorkFailureV1 };
+export type WorkReplyV1 = { kind: "public_read_admitted"; projection: WorkRuntimeProjection; receipt: WorkCommandReceipt; replayed: boolean } | { kind: "environment"; reply: WorkEnvironmentReply } | { kind: "approval_draft"; work: WorkId; expected_revision: WorkRevision; spec: WorkExecutionSpec } | { kind: "projection"; projection: WorkRuntimeProjection } | { kind: "authoring_applied"; receipt: WorkAuthoringReceipt } | { kind: "execution_applied"; projection: WorkRuntimeProjection; receipt: WorkCommandReceipt } | { kind: "evidence"; evidence: WorkEvidencePreviewV1 } | { kind: "snapshot"; snapshot: WorkSnapshot } | { kind: "plan"; plan: WorkPlanRevision } | { kind: "plan_history"; revisions: WorkRevision[] } | { kind: "page"; works: WorkSummary[]; next: WorkId | null } | { kind: "error"; error: WorkFailureV1 };
 
 /**
  *  Closed product reply grammar: the host-only RuntimeStarted reply cannot
  *  cross this conversion, so a read or JSON round trip cannot mint an attempt.
  */
 export type WorkResponseV1 = {
-  version: number;
-  profile: string;
-  reply: WorkReplyV1;
+	version: number,
+	profile: string,
+	reply: WorkReplyV1,
 };
 
 /**
@@ -2264,37 +1654,21 @@ export type WorkRevision = string;
  *  Internal Store grammar. User commands and host-only attempt facts have
  *  separate variants at the application edge; IPC never accepts settlements.
  */
-export type WorkRuntimeIntent =
-  | { kind: "read_public"; scope: WorkPublicSearchScope; limits: WorkExecutionLimits }
-  | {
-      kind: "review_artifact";
-      execution: WorkExecutionId;
-      artifact: WorkArtifactId;
-      decision: WorkArtifactDecision;
-    }
-  | {
-      kind: "edit_artifact";
-      execution: WorkExecutionId;
-      artifact: WorkArtifactId;
-      data: WorkArtifactDataV1;
-      evidence: WorkEvidenceLink[];
-    }
-  | { kind: "approve"; spec: WorkExecutionSpec }
-  | { kind: "cancel"; execution: WorkExecutionId }
-  /**  Explicitly acknowledge that an old owner is gone. Cannot restart it. */
-  | { kind: "acknowledge_interruption"; execution: WorkExecutionId };
+export type WorkRuntimeIntent = { kind: "read_public"; scope: WorkPublicSearchScope; limits: WorkExecutionLimits } | { kind: "review_artifact"; execution: WorkExecutionId; artifact: WorkArtifactId; decision: WorkArtifactDecision } | { kind: "edit_artifact"; execution: WorkExecutionId; artifact: WorkArtifactId; data: WorkArtifactDataV1; evidence: WorkEvidenceLink[] } | { kind: "approve"; spec: WorkExecutionSpec } | { kind: "cancel"; execution: WorkExecutionId } | 
+/**  Explicitly acknowledge that an old owner is gone. Cannot restart it. */
+{ kind: "acknowledge_interruption"; execution: WorkExecutionId };
 
 export type WorkRuntimeProjection = {
-  version: number;
-  work: WorkSnapshot;
-  executions: WorkExecutionFact[];
-  /**  Old incarnation has no live authority. Facts and reservations remain. */
-  interrupted: WorkExecutionId[];
-  /**
-   *  Exact original execution owners. Older projections without this field
-   *  remain readable, but cannot admit transient activity.
-   */
-  owners?: WorkExecutionOwnership[];
+	version: number,
+	work: WorkSnapshot,
+	executions: WorkExecutionFact[],
+	/**  Old incarnation has no live authority. Facts and reservations remain. */
+	interrupted: WorkExecutionId[],
+	/**
+	 *  Exact original execution owners. Older projections without this field
+	 *  remain readable, but cannot admit transient activity.
+	 */
+	owners?: WorkExecutionOwnership[],
 };
 
 /** Store incarnation; never serialized as execution authority. */
@@ -2307,105 +1681,88 @@ export type WorkSearchProvider = "open_ai";
  *  Render only for the matching owner, Work and durable revision.
  */
 export type WorkSignalV1 = {
-  version: number;
-  owner: WorkRuntimeSessionId;
-  profile: string;
-  work: WorkId;
-  basis_revision: WorkRevision;
-  execution: WorkExecutionId;
-  node: WorkPlanNodeId;
-  attempt: WorkAttemptId;
-  activity: WorkActivityV1;
+	version: number,
+	owner: WorkRuntimeSessionId,
+	profile: string,
+	work: WorkId,
+	basis_revision: WorkRevision,
+	execution: WorkExecutionId,
+	node: WorkPlanNodeId,
+	attempt: WorkAttemptId,
+	activity: WorkActivityV1,
 };
 
 /**  Bounded full-resynchronization projection. Serialized facts grant nothing. */
 export type WorkSnapshot = {
-  lifecycle: WorkLifecycle;
-  objective_revision: WorkRevision;
-  context_revision: WorkRevision;
-  objective_author: WorkAuthor;
-  schema_version: number;
-  id: WorkId;
-  profile: ProfileId;
-  revision: WorkRevision;
-  objective: string;
-  status: WorkAuthoringStatus;
-  plan: WorkPlanRevision | null;
-  questions: WorkQuestion[];
+	lifecycle: WorkLifecycle,
+	objective_revision: WorkRevision,
+	context_revision: WorkRevision,
+	objective_author: WorkAuthor,
+	schema_version: number,
+	id: WorkId,
+	profile: ProfileId,
+	revision: WorkRevision,
+	objective: string,
+	status: WorkAuthoringStatus,
+	plan: WorkPlanRevision | null,
+	questions: WorkQuestion[],
 };
 
 export type WorkStartRequestV1 = {
-  version: number;
-  work: WorkId;
-  expected_revision: WorkRevision;
-  execution: WorkExecutionId;
+	version: number,
+	work: WorkId,
+	expected_revision: WorkRevision,
+	execution: WorkExecutionId,
 };
 
 export type WorkSummary = {
-  lifecycle: WorkLifecycle;
-  schema_version: number;
-  id: WorkId;
-  revision: WorkRevision;
-  status: WorkAuthoringStatus;
-  objective: string;
+	lifecycle: WorkLifecycle,
+	schema_version: number,
+	id: WorkId,
+	revision: WorkRevision,
+	status: WorkAuthoringStatus,
+	objective: string,
 };
 
 export type WorkUsage = {
-  model_tokens: number;
-  cost_micro_usd: number;
-  operations: number;
-  accounting: WorkUsageAccounting;
+	model_tokens: number,
+	cost_micro_usd: number,
+	operations: number,
+	accounting: WorkUsageAccounting,
 };
 
 export type WorkUsageAccounting = "exact" | "conservative_reservation";
 
-export type WorkUserEdit =
-  | { kind: "set_objective"; objective: string }
-  | { kind: "open_question"; prompt: string; options: string[] }
-  | { kind: "answer_question"; id: WorkQuestionId; answer: string }
-  | { kind: "dismiss_question"; id: WorkQuestionId }
-  | { kind: "replace_draft"; proposal: WorkPlanProposal }
-  | { kind: "archive" }
-  | { kind: "restore" }
-  | { kind: "compact_history" };
+export type WorkUserEdit = { kind: "set_objective"; objective: string } | { kind: "open_question"; prompt: string; options: string[] } | { kind: "answer_question"; id: WorkQuestionId; answer: string } | { kind: "dismiss_question"; id: WorkQuestionId } | { kind: "replace_draft"; proposal: WorkPlanProposal } | { kind: "archive" } | { kind: "restore" } | { kind: "compact_history" };
 
 /* Tauri Specta runtime */
-async function typedError<T, E>(
-  result: Promise<T>,
-): Promise<{ status: "ok"; data: T } | { status: "error"; error: E }> {
-  try {
-    return { status: "ok", data: await result };
-  } catch (e) {
-    if (e instanceof Error) throw e;
-    return { status: "error", error: e as any };
-  }
+async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; data: T } | { status: "error"; error: E }> {
+    try {
+        return { status: "ok", data: await result };
+    } catch (e) {
+        if (e instanceof Error) throw e;
+        return { status: "error", error: e as any };
+    }
 }
 
 type EventEmit<T> = [T] extends [null] ? () => Promise<void> : (payload: T) => Promise<void>;
 
-function makeEvent<T>(
-  name: string,
-  serialize?: (payload: T) => unknown,
-  deserialize?: (payload: any) => T,
-) {
-  const mapEvent = (cb: __TAURI_EVENT.EventCallback<T>) => (event: __TAURI_EVENT.Event<any>) =>
-    cb({ ...event, payload: deserialize ? deserialize(event.payload) : event.payload });
-  const mapPayload = (payload: T) => (serialize ? serialize(payload) : payload);
+function makeEvent<T>(name: string, serialize?: (payload: T) => unknown, deserialize?: (payload: any) => T) {
+    const mapEvent = (cb: __TAURI_EVENT.EventCallback<T>) => (event: __TAURI_EVENT.Event<any>) => cb({ ...event, payload: deserialize ? deserialize(event.payload) : event.payload });
+    const mapPayload = (payload: T) => serialize ? serialize(payload) : payload;
 
-  const base = {
-    listen: (cb: __TAURI_EVENT.EventCallback<T>) => __TAURI_EVENT.listen(name, mapEvent(cb)),
-    once: (cb: __TAURI_EVENT.EventCallback<T>) => __TAURI_EVENT.once(name, mapEvent(cb)),
-    emit: ((payload: T) =>
-      __TAURI_EVENT.emit(name, mapPayload(payload)) as unknown) as EventEmit<T>,
-  };
+    const base = {
+        listen: (cb: __TAURI_EVENT.EventCallback<T>) => __TAURI_EVENT.listen(name, mapEvent(cb)),
+        once: (cb: __TAURI_EVENT.EventCallback<T>) => __TAURI_EVENT.once(name, mapEvent(cb)),
+        emit: ((payload: T) => __TAURI_EVENT.emit(name, mapPayload(payload)) as unknown) as EventEmit<T>
+    };
 
-  const fn = (
-    target: import("@tauri-apps/api/webview").Webview | import("@tauri-apps/api/window").Window,
-  ) => ({
-    listen: (cb: __TAURI_EVENT.EventCallback<T>) => target.listen(name, mapEvent(cb)),
-    once: (cb: __TAURI_EVENT.EventCallback<T>) => target.once(name, mapEvent(cb)),
-    emit: ((payload: T) => target.emit(name, mapPayload(payload)) as unknown) as EventEmit<T>,
-  });
+    const fn = (target: import("@tauri-apps/api/webview").Webview | import("@tauri-apps/api/window").Window) => ({
+        listen: (cb: __TAURI_EVENT.EventCallback<T>) => target.listen(name, mapEvent(cb)),
+        once: (cb: __TAURI_EVENT.EventCallback<T>) => target.once(name, mapEvent(cb)),
+        emit: ((payload: T) => target.emit(name, mapPayload(payload)) as unknown) as EventEmit<T>
+    });
 
-  return Object.assign(fn, base);
+    return Object.assign(fn, base);
 }
+

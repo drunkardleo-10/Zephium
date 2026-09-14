@@ -112,14 +112,27 @@ fn area_membership_is_exact_and_removal_preserves_elements() {
         }
     )
     .is_err());
-    let removed = edit(
+    let mut placed = attached.clone();
+    placed.view.areas.push(WorkAreaPlacement {
+        area: 20.into(),
+        x: 10,
+        y: 10,
+        width: 640,
+        height: 420,
+    });
+    placed.validate().unwrap();
+    let removed = edit(&placed, WorkEnvironmentEdit::RemoveArea { area: 20.into() }).unwrap();
+    assert_eq!(removed.elements.len(), 1);
+    assert!(removed.elements[0].area.is_none());
+    assert!(removed.areas.is_empty());
+    assert!(removed.view.areas.is_empty());
+    assert_eq!(removed.view.revision, placed.view.revision.next().unwrap());
+    let unplaced = edit(
         &attached,
         WorkEnvironmentEdit::RemoveArea { area: 20.into() },
     )
     .unwrap();
-    assert_eq!(removed.elements.len(), 1);
-    assert!(removed.elements[0].area.is_none());
-    assert!(removed.areas.is_empty());
+    assert_eq!(unplaced.view.revision, attached.view.revision);
     assert!(matches!(
         edit(
             &removed,
@@ -142,6 +155,15 @@ fn snapshot_validation_rejects_duplicate_references_and_dangling_placement() {
     snapshot.view.placements.push(placement(404.into()));
     assert!(snapshot.validate().is_err());
     snapshot.view.placements.clear();
+    snapshot.view.areas.push(WorkAreaPlacement {
+        area: 404.into(),
+        x: 0,
+        y: 0,
+        width: 240,
+        height: 160,
+    });
+    assert!(snapshot.validate().is_err());
+    snapshot.view.areas.clear();
     let mut duplicate = snapshot.elements[0].clone();
     duplicate.id = 11.into();
     snapshot.elements.push(duplicate);
@@ -188,8 +210,20 @@ fn view_admits_boundary_geometry_and_rejects_overflow_duplicates_and_capacity() 
             width: 120,
             height: 80,
         }],
+        areas: vec![WorkAreaPlacement {
+            area: 1.into(),
+            x: -1_000_000,
+            y: 1_000_000,
+            width: 240,
+            height: 160,
+        }],
     };
     valid.validate().unwrap();
+    let legacy: WorkEnvironmentView = serde_json::from_str(
+        r#"{"revision":"1","x":0,"y":0,"zoom_milli":1000,"placements":[]}"#,
+    )
+    .unwrap();
+    assert!(legacy.areas.is_empty());
     for mutate in [
         |v: &mut WorkEnvironmentView| v.x = -1_000_001,
         |v: &mut WorkEnvironmentView| v.y = 1_000_001,
@@ -201,6 +235,10 @@ fn view_admits_boundary_geometry_and_rejects_overflow_duplicates_and_capacity() 
         |v: &mut WorkEnvironmentView| v.placements[0].width = 4097,
         |v: &mut WorkEnvironmentView| v.placements[0].height = 79,
         |v: &mut WorkEnvironmentView| v.placements[0].height = 4097,
+        |v: &mut WorkEnvironmentView| v.areas[0].width = 239,
+        |v: &mut WorkEnvironmentView| v.areas[0].width = 8193,
+        |v: &mut WorkEnvironmentView| v.areas[0].height = 159,
+        |v: &mut WorkEnvironmentView| v.areas[0].x = 1_000_001,
     ] {
         let mut invalid = valid.clone();
         mutate(&mut invalid);
@@ -209,6 +247,9 @@ fn view_admits_boundary_geometry_and_rejects_overflow_duplicates_and_capacity() 
     let mut duplicate = valid.clone();
     duplicate.placements.push(duplicate.placements[0].clone());
     assert!(duplicate.validate().is_err());
+    let mut duplicate_area = valid.clone();
+    duplicate_area.areas.push(duplicate_area.areas[0].clone());
+    assert!(duplicate_area.validate().is_err());
     let mut full = valid;
     full.zoom_milli = 4000;
     full.placements = (0..MAX_ENVIRONMENT_ELEMENTS)

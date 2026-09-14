@@ -81,7 +81,17 @@
   let objectiveSession = $state.raw<WorkSession | null>(null);
   let inspected = $state<string | null>(null);
   let lifted = $state.raw<{ id: string; origin: DOMRect | null } | null>(null);
-  let canvasRef = $state<{ screenRect: (id: string) => DOMRect | null }>();
+  let canvasRef = $state<{
+    screenRect: (id: string) => DOMRect | null;
+    selectionBounds: () => {
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      ids: string[];
+    } | null;
+  }>();
+  let selectionCount = $state(0);
   let cardHost = $state<HTMLElement>();
   let cardBounds = $state.raw<DOMRect | null>(null);
   $effect(() => {
@@ -475,6 +485,22 @@
       x: Math.round(view.viewport.x),
       y: Math.round(view.viewport.y),
       zoom_milli: Math.round(view.viewport.zoom * 1000),
+      areas: snapshot.areas.flatMap((area) => {
+        const place = view.areas?.[area.id];
+        const previous = snapshot.view.areas?.find((entry) => entry.area === area.id);
+        const source = place ?? previous;
+        return source
+          ? [
+              {
+                area: area.id,
+                x: Math.round(source.x),
+                y: Math.round(source.y),
+                width: Math.round(source.width),
+                height: Math.round(source.height),
+              },
+            ]
+          : [];
+      }),
       placements: snapshot.elements.map((element) => {
         const point = view.positions[element.id] ?? { x: 0, y: 0 };
         const previous = snapshot.view.placements.find((place) => place.element === element.id);
@@ -518,6 +544,36 @@
         work.title.toLocaleLowerCase().includes(workQuery.trim().toLocaleLowerCase()),
     ),
   );
+  async function groupSelection() {
+    const bounds = canvasRef?.selectionBounds();
+    const current = snapshot;
+    if (!bounds || !current || !areaTitle.trim()) return;
+    if (!(await session.flushView())) return;
+    if (!(await session.edit({ kind: "create_area", title: areaTitle.trim() }))) return;
+    const created = session.snapshot?.areas.find(
+      (area) => !current.areas.some((known) => known.id === area.id),
+    );
+    if (!created) return;
+    for (const id of bounds.ids)
+      if (!(await session.edit({ kind: "assign_area", element: id, area: created.id }))) return;
+    const latest = session.snapshot;
+    if (latest)
+      session.checkpoint({
+        ...latest.view,
+        areas: [
+          ...(latest.view.areas ?? []).filter((entry) => entry.area !== created.id),
+          {
+            area: created.id,
+            x: bounds.x,
+            y: bounds.y,
+            width: bounds.width,
+            height: bounds.height,
+          },
+        ],
+      });
+    areaTitle = "";
+    chrome?.close();
+  }
   function onPanelChange(panel: WorkEnvironmentPanel | null) {
     session.tabsIntroduced = true;
     if (panel === "notes") notesOpen = false;
@@ -654,13 +710,17 @@
       class="menu-create"
       onsubmit={(event) => {
         event.preventDefault();
-        if (areaTitle.trim())
-          void session.edit({ kind: "create_area", title: areaTitle.trim() }).then((okay) => {
-            if (okay) {
-              areaTitle = "";
-              chrome?.close();
-            }
-          });
+        if (!areaTitle.trim()) return;
+        if (selectionCount > 0) {
+          void groupSelection();
+          return;
+        }
+        void session.edit({ kind: "create_area", title: areaTitle.trim() }).then((okay) => {
+          if (okay) {
+            areaTitle = "";
+            chrome?.close();
+          }
+        });
       }}
     >
       <span class="menu-icon"><Icon icon={FolderAddIcon} /></span>
@@ -671,10 +731,12 @@
         placeholder={m.work_env_area()}
         disabled={busy}
       /><Button type="submit" size="compact" disabled={busy || !areaTitle.trim()}
-        >{m.work_env_create()}</Button
+        >{selectionCount > 0
+          ? m.work_env_group_selection({ count: selectionCount })
+          : m.work_env_create()}</Button
       >
     </form>
-    {#if snapshot?.areas.length}<div class="menu-heading">{m.work_env_area}</div>
+    {#if snapshot?.areas.length}<div class="menu-heading">{m.work_env_area()}</div>
       <ul class="menu-list">
         {#each snapshot.areas as area (area.id)}<li class="menu-row static">{area.title}</li>{/each}
       </ul>{/if}
@@ -822,6 +884,7 @@
           >{#snippet children(Canvas)}<Canvas
               {items}
               links={scene.links}
+              areas={snapshot.areas}
               initialView={canvasView}
               {remoteView}
               {authoritative}
@@ -832,8 +895,11 @@
               }}
               onopen={openLift}
               onselectionchange={(ids: string[]) => {
+                selectionCount = ids.filter((id) => authoritative.has(id)).length;
                 if (!ids.length) inspected = null;
               }}
+              onareachange={(id: string, area: string | null) =>
+                void session.edit({ kind: "assign_area", element: id, area })}
               onevidence={(id: string, source: EvidenceReference) => void inspectResult(id, source)}
               onaction={(id: string, action?: string) => {
                 if (action === "remove") {

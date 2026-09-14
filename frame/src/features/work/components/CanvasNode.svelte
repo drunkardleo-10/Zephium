@@ -2,7 +2,7 @@
   import { Handle, Position, NodeResizer, NodeToolbar, type NodeProps } from "@xyflow/svelte";
   import { getContext, tick } from "svelte";
   import Icon from "$shared/ui/Icon";
-  import type { WorkNode } from "../lib/canvas-model";
+  import type { WorkItemNode } from "../lib/canvas-model";
   import { canvasResize, canvasAction, canvasOpen, canvasFocusResult } from "../lib/canvas-context";
   import { ArrowUpRight01Icon, MinusSignIcon, Target01Icon } from "../lib/icons";
   import TabCard from "./cards/TabCard.svelte";
@@ -15,7 +15,7 @@
   const action = getContext<(id: string, action?: string) => void>(canvasAction);
   const resize = getContext<(active: boolean) => void>(canvasResize);
   const focusResult = getContext<(id: string) => void>(canvasFocusResult);
-  let { id, data, selected }: NodeProps<WorkNode> = $props();
+  let { id, data, selected }: NodeProps<WorkItemNode> = $props();
   let root = $state<HTMLDivElement>();
   const type = $derived(data.type ?? (data.artifact ? "result" : "objective"));
 </script>

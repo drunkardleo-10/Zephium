@@ -11,14 +11,22 @@
     canvasOpen,
   } from "../lib/canvas-context";
   import CanvasNode from "./CanvasNode.svelte";
+  import AreaNode from "./AreaNode.svelte";
   import CanvasControls from "./CanvasControls.svelte";
   import {
     reconcileNodes,
     applyRemoteView,
+    absolutePosition,
+    containingArea,
+    isAreaNode,
+    nodesBounds,
     validScene,
     validViewport,
+    type CanvasArea,
     type CanvasItem,
     type CanvasLink,
+    type CanvasPosition,
+    type CanvasSize,
     type CanvasView,
     type WorkNode,
   } from "../lib/canvas-model";
@@ -27,6 +35,7 @@
   let {
     items,
     links,
+    areas = [],
     initialView,
     remoteView,
     authoritative,
@@ -39,10 +48,12 @@
     onevidence,
     onviewchange,
     onselectionchange,
+    onareachange,
     expose,
   }: {
     items: readonly CanvasItem[];
     links: readonly CanvasLink[];
+    areas?: readonly CanvasArea[];
     initialView?: CanvasView;
     remoteView?: { sequence: number; view: CanvasView };
     authoritative: ReadonlySet<string>;
@@ -55,7 +66,8 @@
     onevidence?: (id: string, reference: EvidenceReference) => void;
     onviewchange?: (view: CanvasView) => void;
     onselectionchange?: (ids: string[]) => void;
-    expose?: (api: { screenRect: (id: string) => DOMRect | null }) => void;
+    onareachange?: (id: string, area: string | null) => void;
+    expose?: (api: CanvasApi) => void;
   } = $props();
   setContext(canvasEvidence, {
     get open() {
@@ -74,12 +86,13 @@
   setContext(canvasFocusResult, (id: string) => {
     const node = nodes.find((node) => node.id === id);
     if (!node) return;
+    const position = absolutePosition(node, nodes);
     viewport = {
-      x: Math.max(24, (canvasWidth - (node.width ?? 480)) / 2) - node.position.x,
+      x: Math.max(24, (canvasWidth - (node.width ?? 480)) / 2) - position.x,
       y:
         fitTopInset +
         Math.max(0, (canvasHeight - fitBottomInset - fitTopInset - (node.height ?? 360)) / 2) -
-        node.position.y,
+        position.y,
       zoom: 1,
     };
     publishView();
@@ -87,7 +100,8 @@
   const restoredViewport = untrack(() => validViewport(initialView?.viewport));
   let viewport = $state(restoredViewport ?? { x: 0, y: 0, zoom: 1 });
   let valid = $derived(validScene(items, links));
-  const nodeTypes = { work: CanvasNode };
+  const nodeTypes = { work: CanvasNode, area: AreaNode };
+  let selection: string[] = [];
   let edges = $derived<Edge[]>(
     valid
       ? links.map((link) => ({
@@ -115,15 +129,32 @@
   );
   $effect(() => {
     const next = items;
+    const grouping = areas;
     const ready = valid;
     nodes = untrack(() =>
-      ready ? reconcileNodes(nodes, next, initialView?.positions, initialView?.sizes) : [],
+      ready
+        ? reconcileNodes(
+            nodes,
+            next,
+            initialView?.positions,
+            initialView?.sizes,
+            grouping,
+            initialView?.areas,
+          )
+        : [],
     );
   });
   let publishedPositions = "";
   const positionKey = (list: WorkNode[]) =>
     JSON.stringify(
-      list.map((node) => [node.id, node.position.x, node.position.y, node.width, node.height]),
+      list.map((node) => [
+        node.id,
+        node.parentId ?? "",
+        node.position.x,
+        node.position.y,
+        node.width,
+        node.height,
+      ]),
     );
   let appliedRemote = 0;
   let deferredRemote: CanvasView | null = null;
@@ -161,31 +192,56 @@
   });
   function publishView() {
     if (resizing) return;
+    const elements = nodes.filter((node) => !isAreaNode(node));
+    const areaNodes = nodes.filter(isAreaNode);
     onviewchange?.({
-      positions: Object.fromEntries(nodes.map((node) => [node.id, { ...node.position }])),
+      positions: Object.fromEntries(
+        elements.map((node) => [node.id, absolutePosition(node, nodes)]),
+      ),
       viewport: { ...viewport },
       sizes: Object.fromEntries(
-        nodes.map((node) => [
+        elements.map((node) => [
           node.id,
           { width: Math.round(node.width ?? 280), height: Math.round(node.height ?? 160) },
         ]),
       ),
+      areas: Object.fromEntries(
+        areaNodes.map((node) => [
+          node.id.slice("area:".length),
+          {
+            x: Math.round(node.position.x),
+            y: Math.round(node.position.y),
+            width: Math.round(node.width ?? 640),
+            height: Math.round(node.height ?? 420),
+          },
+        ]),
+      ),
     });
+  }
+  type CanvasApi = {
+    screenRect: (id: string) => DOMRect | null;
+    selectionBounds: () => (CanvasPosition & CanvasSize & { ids: string[] }) | null;
+  };
+  function selectionBounds() {
+    const ids = selection.filter((id) => nodes.some((node) => node.id === id && !isAreaNode(node)));
+    const bounds = nodesBounds(ids, nodes);
+    return bounds ? { ...bounds, ids } : null;
   }
   function screenRect(id: string): DOMRect | null {
     const node = nodes.find((node) => node.id === id);
     const origin = host?.getBoundingClientRect();
     if (!node || !origin) return null;
     const z = viewport.zoom;
+    const position = absolutePosition(node, nodes);
     return new DOMRect(
-      origin.left + node.position.x * z + viewport.x,
-      origin.top + node.position.y * z + viewport.y,
+      origin.left + position.x * z + viewport.x,
+      origin.top + position.y * z + viewport.y,
       (node.width ?? 280) * z,
       (node.height ?? 160) * z,
     );
   }
   $effect(() => {
-    expose?.({ screenRect });
+    expose?.({ screenRect, selectionBounds });
   });
   let lastClick = { id: "", at: 0 };
 </script>
@@ -247,8 +303,18 @@
         lastClick = { id: "", at: 0 };
         onselectionchange?.([]);
       }}
-      onselectionchange={({ nodes: selected }) =>
-        onselectionchange?.(selected.map((node) => node.id))}
+      onselectionchange={({ nodes: selected }) => {
+        selection = selected.map((node) => node.id);
+        onselectionchange?.(selection);
+      }}
+      onnodedragstop={({ targetNode }) => {
+        if (!targetNode || isAreaNode(targetNode as WorkNode)) return;
+        const node = nodes.find((candidate) => candidate.id === targetNode.id);
+        if (!node || isAreaNode(node) || !authoritative.has(node.id)) return;
+        const area = containingArea(node, nodes);
+        const current = node.parentId ? node.parentId.slice("area:".length) : null;
+        if (area !== current) onareachange?.(node.id, area);
+      }}
       onmoveend={publishView}
     >
       <Background patternColor="var(--color-border)" gap={24} size={1} />

@@ -4,6 +4,7 @@ import { projection, snapshot } from "./environment-fixtures";
 import { environmentItems } from "../lib/project-environment";
 import { environmentPlan } from "../lib/project-environment-plan";
 import { reconcileNodes, validScene } from "../lib/canvas-model";
+import type { CanvasItem } from "../lib/canvas-model";
 const plan: WorkPlanRevision = {
   author: "user",
   revision: "2",
@@ -119,7 +120,7 @@ test("responsibilities expose planned output names without duplicating descripti
   expect(item.detail).toBe("");
   expect(item.artifact).toBeUndefined();
   const changed = { ...item, responsibility: { outputs: ["Updated shortlist"] } };
-  expect(reconcileNodes(reconcileNodes([], [item]), [changed])[0]?.data.responsibility).toEqual(
-    changed.responsibility,
-  );
+  expect(
+    (reconcileNodes(reconcileNodes([], [item]), [changed])[0]?.data as CanvasItem).responsibility,
+  ).toEqual(changed.responsibility);
 });

@@ -1018,5 +1018,6 @@
   "work_env_delete_note": "Move note to trash",
   "work_env_close_tab": "Close tab",
   "work_env_kind": "Kind",
-  "work_env_updated": "Updated"
+  "work_env_updated": "Updated",
+  "work_env_group_selection": "Group {count} into Area"
 }

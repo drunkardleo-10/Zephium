@@ -1,5 +1,13 @@
 import { expect, test } from "vitest";
-import { reconcileNodes, validScene, validViewport, type CanvasItem } from "../lib/canvas-model";
+import {
+  applyRemoteView,
+  containingArea,
+  nodesBounds,
+  reconcileNodes,
+  validScene,
+  validViewport,
+  type CanvasItem,
+} from "../lib/canvas-model";
 const item = (id: string): CanvasItem => ({
   id,
   title: id,
@@ -15,7 +23,7 @@ test("a semantic update preserves unrelated identity and user geometry", () => {
   expect(next[1]).toBe(previous[1]);
   expect(next[0]!.position).toEqual({ x: 12, y: 27 });
   expect(next[0]!.ariaLabel).toContain("Needs review");
-  expect(reconcileNodes(next, [next[0]!.data, next[1]!.data])).toBe(next);
+  expect(reconcileNodes(next, [{ ...items[0]!, status: "Needs review" }, items[1]!])).toBe(next);
 });
 test("rejects duplicate identities, oversized scenes and dangling relationships", () => {
   expect(validScene([item("same"), item("same")], [])).toBe(false);
@@ -55,4 +63,41 @@ test("restored origin remains user-owned while new placements clear chrome", () 
   const nodes = reconcileNodes([], [item("saved"), item("new")], { saved: { x: 0, y: 0 } });
   expect(nodes[0]!.position).toEqual({ x: 0, y: 0 });
   expect(nodes[1]!.position.y).toBeGreaterThanOrEqual(120);
+});
+
+test("areas render first as parents and members keep absolute durable positions", () => {
+  const areas = [{ id: "sources", title: "Sources" }];
+  const placements = { sources: { x: 100, y: 100, width: 640, height: 420 } };
+  const items = [{ ...item("a"), area: "sources" }, item("b")];
+  const nodes = reconcileNodes(
+    [],
+    items,
+    { a: { x: 160, y: 180 }, b: { x: 900, y: 40 } },
+    {},
+    areas,
+    placements,
+  );
+  expect(nodes[0]!.type).toBe("area");
+  expect(nodes[0]!.position).toEqual({ x: 100, y: 100 });
+  expect(nodes[1]!.parentId).toBe("area:sources");
+  expect(nodes[1]!.position).toEqual({ x: 60, y: 80 });
+  expect(nodes[2]!.parentId).toBeUndefined();
+  expect(containingArea(nodes[1]!, nodes)).toBe("sources");
+  expect(containingArea(nodes[2]!, nodes)).toBeNull();
+  const moved = reconcileNodes(nodes, [item("a"), item("b")], {}, {}, areas, placements);
+  expect(moved[1]!.parentId).toBeUndefined();
+  expect(moved[1]!.position).toEqual({ x: 160, y: 180 });
+  const remote = applyRemoteView(
+    nodes,
+    {
+      positions: { a: { x: 400, y: 400 }, b: { x: 900, y: 40 } },
+      areas: { sources: { x: 200, y: 200, width: 640, height: 420 } },
+      viewport: { x: 0, y: 0, zoom: 1 },
+    },
+    new Set(["a", "b"]),
+  );
+  expect(remote[0]!.position).toEqual({ x: 200, y: 200 });
+  expect(remote[1]!.position).toEqual({ x: 200, y: 200 });
+  expect(remote[2]).toBe(nodes[2]);
+  expect(nodesBounds(["a", "b"], nodes)).toEqual({ x: 128, y: -28, width: 1084, height: 400 });
 });

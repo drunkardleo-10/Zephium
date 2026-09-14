@@ -114,6 +114,12 @@ export function environmentItems(
 }
 export function environmentView(snapshot: WorkEnvironmentSnapshot): CanvasView {
   return {
+    areas: Object.fromEntries(
+      (snapshot.view.areas ?? []).map((place) => [
+        place.area,
+        { x: place.x, y: place.y, width: place.width, height: place.height },
+      ]),
+    ),
     sizes: Object.fromEntries(
       snapshot.view.placements.map((place) => [
         place.element,
