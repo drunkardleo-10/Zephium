@@ -23,8 +23,9 @@
     "css": 6463
   },
   "lazy:features/settings/components/sections/DeveloperPage.svelte": {
-    "js": 305000,
-    "css": 84802
+    "js": 307000,
+    "css": 84802,
+    "description": "Media cards and the media tool add to the shared Work graph and message catalog."
   },
   "lazy:features/settings/components/sections/DocumentationPage.svelte": {
     "js": 143000,
@@ -40,12 +41,14 @@
     "css": 6463
   },
   "lazy:features/settings/components/sections/FocusPage.svelte": {
-    "js": 425000,
-    "css": 90293
+    "js": 427000,
+    "css": 90293,
+    "description": "Media cards and the media tool add to the shared Work graph and message catalog."
   },
   "lazy:features/settings/components/sections/GeneralPage.svelte": {
-    "js": 437000,
-    "css": 92134
+    "js": 439000,
+    "css": 92134,
+    "description": "Media cards and the media tool add to the shared Work graph and message catalog."
   },
   "lazy:features/tools/components/previews/HistoryView.svelte": {
     "js": 100000,
@@ -57,16 +60,18 @@
     "description": "Note link marks and the typed document view add to the shared graph."
   },
   "lazy:features/settings/components/sections/LanguagesPage.svelte": {
-    "js": 432000,
-    "css": 90838
+    "js": 434000,
+    "css": 90838,
+    "description": "Media cards and the media tool add to the shared Work graph and message catalog."
   },
   "lazy:features/tools/components/previews/NotesView.svelte": {
     "js": 97876,
     "css": 12558
   },
   "lazy:features/settings/components/sections/PasswordsPage.svelte": {
-    "js": 359000,
-    "css": 86098
+    "js": 361000,
+    "css": 86098,
+    "description": "Media cards and the media tool add to the shared Work graph and message catalog."
   },
   "lazy:features/settings/components/sections/PerformancePage.svelte": {
     "js": 427000,
@@ -84,12 +89,14 @@
     "description": "Note link marks and the typed document view add to the shared graph."
   },
   "lazy:features/settings/components/sections/SearchPage.svelte": {
-    "js": 425000,
-    "css": 90293
+    "js": 427000,
+    "css": 90293,
+    "description": "Media cards and the media tool add to the shared Work graph and message catalog."
   },
   "lazy:features/settings/components/Settings.svelte": {
-    "js": 429000,
-    "css": 93000
+    "js": 431000,
+    "css": 93000,
+    "description": "Media cards and the media tool add to the shared Work graph and message catalog."
   },
   "lazy:features/settings/components/sections/TabsPage.svelte": {
     "js": 413000,
@@ -126,9 +133,9 @@
     "description": "Measured 325466 JS bytes with shared direct-public-read session and operation reconciliation. Note link marks and the typed document view add to the shared graph."
   },
   "lazy:features/work/components/WorkCanvas.svelte": {
-    "js": 520000,
+    "js": 532000,
     "css": 112000,
-    "description": "Measured 96624 CSS bytes with compact responsibility and expected-output chips; JavaScript cap unchanged. M1 canvas: in-place remote reconcile, gesture config, per-icon imports."
+    "description": "Measured 96624 CSS bytes with compact responsibility and expected-output chips; JavaScript cap unchanged. M1 canvas: in-place remote reconcile, gesture config, per-icon imports. Media cards and the media tool add to the shared Work graph and message catalog."
   },
   "lazy:shared/ui/data/Chart/Chart.svelte": {
     "js": 415000,
@@ -139,9 +146,9 @@
     "css": 0
   },
   "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
-    "js": 560000,
+    "js": 565000,
     "css": 116000,
-    "description": "Measured 540883 JS and 111429 CSS bytes with the floating browser pane: pane frame, operation settlement, layout store, icon buttons."
+    "description": "Measured 540883 JS and 111429 CSS bytes with the floating browser pane: pane frame, operation settlement, layout store, icon buttons. Media cards and the media tool add to the shared Work graph and message catalog."
   },
   "lazy:features/work/components/WorkObjectiveInspector.svelte": {
     "js": 156000,

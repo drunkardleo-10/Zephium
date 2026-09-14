@@ -5,6 +5,7 @@
   import {
     ArrowDown01Icon,
     ArrowLeft02Icon,
+    Attachment01Icon,
     BrowserIcon,
     LayoutGridIcon,
     Note01Icon,
@@ -51,6 +52,7 @@
     { key: "notes" as const, label: m.work_env_notes(), icon: Note01Icon },
     { key: "create" as const, label: m.work_env_new(), icon: PlusSignIcon },
     { key: "tabs" as const, label: m.work_env_tabs(), icon: BrowserIcon, prominent: true },
+    { key: "media" as const, label: m.work_env_media(), icon: Attachment01Icon },
     { key: "area" as const, label: m.work_env_area(), icon: LayoutGridIcon },
   ];
 </script>

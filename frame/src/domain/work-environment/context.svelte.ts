@@ -5,6 +5,7 @@ import type {
   WorkRuntimeProjection,
   WorkPlanRevision,
   ResourceSummary,
+  MediaAssetV1_Deserialize as MediaAssetV1,
 } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
 import { observe } from "$shared/lib/observe";
@@ -16,6 +17,8 @@ export class WorkEnvironmentContext {
   readonly objectives = new SvelteMap<string, WorkRuntimeProjection>();
   readonly plans = new SvelteMap<string, WorkPlanRevision>();
   notes = $state.raw<ResourceSummary[]>([]);
+  /** Admitted media assets for resource elements that are not notes. */
+  readonly media = new SvelteMap<string, MediaAssetV1>();
   readonly unavailable = new SvelteMap<string, boolean>();
   private wanted: string[] = [];
   private noteIds: string[] = [];
@@ -203,7 +206,27 @@ export class WorkEnvironmentContext {
       )
         rows.push(...response.value.response.items.filter((item) => ids.includes(item.id)));
     }
-    if (this.active && read === this.noteRead) this.notes = rows;
+    if (!this.active || read !== this.noteRead) return;
+    this.notes = rows;
+    for (const id of [...this.media.keys()]) if (!ids.includes(id)) this.media.delete(id);
+    const others = ids.filter((id) => !rows.some((row) => row.id === id)).slice(0, 32);
+    for (const id of others) {
+      if (this.media.has(id)) continue;
+      const response = await observe(
+        Promise.resolve().then(() => commands.resourceCall(this.profile, { kind: "get", id })),
+        9000,
+        this.lifetime.signal,
+      );
+      if (!this.active || read !== this.noteRead) return;
+      if (
+        response.state === "received" &&
+        response.value.profile === this.profile &&
+        response.value.response.kind === "record" &&
+        response.value.response.record.draft.content.kind === "media" &&
+        !response.value.response.record.trashed
+      )
+        this.media.set(id, response.value.response.record.draft.content.asset);
+    }
   }
   dispose() {
     this.active = false;
@@ -214,6 +237,7 @@ export class WorkEnvironmentContext {
     this.lifetime.abort();
     this.pending.clear();
     this.objectives.clear();
+    this.media.clear();
     this.plans.clear();
     this.unavailable.clear();
     this.notes = [];

@@ -1,8 +1,17 @@
+import type { MediaAssetV1 } from "$domain/resources";
 import type { ArtifactView, FindingView, SubjectView } from "$shared/ui/data/Artifact";
 import type { Node } from "@xyflow/svelte";
 
 type CanvasKind =
-  "tab" | "note" | "objective" | "responsibility" | "result" | "subject" | "finding" | "agent";
+  | "tab"
+  | "note"
+  | "media"
+  | "objective"
+  | "responsibility"
+  | "result"
+  | "subject"
+  | "finding"
+  | "agent";
 type RelationKind = "supports" | "uses" | "depends_on" | "same_as" | "contradicts";
 /** Display values only; deliberately independent from the generated Work wire contract. */
 export type CanvasItem = {
@@ -27,6 +36,8 @@ export type CanvasItem = {
   unavailable?: boolean;
   /** The user's recorded choice about this element. */
   decision?: string;
+  /** An admitted media asset; the image URL is derived from profile and digest. */
+  media?: { profile: string; asset: MediaAssetV1 };
 };
 export type CanvasLink = {
   id: string;
@@ -102,6 +113,8 @@ export function defaultSize(item: CanvasItem): { width: number; height: number }
       return { width: 300, height: 140 };
     case "note":
       return { width: 300, height: 200 };
+    case "media":
+      return { width: 280, height: 230 };
     case "objective":
       return { width: 320, height: 150 };
     case "responsibility":
@@ -226,6 +239,7 @@ export function reconcileNodes(
         node.data.subject === item.subject &&
         node.data.finding === item.finding &&
         node.data.decision === item.decision &&
+        node.data.media?.asset.digest === item.media?.asset.digest &&
         JSON.stringify(node.data.agent) === JSON.stringify(item.agent) &&
         JSON.stringify(node.data.responsibility) === JSON.stringify(item.responsibility);
       if (same) return node;

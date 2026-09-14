@@ -7,6 +7,7 @@
   import { ArrowUpRight01Icon, MinusSignIcon, Target01Icon, Tick02Icon } from "../lib/icons";
   import TabCard from "./cards/TabCard.svelte";
   import NoteCard from "./cards/NoteCard.svelte";
+  import MediaCard from "./cards/MediaCard.svelte";
   import ObjectiveCard from "./cards/ObjectiveCard.svelte";
   import ResponsibilityCard from "./cards/ResponsibilityCard.svelte";
   import ResultCard from "./cards/ResultCard.svelte";
@@ -76,6 +77,7 @@
   {:else if type === "finding"}<FindingCard item={data} {selected} />
   {:else if type === "agent"}<AgentCard item={data} {selected} />
   {:else if type === "note"}<NoteCard item={data} {selected} />
+  {:else if type === "media"}<MediaCard item={data} {selected} />
   {:else if type === "responsibility"}<ResponsibilityCard item={data} {selected} />
   {:else if type === "result" || data.artifact}<ResultCard
       {id}

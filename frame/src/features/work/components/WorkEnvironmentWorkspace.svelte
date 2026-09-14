@@ -31,6 +31,9 @@
   import ContextManifest from "./composer/ContextManifest.svelte";
   import { contextSelection } from "../lib/context-selection";
   import WorkTabPicker from "./WorkTabPicker.svelte";
+  import WorkMediaPicker from "./WorkMediaPicker.svelte";
+  import { mediaUrl } from "$domain/resources";
+  import { commands as nativeCommands } from "$shared/ipc/bindings";
   import BrowserPane from "./pane/BrowserPane.svelte";
   import Lift from "./Lift.svelte";
   import Inspector from "./Inspector.svelte";
@@ -293,7 +296,9 @@
   let archived = $state(false);
   const snapshot = $derived(session.snapshot);
   const baseItems = $derived(
-    snapshot ? environmentItems(snapshot, tabs, context.notes, context.objectives) : [],
+    snapshot
+      ? environmentItems(snapshot, tabs, context.notes, context.objectives, context.media)
+      : [],
   );
   let expanded = $state<string | null>(null);
   let planGeometry = $state.raw<CanvasView>({
@@ -538,6 +543,25 @@
         break;
     }
   }
+  async function attachResources(ids: string[]) {
+    for (const resource of ids) {
+      if (
+        snapshot?.elements.some(
+          (e) => e.reference.kind === "resource" && e.reference.resource === resource,
+        )
+      )
+        continue;
+      if (
+        !(await session.edit({
+          kind: "add",
+          reference: { kind: "resource", resource },
+          area: null,
+        }))
+      )
+        break;
+    }
+    chrome?.close();
+  }
   async function attachNote() {
     const environmentId = session.snapshot?.id;
     const current = notes;
@@ -573,6 +597,10 @@
       if (tabs.some((tab) => tab.id === reference.tab))
         openPane({ kind: "tab", id: reference.tab }, element?.id ?? null);
     } else if (reference.kind === "resource") {
+      if (item?.media) {
+        if (element) openLift(element.id);
+        return;
+      }
       const current = notes;
       if (!current) return;
       await current.start();
@@ -964,6 +992,17 @@
       </ul>{/if}
   </div>
 {/snippet}
+{#snippet mediaPanel()}
+  <WorkMediaPicker
+    profile={session.profile}
+    host={notesHost}
+    attachedIds={snapshot?.elements.flatMap((element) =>
+      element.reference.kind === "resource" ? [element.reference.resource] : [],
+    ) ?? []}
+    pending={busy}
+    onattach={(ids) => void attachResources(ids)}
+  />
+{/snippet}
 {#snippet notesPanel()}
   <div class="notes-panel">
     <LazyView
@@ -1303,7 +1342,27 @@
       title={liftedItem?.title ?? ""}
       onclose={() => (lifted = null)}
     >
-      {#if liftedElement?.reference.kind === "resource"}
+      {#if liftedElement?.reference.kind === "resource" && liftedItem?.media}
+        {@const image =
+          liftedItem.media.asset.kind === "image"
+            ? mediaUrl(liftedItem.media.profile, liftedItem.media.asset.digest)
+            : null}
+        <div class="lift-media">
+          {#if image}<img src={image} alt={liftedItem.title} />{:else}
+            <p>{liftedItem.media.asset.mime}</p>
+            <Button
+              size="compact"
+              onclick={() => {
+                const id =
+                  liftedElement?.reference.kind === "resource"
+                    ? liftedElement.reference.resource
+                    : null;
+                if (id) void nativeCommands.mediaOpen(session.profile, id);
+              }}>{m.work_media_open_file()}</Button
+            >
+          {/if}
+        </div>
+      {:else if liftedElement?.reference.kind === "resource"}
         <LazyView
           loader={loadNoteEditorHost}
           loadingLabel={m.surface_loading()}
@@ -1409,6 +1468,7 @@
       switcher,
       create: createPanel,
       notes: notesPanel,
+      media: mediaPanel,
       area: areaPanel,
       profile: profilePanel,
     }}
@@ -1519,6 +1579,21 @@
     font-size: var(--text-title);
     font-weight: 600;
     letter-spacing: -0.01em;
+  }
+
+  .lift-media {
+    display: grid;
+    place-items: center;
+    gap: 12px;
+    block-size: 100%;
+    min-block-size: 0;
+  }
+
+  .lift-media img {
+    max-inline-size: 100%;
+    max-block-size: 100%;
+    object-fit: contain;
+    border-radius: var(--radius-sm);
   }
 
   .lift-plain .kind {

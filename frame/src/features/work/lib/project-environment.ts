@@ -6,6 +6,7 @@ import type {
 } from "$shared/ipc/bindings";
 import { artifactView } from "./project-work";
 import type { CanvasItem, CanvasLink, CanvasView } from "./canvas-model";
+import type { MediaAssetV1 } from "$domain/resources";
 import * as m from "$shared/i18n/messages";
 
 function objectiveStatus(projection: WorkRuntimeProjection): string {
@@ -36,9 +37,10 @@ export function environmentItems(
   tabs: readonly TabView[],
   notes: readonly ResourceSummary[],
   objectives: ReadonlyMap<string, WorkRuntimeProjection> = new Map(),
+  media: ReadonlyMap<string, MediaAssetV1> = new Map(),
 ): CanvasItem[] {
   const decisions = new Map((snapshot.decisions ?? []).map((d) => [d.element, d.choice]));
-  return elementItems(snapshot, tabs, notes, objectives).map((item) => {
+  return elementItems(snapshot, tabs, notes, objectives, media).map((item) => {
     const decision = decisions.get(item.id);
     return decision === undefined ? item : { ...item, decision };
   });
@@ -49,6 +51,7 @@ function elementItems(
   tabs: readonly TabView[],
   notes: readonly ResourceSummary[],
   objectives: ReadonlyMap<string, WorkRuntimeProjection>,
+  media: ReadonlyMap<string, MediaAssetV1>,
 ): CanvasItem[] {
   return snapshot.elements.map((element) => {
     const area = snapshot.areas.find((area) => area.id === element.area)?.title ?? "";
@@ -78,6 +81,24 @@ function elementItems(
     }
     if (element.reference.kind === "resource") {
       const resourceId = element.reference.resource;
+      const asset = media.get(resourceId);
+      if (asset) {
+        return {
+          id: element.id,
+          type: "media",
+          area: element.area,
+          kind:
+            asset.kind === "image"
+              ? m.work_media_kind_image()
+              : asset.kind === "pdf"
+                ? m.work_media_kind_pdf()
+                : m.work_media_kind_file(),
+          title: asset.name,
+          detail: asset.mime,
+          status: area,
+          media: { profile: snapshot.profile, asset },
+        };
+      }
       const note = notes.find((note) => note.id === resourceId);
       return {
         id: element.id,

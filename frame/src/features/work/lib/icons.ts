@@ -4,6 +4,11 @@ export { default as ArrowLeft02Icon } from "@hugeicons/core-free-icons/ArrowLeft
 export { default as ArrowReloadHorizontalIcon } from "@hugeicons/core-free-icons/ArrowReloadHorizontalIcon";
 export { default as ArrowRight02Icon } from "@hugeicons/core-free-icons/ArrowRight02Icon";
 export { default as ArrowUp02Icon } from "@hugeicons/core-free-icons/ArrowUp02Icon";
+export { default as Attachment01Icon } from "@hugeicons/core-free-icons/Attachment01Icon";
+export { default as File01Icon } from "@hugeicons/core-free-icons/File01Icon";
+export { default as Image01Icon } from "@hugeicons/core-free-icons/Image01Icon";
+export { default as Pdf01Icon } from "@hugeicons/core-free-icons/Pdf01Icon";
+export { default as Upload01Icon } from "@hugeicons/core-free-icons/Upload01Icon";
 export { default as ArrowUpRight01Icon } from "@hugeicons/core-free-icons/ArrowUpRight01Icon";
 export { default as BrowserIcon } from "@hugeicons/core-free-icons/BrowserIcon";
 export { default as Cancel01Icon } from "@hugeicons/core-free-icons/Cancel01Icon";

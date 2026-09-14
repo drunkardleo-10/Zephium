@@ -8,3 +8,5 @@ export type {
   NoteDocument_Deserialize as NoteDocument,
 } from "$shared/ipc/bindings";
 export { noteReferences } from "./resource-model";
+export { mediaUrl, mediaSize } from "./media";
+export type { MediaAssetV1 } from "./media";
