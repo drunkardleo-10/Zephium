@@ -48,6 +48,17 @@ pub struct DocumentAttrs {
 pub struct DocumentMark {
     #[serde(rename = "type")]
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attrs: Option<DocumentMarkAttrs>,
+}
+/// A link is descriptive: chrome opens it through a native intent, never as
+/// an anchor navigation inside privileged chrome.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[serde(deny_unknown_fields)]
+pub struct DocumentMarkAttrs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub href: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -460,9 +471,18 @@ fn valid_node(
     };
     let mut marks = std::collections::HashSet::new();
     attrs_ok
-        && node.marks.len() <= 3
+        && node.marks.len() <= 4
         && node.marks.iter().all(|mark| {
-            matches!(mark.kind.as_str(), "bold" | "italic" | "code") && marks.insert(&mark.kind)
+            let shape = match mark.kind.as_str() {
+                "bold" | "italic" | "code" => mark.attrs.is_none(),
+                "link" => mark.attrs.as_ref().is_some_and(|attrs| {
+                    attrs.href.as_deref().is_some_and(|href| {
+                        href.len() <= 2048 && crate::navigation::is_allowed_str(href)
+                    })
+                }),
+                _ => false,
+            };
+            shape && marks.insert(&mark.kind)
         })
         && node
             .content

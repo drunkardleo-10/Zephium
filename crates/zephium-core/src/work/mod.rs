@@ -5,6 +5,7 @@
 pub mod artifact;
 pub mod authoring;
 pub mod context;
+pub mod document;
 pub mod environment;
 pub mod execution_proposal;
 mod ids;

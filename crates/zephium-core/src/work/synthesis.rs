@@ -213,6 +213,24 @@ impl WorkSynthesisDisclosure {
             }
             validate_text(&output.title, 512)?;
             output.data.validate(output.evidence.len())?;
+            // Prose may link only to sources this attempt was shown; an
+            // invented URL is refused with the whole envelope.
+            if let WorkArtifactDataV1::Document {
+                formatted: Some(document),
+                ..
+            } = &output.data
+            {
+                let cited = super::document::document_links(document);
+                if cited.iter().any(|href| {
+                    !self
+                        .context
+                        .evidence
+                        .iter()
+                        .any(|evidence| evidence.origin == *href)
+                }) {
+                    return Err(WorkError::Invalid);
+                }
+            }
             bytes += serde_json::to_vec(&output)
                 .map_err(|_| WorkError::Invalid)?
                 .len();
@@ -451,6 +469,48 @@ mod tests {
             Err(WorkError::Invalid)
         ));
     }
+    #[test]
+    fn synthesis_prose_may_link_only_to_disclosed_source_urls() {
+        use crate::work::document::*;
+        let (node, source, preview, limits) = fixture();
+        let input = WorkSynthesisDisclosure::try_new(
+            &node,
+            std::slice::from_ref(&source),
+            std::slice::from_ref(&preview),
+            limits,
+        )
+        .unwrap();
+        let document = |href: &str| {
+            let (paragraphs, formatted) = compile_blocks(&[WorkDocumentBlock {
+                kind: WorkBlockKind::Paragraph,
+                level: None,
+                spans: vec![WorkDocumentSpan {
+                    text: "Source".into(),
+                    style: WorkSpanStyle::Plain,
+                    href: Some(href.into()),
+                }],
+                items: vec![],
+            }])
+            .unwrap();
+            WorkSynthesisOutput {
+                output: 0,
+                title: "Summary".into(),
+                data: WorkArtifactDataV1::Document {
+                    paragraphs,
+                    formatted: Some(formatted),
+                },
+                evidence: vec![0],
+            }
+        };
+        assert!(input.resolve(vec![document("https://sqlite.org")]).is_ok());
+        assert_eq!(
+            input
+                .resolve(vec![document("https://invented.example/page")])
+                .err(),
+            Some(WorkError::Invalid)
+        );
+    }
+
     #[test]
     fn synthesis_rejects_renderer_code_as_an_extra_model_field() {
         let mut value = serde_json::to_value(output()).unwrap();

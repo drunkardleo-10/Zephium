@@ -328,8 +328,38 @@ export type DocumentAttrs = {
 	resource?: string | null,
 };
 
-export type DocumentMark = {
+export type DocumentMark = DocumentMark_Serialize | DocumentMark_Deserialize;
+
+/**
+ *  A link is descriptive: chrome opens it through a native intent, never as
+ *  an anchor navigation inside privileged chrome.
+ */
+export type DocumentMarkAttrs = DocumentMarkAttrs_Serialize | DocumentMarkAttrs_Deserialize;
+
+/**
+ *  A link is descriptive: chrome opens it through a native intent, never as
+ *  an anchor navigation inside privileged chrome.
+ */
+export type DocumentMarkAttrs_Deserialize = {
+	href?: string | null,
+};
+
+/**
+ *  A link is descriptive: chrome opens it through a native intent, never as
+ *  an anchor navigation inside privileged chrome.
+ */
+export type DocumentMarkAttrs_Serialize = {
+	href?: string | null,
+};
+
+export type DocumentMark_Deserialize = {
 	type: string,
+	attrs?: DocumentMarkAttrs_Deserialize | null,
+};
+
+export type DocumentMark_Serialize = {
+	type: string,
+	attrs?: DocumentMarkAttrs_Serialize | null,
 };
 
 /**
@@ -347,7 +377,7 @@ export type DocumentNode_Deserialize = {
 	content?: DocumentNode_Deserialize[],
 	text?: string | null,
 	attrs?: DocumentAttrs | null,
-	marks?: DocumentMark[],
+	marks?: DocumentMark_Deserialize[],
 };
 
 /**
@@ -359,7 +389,7 @@ export type DocumentNode_Serialize = {
 	content?: DocumentNode_Serialize[],
 	text?: string | null,
 	attrs?: DocumentAttrs | null,
-	marks?: DocumentMark[],
+	marks?: DocumentMark_Serialize[],
 };
 
 export type ExtensionActionFailed = ExtensionActionFailedView;
