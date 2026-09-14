@@ -818,9 +818,15 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
             true,
         ))
         .is_err());
+    // An uncited object is dropped on its own; a turn made only of dropped
+    // objects is refused.
     let mut uncited = output(vec![], None, true);
     uncited.artifacts[0].evidence.clear();
-    assert!(disclosure.resolve(uncited).is_err());
+    let finished = disclosure.resolve(uncited).unwrap();
+    assert!(finished.artifacts.is_empty() && finished.finish);
+    let mut only_uncited = output(vec![], None, false);
+    only_uncited.artifacts[0].evidence.clear();
+    assert!(disclosure.resolve(only_uncited).is_err());
     assert!(disclosure
         .resolve(WorkAgentTurnOutput {
             say: None,

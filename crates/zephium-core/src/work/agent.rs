@@ -247,45 +247,22 @@ impl WorkAgentTurnDisclosure {
             }
             _ => None,
         };
+        // An uncited or malformed object is dropped on its own; the turn's
+        // other operations still run and the next turn shows what landed.
+        let proposed = output.artifacts.len();
         let mut artifacts = Vec::new();
         for artifact in output.artifacts {
-            validate_text(&artifact.title, 512)?;
-            if artifact.evidence.is_empty() || artifact.evidence.len() > 64 {
-                return Err(WorkError::Invalid);
+            if let Ok(artifact) = self.resolve_artifact(artifact) {
+                artifacts.push(artifact);
             }
-            artifact.data.validate(artifact.evidence.len())?;
-            if let WorkArtifactDataV1::Document {
-                formatted: Some(document),
-                ..
-            } = &artifact.data
-            {
-                if super::document::document_links(document)
-                    .iter()
-                    .any(|href| !self.urls.iter().any(|url| url == href))
-                {
-                    return Err(WorkError::Invalid);
-                }
-            }
-            let mut cited = BTreeSet::new();
-            let evidence = artifact
-                .evidence
-                .into_iter()
-                .map(|key| {
-                    if !cited.insert(key) {
-                        return Err(WorkError::Invalid);
-                    }
-                    self.links
-                        .get(usize::from(key))
-                        .cloned()
-                        .ok_or(WorkError::Invalid)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            artifacts.push(WorkSynthesisArtifact {
-                output: String::new(),
-                title: artifact.title,
-                data: artifact.data,
-                evidence,
-            });
+        }
+        if artifacts.is_empty()
+            && proposed > 0
+            && !output.finish
+            && output.ask.is_none()
+            && output.fetch.is_empty()
+        {
+            return Err(WorkError::Invalid);
         }
         let mut fetch = Vec::new();
         for operation in output.fetch {
@@ -342,6 +319,50 @@ impl WorkAgentTurnDisclosure {
             fetch,
             ask,
             finish: output.finish,
+        })
+    }
+}
+impl WorkAgentTurnDisclosure {
+    fn resolve_artifact(
+        &self,
+        artifact: WorkAgentArtifactOutput,
+    ) -> Result<WorkSynthesisArtifact, WorkError> {
+        validate_text(&artifact.title, 512)?;
+        if artifact.evidence.is_empty() || artifact.evidence.len() > 64 {
+            return Err(WorkError::Invalid);
+        }
+        artifact.data.validate(artifact.evidence.len())?;
+        if let WorkArtifactDataV1::Document {
+            formatted: Some(document),
+            ..
+        } = &artifact.data
+        {
+            if super::document::document_links(document)
+                .iter()
+                .any(|href| !self.urls.iter().any(|url| url == href))
+            {
+                return Err(WorkError::Invalid);
+            }
+        }
+        let mut cited = BTreeSet::new();
+        let evidence = artifact
+            .evidence
+            .into_iter()
+            .map(|key| {
+                if !cited.insert(key) {
+                    return Err(WorkError::Invalid);
+                }
+                self.links
+                    .get(usize::from(key))
+                    .cloned()
+                    .ok_or(WorkError::Invalid)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(WorkSynthesisArtifact {
+            output: String::new(),
+            title: artifact.title,
+            data: artifact.data,
+            evidence,
         })
     }
 }

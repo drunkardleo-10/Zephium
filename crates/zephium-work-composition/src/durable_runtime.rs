@@ -137,8 +137,15 @@ impl MacosWorkComposition {
         let diagnostics = Diagnostics::from(&settings);
         let outputs = vec![request.output.clone()];
         let limits = request.limits;
+        let host = match &request.step {
+            WorkStepKindV1::Read { url } => ContextNavigationTarget::parse(url)
+                .ok()
+                .and_then(|target| target.as_url().host_str().map(str::to_owned)),
+            WorkStepKindV1::Discover { .. } => Some("the web".to_owned()),
+            _ => None,
+        };
         let invocation = compile_step(probe, request, settings)?;
-        let run = self
+        let mut run = self
             .run_retained(
                 shell,
                 probe,
@@ -149,6 +156,11 @@ impl MacosWorkComposition {
                 diagnostics,
             )
             .await?;
+        if let Some(host) = host {
+            for artifact in &mut run.artifacts {
+                artifact.title = format!("Notes from {host}");
+            }
+        }
         Ok(WorkBrowserOutcome {
             status: match run.status {
                 WorkAttemptStatus::Running => WorkStepStatus::Running,

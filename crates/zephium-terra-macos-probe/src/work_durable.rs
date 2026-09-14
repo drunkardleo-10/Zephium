@@ -7,10 +7,13 @@ use std::{
 };
 use zephium_agentic::{
     load_macos_development_openai_credential, AgentProviderTransport, AgentProviderTransportConfig,
-    OpenAiWorkPlanner, OpenAiWorkSynthesizer, WorkPlanningConfig,
+    OpenAiPublicSearch, OpenAiPublicSearchConfig, OpenAiWorkAgent, OpenAiWorkPlanner,
+    OpenAiWorkSynthesizer, WorkPlanningConfig,
 };
 use zephium_app::{
-    work_execution::WorkExecutionService, work_planning::WorkPlanningService,
+    work_agent::{WorkAgentProviders, WorkAgentService},
+    work_execution::WorkExecutionService,
+    work_planning::WorkPlanningService,
     work_runtime::WorkRuntimeService,
 };
 use zephium_core::{
@@ -26,6 +29,9 @@ use zephium_work_composition::{durable_runtime::WorkBrowserAdapterSettings, Maco
 const OBJECTIVE: &str = "Find SQLite's official explanation of why WAL mode does not work when clients on different machines share a database over a network filesystem. Produce one concise source-backed note as a single plan responsibility. Use only public documentation at sqlite.org or www.sqlite.org. No account, writes, installations, or external communication are needed. Every factual output needs source-mapped human review.";
 const COORDINATED_OBJECTIVE: &str = "Explain SQLite's official reason that WAL mode does not work when clients on different machines share a database over a network filesystem. Use exactly two plan responsibilities: a delegated public-documentation research worker with one source-backed findings output, then a primary agent that depends on those findings and produces one concise source-backed explanation. Both outputs require source_mapped_needs_review. Use only sqlite.org or www.sqlite.org. No accounts, writes, installations or external communication are needed.";
 
+const AGENT_READ_OBJECTIVE: &str = "From SQLite's official WAL documentation page, list every situation in which WAL mode does not work or has drawbacks, as cited findings with the page itself as the source. Read the actual page rather than relying on search snippets; use only sqlite.org.";
+const AGENT_OBJECTIVE: &str = "Compare Svelte Flow and React Flow as the canvas library for a desktop app: bundle size, license, and how actively each is maintained in 2026. Place the two libraries as subjects with cited findings, and finish with a short comparison.";
+
 struct WorkflowResult {
     state: WorkRuntimeProjection,
     failure: Option<&'static str>,
@@ -37,6 +43,10 @@ enum Mode {
     Coordinated,
     CancelCoordinated,
     ProductIntegration,
+    /// The routine agent loop: turns, searches, native reads, published objects.
+    Agent,
+    /// The same loop on an objective that needs a native page read.
+    AgentRead,
 }
 
 pub(super) fn run() -> Result<(), super::ProbeFailure> {
@@ -53,6 +63,14 @@ pub(super) fn run_product() -> Result<(), super::ProbeFailure> {
 
 pub(super) fn run_cancelled() -> Result<(), super::ProbeFailure> {
     run_mode(Mode::CancelCoordinated)
+}
+
+pub(super) fn run_agent() -> Result<(), super::ProbeFailure> {
+    run_mode(Mode::Agent)
+}
+
+pub(super) fn run_agent_read() -> Result<(), super::ProbeFailure> {
+    run_mode(Mode::AgentRead)
 }
 
 fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
@@ -103,7 +121,11 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     };
     // Credentials never enter Work, model context, diagnostics or serialized reports.
     let planning_key = load_macos_development_openai_credential().map_err(|_| Error::Keychain)?;
-    let browser_keys = (0..4)
+    let browser_keys = (0..if matches!(mode, Mode::Agent | Mode::AgentRead) {
+        6
+    } else {
+        4
+    })
         .map(|_| load_macos_development_openai_credential())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| Error::Keychain)?;
@@ -152,7 +174,11 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
                         .and_then(|runtime| {
                             runtime.block_on(async {
                                 tokio::time::timeout(
-                                    Duration::from_secs(if coordinated { 240 } else { 160 }),
+                                    Duration::from_secs(match mode {
+                                        Mode::Agent | Mode::AgentRead => 720,
+                                        Mode::Public => 160,
+                                        _ => 240,
+                                    }),
                                     workflow(
                                         &worker_handle,
                                         &composition,
@@ -316,6 +342,37 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     } else {
         WorkExecutionStatus::NeedsReview
     };
+    if matches!(mode, Mode::Agent | Mode::AgentRead) {
+        let execution = &state.executions[0];
+        let counts = |kind: &str| {
+            execution
+                .steps
+                .iter()
+                .filter(|step| {
+                    serde_json::to_value(&step.kind)
+                        .ok()
+                        .and_then(|value| value["kind"].as_str().map(|k| k == kind))
+                        .unwrap_or(false)
+                })
+                .count()
+        };
+        let _ = writeln!(
+            std::io::stdout().lock(),
+            "agent-work: status={:?}; steps={}; turns={}; searches={}; reads={}; discoveries={}; publishes={}; asks={}; finished={}; artifacts={}; sources={}; usage={:?}; content=redacted",
+            execution.status,
+            execution.steps.len(),
+            counts("turn"),
+            counts("search"),
+            counts("read"),
+            counts("discover"),
+            counts("publish"),
+            counts("ask"),
+            counts("finish"),
+            execution.artifacts.len(),
+            execution.provider_evidence.len(),
+            execution.attempts.first().and_then(|attempt| attempt.usage),
+        );
+    }
     if state.executions[0].status != expected_status || state.executions[0].artifacts.is_empty() {
         return Err(Error::Runtime);
     }
@@ -350,7 +407,11 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     let output = std::path::Path::new("target/work-runtime-proof");
     std::fs::create_dir_all(output).map_err(|_| Error::Output)?;
     std::fs::write(
-        output.join(if mode == Mode::ProductIntegration {
+        output.join(if mode == Mode::AgentRead {
+            "agent-read-run.json"
+        } else if mode == Mode::Agent {
+            "agent-run.json"
+        } else if mode == Mode::ProductIntegration {
             "product-integration.json"
         } else if coordinated {
             "coordinated-research.json"
@@ -409,6 +470,22 @@ async fn workflow(
             _ => return Err("profile_not_ready"),
         }
     };
+    if matches!(mode, Mode::Agent | Mode::AgentRead) {
+        return agent_workflow(
+            handle,
+            composition,
+            profile,
+            binding,
+            planning_key,
+            browser_keys,
+            if mode == Mode::AgentRead {
+                AGENT_READ_OBJECTIVE
+            } else {
+                AGENT_OBJECTIVE
+            },
+        )
+        .await;
+    }
     let created = handle
         .work_authoring_command(
             profile,
@@ -472,6 +549,7 @@ async fn workflow(
                 version: 1,
                 work,
                 expected_revision: created.applied_revision,
+                context: None,
             },
         )
         .await;
@@ -904,6 +982,153 @@ async fn review_product_results(
     Ok(state)
 }
 
+/// The routine loop on a public comparison objective. Every step, source and
+/// object is durable before the next turn; the proof file keeps the projection.
+async fn agent_workflow(
+    handle: &zephium_app::Handle,
+    composition: &MacosWorkComposition,
+    profile: ProfileId,
+    binding: zephium_app::AgentWorkProfileBinding,
+    turn_key: zephium_agentic::AgentProviderCredential,
+    mut browser_keys: Vec<zephium_agentic::AgentProviderCredential>,
+    objective: &str,
+) -> Result<WorkflowResult, &'static str> {
+    let created = handle
+        .work_authoring_command(
+            profile,
+            WorkAuthoringCommandV1 {
+                version: 1,
+                command: WorkCommandId::generate(),
+                intent: WorkAuthoringIntent::Create {
+                    objective: objective.into(),
+                },
+            },
+        )
+        .map_err(|_| "create_admission")?
+        .response(profile)
+        .await;
+    let WorkReplyV1::AuthoringApplied { receipt: created } = created.reply else {
+        return Err("create_persistence");
+    };
+    let work = created.work;
+    let transport = AgentProviderTransport::try_new(AgentProviderTransportConfig::STANDARD)
+        .map_err(|_| "agent_transport")?;
+    let agent = OpenAiWorkAgent::try_new(
+        transport.clone(),
+        turn_key,
+        WorkPlanningConfig::try_new(
+            zephium_agent_model_catalog::try_luna_provider_exact_call_config(8192)
+                .map_err(|_| "agent_model")?,
+            32_768,
+            300_000,
+        )
+        .map_err(|_| "agent_limits")?,
+    )
+    .map_err(|_| "agent_provider")?
+    .with_public_response_retention()
+    .with_diagnostic(|event| {
+        let _ = writeln!(
+            std::io::stdout().lock(),
+            "agent-work: turn_diagnostic={event:?}"
+        );
+    });
+    let grant = WorkAgentGrantV1 {
+        provider: zephium_core::work::search::WorkSearchProvider::OpenAi,
+        model: zephium_core::work::search::PUBLIC_SEARCH_MODEL.into(),
+        max_turns: 8,
+        max_steps: 24,
+        browse_hops: 3,
+    };
+    let search = OpenAiPublicSearch::try_new(
+        transport,
+        browser_keys.pop().ok_or("search_key")?,
+        OpenAiPublicSearchConfig::try_new(
+            zephium_agent_model_catalog::try_public_search_provider_exact_call_config(
+                &grant.model,
+                4096,
+            )
+            .map_err(|_| "search_model")?,
+        )
+        .map_err(|_| "search_config")?,
+    )
+    .map_err(|_| "search_provider")?
+    .with_public_response_retention();
+    let limits = WorkExecutionLimits {
+        model_tokens: 1_000_000,
+        cost_micro_usd: 1_500_000,
+        operations: 64,
+        timeout_seconds: 600,
+        max_workers: 2,
+    };
+    let keys = Arc::new(Mutex::new(browser_keys));
+    let callback = handle.callback_handle();
+    let state = WorkAgentService::new(handle.clone())
+        .with_diagnostic(|event| {
+            let _ = writeln!(std::io::stdout().lock(), "agent-work: loop={event:?}");
+        })
+        .run(
+            profile,
+            zephium_ipc::work::WorkCommandV1 {
+                version: 1,
+                work,
+                expected_revision: created.applied_revision,
+                command: WorkCommandId::generate(),
+                intent: WorkRuntimeIntent::BeginAgent { grant, limits },
+            },
+            None,
+            WorkAgentProviders {
+                turn: &agent,
+                search: &search,
+            },
+            |probe, request| {
+                let key = keys.lock().ok().and_then(|mut keys| keys.pop());
+                let callback = &callback;
+                async move {
+                    let key = key.ok_or(WorkError::Capacity)?;
+                    let _ = writeln!(
+                        std::io::stdout().lock(),
+                        "agent-work: browser_step={}; content=redacted",
+                        serde_json::to_value(&request.step)
+                            .ok()
+                            .and_then(|value| value["kind"].as_str().map(str::to_owned))
+                            .unwrap_or_default()
+                    );
+                    composition
+                        .run_agent_step(callback, &probe, request, browser_settings(binding, key))
+                        .await
+                }
+            },
+            |_| {},
+        )
+        .await
+        .map_err(|error| {
+            let _ = writeln!(
+                std::io::stdout().lock(),
+                "agent-work: run_failure={error:?}; content=redacted"
+            );
+            "agent_run"
+        })?;
+    let execution = state.executions.first().ok_or("agent_execution")?;
+    for step in &execution.steps {
+        let _ = writeln!(
+            std::io::stdout().lock(),
+            "agent-work: step turn={} kind={} status={:?} artifacts={} note_bytes={}",
+            step.turn,
+            serde_json::to_value(&step.kind)
+                .ok()
+                .and_then(|value| value["kind"].as_str().map(str::to_owned))
+                .unwrap_or_default(),
+            step.status,
+            step.artifacts.len(),
+            step.note.as_ref().map_or(0, String::len),
+        );
+    }
+    let failure = (execution.status != WorkExecutionStatus::NeedsReview
+        || execution.artifacts.is_empty())
+    .then_some("agent_outcome");
+    Ok(WorkflowResult { state, failure })
+}
+
 fn browser_settings(
     profile: zephium_app::AgentWorkProfileBinding,
     credential: zephium_agentic::AgentProviderCredential,
@@ -916,7 +1141,7 @@ fn browser_settings(
                 "durable-work: resource_failure={cause:?}; content=redacted"
             );
         }),
-        diagnostic: Some(|snapshot| {
+        diagnostic: Some(|_, snapshot| {
             let _ = writeln!(
                 std::io::stdout().lock(),
                 "durable-work: native_phase={:?}; failure={:?}; persistence={:?}; content=redacted",

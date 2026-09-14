@@ -75,6 +75,10 @@ fn main() {
         [argument] if argument == "--live-public-cancelled-work" => work_durable::run_cancelled(),
         #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-public-work-product" => work_durable::run_product(),
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-work" => work_durable::run_agent(),
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-read-work" => work_durable::run_agent_read(),
         [argument] if argument == "--live-public-luna-work-application-inspectable" => {
             work_application::run()
         }

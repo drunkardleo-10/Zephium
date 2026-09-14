@@ -316,6 +316,14 @@ pub enum WorkSynthesisDiagnostic {
         maximum: u32,
         request_bytes: usize,
     },
+    /// Closed transport facts for one generation call: HTTP status when a
+    /// response arrived, body size, whether it decoded, wall time.
+    ProviderTransport {
+        http_status: Option<u16>,
+        body_bytes: usize,
+        decoded: bool,
+        elapsed_millis: u64,
+    },
 }
 /// Per-call attribution only, never worker authority or permission to retrieve Work.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

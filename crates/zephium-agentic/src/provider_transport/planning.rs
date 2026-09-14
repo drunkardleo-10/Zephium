@@ -185,11 +185,39 @@ impl OpenAiWorkPlanner {
                 }
                 slot.mark_committed();
             }
+            let started = std::time::Instant::now();
             let response = self
                 .post(self.transport.endpoints.openai.clone(), body, MAX_BODY)
-                .await
-                .map_err(|_| WorkPlanningError::ProviderOutcomeUnknown)?;
-            let result = decode(&response, tokens, &self.config)
+                .await;
+            let decoded = response
+                .as_ref()
+                .ok()
+                .and_then(|response| decode(response, tokens, &self.config));
+            // Inspectable public development runs keep the refused body on disk
+            // beside the provider-side retention they already opted into.
+            #[cfg(feature = "probe-harness")]
+            if decoded.is_none() && self.retain_public_responses {
+                if let Ok(body) = &response {
+                    let _ = std::fs::create_dir_all("target/work-runtime-proof");
+                    let _ =
+                        std::fs::write("target/work-runtime-proof/undecodable-response.json", body);
+                }
+            }
+            if let Some(diagnostic) = self.diagnostic {
+                diagnostic(
+                    zephium_core::work::synthesis::WorkSynthesisDiagnostic::ProviderTransport {
+                        http_status: match &response {
+                            Ok(_) => Some(200),
+                            Err(status) => *status,
+                        },
+                        body_bytes: response.as_ref().map_or(0, Vec::len),
+                        decoded: decoded.is_some(),
+                        elapsed_millis: u64::try_from(started.elapsed().as_millis())
+                            .unwrap_or(u64::MAX),
+                    },
+                );
+            }
+            let result = decoded
                 .ok_or(WorkPlanningError::ProviderOutcomeUnknown)?
                 .map_err(WorkPlanningError::ProviderRefused);
             if result.is_ok() || matches!(result, Err(WorkPlanningError::ProviderRefused(_))) {
@@ -246,10 +274,11 @@ impl OpenAiWorkPlanner {
         };
         Ok(body)
     }
-    async fn post(&self, endpoint: Url, body: Vec<u8>, limit: u32) -> Result<Vec<u8>, ()> {
+    /// The error carries only the HTTP status when a response arrived.
+    async fn post(&self, endpoint: Url, body: Vec<u8>, limit: u32) -> Result<Vec<u8>, Option<u16>> {
         let credential =
             sensitive_header(AgentProviderKind::OpenAiResponses, &self.credential.secret)
-                .map_err(|_| ())?;
+                .map_err(|_| None)?;
         let response = self
             .transport
             .client
@@ -262,22 +291,23 @@ impl OpenAiWorkPlanner {
             .body(body)
             .send()
             .await
-            .map_err(|_| ())?;
+            .map_err(|_| None)?;
+        let status = response.status().as_u16();
         if response.status() != StatusCode::OK
             || !response_headers_admitted(response.headers())
             || !response_encoding_admitted(response.headers())
             || !response_json_content_type_admitted(response.headers())
             || !response_content_length_admitted(response.headers(), limit)
         {
-            return Err(());
+            return Err(Some(status));
         }
         let mut stream = response.bytes_stream();
         let mut bytes = Vec::new();
-        while let Some(chunk) = stream.try_next().await.map_err(|_| ())? {
+        while let Some(chunk) = stream.try_next().await.map_err(|_| Some(status))? {
             if chunk.len() > limit as usize - bytes.len() {
-                return Err(());
+                return Err(Some(status));
             }
-            bytes.try_reserve(chunk.len()).map_err(|_| ())?;
+            bytes.try_reserve(chunk.len()).map_err(|_| Some(status))?;
             bytes.extend_from_slice(&chunk);
         }
         Ok(bytes)
@@ -404,6 +434,25 @@ pub(super) fn decode_response(
     reserved: u32,
     config: &WorkPlanningConfig,
 ) -> Option<Result<(String, WorkPlanningUsage), WorkPlanningUsage>> {
+    decode_response_with(bytes, reserved, config, false)
+}
+
+/// Agent turns: a model that narrates several turns in one response is
+/// charged for all of them, but only its first message is a proposal.
+pub(super) fn decode_first_message(
+    bytes: &[u8],
+    reserved: u32,
+    config: &WorkPlanningConfig,
+) -> Option<Result<(String, WorkPlanningUsage), WorkPlanningUsage>> {
+    decode_response_with(bytes, reserved, config, true)
+}
+
+fn decode_response_with(
+    bytes: &[u8],
+    reserved: u32,
+    config: &WorkPlanningConfig,
+    first_message: bool,
+) -> Option<Result<(String, WorkPlanningUsage), WorkPlanningUsage>> {
     if bytes.len() > MAX_BODY as usize {
         return None;
     }
@@ -415,7 +464,8 @@ pub(super) fn decode_response(
         || !config
             .call
             .planning_identity_matches(&response.model, &response.service_tier)
-        || response.output.len() > 2
+        || (response.output.len() > 2 && !first_message)
+        || response.output.len() > 32
     {
         return None;
     }
@@ -450,8 +500,13 @@ pub(super) fn decode_response(
     let mut refused = false;
     let mut reasoning = false;
     for output in response.output {
+        if first_message && (text.is_some() || refused) {
+            break;
+        }
         match output {
-            Output::Reasoning {} if !reasoning && text.is_none() && !refused => reasoning = true,
+            Output::Reasoning {} if first_message || (!reasoning && text.is_none() && !refused) => {
+                reasoning = true
+            }
             Output::Message {
                 role,
                 status,

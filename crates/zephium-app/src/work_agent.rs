@@ -38,12 +38,39 @@ const TURN_TOKEN_FLOOR: u32 = 12_000;
 const ASK_POLL: Duration = Duration::from_millis(500);
 const MAX_PREVIEWS: usize = 96;
 
+/// Closed loop facts for development logs; never model, page or user text.
+#[derive(Clone, Copy, Debug)]
+pub enum WorkAgentDiagnostic {
+    TurnAdmitted {
+        turn: u8,
+        artifacts: usize,
+        fetches: usize,
+        asks: bool,
+        finish: bool,
+    },
+    TurnRefused {
+        turn: u8,
+    },
+    CommitRefused {
+        kind: &'static str,
+        error: WorkError,
+    },
+}
+
 pub struct WorkAgentService {
     handle: crate::Handle,
+    diagnostic: Option<fn(WorkAgentDiagnostic)>,
 }
 impl WorkAgentService {
     pub fn new(handle: crate::Handle) -> Self {
-        Self { handle }
+        Self {
+            handle,
+            diagnostic: None,
+        }
+    }
+    pub fn with_diagnostic(mut self, diagnostic: fn(WorkAgentDiagnostic)) -> Self {
+        self.diagnostic = Some(diagnostic);
+        self
     }
 
     /// Admits the objective, begins the single attempt and runs turns until
@@ -164,6 +191,7 @@ impl WorkAgentService {
             turn: 0,
             failed_turns: 0,
             intervention: None,
+            diagnostic: self.diagnostic,
         };
         let outcome = driver.drive(&attempt, &providers, &mut browser).await;
         let (status, usage) = match outcome {
@@ -208,6 +236,7 @@ struct Driver {
     turn: u8,
     failed_turns: u8,
     intervention: Option<WorkInterventionV1>,
+    diagnostic: Option<fn(WorkAgentDiagnostic)>,
 }
 
 enum Fetched {
@@ -293,7 +322,9 @@ impl Driver {
         evidence: Option<WorkProviderSearchRecordV1>,
     ) -> Result<WorkStepId, WorkError> {
         let id = step.id;
-        self.probe
+        let kind = step_kind_label(&step.kind);
+        if let Err(error) = self
+            .probe
             .commit_step(WorkRuntimeUpdate::BeginStep {
                 execution: self.probe.execution(),
                 attempt: self.probe.attempt(),
@@ -301,9 +332,18 @@ impl Driver {
                 artifacts,
                 evidence: evidence.map(Box::new),
             })
-            .await?;
+            .await
+        {
+            self.report(WorkAgentDiagnostic::CommitRefused { kind, error });
+            return Err(error);
+        }
         self.steps += 1;
         Ok(id)
+    }
+    fn report(&self, event: WorkAgentDiagnostic) {
+        if let Some(diagnostic) = self.diagnostic {
+            diagnostic(event);
+        }
     }
     #[allow(clippy::too_many_arguments)]
     async fn settle(
@@ -315,7 +355,8 @@ impl Driver {
         evidence: Option<WorkProviderSearchRecordV1>,
         note: Option<String>,
     ) -> Result<(), WorkError> {
-        self.probe
+        if let Err(error) = self
+            .probe
             .commit_step(WorkRuntimeUpdate::SettleStep {
                 execution: self.probe.execution(),
                 attempt: self.probe.attempt(),
@@ -326,7 +367,14 @@ impl Driver {
                 evidence: evidence.map(Box::new),
                 note,
             })
-            .await?;
+            .await
+        {
+            self.report(WorkAgentDiagnostic::CommitRefused {
+                kind: "settle",
+                error,
+            });
+            return Err(error);
+        }
         Ok(())
     }
     async fn cancelled(&self) -> bool {
@@ -420,6 +468,16 @@ impl Driver {
             record.usage = Some(usage);
             record.note = turn.as_ref().and_then(|turn| turn.say.clone());
             self.begin(record, vec![], None).await?;
+            match &turn {
+                Some(turn) => self.report(WorkAgentDiagnostic::TurnAdmitted {
+                    turn: self.turn,
+                    artifacts: turn.artifacts.len(),
+                    fetches: turn.fetch.len(),
+                    asks: turn.ask.is_some(),
+                    finish: turn.finish,
+                }),
+                None => self.report(WorkAgentDiagnostic::TurnRefused { turn: self.turn }),
+            }
             let Some(turn) = turn else {
                 self.failed_turns += 1;
                 if self.failed_turns >= 2 {
@@ -432,19 +490,21 @@ impl Driver {
                 self.probe
                     .record_activity(WorkActivityV1::ProducingArtifact);
                 let headroom = MAX_WORK_ARTIFACTS.saturating_sub(execution.artifacts.len());
-                let artifacts = turn
+                let artifacts: Vec<WorkArtifactV1> = turn
                     .artifacts
                     .into_iter()
                     .take(headroom)
-                    .map(|artifact| {
-                        attempt.mint_artifact(WorkArtifactDraft {
-                            output: self.output.clone(),
-                            title: artifact.title,
-                            data: artifact.data,
-                            evidence: artifact.evidence,
-                        })
+                    .filter_map(|artifact| {
+                        attempt
+                            .mint_artifact(WorkArtifactDraft {
+                                output: self.output.clone(),
+                                title: artifact.title,
+                                data: artifact.data,
+                                evidence: artifact.evidence,
+                            })
+                            .ok()
                     })
-                    .collect::<Result<Vec<_>, _>>()?;
+                    .collect();
                 if !artifacts.is_empty() {
                     let mut step = self.step(WorkStepKindV1::Publish, WorkStepStatus::Succeeded);
                     step.artifacts = artifacts.iter().map(|a| a.id).collect();
@@ -581,15 +641,21 @@ impl Driver {
                     }
                     match (outcome.status, outcome.record) {
                         (WorkAttemptStatus::Succeeded, Some(record)) => {
-                            let artifact =
-                                attempt.mint_artifact(sources_draft(&self.output, &record))?;
+                            let artifacts = if record.evidence.citations.is_empty() {
+                                vec![]
+                            } else {
+                                attempt
+                                    .mint_artifact(sources_draft(&self.output, &record))
+                                    .map(|artifact| vec![artifact])
+                                    .unwrap_or_default()
+                            };
                             self.remember(&record);
                             let note = Some(sources_note(record.evidence.citations.len()));
                             self.settle(
                                 id,
                                 WorkStepStatus::Succeeded,
                                 outcome.usage,
-                                vec![artifact],
+                                artifacts,
                                 Some(record),
                                 note,
                             )
@@ -630,11 +696,11 @@ impl Driver {
                         } else {
                             outcome.usage.or(Some(WorkUsage::default()))
                         };
-                        let artifacts = outcome
+                        let artifacts: Vec<WorkArtifactV1> = outcome
                             .artifacts
                             .into_iter()
-                            .map(|draft| attempt.mint_artifact(draft))
-                            .collect::<Result<Vec<_>, _>>()?;
+                            .filter_map(|draft| attempt.mint_artifact(draft).ok())
+                            .collect();
                         let mut previews = Vec::new();
                         for link in artifacts.iter().flat_map(|a| &a.evidence).take(8) {
                             if let Ok(preview) = self.probe.read_evidence(link.clone()).await {
@@ -741,7 +807,11 @@ impl Driver {
     }
 
     fn remember(&mut self, record: &WorkProviderSearchRecordV1) {
+        let mut seen = std::collections::BTreeSet::new();
         for (index, citation) in record.evidence.citations.iter().enumerate() {
+            if !seen.insert(source_key(&citation.url)) {
+                continue;
+            }
             let Ok(text) = record.evidence.citation_excerpt(index) else {
                 continue;
             };
@@ -782,6 +852,18 @@ impl Driver {
     }
 }
 
+fn step_kind_label(kind: &WorkStepKindV1) -> &'static str {
+    match kind {
+        WorkStepKindV1::Turn => "turn",
+        WorkStepKindV1::Search { .. } => "search",
+        WorkStepKindV1::Read { .. } => "read",
+        WorkStepKindV1::Discover { .. } => "discover",
+        WorkStepKindV1::Publish => "publish",
+        WorkStepKindV1::Ask { .. } => "ask",
+        WorkStepKindV1::Finish => "finish",
+    }
+}
+
 fn step_status(status: WorkAttemptStatus) -> WorkStepStatus {
     match status {
         WorkAttemptStatus::Running => WorkStepStatus::Running,
@@ -795,9 +877,15 @@ fn step_status(status: WorkAttemptStatus) -> WorkStepStatus {
 /// Provider citations become one sources object: every citation is an entry
 /// the canvas can show and later work can cite.
 fn sources_draft(output: &str, record: &WorkProviderSearchRecordV1) -> WorkArtifactDraft {
-    let citations = record.evidence.citations.iter().take(64);
-    let entries = citations
+    // One card per page: the provider often cites the same page twice.
+    let mut seen = std::collections::BTreeSet::new();
+    let entries = record
+        .evidence
+        .citations
+        .iter()
+        .take(64)
         .enumerate()
+        .filter(|(_, citation)| seen.insert(source_key(&citation.url)))
         .map(|(index, citation)| WorkSourceEntry {
             evidence: index as u16,
             title: source_title(&citation.title, &citation.url),
@@ -827,6 +915,25 @@ fn sources_draft(output: &str, record: &WorkProviderSearchRecordV1) -> WorkArtif
         evidence,
     }
 }
+/// Provider tracking parameters do not make a different page.
+fn source_key(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(mut parsed) => {
+            let kept: Vec<(String, String)> = parsed
+                .query_pairs()
+                .filter(|(key, _)| key != "utm_source")
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect();
+            parsed.set_query(None);
+            if !kept.is_empty() {
+                parsed.query_pairs_mut().extend_pairs(kept);
+            }
+            parsed.set_fragment(None);
+            parsed.to_string().trim_end_matches('/').to_lowercase()
+        }
+        Err(_) => url.to_lowercase(),
+    }
+}
 fn source_title(title: &str, url: &str) -> String {
     let title: String = title.trim().chars().take(200).collect();
     if !title.is_empty() {
@@ -839,6 +946,7 @@ fn source_title(title: &str, url: &str) -> String {
 }
 fn sources_note(count: usize) -> String {
     match count {
+        0 => "No sources found".into(),
         1 => "Found 1 source".into(),
         n => format!("Found {n} sources"),
     }
