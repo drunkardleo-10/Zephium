@@ -2,7 +2,7 @@
 //! (window -> chrome positioning, engine, shell) and the command surface.
 
 #[cfg(all(
-    feature = "resource-ui-qa",
+    any(feature = "resource-ui-qa", feature = "work-integration-qa"),
     any(not(debug_assertions), not(target_os = "macos"))
 ))]
 compile_error!("resource UI QA is macOS debug-only");
@@ -76,6 +76,17 @@ mod platform;
 #[cfg(target_os = "windows")]
 mod privileged_runtime_windows;
 mod resource_close;
+#[cfg(feature = "work-development-traces")]
+mod startup_styles;
+#[cfg(feature = "work-product")]
+mod work_activity;
+#[cfg(feature = "work-development-traces")]
+mod work_diagnostics;
+#[cfg(any(feature = "work-product", test))]
+mod work_operations;
+mod work_product;
+#[cfg(feature = "work-product")]
+mod work_provider;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
@@ -392,6 +403,8 @@ impl UiStartupGate {
         if loaded_url != &self.expected_url {
             return;
         }
+        #[cfg(feature = "work-development-traces")]
+        startup_styles::capture(window, &self.expected_url, "document-loaded");
         self.document_loaded.store(true, Ordering::Release);
         self.show_if_ready(window);
     }
@@ -403,6 +416,8 @@ impl UiStartupGate {
         if current_url != self.expected_url {
             return false;
         }
+        #[cfg(feature = "work-development-traces")]
+        startup_styles::capture(window, &self.expected_url, "frontend-ready");
         self.frontend_ready.store(true, Ordering::Release);
         self.show_if_ready(window);
         true
@@ -426,6 +441,8 @@ impl UiStartupGate {
             );
         } else {
             on_main_window_mapped(window);
+            #[cfg(feature = "work-development-traces")]
+            startup_styles::after_show(window, &self.expected_url);
         }
     }
 
@@ -806,6 +823,23 @@ impl ShutdownCoordinator {
             self.schedule_authorized_exit(app, 1);
             return;
         }
+        #[cfg(feature = "work-product")]
+        if let Some(work) = app.try_state::<work_product::WorkProductState>() {
+            let operations = work.operations.clone();
+            let coordinator = self.clone();
+            tauri::async_runtime::spawn(async move {
+                if !operations.shutdown().await {
+                    coordinator.terminal_failure.store(true, Ordering::Release);
+                    diagnostic!("shutdown: Work operation cleanup was not proven");
+                }
+                coordinator.request_after_work(app, shell);
+            });
+            return;
+        }
+        self.request_after_work(app, shell);
+    }
+
+    fn request_after_work(&self, app: tauri::AppHandle, shell: Handle) {
         #[cfg(feature = "curated-extension-distribution")]
         if let Some(extension_distribution) = self.take_extension_distribution() {
             let deadline = shell.shutdown_deadline();
@@ -1308,6 +1342,12 @@ fn request_unrecoverable_native_failure(app: &tauri::AppHandle, reason: &str) {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct WorkChanged(zephium_ipc::work::WorkChangedV1);
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct WorkEnvironmentChanged(zephium_ipc::work::WorkEnvironmentChangedV1);
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct ResourceChanged {
     profile: String,
     id: String,
@@ -1541,8 +1581,13 @@ fn record_and_deliver_operation(
 fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
     tauri_specta::Builder::<tauri::Wry>::new()
         .commands(collect_commands![
+            work_product::work_call,
+            work_product::work_operation,
+            work_product::work_operation_status,
+            work_product::work_activity,
             tabs_bootstrap,
             tabs_open,
+            tabs_open_url,
             tabs_activate,
             tabs_close,
             tabs_set_essential,
@@ -1601,6 +1646,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             divider_release
         ])
         .events(collect_events![
+            WorkEnvironmentChanged,
+            WorkChanged,
             ItemsChanged,
             ResourceChanged,
             TabChanged,
@@ -2315,6 +2362,30 @@ fn tabs_open(caller: WebviewWindow, shell: State<'_, Handle>) -> zephium_ipc::Op
         return rejected_operation();
     }
     dispatch_operation(caller.app_handle(), &shell, Command::Open)
+}
+
+/// Explicit trusted user navigation. A citation alone never calls this command
+/// or allocates a Work browser resource.
+#[tauri::command]
+#[specta::specta]
+fn tabs_open_url(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    url: String,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "tabs_open_url")
+        || url.len() > 8192
+        || url.chars().any(char::is_control)
+        || !tauri::Url::parse(&url).is_ok_and(|parsed| {
+            matches!(parsed.scheme(), "https" | "http")
+                && parsed.host_str().is_some()
+                && parsed.username().is_empty()
+                && parsed.password().is_none()
+        })
+    {
+        return rejected_operation();
+    }
+    dispatch_operation(caller.app_handle(), &shell, Command::OpenUrl(url))
 }
 
 #[tauri::command]
@@ -3665,6 +3736,25 @@ fn setting_set(
         return rejected_operation();
     }
     if SETTING_KEYS.contains(&key.as_str()) && setting_value_allowed(&key, &value) {
+        #[cfg(feature = "work-product")]
+        if matches!(key.as_str(), "ai.enabled" | "work.enabled") {
+            let Some(owner) = app.try_state::<work_product::WorkProductState>() else {
+                return rejected_operation();
+            };
+            return owner
+                .operations
+                .preference(&key, &value, || {
+                    dispatch_operation(
+                        &app,
+                        &shell,
+                        Command::SetAppSetting {
+                            key: key.clone(),
+                            value: value.clone(),
+                        },
+                    )
+                })
+                .unwrap_or_else(|_| rejected_operation());
+        }
         return dispatch_operation(&app, &shell, Command::SetAppSetting { key, value });
     }
     rejected_operation()
@@ -4449,6 +4539,8 @@ pub fn run() {
                 .devtools(cfg!(debug_assertions))
                 .general_autofill_enabled(false)
                 .initialization_script_for_all_frames(zephium_engine::PAGE_PRINT_DENY_SCRIPT);
+            #[cfg(feature = "work-development-traces")]
+            let main_builder = main_builder.initialization_script(startup_styles::SCRIPT);
             #[cfg(target_os = "windows")]
             let main_builder = main_builder
                 .data_directory(privileged_runtime.main.clone())
@@ -4466,7 +4558,9 @@ pub fn run() {
                 .fetch_or(PRIVILEGED_MAIN_ENVIRONMENT, Ordering::Release);
             let window = main_builder
                 .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
-                .on_web_resource_request(|_, response| {
+                .on_web_resource_request(|_request, response| {
+                    #[cfg(feature = "work-development-traces")]
+                    startup_styles::stylesheet_response(&_request, response);
                     harden_privileged_headers(response.headers_mut())
                 })
                 .on_page_load(move |window, payload| {
@@ -4691,6 +4785,15 @@ pub fn run() {
             let emit_handle = handle.clone();
             let disposition_ledger = operation_ledger.clone();
             let emit: EmitFn = Box::new(move |projection| match projection {
+                Projection::WorkEnvironmentChanged(change) => emit_to_privileged(
+                    &emit_handle, MAIN_LABEL, "zephium:work-environment-changed", &change,
+                ),
+                Projection::WorkChanged(change) => emit_to_privileged(
+                    &emit_handle,
+                    MAIN_LABEL,
+                    "zephium:work-changed",
+                    &change,
+                ),
                 Projection::PanelOwner(owner) => overlay::update_context(&emit_handle, &owner),
                 Projection::Items(state) => {
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_ITEMS, &state)
@@ -4771,7 +4874,10 @@ pub fn run() {
                 }
                 Projection::OperationProcessed(disposition) => {
                     let panel_result=disposition.clone();
-                    if record_and_deliver_operation(&disposition_ledger,disposition,|disposition|try_emit_to_privileged(&emit_handle,MAIN_LABEL,EVENT_OPERATION_PROCESSED,disposition)) {
+                    if record_and_deliver_operation(&disposition_ledger,disposition,|disposition| {
+                        work_product::preference_processed(&emit_handle, disposition);
+                        try_emit_to_privileged(&emit_handle,MAIN_LABEL,EVENT_OPERATION_PROCESSED,disposition)
+                    }) {
                         if let Some(panel)=emit_handle.try_state::<overlay::Overlay>() {panel.operation(panel_result);}
                     } else {
                         diagnostic!("operation: rejected duplicate or unreserved actor disposition");
@@ -4918,6 +5024,15 @@ pub fn run() {
                         shell: Some(shell),
                         ..TerminalStartupResources::default()
                     },
+                );
+                return Err(error.into());
+            }
+            #[cfg(feature = "work-product")]
+            if !work_product::install(app.handle(), engine.clone(), store.clone()) {
+                let error = std::io::Error::other("Work product owner is already installed");
+                shutdown.request_terminal_startup_failure(
+                    app.handle().clone(),
+                    TerminalStartupResources { shell: Some(shell), ..TerminalStartupResources::default() },
                 );
                 return Err(error.into());
             }

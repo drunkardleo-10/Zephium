@@ -1,0 +1,258 @@
+//! Privileged Work intent transport. Serialized data cannot create an attempt.
+use tauri::{Manager, WebviewWindow};
+use zephium_core::work::{WorkCommandId, WorkId};
+use zephium_core::{ids::ProfileId, work::WorkError};
+use zephium_ipc::work::{WorkCallV1, WorkResponseV1};
+use zephium_ipc::work::{WorkOperationResponseV1, WorkOperationStateV1, WorkOperationV1};
+
+#[cfg(feature = "work-product")]
+pub(crate) struct WorkProductState {
+    pub(crate) operations: super::work_operations::WorkOperations,
+    providers: std::sync::Arc<super::work_provider::WorkProviders>,
+}
+#[cfg(feature = "work-product")]
+pub(crate) fn install(
+    app: &tauri::AppHandle,
+    engine: std::sync::Arc<zephium_engine::WebviewEngine>,
+    store: std::sync::Arc<zephium_store::SqliteStore>,
+) -> bool {
+    use zephium_core::ports::store::Store;
+    #[cfg(feature = "work-development-traces")]
+    super::work_diagnostics::install(app);
+    let ai_enabled = store.app_setting("ai.enabled").as_deref() != Some("false");
+    let work_enabled = store.app_setting("work.enabled").as_deref() != Some("false");
+    app.manage(WorkProductState {
+        operations: super::work_operations::WorkOperations::with_enablement(
+            ai_enabled,
+            work_enabled,
+        ),
+        providers: std::sync::Arc::new(super::work_provider::WorkProviders::new(engine, store)),
+    })
+}
+
+pub(crate) fn preference_processed(
+    app: &tauri::AppHandle,
+    disposition: &zephium_ipc::OperationDisposition,
+) {
+    #[cfg(feature = "work-product")]
+    if let Some(owner) = app.try_state::<WorkProductState>() {
+        owner.operations.preference_processed(disposition);
+    }
+    #[cfg(not(feature = "work-product"))]
+    let _ = (app, disposition);
+}
+
+async fn selected_work(
+    app: &tauri::AppHandle,
+    profile: &str,
+    work: WorkId,
+) -> Result<ProfileId, WorkError> {
+    if super::shutdown_started(app) {
+        return Err(WorkError::Shutdown);
+    }
+    let profile = ProfileId::parse(profile)
+        .filter(|id| id.to_string() == profile)
+        .ok_or(WorkError::Invalid)?;
+    let shell = app.state::<zephium_app::Handle>();
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        shell.work_projection(profile, work)?,
+    )
+    .await
+    .map_err(|_| WorkError::Unavailable)??;
+    if response.profile != profile {
+        return Err(WorkError::ProfileUnavailable);
+    }
+    Ok(profile)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn work_activity(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    expected_profile: String,
+    work: WorkId,
+) -> zephium_ipc::work::WorkActivityResponseV1 {
+    let result = async {
+        if !super::authorize(&caller, super::CallerPolicy::Main, "work_activity")
+            || super::shutdown_started(&app)
+        {
+            return Err(WorkError::Unavailable);
+        }
+        let profile = ProfileId::parse(&expected_profile)
+            .filter(|id| id.to_string() == expected_profile)
+            .ok_or(WorkError::Invalid)?;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            app.state::<zephium_app::Handle>()
+                .work_projection(profile, work)?,
+        )
+        .await
+        .map_err(|_| WorkError::Unavailable)??;
+        if response.profile != profile {
+            return Err(WorkError::ProfileUnavailable);
+        }
+        let zephium_core::work::port::WorkReply::Runtime(state) = response.reply else {
+            return Err(WorkError::Invalid);
+        };
+        #[cfg(feature = "work-product")]
+        {
+            Ok(app
+                .state::<WorkProductState>()
+                .providers
+                .activity
+                .read(&state))
+        }
+        #[cfg(not(feature = "work-product"))]
+        {
+            let _ = state;
+            Err(WorkError::Unavailable)
+        }
+    }
+    .await;
+    let (signals, error) = match result {
+        Ok(signals) => (signals, None),
+        Err(error) => (Vec::new(), Some(error.into())),
+    };
+    zephium_ipc::work::WorkActivityResponseV1 {
+        version: 1,
+        profile: expected_profile,
+        work,
+        signals,
+        error,
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn work_operation(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    expected_profile: String,
+    operation: WorkCommandId,
+    input: WorkOperationV1,
+) -> WorkOperationResponseV1 {
+    let result = async {
+        if !super::authorize(&caller, super::CallerPolicy::Main, "work_operation") {
+            return Err(WorkError::Unavailable);
+        }
+        if serde_json::to_vec(&input).map_or(true, |bytes| {
+            bytes.len() > zephium_core::work::MAX_WORK_REQUEST_BYTES
+        }) {
+            return Err(WorkError::Capacity);
+        }
+        let profile = selected_work(&app, &expected_profile, input.work()).await?;
+        #[cfg(feature = "work-product")]
+        {
+            let owner = app.state::<WorkProductState>();
+            let provider = owner.providers.clone();
+            let shell = app.state::<zephium_app::Handle>().inner().clone();
+            let task_input = input.clone();
+            owner
+                .operations
+                .admit((profile, operation), input, async move {
+                    provider.run(shell, profile, task_input).await
+                })
+        }
+        #[cfg(not(feature = "work-product"))]
+        {
+            let _ = profile;
+            Err(WorkError::Unavailable)
+        }
+    }
+    .await;
+    WorkOperationResponseV1 {
+        version: 1,
+        profile: expected_profile,
+        operation,
+        state: result.unwrap_or_else(|error| WorkOperationStateV1::Refused {
+            error: error.into(),
+        }),
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn work_operation_status(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    expected_profile: String,
+    work: WorkId,
+    operation: WorkCommandId,
+    acknowledge: bool,
+) -> WorkOperationResponseV1 {
+    let result = async {
+        if !super::authorize(&caller, super::CallerPolicy::Main, "work_operation_status") {
+            return Err(WorkError::Unavailable);
+        }
+        let profile = selected_work(&app, &expected_profile, work).await?;
+        #[cfg(feature = "work-product")]
+        {
+            app.state::<WorkProductState>().operations.observe(
+                (profile, operation),
+                work,
+                acknowledge,
+            )
+        }
+        #[cfg(not(feature = "work-product"))]
+        {
+            let _ = (profile, acknowledge);
+            Err(WorkError::Unavailable)
+        }
+    }
+    .await;
+    WorkOperationResponseV1 {
+        version: 1,
+        profile: expected_profile,
+        operation,
+        state: result.unwrap_or_else(|error| WorkOperationStateV1::Refused {
+            error: error.into(),
+        }),
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn work_call(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    expected_profile: String,
+    call: WorkCallV1,
+) -> WorkResponseV1 {
+    // Invalid scope is echoed only as correlation, never used as an owner.
+    let failed = |error: WorkError| WorkResponseV1 {
+        version: 1,
+        profile: expected_profile.clone(),
+        reply: zephium_ipc::work::WorkReplyV1::Error {
+            error: error.into(),
+        },
+    };
+    if !super::authorize(&caller, super::CallerPolicy::Main, "work_call")
+        || super::shutdown_started(&app)
+    {
+        return failed(WorkError::Unavailable);
+    }
+    let Some(profile) =
+        ProfileId::parse(&expected_profile).filter(|id| id.to_string() == expected_profile)
+    else {
+        return failed(WorkError::Invalid);
+    };
+    if serde_json::to_vec(&call).map_or(true, |bytes| {
+        bytes.len() > zephium_core::work::MAX_WORK_REQUEST_BYTES
+    }) {
+        return failed(WorkError::Capacity);
+    }
+    super::resource_close::touch(caller.label());
+    let shell = app.state::<zephium_app::Handle>();
+    let request = match shell.work_call(profile, call) {
+        Ok(request) => request,
+        Err(error) => return failed(error),
+    };
+    // An admitted Store operation may commit after observation expires. Its
+    // stable command identity remains replayable through the original Store.
+    match tokio::time::timeout(std::time::Duration::from_secs(8), request.response(profile)).await {
+        Ok(response) => response,
+        Err(_) => failed(WorkError::OutcomeUnknown),
+    }
+}
