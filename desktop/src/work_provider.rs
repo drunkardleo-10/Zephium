@@ -32,6 +32,7 @@ impl WorkProviders {
         let work = input.work();
         let phase = match &input {
             WorkOperationV1::ReadPublic { .. } => "public_read",
+            WorkOperationV1::Run { .. } => "run",
             WorkOperationV1::Plan { .. } => "plan",
             WorkOperationV1::PreparePlan { .. } => "prepare_plan",
             WorkOperationV1::Prepare { .. } => "prepare",
@@ -140,6 +141,147 @@ impl WorkProviders {
                             profile: profile.to_string(),
                             reply: WorkReplyV1::Projection {
                                 projection: Box::new(projection),
+                            },
+                        },
+                    })
+                }
+            }
+            WorkOperationV1::Run { command, context } => {
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let _ = (command, context);
+                    Err(WorkError::Unavailable)
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    use zephium_app::work_agent::{WorkAgentProviders, WorkAgentService};
+                    let zephium_core::work::runtime::WorkRuntimeIntent::BeginAgent {
+                        grant, ..
+                    } = &command.intent
+                    else {
+                        return Err(WorkError::Invalid);
+                    };
+                    if command.version != 1 {
+                        return Err(WorkError::Invalid);
+                    }
+                    grant.validate()?;
+                    let binding_request = shell.work_profile_binding();
+                    let binding =
+                        tokio::time::timeout(std::time::Duration::from_secs(8), async move {
+                            loop {
+                                if let Some(binding) = binding_request.try_recv() {
+                                    break binding;
+                                }
+                                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                            }
+                        })
+                        .await
+                        .map_err(|_| WorkError::Unavailable)?;
+                    let zephium_app::AgentWorkProfileReadiness::Ready(binding) = binding else {
+                        return Err(WorkError::ProfileUnavailable);
+                    };
+                    if binding.profile() != profile {
+                        return Err(WorkError::ProfileUnavailable);
+                    }
+                    let transport =
+                        AgentProviderTransport::try_new(AgentProviderTransportConfig::STANDARD)
+                            .map_err(|_| WorkError::Unavailable)?;
+                    let agent = zephium_agentic::OpenAiWorkAgent::try_new(
+                        transport,
+                        credential().await?,
+                        agent_model_config()?,
+                    )
+                    .map_err(|_| WorkError::Unavailable)?;
+                    #[cfg(feature = "work-development-traces")]
+                    let agent = agent.with_public_response_retention().with_diagnostic(|event| {
+                        use zephium_core::work::synthesis::WorkSynthesisDiagnostic;
+                        if let WorkSynthesisDiagnostic::InputCounted { tokens, maximum, request_bytes } = event {
+                            record_diagnostic(format_args!("work: phase=agent_turn input_counted tokens={tokens} maximum={maximum} request_bytes={request_bytes}"));
+                        }
+                    });
+                    let search_transport =
+                        AgentProviderTransport::try_new(AgentProviderTransportConfig::STANDARD)
+                            .map_err(|_| WorkError::Unavailable)?;
+                    let search_config = zephium_agentic::OpenAiPublicSearchConfig::try_new(
+                        zephium_agent_model_catalog::try_public_search_provider_exact_call_config(
+                            &grant.model,
+                            4096,
+                        )
+                        .map_err(|_| WorkError::Unavailable)?,
+                    )?;
+                    let search = zephium_agentic::OpenAiPublicSearch::try_new(
+                        search_transport,
+                        credential().await?,
+                        search_config,
+                    )?;
+                    #[cfg(feature = "work-development-traces")]
+                    let search = search.with_public_response_retention();
+                    let callback = shell.callback_handle();
+                    let work = command.work;
+                    let started = std::time::Instant::now();
+                    let projection = WorkAgentService::new(shell)
+                        .run(
+                            profile,
+                            command,
+                            context,
+                            WorkAgentProviders {
+                                turn: &agent,
+                                search: &search,
+                            },
+                            |probe, request| {
+                                let callback = &callback;
+                                async move {
+                                    let settings = zephium_work_composition::durable_runtime::WorkBrowserAdapterSettings::new(
+                                        binding,
+                                        zephium_agent_controller::AgentBrowserModel::Luna,
+                                        zephium_app::AgentWorkApplicationConfig::new(
+                                            zephium_agent_runtime::AgentRuntimeConfig::STANDARD,
+                                            AgentProviderTransportConfig::STANDARD,
+                                        ),
+                                        credential().await?,
+                                    );
+                                    #[cfg(feature = "work-development-traces")]
+                                    let settings = {
+                                        let mut settings = settings;
+                                        settings.retain_public_responses = true;
+                                        settings.diagnostic = Some(|attempt, snapshot| {
+                                            record_diagnostic(format_args!("work: attempt={attempt} phase=agent_browser state={:?} failure={:?} persistence_failure={:?}", snapshot.phase, snapshot.failure, snapshot.persistence_failure));
+                                        });
+                                        settings
+                                    };
+                                    let result = self.browser.run_agent_step(callback, &probe, request, settings).await;
+                                    if let Err(error) = &result {
+                                        record_diagnostic(format_args!("work: attempt={} phase=agent_browser failure={error:?}", probe.attempt()));
+                                    }
+                                    result
+                                }
+                            },
+                            |observer| self.activity.track(observer),
+                        )
+                        .await;
+                    match &projection {
+                        Ok(projection) => {
+                            if let Some(fact) = projection.executions.last() {
+                                record_diagnostic(format_args!(
+                                    "work: work={work} phase=agent status={:?} steps={} artifacts={} elapsed_ms={}",
+                                    fact.status,
+                                    fact.steps.len(),
+                                    fact.artifacts.len(),
+                                    started.elapsed().as_millis()
+                                ));
+                            }
+                        }
+                        Err(error) => record_diagnostic(format_args!(
+                            "work: work={work} phase=agent failure={error:?} elapsed_ms={}",
+                            started.elapsed().as_millis()
+                        )),
+                    }
+                    Ok(WorkOperationStateV1::Settled {
+                        response: WorkResponseV1 {
+                            version: 1,
+                            profile: profile.to_string(),
+                            reply: WorkReplyV1::Projection {
+                                projection: Box::new(projection?),
                             },
                         },
                     })
@@ -306,6 +448,19 @@ fn planning_model_config() -> Result<zephium_agentic::WorkPlanningConfig, WorkEr
             .map_err(|_| WorkError::Unavailable)?,
         8192,
         100_000,
+    )
+    .map_err(|_| WorkError::Unavailable)
+}
+// An agent turn discloses a bounded 48KiB context: objective, steps, sources
+// and canvas objects. Each turn is separately capped by the run's remaining
+// limits; this ceiling only bounds one call.
+fn agent_model_config() -> Result<zephium_agentic::WorkPlanningConfig, WorkError> {
+    const MAX_TURN_INPUT_TOKENS: u32 = 32_768;
+    zephium_agentic::WorkPlanningConfig::try_new(
+        zephium_agent_model_catalog::try_luna_provider_exact_call_config(8192)
+            .map_err(|_| WorkError::Unavailable)?,
+        MAX_TURN_INPUT_TOKENS,
+        300_000,
     )
     .map_err(|_| WorkError::Unavailable)
 }

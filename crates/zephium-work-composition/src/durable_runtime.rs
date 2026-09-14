@@ -12,8 +12,10 @@ use zephium_agent_controller::{AgentBrowserModel, AgentWorkEventKind};
 use zephium_agent_provider_transport::AgentProviderCredential;
 use zephium_agentic::*;
 use zephium_app::{
-    work_runtime::*, AgentWorkApplicationConfig, AgentWorkProfileBinding, CallbackHandle,
-    RetainedWorkHandle, RetainedWorkPhase,
+    work_agent::{WorkAgentBrowseRequest, WorkBrowserOutcome},
+    work_runtime::*,
+    AgentWorkApplicationConfig, AgentWorkProfileBinding, CallbackHandle, RetainedWorkHandle,
+    RetainedWorkPhase,
 };
 use zephium_core::work::{artifact::*, runtime::*, WorkError};
 
@@ -86,19 +88,100 @@ impl MacosWorkComposition {
         attempt: WorkNodeAttempt,
         settings: WorkBrowserAdapterSettings,
     ) -> Result<WorkNodeSettlement, WorkError> {
-        #[cfg(feature = "public-qualification")]
-        let diagnostic = settings.diagnostic;
-        #[cfg(feature = "public-qualification")]
-        let mut diagnostic_sent = false;
-        #[cfg(feature = "retained-lifetime-diagnostic")]
-        let resource_diagnostic = settings.resource_diagnostic;
         let intervention_origin = match &attempt.specification().capability {
             WorkCapability::AccountRead { scope } | WorkCapability::AccountUpdate { scope, .. } => {
                 Some(scope.origin.clone())
             }
             _ => None,
         };
+        let diagnostics = Diagnostics::from(&settings);
         let invocation = compile(&attempt, settings)?;
+        let outputs: Vec<String> = attempt
+            .node()
+            .outputs
+            .iter()
+            .map(|o| o.name.clone())
+            .collect();
+        let run = self
+            .run_retained(
+                shell,
+                &attempt.probe(),
+                invocation,
+                intervention_origin,
+                attempt.specification().limits,
+                &outputs,
+                diagnostics,
+            )
+            .await?;
+        attempt
+            .settle_owned(WorkAdapterResult {
+                status: run.status,
+                usage: run.usage,
+                artifacts: run.artifacts,
+                intervention: run
+                    .intervention
+                    .filter(|_| run.status != WorkAttemptStatus::Succeeded),
+            })
+            .await
+    }
+
+    /// One anonymous read or discovery for a running agent step. The step's
+    /// outcome is returned to the loop, which commits it; nothing settles here.
+    pub async fn run_agent_step(
+        &self,
+        shell: &CallbackHandle,
+        probe: &WorkAttemptProbe,
+        request: WorkAgentBrowseRequest,
+        settings: WorkBrowserAdapterSettings,
+    ) -> Result<WorkBrowserOutcome, WorkError> {
+        let diagnostics = Diagnostics::from(&settings);
+        let outputs = vec![request.output.clone()];
+        let limits = request.limits;
+        let invocation = compile_step(probe, request, settings)?;
+        let run = self
+            .run_retained(
+                shell,
+                probe,
+                invocation,
+                None,
+                limits,
+                &outputs,
+                diagnostics,
+            )
+            .await?;
+        Ok(WorkBrowserOutcome {
+            status: match run.status {
+                WorkAttemptStatus::Running => WorkStepStatus::Running,
+                WorkAttemptStatus::Succeeded => WorkStepStatus::Succeeded,
+                WorkAttemptStatus::Failed => WorkStepStatus::Failed,
+                WorkAttemptStatus::Cancelled => WorkStepStatus::Cancelled,
+                WorkAttemptStatus::OutcomeUnknown => WorkStepStatus::OutcomeUnknown,
+            },
+            usage: run.usage,
+            artifacts: run.artifacts,
+            intervention: run.intervention,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_retained(
+        &self,
+        shell: &CallbackHandle,
+        attempt: &WorkAttemptProbe,
+        invocation: crate::TrustedWorkRequest,
+        intervention_origin: Option<String>,
+        limits: WorkExecutionLimits,
+        outputs: &[String],
+        diagnostics: Diagnostics,
+    ) -> Result<BrowserRun, WorkError> {
+        #[cfg(feature = "public-qualification")]
+        let diagnostic = diagnostics.diagnostic;
+        #[cfg(feature = "public-qualification")]
+        let mut diagnostic_sent = false;
+        #[cfg(feature = "retained-lifetime-diagnostic")]
+        let resource_diagnostic = diagnostics.resource_diagnostic;
+        #[cfg(not(feature = "public-qualification"))]
+        let _ = diagnostics;
         let view = self
             .launch_retained(shell, invocation)
             .map_err(|_| WorkError::Unavailable)?
@@ -199,14 +282,12 @@ impl MacosWorkComposition {
             }
             match snapshot.phase {
                 RetainedWorkPhase::Refused => {
-                    return attempt
-                        .settle_owned(WorkAdapterResult {
-                            status: WorkAttemptStatus::Failed,
-                            usage: Some(WorkUsage::default()),
-                            artifacts: vec![],
-                            intervention: None,
-                        })
-                        .await;
+                    return Ok(BrowserRun {
+                        status: WorkAttemptStatus::Failed,
+                        usage: Some(WorkUsage::default()),
+                        artifacts: vec![],
+                        intervention: None,
+                    });
                 }
                 RetainedWorkPhase::Uncertain | RetainedWorkPhase::NeedsReview => {
                     requested_close = true
@@ -244,7 +325,6 @@ impl MacosWorkComposition {
                 guard.0.close();
             }
             if guard.0.is_closed() {
-                let limits = attempt.specification().limits;
                 // Closed usage comes from the original policy/drain/resource and
                 // terminal ACK join, never the lossy public progress stream.
                 let usage = Some(snapshot.usage.unwrap_or(WorkUsage {
@@ -256,7 +336,7 @@ impl MacosWorkComposition {
                 let (status, artifacts) = match (disposition, archived) {
                     (Some(AgentWorkDisposition::Succeeded), Some(archive)) => (
                         WorkAttemptStatus::Succeeded,
-                        map_archive(&attempt, &archive)?,
+                        map_archive(attempt.profile(), outputs, &archive)?,
                     ),
                     (Some(AgentWorkDisposition::Cancelled), _) => {
                         (WorkAttemptStatus::Cancelled, vec![])
@@ -267,19 +347,135 @@ impl MacosWorkComposition {
                     ) => (WorkAttemptStatus::Failed, vec![]),
                     _ => return Err(WorkError::OutcomeUnknown),
                 };
-                return attempt
-                    .settle_owned(WorkAdapterResult {
-                        status,
-                        usage,
-                        artifacts,
-                        intervention: intervention
-                            .filter(|_| status != WorkAttemptStatus::Succeeded),
-                    })
-                    .await;
+                return Ok(BrowserRun {
+                    status,
+                    usage,
+                    artifacts,
+                    intervention,
+                });
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
+}
+
+struct BrowserRun {
+    status: WorkAttemptStatus,
+    usage: Option<WorkUsage>,
+    artifacts: Vec<WorkArtifactDraft>,
+    intervention: Option<WorkInterventionV1>,
+}
+/// Closed diagnostic hooks copied out of the settings before they are consumed.
+#[derive(Clone, Copy)]
+struct Diagnostics {
+    #[cfg(feature = "retained-lifetime-diagnostic")]
+    resource_diagnostic: Option<fn(Option<zephium_engine::WorkResourceFailureCause>)>,
+    #[cfg(feature = "public-qualification")]
+    diagnostic: Option<fn(zephium_core::work::WorkAttemptId, zephium_app::RetainedWorkSnapshot)>,
+}
+impl From<&WorkBrowserAdapterSettings> for Diagnostics {
+    fn from(settings: &WorkBrowserAdapterSettings) -> Self {
+        #[cfg(not(any(
+            feature = "retained-lifetime-diagnostic",
+            feature = "public-qualification"
+        )))]
+        let _ = settings;
+        Self {
+            #[cfg(feature = "retained-lifetime-diagnostic")]
+            resource_diagnostic: settings.resource_diagnostic,
+            #[cfg(feature = "public-qualification")]
+            diagnostic: settings.diagnostic,
+        }
+    }
+}
+
+/// A step reads one shown source or starts one anonymous discovery; both are
+/// read-only, anonymous, and bounded by the loop's remaining limits.
+fn compile_step(
+    probe: &WorkAttemptProbe,
+    request: WorkAgentBrowseRequest,
+    settings: WorkBrowserAdapterSettings,
+) -> Result<crate::TrustedWorkRequest, WorkError> {
+    if settings.profile.profile() != probe.profile() {
+        return Err(WorkError::Invalid);
+    }
+    let limits = request.limits;
+    let budget = AgentRunBudget::try_new(
+        limits.operations,
+        u64::from(limits.model_tokens),
+        u64::from(limits.cost_micro_usd),
+        1,
+    )
+    .map_err(|_| WorkError::Invalid)?;
+    let hops = usize::from(request.hops.clamp(1, 8));
+    let (navigation, task) = match &request.step {
+        WorkStepKindV1::Read { url } => (
+            AgentNavigationDiscovery::try_new_public_web(
+                ContextNavigationTarget::parse(url).map_err(|_| WorkError::Invalid)?,
+                1,
+                2,
+            )
+            .map_err(|_| WorkError::Invalid)?,
+            format!("Read this page: {url}\nReport the facts on it that matter for the objective, with the exact figures, names and dates the page states. Do not follow links unless the page itself is only a listing."),
+        ),
+        WorkStepKindV1::Discover { query } => (
+            AgentNavigationDiscovery::try_new_public_web(
+                ContextNavigationTarget::parse(
+                    WorkPublicDiscoveryScope {
+                        search_query: query.clone(),
+                        max_hops: 1,
+                    }
+                    .start_url()?
+                    .as_str(),
+                )
+                .map_err(|_| WorkError::Invalid)?,
+                hops,
+                2,
+            )
+            .map_err(|_| WorkError::Invalid)?,
+            format!("Search the public web for: {query}\nOpen the most relevant public results and report the facts that matter for the objective, with the exact figures, names and dates the pages state."),
+        ),
+        _ => return Err(WorkError::Invalid),
+    };
+    let mut objective = request.objective;
+    objective.push_str("\n\nThis step: ");
+    objective.push_str(&task);
+    objective.push_str("\noutput_0: findings from the visited pages, as plain text.");
+    if objective.len() > zephium_core::work::MAX_WORK_TEXT_BYTES {
+        return Err(WorkError::Capacity);
+    }
+    let output_fields =
+        vec![
+            SemanticExtractionFieldSchema::try_text("output_0".into(), true, 4096)
+                .map_err(|_| WorkError::Invalid)?,
+        ];
+    let invocation = PublicReadWorkInvocation::new(
+        PublicReadWorkObjective {
+            objective,
+            navigation,
+            output_fields,
+        },
+        PublicReadWorkSettings {
+            account: PublicReadWorkAccount::Anonymous,
+            model: settings.model,
+            budget,
+            max_model_calls: 16,
+            deadline: probe.deadline(),
+        },
+        settings.config,
+        settings.credential,
+    )
+    .with_persistent_result();
+    #[cfg(feature = "public-qualification")]
+    let invocation = if settings.retain_public_responses {
+        invocation.with_inspectable_public_retention()
+    } else {
+        invocation
+    };
+    invocation
+        .into_request(settings.profile)
+        .map(|request| request.with_work_identity(probe.work()))
+        .map_err(|_| WorkError::Invalid)
 }
 
 fn compile(
@@ -443,10 +639,11 @@ fn compile(
 }
 
 fn map_archive(
-    attempt: &WorkNodeAttempt,
+    profile: zephium_core::ids::ProfileId,
+    outputs: &[String],
     archive: &AgentWorkArchivedExtraction,
 ) -> Result<Vec<WorkArtifactDraft>, WorkError> {
-    if archive.descriptor().profile() != attempt.profile() {
+    if archive.descriptor().profile() != profile {
         return Err(WorkError::ProfileUnavailable);
     }
     let extraction_id =
@@ -456,9 +653,7 @@ fn map_archive(
         let ArchivedValue::Text { value, sources } = field.value() else {
             return Err(WorkError::Invalid);
         };
-        let output = attempt
-            .node()
-            .outputs
+        let output = outputs
             .iter()
             .enumerate()
             .find(|(index, _)| format!("output_{index}") == field.name())
@@ -478,8 +673,8 @@ fn map_archive(
             })
             .collect::<Result<Vec<_>, WorkError>>()?;
         result.push(WorkArtifactDraft {
-            output: output.name.clone(),
-            title: output.name.clone(),
+            output: output.clone(),
+            title: output.clone(),
             data: WorkArtifactDataV1::Document {
                 paragraphs: vec![value.clone()],
                 formatted: None,

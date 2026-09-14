@@ -628,6 +628,8 @@ pub use sign_in_handoff::{
 };
 
 #[cfg(feature = "provider-transport")]
+pub use provider_transport::agent::OpenAiWorkAgent;
+#[cfg(feature = "provider-transport")]
 pub use provider_transport::planning::{OpenAiWorkPlanner, WorkPlanningConfig};
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::synthesis::OpenAiWorkSynthesizer;

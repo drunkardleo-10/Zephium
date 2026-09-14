@@ -90,6 +90,9 @@ pub enum WorkContextVisibility {
 pub enum WorkContextPurpose {
     Planning,
     PublicRead,
+    /// The routine agent loop: the model sees the bodies; Rust refuses search
+    /// text that repeats private context.
+    Agent,
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]

@@ -34,7 +34,7 @@ impl Drop for Permit {
 /// selected textual fields through their own provider policy boundary.
 #[must_use]
 pub struct WorkNodeAttempt {
-    basis_revision: Mutex<WorkRevision>,
+    basis_revision: Arc<Mutex<WorkRevision>>,
     owner: WorkRuntimeSessionId,
     progress: Arc<Mutex<Option<zephium_ipc::work::WorkSignalV1>>>,
     handle: crate::Handle,
@@ -99,22 +99,50 @@ impl WorkNodeAttempt {
         }
     }
     pub fn record_activity(&self, activity: zephium_ipc::work::WorkActivityV1) {
-        if let Ok(mut signal) = self.progress.lock() {
-            *signal = Some(zephium_ipc::work::WorkSignalV1 {
-                version: 1,
-                owner: self.owner,
-                profile: self.profile.to_string(),
-                work: self.work,
-                basis_revision: *self
-                    .basis_revision
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner()),
-                execution: self.execution,
-                node: self.node.id,
-                attempt: self.attempt,
-                activity,
-            });
+        self.probe().record_activity(activity);
+    }
+    /// A cloneable observation of this live attempt for step runners: it can
+    /// read cancellation, report activity and commit steps, never settle or
+    /// restart the attempt.
+    pub fn probe(&self) -> WorkAttemptProbe {
+        WorkAttemptProbe {
+            basis_revision: self.basis_revision.clone(),
+            owner: self.owner,
+            progress: self.progress.clone(),
+            handle: self.handle.clone(),
+            profile: self.profile,
+            work: self.work,
+            execution: self.execution,
+            attempt: self.attempt,
+            node: self.node.id,
+            deadline: self.deadline,
         }
+    }
+    pub(crate) fn mint_artifact(
+        &self,
+        draft: WorkArtifactDraft,
+    ) -> Result<WorkArtifactV1, WorkError> {
+        let expected = self
+            .node
+            .outputs
+            .iter()
+            .find(|o| o.name == draft.output)
+            .ok_or(WorkError::Invalid)?;
+        let artifact = WorkArtifactV1 {
+            version: 1,
+            id: WorkArtifactId::generate(),
+            execution: self.execution,
+            node: self.node.id,
+            attempt: self.attempt,
+            output: draft.output,
+            title: draft.title,
+            data: draft.data,
+            evidence: draft.evidence,
+            review: expected.review,
+            presentation: WorkArtifactPresentationV1::Automatic,
+        };
+        artifact.validate()?;
+        Ok(artifact)
     }
     pub fn profile(&self) -> ProfileId {
         self.profile
@@ -171,43 +199,7 @@ impl WorkNodeAttempt {
     /// Authoritative cancellation comes from durable intent. Delayed transient
     /// signals cannot cancel or restart an attempt. Owner changes fail closed.
     pub async fn cancellation_requested(&self) -> Result<bool, WorkError> {
-        let state = read(&self.handle, self.profile, self.work).await?;
-        let execution = state
-            .executions
-            .iter()
-            .find(|e| e.id == self.execution)
-            .ok_or(WorkError::NotFound)?;
-        let owned = state
-            .owners
-            .iter()
-            .any(|entry| entry.execution == self.execution && entry.owner == self.owner)
-            && execution.attempts.iter().any(|attempt| {
-                attempt.id == self.attempt
-                    && attempt.node == self.node.id
-                    && attempt.status == WorkAttemptStatus::Running
-            });
-        if owned && !state.interrupted.contains(&self.execution) {
-            // Only the original attempt advances its observation basis after a
-            // fresh durable read. Historical projections never mint an observer.
-            if let Ok(mut basis) = self.basis_revision.lock() {
-                *basis = state.work.revision;
-            }
-            if let Ok(mut signal) = self.progress.lock() {
-                if let Some(signal) = signal.as_mut() {
-                    signal.basis_revision = state.work.revision;
-                }
-            }
-        }
-        Ok(!owned
-            || state.interrupted.contains(&self.execution)
-            || execution.status == WorkExecutionStatus::CancelRequested
-            || execution.status.terminal()
-            || execution.attempts.iter().any(|attempt| {
-                !matches!(
-                    attempt.status,
-                    WorkAttemptStatus::Running | WorkAttemptStatus::Succeeded
-                )
-            }))
+        self.probe().cancellation_requested().await
     }
 
     /// Called by a trusted typed adapter only after its original worker and
@@ -243,29 +235,7 @@ impl WorkNodeAttempt {
         let mut artifacts = result
             .artifacts
             .into_iter()
-            .map(|draft| {
-                let expected = self
-                    .node
-                    .outputs
-                    .iter()
-                    .find(|o| o.name == draft.output)
-                    .ok_or(WorkError::Invalid)?;
-                let artifact = WorkArtifactV1 {
-                    version: 1,
-                    id: WorkArtifactId::generate(),
-                    execution: self.execution,
-                    node: self.node.id,
-                    attempt: self.attempt,
-                    output: draft.output,
-                    title: draft.title,
-                    data: draft.data,
-                    evidence: draft.evidence,
-                    review: expected.review,
-                    presentation: WorkArtifactPresentationV1::Automatic,
-                };
-                artifact.validate()?;
-                Ok(artifact)
-            })
+            .map(|draft| self.mint_artifact(draft))
             .collect::<Result<Vec<_>, WorkError>>()?;
         // Retry only persistence after a definite CAS conflict. Never repeat
         // adapter execution, change the attempt, or retry an uncertain write.
@@ -381,6 +351,170 @@ impl WorkAttemptObserver {
     /// At most one replaceable transient signal; idle observers own no timer.
     pub fn latest(&self) -> Option<zephium_ipc::work::WorkSignalV1> {
         self.progress.upgrade()?.lock().ok()?.clone()
+    }
+}
+#[derive(Clone)]
+pub struct WorkAttemptProbe {
+    basis_revision: Arc<Mutex<WorkRevision>>,
+    owner: WorkRuntimeSessionId,
+    progress: Arc<Mutex<Option<zephium_ipc::work::WorkSignalV1>>>,
+    handle: crate::Handle,
+    profile: ProfileId,
+    work: WorkId,
+    execution: WorkExecutionId,
+    attempt: WorkAttemptId,
+    node: WorkPlanNodeId,
+    deadline: Instant,
+}
+impl WorkAttemptProbe {
+    pub fn profile(&self) -> ProfileId {
+        self.profile
+    }
+    pub fn work(&self) -> WorkId {
+        self.work
+    }
+    pub fn execution(&self) -> WorkExecutionId {
+        self.execution
+    }
+    pub fn attempt(&self) -> WorkAttemptId {
+        self.attempt
+    }
+    pub fn node(&self) -> WorkPlanNodeId {
+        self.node
+    }
+    pub fn deadline(&self) -> Instant {
+        self.deadline
+    }
+    pub fn record_activity(&self, activity: zephium_ipc::work::WorkActivityV1) {
+        if let Ok(mut signal) = self.progress.lock() {
+            *signal = Some(zephium_ipc::work::WorkSignalV1 {
+                version: 1,
+                owner: self.owner,
+                profile: self.profile.to_string(),
+                work: self.work,
+                basis_revision: *self
+                    .basis_revision
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()),
+                execution: self.execution,
+                node: self.node,
+                attempt: self.attempt,
+                activity,
+            });
+        }
+    }
+    pub async fn runtime_projection(&self) -> Result<WorkRuntimeProjection, WorkError> {
+        read(&self.handle, self.profile, self.work).await
+    }
+    pub async fn cancellation_requested(&self) -> Result<bool, WorkError> {
+        let state = read(&self.handle, self.profile, self.work).await?;
+        let execution = state
+            .executions
+            .iter()
+            .find(|e| e.id == self.execution)
+            .ok_or(WorkError::NotFound)?;
+        let owned = state
+            .owners
+            .iter()
+            .any(|entry| entry.execution == self.execution && entry.owner == self.owner)
+            && execution.attempts.iter().any(|attempt| {
+                attempt.id == self.attempt
+                    && attempt.node == self.node
+                    && attempt.status == WorkAttemptStatus::Running
+            });
+        if owned && !state.interrupted.contains(&self.execution) {
+            // Only the original attempt advances its observation basis after a
+            // fresh durable read. Historical projections never mint an observer.
+            if let Ok(mut basis) = self.basis_revision.lock() {
+                *basis = state.work.revision;
+            }
+            if let Ok(mut signal) = self.progress.lock() {
+                if let Some(signal) = signal.as_mut() {
+                    signal.basis_revision = state.work.revision;
+                }
+            }
+        }
+        Ok(!owned
+            || state.interrupted.contains(&self.execution)
+            || execution.status == WorkExecutionStatus::CancelRequested
+            || execution.status.terminal()
+            || execution.attempts.iter().any(|attempt| {
+                !matches!(
+                    attempt.status,
+                    WorkAttemptStatus::Running | WorkAttemptStatus::Succeeded
+                )
+            }))
+    }
+    pub(crate) async fn read_evidence(
+        &self,
+        link: WorkEvidenceLink,
+    ) -> Result<WorkEvidencePreviewV1, WorkError> {
+        match request(
+            &self.handle,
+            self.profile,
+            WorkRequest::ReadEvidence {
+                id: self.work,
+                link,
+            },
+        )
+        .await?
+        {
+            WorkReply::Evidence(preview) => Ok(preview),
+            _ => Err(WorkError::Invalid),
+        }
+    }
+    /// Commit one step under the live attempt. Persistence retries only a
+    /// definite CAS conflict; a capacity refusal downgrades a successful step
+    /// to a failed one without its payload rather than losing the record.
+    pub(crate) async fn commit_step(
+        &self,
+        mut update: WorkRuntimeUpdate,
+    ) -> Result<WorkRuntimeProjection, WorkError> {
+        for _ in 0..4 {
+            let state = read(&self.handle, self.profile, self.work).await?;
+            match request(
+                &self.handle,
+                self.profile,
+                WorkRequest::RuntimeUpdate {
+                    id: self.work,
+                    expected: state.work.revision,
+                    update: update.clone(),
+                },
+            )
+            .await
+            {
+                Ok(WorkReply::Runtime(state)) => return Ok(*state),
+                Err(WorkError::Conflict) => continue,
+                Err(WorkError::Capacity) => match &mut update {
+                    WorkRuntimeUpdate::SettleStep {
+                        status,
+                        artifacts,
+                        evidence,
+                        ..
+                    } if *status == WorkStepStatus::Succeeded => {
+                        *status = WorkStepStatus::Failed;
+                        artifacts.clear();
+                        *evidence = None;
+                    }
+                    WorkRuntimeUpdate::BeginStep {
+                        step,
+                        artifacts,
+                        evidence,
+                        ..
+                    } if !artifacts.is_empty() => {
+                        step.status = WorkStepStatus::Failed;
+                        step.artifacts.clear();
+                        step.evidence = None;
+                        artifacts.clear();
+                        *evidence = None;
+                    }
+                    _ => return Err(WorkError::Capacity),
+                },
+                Err(error) => return Err(error),
+                Ok(_) => return Err(WorkError::Invalid),
+            }
+        }
+        Err(WorkError::Conflict)
     }
 }
 impl Drop for WorkNodeAttempt {
@@ -549,7 +683,7 @@ impl WorkRuntimeService {
             deadline.min(parent_deadline)
         });
         let owned = WorkNodeAttempt {
-            basis_revision: Mutex::new(projection.work.revision),
+            basis_revision: Arc::new(Mutex::new(projection.work.revision)),
             owner: projection
                 .owners
                 .iter()

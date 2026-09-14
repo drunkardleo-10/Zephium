@@ -2,6 +2,7 @@
 //! contains a live provider, worker, execution token or native reference.
 //! An editable plan describes desired work; compilation is a separate boundary.
 
+pub mod agent;
 pub mod artifact;
 pub mod authoring;
 pub mod context;

@@ -111,7 +111,7 @@ impl WorkSynthesisProvider for OpenAiWorkSynthesizer {
         Box::pin(self.run(input, None))
     }
 }
-fn usage(value: WorkPlanningUsage) -> Result<WorkUsage, WorkSynthesisError> {
+pub(super) fn usage(value: WorkPlanningUsage) -> Result<WorkUsage, WorkSynthesisError> {
     Ok(WorkUsage {
         model_tokens: value
             .input_tokens
@@ -127,7 +127,7 @@ fn usage(value: WorkPlanningUsage) -> Result<WorkUsage, WorkSynthesisError> {
         accounting: WorkUsageAccounting::ConservativeReservation,
     })
 }
-fn map_error(error: WorkPlanningError) -> WorkSynthesisError {
+pub(super) fn map_error(error: WorkPlanningError) -> WorkSynthesisError {
     match error {
         WorkPlanningError::ProviderRefused(charged) => usage(charged)
             .map(WorkSynthesisError::Rejected)
@@ -162,7 +162,7 @@ struct WireArtifact {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WireData {
+pub(super) struct WireData {
     kind: String,
     value: Value,
 }
@@ -212,13 +212,24 @@ fn untag_matrix(payload: &mut serde_json::Map<String, Value>) -> Result<(), ()> 
 }
 impl WireArtifact {
     fn resolve(self) -> Result<WorkSynthesisOutput, ()> {
-        let Value::Object(mut payload) = self.data.value else {
+        let data = self.data.resolve()?;
+        Ok(WorkSynthesisOutput {
+            output: self.output,
+            title: self.title,
+            data,
+            evidence: self.evidence,
+        })
+    }
+}
+impl WireData {
+    pub(super) fn resolve(self) -> Result<zephium_core::work::artifact::WorkArtifactDataV1, ()> {
+        let Value::Object(mut payload) = self.value else {
             return Err(());
         };
-        if self.data.kind == "comparison_matrix" {
+        if self.kind == "comparison_matrix" {
             untag_matrix(&mut payload)?;
         }
-        if self.data.kind == "document" {
+        if self.kind == "document" {
             // Typed blocks become the constrained note schema plus derived
             // plain paragraphs; the model never emits Markdown or HTML.
             let blocks = payload.remove("blocks").ok_or(())?;
@@ -239,28 +250,32 @@ impl WireArtifact {
             );
         }
         if payload
-            .insert("kind".into(), Value::String(self.data.kind))
+            .insert("kind".into(), Value::String(self.kind))
             .is_some()
         {
             return Err(());
         }
-        let data = serde_json::from_value(Value::Object(payload)).map_err(|_| ())?;
-        Ok(WorkSynthesisOutput {
-            output: self.output,
-            title: self.title,
-            data,
-            evidence: self.evidence,
-        })
+        serde_json::from_value(Value::Object(payload)).map_err(|_| ())
     }
 }
 
-fn array(items: Value, min: usize, max: usize) -> Value {
+pub(super) fn array(items: Value, min: usize, max: usize) -> Value {
     json!({"type":"array","items":items,"minItems":min,"maxItems":max})
 }
 fn variant(kind: &str, properties: Value) -> Value {
     object(json!({"kind":{"type":"string","enum":[kind]},"value":object(properties)}))
 }
 fn schema() -> Value {
+    let text = json!({"type":"string"});
+    let artifact = object(json!({
+        "output":{"type":"integer","minimum":0,"maximum":7},
+        "title":text,"data":artifact_data_schema(),
+        "evidence":array(json!({"type":"integer","minimum":0,"maximum":63}),0,64)
+    }));
+    object(json!({"artifacts":array(artifact,1,8)}))
+}
+/// The provider-facing artifact vocabulary shared by synthesis and agent turns.
+pub(super) fn artifact_data_schema() -> Value {
     let text = json!({"type":"string"});
     let maybe_text = json!({"type":["string","null"]});
     let boolean = json!({"type":"boolean"});
@@ -325,12 +340,7 @@ fn schema() -> Value {
         variant("evidence_collection", json!({"summary":text,"subjects":array(subject,0,32),"entries":array(object(json!({"evidence":key,"title":text,"role":text,"subject":subject_index})),0,64)})),
         variant("browser_resource_preview", json!({"title":text,"url":text,"summary":text}))
     ]});
-    let artifact = object(json!({
-        "output":{"type":"integer","minimum":0,"maximum":7},
-        "title":text,"data":data,
-        "evidence":array(json!({"type":"integer","minimum":0,"maximum":63}),0,64)
-    }));
-    object(json!({"artifacts":array(artifact,1,8)}))
+    data
 }
 
 #[cfg(test)]

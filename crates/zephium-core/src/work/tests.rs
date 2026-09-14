@@ -543,3 +543,291 @@ fn account_scoped_specs_bind_one_attested_page_and_a_single_step_plan() {
     .validate()
     .is_err());
 }
+
+#[test]
+fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
+    use super::{agent::*, artifact::*, runtime::*, search::*};
+    let plan = WorkPlanRevision {
+        context: None,
+        author: WorkAuthor::User,
+        revision: WorkRevision::new(2).unwrap(),
+        basis_revision: WorkRevision::INITIAL,
+        draft: draft(),
+    };
+    let limits = WorkExecutionLimits {
+        model_tokens: 600_000,
+        cost_micro_usd: 1_000_000,
+        operations: 64,
+        timeout_seconds: 1200,
+        max_workers: 2,
+    };
+    let grant = WorkAgentGrantV1 {
+        provider: WorkSearchProvider::OpenAi,
+        model: PUBLIC_SEARCH_MODEL.into(),
+        max_turns: 8,
+        max_steps: 24,
+        browse_hops: 4,
+    };
+    assert!(WorkAgentGrantV1 {
+        max_turns: 0,
+        ..grant.clone()
+    }
+    .validate()
+    .is_err());
+    let spec = WorkExecutionSpec::agent(&plan, limits, grant.clone()).unwrap();
+    let node = plan.draft.nodes[0].id;
+    let attempt = WorkAttemptId::from(500);
+    let revision = WorkRevision::new(9).unwrap();
+    let mut fact = WorkExecutionFact {
+        authorization: WorkExecutionAuthorization::UserDirectedAgent,
+        id: WorkExecutionId::from(7),
+        approved_revision: WorkRevision::new(3).unwrap(),
+        spec,
+        status: WorkExecutionStatus::Approved,
+        attempts: vec![],
+        artifacts: vec![],
+        provider_evidence: vec![],
+        user_artifacts: vec![],
+        intervention: None,
+        steps: vec![],
+    };
+    fact.validate(&plan, revision).unwrap();
+    let mut reviewed = fact.clone();
+    reviewed.authorization = WorkExecutionAuthorization::ReviewedPlan;
+    assert!(reviewed.validate(&plan, revision).is_err());
+    fact.attempts.push(WorkAttemptFact {
+        id: attempt,
+        node,
+        status: WorkAttemptStatus::Running,
+        usage: None,
+    });
+    fact.status = WorkExecutionStatus::Running;
+    let step = |id: u128, turn, kind, status| WorkStepFact {
+        id: id.into(),
+        turn,
+        kind,
+        status,
+        usage: None,
+        artifacts: vec![],
+        evidence: None,
+        note: None,
+    };
+    let usage = WorkUsage {
+        model_tokens: 1200,
+        cost_micro_usd: 300,
+        operations: 1,
+        accounting: WorkUsageAccounting::Exact,
+    };
+    let mut turn = step(1, 1, WorkStepKindV1::Turn, WorkStepStatus::Succeeded);
+    turn.usage = Some(usage);
+    turn.note = Some("Looking for current options.".into());
+    fact.steps.push(turn);
+    fact.steps.push(step(
+        2,
+        1,
+        WorkStepKindV1::Search {
+            query: "best canvas libraries".into(),
+        },
+        WorkStepStatus::Running,
+    ));
+    fact.validate(&plan, revision).unwrap();
+    // A settled search binds its provider record and usage.
+    let record = WorkProviderSearchRecordV1 {
+        id: WorkArtifactId::from(40),
+        node,
+        attempt,
+        evidence: WorkProviderSearchEvidenceV1 {
+            version: 1,
+            provider: WorkSearchProvider::OpenAi,
+            model: PUBLIC_SEARCH_MODEL.into(),
+            response_model: PUBLIC_SEARCH_MODEL.into(),
+            response_id: "resp_1".into(),
+            search_call_id: "ws_1".into(),
+            answer: "Svelte Flow is a canvas library".into(),
+            citations: vec![WorkProviderSearchCitation {
+                url: "https://svelteflow.dev".into(),
+                title: "Svelte Flow".into(),
+                start_index: 0,
+                end_index: 11,
+            }],
+            actual_input_tokens: 1000,
+            actual_output_tokens: 200,
+        },
+    };
+    let sources = WorkArtifactV1 {
+        version: 1,
+        id: WorkArtifactId::from(41),
+        execution: fact.id,
+        node,
+        attempt,
+        output: "comparison".into(),
+        title: "Sources".into(),
+        data: artifact::WorkArtifactDataV1::EvidenceCollection {
+            summary: "Svelte Flow is a canvas library".into(),
+            subjects: vec![],
+            entries: vec![],
+        },
+        evidence: vec![WorkEvidenceLink {
+            extraction_id: record.id,
+            source_id: 1,
+        }],
+        review: WorkOutputReview::SourceMappedNeedsReview,
+        presentation: artifact::WorkArtifactPresentationV1::Automatic,
+    };
+    fact.steps[1].status = WorkStepStatus::Succeeded;
+    fact.steps[1].usage = Some(usage);
+    fact.steps[1].evidence = Some(record.id);
+    fact.steps[1].artifacts = vec![sources.id];
+    assert!(fact.validate(&plan, revision).is_err());
+    fact.provider_evidence.push(record);
+    fact.artifacts.push(sources);
+    fact.validate(&plan, revision).unwrap();
+    // Unclaimed artifacts and unknown questions never validate.
+    let mut orphan = fact.clone();
+    orphan.steps[1].artifacts.clear();
+    assert!(orphan.validate(&plan, revision).is_err());
+    let mut answered_running = fact.clone();
+    answered_running.steps.push(step(
+        3,
+        2,
+        WorkStepKindV1::Ask {
+            prompt: "Which budget?".into(),
+            options: vec!["Low".into(), "High".into()],
+            answer: Some("Low".into()),
+        },
+        WorkStepStatus::Running,
+    ));
+    assert!(answered_running.validate(&plan, revision).is_err());
+    // Success requires a final Finish step and no running steps.
+    let mut early = fact.clone();
+    early.attempts[0].status = WorkAttemptStatus::Succeeded;
+    early.attempts[0].usage = Some(usage);
+    early.status = WorkExecutionStatus::NeedsReview;
+    assert!(early.validate(&plan, revision).is_err());
+    fact.steps.push(step(
+        4,
+        2,
+        WorkStepKindV1::Finish,
+        WorkStepStatus::Succeeded,
+    ));
+    fact.attempts[0].status = WorkAttemptStatus::Succeeded;
+    fact.attempts[0].usage = Some(usage);
+    fact.status = WorkExecutionStatus::NeedsReview;
+    fact.validate(&plan, revision).unwrap();
+    let mut after_finish = fact.clone();
+    after_finish.attempts[0].status = WorkAttemptStatus::Running;
+    after_finish.attempts[0].usage = None;
+    after_finish.status = WorkExecutionStatus::Running;
+    after_finish
+        .steps
+        .push(step(5, 3, WorkStepKindV1::Turn, WorkStepStatus::Failed));
+    assert!(after_finish.validate(&plan, revision).is_err());
+
+    // Turn resolution admits only shown sources and a complete vocabulary.
+    let preview = WorkEvidencePreviewV1 {
+        version: 1,
+        link: WorkEvidenceLink {
+            extraction_id: WorkArtifactId::from(40),
+            source_id: 1,
+        },
+        origin: "https://svelteflow.dev".into(),
+        role: "provider_search".into(),
+        text: "Svelte Flow is a canvas library".into(),
+        truncated: false,
+        source_bytes: "31".into(),
+        source: WorkEvidenceSourceV1::ProviderSearch {
+            provider: WorkSearchProvider::OpenAi,
+            model: PUBLIC_SEARCH_MODEL.into(),
+            url: "https://svelteflow.dev/docs".into(),
+            title: "Svelte Flow".into(),
+            response_id: "resp_1".into(),
+            search_call_id: "ws_1".into(),
+        },
+    };
+    let disclosure = WorkAgentTurnDisclosure::try_new(
+        "Compare canvas libraries",
+        vec![],
+        vec![],
+        &fact.steps,
+        &[preview],
+        &fact.artifacts,
+        WorkAgentBudget {
+            turns_left: 6,
+            steps_left: 20,
+            browse_available: true,
+        },
+        limits,
+    )
+    .unwrap();
+    assert_eq!(
+        disclosure.context().sources[0].url,
+        "https://svelteflow.dev/docs"
+    );
+    let output = |fetch, ask, finish| WorkAgentTurnOutput {
+        say: Some("Comparing.".into()),
+        artifacts: vec![WorkAgentArtifactOutput {
+            title: "Svelte Flow".into(),
+            data: artifact::WorkArtifactDataV1::Findings {
+                subjects: vec![],
+                items: vec![artifact::WorkFinding {
+                    claim: "Svelte Flow is a canvas library".into(),
+                    subject: None,
+                    evidence: vec![0],
+                    confidence: artifact::WorkConfidence::Supported,
+                    detail: None,
+                    general_knowledge: false,
+                }],
+            },
+            evidence: vec![0],
+        }],
+        fetch,
+        ask,
+        finish,
+    };
+    let turn = disclosure
+        .resolve(output(
+            vec![
+                WorkAgentFetch::Read {
+                    url: "https://svelteflow.dev/docs".into(),
+                },
+                WorkAgentFetch::Search {
+                    query: "svelte flow bundle size".into(),
+                },
+            ],
+            None,
+            false,
+        ))
+        .unwrap();
+    assert_eq!(turn.fetch.len(), 2);
+    assert_eq!(turn.artifacts[0].evidence[0].source_id, 1);
+    assert!(disclosure
+        .resolve(output(
+            vec![WorkAgentFetch::Read {
+                url: "https://example.test/unseen".into(),
+            }],
+            None,
+            false,
+        ))
+        .is_err());
+    assert!(disclosure
+        .resolve(output(
+            vec![WorkAgentFetch::Search {
+                query: "more".into()
+            }],
+            None,
+            true,
+        ))
+        .is_err());
+    let mut uncited = output(vec![], None, true);
+    uncited.artifacts[0].evidence.clear();
+    assert!(disclosure.resolve(uncited).is_err());
+    assert!(disclosure
+        .resolve(WorkAgentTurnOutput {
+            say: None,
+            artifacts: vec![],
+            fetch: vec![],
+            ask: None,
+            finish: false,
+        })
+        .is_err());
+}

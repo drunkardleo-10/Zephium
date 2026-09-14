@@ -366,7 +366,8 @@ fn compile(
             }
             WorkCapability::Synthesize
             | WorkCapability::AccountRead { .. }
-            | WorkCapability::AccountUpdate { .. } => Err(WorkError::Invalid),
+            | WorkCapability::AccountUpdate { .. }
+            | WorkCapability::Agent { .. } => Err(WorkError::Invalid),
         }
     };
     let parent_origins = origins(&primary.specification().capability)?;

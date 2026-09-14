@@ -6,6 +6,8 @@ use crate::ids::ItemId;
 pub const MAX_WORK_EXECUTIONS: usize = 16;
 pub const MAX_WORK_ATTEMPTS: usize = 128;
 pub const MAX_WORK_COMMANDS: usize = 256;
+pub const MAX_WORK_STEPS: usize = 48;
+pub const MAX_WORK_STEP_NOTE_BYTES: usize = 512;
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -129,6 +131,38 @@ pub enum WorkCapability {
         scope: WorkAccountScope,
         update: WorkFieldUpdateV1,
     },
+    /// Routine public work under one grant: the agent chooses searches, reads,
+    /// discoveries and published objects turn by turn. Read-only, anonymous,
+    /// public; accounts and effects need their own approval.
+    Agent {
+        grant: WorkAgentGrantV1,
+    },
+}
+
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkAgentGrantV1 {
+    pub provider: super::search::WorkSearchProvider,
+    pub model: String,
+    pub max_turns: u8,
+    pub max_steps: u8,
+    pub browse_hops: u8,
+}
+impl WorkAgentGrantV1 {
+    pub fn validate(&self) -> Result<(), WorkError> {
+        if !super::search::supported_public_search_model(&self.model)
+            || self.max_turns == 0
+            || self.max_turns > 16
+            || self.max_steps == 0
+            || usize::from(self.max_steps) > MAX_WORK_STEPS
+            || self.browse_hops == 0
+            || self.browse_hops > 8
+        {
+            return Err(WorkError::Invalid);
+        }
+        Ok(())
+    }
 }
 
 /// A page the user chose from an attached tab. Execution opens it in a
@@ -312,6 +346,40 @@ impl WorkExecutionSpec {
         spec.validate(plan)?;
         Ok(spec)
     }
+    /// The routine envelope for a single-step plan. Sending the objective is
+    /// the grant; nothing here reaches an account or a consequential effect.
+    pub fn agent(
+        plan: &WorkPlanRevision,
+        limits: WorkExecutionLimits,
+        grant: WorkAgentGrantV1,
+    ) -> Result<Self, WorkError> {
+        plan.draft.validate()?;
+        limits.validate()?;
+        grant.validate()?;
+        let [node] = plan.draft.nodes.as_slice() else {
+            return Err(WorkError::Invalid);
+        };
+        if node
+            .outputs
+            .iter()
+            .any(|o| o.review == WorkOutputReview::Mechanical)
+        {
+            return Err(WorkError::Invalid);
+        }
+        let spec = Self {
+            context: None,
+            plan_revision: plan.revision,
+            limits,
+            nodes: vec![WorkNodeExecutionSpec {
+                node: node.id,
+                parent: None,
+                capability: WorkCapability::Agent { grant },
+                limits,
+            }],
+        };
+        spec.validate(plan)?;
+        Ok(spec)
+    }
     pub fn validate_bounds(&self) -> Result<(), WorkError> {
         self.limits.validate()?;
         if self.nodes.is_empty() || self.nodes.len() > MAX_WORK_NODES {
@@ -446,6 +514,7 @@ impl WorkCapability {
                 scope.validate()?;
                 update.validate()?;
             }
+            Self::Agent { grant } => grant.validate()?,
             _ => {}
         }
         if let Self::PublicBrowse { scope } | Self::Coordinate { scope } = self {
@@ -620,6 +689,8 @@ pub enum WorkExecutionAuthorization {
     #[default]
     ReviewedPlan,
     UserDirectedPublicRead,
+    /// The user sent an objective; the routine public envelope is the grant.
+    UserDirectedAgent,
 }
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -641,6 +712,148 @@ pub struct WorkExecutionFact {
     /// Why automation stopped for a person. Continuation is a fresh approval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intervention: Option<WorkInterventionV1>,
+    /// Admitted agent operations in order, committed as each one settles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<WorkStepFact>,
+}
+
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkStepKindV1 {
+    /// One model turn; `note` on the step is what the agent said.
+    Turn,
+    Search {
+        query: String,
+    },
+    Read {
+        url: String,
+    },
+    Discover {
+        query: String,
+    },
+    /// Objects the agent placed on the canvas from this turn.
+    Publish,
+    Ask {
+        prompt: String,
+        options: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answer: Option<String>,
+    },
+    Finish,
+}
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkStepStatus {
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+    OutcomeUnknown,
+}
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkStepFact {
+    pub id: WorkStepId,
+    pub turn: u8,
+    pub kind: WorkStepKindV1,
+    pub status: WorkStepStatus,
+    /// Present once a model or browser step settled; turn-local steps carry none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<WorkUsage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<WorkArtifactId>,
+    /// Provider search record produced by this step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<WorkArtifactId>,
+    /// A short line for people: what the agent said or what this step found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+impl WorkStepKindV1 {
+    fn validate(&self) -> Result<(), WorkError> {
+        match self {
+            Self::Search { query } => super::search::validate_public_search_query(query),
+            Self::Read { url } => validate_public_url(url).map(|_| ()),
+            Self::Discover { query } => WorkPublicDiscoveryScope {
+                search_query: query.clone(),
+                max_hops: 1,
+            }
+            .validate(),
+            Self::Ask {
+                prompt,
+                options,
+                answer,
+            } => {
+                validate_text(prompt, MAX_WORK_TEXT_BYTES)?;
+                if options.len() > 8 {
+                    return Err(WorkError::Invalid);
+                }
+                let mut unique = BTreeSet::new();
+                for option in options {
+                    validate_text(option, 512)?;
+                    if !unique.insert(option) {
+                        return Err(WorkError::Invalid);
+                    }
+                }
+                if let Some(answer) = answer {
+                    validate_text(answer, MAX_WORK_TEXT_BYTES)?;
+                }
+                Ok(())
+            }
+            Self::Turn | Self::Publish | Self::Finish => Ok(()),
+        }
+    }
+    fn fetches(&self) -> bool {
+        matches!(
+            self,
+            Self::Search { .. } | Self::Read { .. } | Self::Discover { .. }
+        )
+    }
+}
+impl WorkStepFact {
+    pub fn validate(&self) -> Result<(), WorkError> {
+        self.kind.validate()?;
+        if let Some(note) = &self.note {
+            validate_text(note, MAX_WORK_STEP_NOTE_BYTES)?;
+        }
+        if self.turn == 0 || self.artifacts.len() > MAX_WORK_ARTIFACTS {
+            return Err(WorkError::Invalid);
+        }
+        let mut unique = BTreeSet::new();
+        if !self.artifacts.iter().all(|id| unique.insert(*id)) {
+            return Err(WorkError::Invalid);
+        }
+        let running = self.status == WorkStepStatus::Running;
+        let succeeded = self.status == WorkStepStatus::Succeeded;
+        let accounted = matches!(self.kind, WorkStepKindV1::Turn) || self.kind.fetches();
+        let usage_expected = accounted
+            && !matches!(
+                self.status,
+                WorkStepStatus::Running | WorkStepStatus::OutcomeUnknown
+            );
+        if self.usage.is_some() != usage_expected
+            || (!self.artifacts.is_empty()
+                && (!succeeded
+                    || !(matches!(self.kind, WorkStepKindV1::Publish) || self.kind.fetches())))
+            || self.evidence.is_some()
+                != (succeeded && matches!(self.kind, WorkStepKindV1::Search { .. }))
+        {
+            return Err(WorkError::Invalid);
+        }
+        let consistent = match &self.kind {
+            WorkStepKindV1::Ask { answer, .. } => answer.is_some() == succeeded,
+            WorkStepKindV1::Publish | WorkStepKindV1::Finish => succeeded,
+            WorkStepKindV1::Turn => !running,
+            _ => true,
+        };
+        if !consistent {
+            return Err(WorkError::Invalid);
+        }
+        Ok(())
+    }
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -799,6 +1012,14 @@ impl WorkExecutionFact {
             .filter(|attempt| attempt.status == WorkAttemptStatus::Running)
             .count()
             > usize::from(self.spec.limits.max_workers)
+        {
+            return Err(WorkError::Invalid);
+        }
+        if self.is_agent() {
+            return self.validate_agent(plan);
+        }
+        if self.authorization == WorkExecutionAuthorization::UserDirectedAgent
+            || !self.steps.is_empty()
         {
             return Err(WorkError::Invalid);
         }
@@ -969,6 +1190,9 @@ impl WorkExecutionFact {
                         .any(|a| a.node == node.id && a.output == output.name)
                 })
             });
+        self.validate_status(complete, running)
+    }
+    fn validate_status(&self, complete: bool, running: bool) -> Result<(), WorkError> {
         let review = self.needs_review();
         let valid_status = match self.status {
             WorkExecutionStatus::Approved => self.attempts.is_empty() && self.artifacts.is_empty(),
@@ -991,6 +1215,157 @@ impl WorkExecutionFact {
             return Err(WorkError::Invalid);
         }
         Ok(())
+    }
+    pub fn is_agent(&self) -> bool {
+        matches!(self.spec.nodes.as_slice(), [node] if matches!(node.capability, WorkCapability::Agent { .. }))
+    }
+    pub fn agent_grant(&self) -> Option<&WorkAgentGrantV1> {
+        match self.spec.nodes.as_slice() {
+            [WorkNodeExecutionSpec {
+                capability: WorkCapability::Agent { grant },
+                ..
+            }] => Some(grant),
+            _ => None,
+        }
+    }
+    /// One attempt, incremental steps. Artifacts and provider evidence belong
+    /// to exactly one settled step; success ends with a Finish step.
+    fn validate_agent(&self, plan: &WorkPlanRevision) -> Result<(), WorkError> {
+        let [node] = self.spec.nodes.as_slice() else {
+            return Err(WorkError::Invalid);
+        };
+        let WorkCapability::Agent { grant } = &node.capability else {
+            return Err(WorkError::Invalid);
+        };
+        let [planned] = plan.draft.nodes.as_slice() else {
+            return Err(WorkError::Invalid);
+        };
+        if self.authorization != WorkExecutionAuthorization::UserDirectedAgent
+            || node.parent.is_some()
+            || node.node != planned.id
+            || !planned.dependencies.is_empty()
+            || self.steps.len() > MAX_WORK_STEPS
+            || self.steps.len() > usize::from(grant.max_steps)
+            || self.attempts.len() > 1
+        {
+            return Err(WorkError::Invalid);
+        }
+        let attempt = self.attempts.first();
+        if let Some(fact) = attempt {
+            if fact.node != node.node
+                || fact.usage.is_some_and(|u| !u.within(node.limits))
+                || matches!(
+                    fact.status,
+                    WorkAttemptStatus::Running | WorkAttemptStatus::OutcomeUnknown
+                ) != fact.usage.is_none()
+            {
+                return Err(WorkError::Invalid);
+            }
+        } else if !self.steps.is_empty()
+            || !self.artifacts.is_empty()
+            || !self.provider_evidence.is_empty()
+        {
+            return Err(WorkError::Invalid);
+        }
+        let running = attempt.is_some_and(|a| a.status == WorkAttemptStatus::Running);
+        let complete = attempt.is_some_and(|a| a.status == WorkAttemptStatus::Succeeded);
+        let mut ids = BTreeSet::new();
+        let mut claimed_artifacts = BTreeSet::new();
+        let mut claimed_evidence = BTreeSet::new();
+        let mut running_steps = 0usize;
+        let mut finished = false;
+        for step in &self.steps {
+            step.validate()?;
+            if !ids.insert(step.id) || step.turn > grant.max_turns || finished {
+                return Err(WorkError::Invalid);
+            }
+            if step.status == WorkStepStatus::Running {
+                if !running {
+                    return Err(WorkError::Invalid);
+                }
+                running_steps += 1;
+            }
+            for artifact in &step.artifacts {
+                if !claimed_artifacts.insert(*artifact)
+                    || !self.artifacts.iter().any(|a| a.id == *artifact)
+                {
+                    return Err(WorkError::Invalid);
+                }
+            }
+            if let Some(evidence) = step.evidence {
+                let record = self
+                    .provider_evidence
+                    .iter()
+                    .find(|record| record.id == evidence)
+                    .ok_or(WorkError::Invalid)?;
+                let usage = step.usage.ok_or(WorkError::Invalid)?;
+                if !claimed_evidence.insert(evidence)
+                    || Some(usage.model_tokens)
+                        != record
+                            .evidence
+                            .actual_input_tokens
+                            .checked_add(record.evidence.actual_output_tokens)
+                {
+                    return Err(WorkError::Invalid);
+                }
+            }
+            if matches!(step.kind, WorkStepKindV1::Finish) {
+                finished = true;
+            }
+        }
+        if running_steps > usize::from(self.spec.limits.max_workers)
+            || (complete && (running_steps > 0 || !finished))
+            || (finished && !(complete || running))
+            || claimed_artifacts.len() != self.artifacts.len()
+            || claimed_evidence.len() != self.provider_evidence.len()
+        {
+            return Err(WorkError::Invalid);
+        }
+        let mut artifacts = BTreeSet::new();
+        for artifact in &self.artifacts {
+            artifact.validate()?;
+            let fact = attempt.ok_or(WorkError::Invalid)?;
+            let output = planned
+                .outputs
+                .iter()
+                .find(|o| o.name == artifact.output)
+                .ok_or(WorkError::Invalid)?;
+            if artifact.execution != self.id
+                || artifact.node != node.node
+                || artifact.attempt != fact.id
+                || artifact.review != output.review
+                || !artifacts.insert(artifact.id)
+            {
+                return Err(WorkError::Invalid);
+            }
+            for link in &artifact.evidence {
+                if self
+                    .provider_evidence
+                    .iter()
+                    .find(|s| s.id == link.extraction_id)
+                    .is_some_and(|source| {
+                        usize::from(link.source_id) > source.evidence.citations.len()
+                    })
+                {
+                    return Err(WorkError::Invalid);
+                }
+            }
+        }
+        let mut sources = BTreeSet::new();
+        for source in &self.provider_evidence {
+            source.evidence.validate()?;
+            let fact = attempt.ok_or(WorkError::Invalid)?;
+            if source.attempt != fact.id
+                || source.node != node.node
+                || source.evidence.provider != grant.provider
+                || source.evidence.model != grant.model
+                || !sources.insert(source.id)
+                || artifacts.contains(&source.id)
+            {
+                return Err(WorkError::Invalid);
+            }
+        }
+        self.validate_status(complete, running)
     }
 }
 
@@ -1029,6 +1404,18 @@ pub enum WorkRuntimeIntent {
     AcknowledgeInterruption {
         execution: WorkExecutionId,
     },
+    /// Start the routine agent loop on the objective. Mints the single-step
+    /// plan and the execution in one transaction; the grant is the approval.
+    BeginAgent {
+        grant: WorkAgentGrantV1,
+        limits: WorkExecutionLimits,
+    },
+    /// Answer a question the running agent asked; allowed while it runs.
+    AnswerStep {
+        execution: WorkExecutionId,
+        step: WorkStepId,
+        answer: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -1064,6 +1451,25 @@ pub enum WorkRuntimeUpdate {
     },
     FinishCancellation {
         execution: WorkExecutionId,
+    },
+    /// Admit one agent step; a turn-local step may already be settled and
+    /// carry its artifacts.
+    BeginStep {
+        execution: WorkExecutionId,
+        attempt: WorkAttemptId,
+        step: WorkStepFact,
+        artifacts: Vec<WorkArtifactV1>,
+        evidence: Option<Box<WorkProviderSearchRecordV1>>,
+    },
+    SettleStep {
+        execution: WorkExecutionId,
+        attempt: WorkAttemptId,
+        step: WorkStepId,
+        status: WorkStepStatus,
+        usage: Option<WorkUsage>,
+        artifacts: Vec<WorkArtifactV1>,
+        evidence: Option<Box<WorkProviderSearchRecordV1>>,
+        note: Option<String>,
     },
 }
 

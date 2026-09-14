@@ -86,6 +86,10 @@ durable_id!(
 durable_id!(WorkAttemptId, "Exact durable worker attempt identity.");
 durable_id!(WorkArtifactId, "Immutable semantic artifact identity.");
 durable_id!(
+    WorkStepId,
+    "One admitted agent operation inside an execution."
+);
+durable_id!(
     WorkEnvironmentId,
     "Persistent working environment, independent of objective execution."
 );

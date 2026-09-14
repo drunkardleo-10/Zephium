@@ -94,6 +94,12 @@ pub enum WorkOperationV1 {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context: Option<context::WorkContextSelectionV1>,
     },
+    /// The routine agent loop on the objective; the command carries the grant.
+    Run {
+        command: WorkCommandV1,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<context::WorkContextSelectionV1>,
+    },
     Plan {
         request: WorkPlanRequestV1,
     },
@@ -114,7 +120,7 @@ pub enum WorkOperationV1 {
 impl WorkOperationV1 {
     pub fn work(&self) -> WorkId {
         match self {
-            Self::ReadPublic { command, .. } => command.work,
+            Self::ReadPublic { command, .. } | Self::Run { command, .. } => command.work,
             Self::Plan { request } | Self::PreparePlan { request } => request.work,
             Self::Prepare { request } => request.work,
             Self::PrepareAccount { request } => request.work,
@@ -418,10 +424,17 @@ impl WorkResponseV1 {
                 receipt,
                 replayed,
             },
-            Ok(port::WorkReply::RuntimeCommand {
-                projection,
-                receipt,
-            }) => WorkReplyV1::ExecutionApplied {
+            Ok(
+                port::WorkReply::RuntimeCommand {
+                    projection,
+                    receipt,
+                }
+                | port::WorkReply::AgentAdmitted {
+                    projection,
+                    receipt,
+                    ..
+                },
+            ) => WorkReplyV1::ExecutionApplied {
                 projection,
                 receipt,
             },
@@ -507,6 +520,7 @@ pub struct WorkActivityResponseV1 {
 pub enum WorkActivityV1 {
     Planning,
     Delegating,
+    Searching,
     Reading,
     Comparing,
     ProducingArtifact,

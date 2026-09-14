@@ -327,7 +327,7 @@ impl WorkExecutionService {
             .find(|e| e.id == execution)
             .ok_or(WorkError::NotFound)?;
         if fact.status != WorkExecutionStatus::Approved
-            || fact.authorization == WorkExecutionAuthorization::UserDirectedPublicRead
+            || fact.authorization != WorkExecutionAuthorization::ReviewedPlan
         {
             return Err(WorkError::Conflict);
         }
@@ -475,6 +475,7 @@ where
         }
         WorkCapability::Coordinate { .. }
         | WorkCapability::CoordinatePublicDiscovery { .. }
-        | WorkCapability::CoordinatePublicResearch { .. } => Err(WorkError::Invalid),
+        | WorkCapability::CoordinatePublicResearch { .. }
+        | WorkCapability::Agent { .. } => Err(WorkError::Invalid),
     }
 }

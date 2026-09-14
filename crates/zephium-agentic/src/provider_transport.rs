@@ -15,6 +15,7 @@
 )]
 
 /// Bounded objective/context planning over the shared fixed-endpoint transport.
+pub mod agent;
 pub mod planning;
 mod rig;
 /// Bounded non-reasoning provider-native public search.

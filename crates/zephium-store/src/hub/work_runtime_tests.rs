@@ -768,3 +768,299 @@ fn takeover_persists_its_reason_and_success_cannot_carry_one() {
         Some(WorkInterventionKindV1::HumanTakeover)
     );
 }
+
+#[test]
+fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
+    use zephium_core::work::search::*;
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&session()).unwrap();
+    let initial = create(&mut hub);
+    let grant = WorkAgentGrantV1 {
+        provider: WorkSearchProvider::OpenAi,
+        model: PUBLIC_SEARCH_MODEL.into(),
+        max_turns: 8,
+        max_steps: 24,
+        browse_hops: 4,
+    };
+    let limits = WorkExecutionLimits {
+        model_tokens: 600_000,
+        cost_micro_usd: 1_000_000,
+        operations: 64,
+        timeout_seconds: 1200,
+        max_workers: 2,
+    };
+    let begin = |hub: &mut Hub, command: u128, expected| {
+        hub.work_document(
+            initial.profile,
+            WorkRequest::RuntimeCommand {
+                id: initial.id,
+                expected,
+                command: command.into(),
+                intent: WorkRuntimeIntent::BeginAgent {
+                    grant: grant.clone(),
+                    limits,
+                },
+            },
+        )
+    };
+    let WorkReply::AgentAdmitted {
+        projection,
+        receipt,
+        replayed: false,
+    } = begin(&mut hub, 100, initial.revision).unwrap()
+    else {
+        panic!()
+    };
+    let execution = receipt.execution;
+    let fact = &projection.executions[0];
+    assert_eq!(
+        fact.authorization,
+        WorkExecutionAuthorization::UserDirectedAgent
+    );
+    assert!(fact.is_agent());
+    assert_eq!(projection.work.plan.as_ref().unwrap().draft.nodes.len(), 1);
+    assert!(matches!(
+        begin(&mut hub, 100, initial.revision).unwrap(),
+        WorkReply::AgentAdmitted { replayed: true, .. }
+    ));
+    assert!(matches!(
+        begin(&mut hub, 101, projection.work.revision),
+        Err(WorkError::Conflict)
+    ));
+    let node = projection.work.plan.as_ref().unwrap().draft.nodes[0].id;
+    let attempt = WorkAttemptId::from(500);
+    let update = |hub: &mut Hub, update| {
+        let state = read_runtime(hub, &initial);
+        hub.work_document(
+            initial.profile,
+            WorkRequest::RuntimeUpdate {
+                id: initial.id,
+                expected: state.work.revision,
+                update,
+            },
+        )
+    };
+    let step = |id: u128, turn, kind, status| WorkStepFact {
+        id: id.into(),
+        turn,
+        kind,
+        status,
+        usage: None,
+        artifacts: vec![],
+        evidence: None,
+        note: None,
+    };
+    // Steps need a live attempt.
+    assert!(update(
+        &mut hub,
+        WorkRuntimeUpdate::BeginStep {
+            execution,
+            attempt,
+            step: step(1, 1, WorkStepKindV1::Turn, WorkStepStatus::Succeeded),
+            artifacts: vec![],
+            evidence: None,
+        }
+    )
+    .is_err());
+    update(
+        &mut hub,
+        WorkRuntimeUpdate::Begin {
+            execution,
+            attempt,
+            node,
+        },
+    )
+    .unwrap();
+    let usage = WorkUsage {
+        model_tokens: 1200,
+        cost_micro_usd: 300,
+        operations: 1,
+        accounting: WorkUsageAccounting::Exact,
+    };
+    let mut turn = step(1, 1, WorkStepKindV1::Turn, WorkStepStatus::Succeeded);
+    turn.usage = Some(usage);
+    turn.note = Some("Searching for options.".into());
+    update(
+        &mut hub,
+        WorkRuntimeUpdate::BeginStep {
+            execution,
+            attempt,
+            step: turn,
+            artifacts: vec![],
+            evidence: None,
+        },
+    )
+    .unwrap();
+    update(
+        &mut hub,
+        WorkRuntimeUpdate::BeginStep {
+            execution,
+            attempt,
+            step: step(
+                2,
+                1,
+                WorkStepKindV1::Search {
+                    query: "canvas libraries".into(),
+                },
+                WorkStepStatus::Running,
+            ),
+            artifacts: vec![],
+            evidence: None,
+        },
+    )
+    .unwrap();
+    let record = WorkProviderSearchRecordV1 {
+        id: WorkArtifactId::from(40),
+        node,
+        attempt,
+        evidence: WorkProviderSearchEvidenceV1 {
+            version: 1,
+            provider: WorkSearchProvider::OpenAi,
+            model: PUBLIC_SEARCH_MODEL.into(),
+            response_model: PUBLIC_SEARCH_MODEL.into(),
+            response_id: "resp_1".into(),
+            search_call_id: "ws_1".into(),
+            answer: "Svelte Flow is a canvas library".into(),
+            citations: vec![WorkProviderSearchCitation {
+                url: "https://svelteflow.dev".into(),
+                title: "Svelte Flow".into(),
+                start_index: 0,
+                end_index: 11,
+            }],
+            actual_input_tokens: 1000,
+            actual_output_tokens: 200,
+        },
+    };
+    let sources = artifact::WorkArtifactV1 {
+        version: 1,
+        id: WorkArtifactId::from(41),
+        execution,
+        node,
+        attempt,
+        output: "Result".into(),
+        title: "Sources".into(),
+        data: artifact::WorkArtifactDataV1::EvidenceCollection {
+            summary: "Svelte Flow is a canvas library".into(),
+            subjects: vec![],
+            entries: vec![],
+        },
+        evidence: vec![artifact::WorkEvidenceLink {
+            extraction_id: record.id,
+            source_id: 1,
+        }],
+        review: WorkOutputReview::SourceMappedNeedsReview,
+        presentation: artifact::WorkArtifactPresentationV1::Automatic,
+    };
+    // A settled search publishes its sources and record atomically.
+    assert!(update(
+        &mut hub,
+        WorkRuntimeUpdate::SettleStep {
+            execution,
+            attempt,
+            step: 2.into(),
+            status: WorkStepStatus::Succeeded,
+            usage: Some(usage),
+            artifacts: vec![sources.clone()],
+            evidence: None,
+            note: None,
+        }
+    )
+    .is_err());
+    update(
+        &mut hub,
+        WorkRuntimeUpdate::SettleStep {
+            execution,
+            attempt,
+            step: 2.into(),
+            status: WorkStepStatus::Succeeded,
+            usage: Some(usage),
+            artifacts: vec![sources],
+            evidence: Some(Box::new(record)),
+            note: Some("Found 1 source".into()),
+        },
+    )
+    .unwrap();
+    let state = read_runtime(&mut hub, &initial);
+    assert_eq!(state.executions[0].artifacts.len(), 1);
+    assert_eq!(state.executions[0].steps[1].artifacts.len(), 1);
+    assert_eq!(state.executions[0].status, WorkExecutionStatus::Running);
+    // Questions are answered while the attempt runs, exactly once.
+    update(
+        &mut hub,
+        WorkRuntimeUpdate::BeginStep {
+            execution,
+            attempt,
+            step: step(
+                3,
+                2,
+                WorkStepKindV1::Ask {
+                    prompt: "Which budget?".into(),
+                    options: vec!["Low".into(), "High".into()],
+                    answer: None,
+                },
+                WorkStepStatus::Running,
+            ),
+            artifacts: vec![],
+            evidence: None,
+        },
+    )
+    .unwrap();
+    let answer = |hub: &mut Hub, command: u128| {
+        let state = read_runtime(hub, &initial);
+        hub.work_document(
+            initial.profile,
+            WorkRequest::RuntimeCommand {
+                id: initial.id,
+                expected: state.work.revision,
+                command: command.into(),
+                intent: WorkRuntimeIntent::AnswerStep {
+                    execution,
+                    step: 3.into(),
+                    answer: "Low".into(),
+                },
+            },
+        )
+    };
+    answer(&mut hub, 200).unwrap();
+    assert!(matches!(answer(&mut hub, 201), Err(WorkError::Conflict)));
+    let state = read_runtime(&mut hub, &initial);
+    assert!(matches!(
+        &state.executions[0].steps[2].kind,
+        WorkStepKindV1::Ask { answer: Some(answer), .. } if answer == "Low"
+    ));
+    // Success needs the Finish step first.
+    let settle = |hub: &mut Hub, status| {
+        let state = read_runtime(hub, &initial);
+        hub.work_document(
+            initial.profile,
+            WorkRequest::RuntimeUpdate {
+                id: initial.id,
+                expected: state.work.revision,
+                update: WorkRuntimeUpdate::Settle {
+                    execution,
+                    attempt,
+                    status,
+                    usage: Some(usage),
+                    artifacts: vec![],
+                    intervention: None,
+                },
+            },
+        )
+    };
+    assert!(settle(&mut hub, WorkAttemptStatus::Succeeded).is_err());
+    update(
+        &mut hub,
+        WorkRuntimeUpdate::BeginStep {
+            execution,
+            attempt,
+            step: step(4, 3, WorkStepKindV1::Finish, WorkStepStatus::Succeeded),
+            artifacts: vec![],
+            evidence: None,
+        },
+    )
+    .unwrap();
+    settle(&mut hub, WorkAttemptStatus::Succeeded).unwrap();
+    let state = read_runtime(&mut hub, &initial);
+    assert_eq!(state.executions[0].status, WorkExecutionStatus::NeedsReview);
+    assert_eq!(state.executions[0].steps.len(), 4);
+}

@@ -62,7 +62,10 @@ impl WorkContextAdmission {
         // Decisions are durable user context for reviewed work. They never ride
         // a public search query.
         let mut implicit = Vec::new();
-        if purpose == WorkContextPurpose::Planning {
+        if matches!(
+            purpose,
+            WorkContextPurpose::Planning | WorkContextPurpose::Agent
+        ) {
             let mut decisions: Vec<_> = environment.decisions.iter().collect();
             decisions.sort_by_key(|decision| decision.element);
             for decision in decisions {
@@ -313,8 +316,15 @@ impl WorkContextAdmission {
             .into_iter()
             .find(|fact| fact.id == execution)
             .ok_or(WorkError::NotFound)?;
-        let visibility = if fact.authorization == WorkExecutionAuthorization::UserDirectedPublicRead
-            && fact.spec.context.is_none()
+        let visibility = if matches!(
+            fact.authorization,
+            WorkExecutionAuthorization::UserDirectedPublicRead
+                | WorkExecutionAuthorization::UserDirectedAgent
+        ) && fact
+            .spec
+            .context
+            .as_ref()
+            .is_none_or(|context| !context.requires_review())
         {
             WorkContextVisibility::Public
         } else {

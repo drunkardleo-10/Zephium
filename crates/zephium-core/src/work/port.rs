@@ -111,17 +111,64 @@ impl WorkRequest {
             } => search::validate_direct_public_read(scope, *limits),
             Self::RuntimeCommandDisclosed {
                 intent, context, ..
-            } => {
-                let runtime::WorkRuntimeIntent::ReadPublic { scope, limits } = intent else {
-                    return Err(WorkError::Invalid);
-                };
-                if context.purpose != context::WorkContextPurpose::PublicRead
-                    || context.requires_review()
-                {
-                    return Err(WorkError::Invalid);
+            } => match intent {
+                runtime::WorkRuntimeIntent::ReadPublic { scope, limits } => {
+                    if context.purpose != context::WorkContextPurpose::PublicRead
+                        || context.requires_review()
+                    {
+                        return Err(WorkError::Invalid);
+                    }
+                    context.validate()?;
+                    search::validate_direct_public_read(scope, *limits)
                 }
-                context.validate()?;
-                search::validate_direct_public_read(scope, *limits)
+                runtime::WorkRuntimeIntent::BeginAgent { grant, limits } => {
+                    if context.purpose != context::WorkContextPurpose::Agent {
+                        return Err(WorkError::Invalid);
+                    }
+                    context.validate()?;
+                    grant.validate()?;
+                    limits.validate()
+                }
+                _ => Err(WorkError::Invalid),
+            },
+            Self::RuntimeCommand {
+                intent: runtime::WorkRuntimeIntent::BeginAgent { grant, limits },
+                ..
+            } => {
+                grant.validate()?;
+                limits.validate()
+            }
+            Self::RuntimeCommand {
+                intent: runtime::WorkRuntimeIntent::AnswerStep { answer, .. },
+                ..
+            } => validate_text(answer, MAX_WORK_TEXT_BYTES),
+            Self::RuntimeUpdate {
+                update:
+                    runtime::WorkRuntimeUpdate::BeginStep {
+                        step,
+                        artifacts,
+                        evidence,
+                        ..
+                    },
+                ..
+            } => {
+                step.validate()?;
+                validate_step_payload(artifacts, evidence.as_deref())
+            }
+            Self::RuntimeUpdate {
+                update:
+                    runtime::WorkRuntimeUpdate::SettleStep {
+                        artifacts,
+                        evidence,
+                        note,
+                        ..
+                    },
+                ..
+            } => {
+                if let Some(note) = note {
+                    validate_text(note, runtime::MAX_WORK_STEP_NOTE_BYTES)?;
+                }
+                validate_step_payload(artifacts, evidence.as_deref())
             }
             Self::RuntimeCommand {
                 intent: runtime::WorkRuntimeIntent::Approve { spec },
@@ -149,6 +196,22 @@ impl WorkRequest {
             _ => Ok(()),
         }
     }
+}
+
+fn validate_step_payload(
+    artifacts: &[artifact::WorkArtifactV1],
+    evidence: Option<&runtime::WorkProviderSearchRecordV1>,
+) -> Result<(), WorkError> {
+    if artifacts.len() > artifact::MAX_WORK_ARTIFACTS {
+        return Err(WorkError::Capacity);
+    }
+    for artifact in artifacts {
+        artifact.validate()?;
+    }
+    if let Some(record) = evidence {
+        record.evidence.validate()?;
+    }
+    Ok(())
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -188,6 +251,13 @@ pub enum WorkReply {
     },
     Runtime(Box<runtime::WorkRuntimeProjection>),
     PublicReadAdmitted {
+        projection: Box<runtime::WorkRuntimeProjection>,
+        receipt: runtime::WorkCommandReceipt,
+        replayed: bool,
+    },
+    /// The agent execution exists and is approved; only a fresh (not replayed)
+    /// admission may begin its attempt.
+    AgentAdmitted {
         projection: Box<runtime::WorkRuntimeProjection>,
         receipt: runtime::WorkCommandReceipt,
         replayed: bool,
