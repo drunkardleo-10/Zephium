@@ -1,5 +1,6 @@
 import { commands } from "$shared/ipc/bindings";
 import type {
+  WorkAccountEffectV1,
   WorkContextSelectionV1,
   WorkEnvironmentCall,
   WorkEnvironmentIntent,
@@ -39,7 +40,11 @@ export class WorkEnvironmentSession {
     research: boolean;
     attached: boolean;
     context: WorkContextSelectionV1 | null;
+    /** The attached tab whose signed-in session the request should use. */
+    account?: { element: string; effect: WorkAccountEffectV1 } | null;
   } | null>(null);
+  /** A tab chosen for signed-in work; cleared when the request is sent. */
+  accountScope = $state.raw<{ element: string; title: string; origin: string } | null>(null);
   objectiveToAttach = $state<string | null>(null);
   viewDraft = $state.raw<{ id: string; expected: string; view: WorkEnvironmentView } | null>(null);
   private active = false;

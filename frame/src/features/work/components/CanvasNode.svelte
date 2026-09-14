@@ -62,6 +62,10 @@
         type="button"
         onclick={() => action(id, "ask")}>{m.work_env_ask()}</button
       >{/if}
+    {#if type === "tab" && !data.unavailable && data.detail}<button
+        type="button"
+        onclick={() => action(id, "account")}>{m.work_account_ask()}</button
+      >{/if}
     {#if type !== "responsibility" && type !== "agent" && !data.actionLabel}<span class="separator"
       ></span><button type="button" class="danger" onclick={() => action(id, "remove")}>
         <Icon icon={MinusSignIcon} size={14} />{m.work_env_remove()}

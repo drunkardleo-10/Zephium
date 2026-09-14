@@ -6,8 +6,16 @@
   import WorkExecutionReview from "./WorkExecutionReview.svelte";
   import { currentActivity } from "$domain/work";
   import * as m from "$shared/i18n/messages";
-  let { session, ondetails }: { session: WorkSession; ondetails: (execution?: string) => void } =
-    $props();
+  let {
+    session,
+    ondetails,
+    onopenpage,
+  }: {
+    session: WorkSession;
+    ondetails: (execution?: string) => void;
+    /** Presents the signed-in page for sign-in handoff or takeover. */
+    onopenpage?: (tab: string) => void;
+  } = $props();
   const id = $props.id();
   const state = $derived(session.projection);
   const work = $derived(state?.work);
@@ -71,6 +79,48 @@
       !currentApproval &&
       !preparationFailure(preparation?.state),
   );
+  const accountScope = $derived.by(() => {
+    for (const node of execution?.spec.nodes ?? [])
+      if (node.capability.kind === "account_read" || node.capability.kind === "account_update")
+        return node.capability.scope;
+    return null;
+  });
+  const intervention = $derived(execution?.intervention ?? null);
+  const interventionLabel = $derived.by(() => {
+    if (!intervention) return "";
+    const origin = intervention.origin ?? accountScope?.origin ?? "";
+    switch (intervention.kind) {
+      case "sign_in":
+        return m.work_intervention_sign_in({ origin });
+      case "challenge":
+        return m.work_intervention_challenge({ origin });
+      case "permission":
+        return m.work_intervention_permission();
+      case "unsupported_interaction":
+        return m.work_intervention_unsupported_interaction();
+      case "review":
+        return m.work_intervention_review();
+      case "human_takeover":
+        return m.work_intervention_human_takeover();
+    }
+  });
+  const rerunnable = $derived(
+    !!execution &&
+      !!work &&
+      !!intervention &&
+      !["running", "cancel_requested", "approved"].includes(execution.status) &&
+      work.status === "plan_ready" &&
+      work.plan?.revision === execution.spec.plan_revision,
+  );
+  async function takeOver() {
+    if (!execution || !accountScope || session.pending) return;
+    const stopped = await session.execute({
+      kind: "cancel",
+      execution: execution.id,
+      intervention: { kind: "human_takeover", origin: accountScope.origin },
+    });
+    if (stopped) onopenpage?.(accountScope.tab);
+  }
   const executionLabel = $derived(
     interrupted
       ? m.work_interrupted()
@@ -170,13 +220,42 @@
         disabled={blocked || session.hasDrafts}
         onclick={() => void plan()}>{m.work_env_continue()}</Button
       >{/if}
+    {#if intervention && execution && !interrupted}<div class="intervention" role="status">
+        <strong>{m.work_intervention_needs_you()}</strong>
+        <p>{interventionLabel}</p>
+        {#if intervention.kind !== "human_takeover"}<p>
+            {m.work_intervention_continue_hint()}
+          </p>{/if}
+        <div class="options">
+          {#if accountScope && onopenpage}<Button
+              size="compact"
+              onclick={() => onopenpage?.(accountScope.tab)}
+              >{m.work_intervention_open_page()}</Button
+            >{/if}
+          {#if rerunnable}<Button
+              size="compact"
+              disabled={blocked || preferences.value("ai.enabled") === "false"}
+              onclick={() => void session.execute({ kind: "approve", spec: execution.spec })}
+              >{m.work_intervention_run_again()}</Button
+            >{/if}
+        </div>
+      </div>{/if}
     {#if !settled}<WorkExecutionReview {session} compact />{/if}
-    {#if execution && !interrupted && ["approved", "running"].includes(execution.status)}<Button
-        size="compact"
-        disabled={!!session.pending}
-        onclick={() => void session.execute({ kind: "cancel", execution: execution.id })}
-        >{m.work_cancel()}</Button
-      >{/if}
+    {#if execution && !interrupted && ["approved", "running"].includes(execution.status)}<div
+        class="options"
+      >
+        {#if accountScope && execution.status === "running" && onopenpage}<Button
+            size="compact"
+            disabled={!!session.pending}
+            onclick={() => void takeOver()}>{m.work_take_over()}</Button
+          >{/if}
+        <Button
+          size="compact"
+          disabled={!!session.pending}
+          onclick={() => void session.execute({ kind: "cancel", execution: execution.id })}
+          >{m.work_cancel()}</Button
+        >
+      </div>{/if}
     {#if failure || session.failure}<p role="status">
         {m.work_request_failed({ reason: session.failure ?? failure ?? "" })}
       </p>{/if}
@@ -242,6 +321,19 @@
   form {
     display: grid;
     gap: 8px;
+  }
+
+  .intervention {
+    display: grid;
+    gap: 6px;
+    padding: 10px 12px;
+    border-radius: var(--radius-control);
+    background: var(--color-fill);
+  }
+
+  .intervention strong {
+    font-size: var(--text-caption);
+    color: var(--color-warning);
   }
 
   .options {

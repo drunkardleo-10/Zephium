@@ -6,6 +6,7 @@
   import { resourceSession, type ResourceSession } from "$domain/resources";
   import type {
     TabView,
+    WorkAccountEffectV1,
     WorkEnvironmentSnapshot,
     WorkExecutionFact,
     WorkRuntimeProjection,
@@ -34,6 +35,7 @@
   import TasksCapsule from "./chrome/TasksCapsule.svelte";
   import Composer from "./composer/Composer.svelte";
   import ContextManifest from "./composer/ContextManifest.svelte";
+  import AccountScopeChip from "./composer/AccountScopeChip.svelte";
   import { contextSelection } from "../lib/context-selection";
   import WorkTabPicker from "./WorkTabPicker.svelte";
   import WorkMediaPicker from "./WorkMediaPicker.svelte";
@@ -113,6 +115,7 @@
   let selectionCount = $state(0);
   let selectedIds = $state.raw<string[]>([]);
   let contextReview = $state(false);
+  let accountEffect = $state.raw<WorkAccountEffectV1>({ kind: "read" });
   const contextSel = $derived(
     contextSelection(session.snapshot, selectedIds, tabs, {
       notes: context.notes,
@@ -280,7 +283,7 @@
   let workQuery = $state("");
   let areaTitle = $state("");
   let objectivePending = $state(false);
-  let composerFailure = $state<"limit" | "changed" | null>(null);
+  let composerFailure = $state<"limit" | "changed" | "account" | null>(null);
   let contextRouted = $state(false);
   let composerElement = $state<HTMLElement>();
   let composerHeight = $state(0);
@@ -672,16 +675,28 @@
     if (!session.composer.trim() || objectivePending || busy) return;
     const current = workSession(session.profile);
     if (!current) return;
+    const account = session.accountScope;
+    if (
+      account &&
+      accountEffect.kind === "update" &&
+      (!accountEffect.update.from.trim() ||
+        !accountEffect.update.to.trim() ||
+        accountEffect.update.from === accountEffect.update.to)
+    ) {
+      composerFailure = "account";
+      return;
+    }
     const submission = session.objectiveSubmission ?? {
       objective: session.composer.trim(),
       command: commandId(),
       // Private context never rides a public search; Rust refuses it, and the
       // reviewed plan shows the same manifest before anything is sent.
-      research: session.publicResearch && !(contextSel && contextReview),
+      research: !account && session.publicResearch && !(contextSel && contextReview),
       attached: false,
-      context: contextSel,
+      context: account ? null : contextSel,
+      account: account ? { element: account.element, effect: accountEffect } : null,
     };
-    contextRouted = !!(session.publicResearch && contextSel && contextReview);
+    contextRouted = !!(!account && session.publicResearch && contextSel && contextReview);
     composerFailure =
       submission.research && !publicResearchQueryValid(submission.objective) ? "limit" : null;
     if (composerFailure) return;
@@ -736,7 +751,22 @@
       session.composer = "";
       session.objectiveToAttach = null;
       session.objectiveSubmission = null;
-      if (submission.research) await current.readPublic(submission.context);
+      session.accountScope = null;
+      accountEffect = { kind: "read" };
+      const environmentId = session.snapshot?.id;
+      if (submission.account && environmentId)
+        await current.operations.begin({
+          kind: "prepare_account",
+          request: {
+            version: 1,
+            work: objectiveId,
+            expected_revision: basis.revision,
+            environment: environmentId,
+            element: submission.account.element,
+            effect: submission.account.effect,
+          },
+        });
+      else if (submission.research) await current.readPublic(submission.context);
       else
         await current.operations.begin({
           kind: "plan",
@@ -1145,13 +1175,22 @@
             inspectCurrentPlan = !execution;
             objectiveOpen = true;
           }}
+          onopenpage={(tab) => {
+            if (!tabs.some((candidate) => candidate.id === tab)) return;
+            const origin = snapshot?.elements.find(
+              (element) => element.reference.kind === "browser" && element.reference.tab === tab,
+            );
+            openPane({ kind: "tab", id: tab }, origin?.id ?? null);
+          }}
         />{/snippet}</LazyView
     >
   {/if}
   {#if composerFailure}<p class="composer-alert" role="alert">
       {composerFailure === "limit"
         ? m.work_env_public_query_limit()
-        : m.work_env_public_query_changed()}
+        : composerFailure === "account"
+          ? m.work_account_update_invalid()
+          : m.work_env_public_query_changed()}
     </p>{/if}
   {#if contextRouted && (objectivePending || session.objectiveSubmission)}<p
       class="composer-alert"
@@ -1164,7 +1203,19 @@
     </p>{/if}
 {/snippet}
 {#snippet composerContext()}
-  {#if contextSel}
+  {#if session.accountScope}
+    <AccountScopeChip
+      title={session.accountScope.title}
+      origin={session.accountScope.origin}
+      bind:effect={accountEffect}
+      disabled={objectivePending || !!session.objectiveSubmission}
+      onremove={() => {
+        session.accountScope = null;
+        accountEffect = { kind: "read" };
+        composerFailure = null;
+      }}
+    />
+  {:else if contextSel}
     <ContextManifest
       profile={session.profile}
       selection={contextSel}
@@ -1174,20 +1225,26 @@
   {/if}
 {/snippet}
 {#snippet composerFooter()}
-  <button
-    type="button"
-    class="mode"
-    class:on={session.publicResearch}
-    aria-pressed={session.publicResearch}
-    disabled={objectivePending || !!session.objectiveSubmission}
-    onclick={() => {
-      session.publicResearch = !session.publicResearch;
-      composerFailure = null;
-    }}>{m.work_env_public_research()}</button
-  >
-  <span class="disclosure"
-    >{session.publicResearch ? m.work_env_public_disclosure() : m.work_planning_disclosure()}</span
-  >
+  {#if session.accountScope}
+    <span class="disclosure">{m.work_account_disclosure()}</span>
+  {:else}
+    <button
+      type="button"
+      class="mode"
+      class:on={session.publicResearch}
+      aria-pressed={session.publicResearch}
+      disabled={objectivePending || !!session.objectiveSubmission}
+      onclick={() => {
+        session.publicResearch = !session.publicResearch;
+        composerFailure = null;
+      }}>{m.work_env_public_research()}</button
+    >
+    <span class="disclosure"
+      >{session.publicResearch
+        ? m.work_env_public_disclosure()
+        : m.work_planning_disclosure()}</span
+    >
+  {/if}
 {/snippet}
 
 <div
@@ -1240,6 +1297,16 @@
                 }
                 if (action === "ask") {
                   composerElement?.querySelector<HTMLElement>("textarea")?.focus();
+                  return;
+                }
+                if (action === "account") {
+                  const item = items.find((item) => item.id === id);
+                  if (item?.type === "tab" && !item.unavailable && item.detail) {
+                    session.accountScope = { element: id, title: item.title, origin: item.detail };
+                    accountEffect = { kind: "read" };
+                    composerFailure = null;
+                    composerElement?.querySelector<HTMLElement>("textarea")?.focus();
+                  }
                   return;
                 }
                 const reference = results.references.get(id);
@@ -1537,7 +1604,7 @@
         disabled={objectivePending || !!session.objectiveSubmission}
         {busy}
         above={composerAbove}
-        context={contextSel ? composerContext : undefined}
+        context={contextSel || session.accountScope ? composerContext : undefined}
         footer={composerFooter}
         onsubmit={() => void createObjective()}
       />

@@ -146,19 +146,19 @@
     "css": 0
   },
   "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
-    "js": 565000,
-    "css": 116000,
-    "description": "Measured 540883 JS and 111429 CSS bytes with the floating browser pane: pane frame, operation settlement, layout store, icon buttons. Media cards and the media tool add to the shared Work graph and message catalog."
+    "js": 574000,
+    "css": 119000,
+    "description": "Account-scoped approvals, the signed-in composer chip, and intervention controls add to the Work graph and message catalog."
   },
   "lazy:features/work/components/WorkObjectiveInspector.svelte": {
-    "js": 156000,
+    "js": 162000,
     "css": 19500,
-    "description": "Measured 150473 JS bytes with the disclosed-context manifest on plan revisions and approval specs; matrix/findings/source renderers retained. Note link marks and the typed document view add to the shared graph."
+    "description": "Account-scoped approvals, the signed-in composer chip, and intervention controls add to the Work graph and message catalog."
   },
   "lazy:features/work/components/WorkInteraction.svelte": {
-    "js": 123000,
-    "css": 7000,
-    "description": "Measured 119472 JS and 6728 CSS bytes; shared Work chunk grew with context-selection tokens and manifest rendering."
+    "js": 131000,
+    "css": 7600,
+    "description": "Account-scoped approvals, the signed-in composer chip, and intervention controls add to the Work graph and message catalog."
   },
   "lazy:features/work/components/WorkResultInspector.svelte": {
     "js": 74000,

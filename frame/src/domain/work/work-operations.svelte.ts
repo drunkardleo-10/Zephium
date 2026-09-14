@@ -40,9 +40,10 @@ export class WorkOperations {
     ++this.generation;
     clearTimeout(this.timer);
   }
-  latest(work: string, kind: WorkOperationV1["kind"]) {
+  latest(work: string, kind: WorkOperationV1["kind"] | readonly WorkOperationV1["kind"][]) {
+    const kinds = typeof kind === "string" ? [kind] : kind;
     return [...this.jobs.values()].findLast(
-      (job) => operationBasis(job.input).work === work && job.input.kind === kind,
+      (job) => operationBasis(job.input).work === work && kinds.includes(job.input.kind),
     );
   }
   busy(work: string) {
@@ -109,7 +110,7 @@ export class WorkOperations {
             ? state.response.version === 1 &&
               state.response.profile === this.profile &&
               (state.response.reply.kind === "error" ||
-                (job.input.kind === "prepare" &&
+                (["prepare", "prepare_account"].includes(job.input.kind) &&
                   state.response.reply.kind === "approval_draft" &&
                   state.response.reply.work === work &&
                   state.response.reply.expected_revision ===

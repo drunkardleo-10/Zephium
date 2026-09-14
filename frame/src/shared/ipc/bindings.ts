@@ -1222,6 +1222,64 @@ export type UiInfo = {
 	material: Material,
 };
 
+/**
+ *  The user names the tab, the effect, and (for updates) exact values. Rust
+ *  resolves the page, mints the account identity, and returns the draft the
+ *  user approves; approval is the account attestation.
+ */
+export type WorkAccountApprovalRequestV1 = WorkAccountApprovalRequestV1_Serialize | WorkAccountApprovalRequestV1_Deserialize;
+
+/**
+ *  The user names the tab, the effect, and (for updates) exact values. Rust
+ *  resolves the page, mints the account identity, and returns the draft the
+ *  user approves; approval is the account attestation.
+ */
+export type WorkAccountApprovalRequestV1_Deserialize = {
+	version: number,
+	work: WorkId,
+	expected_revision: WorkRevision,
+	environment: WorkEnvironmentId,
+	/**  The attached browser element on the canvas. */
+	element: WorkElementId,
+	effect: WorkAccountEffectV1_Deserialize,
+};
+
+/**
+ *  The user names the tab, the effect, and (for updates) exact values. Rust
+ *  resolves the page, mints the account identity, and returns the draft the
+ *  user approves; approval is the account attestation.
+ */
+export type WorkAccountApprovalRequestV1_Serialize = {
+	version: number,
+	work: WorkId,
+	expected_revision: WorkRevision,
+	environment: WorkEnvironmentId,
+	/**  The attached browser element on the canvas. */
+	element: WorkElementId,
+	effect: WorkAccountEffectV1_Serialize,
+};
+
+export type WorkAccountEffectV1 = WorkAccountEffectV1_Serialize | WorkAccountEffectV1_Deserialize;
+
+export type WorkAccountEffectV1_Deserialize = ({ kind: "read" }) & { update?: never } | { kind: "update"; update: WorkFieldUpdateV1_Deserialize };
+
+export type WorkAccountEffectV1_Serialize = ({ kind: "read" }) & { update?: never } | { kind: "update"; update: WorkFieldUpdateV1_Serialize };
+
+/**
+ *  A page the user chose from an attached tab. Execution opens it in a
+ *  Work-owned page sharing the profile's cookies; the tab itself is untouched.
+ */
+export type WorkAccountScope = {
+	tab: ItemId,
+	url: string,
+	origin: string,
+	/**
+	 *  Opaque account identity minted by Rust at preparation; the approval
+	 *  binds it to this profile and origin.
+	 */
+	account: string,
+};
+
 export type WorkActivityResponseV1 = {
 	version: number,
 	profile: string,
@@ -1409,25 +1467,67 @@ export type WorkCallV1_Deserialize = ({ kind: "environment"; version: number; re
  */
 export type WorkCallV1_Serialize = ({ kind: "environment"; version: number; request: WorkEnvironmentCall_Serialize }) & { command?: never } | ({ kind: "query"; request: WorkQueryV1 }) & { command?: never; version?: never } | ({ kind: "author"; command: WorkAuthoringCommandV1 }) & { request?: never; version?: never } | ({ kind: "execute"; command: WorkCommandV1_Serialize }) & { request?: never; version?: never };
 
-export type WorkCapability = 
+export type WorkCapability = WorkCapability_Serialize | WorkCapability_Deserialize;
+
+export type WorkCapability_Deserialize = 
 /**  One public provider search, without browser state or attached context. */
-{ kind: "public_search"; scope: WorkPublicSearchScope } | 
+({ kind: "public_search"; scope: WorkPublicSearchScope }) & { max_hops?: never; model?: never; provider?: never; update?: never } | 
 /**
  *  Direct children can search with this explicit model, browse anonymously,
  *  or synthesize. Each child's exact query remains separately approved.
  */
-{ kind: "coordinate_public_research"; provider: WorkSearchProvider; model: string; max_hops: number } | 
+({ kind: "coordinate_public_research"; provider: WorkSearchProvider; model: string; max_hops: number }) & { scope?: never; update?: never } | 
 /**  Anonymous read-only discovery in a fresh per-resource cookie store. */
-{ kind: "public_discovery"; scope: WorkPublicDiscoveryScope } | 
+({ kind: "public_discovery"; scope: WorkPublicDiscoveryScope }) & { max_hops?: never; model?: never; provider?: never; update?: never } | 
 /**  Direct-child scheduling and compact synthesis within public discovery. */
-{ kind: "coordinate_public_discovery"; max_hops: number } | { kind: "public_browse"; scope: WorkBrowseScope } | 
+({ kind: "coordinate_public_discovery"; max_hops: number }) & { model?: never; provider?: never; scope?: never; update?: never } | ({ kind: "public_browse"; scope: WorkBrowseScope }) & { max_hops?: never; model?: never; provider?: never; update?: never } | 
 /**
  *  A primary agent may assign pre-approved children within this envelope
  *  and synthesize their results. This is not a direct browser/action port.
  */
-{ kind: "coordinate"; scope: WorkBrowseScope } | 
+({ kind: "coordinate"; scope: WorkBrowseScope }) & { max_hops?: never; model?: never; provider?: never; update?: never } | 
 /**  Structured handoffs from completed plan dependencies only. */
-{ kind: "synthesize" };
+({ kind: "synthesize" }) & { max_hops?: never; model?: never; provider?: never; scope?: never; update?: never } | 
+/**
+ *  Read one exact page with the profile's own signed-in session. The
+ *  approving user attests the account; Zephium cannot verify it.
+ */
+({ kind: "account_read"; scope: WorkAccountScope }) & { max_hops?: never; model?: never; provider?: never; update?: never } | 
+/**
+ *  One approved field transition on that page, then its restoration,
+ *  each verified from a fresh observation before the next step.
+ */
+({ kind: "account_update"; scope: WorkAccountScope; update: WorkFieldUpdateV1_Deserialize }) & { max_hops?: never; model?: never; provider?: never };
+
+export type WorkCapability_Serialize = 
+/**  One public provider search, without browser state or attached context. */
+({ kind: "public_search"; scope: WorkPublicSearchScope }) & { max_hops?: never; model?: never; provider?: never; update?: never } | 
+/**
+ *  Direct children can search with this explicit model, browse anonymously,
+ *  or synthesize. Each child's exact query remains separately approved.
+ */
+({ kind: "coordinate_public_research"; provider: WorkSearchProvider; model: string; max_hops: number }) & { scope?: never; update?: never } | 
+/**  Anonymous read-only discovery in a fresh per-resource cookie store. */
+({ kind: "public_discovery"; scope: WorkPublicDiscoveryScope }) & { max_hops?: never; model?: never; provider?: never; update?: never } | 
+/**  Direct-child scheduling and compact synthesis within public discovery. */
+({ kind: "coordinate_public_discovery"; max_hops: number }) & { model?: never; provider?: never; scope?: never; update?: never } | ({ kind: "public_browse"; scope: WorkBrowseScope }) & { max_hops?: never; model?: never; provider?: never; update?: never } | 
+/**
+ *  A primary agent may assign pre-approved children within this envelope
+ *  and synthesize their results. This is not a direct browser/action port.
+ */
+({ kind: "coordinate"; scope: WorkBrowseScope }) & { max_hops?: never; model?: never; provider?: never; update?: never } | 
+/**  Structured handoffs from completed plan dependencies only. */
+({ kind: "synthesize" }) & { max_hops?: never; model?: never; provider?: never; scope?: never; update?: never } | 
+/**
+ *  Read one exact page with the profile's own signed-in session. The
+ *  approving user attests the account; Zephium cannot verify it.
+ */
+({ kind: "account_read"; scope: WorkAccountScope }) & { max_hops?: never; model?: never; provider?: never; update?: never } | 
+/**
+ *  One approved field transition on that page, then its restoration,
+ *  each verified from a fresh observation before the next step.
+ */
+({ kind: "account_update"; scope: WorkAccountScope; update: WorkFieldUpdateV1_Serialize }) & { max_hops?: never; model?: never; provider?: never };
 
 export type WorkCell = WorkCell_Serialize | WorkCell_Deserialize;
 
@@ -1849,6 +1949,8 @@ export type WorkExecutionFact_Deserialize = {
 	provider_evidence?: WorkProviderSearchRecordV1[],
 	/**  User edits and decisions never overwrite the original agent output. */
 	user_artifacts?: WorkArtifactUserState_Deserialize[],
+	/**  Why automation stopped for a person. Continuation is a fresh approval. */
+	intervention?: WorkInterventionV1_Deserialize | null,
 };
 
 export type WorkExecutionFact_Serialize = {
@@ -1862,6 +1964,8 @@ export type WorkExecutionFact_Serialize = {
 	provider_evidence: WorkProviderSearchRecordV1[],
 	/**  User edits and decisions never overwrite the original agent output. */
 	user_artifacts: WorkArtifactUserState_Serialize[],
+	/**  Why automation stopped for a person. Continuation is a fresh approval. */
+	intervention?: WorkInterventionV1_Serialize | null,
 };
 
 /** Durable execution identity, never a live admission. */
@@ -1886,7 +1990,7 @@ export type WorkExecutionSpec = WorkExecutionSpec_Serialize | WorkExecutionSpec_
 export type WorkExecutionSpec_Deserialize = {
 	plan_revision: WorkRevision,
 	limits: WorkExecutionLimits,
-	nodes: WorkNodeExecutionSpec[],
+	nodes: WorkNodeExecutionSpec_Deserialize[],
 	/**  Admitted canvas context disclosed to this execution's provider calls. */
 	context?: WorkContextDisclosureV1_Deserialize | null,
 };
@@ -1894,7 +1998,7 @@ export type WorkExecutionSpec_Deserialize = {
 export type WorkExecutionSpec_Serialize = {
 	plan_revision: WorkRevision,
 	limits: WorkExecutionLimits,
-	nodes: WorkNodeExecutionSpec[],
+	nodes: WorkNodeExecutionSpec_Serialize[],
 	/**  Admitted canvas context disclosed to this execution's provider calls. */
 	context?: WorkContextDisclosureV1_Serialize | null,
 };
@@ -1908,6 +2012,22 @@ export type WorkExpectedOutput = {
 };
 
 export type WorkFailureV1 = "invalid" | "capacity" | "conflict" | "not_found" | "profile_unavailable" | "unavailable" | "shutdown" | "outcome_unknown" | "review_required";
+
+export type WorkFieldUpdateV1 = WorkFieldUpdateV1_Serialize | WorkFieldUpdateV1_Deserialize;
+
+export type WorkFieldUpdateV1_Deserialize = {
+	/**  Accessible field name when the page has several candidates. */
+	field?: string | null,
+	from: string,
+	to: string,
+};
+
+export type WorkFieldUpdateV1_Serialize = {
+	/**  Accessible field name when the page has several candidates. */
+	field?: string | null,
+	from: string,
+	to: string,
+};
 
 export type WorkFinding = WorkFinding_Serialize | WorkFinding_Deserialize;
 
@@ -1932,6 +2052,32 @@ export type WorkFinding_Serialize = {
 /** Durable profile-owned Work identity; never an execution capability. */
 export type WorkId = string;
 
+export type WorkInterventionKindV1 = 
+/**  Authentication or account selection needs a person. */
+"sign_in" | 
+/**  A CAPTCHA or equivalent human challenge is present. */
+"challenge" | 
+/**  A permission or operating-system boundary needs a person. */
+"permission" | 
+/**  The page needs an interaction Zephium cannot automate safely. */
+"unsupported_interaction" | 
+/**  The effect or its verification needs the user's review. */
+"review" | 
+/**  The user took the page over; automation was revoked and drained. */
+"human_takeover";
+
+export type WorkInterventionV1 = WorkInterventionV1_Serialize | WorkInterventionV1_Deserialize;
+
+export type WorkInterventionV1_Deserialize = {
+	kind: WorkInterventionKindV1,
+	origin?: string | null,
+};
+
+export type WorkInterventionV1_Serialize = {
+	kind: WorkInterventionKindV1,
+	origin?: string | null,
+};
+
 export type WorkLifecycle = "active" | "archived";
 
 export type WorkMeasurementBasis = WorkMeasurementBasis_Serialize | WorkMeasurementBasis_Deserialize;
@@ -1950,14 +2096,27 @@ export type WorkMeasurementBasis_Serialize = {
 	observed_at?: string | null,
 };
 
-export type WorkNodeExecutionSpec = {
+export type WorkNodeExecutionSpec = WorkNodeExecutionSpec_Serialize | WorkNodeExecutionSpec_Deserialize;
+
+export type WorkNodeExecutionSpec_Deserialize = {
 	node: WorkPlanNodeId,
 	/**
 	 *  A direct delegation edge, independent from data dependencies. Its
 	 *  authority must be contained in its parent's approved capability.
 	 */
 	parent: WorkPlanNodeId | null,
-	capability: WorkCapability,
+	capability: WorkCapability_Deserialize,
+	limits: WorkExecutionLimits,
+};
+
+export type WorkNodeExecutionSpec_Serialize = {
+	node: WorkPlanNodeId,
+	/**
+	 *  A direct delegation edge, independent from data dependencies. Its
+	 *  authority must be contained in its parent's approved capability.
+	 */
+	parent: WorkPlanNodeId | null,
+	capability: WorkCapability_Serialize,
 	limits: WorkExecutionLimits,
 };
 
@@ -2040,7 +2199,9 @@ export type WorkOperationV1 = WorkOperationV1_Serialize | WorkOperationV1_Deseri
  */
 export type WorkOperationV1_Deserialize = ({ kind: "read_public"; command: WorkCommandV1_Deserialize; 
 /**  Selected public canvas objects to accompany the query. */
-context?: WorkContextSelectionV1 | null }) & { request?: never } | ({ kind: "plan"; request: WorkPlanRequestV1_Deserialize }) & { command?: never; context?: never } | ({ kind: "prepare_plan"; request: WorkPlanRequestV1_Deserialize }) & { command?: never; context?: never } | ({ kind: "prepare"; request: WorkApprovalRequestV1 }) & { command?: never; context?: never } | ({ kind: "start"; request: WorkStartRequestV1 }) & { command?: never; context?: never };
+context?: WorkContextSelectionV1 | null }) & { request?: never } | ({ kind: "plan"; request: WorkPlanRequestV1_Deserialize }) & { command?: never; context?: never } | ({ kind: "prepare_plan"; request: WorkPlanRequestV1_Deserialize }) & { command?: never; context?: never } | ({ kind: "prepare"; request: WorkApprovalRequestV1 }) & { command?: never; context?: never } | 
+/**  Approval draft for one signed-in page chosen from an attached tab. */
+({ kind: "prepare_account"; request: WorkAccountApprovalRequestV1_Deserialize }) & { command?: never; context?: never } | ({ kind: "start"; request: WorkStartRequestV1 }) & { command?: never; context?: never };
 
 /**
  *  On-demand operations have an application lifetime independent of a view.
@@ -2048,7 +2209,9 @@ context?: WorkContextSelectionV1 | null }) & { request?: never } | ({ kind: "pla
  */
 export type WorkOperationV1_Serialize = ({ kind: "read_public"; command: WorkCommandV1_Serialize; 
 /**  Selected public canvas objects to accompany the query. */
-context?: WorkContextSelectionV1 | null }) & { request?: never } | ({ kind: "plan"; request: WorkPlanRequestV1_Serialize }) & { command?: never; context?: never } | ({ kind: "prepare_plan"; request: WorkPlanRequestV1_Serialize }) & { command?: never; context?: never } | ({ kind: "prepare"; request: WorkApprovalRequestV1 }) & { command?: never; context?: never } | ({ kind: "start"; request: WorkStartRequestV1 }) & { command?: never; context?: never };
+context?: WorkContextSelectionV1 | null }) & { request?: never } | ({ kind: "plan"; request: WorkPlanRequestV1_Serialize }) & { command?: never; context?: never } | ({ kind: "prepare_plan"; request: WorkPlanRequestV1_Serialize }) & { command?: never; context?: never } | ({ kind: "prepare"; request: WorkApprovalRequestV1 }) & { command?: never; context?: never } | 
+/**  Approval draft for one signed-in page chosen from an attached tab. */
+({ kind: "prepare_account"; request: WorkAccountApprovalRequestV1_Serialize }) & { command?: never; context?: never } | ({ kind: "start"; request: WorkStartRequestV1 }) & { command?: never; context?: never };
 
 /**  Requested output review level, never evidence that a requirement was met. */
 export type WorkOutputReview = "mechanical" | "source_mapped_needs_review" | "user_acceptance";
@@ -2317,17 +2480,27 @@ export type WorkRuntimeIntent = WorkRuntimeIntent_Serialize | WorkRuntimeIntent_
  *  Internal Store grammar. User commands and host-only attempt facts have
  *  separate variants at the application edge; IPC never accepts settlements.
  */
-export type WorkRuntimeIntent_Deserialize = ({ kind: "read_public"; scope: WorkPublicSearchScope; limits: WorkExecutionLimits }) & { artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; spec?: never } | ({ kind: "review_artifact"; execution: WorkExecutionId; artifact: WorkArtifactId; decision: WorkArtifactDecision }) & { data?: never; evidence?: never; limits?: never; scope?: never; spec?: never } | ({ kind: "edit_artifact"; execution: WorkExecutionId; artifact: WorkArtifactId; data: WorkArtifactDataV1_Deserialize; evidence: WorkEvidenceLink[] }) & { decision?: never; limits?: never; scope?: never; spec?: never } | ({ kind: "approve"; spec: WorkExecutionSpec_Deserialize }) & { artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; limits?: never; scope?: never } | ({ kind: "cancel"; execution: WorkExecutionId }) & { artifact?: never; data?: never; decision?: never; evidence?: never; limits?: never; scope?: never; spec?: never } | 
+export type WorkRuntimeIntent_Deserialize = ({ kind: "read_public"; scope: WorkPublicSearchScope; limits: WorkExecutionLimits }) & { artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; intervention?: never; spec?: never } | ({ kind: "review_artifact"; execution: WorkExecutionId; artifact: WorkArtifactId; decision: WorkArtifactDecision }) & { data?: never; evidence?: never; intervention?: never; limits?: never; scope?: never; spec?: never } | ({ kind: "edit_artifact"; execution: WorkExecutionId; artifact: WorkArtifactId; data: WorkArtifactDataV1_Deserialize; evidence: WorkEvidenceLink[] }) & { decision?: never; intervention?: never; limits?: never; scope?: never; spec?: never } | ({ kind: "approve"; spec: WorkExecutionSpec_Deserialize }) & { artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; intervention?: never; limits?: never; scope?: never } | ({ kind: "cancel"; execution: WorkExecutionId; 
+/**
+ *  Present when a person takes the page over rather than abandoning
+ *  the work; persisted with the execution.
+ */
+intervention?: WorkInterventionV1_Deserialize | null }) & { artifact?: never; data?: never; decision?: never; evidence?: never; limits?: never; scope?: never; spec?: never } | 
 /**  Explicitly acknowledge that an old owner is gone. Cannot restart it. */
-({ kind: "acknowledge_interruption"; execution: WorkExecutionId }) & { artifact?: never; data?: never; decision?: never; evidence?: never; limits?: never; scope?: never; spec?: never };
+({ kind: "acknowledge_interruption"; execution: WorkExecutionId }) & { artifact?: never; data?: never; decision?: never; evidence?: never; intervention?: never; limits?: never; scope?: never; spec?: never };
 
 /**
  *  Internal Store grammar. User commands and host-only attempt facts have
  *  separate variants at the application edge; IPC never accepts settlements.
  */
-export type WorkRuntimeIntent_Serialize = ({ kind: "read_public"; scope: WorkPublicSearchScope; limits: WorkExecutionLimits }) & { artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; spec?: never } | ({ kind: "review_artifact"; execution: WorkExecutionId; artifact: WorkArtifactId; decision: WorkArtifactDecision }) & { data?: never; evidence?: never; limits?: never; scope?: never; spec?: never } | ({ kind: "edit_artifact"; execution: WorkExecutionId; artifact: WorkArtifactId; data: WorkArtifactDataV1_Serialize; evidence: WorkEvidenceLink[] }) & { decision?: never; limits?: never; scope?: never; spec?: never } | ({ kind: "approve"; spec: WorkExecutionSpec_Serialize }) & { artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; limits?: never; scope?: never } | ({ kind: "cancel"; execution: WorkExecutionId }) & { artifact?: never; data?: never; decision?: never; evidence?: never; limits?: never; scope?: never; spec?: never } | 
+export type WorkRuntimeIntent_Serialize = ({ kind: "read_public"; scope: WorkPublicSearchScope; limits: WorkExecutionLimits }) & { artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; intervention?: never; spec?: never } | ({ kind: "review_artifact"; execution: WorkExecutionId; artifact: WorkArtifactId; decision: WorkArtifactDecision }) & { data?: never; evidence?: never; intervention?: never; limits?: never; scope?: never; spec?: never } | ({ kind: "edit_artifact"; execution: WorkExecutionId; artifact: WorkArtifactId; data: WorkArtifactDataV1_Serialize; evidence: WorkEvidenceLink[] }) & { decision?: never; intervention?: never; limits?: never; scope?: never; spec?: never } | ({ kind: "approve"; spec: WorkExecutionSpec_Serialize }) & { artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; intervention?: never; limits?: never; scope?: never } | ({ kind: "cancel"; execution: WorkExecutionId; 
+/**
+ *  Present when a person takes the page over rather than abandoning
+ *  the work; persisted with the execution.
+ */
+intervention?: WorkInterventionV1_Serialize | null }) & { artifact?: never; data?: never; decision?: never; evidence?: never; limits?: never; scope?: never; spec?: never } | 
 /**  Explicitly acknowledge that an old owner is gone. Cannot restart it. */
-({ kind: "acknowledge_interruption"; execution: WorkExecutionId }) & { artifact?: never; data?: never; decision?: never; evidence?: never; limits?: never; scope?: never; spec?: never };
+({ kind: "acknowledge_interruption"; execution: WorkExecutionId }) & { artifact?: never; data?: never; decision?: never; evidence?: never; intervention?: never; limits?: never; scope?: never; spec?: never };
 
 export type WorkRuntimeProjection = WorkRuntimeProjection_Serialize | WorkRuntimeProjection_Deserialize;
 
