@@ -40,9 +40,28 @@ export function environmentItems(
   media: ReadonlyMap<string, MediaAssetV1> = new Map(),
 ): CanvasItem[] {
   const decisions = new Map((snapshot.decisions ?? []).map((d) => [d.element, d.choice]));
+  const resources = new Map(
+    snapshot.elements.flatMap((element) =>
+      element.reference.kind === "resource" ? [[element.id, element.reference.resource]] : [],
+    ),
+  );
+  // A `uses` relation to an admitted image gives a subject its picture.
+  const pictures = new Map<string, { profile: string; digest: string }>();
+  for (const relation of snapshot.relations ?? []) {
+    if (relation.kind !== "uses" || pictures.has(relation.from)) continue;
+    const resource = resources.get(relation.to);
+    const asset = resource ? media.get(resource) : undefined;
+    if (asset?.kind === "image")
+      pictures.set(relation.from, { profile: snapshot.profile, digest: asset.digest });
+  }
   return elementItems(snapshot, tabs, notes, objectives, media).map((item) => {
     const decision = decisions.get(item.id);
-    return decision === undefined ? item : { ...item, decision };
+    const image = pictures.get(item.id);
+    return {
+      ...item,
+      ...(decision === undefined ? {} : { decision }),
+      ...(image ? { image } : {}),
+    };
   });
 }
 

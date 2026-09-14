@@ -4,7 +4,12 @@
   import { WorkEnvironmentContext, type WorkEnvironmentSession } from "$domain/work-environment";
   import { commandId, workSession, type WorkSession } from "$domain/work";
   import { resourceSession, type ResourceSession } from "$domain/resources";
-  import type { TabView, WorkExecutionFact, WorkRuntimeProjection } from "$shared/ipc/bindings";
+  import type {
+    TabView,
+    WorkEnvironmentSnapshot,
+    WorkExecutionFact,
+    WorkRuntimeProjection,
+  } from "$shared/ipc/bindings";
   import { commands } from "$shared/ipc/bindings";
   import { layout } from "$domain/layout";
   import { workPane, type WorkPaneRect, type WorkPaneTarget } from "$domain/work-pane";
@@ -33,7 +38,6 @@
   import WorkTabPicker from "./WorkTabPicker.svelte";
   import WorkMediaPicker from "./WorkMediaPicker.svelte";
   import { mediaUrl } from "$domain/resources";
-  import { commands as nativeCommands } from "$shared/ipc/bindings";
   import BrowserPane from "./pane/BrowserPane.svelte";
   import Lift from "./Lift.svelte";
   import Inspector from "./Inspector.svelte";
@@ -397,6 +401,46 @@
         ...placements,
       ],
     });
+    void admitSubjectImages(projection, execution, placed);
+  }
+  // Subjects may name public image candidates from their cited sources. Rust
+  // fetches, bounds, decodes, and stores an admitted copy; the canvas only ever
+  // renders that copy. Bounded per execution, once per subject element.
+  const imageAdmissions = new SvelteSet<string>();
+  async function admitSubjectImages(
+    projection: WorkRuntimeProjection,
+    execution: WorkExecutionFact,
+    placed: WorkEnvironmentSnapshot,
+  ) {
+    let budget = 6;
+    for (const element of placed.elements) {
+      if (budget <= 0) break;
+      const reference = element.reference;
+      if (reference.kind !== "subject" || reference.execution !== execution.id) continue;
+      if (imageAdmissions.has(element.id)) continue;
+      const related = (placed.relations ?? []).some(
+        (relation) => relation.from === element.id && relation.kind === "uses",
+      );
+      if (related) continue;
+      const artifact = projection.executions
+        .find((entry) => entry.id === reference.execution)
+        ?.artifacts.find((entry) => entry.id === reference.artifact);
+      const subjects =
+        artifact?.data.kind === "comparison_matrix" ||
+        artifact?.data.kind === "findings" ||
+        artifact?.data.kind === "evidence_collection"
+          ? artifact.data.subjects
+          : [];
+      const candidate = subjects?.[reference.index]?.image_candidates?.[0];
+      if (!candidate) continue;
+      imageAdmissions.add(element.id);
+      budget -= 1;
+      try {
+        await commands.mediaAdmitRemote(session.profile, placed.id, element.id, candidate);
+      } catch {
+        /* Admission is best effort; the subject keeps its honest placeholder. */
+      }
+    }
   }
   const liftedItem = $derived(items.find((item) => item.id === lifted?.id));
   const liftedElement = $derived(snapshot?.elements.find((element) => element.id === lifted?.id));
@@ -1357,7 +1401,7 @@
                   liftedElement?.reference.kind === "resource"
                     ? liftedElement.reference.resource
                     : null;
-                if (id) void nativeCommands.mediaOpen(session.profile, id);
+                if (id) void commands.mediaOpen(session.profile, id);
               }}>{m.work_media_open_file()}</Button
             >
           {/if}

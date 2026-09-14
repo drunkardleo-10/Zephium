@@ -12,7 +12,12 @@ export type NoteDocumentView = { version: number; document: DocumentNodeView };
 
 /** Rendering inputs only. The runtime adapter owns wire validation, identities and permissions. */
 export type EvidenceReference = { key: string; label: string; origin?: string; url?: string };
-export type SubjectView = { name: string; descriptor?: string; homepage?: string };
+export type SubjectView = {
+  name: string;
+  descriptor?: string;
+  homepage?: string;
+  imageCandidates?: readonly string[];
+};
 export type CriterionView = {
   name: string;
   kind: "text" | "measurement" | "rating" | "presence";

@@ -48,3 +48,55 @@ test("objective status follows the latest durable execution and native interrupt
   ).toBe("Status: Interrupted");
   expect(items({ ...projection, executions: [] })[0]?.detail).toBe("Status: Plan ready");
 });
+
+test("a subject takes its picture from a uses relation to an admitted image", async () => {
+  const { environmentItems } = await import("../lib/project-environment");
+  const snapshot = {
+    version: 1,
+    id: "env",
+    profile: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    space: "s",
+    title: "T",
+    lifecycle: "active",
+    revision: "3",
+    elements: [
+      {
+        id: "e-subject",
+        area: null,
+        reference: { kind: "subject", objective: "w", execution: "x", artifact: "a", index: 0 },
+      },
+      { id: "e-media", area: null, reference: { kind: "resource", resource: "res-media" } },
+      { id: "e-note", area: null, reference: { kind: "resource", resource: "res-note" } },
+    ],
+    areas: [],
+    relations: [
+      { id: "r1", from: "e-subject", to: "e-media", kind: "uses", origin: { kind: "user" } },
+    ],
+    view: { revision: "1", x: 0, y: 0, zoom_milli: 1000, placements: [] },
+  } as unknown as Parameters<typeof environmentItems>[0];
+  const media = new Map([
+    [
+      "res-media",
+      {
+        version: 1,
+        kind: "image" as const,
+        mime: "image/png",
+        bytes: 10,
+        digest: "d".repeat(64),
+        name: "kb.png",
+        origin: { kind: "imported" as const },
+        width: 4,
+        height: 4,
+      },
+    ],
+  ]);
+  const items = environmentItems(snapshot, [], [], new Map(), media);
+  const subject = items.find((item) => item.id === "e-subject")!;
+  expect(subject.image).toEqual({ profile: "01ARZ3NDEKTSV4RRFFQ69G5FAV", digest: "d".repeat(64) });
+  const picture = items.find((item) => item.id === "e-media")!;
+  expect(picture.type).toBe("media");
+  expect(picture.media?.asset.name).toBe("kb.png");
+  const note = items.find((item) => item.id === "e-note")!;
+  expect(note.type).toBe("note");
+  expect(note.image).toBeUndefined();
+});

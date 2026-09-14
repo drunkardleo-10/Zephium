@@ -38,6 +38,8 @@ export type CanvasItem = {
   decision?: string;
   /** An admitted media asset; the image URL is derived from profile and digest. */
   media?: { profile: string; asset: MediaAssetV1 };
+  /** An admitted image related to this element, shown as its picture. */
+  image?: { profile: string; digest: string };
 };
 export type CanvasLink = {
   id: string;
@@ -240,6 +242,7 @@ export function reconcileNodes(
         node.data.finding === item.finding &&
         node.data.decision === item.decision &&
         node.data.media?.asset.digest === item.media?.asset.digest &&
+        node.data.image?.digest === item.image?.digest &&
         JSON.stringify(node.data.agent) === JSON.stringify(item.agent) &&
         JSON.stringify(node.data.responsibility) === JSON.stringify(item.responsibility);
       if (same) return node;

@@ -35,12 +35,21 @@ export type ProjectedWork = {
 type Refs = (indices: readonly number[] | undefined) => EvidenceReference[];
 function subjects(
   list:
-    readonly { name: string; descriptor?: string | null; homepage?: string | null }[] | undefined,
+    | readonly {
+        name: string;
+        descriptor?: string | null;
+        homepage?: string | null;
+        image_candidates?: readonly string[] | null;
+      }[]
+    | undefined,
 ) {
   return (list ?? []).map((subject) => ({
     name: subject.name,
     ...(subject.descriptor ? { descriptor: subject.descriptor } : {}),
     ...(subject.homepage ? { homepage: subject.homepage } : {}),
+    ...(subject.image_candidates?.length
+      ? { imageCandidates: subject.image_candidates.slice(0, 3) }
+      : {}),
   }));
 }
 function content(data: WorkArtifactDataV1, refs: Refs): ArtifactContent {
