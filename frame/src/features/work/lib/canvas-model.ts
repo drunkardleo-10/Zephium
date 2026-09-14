@@ -1,7 +1,9 @@
-import type { ArtifactView } from "$shared/ui/data/Artifact";
+import type { ArtifactView, FindingView, SubjectView } from "$shared/ui/data/Artifact";
 import type { Node } from "@xyflow/svelte";
 
-type CanvasKind = "tab" | "note" | "objective" | "responsibility" | "result" | "agent";
+type CanvasKind =
+  "tab" | "note" | "objective" | "responsibility" | "result" | "subject" | "finding" | "agent";
+type RelationKind = "supports" | "uses" | "depends_on" | "same_as" | "contradicts";
 /** Display values only; deliberately independent from the generated Work wire contract. */
 export type CanvasItem = {
   id: string;
@@ -18,13 +20,18 @@ export type CanvasItem = {
   actionLabel?: string;
   /** Planned output names only; these are not produced artifact resources. */
   responsibility?: { outputs: string[] };
+  subject?: SubjectView;
+  finding?: FindingView;
+  /** Transient agent presence: avatar seed and status. */
+  agent?: { seed: number; activity: string; objective: string };
   unavailable?: boolean;
 };
 export type CanvasLink = {
   id: string;
   source: string;
   target: string;
-  kind: "dependency" | "reference";
+  kind: "dependency" | "reference" | RelationKind;
+  label?: string;
 };
 export type CanvasPosition = { x: number; y: number };
 export type CanvasSize = { width: number; height: number };
@@ -38,8 +45,8 @@ export type CanvasView = {
 export type AreaData = { title: string; count: number };
 export type WorkItemNode = Node<CanvasItem, "work">;
 export type WorkNode = WorkItemNode | Node<AreaData, "area">;
-export const AREA_PREFIX = "area:";
-export const areaNodeId = (id: string) => `${AREA_PREFIX}${id}`;
+const AREA_PREFIX = "area:";
+const areaNodeId = (id: string) => `${AREA_PREFIX}${id}`;
 export const isAreaNode = (node: WorkNode): node is Node<AreaData, "area"> => node.type === "area";
 const DEFAULT_AREA: CanvasSize = { width: 640, height: 420 };
 const validPosition = (p: CanvasPosition | undefined): p is CanvasPosition =>
@@ -87,6 +94,10 @@ export function defaultSize(item: CanvasItem): { width: number; height: number }
   switch (item.type) {
     case "tab":
       return { width: 280, height: 96 };
+    case "subject":
+      return { width: 240, height: 112 };
+    case "finding":
+      return { width: 300, height: 140 };
     case "note":
       return { width: 300, height: 200 };
     case "objective":
@@ -210,6 +221,9 @@ export function reconcileNodes(
         node.data.artifact === item.artifact &&
         node.data.layout === item.layout &&
         node.data.actionLabel === item.actionLabel &&
+        node.data.subject === item.subject &&
+        node.data.finding === item.finding &&
+        JSON.stringify(node.data.agent) === JSON.stringify(item.agent) &&
         JSON.stringify(node.data.responsibility) === JSON.stringify(item.responsibility);
       if (same) return node;
       if (!reparented) return { ...node, data: item, ariaLabel: `${item.title}. ${item.status}` };

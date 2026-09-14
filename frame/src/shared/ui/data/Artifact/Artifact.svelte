@@ -1,7 +1,10 @@
 <script lang="ts">
   import DataTable from "../DataTable";
   import LazyView from "$shared/ui/LazyView";
-  import Button from "$shared/ui/Button";
+  import Matrix from "./Matrix.svelte";
+  import Findings from "./Findings.svelte";
+  import Sources from "./Sources.svelte";
+  import EvidenceChips from "./EvidenceChips.svelte";
   import { loadChart } from "../Chart";
   import {
     artifactRenderable,
@@ -31,6 +34,23 @@
     next: m.work_next(),
     range: (first: number, last: number, total: number) =>
       m.work_table_range({ first, last, total }),
+  };
+  const matrixLabels = {
+    unknown: m.work_cell_unknown(),
+    generalKnowledge: m.work_general_knowledge(),
+    criterion: m.work_matrix_criterion(),
+    subject: m.work_matrix_subject(),
+    yes: m.work_yes(),
+    no: m.work_no(),
+  };
+  const findingLabels = {
+    confidence: {
+      supported: m.work_confidence_supported(),
+      inferred: m.work_confidence_inferred(),
+      unverified: m.work_confidence_unverified(),
+      contradicted: m.work_confidence_contradicted(),
+    },
+    generalKnowledge: m.work_general_knowledge(),
   };
 </script>
 
@@ -67,6 +87,20 @@
       }))}
       {labels}
     />
+  {:else if content.kind === "matrix"}<Matrix
+      subjects={content.subjects}
+      criteria={content.criteria}
+      cells={content.cells}
+      notes={content.notes}
+      labels={matrixLabels}
+      {onevidence}
+    />
+  {:else if content.kind === "findings"}<Findings
+      subjects={content.subjects}
+      items={content.items}
+      labels={findingLabels}
+      {onevidence}
+    />
   {:else if content.kind === "chart"}<LazyView
       loader={loadChart}
       loadingLabel={m.surface_loading()}
@@ -86,7 +120,13 @@
           ><span>{item.text}</span>
         </li>{:else}<li>{m.work_empty_data()}</li>{/each}
     </ul>
-  {:else if content.kind === "sources"}<p>{content.summary}</p>
+  {:else if content.kind === "sources"}<Sources
+      summary={content.summary}
+      subjects={content.subjects}
+      entries={content.entries}
+      fallback={artifact.evidence}
+      {onevidence}
+    />
   {:else if content.kind === "browser"}<section class="resource">
       <p class="eyebrow">{m.work_browser_resource()}</p>
       <h3>{content.title}</h3>
@@ -95,12 +135,10 @@
       <small>{m.work_browser_preview_only()}</small>
     </section>
   {:else if content.kind === "unavailable"}<p role="status">{content.reason}</p>{/if}
-  {#if valid && artifact.evidence.length}<footer aria-label={m.work_sources()}>
-      {#each artifact.evidence as reference (reference.key)}<Button
-          size="compact"
-          disabled={!onevidence}
-          onclick={() => onevidence?.(reference)}>{reference.label}</Button
-        >{/each}
+  {#if valid && artifact.evidence.length && content.kind !== "sources" && content.kind !== "matrix" && content.kind !== "findings"}<footer
+      aria-label={m.work_sources()}
+    >
+      <EvidenceChips references={artifact.evidence} {onevidence} />
     </footer>{/if}
 </article>
 
@@ -172,8 +210,8 @@
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
-    margin-block-start: 24px;
-    padding-block-start: 16px;
+    margin-block-start: 16px;
+    padding-block-start: 12px;
     border-block-start: 1px solid var(--color-border);
   }
 </style>

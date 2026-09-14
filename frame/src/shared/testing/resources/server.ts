@@ -76,6 +76,8 @@ export function resourceTestServer(profile: string) {
         draft: structuredClone(intent.draft),
       };
     else {
+      if (intent.kind === "preserve_artifact")
+        return response({ kind: "error", error: "unavailable" });
       const current = records.get(intent.id);
       if (!current) return response({ kind: "error", error: "not_found" });
       if (current.revision !== intent.expected_revision)

@@ -5,7 +5,7 @@ import type {
   WorkRuntimeProjection,
 } from "$shared/ipc/bindings";
 import { artifactView } from "./project-work";
-import type { CanvasItem, CanvasView } from "./canvas-model";
+import type { CanvasItem, CanvasLink, CanvasView } from "./canvas-model";
 import * as m from "$shared/i18n/messages";
 
 function objectiveStatus(projection: WorkRuntimeProjection): string {
@@ -78,6 +78,47 @@ export function environmentItems(
       };
     }
     const projection = objectives.get(element.reference.objective);
+    if (element.reference.kind === "subject" || element.reference.kind === "finding") {
+      const reference = element.reference;
+      const execution = projection?.executions.find(
+        (execution) => execution.id === reference.execution,
+      );
+      const artifact = execution?.artifacts.find((artifact) => artifact.id === reference.artifact);
+      const view = artifact && execution ? artifactView(artifact, execution) : undefined;
+      if (reference.kind === "subject") {
+        const subject =
+          view &&
+          (view.content.kind === "matrix" ||
+            view.content.kind === "findings" ||
+            view.content.kind === "sources")
+            ? view.content.subjects[reference.index]
+            : undefined;
+        return {
+          id: element.id,
+          type: "subject",
+          area: element.area,
+          kind: m.work_env_subject(),
+          title: subject?.name ?? m.work_artifact_unavailable(),
+          detail: subject?.descriptor ?? "",
+          status: area,
+          subject,
+          unavailable: !subject,
+        };
+      }
+      const finding =
+        view && view.content.kind === "findings" ? view.content.items[reference.index] : undefined;
+      return {
+        id: element.id,
+        type: "finding",
+        area: element.area,
+        kind: m.work_env_finding(),
+        title: finding?.claim ?? m.work_artifact_unavailable(),
+        detail: finding?.detail ?? "",
+        status: area,
+        finding,
+        unavailable: !finding,
+      };
+    }
     if (element.reference.kind === "artifact") {
       const reference = element.reference;
       const execution = projection?.executions.find(
@@ -131,4 +172,81 @@ export function environmentView(snapshot: WorkEnvironmentSnapshot): CanvasView {
     ),
     viewport: { x: snapshot.view.x, y: snapshot.view.y, zoom: snapshot.view.zoom_milli / 1000 },
   };
+}
+const relationLabels: Record<CanvasLink["kind"], () => string> = {
+  dependency: m.work_env_relation_depends_on,
+  reference: m.work_env_relation_uses,
+  supports: m.work_env_relation_supports,
+  uses: m.work_env_relation_uses,
+  depends_on: m.work_env_relation_depends_on,
+  same_as: m.work_env_relation_same_as,
+  contradicts: m.work_env_relation_contradicts,
+};
+export function environmentLinks(snapshot: WorkEnvironmentSnapshot): CanvasLink[] {
+  const ids = new Set(snapshot.elements.map((element) => element.id));
+  return (snapshot.relations ?? []).flatMap((relation) =>
+    ids.has(relation.from) && ids.has(relation.to)
+      ? [
+          {
+            id: `relation:${relation.id}`,
+            source: relation.from,
+            target: relation.to,
+            kind: relation.kind,
+            label: relationLabels[relation.kind](),
+          },
+        ]
+      : [],
+  );
+}
+
+const agentLabels: Record<string, () => string> = {
+  planning: m.work_activity_planning,
+  delegating: m.work_activity_delegating,
+  reading: m.work_activity_reading,
+  comparing: m.work_activity_comparing,
+  producing_artifact: m.work_activity_producing,
+  waiting_for_approval: m.work_activity_approval,
+  waiting_for_human: m.work_activity_human,
+  cancelling: m.work_activity_cancelling,
+  finishing: m.work_activity_finishing,
+};
+/** Transient agent presence for objectives with live executions; never persisted. */
+export function environmentAgents(
+  snapshot: WorkEnvironmentSnapshot,
+  objectives: ReadonlyMap<string, WorkRuntimeProjection>,
+  activity: (objective: string) => string | undefined,
+): CanvasItem[] {
+  const items: CanvasItem[] = [];
+  for (const element of snapshot.elements) {
+    if (element.reference.kind !== "objective") continue;
+    const projection = objectives.get(element.reference.objective);
+    const execution = projection?.executions.at(-1);
+    if (
+      !projection ||
+      !execution ||
+      !["running", "cancel_requested", "approved"].includes(execution.status) ||
+      projection.interrupted.includes(execution.id)
+    )
+      continue;
+    const signal = activity(projection.work.id);
+    const label = signal ? agentLabels[signal]?.() : undefined;
+    let seed = 0;
+    for (const char of projection.work.id) seed = (seed * 31 + char.charCodeAt(0)) % 9973;
+    items.push({
+      id: `agent:${element.id}`,
+      type: "agent",
+      kind: m.work_env_agent(),
+      title: m.work_env_agent(),
+      detail: "",
+      status:
+        label ??
+        (execution.status === "cancel_requested"
+          ? m.work_activity_cancelling()
+          : execution.status === "approved"
+            ? m.work_env_agent_idle()
+            : m.work_env_working()),
+      agent: { seed, activity: signal ?? "", objective: projection.work.id },
+    });
+  }
+  return items;
 }

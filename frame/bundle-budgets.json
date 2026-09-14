@@ -117,8 +117,8 @@
     "description": "Measured 325466 JS bytes with shared direct-public-read session and operation reconciliation."
   },
   "lazy:features/work/components/WorkCanvas.svelte": {
-    "js": 505000,
-    "css": 102000,
+    "js": 520000,
+    "css": 112000,
     "description": "Measured 96624 CSS bytes with compact responsibility and expected-output chips; JavaScript cap unchanged. M1 canvas: in-place remote reconcile, gesture config, per-icon imports."
   },
   "lazy:shared/ui/data/Chart/Chart.svelte": {
@@ -135,9 +135,9 @@
     "description": "Measured 475938 JS bytes with explicit objective-only public research selection, disclosure and captured submission identity."
   },
   "lazy:features/work/components/WorkObjectiveInspector.svelte": {
-    "js": 133000,
-    "css": 12000,
-    "description": "Measured 132194 JS bytes after shared artifact chunk movement for readable result focus/list rendering; exact provider scope and citations retained."
+    "js": 148000,
+    "css": 18000,
+    "description": "Measured 132194 JS bytes after shared artifact chunk movement for readable result focus/list rendering; exact provider scope and citations retained. M1 semantics: matrix/findings/source renderers."
   },
   "lazy:features/work/components/WorkInteraction.svelte": {
     "js": 117000,

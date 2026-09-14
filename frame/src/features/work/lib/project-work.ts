@@ -5,8 +5,10 @@ import type {
   WorkExecutionFact,
   WorkArtifactDataV1,
   WorkSignalV1,
+  WorkEvidenceLink,
 } from "$domain/work";
-import type { ArtifactView, ArtifactContent } from "$shared/ui/data/Artifact";
+import { displayHost } from "$shared/ui/data/Artifact";
+import type { ArtifactView, ArtifactContent, EvidenceReference } from "$shared/ui/data/Artifact";
 import * as m from "$shared/i18n/messages";
 import type { CanvasItem, CanvasLink } from "./canvas-model";
 
@@ -30,29 +32,141 @@ export type ProjectedWork = {
   }[];
 };
 
-function content(data: WorkArtifactDataV1): ArtifactContent {
+type Refs = (indices: readonly number[] | undefined) => EvidenceReference[];
+function subjects(
+  list:
+    readonly { name: string; descriptor?: string | null; homepage?: string | null }[] | undefined,
+) {
+  return (list ?? []).map((subject) => ({
+    name: subject.name,
+    ...(subject.descriptor ? { descriptor: subject.descriptor } : {}),
+    ...(subject.homepage ? { homepage: subject.homepage } : {}),
+  }));
+}
+function content(data: WorkArtifactDataV1, refs: Refs): ArtifactContent {
   switch (data.kind) {
     case "document":
+      return { kind: "document", paragraphs: data.paragraphs };
     case "table":
     case "comparison":
     case "checklist":
       return data;
     case "chart":
-      return { kind: "chart", xLabel: data.x_label, yLabel: data.y_label, series: data.series };
+      return {
+        kind: "chart",
+        xLabel: data.x_label,
+        yLabel: data.y_label,
+        series: data.series,
+        ...(data.basis
+          ? {
+              basis: {
+                method: data.basis.method,
+                ...(data.basis.conditions ? { conditions: data.basis.conditions } : {}),
+                ...(data.basis.versions ? { versions: data.basis.versions } : {}),
+                ...(data.basis.observed_at ? { observedAt: data.basis.observed_at } : {}),
+              },
+            }
+          : {}),
+        generalKnowledge: !!data.general_knowledge,
+      };
     case "evidence_collection":
-      return { kind: "sources", summary: data.summary };
+      return {
+        kind: "sources",
+        summary: data.summary,
+        subjects: subjects(data.subjects),
+        entries: (data.entries ?? []).flatMap((entry) => {
+          const [evidence] = refs([entry.evidence]);
+          return evidence
+            ? [
+                {
+                  evidence,
+                  title: entry.title,
+                  role: entry.role,
+                  ...(entry.subject !== null && entry.subject !== undefined
+                    ? { subject: entry.subject }
+                    : {}),
+                },
+              ]
+            : [];
+        }),
+      };
+    case "comparison_matrix":
+      return {
+        kind: "matrix",
+        subjects: subjects(data.subjects),
+        criteria: data.criteria.map((criterion) => ({
+          name: criterion.name,
+          kind: criterion.kind.kind,
+          ...(criterion.kind.kind === "measurement"
+            ? { unit: criterion.kind.unit, basis: criterion.kind.basis }
+            : criterion.kind.kind === "rating"
+              ? { rubric: criterion.kind.rubric, scaleMax: criterion.kind.scale_max }
+              : {}),
+        })),
+        cells: data.cells.map((row) =>
+          row.map((cell) => ({
+            value:
+              cell.value.kind === "money"
+                ? {
+                    kind: "money",
+                    amount: cell.value.amount,
+                    currency: cell.value.currency,
+                    ...(cell.value.observed_at ? { observedAt: cell.value.observed_at } : {}),
+                  }
+                : cell.value,
+            evidence: refs(cell.evidence),
+            ...(cell.note ? { note: cell.note } : {}),
+            generalKnowledge: !!cell.general_knowledge,
+          })),
+        ),
+        notes: data.notes ?? [],
+      };
+    case "findings":
+      return {
+        kind: "findings",
+        subjects: subjects(data.subjects),
+        items: data.items.map((item) => ({
+          claim: item.claim,
+          ...(item.subject !== null && item.subject !== undefined ? { subject: item.subject } : {}),
+          evidence: refs(item.evidence),
+          confidence: item.confidence,
+          ...(item.detail ? { detail: item.detail } : {}),
+          generalKnowledge: !!item.general_knowledge,
+        })),
+      };
     case "browser_resource_preview":
       return { kind: "browser", title: data.title, location: data.url, summary: data.summary };
   }
 }
 
+/** Recognizable source labels from provider citations; falls back to numbering. */
+function evidenceReferences(
+  links: readonly WorkEvidenceLink[],
+  execution: WorkExecutionFact,
+): EvidenceReference[] {
+  return links.map((link, index) => {
+    const record = execution.provider_evidence?.find((record) => record.id === link.extraction_id);
+    const citation = record?.evidence.citations[link.source_id - 1];
+    const origin = displayHost(citation?.url);
+    return {
+      key: `${link.extraction_id}:${link.source_id}`,
+      label: citation?.title?.trim() || origin || m.work_source_number({ number: index + 1 }),
+      ...(origin ? { origin } : {}),
+      ...(citation?.url ? { url: citation.url } : {}),
+    };
+  });
+}
+
 export function artifactView(artifact: WorkArtifactV1, execution: WorkExecutionFact): ArtifactView {
   const user = execution.user_artifacts?.find((value) => value.artifact === artifact.id);
-  const evidence = user?.edited_data ? user.evidence : artifact.evidence;
+  const links = user?.edited_data ? user.evidence : artifact.evidence;
+  const evidence = evidenceReferences(links, execution);
+  const refs: Refs = (indices) =>
+    (indices ?? []).flatMap((index) => (evidence[index] ? [evidence[index]] : []));
   return {
     key: artifact.id,
     title: artifact.title,
-    content: content(user?.edited_data ?? artifact.data),
+    content: content(user?.edited_data ?? artifact.data, refs),
     reviewLabel:
       user?.decision === "accepted"
         ? m.work_accepted()
@@ -61,10 +175,7 @@ export function artifactView(artifact: WorkArtifactV1, execution: WorkExecutionF
           : artifact.review === "mechanical"
             ? m.work_mechanical_review()
             : m.work_review_required(),
-    evidence: evidence.map((link, index) => ({
-      key: `${link.extraction_id}:${link.source_id}`,
-      label: m.work_source_number({ number: index + 1 }),
-    })),
+    evidence,
   };
 }
 

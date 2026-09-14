@@ -1,2 +1,10 @@
 export { default } from "./Artifact.svelte";
-export type { ArtifactView, ArtifactContent, EvidenceReference } from "./artifact";
+export { displayHost } from "./artifact";
+export type {
+  ArtifactView,
+  ArtifactContent,
+  EvidenceReference,
+  SubjectView,
+  FindingView,
+  SourceEntryView,
+} from "./artifact";

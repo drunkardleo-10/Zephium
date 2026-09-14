@@ -102,29 +102,37 @@
   let valid = $derived(validScene(items, links));
   const nodeTypes = { work: CanvasNode, area: AreaNode };
   let selection: string[] = [];
+  let selectedIds = $state.raw<ReadonlySet<string>>(new Set());
   let edges = $derived<Edge[]>(
     valid
-      ? links.map((link) => ({
-          id: link.id,
-          source: link.source,
-          target: link.target,
-          type: "smoothstep",
-          animated: false,
-          deletable: false,
-          selectable: false,
-          focusable: false,
-          ariaLabel:
-            link.kind === "dependency"
-              ? m.work_env_dependency_label({
-                  source: items.find((item) => item.id === link.source)?.title ?? "",
-                  target: items.find((item) => item.id === link.target)?.title ?? "",
-                })
-              : m.work_env_reference_label({
-                  source: items.find((item) => item.id === link.source)?.title ?? "",
-                  target: items.find((item) => item.id === link.target)?.title ?? "",
-                }),
-          style: link.kind === "reference" ? "stroke-dasharray: 5 5" : undefined,
-        }))
+      ? links.map((link) => {
+          const active = selectedIds.has(link.source) || selectedIds.has(link.target);
+          const title = (id: string) => items.find((item) => item.id === id)?.title ?? "";
+          return {
+            id: link.id,
+            source: link.source,
+            target: link.target,
+            type: "smoothstep",
+            animated: false,
+            deletable: false,
+            selectable: false,
+            focusable: false,
+            class: `work-edge kind-${link.kind}${active ? " active" : ""}`,
+            label: active && link.label ? link.label : undefined,
+            ariaLabel:
+              link.kind === "dependency"
+                ? m.work_env_dependency_label({
+                    source: title(link.source),
+                    target: title(link.target),
+                  })
+                : link.label
+                  ? `${title(link.source)} ${link.label} ${title(link.target)}`
+                  : m.work_env_reference_label({
+                      source: title(link.source),
+                      target: title(link.target),
+                    }),
+          };
+        })
       : [],
   );
   $effect(() => {
@@ -305,6 +313,7 @@
       }}
       onselectionchange={({ nodes: selected }) => {
         selection = selected.map((node) => node.id);
+        selectedIds = new Set(selection);
         onselectionchange?.(selection);
       }}
       onnodedragstop={({ targetNode }) => {
@@ -348,6 +357,29 @@
   /* stylelint-disable-next-line selector-class-pattern */
   .work-canvas :global(.svelte-flow__node) {
     transition: none;
+  }
+
+  .work-canvas :global(.work-edge) {
+    opacity: 0.45;
+    transition: opacity var(--motion-fast) var(--ease-smooth);
+  }
+
+  .work-canvas :global(.work-edge.active) {
+    opacity: 1;
+  }
+
+  .work-canvas :global(.work-edge.kind-reference),
+  .work-canvas :global(.work-edge.kind-uses),
+  .work-canvas :global(.work-edge.kind-same-as) {
+    stroke-dasharray: 5 5;
+  }
+
+  .work-canvas :global(.work-edge.kind-contradicts) {
+    stroke: var(--color-danger);
+  }
+
+  .work-canvas :global(.work-edge.kind-supports.active) {
+    stroke: var(--color-success);
   }
 
   .canvas-empty {

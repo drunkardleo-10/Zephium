@@ -7,6 +7,7 @@ export type {
   WorkArtifactDataV1,
   WorkExecutionFact,
   WorkSignalV1,
+  WorkEvidenceLink,
 } from "$shared/ipc/bindings";
 export { commandId, validRevision } from "./work-model";
 

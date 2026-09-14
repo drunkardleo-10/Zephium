@@ -1,7 +1,49 @@
 import type { ChartSeries } from "../Chart";
 
 /** Rendering inputs only. The runtime adapter owns wire validation, identities and permissions. */
-export type EvidenceReference = { key: string; label: string };
+export type EvidenceReference = { key: string; label: string; origin?: string; url?: string };
+export type SubjectView = { name: string; descriptor?: string; homepage?: string };
+export type CriterionView = {
+  name: string;
+  kind: "text" | "measurement" | "rating" | "presence";
+  unit?: string;
+  basis?: string;
+  rubric?: string;
+  scaleMax?: number;
+};
+type CellValueView =
+  | { kind: "text"; text: string }
+  | { kind: "measurement"; value: string }
+  | { kind: "money"; amount: string; currency: string; observedAt?: string }
+  | { kind: "rating"; value: number }
+  | { kind: "presence"; present: boolean }
+  | { kind: "unknown" };
+export type CellView = {
+  value: CellValueView;
+  evidence: readonly EvidenceReference[];
+  note?: string;
+  generalKnowledge: boolean;
+};
+export type FindingView = {
+  claim: string;
+  subject?: number;
+  evidence: readonly EvidenceReference[];
+  confidence: "supported" | "inferred" | "unverified" | "contradicted";
+  detail?: string;
+  generalKnowledge: boolean;
+};
+export type SourceEntryView = {
+  evidence: EvidenceReference;
+  title: string;
+  role: string;
+  subject?: number;
+};
+type MeasurementBasisView = {
+  method: string;
+  conditions?: string;
+  versions?: string;
+  observedAt?: string;
+};
 export type ArtifactContent =
   | { kind: "document"; paragraphs: readonly string[] }
   | { kind: "table"; columns: readonly string[]; rows: readonly (readonly string[])[] }
@@ -10,9 +52,29 @@ export type ArtifactContent =
       criteria: readonly string[];
       alternatives: readonly { name: string; values: readonly string[] }[];
     }
-  | { kind: "chart"; xLabel: string; yLabel: string; series: readonly ChartSeries[] }
+  | {
+      kind: "matrix";
+      subjects: readonly SubjectView[];
+      criteria: readonly CriterionView[];
+      cells: readonly (readonly CellView[])[];
+      notes: readonly string[];
+    }
+  | { kind: "findings"; subjects: readonly SubjectView[]; items: readonly FindingView[] }
+  | {
+      kind: "chart";
+      xLabel: string;
+      yLabel: string;
+      series: readonly ChartSeries[];
+      basis?: MeasurementBasisView;
+      generalKnowledge?: boolean;
+    }
   | { kind: "checklist"; items: readonly { text: string; completed: boolean }[] }
-  | { kind: "sources"; summary: string }
+  | {
+      kind: "sources";
+      summary: string;
+      subjects: readonly SubjectView[];
+      entries: readonly SourceEntryView[];
+    }
   | { kind: "browser"; title: string; location: string; summary: string }
   | { kind: "unavailable"; reason: string };
 export type ArtifactView = {
@@ -28,15 +90,26 @@ export type ArtifactView = {
 const text = (value: string) => typeof value === "string" && value.length <= 16_384;
 const strings = (values: readonly string[], max: number) =>
   values.length <= max && values.every(text);
+const evidenceOk = (refs: readonly EvidenceReference[]) =>
+  refs.length <= 128 &&
+  new Set(refs.map((item) => item.key)).size === refs.length &&
+  refs.every((item) => item.key.length <= 128 && item.label.length <= 512);
+const subjectsOk = (subjects: readonly SubjectView[], max = 32) =>
+  subjects.length <= max &&
+  subjects.every(
+    (subject) =>
+      text(subject.name) &&
+      subject.name.length <= 256 &&
+      (subject.descriptor === undefined || subject.descriptor.length <= 256) &&
+      (subject.homepage === undefined || subject.homepage.length <= 2048),
+  );
 export function artifactRenderable(view: ArtifactView): boolean {
   if (
     view.key.length > 128 ||
     view.title.length > 512 ||
     !text(view.title) ||
     !text(view.reviewLabel) ||
-    view.evidence.length > 128 ||
-    new Set(view.evidence.map((item) => item.key)).size !== view.evidence.length ||
-    !view.evidence.every((item) => item.key.length <= 128 && item.label.length <= 512)
+    !evidenceOk(view.evidence)
   )
     return false;
   const data = view.content;
@@ -68,6 +141,40 @@ export function artifactRenderable(view: ArtifactView): boolean {
             text(row.name) && row.values.length === data.criteria.length && strings(row.values, 32),
         )
       );
+    case "matrix":
+      return (
+        subjectsOk(data.subjects) &&
+        data.subjects.length > 0 &&
+        data.criteria.length > 0 &&
+        data.criteria.length <= 16 &&
+        data.criteria.every((criterion) => text(criterion.name) && criterion.name.length <= 256) &&
+        data.cells.length === data.subjects.length &&
+        data.cells.every(
+          (row) =>
+            row.length === data.criteria.length &&
+            row.every(
+              (cell) =>
+                evidenceOk(cell.evidence) &&
+                (cell.note === undefined || cell.note.length <= 512) &&
+                (cell.value.kind !== "text" || text(cell.value.text)),
+            ),
+        ) &&
+        strings(data.notes, 8)
+      );
+    case "findings":
+      return (
+        subjectsOk(data.subjects) &&
+        data.items.length > 0 &&
+        data.items.length <= 64 &&
+        data.items.every(
+          (item) =>
+            text(item.claim) &&
+            item.claim.length <= 1024 &&
+            evidenceOk(item.evidence) &&
+            (item.subject === undefined || item.subject < data.subjects.length) &&
+            (item.detail === undefined || item.detail.length <= 4096),
+        )
+      );
     case "chart":
       return (
         text(data.xLabel) &&
@@ -96,7 +203,18 @@ export function artifactRenderable(view: ArtifactView): boolean {
         data.items.every((item) => text(item.text) && typeof item.completed === "boolean")
       );
     case "sources":
-      return text(data.summary);
+      return (
+        text(data.summary) &&
+        subjectsOk(data.subjects) &&
+        data.entries.length <= 64 &&
+        data.entries.every(
+          (entry) =>
+            text(entry.title) &&
+            entry.title.length <= 512 &&
+            entry.role.length <= 128 &&
+            (entry.subject === undefined || entry.subject < data.subjects.length),
+        )
+      );
     case "browser":
       return text(data.title) && text(data.location) && text(data.summary);
     case "unavailable":
@@ -113,6 +231,17 @@ export function displayLocation(value: string): string {
     return ["https:", "http:"].includes(url.protocol) && !url.username && !url.password
       ? url.origin
       : "";
+  } catch {
+    return "";
+  }
+}
+
+/** Hostname for a source label; empty when the URL is not a plain web address. */
+export function displayHost(value: string | undefined): string {
+  if (!value) return "";
+  try {
+    const url = new URL(value);
+    return ["https:", "http:"].includes(url.protocol) ? url.hostname.replace(/^www\./, "") : "";
   } catch {
     return "";
   }

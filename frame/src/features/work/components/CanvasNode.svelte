@@ -10,6 +10,9 @@
   import ObjectiveCard from "./cards/ObjectiveCard.svelte";
   import ResponsibilityCard from "./cards/ResponsibilityCard.svelte";
   import ResultCard from "./cards/ResultCard.svelte";
+  import SubjectCard from "./cards/SubjectCard.svelte";
+  import FindingCard from "./cards/FindingCard.svelte";
+  import AgentCard from "./cards/AgentCard.svelte";
   import * as m from "$shared/i18n/messages";
   const open = getContext<(id: string) => void>(canvasOpen);
   const action = getContext<(id: string, action?: string) => void>(canvasAction);
@@ -54,17 +57,17 @@
         <Icon icon={Target01Icon} size={14} />{m.work_env_focus_result()}
       </button>{/if}
     <button type="button" onclick={() => action(id, "inspect")}>{m.work_inspect()}</button>
-    {#if type !== "responsibility" && !data.actionLabel}<span class="separator"></span><button
-        type="button"
-        class="danger"
-        onclick={() => action(id, "remove")}
-      >
+    {#if type !== "responsibility" && type !== "agent" && !data.actionLabel}<span class="separator"
+      ></span><button type="button" class="danger" onclick={() => action(id, "remove")}>
         <Icon icon={MinusSignIcon} size={14} />{m.work_env_remove()}
       </button>{/if}
   </div>
 </NodeToolbar>
 <div class="node-root" bind:this={root}>
   {#if type === "tab"}<TabCard item={data} {selected} />
+  {:else if type === "subject"}<SubjectCard item={data} {selected} />
+  {:else if type === "finding"}<FindingCard item={data} {selected} />
+  {:else if type === "agent"}<AgentCard item={data} {selected} />
   {:else if type === "note"}<NoteCard item={data} {selected} />
   {:else if type === "responsibility"}<ResponsibilityCard item={data} {selected} />
   {:else if type === "result" || data.artifact}<ResultCard

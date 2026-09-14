@@ -41,6 +41,8 @@
       case "objective":
         return [[m.work_env_objective(), reference.objective]];
       case "artifact":
+      case "subject":
+      case "finding":
         return [
           [m.work_env_objective(), reference.objective],
           [m.work_env_results(), reference.artifact],

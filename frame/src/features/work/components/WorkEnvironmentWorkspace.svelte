@@ -1,9 +1,10 @@
 <script lang="ts">
   import { untrack, onMount } from "svelte";
+  import { SvelteSet } from "svelte/reactivity";
   import { WorkEnvironmentContext, type WorkEnvironmentSession } from "$domain/work-environment";
   import { commandId, workSession, type WorkSession } from "$domain/work";
   import { resourceSession, type ResourceSession } from "$domain/resources";
-  import type { TabView } from "$shared/ipc/bindings";
+  import type { TabView, WorkExecutionFact, WorkRuntimeProjection } from "$shared/ipc/bindings";
   import { preferences } from "$domain/preferences";
   import { loadNotes, loadNoteEditorHost } from "$features/notes";
   import { loadTasks } from "$features/tasks";
@@ -29,7 +30,13 @@
   import Inspector from "./Inspector.svelte";
   import { defaultSize } from "../lib/canvas-model";
   import { environmentPlan } from "../lib/project-environment-plan";
-  import { environmentItems, environmentView } from "../lib/project-environment";
+  import {
+    environmentAgents,
+    environmentItems,
+    environmentLinks,
+    environmentView,
+  } from "../lib/project-environment";
+  import { organizeExecution, pendingOrganize, elementFor } from "../lib/organize";
   import { environmentResults, type ResultReference } from "../lib/project-environment-results";
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
   import type { CanvasView, CanvasItem } from "../lib/canvas-model";
@@ -179,7 +186,86 @@
       ? environmentResults(snapshot, scene.items, objectiveSession?.projection ?? null)
       : { items: scene.items, references: new Map<string, ResultReference>(), remaining: null },
   );
-  const items = $derived(results.items);
+  const agents = $derived(
+    snapshot
+      ? environmentAgents(snapshot, context.objectives, (objective) =>
+          objectiveSession?.selected === objective
+            ? objectiveSession.activity.at(-1)?.activity
+            : undefined,
+        )
+      : [],
+  );
+  const items = $derived([...results.items, ...agents]);
+  const links = $derived([...scene.links, ...(snapshot ? environmentLinks(snapshot) : [])]);
+  const organizing = new SvelteSet<string>();
+  $effect(() => {
+    const current = snapshot;
+    const objectives = context.objectives;
+    if (!current || session.pending || session.loading) return;
+    for (const element of current.elements) {
+      if (element.reference.kind !== "objective") continue;
+      const projection = objectives.get(element.reference.objective);
+      if (!projection) continue;
+      const execution = pendingOrganize(current, projection);
+      if (!execution || organizing.has(execution.id)) continue;
+      organizing.add(execution.id);
+      const place = current.view.placements.find((place) => place.element === element.id);
+      const anchor = place ? { x: place.x, y: place.y + place.height + 48 } : { x: 80, y: 320 };
+      void untrack(() => organize(projection, execution, anchor));
+    }
+  });
+  async function organize(
+    projection: WorkRuntimeProjection,
+    execution: WorkExecutionFact,
+    anchor: { x: number; y: number },
+  ) {
+    const plan = organizeExecution(projection, execution, anchor);
+    if (!plan.adds.length || !(await session.flushView())) return;
+    for (const add of plan.adds) {
+      if (session.snapshot && elementFor(session.snapshot, add.reference)) continue;
+      if (!(await session.edit({ kind: "add", reference: add.reference, area: null }))) return;
+    }
+    const latest = session.snapshot;
+    if (!latest) return;
+    for (const relation of plan.relations) {
+      const from = elementFor(latest, relation.from);
+      const to = elementFor(latest, relation.to);
+      if (!from || !to) continue;
+      if (
+        !(await session.edit({
+          kind: "relate",
+          from: from.id,
+          to: to.id,
+          relation: relation.kind,
+        }))
+      )
+        return;
+    }
+    const placed = session.snapshot;
+    if (!placed) return;
+    const placements = plan.adds.flatMap((add) => {
+      const element = elementFor(placed, add.reference);
+      return element
+        ? [
+            {
+              element: element.id,
+              x: Math.round(add.placement.x),
+              y: Math.round(add.placement.y),
+              width: Math.round(add.placement.width),
+              height: Math.round(add.placement.height),
+            },
+          ]
+        : [];
+    });
+    const ids = new Set(placements.map((place) => place.element));
+    session.checkpoint({
+      ...placed.view,
+      placements: [
+        ...placed.view.placements.filter((place) => !ids.has(place.element)),
+        ...placements,
+      ],
+    });
+  }
   const liftedItem = $derived(items.find((item) => item.id === lifted?.id));
   const liftedElement = $derived(snapshot?.elements.find((element) => element.id === lifted?.id));
   const authoritative = $derived(new Set(snapshot?.elements.map((element) => element.id) ?? []));
@@ -883,7 +969,7 @@
           retryLabel={m.surface_retry()}
           >{#snippet children(Canvas)}<Canvas
               {items}
-              links={scene.links}
+              {links}
               areas={snapshot.areas}
               initialView={canvasView}
               {remoteView}
