@@ -101,6 +101,32 @@ no pause/resume is promised. Borrowed-tab leases, the human sign-in handoff
 context kind, and independent account collectors remain unbuilt; the retained
 Notion qualifiers stay feature-gated and are superseded by the product path.
 
+**2026-09-14 M5 agent loop checkpoint.** The routine path is a Rust-supervised
+turn loop, not the plan/prepare/approve/start pipeline (which remains only for
+account-scoped and reviewed-plan approvals). Chrome sends
+`WorkOperationV1::Run { command, context }` whose intent is
+`WorkRuntimeIntent::BeginAgent { grant, limits }`; the store mints a
+single-step plan and approves an execution with
+`WorkCapability::Agent { grant: WorkAgentGrantV1 }` and authorization
+`UserDirectedAgent` (`hub/work_runtime.rs`, reply `WorkReply::AgentAdmitted`).
+`zephium-app/src/work_agent.rs` begins the one attempt and runs turns: each
+turn discloses objective, decisions, admitted context, prior steps, sources
+with local keys, published objects, and remaining budget
+(`zephium-core/src/work/agent.rs`); `OpenAiWorkAgent`
+(`provider_transport/agent.rs`) returns say/artifacts/fetch/ask/finish; Rust
+resolves evidence keys, refuses unseen read URLs and search text that repeats
+private context, and commits every step (`WorkStepFact`, kinds turn, search,
+read, discover, publish, ask, finish) with `BeginStep`/`SettleStep` updates
+while the attempt runs. Searches run together through `OpenAiPublicSearch`
+(`WorkAttemptProbe::run_search`); reads and discoveries run one at a time
+through the composition browser runner (`run_agent_step`), anonymous and
+read-only. Questions are `Ask` steps answered with
+`WorkRuntimeIntent::AnswerStep` while the loop polls; success requires a final
+`Finish` step. Budgets: grant turns/steps/hops, execution limits, per-call turn
+config in `desktop/src/work_provider.rs`. Deferred: parallel native workers,
+live page cards, source cards as first-class canvas elements, history and
+memory retrieval on turn zero.
+
 [`product-system.md`](product-system.md) now records the agreed full product
 direction: Profile → Space → Work → Area, objective-independent manual Works,
 the canvas as the primary environment, a centered Tabs toolbar popover opening

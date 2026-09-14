@@ -507,6 +507,15 @@ interactions stop the run with a persisted reason and offer the page in the
 pane; a takeover revokes and drains automation first. Continuing is a fresh
 approval of the same specification, never a resumed run.
 
+Routine public work runs as a Rust-supervised loop under one grant: sending
+the objective authorizes anonymous public search, reading, discovery, and
+placing objects on the canvas within a shown budget, and nothing else. Each
+turn the model proposes operations from a closed vocabulary; Rust admits them,
+runs them, and commits every step, source, and object as it settles, so the
+canvas fills while the agent works. Questions are steps of the run, answered
+above the composer while it waits. Search text that repeats private context is
+refused. Accounts and effects never enter this grant; they keep exact approval.
+
 Adaptation inside an approved capability must still create Rust-admitted,
 durable assignments under a bounded delegation policy. Never mutate historical
 approvals/specifications or allow a child to expand its own authority. Changes
