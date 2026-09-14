@@ -60,9 +60,23 @@ manifest for the composer chip. Decisions: `WorkEnvironmentEdit::Decide` /
 current decisions as implicit private items. Documents: synthesis emits typed
 blocks compiled by `zephium-core/src/work/document.rs` into the note schema
 plus derived paragraphs; prose links must match a disclosed evidence URL; notes
-carry a `link` mark opened through native intents. Not yet done: Media & Files
-(`ResourceContent::Media`, media store, import, remote image admission) and
-account-scoped work; both need the decisions recorded in the session report.
+carry a `link` mark opened through native intents.
+
+**2026-09-14 M3 media checkpoint (commits `0dbf57f2` … frame `admit candidates`).**
+`ResourceContent::Media { asset: MediaAssetV1 }` describes bytes in a
+profile-scoped, content-addressed store (`<data>/media/<profile>/<digest>`,
+`zephium-store/src/hub/media.rs`). Admission sniffs bytes, decodes images with
+the `image` crate under fixed limits (8 MiB imported, 2 MiB fetched, 8192 px),
+recognizes PDFs, and keeps other files opaque; the store mints the resource in
+the same call and IPC callers cannot forge a Media draft. Images reach main
+chrome only through `zephium-media://localhost/<profile>/<digest>` (CSP
+`img-src` widened accordingly); other kinds open with the OS default app.
+Subjects carry `image_candidates`; `media_admit_remote` fetches one candidate
+without cookies (`zephium-agentic/src/public_asset.rs`, public HTTPS only,
+three redirects, 2 MiB), stores it with `Fetched` provenance, and relates
+subject → media with `Uses`. Live file references (`Reference{scoped path}`)
+and in-Work PDF viewing are deferred; PDFs open with the OS. Account-scoped
+work remains the last M3 item.
 
 [`product-system.md`](product-system.md) now records the agreed full product
 direction: Profile → Space → Work → Area, objective-independent manual Works,
