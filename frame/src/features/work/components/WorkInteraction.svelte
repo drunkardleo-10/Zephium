@@ -2,6 +2,7 @@
   import type { WorkSession } from "$domain/work";
   import { preferences } from "$domain/preferences";
   import { preparationFailure } from "../lib/preparation-failure";
+  import { agentLine, stepLabel } from "../lib/agent-steps";
   import Button from "$shared/ui/Button";
   import WorkExecutionReview from "./WorkExecutionReview.svelte";
   import { currentActivity } from "$domain/work";
@@ -12,27 +13,33 @@
     onopenpage,
   }: {
     session: WorkSession;
+    /** Opens the objective inspector for an interrupted execution. */
     ondetails: (execution?: string) => void;
     /** Presents the signed-in page for sign-in handoff or takeover. */
     onopenpage?: (tab: string) => void;
   } = $props();
   const id = $props.id();
-  const state = $derived(session.projection);
-  const work = $derived(state?.work);
-  const planning = $derived(work ? session.operations.latest(work.id, "plan") : undefined);
-  const publicRead = $derived(work ? session.operations.latest(work.id, "read_public") : undefined);
-  const execution = $derived(state?.executions.at(-1));
-  const interrupted = $derived(!!execution && !!state?.interrupted.includes(execution.id));
+  const runtime = $derived(session.projection);
+  const work = $derived(runtime?.work);
+  const run = $derived(work ? session.operations.latest(work.id, "run") : undefined);
+  const execution = $derived(runtime?.executions.at(-1));
+  const interrupted = $derived(!!execution && !!runtime?.interrupted.includes(execution.id));
   const operating = $derived(work ? session.operations.busy(work.id) : false);
   const blocked = $derived(
     !!session.pending || operating || !["ready", "rejected"].includes(session.delivery),
   );
+  const live = $derived(
+    !!execution &&
+      !interrupted &&
+      ["approved", "running", "cancel_requested"].includes(execution.status),
+  );
   const activity = $derived(
-    state ? currentActivity(state, session.activity).at(-1)?.activity : undefined,
+    runtime ? currentActivity(runtime, session.activity).at(-1)?.activity : undefined,
   );
   const activityLabels = {
     planning: m.work_activity_planning,
     delegating: m.work_activity_delegating,
+    searching: m.work_activity_searching,
     reading: m.work_activity_reading,
     comparing: m.work_activity_comparing,
     producing_artifact: m.work_activity_producing,
@@ -41,43 +48,50 @@
     cancelling: m.work_activity_cancelling,
     finishing: m.work_activity_finishing,
   };
+  const line = $derived(execution ? agentLine(execution) : null);
+  const recent = $derived(
+    (execution?.steps ?? [])
+      .filter((step) => step.kind.kind !== "turn" && step.kind.kind !== "ask")
+      .slice(-4)
+      .map((step) => ({ id: step.id, label: stepLabel(step) })),
+  );
+  const questions = $derived(
+    live
+      ? (execution?.steps ?? []).flatMap((step) =>
+          step.kind.kind === "ask" && step.status === "running"
+            ? [{ id: step.id, prompt: step.kind.prompt, options: step.kind.options }]
+            : [],
+        )
+      : [],
+  );
   const failure = $derived(
-    preparationFailure(publicRead?.state) ??
-      (planning?.state.kind === "refused"
-        ? planning.state.error
-        : planning?.state.kind === "planned" && planning.state.response.outcome.kind === "refused"
-          ? planning.state.response.outcome.reason.kind
-          : planning?.state.kind === "planned" &&
-              planning.state.response.outcome.kind === "settled" &&
-              planning.state.response.outcome.response.reply.kind === "error"
-            ? planning.state.response.outcome.response.reply.error
-            : null),
+    preparationFailure(run?.state) ??
+      (run?.state.kind === "settled" && run.state.response.reply.kind === "error"
+        ? run.state.response.reply.error
+        : null),
   );
-  const preparation = $derived(
-    work ? session.operations.latest(work.id, "prepare_plan") : undefined,
+  const approval = $derived(
+    work ? session.operations.latest(work.id, ["prepare_plan", "prepare_account"]) : undefined,
   );
-  const prepared = $derived(
-    preparation?.state.kind === "planned" && preparation.state.response.outcome.kind === "settled"
-      ? preparation.state.response.outcome.response.reply
-      : null,
-  );
-  const currentApproval = $derived(
-    prepared?.kind === "approval_draft" && prepared.expected_revision === work?.revision,
+  const awaitingApproval = $derived(
+    (approval?.state.kind === "settled" &&
+      approval.state.response.reply.kind === "approval_draft" &&
+      approval.state.response.reply.expected_revision === work?.revision) ||
+      (approval?.state.kind === "planned" &&
+        approval.state.response.outcome.kind === "settled" &&
+        approval.state.response.outcome.response.reply.kind === "approval_draft" &&
+        approval.state.response.outcome.response.reply.expected_revision === work?.revision) ||
+      approval?.state.kind === "pending",
   );
   const settled = $derived(
-    !!execution &&
-      (interrupted ||
-        ["completed", "failed", "cancelled", "interrupted", "needs_review"].includes(
-          execution.status,
-        )) &&
-      (!work?.plan || work.plan.revision === execution.spec.plan_revision) &&
-      !work?.questions.some((question) => question.state === "active") &&
+    !live &&
+      questions.length === 0 &&
       !blocked &&
       !session.hasDrafts &&
       !session.failure &&
       !failure &&
-      !currentApproval &&
-      !preparationFailure(preparation?.state),
+      !awaitingApproval &&
+      run?.state.kind !== "pending",
   );
   const accountScope = $derived.by(() => {
     for (const node of execution?.spec.nodes ?? [])
@@ -108,6 +122,7 @@
     !!execution &&
       !!work &&
       !!intervention &&
+      !!accountScope &&
       !["running", "cancel_requested", "approved"].includes(execution.status) &&
       work.status === "plan_ready" &&
       work.plan?.revision === execution.spec.plan_revision,
@@ -126,68 +141,52 @@
       ? m.work_interrupted()
       : execution?.status === "failed"
         ? m.work_env_status_failed()
-        : execution?.status === "completed"
-          ? m.work_env_status_completed()
+        : execution?.status === "completed" || execution?.status === "needs_review"
+          ? m.work_env_status_done()
           : execution?.status === "interrupted"
             ? m.work_interrupted()
             : execution?.status === "cancelled"
               ? m.work_env_status_cancelled()
               : execution?.status === "cancel_requested"
                 ? m.work_env_status_stopping()
-                : execution?.status === "needs_review"
-                  ? m.work_review_required()
-                  : execution?.status === "running"
-                    ? m.work_env_status_running()
-                    : execution?.authorization === "user_directed_public_read"
-                      ? m.work_env_public_unstarted_status()
-                      : m.work_env_status_approved(),
+                : execution?.status === "running"
+                  ? m.work_env_status_running()
+                  : execution?.authorization === "user_directed_public_read"
+                    ? m.work_env_public_unstarted_status()
+                    : m.work_env_status_approved(),
   );
-  async function plan() {
-    if (!work || blocked || session.hasDrafts || work.status === "needs_input") return;
-    await session.operations.begin({
-      kind: "plan",
-      request: { version: 1, work: work.id, expected_revision: work.revision },
-    });
-  }
-  async function answer(question: string) {
-    const text = session.draft(`question:${question}`)?.trim();
-    if (!text || blocked) return;
-    if (await session.saveDraft(`question:${question}`, text)) await plan();
+  let answers = $state<Record<string, string>>({});
+  async function answer(step: string) {
+    const text = answers[step]?.trim();
+    if (!text || !execution || blocked) return;
+    if (await session.answerStep(execution.id, step, text)) delete answers[step];
   }
 </script>
 
 {#if work}<section class="interaction" class:settled aria-label={m.work_env_current_work()}>
     <header>
       <strong role={settled ? "status" : undefined}
-        >{settled ? executionLabel : work.objective.slice(0, 96)}</strong
-      >{#if settled && !interrupted && work.status === "plan_ready" && (execution?.status === "failed" || execution?.status === "interrupted")}<Button
+        >{settled ? (line ?? executionLabel) : work.objective.slice(0, 96)}</strong
+      >{#if interrupted}<Button
+          class="plan-details"
           size="compact"
-          disabled={preferences.value("ai.enabled") === "false" || blocked}
-          onclick={() => {
-            if (work && !blocked && preferences.value("ai.enabled") !== "false")
-              void session.operations.begin({
-                kind: "prepare_plan",
-                request: { version: 1, work: work.id, expected_revision: work.revision },
-              });
-          }}>{m.work_prepare_execution()}</Button
-        >{/if}<Button
-        class="plan-details"
-        size="compact"
-        onclick={() => ondetails(interrupted ? execution?.id : undefined)}
-        >{interrupted ? m.work_env_review_interruption() : m.work_env_plan_details()}</Button
-      >
+          onclick={() => ondetails(execution?.id)}>{m.work_env_review_interruption()}</Button
+        >{/if}
     </header>
     {#if !settled}
-      {#if publicRead?.state.kind === "unknown"}<p role="status">{m.work_operation_unknown()}</p>
-      {:else if publicRead?.state.kind === "pending" && !activity}<p role="status">
-          {m.work_env_public_pending()}
+      {#if run?.state.kind === "unknown" || session.delivery === "unknown"}<p role="status">
+          {m.work_operation_unknown()}
         </p>
+      {:else if line && live}<p class="line" role="status">{line}</p>
       {:else if activity}<p role="status">{activityLabels[activity]()}</p>
-      {:else if planning?.state.kind === "pending"}<p role="status">{m.work_activity_planning()}</p>
-      {:else if planning?.state.kind === "unknown"}<p role="status">{m.work_operation_unknown()}</p>
+      {:else if run?.state.kind === "pending"}<p role="status">{m.work_activity_planning()}</p>
       {:else if execution}<p role="status">{executionLabel}</p>{/if}
+      {#if live && activity && line}<p class="activity">{activityLabels[activity]()}</p>{/if}
+      {#if live && recent.length}<ol class="steps">
+          {#each recent as step (step.id)}<li>{step.label}</li>{/each}
+        </ol>{/if}
     {/if}
-    {#each work.questions.filter((question) => question.state === "active") as question (question.id)}<form
+    {#each questions as question (question.id)}<form
         onsubmit={(event) => {
           event.preventDefault();
           void answer(question.id);
@@ -198,28 +197,20 @@
           {#each question.options as option, index (index)}<Button
               size="compact"
               disabled={blocked}
-              onclick={() => session.setDraft(`question:${question.id}`, option)}>{option}</Button
+              onclick={() => (answers[question.id] = option)}>{option}</Button
             >{/each}
         </div>
         <input
           id={`${id}-${question.id}`}
           maxlength="8192"
-          value={session.draft(`question:${question.id}`) ?? ""}
-          oninput={(event) =>
-            session.setDraft(`question:${question.id}`, event.currentTarget.value)}
+          value={answers[question.id] ?? ""}
+          oninput={(event) => (answers[question.id] = event.currentTarget.value)}
           disabled={blocked}
         />
-        <Button
-          type="submit"
-          disabled={blocked || !session.draft(`question:${question.id}`)?.trim()}
+        <Button type="submit" disabled={blocked || !answers[question.id]?.trim()}
           >{m.work_env_continue()}</Button
         >
       </form>{/each}
-    {#if work.status === "draft" && !operating && !publicRead}<Button
-        size="compact"
-        disabled={blocked || session.hasDrafts}
-        onclick={() => void plan()}>{m.work_env_continue()}</Button
-      >{/if}
     {#if intervention && execution && !interrupted}<div class="intervention" role="status">
         <strong>{m.work_intervention_needs_you()}</strong>
         <p>{interventionLabel}</p>
@@ -241,25 +232,17 @@
         </div>
       </div>{/if}
     {#if !settled}<WorkExecutionReview {session} compact />{/if}
-    {#if execution && !interrupted && ["approved", "running"].includes(execution.status)}<div
+    {#if accountScope && execution && !interrupted && execution.status === "running" && onopenpage}<div
         class="options"
       >
-        {#if accountScope && execution.status === "running" && onopenpage}<Button
-            size="compact"
-            disabled={!!session.pending}
-            onclick={() => void takeOver()}>{m.work_take_over()}</Button
-          >{/if}
-        <Button
-          size="compact"
-          disabled={!!session.pending}
-          onclick={() => void session.execute({ kind: "cancel", execution: execution.id })}
-          >{m.work_cancel()}</Button
+        <Button size="compact" disabled={!!session.pending} onclick={() => void takeOver()}
+          >{m.work_take_over()}</Button
         >
       </div>{/if}
     {#if failure || session.failure}<p role="status">
         {m.work_request_failed({ reason: session.failure ?? failure ?? "" })}
       </p>{/if}
-    {#if session.pending || publicRead?.state.kind === "unknown" || !["ready", "rejected"].includes(session.delivery)}<Button
+    {#if session.pending || run?.state.kind === "unknown" || !["ready", "rejected"].includes(session.delivery)}<Button
         size="compact"
         onclick={() => void session.reconcile()}>{m.work_reconcile()}</Button
       >{/if}
@@ -316,6 +299,30 @@
     margin: 0;
     color: var(--color-muted);
     font-size: var(--text-caption);
+  }
+
+  .line {
+    color: var(--color-text);
+  }
+
+  .activity {
+    font-size: var(--text-label);
+  }
+
+  .steps {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: grid;
+    gap: 2px;
+    color: var(--color-faint);
+    font-size: var(--text-label);
+  }
+
+  .steps li {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   form {

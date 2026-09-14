@@ -322,6 +322,7 @@ function activityLabel(activity: WorkSignalV1["activity"]): string {
   const labels: Record<WorkSignalV1["activity"], string> = {
     planning: m.work_activity_planning(),
     delegating: m.work_activity_delegating(),
+    searching: m.work_activity_searching(),
     reading: m.work_activity_reading(),
     comparing: m.work_activity_comparing(),
     producing_artifact: m.work_activity_producing(),

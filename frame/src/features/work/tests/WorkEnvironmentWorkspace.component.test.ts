@@ -3,6 +3,7 @@ import { expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
 import { WorkEnvironmentSession } from "$domain/work-environment";
+import { AGENT_GRANT, AGENT_LIMITS } from "$domain/work";
 import type { WorkCallV1, WorkEnvironmentSnapshot } from "$shared/ipc/bindings";
 import { tabFixture } from "$shared/testing/fixtures";
 import WorkEnvironmentWorkspace from "../components/WorkEnvironmentWorkspace.svelte";
@@ -387,49 +388,52 @@ test("prompt submission keeps work on canvas and clarification choices above the
     .toEqual([
       [
         {
-          kind: "plan",
-          request: { version: 1, work: "objective", expected_revision: "4" },
+          kind: "run",
+          command: {
+            version: 1,
+            work: "objective",
+            expected_revision: "4",
+            command: expect.any(String),
+            intent: { kind: "begin_agent", grant: AGENT_GRANT, limits: AGENT_LIMITS },
+          },
         },
       ],
     ]);
   expect(screen.container.querySelector(".detail")).toBeNull();
   expect(screen.container.querySelector(".approval")).toBeNull();
-  objective.projection = {
-    ...objective.projection!,
-    work: {
-      ...objective.projection!.work,
-      status: "needs_input",
-      questions: [
-        {
-          id: "budget",
-          basis_revision: "4",
-          objective_revision: "1",
-          state: "active",
-          author: "primary_agent",
-          answer_author: null,
-          prompt: "Choose a budget",
-          options: ["Under 150", "Under 300"],
-          answer: null,
-        },
-      ],
+  const asking = structuredClone(projection.executions[0]!);
+  asking.status = "running";
+  asking.authorization = "user_directed_agent";
+  asking.attempts = [{ id: "attempt", node: "node", status: "running", usage: null }];
+  asking.spec.nodes[0]!.capability = {
+    kind: "agent",
+    grant: {
+      provider: "open_ai",
+      model: "gpt-5.6-luna",
+      max_turns: 10,
+      max_steps: 32,
+      browse_hops: 4,
     },
   };
+  asking.steps = [
+    {
+      id: "ask-1",
+      turn: 1,
+      kind: { kind: "ask", prompt: "Choose a budget", options: ["Under 150", "Under 300"] },
+      status: "running",
+    },
+  ];
+  objective.projection = { ...objective.projection!, executions: [asking] };
   await screen.getByRole("button", { name: "Under 150", exact: true }).click();
-  expect(objective.draft("question:budget")).toBe("Under 150");
   await expect.element(composer).toBeVisible();
   const question = screen.container.querySelector(".interaction input")!;
   const prompt = screen.container.querySelector(".panel textarea")!;
   expect(question.compareDocumentPosition(prompt) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(question.getBoundingClientRect().bottom).toBeLessThan(prompt.getBoundingClientRect().top);
-  const save = vi.spyOn(objective, "saveDraft").mockResolvedValue(false);
+  const answerStep = vi.spyOn(objective, "answerStep").mockResolvedValue(true);
   await screen.getByRole("button", { name: "Continue", exact: true }).click();
-  expect(save).toHaveBeenCalledExactlyOnceWith("question:budget", "Under 150");
+  expect(answerStep).toHaveBeenCalledExactlyOnceWith("execution", "ask-1", "Under 150");
   expect(planning).toHaveBeenCalledTimes(1);
-  expect(objective.draft("question:budget")).toBe("Under 150");
-  const activeHeader = screen.container.querySelector(".interaction header")!;
-  expect(activeHeader.querySelector("button")!.getBoundingClientRect().right).toBeLessThanOrEqual(
-    activeHeader.getBoundingClientRect().right,
-  );
   const link = { extraction_id: "provider-record", source_id: 1 };
   const completed = structuredClone(projection.executions[0]!);
   completed.user_artifacts![0]!.evidence = [link];
@@ -482,16 +486,7 @@ test("prompt submission keeps work on canvas and clarification choices above the
   await expect
     .poll(() => screen.container.querySelector(".above")!.getBoundingClientRect().height)
     .toBeLessThan(110);
-  const details = screen.getByRole("button", { name: "Plan details", exact: true });
-  await expect.element(details).toBeVisible();
-  const header = screen.container.querySelector(".interaction header")!;
-  const title = header.querySelector("strong")!;
-  const button = header.querySelector("button")!;
-  expect(title.getBoundingClientRect().right).toBeLessThan(button.getBoundingClientRect().left);
-  expect(button.getBoundingClientRect().right).toBeLessThanOrEqual(
-    header.getBoundingClientRect().right,
-  );
-  expect(button.getBoundingClientRect().right).toBeLessThanOrEqual(1100);
+  expect(screen.container.querySelector(".interaction header button")).toBeNull();
   await expect.element(screen.getByRole("button", { name: "Source 1", exact: true })).toBeEnabled();
   await screen.getByRole("button", { name: "View 1 other results", exact: true }).click();
   await expect
@@ -504,91 +499,4 @@ test("prompt submission keeps work on canvas and clarification choices above the
   await screen.unmount();
   environment.dispose();
   objective.dispose();
-});
-
-test("public research is explicit, validates without truncation, and submits only the saved objective", async () => {
-  await page.viewport(1100, 750);
-  const { workSession } = await import("$domain/work");
-  const { projection, snapshot } = await import("./environment-fixtures");
-  const profile = "public-composer-profile";
-  const environment = new WorkEnvironmentSession(profile, "space");
-  environment.snapshot = { ...snapshot, profile, elements: [] };
-  environment.tabsIntroduced = true;
-  const objective = workSession(profile)!;
-  vi.spyOn(objective, "start").mockResolvedValue();
-  vi.spyOn(objective, "open").mockResolvedValue(true);
-  const create = vi.spyOn(objective, "create").mockImplementation(async (text) => {
-    objective.selected = "objective";
-    objective.projection = {
-      ...projection,
-      executions: [],
-      work: { ...projection.work, profile, status: "draft", objective: text },
-    };
-    return true;
-  });
-  const operation = vi.spyOn(objective.operations, "begin").mockResolvedValue();
-  vi.spyOn(environment, "edit").mockResolvedValue(true);
-  native.call.mockResolvedValue({
-    version: 1,
-    profile,
-    reply: { kind: "error", error: "not_found" },
-  });
-  const screen = await render(WorkEnvironmentWorkspace, {
-    session: environment,
-    tabs: [],
-    spaceName: "Personal",
-    profileLabel: "Reader",
-    onreturn: vi.fn(),
-    onopen: vi.fn(),
-    onnewtab: vi.fn(),
-    onsettings: vi.fn(),
-  });
-  const root = screen.container.querySelector<HTMLElement>(".environment")!;
-  root.style.height = "600px";
-  root.style.width = "1100px";
-  const composer = screen.getByRole("textbox", { name: "Start a new objective", exact: true });
-  await composer.fill("🔬".repeat(513));
-  await screen.getByRole("button", { name: "Research public web", exact: true }).click();
-  await expect
-    .element(
-      screen.getByText(
-        "OpenAI · GPT-5.6 Luna. Sends only this objective to public web search; excludes attached resources, private and account context. Maximum $0.10.",
-        { exact: true },
-      ),
-    )
-    .toBeVisible();
-  await screen.getByRole("button", { name: "Send", exact: true }).click();
-  await expect.element(screen.getByRole("alert")).toBeVisible();
-  expect(create).not.toHaveBeenCalled();
-  expect(environment.composer).toBe("🔬".repeat(513));
-  await composer.fill("  Find cafés in Łódź 🔬  ");
-  await screen.getByRole("button", { name: "Send", exact: true }).click();
-  await expect.poll(() => operation.mock.calls.length).toBe(1);
-  expect(create).toHaveBeenCalledExactlyOnceWith("Find cafés in Łódź 🔬", expect.any(String));
-  expect(operation.mock.calls[0]![0]).toEqual({
-    kind: "read_public",
-    command: {
-      version: 1,
-      work: "objective",
-      expected_revision: "4",
-      command: expect.any(String),
-      intent: {
-        kind: "read_public",
-        scope: { provider: "open_ai", model: "gpt-5.6-luna", query: "Find cafés in Łódź 🔬" },
-        limits: {
-          model_tokens: 147456,
-          cost_micro_usd: 100000,
-          operations: 1,
-          timeout_seconds: 180,
-          max_workers: 1,
-        },
-      },
-    },
-  });
-  expect(environment.composer).toBe("");
-  await expect
-    .element(screen.getByRole("button", { name: "Back to canvas", exact: true }))
-    .not.toBeInTheDocument();
-  await screen.unmount();
-  environment.dispose();
 });

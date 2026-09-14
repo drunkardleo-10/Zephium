@@ -18,7 +18,14 @@ import { events } from "$shared/ipc/native-events";
 import { observe } from "$shared/lib/observe";
 import { registerCloseTask } from "$shared/lib/close";
 import { SvelteMap } from "svelte/reactivity";
-import { admitProjection, commandId, validRevision, planProposal } from "./work-model";
+import {
+  admitProjection,
+  commandId,
+  validRevision,
+  planProposal,
+  AGENT_GRANT,
+  AGENT_LIMITS,
+} from "./work-model";
 import { currentActivity } from "./work-activity";
 import { WorkOperations } from "./work-operations.svelte";
 
@@ -413,7 +420,29 @@ export class WorkSession {
       },
     });
   }
-  execute(intent: Exclude<WorkRuntimeIntent, { kind: "read_public" }>, expected?: string) {
+  /** The routine loop: sending the objective grants the public envelope. */
+  async run(context: WorkContextSelectionV1 | null = null) {
+    const work = this.projection?.work;
+    if (!work || this.pending || this.operations.busy(work.id)) return;
+    await this.operations.begin({
+      kind: "run",
+      ...(context ? { context } : {}),
+      command: {
+        version: 1,
+        work: work.id,
+        expected_revision: work.revision,
+        command: commandId(),
+        intent: { kind: "begin_agent", grant: AGENT_GRANT, limits: AGENT_LIMITS },
+      },
+    });
+  }
+  answerStep(execution: string, step: string, answer: string) {
+    return this.execute({ kind: "answer_step", execution, step, answer });
+  }
+  execute(
+    intent: Exclude<WorkRuntimeIntent, { kind: "read_public" | "begin_agent" }>,
+    expected?: string,
+  ) {
     const work = this.projection?.work;
     if (!work) return Promise.resolve(false);
     return this.mutate({

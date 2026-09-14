@@ -14,7 +14,7 @@ export type OperationObservation = {
   state: WorkOperationStateV1;
 };
 function operationBasis(input: WorkOperationV1) {
-  return input.kind === "read_public" ? input.command : input.request;
+  return input.kind === "read_public" || input.kind === "run" ? input.command : input.request;
 }
 
 /** Transient observations of native jobs. Disposal stops reads, never workers. */
@@ -115,7 +115,7 @@ export class WorkOperations {
                   state.response.reply.work === work &&
                   state.response.reply.expected_revision ===
                     operationBasis(job.input).expected_revision) ||
-                ((job.input.kind === "start" || job.input.kind === "read_public") &&
+                (["start", "read_public", "run"].includes(job.input.kind) &&
                   state.response.reply.kind === "projection" &&
                   state.response.reply.projection.work.id === work &&
                   state.response.reply.projection.work.profile === this.profile))

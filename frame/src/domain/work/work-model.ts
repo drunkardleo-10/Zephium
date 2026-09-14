@@ -1,4 +1,25 @@
-import type { WorkRuntimeProjection, WorkPlanRevision } from "$shared/ipc/bindings";
+import type {
+  WorkRuntimeProjection,
+  WorkPlanRevision,
+  WorkAgentGrantV1,
+  WorkExecutionLimits,
+} from "$shared/ipc/bindings";
+
+/** The routine public envelope shown in the composer; Rust enforces it. */
+export const AGENT_GRANT: WorkAgentGrantV1 = {
+  provider: "open_ai",
+  model: "gpt-5.6-luna",
+  max_turns: 10,
+  max_steps: 32,
+  browse_hops: 4,
+};
+export const AGENT_LIMITS: WorkExecutionLimits = {
+  model_tokens: 1_000_000,
+  cost_micro_usd: 1_500_000,
+  operations: 64,
+  timeout_seconds: 1800,
+  max_workers: 2,
+};
 
 const identity = (value: string) => /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/u.test(value);
 export function validRevision(value: string): boolean {

@@ -33,11 +33,9 @@ export class WorkEnvironmentSession {
   remoteView = $state.raw<{ sequence: number; view: WorkEnvironmentView } | null>(null);
   private remoteSequence = 0;
   composer = $state("");
-  publicResearch = $state(false);
   objectiveSubmission = $state.raw<{
     objective: string;
     command: string;
-    research: boolean;
     attached: boolean;
     context: WorkContextSelectionV1 | null;
     /** The attached tab whose signed-in session the request should use. */

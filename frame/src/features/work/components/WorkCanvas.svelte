@@ -331,7 +331,7 @@
       }}
       onmoveend={publishView}
     >
-      <Background patternColor="var(--color-border)" gap={24} size={1} />
+      <Background patternColor="var(--work-canvas-dot)" gap={20} size={1.5} />
       <CanvasControls bottomInset={fitBottomInset} />
     </SvelteFlow>
   {:else}<div class="canvas-empty" role="status">
@@ -352,6 +352,7 @@
     --xy-selection-background-color-default: var(--color-accent-soft);
     --xy-selection-border-default: 1px solid var(--color-accent);
     --xy-background-color-default: transparent;
+    --work-canvas-dot: color-mix(in srgb, var(--color-text) 16%, transparent);
   }
 
   .work-canvas :global(.svelte-flow) {

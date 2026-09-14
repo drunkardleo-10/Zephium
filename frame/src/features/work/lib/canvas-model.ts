@@ -31,8 +31,8 @@ export type CanvasItem = {
   responsibility?: { outputs: string[] };
   subject?: SubjectView;
   finding?: FindingView;
-  /** Transient agent presence: avatar seed and status. */
-  agent?: { seed: number; activity: string; objective: string };
+  /** Transient agent presence: avatar seed, status, and its latest line. */
+  agent?: { seed: number; activity: string; objective: string; line?: string };
   unavailable?: boolean;
   /** The user's recorded choice about this element. */
   decision?: string;
@@ -122,7 +122,7 @@ export function defaultSize(item: CanvasItem): { width: number; height: number }
     case "responsibility":
       return { width: 280, height: 150 };
     case "agent":
-      return { width: 220, height: 84 };
+      return { width: 260, height: item.agent?.line ? 104 : 84 };
     default:
       return { width: 280, height: 160 };
   }

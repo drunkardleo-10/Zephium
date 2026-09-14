@@ -5,6 +5,7 @@ import type {
   WorkRuntimeProjection,
 } from "$shared/ipc/bindings";
 import { artifactView } from "./project-work";
+import { agentLine, isAgentExecution } from "./agent-steps";
 import type { CanvasItem, CanvasLink, CanvasView } from "./canvas-model";
 import type { MediaAssetV1 } from "$domain/resources";
 import * as m from "$shared/i18n/messages";
@@ -13,12 +14,13 @@ function objectiveStatus(projection: WorkRuntimeProjection): string {
   const execution = projection.executions.at(-1);
   if (execution) {
     if (projection.interrupted.includes(execution.id)) return m.work_interrupted();
+    const agent = isAgentExecution(execution);
     const labels = {
       approved: m.work_env_status_approved,
       running: m.work_env_status_running,
       cancel_requested: m.work_env_status_stopping,
-      completed: m.work_env_status_completed,
-      needs_review: m.work_review_required,
+      completed: agent ? m.work_env_status_done : m.work_env_status_completed,
+      needs_review: agent ? m.work_env_status_done : m.work_review_required,
       cancelled: m.work_env_status_cancelled,
       failed: m.work_env_status_failed,
       interrupted: m.work_interrupted,
@@ -255,6 +257,7 @@ export function environmentLinks(snapshot: WorkEnvironmentSnapshot): CanvasLink[
 const agentLabels: Record<string, () => string> = {
   planning: m.work_activity_planning,
   delegating: m.work_activity_delegating,
+  searching: m.work_activity_searching,
   reading: m.work_activity_reading,
   comparing: m.work_activity_comparing,
   producing_artifact: m.work_activity_producing,
@@ -298,7 +301,12 @@ export function environmentAgents(
           : execution.status === "approved"
             ? m.work_env_agent_idle()
             : m.work_env_working()),
-      agent: { seed, activity: signal ?? "", objective: projection.work.id },
+      agent: {
+        seed,
+        activity: signal ?? "",
+        objective: projection.work.id,
+        ...(agentLine(execution) ? { line: agentLine(execution)! } : {}),
+      },
     });
   }
   return items;

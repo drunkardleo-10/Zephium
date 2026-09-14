@@ -128,9 +128,9 @@
     "css": 12000
   },
   "lazy:app/browser/WorkWorkspace.svelte": {
-    "js": 328000,
+    "js": 330000,
     "css": 88000,
-    "description": "Measured 325466 JS bytes with shared direct-public-read session and operation reconciliation. Note link marks and the typed document view add to the shared graph."
+    "description": "Measured 328183 JS bytes with the agent run operation, step labels, and the agent line on the canvas card in the shared graph."
   },
   "lazy:features/work/components/WorkCanvas.svelte": {
     "js": 532000,
@@ -157,8 +157,8 @@
   },
   "lazy:features/work/components/WorkInteraction.svelte": {
     "js": 131000,
-    "css": 7600,
-    "description": "Account-scoped approvals, the signed-in composer chip, and intervention controls add to the Work graph and message catalog."
+    "css": 7800,
+    "description": "Measured 127103 JS and 7627 CSS bytes: the agent line, recent step list, and run questions replaced the planning ceremony controls."
   },
   "lazy:features/work/components/WorkResultInspector.svelte": {
     "js": 74000,

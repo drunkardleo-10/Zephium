@@ -2,7 +2,7 @@
   import { untrack, onMount } from "svelte";
   import { SvelteSet } from "svelte/reactivity";
   import { WorkEnvironmentContext, type WorkEnvironmentSession } from "$domain/work-environment";
-  import { commandId, workSession, type WorkSession } from "$domain/work";
+  import { commandId, workSession, AGENT_LIMITS, type WorkSession } from "$domain/work";
   import { resourceSession, type ResourceSession } from "$domain/resources";
   import type {
     TabView,
@@ -30,7 +30,6 @@
     Settings02Icon,
     Tick02Icon,
   } from "../lib/icons";
-  import { publicResearchQueryValid } from "../lib/public-research";
   import WorkChrome from "./chrome/WorkChrome.svelte";
   import TasksCapsule from "./chrome/TasksCapsule.svelte";
   import Composer from "./composer/Composer.svelte";
@@ -114,7 +113,6 @@
   }>();
   let selectionCount = $state(0);
   let selectedIds = $state.raw<string[]>([]);
-  let contextReview = $state(false);
   let accountEffect = $state.raw<WorkAccountEffectV1>({ kind: "read" });
   const contextSel = $derived(
     contextSelection(session.snapshot, selectedIds, tabs, {
@@ -283,8 +281,7 @@
   let workQuery = $state("");
   let areaTitle = $state("");
   let objectivePending = $state(false);
-  let composerFailure = $state<"limit" | "changed" | "account" | null>(null);
-  let contextRouted = $state(false);
+  let composerFailure = $state<"account" | null>(null);
   let composerElement = $state<HTMLElement>();
   let composerHeight = $state(0);
   let chrome = $state<WorkChrome>();
@@ -689,17 +686,11 @@
     const submission = session.objectiveSubmission ?? {
       objective: session.composer.trim(),
       command: commandId(),
-      // Private context never rides a public search; Rust refuses it, and the
-      // reviewed plan shows the same manifest before anything is sent.
-      research: !account && session.publicResearch && !(contextSel && contextReview),
       attached: false,
       context: account ? null : contextSel,
       account: account ? { element: account.element, effect: accountEffect } : null,
     };
-    contextRouted = !!(!account && session.publicResearch && contextSel && contextReview);
-    composerFailure =
-      submission.research && !publicResearchQueryValid(submission.objective) ? "limit" : null;
-    if (composerFailure) return;
+    composerFailure = null;
     session.objectiveSubmission = submission;
     inspectionExecution = null;
     inspectCurrentPlan = false;
@@ -743,10 +734,6 @@
       if (!(await current.open(objectiveId))) return;
       const basis = current.projection?.work;
       if (current.selected !== objectiveId || basis?.id !== objectiveId) return;
-      if (submission.research && basis.objective !== submission.objective) {
-        composerFailure = "changed";
-        return;
-      }
       objectiveOpen = false;
       session.composer = "";
       session.objectiveToAttach = null;
@@ -766,17 +753,7 @@
             effect: submission.account.effect,
           },
         });
-      else if (submission.research) await current.readPublic(submission.context);
-      else
-        await current.operations.begin({
-          kind: "plan",
-          request: {
-            version: 1,
-            work: objectiveId,
-            expected_revision: basis.revision,
-            ...(submission.context ? { context: submission.context } : {}),
-          },
-        });
+      else await current.run(submission.context);
     } finally {
       objectivePending = false;
     }
@@ -859,6 +836,18 @@
         !objectiveSession?.projection?.interrupted.includes(execution.id),
     ),
   );
+  async function stopObjective() {
+    const current = objectiveSession;
+    const execution = current?.projection?.executions.find(
+      (execution) =>
+        ["running", "approved"].includes(execution.status) &&
+        !current.projection?.interrupted.includes(execution.id),
+    );
+    if (!current || !execution || current.pending) return;
+    await current.execute({ kind: "cancel", execution: execution.id });
+  }
+  const dollars = (micro: number) =>
+    new Intl.NumberFormat("en", { style: "currency", currency: "USD" }).format(micro / 1_000_000);
   const needsDecision = $derived(
     !!objectiveSession?.projection?.work.questions.some((question) => question.state === "active"),
   );
@@ -1186,17 +1175,7 @@
     >
   {/if}
   {#if composerFailure}<p class="composer-alert" role="alert">
-      {composerFailure === "limit"
-        ? m.work_env_public_query_limit()
-        : composerFailure === "account"
-          ? m.work_account_update_invalid()
-          : m.work_env_public_query_changed()}
-    </p>{/if}
-  {#if contextRouted && (objectivePending || session.objectiveSubmission)}<p
-      class="composer-alert"
-      role="status"
-    >
-      {m.work_context_routed()}
+      {m.work_account_update_invalid()}
     </p>{/if}
   {#if objectiveSession?.failure}<p class="composer-alert" role="status">
       {m.work_request_failed({ reason: objectiveSession.failure })}
@@ -1216,33 +1195,18 @@
       }}
     />
   {:else if contextSel}
-    <ContextManifest
-      profile={session.profile}
-      selection={contextSel}
-      purpose={session.publicResearch ? "public_read" : "planning"}
-      onreview={(required) => (contextReview = required)}
-    />
+    <ContextManifest profile={session.profile} selection={contextSel} purpose="agent" />
   {/if}
 {/snippet}
 {#snippet composerFooter()}
   {#if session.accountScope}
     <span class="disclosure">{m.work_account_disclosure()}</span>
   {:else}
-    <button
-      type="button"
-      class="mode"
-      class:on={session.publicResearch}
-      aria-pressed={session.publicResearch}
-      disabled={objectivePending || !!session.objectiveSubmission}
-      onclick={() => {
-        session.publicResearch = !session.publicResearch;
-        composerFailure = null;
-      }}>{m.work_env_public_research()}</button
-    >
     <span class="disclosure"
-      >{session.publicResearch
-        ? m.work_env_public_disclosure()
-        : m.work_planning_disclosure()}</span
+      >{m.work_agent_disclosure({
+        cost: dollars(AGENT_LIMITS.cost_micro_usd),
+        minutes: AGENT_LIMITS.timeout_seconds / 60,
+      })}</span
     >
   {/if}
 {/snippet}
@@ -1606,7 +1570,9 @@
         above={composerAbove}
         context={contextSel || session.accountScope ? composerContext : undefined}
         footer={composerFooter}
+        canStop={activeExecution}
         onsubmit={() => void createObjective()}
+        onstop={() => void stopObjective()}
       />
     </div>
   {/if}
@@ -1905,31 +1871,6 @@
     box-shadow: var(--shadow-popover);
     color: var(--color-warning);
     font-size: var(--text-label);
-  }
-
-  .mode {
-    flex: none;
-    padding: 2px 8px;
-    border: 0;
-    border-radius: var(--radius-capsule);
-    background: var(--color-fill);
-    color: var(--color-muted);
-    font: inherit;
-    font-size: var(--text-caption);
-    font-weight: 500;
-    cursor: default;
-    transition:
-      background-color var(--motion-fast) var(--ease-smooth),
-      color var(--motion-fast) var(--ease-smooth);
-  }
-
-  .mode:hover:not(:disabled) {
-    background: var(--color-fill-hover);
-  }
-
-  .mode.on {
-    background: var(--color-fill-active);
-    color: var(--color-text);
   }
 
   .disclosure {

@@ -11,6 +11,7 @@
   <div class="text">
     <span class="kind">{item.kind}</span>
     <strong>{item.status}</strong>
+    {#if item.agent?.line}<span class="line">{item.agent.line}</span>{/if}
   </div>
 </article>
 
@@ -63,5 +64,15 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .line {
+    color: var(--color-muted);
+    font-size: var(--text-caption);
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
   }
 </style>
