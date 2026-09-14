@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
-  import { Editor, Extension, Node, type JSONContent } from "@tiptap/core";
+  import { Editor, Extension, Mark, Node, type JSONContent } from "@tiptap/core";
   import Document from "@tiptap/extension-document";
   import Paragraph from "@tiptap/extension-paragraph";
   import Text from "@tiptap/extension-text";
@@ -25,6 +25,7 @@
     disabled = false,
     onchange,
     onopen,
+    onlink,
     findNotes,
     resolveNotes,
     referencesRevision = 0,
@@ -33,6 +34,8 @@
     disabled?: boolean;
     onchange: (value: NoteDocument) => void;
     onopen: (id: string) => void;
+    /** A web link in the note; opened through a native intent, never by chrome itself. */
+    onlink?: (href: string) => void;
     findNotes: (query: string) => Promise<ResourceSummary[]>;
     resolveNotes: (ids: string[]) => Promise<ResourceSummary[]>;
     referencesRevision?: number;
@@ -118,6 +121,25 @@
   });
   onMount(() => {
     const project = documentProjector();
+    // Links are descriptive marks. Clicking one hands the URL to the host;
+    // the privileged editor never follows an anchor. Pasting a URL over a
+    // selection links it; Mod-K removes the link under the cursor.
+    const link = Mark.create({
+      name: "link",
+      inclusive: false,
+      addAttributes: () => ({ href: { default: null } }),
+      parseHTML: () => [{ tag: "a[href]" }],
+      renderHTML: ({ HTMLAttributes }) => [
+        "a",
+        { "data-link": String(HTMLAttributes.href ?? ""), href: "#", rel: "noreferrer" },
+        0,
+      ],
+      addKeyboardShortcuts() {
+        return {
+          "Mod-k": () => this.editor.chain().focus().unsetMark("link").run(),
+        };
+      },
+    });
     const reference = Node.create({
       name: "noteReference",
       group: "inline",
@@ -156,6 +178,7 @@
         Bold,
         Italic,
         Code,
+        link,
         BulletList,
         OrderedList,
         ListItem,
@@ -201,7 +224,29 @@
             onopen(id);
             return true;
           }
+          const anchor = (event.target as HTMLElement).closest<HTMLElement>("a[data-link]");
+          const href = anchor?.dataset.link;
+          if (href) {
+            event.preventDefault();
+            onlink?.(href);
+            return true;
+          }
           return false;
+        },
+        handleDOMEvents: {
+          click: (_view, event) => {
+            if ((event.target as HTMLElement).closest("a[data-link]")) event.preventDefault();
+            return false;
+          },
+        },
+        handlePaste: (view, event) => {
+          const text = event.clipboardData?.getData("text/plain")?.trim() ?? "";
+          const { from, to } = view.state.selection;
+          if (from === to || !/^https?:\/\/\S+$/.test(text) || text.length > 2048) return false;
+          const type = view.state.schema.marks.link;
+          if (!type) return false;
+          view.dispatch(view.state.tr.addMark(from, to, type.create({ href: text })));
+          return true;
         },
         handleKeyDown: (_view, event) => {
           const target = event.target as HTMLElement;

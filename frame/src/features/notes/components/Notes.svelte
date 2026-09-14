@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from "svelte";
+  import { commands } from "$shared/ipc/bindings";
   import { resourceSession, type ResourceSession } from "$domain/resources";
   import ResourcePanel from "$shared/ui/data/ResourcePanel";
   import SaveStatus from "$shared/ui/data/SaveStatus";
@@ -143,6 +144,7 @@
                 onopen={(id) => {
                   void current.open(id);
                 }}
+                onlink={(href) => void commands.tabsOpenUrl(href)}
                 findNotes={(query) => current.findNotes(query)}
                 resolveNotes={(ids) => current.resolveNotes(ids)}
                 referencesRevision={current.referencesRevision}

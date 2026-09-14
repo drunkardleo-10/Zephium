@@ -1132,6 +1132,7 @@
                 if (scene.targets.has(id) || results.references.has(id)) void inspectCanvas(id);
               }}
               onopen={openLift}
+              onopenlink={openCitation}
               onselectionchange={(ids: string[]) => {
                 const owned = ids.filter((id) => authoritative.has(id));
                 selectionCount = owned.length;
@@ -1311,6 +1312,7 @@
           >{#snippet children(Host)}<Host
               profile={session.profile}
               host={notesHost}
+              onlink={openCitation}
               id={liftedElement.reference.kind === "resource"
                 ? liftedElement.reference.resource
                 : ""}

@@ -9,7 +9,14 @@
     host,
     id,
     autofocus = false,
-  }: { profile: string; host: string; id: string; autofocus?: boolean } = $props();
+    onlink,
+  }: {
+    profile: string;
+    host: string;
+    id: string;
+    autofocus?: boolean;
+    onlink?: (href: string) => void;
+  } = $props();
   let session = $state.raw<ResourceSession | null>(null);
   const loadEditor = () => import("./NotesEditor.svelte");
   let titleInput = $state<HTMLInputElement>();
@@ -75,6 +82,7 @@
               disabled={!current.canEdit}
               onchange={(document) => current.edit({ content: { kind: "note", document } })}
               onopen={(target) => void current.open(target)}
+              {onlink}
               findNotes={(query) => current.findNotes(query)}
               resolveNotes={(ids) => current.resolveNotes(ids)}
               referencesRevision={current.referencesRevision}

@@ -236,6 +236,7 @@
     {#if artifact && execution}<Artifact
         {artifact}
         onevidence={(reference) => void inspectEvidence(reference)}
+        onlink={onopencitation}
       /><WorkArtifactActions {session} execution={execution.id} artifact={artifact.key} />{/if}
     {#if evidence}<aside>
         <Button

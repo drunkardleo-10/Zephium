@@ -26,7 +26,7 @@ export function documentProjector() {
       type: node.type.name,
       attrs: node.attrs,
       ...(node.isText ? { text: node.text } : {}),
-      marks: node.marks.map((mark) => ({ type: mark.type.name })),
+      marks: node.marks.map((mark) => ({ type: mark.type.name, attrs: mark.attrs })),
     }).document;
     const children: DocumentNode[] = [];
     const references = new Set<string>();

@@ -46,7 +46,11 @@ function subjects(
 function content(data: WorkArtifactDataV1, refs: Refs): ArtifactContent {
   switch (data.kind) {
     case "document":
-      return { kind: "document", paragraphs: data.paragraphs };
+      return {
+        kind: "document",
+        paragraphs: data.paragraphs,
+        ...(data.formatted ? { formatted: data.formatted } : {}),
+      };
     case "table":
     case "comparison":
     case "checklist":

@@ -8,7 +8,15 @@ export function noteDocument(node: JSONContent): NoteDocument {
       type: kind,
       ...(value.text !== undefined ? { text: value.text } : {}),
       ...(value.content?.length ? { content: value.content.map(convert) } : {}),
-      ...(value.marks?.length ? { marks: value.marks.map((mark) => ({ type: mark.type })) } : {}),
+      ...(value.marks?.length
+        ? {
+            marks: value.marks.map((mark) =>
+              mark.type === "link" && typeof mark.attrs?.href === "string"
+                ? { type: "link", attrs: { href: mark.attrs.href } }
+                : { type: mark.type },
+            ),
+          }
+        : {}),
       ...(kind === "heading"
         ? { attrs: { level: value.attrs?.level } }
         : kind === "noteReference"

@@ -1,19 +1,22 @@
 {
   "browser": {
-    "js": 295000,
-    "css": 81564
+    "js": 297000,
+    "css": 81564,
+    "description": "Note link marks and the typed document view add to the shared graph."
   },
   "panel": {
     "js": 138000,
     "css": 26345
   },
   "lazy:features/settings/components/sections/AboutPage.svelte": {
-    "js": 430000,
-    "css": 90838
+    "js": 432000,
+    "css": 90838,
+    "description": "Note link marks and the typed document view add to the shared graph."
   },
   "lazy:features/settings/components/sections/AccountPage.svelte": {
-    "js": 349000,
-    "css": 84110
+    "js": 351000,
+    "css": 84110,
+    "description": "Note link marks and the typed document view add to the shared graph."
   },
   "lazy:features/tools/components/previews/ChatView.svelte": {
     "js": 101000,
@@ -28,8 +31,9 @@
     "css": 3491
   },
   "lazy:features/settings/components/sections/DownloadsPage.svelte": {
-    "js": 422000,
-    "css": 90293
+    "js": 424000,
+    "css": 90293,
+    "description": "Note link marks and the typed document view add to the shared graph."
   },
   "lazy:features/tools/components/previews/DownloadsView.svelte": {
     "js": 100000,
@@ -48,8 +52,9 @@
     "css": 6463
   },
   "lazy:features/settings/components/sections/KeyboardPage.svelte": {
-    "js": 426000,
-    "css": 90293
+    "js": 428000,
+    "css": 90293,
+    "description": "Note link marks and the typed document view add to the shared graph."
   },
   "lazy:features/settings/components/sections/LanguagesPage.svelte": {
     "js": 432000,
@@ -64,16 +69,19 @@
     "css": 86098
   },
   "lazy:features/settings/components/sections/PerformancePage.svelte": {
-    "js": 425000,
-    "css": 90293
+    "js": 427000,
+    "css": 90293,
+    "description": "Note link marks and the typed document view add to the shared graph."
   },
   "lazy:features/settings/components/sections/PrivacyPage.svelte": {
-    "js": 435000,
-    "css": 92134
+    "js": 437000,
+    "css": 92134,
+    "description": "Note link marks and the typed document view add to the shared graph."
   },
   "lazy:features/settings/components/sections/ProfilesPage.svelte": {
-    "js": 421000,
-    "css": 90943
+    "js": 423000,
+    "css": 90943,
+    "description": "Note link marks and the typed document view add to the shared graph."
   },
   "lazy:features/settings/components/sections/SearchPage.svelte": {
     "js": 425000,
@@ -84,8 +92,9 @@
     "css": 93000
   },
   "lazy:features/settings/components/sections/TabsPage.svelte": {
-    "js": 411000,
-    "css": 91684
+    "js": 413000,
+    "css": 91684,
+    "description": "Note link marks and the typed document view add to the shared graph."
   },
   "lazy:features/tools/components/previews/TasksView.svelte": {
     "js": 97236,
@@ -112,9 +121,9 @@
     "css": 12000
   },
   "lazy:app/browser/WorkWorkspace.svelte": {
-    "js": 326000,
+    "js": 328000,
     "css": 88000,
-    "description": "Measured 325466 JS bytes with shared direct-public-read session and operation reconciliation."
+    "description": "Measured 325466 JS bytes with shared direct-public-read session and operation reconciliation. Note link marks and the typed document view add to the shared graph."
   },
   "lazy:features/work/components/WorkCanvas.svelte": {
     "js": 520000,
@@ -136,8 +145,8 @@
   },
   "lazy:features/work/components/WorkObjectiveInspector.svelte": {
     "js": 156000,
-    "css": 18000,
-    "description": "Measured 150473 JS bytes with the disclosed-context manifest on plan revisions and approval specs; matrix/findings/source renderers retained."
+    "css": 19500,
+    "description": "Measured 150473 JS bytes with the disclosed-context manifest on plan revisions and approval specs; matrix/findings/source renderers retained. Note link marks and the typed document view add to the shared graph."
   },
   "lazy:features/work/components/WorkInteraction.svelte": {
     "js": 123000,

@@ -9,6 +9,7 @@
     canvasEvidence,
     canvasFocusResult,
     canvasOpen,
+    canvasOpenLink,
   } from "../lib/canvas-context";
   import CanvasNode from "./CanvasNode.svelte";
   import AreaNode from "./AreaNode.svelte";
@@ -44,6 +45,7 @@
     virtualizeFrom = 24,
     oninspect,
     onopen,
+    onopenlink,
     onaction,
     onevidence,
     onviewchange,
@@ -62,6 +64,8 @@
     virtualizeFrom?: number;
     oninspect: (id: string) => void;
     onopen?: (id: string) => void;
+    /** A prose link inside a result; opens through a native intent. */
+    onopenlink?: (href: string) => void;
     onaction?: (id: string, action?: string) => void;
     onevidence?: (id: string, reference: EvidenceReference) => void;
     onviewchange?: (view: CanvasView) => void;
@@ -75,6 +79,7 @@
     },
   });
   setContext(canvasAction, (id: string, action?: string) => onaction?.(id, action));
+  setContext(canvasOpenLink, (href: string) => onopenlink?.(href));
   setContext(canvasInspection, (id: string) => oninspect(id));
   setContext(canvasOpen, (id: string) => onopen?.(id));
   let resizing = $state(false);

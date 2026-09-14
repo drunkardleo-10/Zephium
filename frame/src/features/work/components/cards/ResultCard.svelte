@@ -12,7 +12,7 @@
     Link04Icon,
     Table01Icon,
   } from "../../lib/icons";
-  import { canvasEvidence } from "../../lib/canvas-context";
+  import { canvasEvidence, canvasOpenLink } from "../../lib/canvas-context";
   import type { CanvasItem } from "../../lib/canvas-model";
   let {
     id,
@@ -20,6 +20,7 @@
     selected,
     onaction,
   }: { id: string; item: CanvasItem; selected: boolean; onaction: () => void } = $props();
+  const openLink = getContext<((href: string) => void) | undefined>(canvasOpenLink);
   const evidence = getContext<{ open?: (id: string, reference: EvidenceReference) => void }>(
     canvasEvidence,
   );
@@ -56,6 +57,7 @@
         artifact={item.artifact}
         embedded
         onevidence={evidence?.open ? (reference) => evidence.open?.(id, reference) : undefined}
+        onlink={openLink}
       />
     </div>
   {:else}<p class="summary">{item.detail || item.status}</p>{/if}

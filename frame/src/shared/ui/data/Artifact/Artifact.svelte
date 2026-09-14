@@ -2,6 +2,7 @@
   import DataTable from "../DataTable";
   import LazyView from "$shared/ui/LazyView";
   import Matrix from "./Matrix.svelte";
+  import DocumentView from "./DocumentView.svelte";
   import Findings from "./Findings.svelte";
   import Sources from "./Sources.svelte";
   import EvidenceChips from "./EvidenceChips.svelte";
@@ -16,10 +17,13 @@
   let {
     artifact,
     onevidence,
+    onlink,
     embedded = false,
   }: {
     artifact: ArtifactView;
     onevidence?: (reference: EvidenceReference) => void;
+    /** Prose links open through a native intent (the Work pane or a tab). */
+    onlink?: (href: string) => void;
     embedded?: boolean;
   } = $props();
   let valid = $derived(artifactRenderable(artifact));
@@ -61,9 +65,10 @@
     </header>{/if}
   {#if !valid}<p role="alert">{m.work_artifact_unavailable()}</p>
   {:else if content.kind === "document"}<div class="document">
-      {#each content.paragraphs as paragraph, i (i)}<p>{paragraph}</p>{:else}<p>
-          {m.work_empty_data()}
-        </p>{/each}
+      {#if content.formatted}<DocumentView document={content.formatted} {onlink} />
+      {:else}{#each content.paragraphs as paragraph, i (i)}<p>{paragraph}</p>{:else}<p>
+            {m.work_empty_data()}
+          </p>{/each}{/if}
     </div>
   {:else if content.kind === "table"}<DataTable
       caption={artifact.title}

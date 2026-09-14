@@ -1,4 +1,14 @@
 import type { ChartSeries } from "../Chart";
+/** Structural view of the constrained note schema; the owner supplies the wire value. */
+type DocumentMarkView = { type: string; attrs?: { href?: string | null } | null };
+export type DocumentNodeView = {
+  type: string;
+  content?: DocumentNodeView[];
+  text?: string | null;
+  attrs?: { level?: number | null; start?: number | null; resource?: string | null } | null;
+  marks?: DocumentMarkView[];
+};
+export type NoteDocumentView = { version: number; document: DocumentNodeView };
 
 /** Rendering inputs only. The runtime adapter owns wire validation, identities and permissions. */
 export type EvidenceReference = { key: string; label: string; origin?: string; url?: string };
@@ -45,7 +55,7 @@ type MeasurementBasisView = {
   observedAt?: string;
 };
 export type ArtifactContent =
-  | { kind: "document"; paragraphs: readonly string[] }
+  | { kind: "document"; paragraphs: readonly string[]; formatted?: NoteDocumentView | null }
   | { kind: "table"; columns: readonly string[]; rows: readonly (readonly string[])[] }
   | {
       kind: "comparison";
