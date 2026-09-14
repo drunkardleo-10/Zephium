@@ -128,6 +128,7 @@ impl WorkNodeAttempt {
                     match input.resolve(result.outputs) {
                         Ok(artifacts) => WorkAdapterResult {
                             status: WorkAttemptStatus::Succeeded,
+                            intervention: None,
                             usage: Some(result.usage),
                             artifacts: artifacts
                                 .into_iter()
@@ -188,5 +189,6 @@ fn empty(status: WorkAttemptStatus, usage: Option<WorkUsage>) -> WorkAdapterResu
         status,
         usage,
         artifacts: vec![],
+        intervention: None,
     }
 }

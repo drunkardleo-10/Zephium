@@ -205,6 +205,7 @@ async fn search_case(mode: u8) {
                     command: WorkCommandId::generate(),
                     intent: WorkRuntimeIntent::Cancel {
                         execution: receipt.execution,
+                        intervention: None,
                     },
                 },
             )
@@ -849,6 +850,7 @@ async fn direct_public_read_dispatches_only_after_fresh_receipt_and_never_on_rep
                             command: WorkCommandId::generate(),
                             intent: WorkRuntimeIntent::Cancel {
                                 execution: state.executions[0].id,
+                                intervention: None,
                             },
                         },
                     )

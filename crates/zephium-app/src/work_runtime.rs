@@ -287,6 +287,7 @@ impl WorkNodeAttempt {
                     status,
                     usage: result.usage,
                     artifacts: artifacts.clone(),
+                    intervention: result.intervention.clone(),
                 }
             };
             match request(
@@ -414,6 +415,8 @@ pub struct WorkAdapterResult {
     pub status: WorkAttemptStatus,
     pub usage: Option<WorkUsage>,
     pub artifacts: Vec<WorkArtifactDraft>,
+    /// Closed reason automation stopped for a person; never page text.
+    pub intervention: Option<WorkInterventionV1>,
 }
 
 pub struct WorkRuntimeService {

@@ -694,6 +694,7 @@ async fn workflow(
                                     command: WorkCommandId::generate(),
                                     intent: WorkRuntimeIntent::Cancel {
                                         execution: receipt.execution,
+                                        intervention: None,
                                     },
                                 },
                             )?

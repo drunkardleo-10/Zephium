@@ -91,6 +91,7 @@ impl WorkNodeAttempt {
                     .settle_with_provider_evidence(
                         WorkAdapterResult {
                             status: WorkAttemptStatus::Succeeded,
+                            intervention: None,
                             usage: Some(result.usage),
                             artifacts,
                         },
@@ -117,5 +118,6 @@ fn empty(status: WorkAttemptStatus, usage: Option<WorkUsage>) -> WorkAdapterResu
         status,
         usage,
         artifacts: vec![],
+        intervention: None,
     }
 }

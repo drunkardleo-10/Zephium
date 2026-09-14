@@ -242,6 +242,7 @@ async fn product_commands_execute_review_edit_and_reopen_without_mutating_origin
                     attempt
                         .settle_owned(WorkAdapterResult {
                             status: WorkAttemptStatus::Succeeded,
+                            intervention: None,
                             usage: Some(WorkUsage {
                                 operations: 1,
                                 ..WorkUsage::default()

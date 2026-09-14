@@ -124,6 +124,7 @@ fn coordination_requires_exact_live_parent_and_complete_children() {
             &mut hub,
             WorkRuntimeUpdate::Settle {
                 execution,
+                intervention: None,
                 attempt: 500.into(),
                 status: WorkAttemptStatus::Succeeded,
                 usage: Some(WorkUsage::default()),
@@ -146,6 +147,7 @@ fn coordination_requires_exact_live_parent_and_complete_children() {
         &mut hub,
         WorkRuntimeUpdate::Settle {
             execution,
+            intervention: None,
             attempt: 501.into(),
             status: WorkAttemptStatus::Succeeded,
             usage: Some(WorkUsage::default()),
@@ -157,6 +159,7 @@ fn coordination_requires_exact_live_parent_and_complete_children() {
         &mut hub,
         WorkRuntimeUpdate::Settle {
             execution,
+            intervention: None,
             attempt: 500.into(),
             status: WorkAttemptStatus::Succeeded,
             usage: Some(WorkUsage::default()),
@@ -320,7 +323,8 @@ fn approved_revision_is_idempotent_profile_bound_and_retained_after_compaction()
                 expected: approved.work.revision,
                 command: 100.into(),
                 intent: WorkRuntimeIntent::Cancel {
-                    execution: receipt.execution
+                    execution: receipt.execution,
+                    intervention: None,
                 }
             }
         ),
@@ -334,6 +338,7 @@ fn approved_revision_is_idempotent_profile_bound_and_retained_after_compaction()
             command: 101.into(),
             intent: WorkRuntimeIntent::Cancel {
                 execution: receipt.execution,
+                intervention: None,
             },
         },
     )
@@ -408,6 +413,7 @@ fn restart_never_recreates_authority_and_preserves_unknown_reservation() {
                 expected: interrupted.work.revision,
                 update: WorkRuntimeUpdate::Settle {
                     execution: receipt.execution,
+                    intervention: None,
                     attempt,
                     status: WorkAttemptStatus::Failed,
                     usage: Some(WorkUsage::default()),
@@ -604,6 +610,7 @@ fn direct_public_read_is_atomic_replayable_and_exactly_scoped() {
             command: 702.into(),
             intent: WorkRuntimeIntent::Cancel {
                 execution: receipt.execution,
+                intervention: None,
             },
         },
     )
@@ -651,4 +658,113 @@ fn direct_public_read_refuses_unanswered_clarification_and_changed_disclosure() 
     let state = read_runtime(&mut hub, &asked);
     assert!(state.executions.is_empty());
     assert_eq!(state.work, asked);
+}
+#[test]
+fn takeover_persists_its_reason_and_success_cannot_carry_one() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&session()).unwrap();
+    let initial = create(&mut hub);
+    let planned = edit(
+        &mut hub,
+        &initial,
+        WorkEdit::ReplaceDraft { draft: draft() },
+    )
+    .unwrap();
+    let (approved, receipt) = approve(&mut hub, &planned, 100.into());
+    let attempt = WorkAttemptId::from(500);
+    hub.work_document(
+        planned.profile,
+        WorkRequest::RuntimeUpdate {
+            id: planned.id,
+            expected: approved.work.revision,
+            update: WorkRuntimeUpdate::Begin {
+                execution: receipt.execution,
+                attempt,
+                node: planned.plan.as_ref().unwrap().draft.nodes[0].id,
+            },
+        },
+    )
+    .unwrap();
+    let running = read_runtime(&mut hub, &planned);
+    let cancel = |hub: &mut Hub, command: u128, intervention| {
+        hub.work_document(
+            planned.profile,
+            WorkRequest::RuntimeCommand {
+                id: planned.id,
+                expected: running.work.revision,
+                command: command.into(),
+                intent: WorkRuntimeIntent::Cancel {
+                    execution: receipt.execution,
+                    intervention,
+                },
+            },
+        )
+    };
+    assert!(matches!(
+        cancel(
+            &mut hub,
+            101,
+            Some(WorkInterventionV1 {
+                kind: WorkInterventionKindV1::HumanTakeover,
+                origin: Some("https://example.test/page".into()),
+            })
+        ),
+        Err(WorkError::Invalid)
+    ));
+    cancel(
+        &mut hub,
+        102,
+        Some(WorkInterventionV1 {
+            kind: WorkInterventionKindV1::HumanTakeover,
+            origin: Some("https://example.test".into()),
+        }),
+    )
+    .unwrap();
+    let taken = read_runtime(&mut hub, &planned);
+    assert_eq!(
+        taken.executions[0].status,
+        WorkExecutionStatus::CancelRequested
+    );
+    assert_eq!(
+        taken.executions[0].intervention,
+        Some(WorkInterventionV1 {
+            kind: WorkInterventionKindV1::HumanTakeover,
+            origin: Some("https://example.test".into()),
+        })
+    );
+    let settle = |hub: &mut Hub, status, intervention| {
+        let state = read_runtime(hub, &planned);
+        hub.work_document(
+            planned.profile,
+            WorkRequest::RuntimeUpdate {
+                id: planned.id,
+                expected: state.work.revision,
+                update: WorkRuntimeUpdate::Settle {
+                    execution: receipt.execution,
+                    attempt,
+                    status,
+                    usage: Some(WorkUsage::default()),
+                    artifacts: vec![],
+                    intervention,
+                },
+            },
+        )
+    };
+    assert!(matches!(
+        settle(
+            &mut hub,
+            WorkAttemptStatus::Succeeded,
+            Some(WorkInterventionV1 {
+                kind: WorkInterventionKindV1::SignIn,
+                origin: None,
+            })
+        ),
+        Err(WorkError::Invalid)
+    ));
+    settle(&mut hub, WorkAttemptStatus::Cancelled, None).unwrap();
+    let settled = read_runtime(&mut hub, &planned);
+    assert_eq!(
+        settled.executions[0].intervention.as_ref().map(|i| i.kind),
+        Some(WorkInterventionKindV1::HumanTakeover)
+    );
 }

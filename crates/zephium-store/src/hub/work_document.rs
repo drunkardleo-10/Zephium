@@ -161,6 +161,7 @@ fn apply(
                 runtime::WorkRuntimeUpdate::Settle {
                     execution,
                     attempt,
+                    intervention: None,
                     status: runtime::WorkAttemptStatus::OutcomeUnknown,
                     usage: None,
                     artifacts: vec![],

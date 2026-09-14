@@ -103,6 +103,10 @@ pub enum WorkOperationV1 {
     Prepare {
         request: WorkApprovalRequestV1,
     },
+    /// Approval draft for one signed-in page chosen from an attached tab.
+    PrepareAccount {
+        request: WorkAccountApprovalRequestV1,
+    },
     Start {
         request: WorkStartRequestV1,
     },
@@ -113,9 +117,31 @@ impl WorkOperationV1 {
             Self::ReadPublic { command, .. } => command.work,
             Self::Plan { request } | Self::PreparePlan { request } => request.work,
             Self::Prepare { request } => request.work,
+            Self::PrepareAccount { request } => request.work,
             Self::Start { request } => request.work,
         }
     }
+}
+
+/// The user names the tab, the effect, and (for updates) exact values. Rust
+/// resolves the page, mints the account identity, and returns the draft the
+/// user approves; approval is the account attestation.
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(deny_unknown_fields)]
+pub struct WorkAccountApprovalRequestV1 {
+    pub version: u16,
+    pub work: WorkId,
+    pub expected_revision: WorkRevision,
+    pub environment: WorkEnvironmentId,
+    /// The attached browser element on the canvas.
+    pub element: WorkElementId,
+    pub effect: WorkAccountEffectV1,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkAccountEffectV1 {
+    Read,
+    Update { update: WorkFieldUpdateV1 },
 }
 
 /// The manifest chrome renders before dispatch, computed by the same

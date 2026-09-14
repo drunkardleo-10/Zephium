@@ -35,6 +35,7 @@ impl WorkProviders {
             WorkOperationV1::Plan { .. } => "plan",
             WorkOperationV1::PreparePlan { .. } => "prepare_plan",
             WorkOperationV1::Prepare { .. } => "prepare",
+            WorkOperationV1::PrepareAccount { .. } => "prepare_account",
             WorkOperationV1::Start { .. } => "execute",
         };
         let started = std::time::Instant::now();
@@ -176,6 +177,12 @@ impl WorkProviders {
             WorkOperationV1::Prepare { request } => {
                 let response = WorkExecutionService::new(shell)
                     .prepare_public_approval(profile, request)
+                    .await?;
+                Ok(WorkOperationStateV1::Settled { response })
+            }
+            WorkOperationV1::PrepareAccount { request } => {
+                let response = zephium_app::work_account_scope::WorkAccountApproval::new(shell)
+                    .prepare(profile, request)
                     .await?;
                 Ok(WorkOperationStateV1::Settled { response })
             }

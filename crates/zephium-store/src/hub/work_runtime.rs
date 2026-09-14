@@ -419,6 +419,7 @@ pub(super) fn command(
                 spec,
                 status: WorkExecutionStatus::Approved,
                 attempts: vec![],
+                intervention: None,
                 artifacts: vec![],
                 user_artifacts: vec![],
                 provider_evidence: vec![],
@@ -427,13 +428,20 @@ pub(super) fn command(
             tx.execute("INSERT INTO work_executions(work_id, execution_id, plan_revision, owner_session, approved_unix_ms, expires_unix_ms, body, approved_tick_ms, expires_tick_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", params![id.to_string(), id_execution.to_string(), fact.spec.plan_revision.get() as i64, session.session.to_string(), now, expires, body(&fact)?, session.tick_ms, expires_tick]).map_err(db)?;
             id_execution
         }
-        WorkRuntimeIntent::Cancel { execution } => {
+        WorkRuntimeIntent::Cancel {
+            execution,
+            intervention,
+        } => {
             let mut row = all
                 .into_iter()
                 .find(|r| r.fact.id == execution)
                 .ok_or(WorkError::NotFound)?;
             if row.fact.status.terminal() {
                 return Err(WorkError::Conflict);
+            }
+            if let Some(intervention) = intervention {
+                intervention.validate()?;
+                row.fact.intervention = Some(intervention);
             }
             row.fact.status = if row
                 .fact
@@ -513,6 +521,7 @@ pub(super) fn update(
                 status,
                 usage,
                 artifacts,
+                intervention: None,
             },
             Some(evidence),
         ),
@@ -635,10 +644,14 @@ pub(super) fn update(
             status,
             usage,
             artifacts,
+            intervention,
             ..
         } => {
             if status == WorkAttemptStatus::Running
                 || (status != WorkAttemptStatus::Succeeded && !artifacts.is_empty())
+                || intervention.as_ref().is_some_and(|i| {
+                    i.validate().is_err() || status == WorkAttemptStatus::Succeeded
+                })
             {
                 return Err(WorkError::Invalid);
             }
@@ -695,6 +708,9 @@ pub(super) fn update(
             row.fact.attempts[index].status = status;
             row.fact.attempts[index].usage = usage;
             row.fact.artifacts.extend(artifacts);
+            if intervention.is_some() {
+                row.fact.intervention = intervention;
+            }
             if let Some(evidence) = provider_evidence {
                 if evidence.attempt != attempt {
                     return Err(WorkError::Invalid);

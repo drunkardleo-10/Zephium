@@ -35,6 +35,8 @@ compile_error!("select the authenticated Notion qualification without another ob
 compile_error!("select the authenticated Notion write qualification without another objective");
 
 #[cfg(feature = "durable-runtime")]
+mod account_scope;
+#[cfg(feature = "durable-runtime")]
 pub mod durable_runtime;
 #[cfg(feature = "macos-work")]
 mod native;

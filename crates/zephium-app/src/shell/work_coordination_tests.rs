@@ -225,6 +225,7 @@ async fn coordinator_joins_original_child_publication_and_fails_closed_on_loss()
                                     command: WorkCommandId::generate(),
                                     intent: WorkRuntimeIntent::Cancel {
                                         execution: receipt.execution,
+                                        intervention: None,
                                     },
                                 },
                             )

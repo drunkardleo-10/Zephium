@@ -431,3 +431,115 @@ fn work_proposals_have_temporary_keys_and_cannot_smuggle_durable_identity_or_aut
     wire["author"] = serde_json::json!("user");
     assert!(serde_json::from_value::<WorkPlanProposal>(wire).is_err());
 }
+
+#[test]
+fn account_scoped_specs_bind_one_attested_page_and_a_single_step_plan() {
+    use super::runtime::*;
+    let plan = WorkPlanRevision {
+        context: None,
+        author: WorkAuthor::User,
+        revision: WorkRevision::INITIAL,
+        basis_revision: WorkRevision::INITIAL,
+        draft: draft(),
+    };
+    let limits = WorkExecutionLimits {
+        model_tokens: 128_000,
+        cost_micro_usd: 500_000,
+        operations: 64,
+        timeout_seconds: 600,
+        max_workers: 4,
+    };
+    let scope = WorkAccountScope {
+        tab: crate::ids::ItemId::generate(),
+        url: "https://app.notion.com/p/Sprint-42".into(),
+        origin: "https://app.notion.com".into(),
+        account: "01JACCOUNT0000000000000000".into(),
+    };
+    let read = WorkExecutionSpec::account_scoped(
+        &plan,
+        limits,
+        WorkCapability::AccountRead {
+            scope: scope.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(read.nodes.len(), 1);
+    assert_eq!(read.nodes[0].limits.max_workers, 1);
+    let update = WorkFieldUpdateV1 {
+        field: Some("Title".into()),
+        from: "Sprint 42".into(),
+        to: "Sprint 42 (probe)".into(),
+    };
+    WorkExecutionSpec::account_scoped(
+        &plan,
+        limits,
+        WorkCapability::AccountUpdate {
+            scope: scope.clone(),
+            update: update.clone(),
+        },
+    )
+    .unwrap();
+    for refused in [
+        WorkCapability::AccountRead {
+            scope: WorkAccountScope {
+                origin: "https://www.notion.so".into(),
+                ..scope.clone()
+            },
+        },
+        WorkCapability::AccountRead {
+            scope: WorkAccountScope {
+                url: "http://app.notion.com/p/Sprint-42".into(),
+                origin: "http://app.notion.com".into(),
+                ..scope.clone()
+            },
+        },
+        WorkCapability::AccountRead {
+            scope: WorkAccountScope {
+                account: "not an id".into(),
+                ..scope.clone()
+            },
+        },
+        WorkCapability::AccountUpdate {
+            scope: scope.clone(),
+            update: WorkFieldUpdateV1 {
+                to: "Sprint 42".into(),
+                ..update.clone()
+            },
+        },
+        WorkCapability::AccountUpdate {
+            scope: scope.clone(),
+            update: WorkFieldUpdateV1 {
+                from: " ".into(),
+                ..update.clone()
+            },
+        },
+        WorkCapability::PublicBrowse {
+            scope: WorkBrowseScope {
+                start_url: "https://app.notion.com/p/Sprint-42".into(),
+                routes: vec![WorkBrowseRoute {
+                    origin: "https://app.notion.com".into(),
+                    path_prefix: "/".into(),
+                }],
+                max_hops: 1,
+            },
+        },
+    ] {
+        assert!(WorkExecutionSpec::account_scoped(&plan, limits, refused).is_err());
+    }
+    let mut two_steps = plan.clone();
+    let mut second = two_steps.draft.nodes[0].clone();
+    second.id = WorkPlanNodeId::generate();
+    two_steps.draft.nodes.push(second);
+    assert!(WorkExecutionSpec::account_scoped(
+        &two_steps,
+        limits,
+        WorkCapability::AccountRead { scope },
+    )
+    .is_err());
+    assert!(WorkInterventionV1 {
+        kind: WorkInterventionKindV1::SignIn,
+        origin: Some("https://app.notion.com/p".into()),
+    }
+    .validate()
+    .is_err());
+}

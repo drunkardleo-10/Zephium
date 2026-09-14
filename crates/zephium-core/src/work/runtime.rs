@@ -1,6 +1,7 @@
 //! Durable execution facts and a closed compilation vocabulary. None of these
 //! serializable values is a policy manifest, context lease or live worker token.
 use super::{artifact::*, *};
+use crate::ids::ItemId;
 
 pub const MAX_WORK_EXECUTIONS: usize = 16;
 pub const MAX_WORK_ATTEMPTS: usize = 128;
@@ -117,6 +118,75 @@ pub enum WorkCapability {
     },
     /// Structured handoffs from completed plan dependencies only.
     Synthesize,
+    /// Read one exact page with the profile's own signed-in session. The
+    /// approving user attests the account; Zephium cannot verify it.
+    AccountRead {
+        scope: WorkAccountScope,
+    },
+    /// One approved field transition on that page, then its restoration,
+    /// each verified from a fresh observation before the next step.
+    AccountUpdate {
+        scope: WorkAccountScope,
+        update: WorkFieldUpdateV1,
+    },
+}
+
+/// A page the user chose from an attached tab. Execution opens it in a
+/// Work-owned page sharing the profile's cookies; the tab itself is untouched.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkAccountScope {
+    pub tab: ItemId,
+    pub url: String,
+    pub origin: String,
+    /// Opaque account identity minted by Rust at preparation; the approval
+    /// binds it to this profile and origin.
+    pub account: String,
+}
+pub const MAX_WORK_FIELD_VALUE_BYTES: usize = 512;
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkFieldUpdateV1 {
+    /// Accessible field name when the page has several candidates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    pub from: String,
+    pub to: String,
+}
+impl WorkAccountScope {
+    pub fn validate(&self) -> Result<(), WorkError> {
+        let url = validate_public_url(&self.url)?;
+        if url.origin().ascii_serialization() != self.origin
+            || self.account.is_empty()
+            || self.account.len() > 64
+            || !self.account.bytes().all(|b| b.is_ascii_alphanumeric())
+        {
+            return Err(WorkError::Invalid);
+        }
+        Ok(())
+    }
+}
+impl WorkFieldUpdateV1 {
+    pub fn validate(&self) -> Result<(), WorkError> {
+        for value in [&self.from, &self.to] {
+            validate_text(value, MAX_WORK_FIELD_VALUE_BYTES)?;
+            if value.trim().is_empty() || value.chars().any(char::is_control) {
+                return Err(WorkError::Invalid);
+            }
+        }
+        if let Some(field) = &self.field {
+            validate_text(field, 128)?;
+            if field.trim().is_empty() || field.chars().any(char::is_control) {
+                return Err(WorkError::Invalid);
+            }
+        }
+        if self.from == self.to {
+            return Err(WorkError::Invalid);
+        }
+        Ok(())
+    }
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -198,6 +268,46 @@ impl WorkExecutionSpec {
                     },
                 })
                 .collect(),
+        };
+        spec.validate(plan)?;
+        Ok(spec)
+    }
+    /// One signed-in page for a single-step plan. Approval of this draft is
+    /// the user's attestation of the account; it grants only the named effect.
+    pub fn account_scoped(
+        plan: &WorkPlanRevision,
+        limits: WorkExecutionLimits,
+        capability: WorkCapability,
+    ) -> Result<Self, WorkError> {
+        plan.draft.validate()?;
+        limits.validate()?;
+        capability.validate()?;
+        let [node] = plan.draft.nodes.as_slice() else {
+            return Err(WorkError::Invalid);
+        };
+        if !matches!(
+            capability,
+            WorkCapability::AccountRead { .. } | WorkCapability::AccountUpdate { .. }
+        ) || node
+            .outputs
+            .iter()
+            .any(|o| o.review == WorkOutputReview::Mechanical)
+        {
+            return Err(WorkError::Invalid);
+        }
+        let spec = Self {
+            context: None,
+            plan_revision: plan.revision,
+            limits,
+            nodes: vec![WorkNodeExecutionSpec {
+                node: node.id,
+                parent: None,
+                capability,
+                limits: WorkExecutionLimits {
+                    max_workers: 1,
+                    ..limits
+                },
+            }],
         };
         spec.validate(plan)?;
         Ok(spec)
@@ -330,6 +440,11 @@ impl WorkCapability {
             Self::PublicDiscovery { scope } => scope.validate()?,
             Self::CoordinatePublicDiscovery { max_hops } if *max_hops == 0 || *max_hops > 32 => {
                 return Err(WorkError::Invalid);
+            }
+            Self::AccountRead { scope } => scope.validate()?,
+            Self::AccountUpdate { scope, update } => {
+                scope.validate()?;
+                update.validate()?;
             }
             _ => {}
         }
@@ -523,6 +638,46 @@ pub struct WorkExecutionFact {
     /// User edits and decisions never overwrite the original agent output.
     #[serde(default)]
     pub user_artifacts: Vec<WorkArtifactUserState>,
+    /// Why automation stopped for a person. Continuation is a fresh approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intervention: Option<WorkInterventionV1>,
+}
+
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkInterventionKindV1 {
+    /// Authentication or account selection needs a person.
+    SignIn,
+    /// A CAPTCHA or equivalent human challenge is present.
+    Challenge,
+    /// A permission or operating-system boundary needs a person.
+    Permission,
+    /// The page needs an interaction Zephium cannot automate safely.
+    UnsupportedInteraction,
+    /// The effect or its verification needs the user's review.
+    Review,
+    /// The user took the page over; automation was revoked and drained.
+    HumanTakeover,
+}
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkInterventionV1 {
+    pub kind: WorkInterventionKindV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+}
+impl WorkInterventionV1 {
+    pub fn validate(&self) -> Result<(), WorkError> {
+        if let Some(origin) = &self.origin {
+            let url = validate_public_url(origin)?;
+            if url.origin().ascii_serialization() != *origin {
+                return Err(WorkError::Invalid);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Original provider attribution committed with its attempt's outputs. This
@@ -865,6 +1020,10 @@ pub enum WorkRuntimeIntent {
     },
     Cancel {
         execution: WorkExecutionId,
+        /// Present when a person takes the page over rather than abandoning
+        /// the work; persisted with the execution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        intervention: Option<WorkInterventionV1>,
     },
     /// Explicitly acknowledge that an old owner is gone. Cannot restart it.
     AcknowledgeInterruption {
@@ -901,6 +1060,7 @@ pub enum WorkRuntimeUpdate {
         status: WorkAttemptStatus,
         usage: Option<WorkUsage>,
         artifacts: Vec<WorkArtifactV1>,
+        intervention: Option<WorkInterventionV1>,
     },
     FinishCancellation {
         execution: WorkExecutionId,

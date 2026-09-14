@@ -289,6 +289,7 @@ impl WorkCoordinator {
                 .primary
                 .settle_owned(WorkAdapterResult {
                     status: WorkAttemptStatus::Failed,
+                    intervention: None,
                     usage: Some(WorkUsage::default()),
                     artifacts: vec![],
                 })
@@ -363,7 +364,9 @@ fn compile(
                     .map(|origin| SemanticOrigin::parse(origin).map_err(|_| WorkError::Invalid))
                     .collect()
             }
-            WorkCapability::Synthesize => Err(WorkError::Invalid),
+            WorkCapability::Synthesize
+            | WorkCapability::AccountRead { .. }
+            | WorkCapability::AccountUpdate { .. } => Err(WorkError::Invalid),
         }
     };
     let parent_origins = origins(&primary.specification().capability)?;

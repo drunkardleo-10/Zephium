@@ -465,7 +465,9 @@ where
     match attempt.specification().capability {
         WorkCapability::PublicBrowse { .. }
         | WorkCapability::PublicDiscovery { .. }
-        | WorkCapability::PublicSearch { .. } => browser(attempt).await,
+        | WorkCapability::PublicSearch { .. }
+        | WorkCapability::AccountRead { .. }
+        | WorkCapability::AccountUpdate { .. } => browser(attempt).await,
         WorkCapability::Synthesize => {
             attempt
                 .synthesize_owned_with_context(provider, context)

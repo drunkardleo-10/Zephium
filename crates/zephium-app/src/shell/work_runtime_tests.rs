@@ -106,7 +106,8 @@ async fn owned_evidence_reads_reach_store_without_bypassing_profile_or_link_chec
                     expected: WorkRevision::INITIAL,
                     command: WorkCommandId::generate(),
                     intent: WorkRuntimeIntent::Cancel {
-                        execution: WorkExecutionId::generate()
+                        execution: WorkExecutionId::generate(),
+                        intervention: None,
                     },
                 },
                 profile
@@ -233,6 +234,7 @@ async fn synthesis_case(
                     command: WorkCommandId::generate(),
                     intent: WorkRuntimeIntent::Cancel {
                         execution: receipt.execution,
+                        intervention: None,
                     },
                 },
             )
@@ -512,6 +514,7 @@ async fn runtime_application_approves_exact_plan_settles_artifact_and_recovers_d
     ));
     let result = WorkAdapterResult {
         status: WorkAttemptStatus::Succeeded,
+        intervention: None,
         usage: Some(WorkUsage::default()),
         artifacts: vec![WorkArtifactDraft {
             output: "checklist".into(),
@@ -562,6 +565,7 @@ async fn runtime_application_approves_exact_plan_settles_artifact_and_recovers_d
         &queue,
         successor.settle(WorkAdapterResult {
             status: WorkAttemptStatus::Succeeded,
+            intervention: None,
             usage: Some(WorkUsage::default()),
             artifacts: vec![WorkArtifactDraft {
                 output: "summary".into(),
