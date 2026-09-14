@@ -34,8 +34,10 @@ the required behavior. Popovers must remain inside their owning chrome WebView.
   (`--shadow-control`, `--shadow-primary`, `--shadow-recess`): a soft top-lit gradient
   fill, a hairline rim of light on the upper edge and a 2px contact shadow. Real soft
   shadows exist only on things that physically float (`--shadow-float`,
-  `--shadow-thumb`, `--shadow-popover`, `--shadow-overlay`). No glow, no CSS blur;
-  the native material supplies the blur.
+  `--shadow-thumb`, `--shadow-popover`, `--shadow-overlay`). Prefer native material
+  for window glass. CSS blur is allowed when it improves the interface and its
+  bounded rendering cost is justified; avoid gratuitous or animated blur. This
+  supersedes older blanket blur prohibitions in design documents.
 - Colors and shadows come only through semantic tokens in
   `src/styles/tokens.css`, shared by both app roots. Never use raw palette utilities such as `white/10` in
   component markup. Every component must work in dark, light, reduced-motion,
@@ -256,8 +258,8 @@ it for the existing wordmark or change its pixels.
 
 `UiInfo.material` reports a per-window enum. Native material updates still use the
 scoped `material.*` UI-command transport until typed appearance projections land.
-Preserve startup-query versus live-update ordering. Svelte never implements glass
-with CSS blur.
+Preserve startup-query versus live-update ordering. CSS effects must preserve
+native surface boundaries and meet the visual/performance guidance above.
 
 ## Work presentation foundation
 

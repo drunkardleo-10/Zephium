@@ -1,13 +1,157 @@
 # Zephium Work runtime continuation brief
 
-Status: current implementation handoff and delivery direction  
+Status: integrated implementation handoff; historical runtime evidence retained
+
+Latest product checkpoint: 2026-09-13
+
+Current branch: `work-mode-integration`
+
+Integrated baseline: `c5a7b08e` (`Integrate Work runtime and frontend foundation`)
+
+## Current integration checkpoint — read first
+
+[`product-system.md`](product-system.md) now records the agreed full product
+direction: Profile → Space → Work → Area, objective-independent manual Works,
+the canvas as the primary environment, a centered Tabs toolbar popover opening
+on first entry, a single Work profile menu, a bottom composer, and a compact
+task control. Browse's sidebar is hidden in Work. AI and Work can be disabled
+independently. Context starts from a bounded semantic view of the current Work;
+provider-native search and Rig reuse fit behind Zephium's authority boundaries.
+Read that document before interpreting the earlier runtime notes below.
+
+The runtime and frontend histories are already integrated. Preserve both,
+`backup/runtime-before-work-ui-integration`,
+`backup/frontend-main-before-work-ui-integration`, and unrelated work. Do not
+reset, rebase, separate, replace, or push the integration branch. The current
+integration changes are uncommitted; inspect `git status` and the actual diff
+before editing or making coherent local commits.
+
+The integrated implementation now has objective-independent Rust Work environments,
+Space membership, Areas, explicit browser/resource/objective/artifact references,
+and separate presentation revisions. Existing `WorkId` remains an objective and
+execution identity; `WorkEnvironmentId` is the persistent canvas. No execution
+identity is rewritten. Schema 19 introduced environments; schema 20 adds a bounded
+revision-scoped checkpoint replay window. Only semantic edits consume immutable
+command receipts. Old checkpoint identities remain stale after receipt eviction.
+Profile scrubbing includes all environment tables.
+
+The native Work host now renders the live canvas with Browse chrome hidden,
+create/reopen, the Tabs popover, Notes attachment/editing, objective controls,
+exact approval/start/cancel, historical results and independent AI/Work settings.
+Generated IPC and explicit projection adapters connect these to Rust. Rig maps
+provider requests behind Zephium's exact-byte admission and transport; it does
+not own scheduling or authority. Provider-native search is now a bounded approved runtime capability, with an
+exact provider/model/query grant, original-attempt settlement, durable provider
+citations, and no native browser allocation. The preferred qualified search
+profile is Luna; legacy mini approvals remain readable without hidden fallback.
+Semantic answer rejection settles known usage when the provider envelope proves
+completion; uncertain dispatch or accounting remains unknown. Canvas attachments
+are not yet admitted model context. Browser activation currently returns to the
+exact retained Browse tab; a dedicated Work pane/takeover remains incomplete.
+
+Native qualification on 2026-09-13 uses the isolated
+`app.zephium.work-integration` application and Node 24.19.0. Canvas/objective
+reopening and the schema 19→20 migration were observed. Genuine execution
+`01M2DNMRVGR7B8C2YRT4HSDWGT` reached `cancel_requested` then durable `cancelled`;
+uncertain child usage remains a conservative reservation. A normal restart did
+not restore worker authority. Abrupt-restart execution
+`01M2E0F790QQM1PQSCHZDMPPEX` was terminated after its original public-search
+attempt had been running for five seconds. Reopening projected interruption from
+the stale owner without redispatch. Explicit acknowledgement then persisted
+`interrupted` with attempt `01M2E0H26E314NK63GSQG4SP85` left `outcome_unknown`,
+usage unknown, and zero artifacts. Read-only observation deliberately does not
+rewrite the original running fact; acknowledgement is a durable user command.
+Completed-result reopening is recorded below.
+
+Public qualification has advanced but is not complete. Single-objective execution
+`01M2DX1GB3HXYZPBHFJRRK1SFD` produced a durable evidence collection identifying
+Svelte issue #18096, with four citations, explicit caveats, and mitigation advice.
+The original issue was independently checked as open. The native search took
+13,119 ms, used 13,982 model tokens, conservatively accounted 14,498 micro-USD,
+and allocated zero browser resources. Provider trace
+`resp_06d1f0566235ad69006aa6dd69b20087d292821d1849219a94` includes the opaque Work,
+execution and attempt metadata. The user judged the information provisionally
+useful, pending deeper review, but rejected the presentation as substantially
+below the intended product quality. Two earlier
+mini searches lacked usable citations; their failure/unknown facts remain intact.
+
+The real four-responsibility comparison execution
+`01M2DXE06214DS594DR6MQKNBC` persisted its first successful Svelte Flow research
+branch (15,857 tokens, 30,141 ms, eleven citations), then the coordinator failed
+before the remaining branches. This is partial evidence, not a completed
+multi-agent result. The handoff failed because it copied an entire research
+artifact into the smaller dependency envelope. The fix projects bounded,
+explicitly truncated dependency summaries and citation passages while preserving
+original Store publications, source keys and all existing admission limits. A
+three-child regression with realistic answer sizes and 33 citations passes;
+The next native run, `01M2DXX1AT4DQFSVH4BK9NDHWC`, completed all three
+research branches (47,556 tokens in total; 49,958 micro-USD conservative
+accounting) but its primary failed before publishing synthesis. All three
+originals and their 37 citations remain durable. A subsequent run exposed the
+exact synthesis refusal: 8,529 counted input tokens exceeded the planner's 8,192
+allowance. Synthesis now has a separate 32,768 input-token ceiling; its existing
+32KiB disclosure, request-size bounds, and original attempt budget still apply.
+The native rerun `01M2DZS3SMRZH3PBZP67B84ZGS` completed three research branches
+and published a typed Comparison, reaching durable `needs_review`. It took
+126,545 ms, used 58,971 tokens across four attempts, conservatively accounted
+55,772 micro-USD, and allocated no native browser resources. The parent received
+three compact outcomes with 48 source references and published 46 evidence
+references. This proves native multi-agent publication, not human-rated utility:
+the table is too verbose, contains raw Markdown/local citation indices, and
+needs review for category distinctions and unsupported platform assumptions.
+Saved originals remain unchanged. Keychain wait timing is now separately logged
+from provider execution. Source navigation
+also exposed an OpenUrl/native-return sequencing bug and incorrect frontend
+handling of deferred outcomes; targeted Rust and browser regressions pass.
+The rebuilt native app now opens the real GitHub source in Browse. The completed
+single-objective artifact, its explicit canvas attachment and original citations
+also reopened after process restart without restoring worker authority.
+
+Results are projected directly onto the canvas from durable execution facts;
+explicit attachment saves a same-profile artifact reference independently of
+layout. Automatic projection prioritizes exact root outputs; child and overflow
+results remain accessible through the historical execution review. Focus result
+preserves placement while restoring readable zoom. Embedded tables retain one
+visible title and minimum column widths. Native vertical reading was verified;
+real-trackpad horizontal scrolling and overall presentation acceptance remain
+pending. Stale-owner recovery opens the exact interruption review, suppressing
+misleading Start/Cancel controls until the appropriate durable transition.
+
+An explicit Research public web workflow is now implemented in source through
+generated IPC. It atomically admits an internal one-node plan and execution for
+the exact submitted objective, provider/model and bounded allowance, without
+separate planning/approval screens. Its provenance is user-directed public
+reading, not reviewed-plan approval. Only the original fresh Store callback can
+dispatch; replay, reopening and ordinary Start cannot restart an admitted read.
+It excludes attached/private/account context and rejects overlong queries rather
+than shortening them. Store rollback/replay/scope tests, application dispatch/
+cancel/reopen tests and strict desktop Clippy pass. This shortcut has not yet
+been qualified with a live model through the native UI. Desktop operation replay
+still resolves credentials before receipt reconciliation; unavailable credentials
+can prevent that operation replay, although projection and cancellation remain
+available. The ordinary complex-work entry and intended visual planning
+experience remain unfinished. Recent checks include frontend unit and WebKit
+tests, provider transport tests, and actual-capacity/reopen settlement regressions. They do not substitute for useful
+multi-agent output, takeover, and
+authenticated read/write qualification. Development logs retain bounded identities,
+counters and closed failure enums, never prompts, page contents or credentials.
+
+Sections 3–8 below retain earlier implementation evidence and runtime design
+context at their named baselines. Their older sequencing, separate-stream
+assumptions, gap lists, and green-build statements are historical, not current
+instructions or qualification claims. Current code/tests establish implemented
+behavior; the revised product document establishes direction; security-model
+establishes enforced guarantees.
+
+### Earlier runtime handoff baseline
+
 Browser foundation baseline: `c88e6d1` (`Close bounded navigation grounding gaps`)
 
 Durable runtime baseline: `68d28d51`; subsequent fixes and live evidence are in section 3.3.
 
 Prepared: 2026-09-11
 
-Latest checkpoint: the first macOS read-only Work flow is ready for frontend
+Earlier checkpoint: the first macOS read-only Work flow was ready for frontend
 integration. Versioned authoring/query/planning/review interfaces, durable
 authoring replay, immutable originals with user edits/acceptance, bounded current
 answers in assignments, public approval preparation and reusable execution
@@ -24,9 +168,8 @@ limits supersede the older blanket integration gates below; finish further
 product behavior with the frontend connected instead of indefinitely extending
 the isolated runtime.
 
-For the frontend agent working in parallel, see
-[`work-frontend-context.md`](work-frontend-context.md). It records the initial
-runtime-owned types and current limits without handing off this implementation.
+[`work-frontend-context.md`](work-frontend-context.md) preserves the earlier
+frontend handoff. It does not describe a separate stream that still needs merging.
 
 ## 0. Purpose and authority
 
@@ -46,9 +189,8 @@ This document does not replace the established sources of truth:
   enforced security guarantees.
 - [`architecture.md`](architecture.md) controls the implemented browser and
   native-shell foundation.
-- [`frontend.md`](frontend.md) controls the checked-in Svelte frame; the newer
-  frontend/design-system work may live in a separate development stream until
-  it is intentionally reconciled.
+- [`frontend.md`](frontend.md) controls the checked-in Svelte frame. The design
+  system and runtime are already integrated; inspect their actual contracts.
 - [`agentic-browsing.md`](agentic-browsing.md) and the narrow `agent-work-*`
   documents contain detailed contracts and engineering history for the browser
   execution substrate.
@@ -87,7 +229,9 @@ The product must preserve these properties:
 
 - normal browsing carries no novelty tax;
 - Browse remains excellent and independently disableable from AI and Work;
-- Work follows clarify, understand, plan, approve, execute visibly, and persist;
+- Work can exist without an objective or AI; substantial delegated work uses
+  relevant context, clarification when needed, a visible approach, exact
+  approval, execution, and persistent results;
 - plans, tasks, resources, evidence, questions, approvals, and results have
   durable product identity instead of existing only inside a message;
 - the user can inspect, redirect, stop, approve, reject, or take over without
@@ -106,41 +250,23 @@ cloud browser execution, mobile continuation, multiplayer collaboration, teams,
 and capability packs are later expansions. The architecture must leave honest
 ports for them, but the current phase must not build their infrastructure.
 
-## 2. Why the current sequencing is correct
+## 2. Integrated delivery sequence
 
-The frontend and runtime should meet through typed product contracts, not invent
-each other from opposite sides.
+Follow product-system section 14. The foundation histories have met; the next
+unit of delivery is a real user behavior across persistence, Rust authority,
+generated IPC, native hosting, and Svelte presentation. Stabilize shared
+contracts before parallel implementation, then integrate small coherent vertical
+behaviors continuously. Neither a detached backend subsystem nor a fixture-only
+canvas completes this phase.
 
-The separate frontend stream has established a stronger Svelte 5 architecture,
-design system, components, state conventions, and early Work units such as
-tasks/nodes. That work is valuable, but the final Work canvas should not decide
-what a run, plan, approval, task, resource, or result means. Rust owns those
-semantics.
+Keep the primary agent responsible for the tightly coupled domain and native
+integration. Delegate substantial independent work only after its boundaries
+are clear, with explicit ownership and review. Model choice and parallelism
+are implementation-session decisions, not properties of Zephium's product agent
+topology. The user is reviewing the next implementation allocation separately
+from this product-direction update.
 
-The backend stream has now proven the difficult browser actor beneath Work. It
-can move from a natural-language objective through a real model and real native
-WebView operations to a source-bound, durable terminal result. The correct next
-center of gravity is therefore the **full Rust Work runtime and AI system**:
-the durable Work aggregate, intent and plan lifecycle, approval compilation,
-execution orchestration, agent/tool scheduling, evidence and artifacts,
-questions and human intervention, persistence, recovery, and frontend
-projection.
-
-Once those contracts exist as a coherent vertical system, the product
-integration agent can connect the frontend foundation and the runtime without
-making the canvas authoritative or wrapping the browser actor in ad hoc IPC.
-
-The latest direct-child research/synthesis and cancellation proofs close concrete
-runtime blockers, but do not make the full product ready for wiring. The next
-integration gates are the versioned authoring/planning/result-review command and
-reply boundary, selected decisions/resources in bounded assignments and primary
-dispatch, and an exact consequential-action approval workflow with honest effect
-settlement. Exercise those through the same product command boundary before
-combining the frontend stream. Additional providers, broad service integrations
-and arbitrary-depth parallel execution are not prerequisites for that first
-coherent integration.
-
-## 3. Current implementation checkpoint
+## 3. Historical runtime implementation checkpoints
 
 ### 3.1 Browser foundation
 
@@ -531,7 +657,7 @@ assume this checkout contains that stream, duplicate its components, or redesign
 it from an older file listing. Preserve the core boundary: frontend nodes are
 views of Rust-owned Work concepts, not a second Work domain.
 
-## 4. Evidence at this checkpoint
+## 4. Historical evidence at the named backend checkpoint
 
 The browser actor is sufficiently proven to move the main engineering effort to
 the Work runtime. That does not mean agentic browsing is release-qualified on
@@ -574,11 +700,11 @@ Notable resolved risks include:
 - model-requested human handoff, cancellation, uncertain callbacks, audit debt,
   and shutdown remain typed terminal/recovery states rather than false success.
 
-The latest focused checks are green: 20 provider-request tests and 45 controller
+At that historical checkpoint, focused checks passed: 20 provider-request tests and 45 controller
 tests, plus a successful debug application bundle. These checks are a narrow
 regression statement, not a replacement for the repository's broader gates.
 
-## 5. Honest remaining gaps
+## 5. Historical gap analysis (recheck against the integrated tree)
 
 There is no known fundamental macOS WebView, semantic observation, native Back,
 provider transport, or lifecycle blocker preventing Work. The primary gap is
@@ -629,7 +755,7 @@ represent, not used as a default computer-vision loop. Likewise, new tools
 should be added because real workflows demonstrate a capability or efficiency
 gap—not to maximize the function list.
 
-## 6. The system to build now
+## 6. Runtime boundary guidance from the earlier phase
 
 The next implementation target is a coherent **Rust Work runtime**, not a
 collection of extra browser tools and not the final canvas in isolation.
@@ -892,7 +1018,7 @@ dispatch, verification, accounting joins, persistence, timing, and teardown.
 Product/BYOK logging stays redacted/stateless by default. Do not add raw page or
 model-content logging merely because it is convenient during development.
 
-## 7. Completion boundary for the next phase
+## 7. Earlier runtime completion boundary
 
 The next phase is complete when Zephium can take a normal user objective through
 the actual Rust product boundary—not a qualification-specific constructor—and
@@ -1023,8 +1149,8 @@ Engineering behavior:
 
 - Build production code, not a throwaway V0, while still moving quickly toward
   the vertical product outcome.
-- Preserve unrelated user changes and reconcile the separate frontend stream
-  deliberately.
+- Preserve unrelated user changes and the already-integrated frontend/runtime
+  histories. Do not repeat or undo their integration.
 - Prefer coherent commits containing a contract and its tests or one complete
   vertical behavior. Avoid both tiny noisy commits and multi-subsystem dumps.
 - Keep commits local and do not push unless the user explicitly asks.
@@ -1049,14 +1175,14 @@ success, while keeping effects scoped, reversible, and explicit.
 
 ## 11. Instruction to the next agent
 
-Continue Zephium from the current repository state by building the full Rust
-Work runtime and AI system described here. Begin by verifying the exact checkout
-and the separate frontend state that will later be integrated. Understand the
-existing browser actor, application admission, orchestration seed, persistence,
-and security boundaries before changing them. Then choose and execute the best
-production architecture that moves a plain user objective through persistent
-Work state, planning and approval, bounded execution, evidence and artifacts,
-human control, recovery, and typed frontend projection.
+Continue from `work-mode-integration` and its actual uncommitted state. Read
+the current checkpoint above and product-system before the historical runtime
+guidance. Preserve the integrated histories. Understand the browser actor,
+application admission, persistence, generated contracts, native host, and real
+frontend components before changing them. Implement the agreed shared human
+and agent environment, including manual Work, actual tab continuity, contextual
+execution, persistent useful objects, intervention, and recovery. Do not turn
+the runtime graph into a card transcript and call it the product.
 
 Think independently. If repository evidence or primary research shows a better
 mechanism than one suggested here, use it while preserving the product and trust
