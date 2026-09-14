@@ -44,6 +44,26 @@ distinguished from native clamps), and reports opening, failed, and unavailable
 states honestly. Native qualification of Escape-from-page, focus after dismiss,
 and geometry after resize/reopen is pending user review.
 
+**2026-09-14 M3 checkpoint (commits `e7977c44` … `eddf03dc`).** Context
+admission: `zephium-app/src/work_context.rs` resolves the user's selected
+canvas elements to bodies at operation begin (notes, tasks, objects, tab title
+and URL, objectives, results, subjects, findings), truncates and digests them,
+and binds `WorkContextDisclosureV1` to the plan revision
+(`WorkEdit::ReplaceDraftDisclosed`) or execution spec
+(`WorkRequest::RuntimeCommandDisclosed` for public reads). A changed body
+refuses with `Conflict` (Stale); private context on a public read refuses with
+`ReviewRequired` and chrome routes through the reviewed plan. Public search
+never receives bodies inside a reviewed plan; synthesis does, after
+re-admission verifies every digest. `work_context_preview` returns the same
+manifest for the composer chip. Decisions: `WorkEnvironmentEdit::Decide` /
+`Undecide` record the user's choice per element; planning admission appends
+current decisions as implicit private items. Documents: synthesis emits typed
+blocks compiled by `zephium-core/src/work/document.rs` into the note schema
+plus derived paragraphs; prose links must match a disclosed evidence URL; notes
+carry a `link` mark opened through native intents. Not yet done: Media & Files
+(`ResourceContent::Media`, media store, import, remote image admission) and
+account-scoped work; both need the decisions recorded in the session report.
+
 [`product-system.md`](product-system.md) now records the agreed full product
 direction: Profile → Space → Work → Area, objective-independent manual Works,
 the canvas as the primary environment, a centered Tabs toolbar popover opening
