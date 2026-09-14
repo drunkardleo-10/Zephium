@@ -55,8 +55,58 @@ pub struct WorkBrowseRoute {
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkPublicDiscoveryScope {
+    /// Exact initial public search disclosure reviewed before execution.
+    pub search_query: String,
+    pub max_hops: u8,
+}
+pub const WORK_PUBLIC_DISCOVERY_MAX_HOPS: u8 = 16;
+pub const WORK_PUBLIC_DISCOVERY_MAX_QUERY_CHARS: usize = 512;
+pub const WORK_PUBLIC_DISCOVERY_MAX_QUERY_BYTES: usize = 2048;
+impl WorkPublicDiscoveryScope {
+    pub fn validate(&self) -> Result<(), WorkError> {
+        validate_text(&self.search_query, WORK_PUBLIC_DISCOVERY_MAX_QUERY_BYTES)?;
+        if self.search_query.chars().count() > WORK_PUBLIC_DISCOVERY_MAX_QUERY_CHARS {
+            return Err(WorkError::Invalid);
+        }
+        if self.max_hops == 0 || self.max_hops > 32 {
+            return Err(WorkError::Invalid);
+        }
+        Ok(())
+    }
+    pub fn start_url(&self) -> Result<url::Url, WorkError> {
+        self.validate()?;
+        let mut url =
+            url::Url::parse("https://www.bing.com/search").map_err(|_| WorkError::Invalid)?;
+        url.query_pairs_mut().append_pair("q", &self.search_query);
+        Ok(url)
+    }
+}
+
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkCapability {
+    /// One public provider search, without browser state or attached context.
+    PublicSearch {
+        scope: super::search::WorkPublicSearchScope,
+    },
+    /// Direct children can search with this explicit model, browse anonymously,
+    /// or synthesize. Each child's exact query remains separately approved.
+    CoordinatePublicResearch {
+        provider: super::search::WorkSearchProvider,
+        model: String,
+        max_hops: u8,
+    },
+    /// Anonymous read-only discovery in a fresh per-resource cookie store.
+    PublicDiscovery {
+        scope: WorkPublicDiscoveryScope,
+    },
+    /// Direct-child scheduling and compact synthesis within public discovery.
+    CoordinatePublicDiscovery {
+        max_hops: u8,
+    },
     PublicBrowse {
         scope: WorkBrowseScope,
     },
@@ -190,7 +240,7 @@ impl WorkExecutionSpec {
                     .find(|n| n.node == parent)
                     .ok_or(WorkError::Invalid)?;
                 if parent.node == node.node
-                    || !matches!(parent.capability, WorkCapability::Coordinate { .. })
+                    || !parent.capability.is_coordinator()
                     || !node.capability.is_subset_of(&parent.capability)
                     || node.limits.model_tokens > parent.limits.model_tokens
                     || node.limits.cost_micro_usd > parent.limits.cost_micro_usd
@@ -254,7 +304,31 @@ impl WorkExecutionSpec {
     }
 }
 impl WorkCapability {
+    pub fn is_coordinator(&self) -> bool {
+        matches!(
+            self,
+            Self::Coordinate { .. }
+                | Self::CoordinatePublicDiscovery { .. }
+                | Self::CoordinatePublicResearch { .. }
+        )
+    }
     pub fn validate(&self) -> Result<(), WorkError> {
+        match self {
+            Self::PublicSearch { scope } => scope.validate()?,
+            Self::CoordinatePublicResearch {
+                model, max_hops, ..
+            } if !super::search::supported_public_search_model(model)
+                || *max_hops == 0
+                || *max_hops > 32 =>
+            {
+                return Err(WorkError::Invalid);
+            }
+            Self::PublicDiscovery { scope } => scope.validate()?,
+            Self::CoordinatePublicDiscovery { max_hops } if *max_hops == 0 || *max_hops > 32 => {
+                return Err(WorkError::Invalid);
+            }
+            _ => {}
+        }
         if let Self::PublicBrowse { scope } | Self::Coordinate { scope } = self {
             let start = validate_public_url(&scope.start_url)?;
             if scope.routes.is_empty()
@@ -290,7 +364,29 @@ impl WorkCapability {
     }
     pub fn is_subset_of(&self, parent: &Self) -> bool {
         match (self, parent) {
-            (Self::Synthesize, Self::Synthesize | Self::Coordinate { .. }) => true,
+            (
+                Self::Synthesize,
+                Self::Synthesize
+                | Self::Coordinate { .. }
+                | Self::CoordinatePublicDiscovery { .. }
+                | Self::CoordinatePublicResearch { .. },
+            ) => true,
+            (Self::PublicSearch { scope }, Self::PublicSearch { scope: parent }) => scope == parent,
+            (
+                Self::PublicSearch { scope },
+                Self::CoordinatePublicResearch {
+                    provider, model, ..
+                },
+            ) => scope.provider == *provider && scope.model == *model,
+            (Self::PublicDiscovery { scope }, Self::CoordinatePublicResearch { max_hops, .. }) => {
+                scope.max_hops <= *max_hops
+            }
+            (Self::PublicDiscovery { scope }, Self::CoordinatePublicDiscovery { max_hops }) => {
+                scope.max_hops <= *max_hops
+            }
+            (Self::PublicDiscovery { scope }, Self::PublicDiscovery { scope: parent }) => {
+                scope.max_hops <= parent.max_hops && scope.search_query == parent.search_query
+            }
             (
                 Self::PublicBrowse { scope: child },
                 Self::PublicBrowse { scope: parent } | Self::Coordinate { scope: parent },
@@ -399,18 +495,42 @@ pub struct WorkAttemptFact {
     pub usage: Option<WorkUsage>,
 }
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkExecutionAuthorization {
+    #[default]
+    ReviewedPlan,
+    UserDirectedPublicRead,
+}
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkExecutionFact {
+    #[serde(default)]
+    pub authorization: WorkExecutionAuthorization,
     pub id: WorkExecutionId,
     pub approved_revision: WorkRevision,
     pub spec: WorkExecutionSpec,
     pub status: WorkExecutionStatus,
     pub attempts: Vec<WorkAttemptFact>,
     pub artifacts: Vec<WorkArtifactV1>,
+    #[serde(default)]
+    pub provider_evidence: Vec<WorkProviderSearchRecordV1>,
     /// User edits and decisions never overwrite the original agent output.
     #[serde(default)]
     pub user_artifacts: Vec<WorkArtifactUserState>,
+}
+
+/// Original provider attribution committed with its attempt's outputs. This
+/// carries no native browser reference or authority to open its source URLs.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkProviderSearchRecordV1 {
+    pub id: WorkArtifactId,
+    pub node: WorkPlanNodeId,
+    pub attempt: WorkAttemptId,
+    pub evidence: super::search::WorkProviderSearchEvidenceV1,
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -456,6 +576,26 @@ impl WorkExecutionFact {
         revision: WorkRevision,
     ) -> Result<(), WorkError> {
         self.spec.validate(plan)?;
+        if self.authorization == WorkExecutionAuthorization::UserDirectedPublicRead {
+            let [node] = self.spec.nodes.as_slice() else {
+                return Err(WorkError::Invalid);
+            };
+            let [planned] = plan.draft.nodes.as_slice() else {
+                return Err(WorkError::Invalid);
+            };
+            let WorkCapability::PublicSearch { scope } = &node.capability else {
+                return Err(WorkError::Invalid);
+            };
+            super::search::validate_direct_public_read(scope, self.spec.limits)?;
+            if node.parent.is_some()
+                || !planned.dependencies.is_empty()
+                || scope.query != planned.objective
+                || node.limits != self.spec.limits
+            {
+                return Err(WorkError::Invalid);
+            }
+        }
+
         if self.user_artifacts.len() > self.artifacts.len() {
             return Err(WorkError::Invalid);
         }
@@ -579,6 +719,81 @@ impl WorkExecutionFact {
                 return Err(WorkError::Invalid);
             }
         }
+        if self.provider_evidence.len() > MAX_WORK_ARTIFACTS {
+            return Err(WorkError::Capacity);
+        }
+        let mut source_ids = BTreeSet::new();
+        let mut source_attempts = BTreeSet::new();
+        for source in &self.provider_evidence {
+            source.evidence.validate()?;
+            let attempt = self
+                .attempts
+                .iter()
+                .find(|a| a.id == source.attempt)
+                .ok_or(WorkError::Invalid)?;
+            let spec = self
+                .spec
+                .nodes
+                .iter()
+                .find(|n| n.node == source.node)
+                .ok_or(WorkError::Invalid)?;
+            let WorkCapability::PublicSearch { scope } = &spec.capability else {
+                return Err(WorkError::Invalid);
+            };
+            if attempt.node != source.node
+                || attempt.status != WorkAttemptStatus::Succeeded
+                || scope.provider != source.evidence.provider
+                || scope.model != source.evidence.model
+                || !source_ids.insert(source.id)
+                || !source_attempts.insert(source.attempt)
+                || artifacts.contains(&source.id)
+                || attempt.usage.is_none_or(|usage| {
+                    Some(usage.model_tokens)
+                        != source
+                            .evidence
+                            .actual_input_tokens
+                            .checked_add(source.evidence.actual_output_tokens)
+                })
+                || !self.artifacts.iter().any(|a| {
+                    a.attempt == source.attempt
+                        && a.evidence
+                            .iter()
+                            .any(|link| link.extraction_id == source.id)
+                })
+            {
+                return Err(WorkError::Invalid);
+            }
+        }
+        for attempt in &self.attempts {
+            if attempt.status == WorkAttemptStatus::Succeeded
+                && self.spec.nodes.iter().any(|n| {
+                    n.node == attempt.node
+                        && matches!(n.capability, WorkCapability::PublicSearch { .. })
+                })
+                && !source_attempts.contains(&attempt.id)
+            {
+                return Err(WorkError::Invalid);
+            }
+        }
+        for artifact in &self.artifacts {
+            let is_search = self.spec.nodes.iter().any(|n| {
+                n.node == artifact.node
+                    && matches!(n.capability, WorkCapability::PublicSearch { .. })
+            });
+            for link in &artifact.evidence {
+                let source = self
+                    .provider_evidence
+                    .iter()
+                    .find(|s| s.id == link.extraction_id);
+                if source.is_some_and(|source| {
+                    usize::from(link.source_id) > source.evidence.citations.len()
+                }) || (is_search
+                    && source.is_none_or(|source| source.attempt != artifact.attempt))
+                {
+                    return Err(WorkError::Invalid);
+                }
+            }
+        }
         let running = self
             .attempts
             .iter()
@@ -626,6 +841,10 @@ impl WorkExecutionFact {
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkRuntimeIntent {
+    ReadPublic {
+        scope: super::search::WorkPublicSearchScope,
+        limits: WorkExecutionLimits,
+    },
     ReviewArtifact {
         execution: WorkExecutionId,
         artifact: WorkArtifactId,
@@ -651,6 +870,14 @@ pub enum WorkRuntimeIntent {
 
 #[derive(Clone, Debug)]
 pub enum WorkRuntimeUpdate {
+    SettleProviderSearch {
+        execution: WorkExecutionId,
+        attempt: WorkAttemptId,
+        status: WorkAttemptStatus,
+        usage: Option<WorkUsage>,
+        artifacts: Vec<WorkArtifactV1>,
+        evidence: Box<WorkProviderSearchRecordV1>,
+    },
     Begin {
         execution: WorkExecutionId,
         attempt: WorkAttemptId,
@@ -679,12 +906,25 @@ pub enum WorkRuntimeUpdate {
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
+pub struct WorkExecutionOwnership {
+    pub execution: WorkExecutionId,
+    /// Observation identity only. Never a worker token or restart authority.
+    pub owner: WorkRuntimeSessionId,
+}
+
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct WorkRuntimeProjection {
     pub version: u16,
     pub work: WorkSnapshot,
     pub executions: Vec<WorkExecutionFact>,
     /// Old incarnation has no live authority. Facts and reservations remain.
     pub interrupted: Vec<WorkExecutionId>,
+    /// Exact original execution owners. Older projections without this field
+    /// remain readable, but cannot admit transient activity.
+    #[serde(default)]
+    pub owners: Vec<WorkExecutionOwnership>,
 }
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -693,4 +933,40 @@ pub struct WorkCommandReceipt {
     pub command: WorkCommandId,
     pub applied_revision: WorkRevision,
     pub execution: WorkExecutionId,
+}
+
+#[cfg(test)]
+mod discovery_query_tests {
+    use super::*;
+
+    #[test]
+    fn unicode_discovery_query_matches_schema_and_preserves_bounded_navigation() {
+        for character in ['a', '—', '界', '😀', '&', '%'] {
+            let mut scope = WorkPublicDiscoveryScope {
+                search_query: character
+                    .to_string()
+                    .repeat(WORK_PUBLIC_DISCOVERY_MAX_QUERY_CHARS),
+                max_hops: WORK_PUBLIC_DISCOVERY_MAX_HOPS,
+            };
+            assert!(scope.validate().is_ok());
+            assert!(scope.search_query.len() <= WORK_PUBLIC_DISCOVERY_MAX_QUERY_BYTES);
+            let url = scope.start_url().unwrap();
+            assert!(
+                url.as_str().len() < 8192,
+                "must fit the existing native navigation URL ceiling"
+            );
+            assert_eq!(
+                url.query_pairs().find(|(key, _)| key == "q").unwrap().1,
+                scope.search_query
+            );
+            assert_eq!(url.origin().ascii_serialization(), "https://www.bing.com");
+            scope.search_query.push(character);
+            assert_eq!(scope.start_url(), Err(WorkError::Invalid));
+        }
+        let invalid = WorkPublicDiscoveryScope {
+            search_query: "public\0query".into(),
+            max_hops: WORK_PUBLIC_DISCOVERY_MAX_HOPS,
+        };
+        assert_eq!(invalid.validate(), Err(WorkError::Invalid));
+    }
 }

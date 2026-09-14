@@ -5,6 +5,62 @@ use specta::Type;
 use zephium_core::work::{runtime::*, *};
 
 pub type WorkProjectionV1 = WorkRuntimeProjection;
+
+/// Invalidation only. Consumers read current facts; delivery grants no authority
+/// and is neither an ordered event log nor proof that a command succeeded.
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(deny_unknown_fields)]
+pub struct WorkChangedV1 {
+    pub profile: String,
+    pub work: WorkId,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(deny_unknown_fields)]
+pub struct WorkEnvironmentChangedV1 {
+    pub profile: String,
+    pub environment: WorkEnvironmentId,
+}
+
+/// Durable document operations share a bounded, profile-checked transport.
+/// Provider generation and worker admission have separate lifetimes.
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkCallV1 {
+    Environment {
+        version: u16,
+        request: environment::WorkEnvironmentCall,
+    },
+    Query {
+        request: WorkQueryV1,
+    },
+    Author {
+        command: WorkAuthoringCommandV1,
+    },
+    Execute {
+        command: WorkCommandV1,
+    },
+}
+impl WorkCallV1 {
+    pub fn into_request(self) -> Result<port::WorkRequest, WorkError> {
+        let request = match self {
+            Self::Environment {
+                version: 1,
+                request,
+            } => port::WorkRequest::Environment {
+                call: request,
+                space_available: false,
+                browser_available: false,
+            },
+            Self::Environment { .. } => return Err(WorkError::Invalid),
+            Self::Query { request } => request.into_request()?,
+            Self::Author { command } => command.into_request()?,
+            Self::Execute { command } => command.into_request()?,
+        };
+        request.validate()?;
+        Ok(request)
+    }
+}
 /// One non-replayable provider operation. After a lost result, refresh Work;
 /// never automatically repeat generation or interpret missing usage as zero.
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
@@ -22,6 +78,57 @@ pub struct WorkStartRequestV1 {
     pub work: WorkId,
     pub expected_revision: WorkRevision,
     pub execution: WorkExecutionId,
+}
+
+/// On-demand operations have an application lifetime independent of a view.
+/// Their correlation IDs do not constitute durable commands or worker handles.
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkOperationV1 {
+    ReadPublic { command: WorkCommandV1 },
+    Plan { request: WorkPlanRequestV1 },
+    PreparePlan { request: WorkPlanRequestV1 },
+    Prepare { request: WorkApprovalRequestV1 },
+    Start { request: WorkStartRequestV1 },
+}
+impl WorkOperationV1 {
+    pub fn work(&self) -> WorkId {
+        match self {
+            Self::ReadPublic { command } => command.work,
+            Self::Plan { request } | Self::PreparePlan { request } => request.work,
+            Self::Prepare { request } => request.work,
+            Self::Start { request } => request.work,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(deny_unknown_fields)]
+pub struct WorkOperationResponseV1 {
+    pub version: u16,
+    pub profile: String,
+    pub operation: WorkCommandId,
+    pub state: WorkOperationStateV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkOperationStateV1 {
+    /// No retained observation. Reconcile durable Work; do not replay a model
+    /// call or reconstruct an execution from this state after a restart.
+    Unknown,
+    Pending {
+        work: WorkId,
+    },
+    Planned {
+        response: WorkPlanningResponseV1,
+    },
+    Settled {
+        response: WorkResponseV1,
+    },
+    Refused {
+        error: WorkFailureV1,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
@@ -165,6 +272,14 @@ pub struct WorkResponseV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkReplyV1 {
+    PublicReadAdmitted {
+        projection: Box<WorkProjectionV1>,
+        receipt: WorkCommandReceipt,
+        replayed: bool,
+    },
+    Environment {
+        reply: environment::WorkEnvironmentReply,
+    },
     ApprovalDraft {
         work: WorkId,
         expected_revision: WorkRevision,
@@ -181,7 +296,7 @@ pub enum WorkReplyV1 {
         receipt: WorkCommandReceipt,
     },
     Evidence {
-        evidence: WorkEvidencePreviewV1,
+        evidence: Box<WorkEvidencePreviewV1>,
     },
     Snapshot {
         snapshot: Box<WorkSnapshot>,
@@ -232,10 +347,20 @@ impl WorkResponseV1 {
         result: Result<port::WorkReply, WorkError>,
     ) -> Self {
         let reply = match result {
+            Ok(port::WorkReply::Environment(reply)) => WorkReplyV1::Environment { reply },
             Ok(port::WorkReply::Runtime(projection)) => WorkReplyV1::Projection { projection },
             Ok(port::WorkReply::AuthoringCommand(receipt)) => {
                 WorkReplyV1::AuthoringApplied { receipt }
             }
+            Ok(port::WorkReply::PublicReadAdmitted {
+                projection,
+                receipt,
+                replayed,
+            }) => WorkReplyV1::PublicReadAdmitted {
+                projection,
+                receipt,
+                replayed,
+            },
             Ok(port::WorkReply::RuntimeCommand {
                 projection,
                 receipt,
@@ -243,7 +368,9 @@ impl WorkResponseV1 {
                 projection,
                 receipt,
             },
-            Ok(port::WorkReply::Evidence(evidence)) => WorkReplyV1::Evidence { evidence },
+            Ok(port::WorkReply::Evidence(evidence)) => WorkReplyV1::Evidence {
+                evidence: Box::new(evidence),
+            },
             Ok(port::WorkReply::Snapshot(snapshot)) => WorkReplyV1::Snapshot { snapshot },
             Ok(port::WorkReply::Plan(plan)) => WorkReplyV1::Plan { plan },
             Ok(port::WorkReply::PlanHistory { revisions }) => {
@@ -299,6 +426,7 @@ impl WorkCommandV1 {
 #[serde(deny_unknown_fields)]
 pub struct WorkSignalV1 {
     pub version: u16,
+    pub owner: WorkRuntimeSessionId,
     pub profile: String,
     pub work: WorkId,
     pub basis_revision: WorkRevision,
@@ -307,6 +435,16 @@ pub struct WorkSignalV1 {
     pub attempt: WorkAttemptId,
     pub activity: WorkActivityV1,
 }
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(deny_unknown_fields)]
+pub struct WorkActivityResponseV1 {
+    pub version: u16,
+    pub profile: String,
+    pub work: WorkId,
+    pub signals: Vec<WorkSignalV1>,
+    pub error: Option<WorkFailureV1>,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkActivityV1 {
@@ -399,5 +537,28 @@ mod tests {
             .register::<WorkCommandV1>()
             .register::<WorkEvidencePreviewV1>()
             .register::<WorkSignalV1>();
+    }
+}
+
+impl From<planning::WorkPlanningError> for WorkPlanningFailureV1 {
+    fn from(error: planning::WorkPlanningError) -> Self {
+        use planning::WorkPlanningError;
+        match error {
+            WorkPlanningError::Invalid => WorkPlanningFailureV1::Invalid,
+            WorkPlanningError::Capacity => WorkPlanningFailureV1::Capacity,
+            WorkPlanningError::Unavailable => WorkPlanningFailureV1::Unavailable,
+            WorkPlanningError::Cancelled => WorkPlanningFailureV1::Cancelled,
+            WorkPlanningError::Timeout => WorkPlanningFailureV1::Timeout,
+            WorkPlanningError::Stale => WorkPlanningFailureV1::Stale,
+            WorkPlanningError::NeedsInput => WorkPlanningFailureV1::NeedsInput,
+            WorkPlanningError::Privacy => WorkPlanningFailureV1::Privacy,
+            WorkPlanningError::ProviderOutcomeUnknown => {
+                WorkPlanningFailureV1::ProviderOutcomeUnknown
+            }
+            WorkPlanningError::ProviderRefused(_) => WorkPlanningFailureV1::ProviderRefused,
+            WorkPlanningError::Store(error) => WorkPlanningFailureV1::Store {
+                error: error.into(),
+            },
+        }
     }
 }

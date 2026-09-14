@@ -7,6 +7,8 @@ pub const KEYS: &[&str] = &[
     "ui.reduce-motion",
     "ui.newtab-logo",
     "ui.newtab-shortcuts",
+    "ai.enabled",
+    "work.enabled",
 ];
 
 pub fn value_allowed(key: &str, value: &str) -> bool {
@@ -15,7 +17,11 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         "tools.presentation" => matches!(value, "follow_layout" | "floating"),
         "sidebar.mode" => matches!(value, "default" | "compact"),
         "ui.accent" => matches!(value, "graphite" | "sky" | "sage" | "rose"),
-        "ui.reduce-motion" | "ui.newtab-logo" | "ui.newtab-shortcuts" => {
+        "ui.reduce-motion"
+        | "ui.newtab-logo"
+        | "ui.newtab-shortcuts"
+        | "ai.enabled"
+        | "work.enabled" => {
             matches!(value, "true" | "false")
         }
         _ => false,
@@ -30,6 +36,14 @@ mod tests {
         assert!(value_allowed("sidebar.mode", "compact"));
         assert!(value_allowed("ui.accent", "sage"));
         assert!(value_allowed("ui.newtab-logo", "false"));
+        for key in ["ai.enabled", "work.enabled"] {
+            assert!(KEYS.contains(&key));
+            assert!(value_allowed(key, "true"));
+            assert!(value_allowed(key, "false"));
+            for value in ["", "0", "1", "TRUE", " false", "false "] {
+                assert!(!value_allowed(key, value));
+            }
+        }
         for (key, value) in [
             ("ui.custom-css", "body{}"),
             ("ui.accent", "url(evil)"),

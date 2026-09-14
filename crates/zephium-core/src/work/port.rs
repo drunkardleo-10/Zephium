@@ -5,6 +5,13 @@ use super::*;
 
 #[derive(Clone)]
 pub enum WorkRequest {
+    Environment {
+        call: environment::WorkEnvironmentCall,
+        /// Application-actor observations, never decoded from IPC. Store checks
+        /// them after receipt lookup so replay survives resource retirement.
+        space_available: bool,
+        browser_available: bool,
+    },
     AuthoringCommand {
         command: WorkCommandId,
         intent: authoring::WorkAuthoringIntent,
@@ -70,7 +77,15 @@ pub enum WorkRequest {
 }
 impl WorkRequest {
     pub fn validate(&self) -> Result<(), WorkError> {
+        if let Self::RuntimeUpdate {
+            update: runtime::WorkRuntimeUpdate::SettleProviderSearch { evidence, .. },
+            ..
+        } = self
+        {
+            evidence.evidence.validate()?;
+        }
         match self {
+            Self::Environment { call, .. } => call.validate(),
             Self::AuthoringCommand { intent, .. } => intent.validate(),
             Self::RuntimeCommand {
                 intent: runtime::WorkRuntimeIntent::EditArtifact { data, evidence, .. },
@@ -82,11 +97,17 @@ impl WorkRequest {
                 data.validate()
             }
             Self::RuntimeCommand {
+                intent: runtime::WorkRuntimeIntent::ReadPublic { scope, limits },
+                ..
+            } => search::validate_direct_public_read(scope, *limits),
+            Self::RuntimeCommand {
                 intent: runtime::WorkRuntimeIntent::Approve { spec },
                 ..
             } => spec.validate_bounds(),
             Self::RuntimeUpdate {
-                update: runtime::WorkRuntimeUpdate::Settle { artifacts, .. },
+                update:
+                    runtime::WorkRuntimeUpdate::Settle { artifacts, .. }
+                    | runtime::WorkRuntimeUpdate::SettleProviderSearch { artifacts, .. },
                 ..
             } => {
                 if artifacts.len() > artifact::MAX_WORK_ARTIFACTS {
@@ -133,6 +154,7 @@ impl std::fmt::Debug for WorkSummary {
 }
 #[derive(Clone, Debug)]
 pub enum WorkReply {
+    Environment(environment::WorkEnvironmentReply),
     AuthoringCommand(authoring::WorkAuthoringReceipt),
     Evidence(artifact::WorkEvidencePreviewV1),
     /// Returned only to the original successful Begin observer, never by read
@@ -142,6 +164,11 @@ pub enum WorkReply {
         remaining_millis: u32,
     },
     Runtime(Box<runtime::WorkRuntimeProjection>),
+    PublicReadAdmitted {
+        projection: Box<runtime::WorkRuntimeProjection>,
+        receipt: runtime::WorkCommandReceipt,
+        replayed: bool,
+    },
     RuntimeCommand {
         projection: Box<runtime::WorkRuntimeProjection>,
         receipt: runtime::WorkCommandReceipt,

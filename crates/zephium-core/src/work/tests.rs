@@ -92,6 +92,92 @@ fn draft() -> WorkPlanDraft {
 fn work() -> WorkSnapshot {
     WorkSnapshot::create(1.into(), 4.into(), "Understand the alternatives".into()).unwrap()
 }
+
+#[test]
+fn execution_proposal_preserves_plan_and_bounds_public_browser_responsibilities() {
+    use super::{execution_proposal::*, runtime::*};
+    let plan = work()
+        .apply(
+            WorkRevision::INITIAL,
+            WorkEdit::ReplaceDraft { draft: draft() },
+            WorkAuthor::User,
+        )
+        .unwrap()
+        .0
+        .plan
+        .unwrap();
+    let limits = WorkExecutionLimits {
+        model_tokens: 256_000,
+        cost_micro_usd: 1_000_000,
+        operations: 256,
+        timeout_seconds: 900,
+        max_workers: 4,
+    };
+    let proposal = WorkExecutionProposal {
+        nodes: vec![WorkResponsibilityProposal {
+            key: 0,
+            parent: None,
+            capability: WorkCapabilityProposal::PublicDiscovery {
+                search_query: "Svelte graph performance".into(),
+            },
+        }],
+    };
+    let spec = proposal.clone().compile(&plan, limits).unwrap();
+    assert_eq!(spec.plan_revision, plan.revision);
+    assert_eq!(spec.nodes[0].node, plan.draft.nodes[0].id);
+    assert_eq!(spec.nodes[0].limits.timeout_seconds, 600);
+    assert!(
+        matches!(&spec.nodes[0].capability, WorkCapability::PublicDiscovery { scope } if scope.max_hops == WORK_PUBLIC_DISCOVERY_MAX_HOPS && scope.search_query == "Svelte graph performance")
+    );
+    for invalid in 0..3 {
+        let mut changed = proposal.clone();
+        match invalid {
+            0 => changed.nodes[0].key = 1,
+            1 => changed.nodes[0].parent = Some(0),
+            _ => changed.nodes.push(changed.nodes[0].clone()),
+        }
+        let reason = changed
+            .clone()
+            .compile_diagnosed(&plan, limits)
+            .err()
+            .unwrap();
+        assert_eq!(
+            reason,
+            match invalid {
+                0 => WorkExecutionProposalRefusal::UnknownKey { key: 1 },
+                1 => WorkExecutionProposalRefusal::DelegationTopology,
+                _ => WorkExecutionProposalRefusal::NodeCount {
+                    expected: 1,
+                    actual: 2
+                },
+            }
+        );
+        assert!(changed.compile(&plan, limits).is_err());
+    }
+    let mut wrong_review = plan.clone();
+    wrong_review.draft.nodes[0].outputs[0].review = WorkOutputReview::UserAcceptance;
+    assert_eq!(
+        proposal
+            .clone()
+            .compile_diagnosed(&wrong_review, limits)
+            .err(),
+        Some(WorkExecutionProposalRefusal::OutputReview { key: 0 })
+    );
+    let mut invalid_parent = proposal.clone();
+    invalid_parent.nodes[0].parent = Some(4);
+    assert_eq!(
+        invalid_parent.compile_diagnosed(&plan, limits).err(),
+        Some(WorkExecutionProposalRefusal::UnknownParent { key: 0, parent: 4 })
+    );
+    let mut invalid_query = proposal;
+    invalid_query.nodes[0].capability = WorkCapabilityProposal::PublicDiscovery {
+        search_query: "".into(),
+    };
+    assert_eq!(
+        invalid_query.compile_diagnosed(&plan, limits).err(),
+        Some(WorkExecutionProposalRefusal::Capability { key: 0 })
+    );
+}
 #[test]
 fn work_authoring_questions_invalidate_plans_and_stale_edits_leave_facts_unchanged() {
     let original = work();

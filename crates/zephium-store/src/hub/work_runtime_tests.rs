@@ -165,6 +165,28 @@ fn coordination_requires_exact_live_parent_and_complete_children() {
     .unwrap();
     let state = read_runtime(&mut hub, &planned);
     assert_eq!(state.executions[0].status, WorkExecutionStatus::NeedsReview);
+    // A canvas reference retains the exact historical result and does not
+    // accept a valid artifact ID paired with another execution or profile.
+    let original = &state.executions[0].artifacts[0];
+    let conn = hub.profile_conn(planned.profile).unwrap();
+    assert!(
+        validate_artifact_reference(conn, planned.profile, planned.id, execution, original.id)
+            .is_ok()
+    );
+    assert!(matches!(
+        validate_artifact_reference(conn, planned.profile, planned.id, 999.into(), original.id),
+        Err(WorkError::NotFound)
+    ));
+    assert!(matches!(
+        validate_artifact_reference(conn, planned.profile, planned.id, execution, 999.into()),
+        Err(WorkError::NotFound)
+    ));
+    // Profile authority selects the database at Hub admission; a caller cannot
+    // choose a different profile label for an already-open connection.
+    assert!(matches!(
+        hub.work_document(999.into(), WorkRequest::RuntimeRead { id: planned.id }),
+        Err(WorkError::ProfileUnavailable)
+    ));
     // Durable decoding independently refuses an impossible parent success.
     let mut forged = state.executions[0].clone();
     forged.attempts.pop();
@@ -482,4 +504,149 @@ fn approved_deadline_uses_original_monotonic_store_incarnation() {
     assert!(read_runtime(&mut hub, &planned).executions[0]
         .attempts
         .is_empty());
+}
+
+fn direct_read_request(work: &WorkSnapshot, command: u128) -> WorkRequest {
+    WorkRequest::RuntimeCommand {
+        id: work.id,
+        expected: work.revision,
+        command: command.into(),
+        intent: WorkRuntimeIntent::ReadPublic {
+            scope: zephium_core::work::search::WorkPublicSearchScope {
+                provider: zephium_core::work::search::WorkSearchProvider::OpenAi,
+                model: zephium_core::work::search::PUBLIC_SEARCH_MODEL.into(),
+                query: work.objective.clone(),
+            },
+            limits: WorkExecutionLimits {
+                model_tokens: 147456,
+                cost_micro_usd: 100000,
+                operations: 1,
+                timeout_seconds: 180,
+                max_workers: 1,
+            },
+        },
+    }
+}
+#[test]
+fn direct_public_read_is_atomic_replayable_and_exactly_scoped() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&session()).unwrap();
+    let initial = create(&mut hub);
+    // A failure after the internal plan write rolls the entire command back.
+    hub.profile_conn(initial.profile).unwrap().execute_batch("CREATE TRIGGER fail_direct_execution BEFORE INSERT ON work_executions BEGIN SELECT RAISE(ABORT, 'test'); END;").unwrap();
+    assert!(hub
+        .work_document(initial.profile, direct_read_request(&initial, 700))
+        .is_err());
+    let unchanged = read_runtime(&mut hub, &initial);
+    assert_eq!(unchanged.work.revision, initial.revision);
+    assert!(unchanged.work.plan.is_none());
+    assert!(unchanged.executions.is_empty());
+    hub.profile_conn(initial.profile)
+        .unwrap()
+        .execute_batch("DROP TRIGGER fail_direct_execution;")
+        .unwrap();
+    assert!(hub
+        .work_document(2.into(), direct_read_request(&initial, 700))
+        .is_err());
+    let WorkReply::PublicReadAdmitted {
+        projection,
+        receipt,
+        replayed,
+    } = hub
+        .work_document(initial.profile, direct_read_request(&initial, 700))
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert!(!replayed);
+    assert_eq!(projection.executions.len(), 1);
+    assert!(projection.executions[0].attempts.is_empty());
+    assert_eq!(
+        projection.executions[0].authorization,
+        WorkExecutionAuthorization::UserDirectedPublicRead
+    );
+    assert_eq!(
+        projection.work.plan.as_ref().unwrap().draft.nodes[0].outputs[0].name,
+        "Research findings"
+    );
+    let WorkReply::PublicReadAdmitted {
+        receipt: again,
+        replayed,
+        ..
+    } = hub
+        .work_document(initial.profile, direct_read_request(&initial, 700))
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert!(replayed);
+    assert_eq!(receipt, again);
+    let mut changed = initial.clone();
+    changed.objective.push('!');
+    assert!(matches!(
+        hub.work_document(initial.profile, direct_read_request(&changed, 700)),
+        Err(WorkError::Conflict)
+    ));
+    assert!(matches!(
+        hub.work_document(initial.profile, direct_read_request(&initial, 701)),
+        Err(WorkError::Conflict)
+    ));
+    assert!(hub
+        .work_document(initial.profile, direct_read_request(&projection.work, 701))
+        .is_err());
+    hub.work_document(
+        initial.profile,
+        WorkRequest::RuntimeCommand {
+            id: initial.id,
+            expected: projection.work.revision,
+            command: 702.into(),
+            intent: WorkRuntimeIntent::Cancel {
+                execution: receipt.execution,
+            },
+        },
+    )
+    .unwrap();
+    let WorkReply::PublicReadAdmitted {
+        projection,
+        replayed,
+        ..
+    } = hub
+        .work_document(initial.profile, direct_read_request(&initial, 700))
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert!(replayed);
+    assert_eq!(projection.executions.len(), 1);
+    assert!(projection.executions[0].attempts.is_empty());
+}
+
+#[test]
+fn direct_public_read_refuses_unanswered_clarification_and_changed_disclosure() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&session()).unwrap();
+    let initial = create(&mut hub);
+    let mut changed = initial.clone();
+    changed.objective.push('!');
+    assert!(matches!(
+        hub.work_document(initial.profile, direct_read_request(&changed, 800)),
+        Err(WorkError::Invalid)
+    ));
+    let asked = edit(
+        &mut hub,
+        &initial,
+        WorkEdit::OpenQuestion {
+            id: 99.into(),
+            prompt: "Which public release?".into(),
+            options: vec![],
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        hub.work_document(initial.profile, direct_read_request(&asked, 801)),
+        Err(WorkError::Invalid)
+    ));
+    let state = read_runtime(&mut hub, &asked);
+    assert!(state.executions.is_empty());
+    assert_eq!(state.work, asked);
 }

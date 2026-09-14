@@ -10,6 +10,8 @@ use zephium_core::{
 const MAX_BODY_BYTES: usize = 131072;
 #[path = "work_authoring_commands.rs"]
 mod authoring_store;
+#[path = "work_environment.rs"]
+mod environment_store;
 #[path = "work_runtime.rs"]
 mod runtime_store;
 const _: [(); 512] = [(); MAX_WORKS_PER_PROFILE];
@@ -54,6 +56,51 @@ impl Hub {
             {
                 return Err(WorkError::NotFound);
             }
+            // Provider attribution is stored in this same Work execution,
+            // never reconstructed as a native archive or browser reference.
+            if let Some(source) = state.executions.iter().find_map(|execution| {
+                execution
+                    .artifacts
+                    .iter()
+                    .any(|a| a.evidence.contains(link))
+                    .then(|| {
+                        execution
+                            .provider_evidence
+                            .iter()
+                            .find(|source| source.id == link.extraction_id)
+                    })
+                    .flatten()
+            }) {
+                use zephium_core::work::artifact::{WorkEvidencePreviewV1, WorkEvidenceSourceV1};
+                let index = link.source_id.checked_sub(1).ok_or(WorkError::Invalid)?;
+                let citation = source
+                    .evidence
+                    .citations
+                    .get(usize::from(index))
+                    .ok_or(WorkError::NotFound)?;
+                let source_bytes = source.evidence.answer.len();
+                let text = source.evidence.citation_excerpt(usize::from(index))?;
+                return Ok(WorkReply::Evidence(WorkEvidencePreviewV1 {
+                    version: 1,
+                    link: link.clone(),
+                    origin: url::Url::parse(&citation.url)
+                        .map_err(|_| WorkError::Invalid)?
+                        .origin()
+                        .ascii_serialization(),
+                    role: "provider_search".into(),
+                    truncated: text.len() < source_bytes,
+                    text,
+                    source_bytes: source_bytes.to_string(),
+                    source: WorkEvidenceSourceV1::ProviderSearch {
+                        provider: source.evidence.provider,
+                        model: source.evidence.model.clone(),
+                        url: citation.url.clone(),
+                        title: citation.title.clone(),
+                        response_id: source.evidence.response_id.clone(),
+                        search_call_id: source.evidence.search_call_id.clone(),
+                    },
+                }));
+            }
             #[cfg(feature = "work-execution")]
             return super::agent_work::read_work_evidence(&self.meta, profile, link.clone())
                 .map(WorkReply::Evidence);
@@ -86,6 +133,15 @@ fn apply(
     request: WorkRequest,
 ) -> Result<(WorkReply, bool), WorkError> {
     let result = match request {
+        WorkRequest::Environment {
+            call,
+            space_available,
+            browser_available,
+        } => {
+            let (reply, write) =
+                environment_store::apply(tx, profile, call, space_available, browser_available)?;
+            (WorkReply::Environment(reply), write)
+        }
         WorkRequest::AuthoringCommand { command, intent } => {
             authoring_store::command(tx, profile, runtime_session, command, intent)?
         }

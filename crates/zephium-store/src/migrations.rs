@@ -1979,6 +1979,14 @@ pub static PROFILE: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 19,
+        up: |tx| tx.execute_batch(include_str!("work_environment_schema_v1.sql")),
+    },
+    Migration {
+        version: 20,
+        up: |tx| tx.execute_batch(include_str!("work_environment_checkpoints_v1.sql")),
+    },
 ];
 
 #[cfg(test)]

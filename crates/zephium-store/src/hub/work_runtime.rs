@@ -64,7 +64,7 @@ fn rows(conn: &Connection, id: WorkId) -> Result<Vec<Row>, WorkError> {
         if result.len() >= MAX_WORK_EXECUTIONS || bytes > MAX_RUNTIME_BYTES {
             return Err(WorkError::Capacity);
         }
-        crate::bounded_json::preflight(&body).map_err(|_| WorkError::Invalid)?;
+        crate::bounded_json::preflight_work_execution(&body).map_err(|_| WorkError::Invalid)?;
         let fact: WorkExecutionFact =
             serde_json::from_str(&body).map_err(|_| WorkError::Invalid)?;
         if fact.id.to_string() != key
@@ -88,6 +88,34 @@ fn rows(conn: &Connection, id: WorkId) -> Result<Vec<Row>, WorkError> {
     }
     Ok(result)
 }
+/// Joins the original result without inventing an observation session or worker.
+pub(super) fn validate_artifact_reference(
+    conn: &Connection,
+    profile: ProfileId,
+    objective: WorkId,
+    execution: WorkExecutionId,
+    artifact: WorkArtifactId,
+) -> Result<(), WorkError> {
+    let work = read(conn, profile, objective)?;
+    let row = rows(conn, objective)?
+        .into_iter()
+        .find(|row| row.fact.id == execution)
+        .ok_or(WorkError::NotFound)?;
+    row.fact.validate(
+        &read_plan(conn, objective, row.fact.spec.plan_revision)?,
+        work.revision,
+    )?;
+    if !row
+        .fact
+        .artifacts
+        .iter()
+        .any(|value| value.id == artifact && value.execution == execution)
+    {
+        return Err(WorkError::NotFound);
+    }
+    Ok(())
+}
+
 pub(super) fn projection(
     conn: &Connection,
     profile: ProfileId,
@@ -97,6 +125,7 @@ pub(super) fn projection(
     let work = read(conn, profile, id)?;
     let mut executions = Vec::new();
     let mut interrupted = Vec::new();
+    let mut owners = Vec::new();
     for row in rows(conn, id)? {
         row.fact.validate(
             &read_plan(conn, id, row.fact.spec.plan_revision)?,
@@ -105,6 +134,10 @@ pub(super) fn projection(
         if !row.fact.status.terminal() && row.owner != session.session {
             interrupted.push(row.fact.id);
         }
+        owners.push(WorkExecutionOwnership {
+            execution: row.fact.id,
+            owner: row.owner,
+        });
         executions.push(row.fact);
     }
     Ok(WorkRuntimeProjection {
@@ -112,6 +145,7 @@ pub(super) fn projection(
         work,
         executions,
         interrupted,
+        owners,
     })
 }
 pub(super) fn require_idle(
@@ -171,7 +205,8 @@ pub(super) fn command(
     command: WorkCommandId,
     intent: WorkRuntimeIntent,
 ) -> Result<(WorkReply, bool), WorkError> {
-    let current = read(tx, profile, id)?;
+    let mut current = read(tx, profile, id)?;
+    let direct = matches!(intent, WorkRuntimeIntent::ReadPublic { .. });
     let input = serde_json::to_vec(&(expected, &intent)).map_err(|_| WorkError::Invalid)?;
     if input.len() > MAX_WORK_REQUEST_BYTES {
         return Err(WorkError::Capacity);
@@ -187,9 +222,17 @@ pub(super) fn command(
             return Err(WorkError::Invalid);
         }
         return Ok((
-            WorkReply::RuntimeCommand {
-                projection: Box::new(projection(tx, profile, id, session)?),
-                receipt,
+            if direct {
+                WorkReply::PublicReadAdmitted {
+                    projection: Box::new(projection(tx, profile, id, session)?),
+                    receipt,
+                    replayed: true,
+                }
+            } else {
+                WorkReply::RuntimeCommand {
+                    projection: Box::new(projection(tx, profile, id, session)?),
+                    receipt,
+                }
             },
             false,
         ));
@@ -197,8 +240,61 @@ pub(super) fn command(
     if current.revision != expected || current.lifecycle != WorkLifecycle::Active {
         return Err(WorkError::Conflict);
     }
+    let mut expected = expected;
+    let intent = if let WorkRuntimeIntent::ReadPublic { scope, limits } = intent {
+        zephium_core::work::search::validate_direct_public_read(&scope, limits)?;
+        if current.objective != scope.query || current.status == WorkAuthoringStatus::NeedsInput {
+            return Err(WorkError::Invalid);
+        }
+        require_idle(tx, id, expected)?;
+        let draft = zephium_core::work::proposal::WorkPlanProposal {
+            nodes: vec![zephium_core::work::proposal::WorkNodeProposal {
+                key: 0,
+                objective: scope.query.clone(),
+                dependencies: vec![],
+                outputs: vec![WorkExpectedOutput {
+                    name: "Research findings".into(),
+                    description: "Public findings with attributable sources".into(),
+                    review: WorkOutputReview::SourceMappedNeedsReview,
+                }],
+            }],
+        }
+        .mint()?;
+        let (reply, _) = apply(
+            tx,
+            profile,
+            session,
+            WorkRequest::Edit {
+                id,
+                expected,
+                edit: WorkEdit::ReplaceDraft { draft },
+                author: WorkAuthor::User,
+            },
+        )?;
+        let WorkReply::Snapshot(snapshot) = reply else {
+            return Err(WorkError::Invalid);
+        };
+        current = *snapshot;
+        expected = current.revision;
+        let plan = current.plan.as_ref().ok_or(WorkError::Invalid)?;
+        WorkRuntimeIntent::Approve {
+            spec: WorkExecutionSpec {
+                plan_revision: plan.revision,
+                limits,
+                nodes: vec![WorkNodeExecutionSpec {
+                    node: plan.draft.nodes[0].id,
+                    parent: None,
+                    capability: WorkCapability::PublicSearch { scope },
+                    limits,
+                }],
+            },
+        }
+    } else {
+        intent
+    };
     let all = rows(tx, id)?;
     let execution = match intent {
+        WorkRuntimeIntent::ReadPublic { .. } => return Err(WorkError::Invalid),
         intent @ (WorkRuntimeIntent::ReviewArtifact { .. }
         | WorkRuntimeIntent::EditArtifact { .. }) => {
             let (execution, artifact) = match &intent {
@@ -284,6 +380,11 @@ pub(super) fn command(
                 .checked_add(i64::from(spec.limits.timeout_seconds) * 1000)
                 .ok_or(WorkError::Capacity)?;
             let fact = WorkExecutionFact {
+                authorization: if direct {
+                    WorkExecutionAuthorization::UserDirectedPublicRead
+                } else {
+                    WorkExecutionAuthorization::ReviewedPlan
+                },
                 id: id_execution,
                 approved_revision: expected.next()?,
                 spec,
@@ -291,6 +392,7 @@ pub(super) fn command(
                 attempts: vec![],
                 artifacts: vec![],
                 user_artifacts: vec![],
+                provider_evidence: vec![],
             };
             fact.validate(plan, expected.next()?)?;
             tx.execute("INSERT INTO work_executions(work_id, execution_id, plan_revision, owner_session, approved_unix_ms, expires_unix_ms, body, approved_tick_ms, expires_tick_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", params![id.to_string(), id_execution.to_string(), fact.spec.plan_revision.get() as i64, session.session.to_string(), now, expires, body(&fact)?, session.tick_ms, expires_tick]).map_err(db)?;
@@ -343,9 +445,17 @@ pub(super) fn command(
     };
     tx.execute("INSERT INTO work_commands(work_id, command_id, request_digest, body) VALUES (?1, ?2, ?3, ?4)", params![id.to_string(), command.to_string(), digest, encode(&receipt)?]).map_err(db)?;
     Ok((
-        WorkReply::RuntimeCommand {
-            projection: Box::new(projection(tx, profile, id, session)?),
-            receipt,
+        if direct {
+            WorkReply::PublicReadAdmitted {
+                projection: Box::new(projection(tx, profile, id, session)?),
+                receipt,
+                replayed: false,
+            }
+        } else {
+            WorkReply::RuntimeCommand {
+                projection: Box::new(projection(tx, profile, id, session)?),
+                receipt,
+            }
         },
         true,
     ))
@@ -359,6 +469,26 @@ pub(super) fn update(
     expected: WorkRevision,
     update: WorkRuntimeUpdate,
 ) -> Result<(WorkReply, bool), WorkError> {
+    let (update, provider_evidence) = match update {
+        WorkRuntimeUpdate::SettleProviderSearch {
+            execution,
+            attempt,
+            status,
+            usage,
+            artifacts,
+            evidence,
+        } => (
+            WorkRuntimeUpdate::Settle {
+                execution,
+                attempt,
+                status,
+                usage,
+                artifacts,
+            },
+            Some(evidence),
+        ),
+        update => (update, None),
+    };
     let current = read(tx, profile, id)?;
     if current.revision != expected || current.lifecycle != WorkLifecycle::Active {
         return Err(WorkError::Conflict);
@@ -368,6 +498,7 @@ pub(super) fn update(
         | WorkRuntimeUpdate::BeginChild { execution, .. }
         | WorkRuntimeUpdate::Settle { execution, .. }
         | WorkRuntimeUpdate::FinishCancellation { execution } => *execution,
+        WorkRuntimeUpdate::SettleProviderSearch { .. } => return Err(WorkError::Invalid),
     };
     let mut row = rows(tx, id)?
         .into_iter()
@@ -402,7 +533,12 @@ pub(super) fn update(
                             && entry.status == WorkAttemptStatus::Running
                     }) && row.fact.spec.nodes.iter().any(|entry| {
                         entry.node == parent_node
-                            && matches!(entry.capability, WorkCapability::Coordinate { .. })
+                            && matches!(
+                                entry.capability,
+                                WorkCapability::Coordinate { .. }
+                                    | WorkCapability::CoordinatePublicDiscovery { .. }
+                                    | WorkCapability::CoordinatePublicResearch { .. }
+                            )
                     }) => {}
                 _ => return Err(WorkError::Unavailable),
             }
@@ -446,8 +582,12 @@ pub(super) fn update(
                     .attempts
                     .iter()
                     .any(|a| a.node == *dependency && a.status == WorkAttemptStatus::Succeeded)
-                    || (matches!(spec.capability, WorkCapability::Coordinate { .. })
-                        && descendant(&row.fact.spec, *dependency, node))
+                    || (matches!(
+                        spec.capability,
+                        WorkCapability::Coordinate { .. }
+                            | WorkCapability::CoordinatePublicDiscovery { .. }
+                            | WorkCapability::CoordinatePublicResearch { .. }
+                    ) && descendant(&row.fact.spec, *dependency, node))
             }) {
                 return Err(WorkError::Conflict);
             }
@@ -526,6 +666,12 @@ pub(super) fn update(
             row.fact.attempts[index].status = status;
             row.fact.attempts[index].usage = usage;
             row.fact.artifacts.extend(artifacts);
+            if let Some(evidence) = provider_evidence {
+                if evidence.attempt != attempt {
+                    return Err(WorkError::Invalid);
+                }
+                row.fact.provider_evidence.push(*evidence);
+            }
             let running = row
                 .fact
                 .attempts
@@ -576,6 +722,7 @@ pub(super) fn update(
             }
             row.fact.status = WorkExecutionStatus::Cancelled;
         }
+        WorkRuntimeUpdate::SettleProviderSearch { .. } => return Err(WorkError::Invalid),
     }
     row.fact.validate(&plan, expected.next()?)?;
     write(tx, id, &row.fact)?;

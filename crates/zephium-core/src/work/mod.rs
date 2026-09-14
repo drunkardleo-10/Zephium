@@ -4,11 +4,14 @@
 
 pub mod artifact;
 pub mod authoring;
+pub mod environment;
+pub mod execution_proposal;
 mod ids;
 pub mod planning;
 pub mod port;
 pub mod proposal;
 pub mod runtime;
+pub mod search;
 pub mod synthesis;
 #[cfg(test)]
 mod tests;

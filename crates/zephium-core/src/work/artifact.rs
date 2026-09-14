@@ -29,6 +29,24 @@ pub struct WorkEvidencePreviewV1 {
     pub truncated: bool,
     /// Decimal byte count avoids JavaScript integer precision loss.
     pub source_bytes: String,
+    #[serde(default)]
+    pub source: WorkEvidenceSourceV1,
+}
+
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Default)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkEvidenceSourceV1 {
+    #[default]
+    NativeExtraction,
+    ProviderSearch {
+        provider: super::search::WorkSearchProvider,
+        model: String,
+        url: String,
+        title: String,
+        response_id: String,
+        search_call_id: String,
+    },
 }
 impl std::fmt::Debug for WorkEvidencePreviewV1 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

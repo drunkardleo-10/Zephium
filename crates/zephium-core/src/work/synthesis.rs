@@ -117,15 +117,48 @@ impl WorkSynthesisDisclosure {
                 evidence: citations,
             });
         }
-        let context = WorkSynthesisContext {
+        let mut context = WorkSynthesisContext {
             objective: node.objective.clone(),
             outputs: node.outputs.clone(),
             sources: selected,
             evidence,
         };
-        let bytes = serde_json::to_vec(&context).map_err(|_| WorkError::Invalid)?;
-        if bytes.len() > MAX_SYNTHESIS_CONTEXT_BYTES {
-            return Err(WorkError::Capacity);
+        let fits = |context: &WorkSynthesisContext| -> Result<bool, WorkError> {
+            Ok(serde_json::to_vec(context)
+                .map_err(|_| WorkError::Invalid)?
+                .len()
+                <= MAX_SYNTHESIS_CONTEXT_BYTES)
+        };
+        if !fits(&context)? {
+            // Only the model-facing evidence passage is shortened. Exact local
+            // citation keys and original persisted evidence remain unchanged.
+            let original: Vec<_> = context
+                .evidence
+                .iter()
+                .map(|item| (item.text.clone(), item.truncated))
+                .collect();
+            let project = |context: &mut WorkSynthesisContext, characters: usize| {
+                for (item, (text, truncated)) in context.evidence.iter_mut().zip(&original) {
+                    item.text = text.chars().take(characters).collect();
+                    item.truncated = *truncated || item.text.len() < text.len();
+                }
+            };
+            project(&mut context, 128);
+            if !fits(&context)? {
+                return Err(WorkError::Capacity);
+            }
+            let mut low = 128usize;
+            let mut high = 8192;
+            while low < high {
+                let middle = low + (high - low).div_ceil(2);
+                project(&mut context, middle);
+                if fits(&context)? {
+                    low = middle;
+                } else {
+                    high = middle - 1;
+                }
+            }
+            project(&mut context, low);
         }
         Ok(Self {
             context,
@@ -225,8 +258,46 @@ pub enum WorkSynthesisError {
 }
 pub type WorkSynthesisFuture<'a> =
     Pin<Box<dyn Future<Output = Result<WorkSynthesisResult, WorkSynthesisError>> + Send + 'a>>;
+/// Content-free facts identifying the boundary of a synthesis refusal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkSynthesisDiagnostic {
+    DisclosureReady {
+        attempt: WorkAttemptId,
+        bytes: usize,
+        sources: usize,
+        evidence: usize,
+    },
+    DisclosureFailed {
+        attempt: WorkAttemptId,
+        error: WorkError,
+    },
+    ProviderRefused {
+        attempt: WorkAttemptId,
+        error: WorkSynthesisError,
+    },
+    InputCounted {
+        tokens: u32,
+        maximum: u32,
+        request_bytes: usize,
+    },
+}
+/// Per-call attribution only, never worker authority or permission to retrieve Work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkSynthesisTrace {
+    pub work: WorkId,
+    pub execution: WorkExecutionId,
+    pub attempt: WorkAttemptId,
+}
 pub trait WorkSynthesisProvider: Send + Sync {
+    fn diagnostic(&self, _event: WorkSynthesisDiagnostic) {}
     fn produce<'a>(&'a self, input: &'a WorkSynthesisDisclosure) -> WorkSynthesisFuture<'a>;
+    fn produce_owned<'a>(
+        &'a self,
+        input: &'a WorkSynthesisDisclosure,
+        _trace: WorkSynthesisTrace,
+    ) -> WorkSynthesisFuture<'a> {
+        self.produce(input)
+    }
 }
 impl std::fmt::Debug for WorkSynthesisDisclosure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -273,6 +344,7 @@ mod tests {
             presentation: WorkArtifactPresentationV1::Automatic,
         };
         let preview = WorkEvidencePreviewV1 {
+            source: super::super::artifact::WorkEvidenceSourceV1::NativeExtraction,
             version: 1,
             link,
             origin: "https://sqlite.org".into(),

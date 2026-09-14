@@ -193,7 +193,21 @@ pub type WorkPlanningFuture<'a> =
     Pin<Box<dyn Future<Output = Result<WorkPlanningResult, WorkPlanningError>> + Send + 'a>>;
 /// Implementations own configured routing and budgets. Dropping the future
 /// must stop their local I/O; they must never auto-retry a generation.
+pub type WorkExecutionPlanningFuture<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    super::execution_proposal::WorkExecutionPlanningResult,
+                    WorkPlanningError,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
 pub trait WorkPlanningProvider: Send + Sync {
+    fn propose_execution(&self, _input: WorkPlanningDisclosure) -> WorkExecutionPlanningFuture<'_> {
+        Box::pin(async { Err(WorkPlanningError::Unavailable) })
+    }
     fn propose(&self, input: WorkPlanningDisclosure) -> WorkPlanningFuture<'_>;
 }
 impl std::fmt::Debug for WorkPlanningDisclosure {

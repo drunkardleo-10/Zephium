@@ -86,6 +86,18 @@ durable_id!(
 durable_id!(WorkAttemptId, "Exact durable worker attempt identity.");
 durable_id!(WorkArtifactId, "Immutable semantic artifact identity.");
 durable_id!(
+    WorkEnvironmentId,
+    "Persistent working environment, independent of objective execution."
+);
+durable_id!(
+    WorkElementId,
+    "One resource representation in a Work environment."
+);
+durable_id!(
+    WorkAreaId,
+    "Named spatial group, never execution authority."
+);
+durable_id!(
     WorkCommandId,
     "Idempotency correlation only, never an entity capability."
 );

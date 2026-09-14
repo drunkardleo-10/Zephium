@@ -634,6 +634,10 @@ fn scrub_profile_database(path: &Path) -> rusqlite::Result<()> {
     let tx = conn.transaction()?;
     tx.execute_batch(
         "INSERT INTO history_fts(history_fts, rank) VALUES('secure-delete', 1);
+         DELETE FROM work_environment_checkpoints;
+         DELETE FROM work_environment_commands;
+         DELETE FROM work_environment_selection;
+         DELETE FROM work_environments;
          DELETE FROM work_authoring_commands;
          DELETE FROM works;
          DELETE FROM work_payload_usage;
@@ -876,6 +880,12 @@ mod tests {
         conn.execute("INSERT INTO work_executions(work_id, execution_id, plan_revision, owner_session, approved_unix_ms, expires_unix_ms, body) VALUES ('00000000000000000000000001', '00000000000000000000000003', 2, '00000000000000000000000004', 1, 2, ?1)", [PROFILE_SCRUB_MARKER]).unwrap();
         conn.execute("INSERT INTO work_commands(work_id, command_id, request_digest, body) VALUES ('00000000000000000000000001', '00000000000000000000000005', zeroblob(32), ?1)", [PROFILE_SCRUB_MARKER]).unwrap();
         conn.execute("INSERT INTO work_authoring_commands(command_id, request_digest, body) VALUES ('00000000000000000000000006', zeroblob(32), ?1)", [PROFILE_SCRUB_MARKER]).unwrap();
+        // Environment rows have no objective FK; scrub them explicitly before
+        // their accounting singleton, including selected state and replay IDs.
+        conn.execute("INSERT INTO work_environments(id,space_id,revision,view_revision,body,view) VALUES ('00000000000000000000000007','00000000000000000000000008',1,1,?1,?1)", [PROFILE_SCRUB_MARKER]).unwrap();
+        conn.execute("INSERT INTO work_environment_selection(space_id,environment_id) VALUES ('00000000000000000000000008','00000000000000000000000007')", []).unwrap();
+        conn.execute("INSERT INTO work_environment_checkpoints(environment_id,expected_revision,digest,applied_revision) VALUES ('00000000000000000000000007',1,zeroblob(32),2)", []).unwrap();
+        conn.execute("INSERT INTO work_environment_commands(command_id,digest,environment_id,revision,view_revision) VALUES ('00000000000000000000000009',zeroblob(32),'00000000000000000000000007',1,1)", []).unwrap();
         let body = serde_json::to_string(&zephium_core::resources::ResourceDraft {
             title: PROFILE_SCRUB_MARKER.into(),
             pinned: false,
@@ -936,6 +946,10 @@ mod tests {
             "userscripts",
             "work_authoring_commands",
             "work_commands",
+            "work_environment_checkpoints",
+            "work_environment_commands",
+            "work_environment_selection",
+            "work_environments",
             "work_events",
             "work_executions",
             "work_payload_usage",
@@ -981,6 +995,10 @@ mod tests {
             "work_executions",
             "work_authoring_commands",
             "work_commands",
+            "work_environment_checkpoints",
+            "work_environment_commands",
+            "work_environment_selection",
+            "work_environments",
         ] {
             let count: i64 = conn
                 .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {

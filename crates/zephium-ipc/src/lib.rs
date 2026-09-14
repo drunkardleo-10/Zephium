@@ -984,6 +984,8 @@ pub struct PanelOwner {
 /// Snapshots for structural changes, single-row deltas for per-tab churn.
 #[derive(Clone, Debug)]
 pub enum Projection {
+    WorkEnvironmentChanged(work::WorkEnvironmentChangedV1),
+    WorkChanged(work::WorkChangedV1),
     PanelOwner(PanelOwner),
     Items(ItemsState),
     Tab(TabView),
