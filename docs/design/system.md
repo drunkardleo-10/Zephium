@@ -18,8 +18,9 @@ map, preview-state contract, and language-selection behavior.
 Use semantic colors, never raw palette utilities in product markup. The
 surface ladder is canvas → surface → raised; transient chrome fills remain
 transparent overlays on a real native material. Material chrome uses stronger
-foreground tokens to remain legible over varying backgrounds. The original browser controls are the styling reference. Do not add CSS blur, backdrop
-filters, decorative color gradients, or glow.
+foreground tokens to remain legible over varying backgrounds. The original browser controls are the styling reference. Do not add decorative color gradients or glow.
+CSS blur and backdrop filters follow `frontend.md`: allowed where they improve the
+interface within measured cost, never gratuitous or animated.
 
 The rhythm is 8 px with 4 px subdivisions. Chrome controls are 28–36 px; general
 buttons also have a 40 px large size. Icons are optically consistent at 16 px in
