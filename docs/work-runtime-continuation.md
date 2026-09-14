@@ -123,9 +123,15 @@ through the composition browser runner (`run_agent_step`), anonymous and
 read-only. Questions are `Ask` steps answered with
 `WorkRuntimeIntent::AnswerStep` while the loop polls; success requires a final
 `Finish` step. Budgets: grant turns/steps/hops, execution limits, per-call turn
-config in `desktop/src/work_provider.rs`. Deferred: parallel native workers,
-live page cards, source cards as first-class canvas elements, history and
-memory retrieval on turn zero.
+config in `desktop/src/work_provider.rs`. Canvas: `WorkEnvironmentReference::Source`
+(one cited entry of a sources artifact) is a first-class element;
+`frame/src/features/work/lib/organize.ts` organizes agent runs incrementally
+while they run (sources per search, subjects as hubs, findings per claim,
+relations source→finding→subject, subject→matrix), and
+`environmentAgents` links the primary avatar to its latest search sources and
+shows a worker avatar beside the source a native step is reading. Deferred:
+parallel native workers, live page cards, history and memory retrieval on
+turn zero.
 
 [`product-system.md`](product-system.md) now records the agreed full product
 direction: Profile → Space → Work → Area, objective-independent manual Works,
