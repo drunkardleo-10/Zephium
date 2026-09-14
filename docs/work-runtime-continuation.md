@@ -75,8 +75,31 @@ Subjects carry `image_candidates`; `media_admit_remote` fetches one candidate
 without cookies (`zephium-agentic/src/public_asset.rs`, public HTTPS only,
 three redirects, 2 MiB), stores it with `Fetched` provenance, and relates
 subject → media with `Uses`. Live file references (`Reference{scoped path}`)
-and in-Work PDF viewing are deferred; PDFs open with the OS. Account-scoped
-work remains the last M3 item.
+and in-Work PDF viewing are deferred; PDFs open with the OS.
+
+**2026-09-14 M3 account checkpoint.** Account-scoped work runs on the
+existing owned-context runtime, not on a tab lease: the user picks an attached
+tab ("Ask signed in"), chrome sends `WorkOperationV1::PrepareAccount`, and
+`zephium-app/src/work_account_scope.rs` resolves the tab, mints a single-step
+plan when the Work has none, mints an opaque `AgentAccountId`, and returns an
+approval draft whose node capability is `WorkCapability::AccountRead { scope }`
+or `AccountUpdate { scope, update }` (`WorkAccountScope` names tab, page URL,
+origin, account). Approval is the user's attestation of the account (the review
+requires an explicit checkbox); Zephium has no independent account collector
+and says so. Execution (`zephium-work-composition/src/account_scope.rs`) opens
+the page in a Work-owned page that shares the profile's cookie store
+(`isolated_public` false), with a `UserAttestedAccount` source for reads and a
+`FieldUpdateTask` for updates: exactly two verified fill transitions on one
+uniquely matched public text control (optional accessible name), each from a
+fresh observation, then an extraction bound to the restored value. Interventions
+persist on the execution (`WorkExecutionFact.intervention`): the adapter maps
+`NeedsHuman` / `ModelRequestedHuman` to closed kinds (sign-in, challenge,
+permission, unsupported interaction, review), and a user takeover cancels with
+`WorkRuntimeIntent::Cancel { intervention: HumanTakeover }` before the pane
+shows the tab. Continuation is a fresh approval of the same spec ("Run again");
+no pause/resume is promised. Borrowed-tab leases, the human sign-in handoff
+context kind, and independent account collectors remain unbuilt; the retained
+Notion qualifiers stay feature-gated and are superseded by the product path.
 
 [`product-system.md`](product-system.md) now records the agreed full product
 direction: Profile → Space → Work → Area, objective-independent manual Works,

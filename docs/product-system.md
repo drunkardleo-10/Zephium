@@ -497,6 +497,16 @@ must be visible decisions with proven settlement boundaries. Signed-in reading
 and approved reversible writes are part of the product; do not blanket-exclude
 them because more consequential effects are not yet qualified.
 
+Account-scoped work starts from an attached tab the user names. The approval
+shows the profile, origin, exact page, effect class (read only, or one field
+transition plus its restoration), and budget; the user attests that the tab is
+signed in as the intended account, and the product states that it cannot verify
+the account itself. Execution uses a Work-owned page sharing that profile's
+session; the tab is never driven. Sign-in walls, challenges, and unsupported
+interactions stop the run with a persisted reason and offer the page in the
+pane; a takeover revokes and drains automation first. Continuing is a fresh
+approval of the same specification, never a resumed run.
+
 Adaptation inside an approved capability must still create Rust-admitted,
 durable assignments under a bounded delegation policy. Never mutate historical
 approvals/specifications or allow a child to expand its own authority. Changes
