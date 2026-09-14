@@ -45,6 +45,14 @@ pub enum WorkEnvironmentReference {
         artifact: WorkArtifactId,
         index: u16,
     },
+    /// One cited source entry inside an immutable sources artifact. A card,
+    /// never a navigation grant: opening it goes through the ordinary pane.
+    Source {
+        objective: WorkId,
+        execution: WorkExecutionId,
+        artifact: WorkArtifactId,
+        index: u16,
+    },
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]

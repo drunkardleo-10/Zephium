@@ -573,7 +573,7 @@ export type WorkContextDisclosureV1_Serialize = {
 	total_bytes: number,
 };
 
-export type WorkContextItemKind = "note" | "task" | "object" | "tab" | "objective" | "artifact" | "subject" | "finding" |
+export type WorkContextItemKind = "note" | "task" | "object" | "tab" | "objective" | "artifact" | "subject" | "finding" | "source" |
 /**  The user's recorded choice about an element; added by Rust, not selected. */
 "decision";
 
@@ -709,7 +709,12 @@ export type WorkEnvironmentReference = { kind: "browser"; tab: ItemId } | { kind
 /**  One subject inside an immutable artifact, addressed by index. */
 { kind: "subject"; objective: WorkId; execution: WorkExecutionId; artifact: WorkArtifactId; index: number } |
 /**  One finding inside an immutable artifact, addressed by index. */
-{ kind: "finding"; objective: WorkId; execution: WorkExecutionId; artifact: WorkArtifactId; index: number };
+{ kind: "finding"; objective: WorkId; execution: WorkExecutionId; artifact: WorkArtifactId; index: number } |
+/**
+ *  One cited source entry inside an immutable sources artifact. A card,
+ *  never a navigation grant: opening it goes through the ordinary pane.
+ */
+{ kind: "source"; objective: WorkId; execution: WorkExecutionId; artifact: WorkArtifactId; index: number };
 
 export type WorkEnvironmentReply = WorkEnvironmentReply_Serialize | WorkEnvironmentReply_Deserialize;
 

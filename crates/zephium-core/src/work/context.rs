@@ -55,6 +55,7 @@ pub enum WorkContextItemKind {
     Artifact,
     Subject,
     Finding,
+    Source,
     /// The user's recorded choice about an element; added by Rust, not selected.
     Decision,
 }
@@ -69,6 +70,7 @@ impl WorkContextItemKind {
             Self::Artifact => "result",
             Self::Subject => "subject",
             Self::Finding => "finding",
+            Self::Source => "source",
             Self::Decision => "decision",
         }
     }
@@ -350,6 +352,16 @@ pub fn subject_body(data: &artifact::WorkArtifactDataV1, index: u16) -> Option<(
         }
         _ => None,
     }
+}
+
+/// One cited source entry: its title and role. The URL stays with the
+/// provider record; a card shows it, context does not need it.
+pub fn source_body(data: &artifact::WorkArtifactDataV1, index: u16) -> Option<(String, String)> {
+    let artifact::WorkArtifactDataV1::EvidenceCollection { entries, .. } = data else {
+        return None;
+    };
+    let entry = entries.get(usize::from(index))?;
+    Some((entry.title.clone(), entry.role.clone()))
 }
 
 pub fn finding_body(data: &artifact::WorkArtifactDataV1, index: u16) -> Option<(String, String)> {

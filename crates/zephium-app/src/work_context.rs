@@ -224,6 +224,26 @@ impl WorkContextAdmission {
                     text,
                 })
             }
+            WorkEnvironmentReference::Source {
+                objective,
+                execution,
+                artifact,
+                index,
+            } => {
+                let (artifact, visibility) = self
+                    .artifact(profile, *objective, *execution, *artifact)
+                    .await?;
+                let (title, text) =
+                    source_body(&artifact.data, *index).ok_or(WorkError::NotFound)?;
+                Ok(WorkContextSource {
+                    element: id,
+                    kind: WorkContextItemKind::Source,
+                    title,
+                    revision: artifact.id.to_string(),
+                    visibility,
+                    text,
+                })
+            }
         }
     }
 

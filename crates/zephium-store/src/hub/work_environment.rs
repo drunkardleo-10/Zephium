@@ -151,6 +151,23 @@ fn validate_reference(
                 return Err(WorkError::NotFound);
             }
         }
+        WorkEnvironmentReference::Source {
+            objective,
+            execution,
+            artifact,
+            index,
+        } => {
+            let value = super::runtime_store::read_artifact(
+                tx, profile, *objective, *execution, *artifact,
+            )?;
+            let entries = match &value.data {
+                WorkArtifactDataV1::EvidenceCollection { entries, .. } => entries.len(),
+                _ => 0,
+            };
+            if usize::from(*index) >= entries {
+                return Err(WorkError::NotFound);
+            }
+        }
         // Native tab ownership is validated by the application actor. The Store
         // retains only the ID; it neither opens a URL nor constructs a context.
         WorkEnvironmentReference::Browser { .. } => {}
