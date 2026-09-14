@@ -183,6 +183,7 @@ impl AgentLifecycleOwner {
 }
 
 mod browser_pages;
+mod work_pane;
 
 pub struct Shell {
     #[cfg(feature = "work-execution")]
@@ -207,6 +208,8 @@ pub struct Shell {
     browser_return_revision: u64,
     browser_after_return: Option<Box<Command>>,
     browser_return: Option<browser_pages::PendingBrowserReturn>,
+    work_pane: Option<work_pane::WorkPane>,
+    work_pane_generation: u32,
     runtime_restart_required: bool,
     user_content_status: user_content_status::UserContentStatus,
     crash: CrashState,
@@ -465,6 +468,8 @@ impl Shell {
             browser_return_revision: 0,
             browser_after_return: None,
             browser_return: None,
+            work_pane: None,
+            work_pane_generation: 0,
             runtime_restart_required: false,
             user_content_status: user_content_status::UserContentStatus::default(),
             crash: CrashState::default(),
@@ -792,6 +797,15 @@ impl Shell {
                     win.metrics.sidebar_width = zephium_core::layout::clamp_sidebar_width(width);
                 }
                 let _ = self.relayout();
+            }
+            Command::WorkPaneSetRect { rect, generation } => {
+                self.work_pane_set_rect(rect, generation);
+            }
+            Command::WorkPaneShow { target, rect } => {
+                let _ = self.operation_work_pane_show(target, rect);
+            }
+            Command::WorkPaneHide => {
+                let _ = self.operation_work_pane_hide();
             }
             Command::ResourceCall {
                 expected_profile,

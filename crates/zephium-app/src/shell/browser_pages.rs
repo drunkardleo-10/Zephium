@@ -43,6 +43,9 @@ impl Shell {
         let previous = self.browser_page;
         self.browser_page = page.map(|page| (window, page));
         self.divider = None;
+        if page != Some(crate::BrowserPage::Work) {
+            self.clear_work_pane();
+        }
         if self.relayout() != NativeDispatch::Scheduled {
             self.browser_page = previous;
             let _ = self.relayout();
@@ -77,6 +80,11 @@ impl Shell {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         };
         self.browser_return_revision = revision;
+        // The pane's page must leave the native stage before Browse chrome is
+        // restored underneath it.
+        if self.clear_work_pane() {
+            let _ = self.relayout();
+        }
         self.browser_return = Some(PendingBrowserReturn {
             revision,
             window,

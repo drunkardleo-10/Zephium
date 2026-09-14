@@ -26,7 +26,12 @@ impl Shell {
         let Some(win) = self.windows.focused() else {
             return NativeDispatch::Rejected;
         };
-        let tree = self.pane_tree();
+        let browser_page_active = self.active_browser_page().is_some();
+        let tree = if browser_page_active {
+            self.work_pane_tree()
+        } else {
+            self.pane_tree()
+        };
         let present = tree.as_ref().is_some_and(|t| self.present(t));
         let mut l = layout::compute(win.size, win.mode, win.metrics, present);
         // A browser-owned extension consent prompt is window-modal. Native
@@ -42,9 +47,8 @@ impl Shell {
         // full window instead of the sidebar's narrow viewport. Native page
         // siblings are removed from the stage for the exact visible lifetime.
         let extension_center_active = self.extension_management.visible_profile().is_some();
-        let privileged_overlay_active = extension_consent_active
-            || extension_center_active
-            || self.active_browser_page().is_some();
+        let privileged_overlay_active =
+            extension_consent_active || extension_center_active || browser_page_active;
         // `Items` marks a prospective view resident before its CreateView
         // effect is dispatched. While the profile's first explicit native
         // policy is still compiling/installing, that effect is intentionally
@@ -56,6 +60,18 @@ impl Shell {
         let native_policy_available = self.blocker.native_policy_available(win.profile);
         if !self.window_visible || !native_policy_available || privileged_overlay_active {
             l.content = None;
+        }
+        // The Work pane is the one content rect that coexists with full-window
+        // chrome: the native leaf floats above the canvas inside a hole the
+        // chrome draws around the applied rect. Modal prompts still win.
+        let pane_admitted = browser_page_active
+            && !extension_consent_active
+            && !extension_center_active
+            && self.window_visible
+            && native_policy_available;
+        let work_pane = self.work_pane_layout(pane_admitted && present);
+        if let Some(pane) = work_pane.as_ref().filter(|pane| pane.presented) {
+            l.content = Some(Rect::new(pane.x, pane.y, pane.width, pane.height));
         }
         // Raw native children still receive their final geometry while a
         // first navigation is provisional, but macOS must not shrink the
@@ -92,7 +108,7 @@ impl Shell {
             return NativeDispatch::Rejected;
         }
         let dividers = match (&tree, l.content) {
-            (Some(tree), Some(region)) => {
+            (Some(tree), Some(region)) if !browser_page_active => {
                 let local = Rect::new(0.0, 0.0, region.width, region.height);
                 split::dividers(tree, local, win.metrics.gap)
                     .into_iter()
@@ -107,7 +123,10 @@ impl Shell {
             }
             _ => Vec::new(),
         };
-        (self.emit)(Projection::Layout(LayoutState { dividers }));
+        (self.emit)(Projection::Layout(LayoutState {
+            dividers,
+            work_pane,
+        }));
         self.engine.set_content(win.id, tree, l.content)
     }
 

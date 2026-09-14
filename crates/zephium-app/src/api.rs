@@ -10,7 +10,7 @@ use zephium_core::extensions::{
     ExtensionInstallRevision, ExtensionPopupAnchor, ExtensionProfilePolicyRevision,
     ExtensionRuntimeInstance,
 };
-use zephium_core::geometry::Size;
+use zephium_core::geometry::{Rect, Size};
 use zephium_core::ids::{ExtensionInstallId, ItemId, ProfileId};
 use zephium_core::ports::blocker::ContentBlocker;
 use zephium_core::ports::chrome::Chrome as GeometryChrome;
@@ -365,6 +365,12 @@ impl BrowserPage {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum WorkPaneTarget {
+    Tab(ItemId),
+    Url(String),
+}
+
 #[derive(Clone, Debug)]
 pub enum Command {
     WorkDocument(crate::WorkDocumentSubmission),
@@ -420,6 +426,19 @@ pub enum Command {
     SetWindowVisible(bool),
     SetSidebarWidth(f64),
     ShowBrowserPage(Option<BrowserPage>),
+    /// Shows the transient Work browser pane over an existing Space tab or a
+    /// fresh tab navigated to `Url`. `rect` is window-local and clamped.
+    WorkPaneShow {
+        target: WorkPaneTarget,
+        rect: Rect,
+    },
+    /// Replaceable geometry fact carrying the pane generation it measured.
+    WorkPaneSetRect {
+        rect: Rect,
+        generation: u32,
+    },
+    /// Hides the pane; its tab keeps every page state.
+    WorkPaneHide,
     BrowserChromeRestored {
         revision: u64,
         applied: bool,

@@ -1083,6 +1083,8 @@ fn tracked_operation_command(command: &Command) -> bool {
         command,
         Command::Open
             | Command::ShowBrowserPage(_)
+            | Command::WorkPaneShow { .. }
+            | Command::WorkPaneHide
             | Command::SetTabEssential { .. }
             | Command::Activate(_)
             | Command::Close(_)

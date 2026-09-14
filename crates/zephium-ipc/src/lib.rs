@@ -593,9 +593,39 @@ pub struct DividerView {
     pub vertical: bool,
 }
 
+/// The Work browser pane's applied native hole in window logical coordinates.
+/// `presented` is false while the pane's tab has no live view (crash, discard,
+/// or a modal prompt that removes content from the stage).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct WorkPaneLayout {
+    pub tab: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub presented: bool,
+    pub generation: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct WorkPaneRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkPaneTarget {
+    Tab { id: String },
+    Url { url: String },
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 pub struct LayoutState {
     pub dividers: Vec<DividerView>,
+    pub work_pane: Option<WorkPaneLayout>,
 }
 
 /// Immediate result returned by a privileged IPC command. `accepted` with an

@@ -6,6 +6,8 @@ impl Shell {
     pub(super) fn handle_operation(&mut self, command: Command) -> OperationDisposition {
         match command {
             Command::ShowBrowserPage(page) => self.operation_show_browser_page(page),
+            Command::WorkPaneShow { target, rect } => self.operation_work_pane_show(target, rect),
+            Command::WorkPaneHide => self.operation_work_pane_hide(),
             Command::Open => self.operation_open(),
             Command::Activate(id) => self.operation_activate(id),
             Command::Close(id) => self.operation_close(id),
@@ -222,7 +224,7 @@ impl Shell {
     }
 
     pub(super) fn operation_navigate(&mut self, id: ItemId, input: String) -> OperationDisposition {
-        if self.active_browser_page().is_some() {
+        if self.active_browser_page().is_some() && !self.work_pane_shows(id) {
             self.browser_after_return = Some(Box::new(Command::Navigate { id, input }));
             return self.operation_show_browser_page(None);
         }
@@ -454,12 +456,24 @@ impl Shell {
     }
 
     pub(super) fn operation_run_command(&mut self, id: &str) -> OperationDisposition {
-        let active = self.windows.focused().and_then(|window| window.active);
+        // Inside Work the pane's tab is the only page a shortcut can mean.
+        let in_work = self.active_browser_page().is_some();
+        let active = if in_work {
+            self.work_pane_tab()
+        } else {
+            self.windows.focused().and_then(|window| window.active)
+        };
         match id {
             "tab.new" => self.operation_open(),
+            "tab.close" if in_work => self.operation_work_pane_hide(),
             "tab.close" => active.map_or_else(
                 || operation_result(OperationOutcome::NoOp, OperationReason::NoFocusedWindow),
                 |id| self.operation_close(id),
+            ),
+            "work.pane.close" => self.operation_work_pane_hide(),
+            "work.pane.openInBrowse" => active.filter(|_| in_work).map_or_else(
+                || operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged),
+                |id| self.operation_activate(id),
             ),
             "tab.next" => self.operation_cycle_tab(1),
             "tab.previous" => self.operation_cycle_tab(-1),

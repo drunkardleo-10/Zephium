@@ -1595,6 +1595,9 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tabs_reload,
             tabs_back,
             tabs_forward,
+            work_pane_show,
+            work_pane_set_rect,
+            work_pane_hide,
             tabs_split,
             tabs_unsplit,
             extension_action_invoke,
@@ -2373,16 +2376,7 @@ fn tabs_open_url(
     shell: State<'_, Handle>,
     url: String,
 ) -> zephium_ipc::OperationAdmission {
-    if !authorize(&caller, CallerPolicy::Main, "tabs_open_url")
-        || url.len() > 8192
-        || url.chars().any(char::is_control)
-        || !tauri::Url::parse(&url).is_ok_and(|parsed| {
-            matches!(parsed.scheme(), "https" | "http")
-                && parsed.host_str().is_some()
-                && parsed.username().is_empty()
-                && parsed.password().is_none()
-        })
-    {
+    if !authorize(&caller, CallerPolicy::Main, "tabs_open_url") || !trusted_web_url(&url) {
         return rejected_operation();
     }
     dispatch_operation(caller.app_handle(), &shell, Command::OpenUrl(url))
@@ -2506,6 +2500,97 @@ fn tabs_forward(
         return rejected_operation();
     }
     dispatch_with_id(caller.app_handle(), &shell, &id, Command::GoForward)
+}
+
+fn work_pane_rect(rect: zephium_ipc::WorkPaneRect) -> Option<zephium_core::geometry::Rect> {
+    (point_in_bounds(rect.x, rect.y)
+        && rect.width.is_finite()
+        && rect.height.is_finite()
+        && rect.width > 0.0
+        && rect.height > 0.0
+        && rect.width <= MAX_WINDOW_COORDINATE
+        && rect.height <= MAX_WINDOW_COORDINATE)
+        .then(|| zephium_core::geometry::Rect::new(rect.x, rect.y, rect.width, rect.height))
+}
+
+fn trusted_web_url(url: &str) -> bool {
+    url.len() <= 8192
+        && !url.chars().any(char::is_control)
+        && tauri::Url::parse(url).is_ok_and(|parsed| {
+            matches!(parsed.scheme(), "https" | "http")
+                && parsed.host_str().is_some()
+                && parsed.username().is_empty()
+                && parsed.password().is_none()
+        })
+}
+
+/// Shows the transient Work browser pane over a Space tab or a fresh tab at
+/// an explicit trusted URL. The rect is the chrome's measured hole.
+#[tauri::command]
+#[specta::specta]
+fn work_pane_show(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    target: zephium_ipc::WorkPaneTarget,
+    rect: zephium_ipc::WorkPaneRect,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "work_pane_show") {
+        return rejected_operation();
+    }
+    let Some(rect) = work_pane_rect(rect) else {
+        return rejected_operation();
+    };
+    let target = match target {
+        zephium_ipc::WorkPaneTarget::Tab { id } => {
+            if !bounded(&id, MAX_ITEM_ID_BYTES) {
+                return rejected_operation();
+            }
+            match ItemId::parse(&id) {
+                Some(id) => zephium_app::WorkPaneTarget::Tab(id),
+                None => return rejected_operation(),
+            }
+        }
+        zephium_ipc::WorkPaneTarget::Url { url } => {
+            if !trusted_web_url(&url) {
+                return rejected_operation();
+            }
+            zephium_app::WorkPaneTarget::Url(url)
+        }
+    };
+    dispatch_operation(
+        caller.app_handle(),
+        &shell,
+        Command::WorkPaneShow { target, rect },
+    )
+}
+
+#[tauri::command]
+#[specta::specta]
+fn work_pane_set_rect(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    rect: zephium_ipc::WorkPaneRect,
+    generation: u32,
+) {
+    if !authorize(&caller, CallerPolicy::Main, "work_pane_set_rect") {
+        return;
+    }
+    let Some(rect) = work_pane_rect(rect) else {
+        return;
+    };
+    shell.dispatch(Command::WorkPaneSetRect { rect, generation });
+}
+
+#[tauri::command]
+#[specta::specta]
+fn work_pane_hide(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "work_pane_hide") {
+        return rejected_operation();
+    }
+    dispatch_operation(caller.app_handle(), &shell, Command::WorkPaneHide)
 }
 
 #[tauri::command]
@@ -3203,6 +3288,8 @@ fn vk_for(token: &str) -> Option<u32> {
     }
     Some(match upper.as_str() {
         "TAB" => 0x09,
+        "RETURN" | "ENTER" => 0x0D,
+        "ESCAPE" | "ESC" => 0x1B,
         "SPACE" => 0x20,
         "," => 0xBC,
         "-" => 0xBD,
@@ -4118,8 +4205,37 @@ fn build_menu(
         .item(&item("tab.next")?)
         .item(&item("tab.previous")?)
         .build()?;
+    // Page keystrokes never reach privileged chrome, so the pane's dismissal
+    // keys live in the menu and are enabled exactly while a pane is shown.
+    let pane_close = build_command_menu_item_enabled(handle, &resolved, "work.pane.close", false)?;
+    let pane_open =
+        build_command_menu_item_enabled(handle, &resolved, "work.pane.openInBrowse", false)?;
+    let work = SubmenuBuilder::new(handle, "Work")
+        .item(&pane_close)
+        .item(&pane_open)
+        .build()?;
+    handle.manage(WorkPaneMenu {
+        items: vec![pane_close, pane_open],
+    });
 
-    Menu::with_items(handle, &[&app_menu, &file, &edit, &view, &history, &window])
+    Menu::with_items(
+        handle,
+        &[&app_menu, &file, &edit, &view, &history, &work, &window],
+    )
+}
+
+struct WorkPaneMenu {
+    items: Vec<tauri::menu::MenuItem<tauri::Wry>>,
+}
+
+impl WorkPaneMenu {
+    fn set_shown(&self, shown: bool) {
+        for item in &self.items {
+            if item.set_enabled(shown).is_err() {
+                diagnostic!("menu: work pane binding state was not applied");
+            }
+        }
+    }
 }
 
 fn build_add_menu(
@@ -4864,6 +4980,9 @@ pub fn run() {
                     emit_to_privileged(&emit_handle, overlay::PANEL_LABEL, EVENT_SEARCH, &results)
                 }
                 Projection::Layout(layout) => {
+                    if let Some(menu) = emit_handle.try_state::<WorkPaneMenu>() {
+                        menu.set_shown(layout.work_pane.is_some());
+                    }
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_LAYOUT, &layout)
                 }
                 Projection::RuntimeStatus(status) => {
@@ -7457,6 +7576,36 @@ mod tests {
             super::MIN_SIDEBAR_WIDTH - 1.0
         ));
         assert!(!super::sidebar_width_in_bounds(f64::NAN));
+    }
+
+    #[test]
+    fn work_pane_inputs_are_finite_positive_and_trusted() {
+        let rect = |x, y, width, height| {
+            super::work_pane_rect(zephium_ipc::WorkPaneRect {
+                x,
+                y,
+                width,
+                height,
+            })
+        };
+        assert_eq!(
+            rect(10.0, 20.0, 640.0, 480.0),
+            Some(zephium_core::geometry::Rect::new(10.0, 20.0, 640.0, 480.0))
+        );
+        assert_eq!(rect(-5.0, 20.0, 640.0, 480.0).map(|r| r.x), Some(-5.0));
+        assert!(rect(10.0, 20.0, 0.0, 480.0).is_none());
+        assert!(rect(10.0, 20.0, 640.0, -1.0).is_none());
+        assert!(rect(f64::NAN, 20.0, 640.0, 480.0).is_none());
+        assert!(rect(10.0, 20.0, f64::INFINITY, 480.0).is_none());
+        assert!(rect(10.0, 20.0, super::MAX_WINDOW_COORDINATE + 1.0, 480.0).is_none());
+
+        assert!(super::trusted_web_url("https://example.com/path?q=1"));
+        assert!(super::trusted_web_url("http://example.com"));
+        assert!(!super::trusted_web_url("javascript:alert(1)"));
+        assert!(!super::trusted_web_url("https://user:pw@example.com"));
+        assert!(!super::trusted_web_url("file:///etc/hosts"));
+        assert!(!super::trusted_web_url("https://example.com/\u{7}"));
+        assert!(!super::trusted_web_url(&format!("https://example.com/{}", "a".repeat(8192))));
     }
 
     #[test]

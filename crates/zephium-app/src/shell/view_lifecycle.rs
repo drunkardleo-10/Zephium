@@ -106,14 +106,14 @@ impl Shell {
         if self.windows.focused().is_none() {
             return false;
         }
-        let shown: std::collections::HashSet<ItemId> =
-            if self.window_visible && self.active_browser_page().is_none() {
-                self.pane_tree()
-                    .map(|t| t.tabs().into_iter().collect())
-                    .unwrap_or_default()
-            } else {
-                std::collections::HashSet::new()
-            };
+        self.prune_work_pane();
+        let shown: std::collections::HashSet<ItemId> = if self.window_visible {
+            self.visible_tree()
+                .map(|t| t.tabs().into_iter().collect())
+                .unwrap_or_default()
+        } else {
+            std::collections::HashSet::new()
+        };
         self.residency
             .recent
             .retain(|id| self.items.tab(*id).is_some());
@@ -276,7 +276,7 @@ impl Shell {
     }
 
     pub(super) fn discard_protected_leaves(&self) -> std::collections::HashSet<ItemId> {
-        self.pane_tree()
+        self.visible_tree()
             .map(|tree| tree.tabs().into_iter().collect())
             .unwrap_or_default()
     }
@@ -476,13 +476,14 @@ impl Shell {
             .insert(id, std::time::Instant::now())
             .is_some_and(|t| t.elapsed() < RETRY_WINDOW);
         let active = self.windows.focused().and_then(|window| window.active);
-        let effects = if !recent && active == Some(id) {
+        let visible = active == Some(id) || self.work_pane_shows(id);
+        let effects = if !recent && visible {
             self.items.ensure_view(id)
         } else {
             Vec::new()
         };
         self.apply(effects);
-        if active == Some(id) {
+        if visible {
             let _ = self.relayout();
             self.maintain_views();
         }
@@ -494,8 +495,10 @@ impl Shell {
 
     pub(super) fn on_profile_process_exit(&mut self, profile: ProfileId, ids: Vec<ItemId>) {
         const RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
-        let visible_order: Vec<ItemId> =
-            self.pane_tree().map(|tree| tree.tabs()).unwrap_or_default();
+        let visible_order: Vec<ItemId> = self
+            .visible_tree()
+            .map(|tree| tree.tabs())
+            .unwrap_or_default();
         let visible: std::collections::HashSet<ItemId> = visible_order.iter().copied().collect();
         let mut suppressed_visible = std::collections::HashSet::new();
         let mut effects = Vec::new();

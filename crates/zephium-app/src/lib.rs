@@ -73,7 +73,7 @@ pub use api::{
     ChromePresentation, ChromePresentationCallback, ChromePresentationDispatch, Command,
     ContentPolicyStatusQueryOutcome, EmitFn, ExtensionLifecycle, PagePermissionPromptDecision,
     PresentationChrome, SharedBlocker, SharedChrome, SharedEngine, SharedStore,
-    ShellTerminalFailure, ShellTerminalFailureCallback, ShutdownOutcome,
+    ShellTerminalFailure, ShellTerminalFailureCallback, ShutdownOutcome, WorkPaneTarget,
 };
 pub use shell::Shell;
 

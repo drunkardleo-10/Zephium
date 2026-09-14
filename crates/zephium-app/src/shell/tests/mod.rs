@@ -2197,4 +2197,5 @@ mod shutdown;
 mod tabs;
 mod view_lifecycle;
 mod window_layout;
+mod work_pane;
 mod zoom;

@@ -23,6 +23,13 @@ export const commands = {
 	tabsReload: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_reload", { id }),
 	tabsBack: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_back", { id }),
 	tabsForward: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_forward", { id }),
+	/**
+	 *  Shows the transient Work browser pane over a Space tab or a fresh tab at
+	 *  an explicit trusted URL. The rect is the chrome's measured hole.
+	 */
+	workPaneShow: (target: WorkPaneTarget, rect: WorkPaneRect) => __TAURI_INVOKE<OperationAdmission>("work_pane_show", { target, rect }),
+	workPaneSetRect: (rect: WorkPaneRect, generation: number) => __TAURI_INVOKE<void>("work_pane_set_rect", { rect, generation }),
+	workPaneHide: () => __TAURI_INVOKE<OperationAdmission>("work_pane_hide"),
 	tabsSplit: (other: string) => __TAURI_INVOKE<OperationAdmission>("tabs_split", { other }),
 	tabsUnsplit: () => __TAURI_INVOKE<OperationAdmission>("tabs_unsplit"),
 	extensionActionInvoke: (profileId: string, installId: string, runtimeGeneration: string, actionRevision: string, anchorX: number | null, anchorY: number | null, anchorWidth: number | null, anchorHeight: number | null) => __TAURI_INVOKE<OperationAdmission>("extension_action_invoke", { profileId, installId, runtimeGeneration, actionRevision, anchorX, anchorY, anchorWidth, anchorHeight }),
@@ -692,6 +699,7 @@ export type LayoutChanged = LayoutState;
 
 export type LayoutState = {
 	dividers: DividerView[],
+	work_pane: WorkPaneLayout | null,
 };
 
 export type Material = "none" | "vibrancy" | "liquid_glass" | "acrylic" | "mica";
@@ -1800,6 +1808,30 @@ export type WorkOperationV1_Serialize = ({ kind: "read_public"; command: WorkCom
 
 /**  Requested output review level, never evidence that a requirement was met. */
 export type WorkOutputReview = "mechanical" | "source_mapped_needs_review" | "user_acceptance";
+
+/**
+ *  The Work browser pane's applied native hole in window logical coordinates.
+ *  `presented` is false while the pane's tab has no live view (crash, discard,
+ *  or a modal prompt that removes content from the stage).
+ */
+export type WorkPaneLayout = {
+	tab: string,
+	x: number | null,
+	y: number | null,
+	width: number | null,
+	height: number | null,
+	presented: boolean,
+	generation: number,
+};
+
+export type WorkPaneRect = {
+	x: number | null,
+	y: number | null,
+	width: number | null,
+	height: number | null,
+};
+
+export type WorkPaneTarget = { kind: "tab"; id: string } | { kind: "url"; url: string };
 
 export type WorkPlanDraft = {
 	id: WorkPlanId,

@@ -197,7 +197,7 @@ impl Shell {
             results.extend(
                 commands::REGISTRY
                     .iter()
-                    .filter(|c| c.id != "launcher.toggle")
+                    .filter(|c| c.id != "launcher.toggle" && c.group != commands::Group::Work)
                     .filter(|c| c.title.to_lowercase().contains(&needle))
                     .take(3)
                     .map(|c| SearchResult {

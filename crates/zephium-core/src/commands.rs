@@ -11,6 +11,9 @@ pub enum Group {
     Window,
     /// Not placed in any menu; bound to a system-wide shortcut.
     Global,
+    /// Work pane bindings: menu-hosted so page keystrokes reach them, enabled
+    /// only while the pane is shown.
+    Work,
 }
 
 pub struct CommandSpec {
@@ -104,6 +107,18 @@ pub const REGISTRY: &[CommandSpec] = &[
         title: "Previous Tab",
         accelerator: Some("Ctrl+Shift+Tab"),
         group: Group::Window,
+    },
+    CommandSpec {
+        id: "work.pane.close",
+        title: "Close Pane",
+        accelerator: Some("Escape"),
+        group: Group::Work,
+    },
+    CommandSpec {
+        id: "work.pane.openInBrowse",
+        title: "Open Pane in Browse",
+        accelerator: Some("CmdOrCtrl+Shift+Return"),
+        group: Group::Work,
     },
     CommandSpec {
         id: "launcher.toggle",
