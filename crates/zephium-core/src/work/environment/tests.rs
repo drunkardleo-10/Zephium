@@ -8,7 +8,7 @@ fn edit(
     snapshot: &WorkEnvironmentSnapshot,
     edit: WorkEnvironmentEdit,
 ) -> Result<WorkEnvironmentSnapshot, WorkError> {
-    snapshot.edit(edit, 10.into(), 20.into())
+    snapshot.edit(edit, 10.into(), 20.into(), 30.into())
 }
 fn placement(element: WorkElementId) -> WorkElementPlacement {
     WorkElementPlacement {
@@ -100,7 +100,8 @@ fn area_membership_is_exact_and_removal_preserves_elements() {
                 area: None
             },
             11.into(),
-            21.into()
+            21.into(),
+            31.into()
         ),
         Err(WorkError::Conflict)
     ));
@@ -219,10 +220,9 @@ fn view_admits_boundary_geometry_and_rejects_overflow_duplicates_and_capacity() 
         }],
     };
     valid.validate().unwrap();
-    let legacy: WorkEnvironmentView = serde_json::from_str(
-        r#"{"revision":"1","x":0,"y":0,"zoom_milli":1000,"placements":[]}"#,
-    )
-    .unwrap();
+    let legacy: WorkEnvironmentView =
+        serde_json::from_str(r#"{"revision":"1","x":0,"y":0,"zoom_milli":1000,"placements":[]}"#)
+            .unwrap();
     assert!(legacy.areas.is_empty());
     for mutate in [
         |v: &mut WorkEnvironmentView| v.x = -1_000_001,
@@ -339,4 +339,90 @@ fn checkpoint_wire_identity_is_scoped_to_view_revision_not_global_command_id() {
     old_intent.as_object_mut().unwrap().remove("kind");
     old_intent["kind"] = serde_json::json!("checkpoint");
     assert!(serde_json::from_value::<WorkEnvironmentIntent>(old_intent).is_err());
+}
+
+#[test]
+fn relations_join_existing_elements_and_leave_with_them() {
+    let one = edit(
+        &empty(),
+        WorkEnvironmentEdit::Add {
+            reference: WorkEnvironmentReference::Browser { tab: 1.into() },
+            area: None,
+        },
+    )
+    .unwrap();
+    let two = one
+        .edit(
+            WorkEnvironmentEdit::Add {
+                reference: WorkEnvironmentReference::Subject {
+                    objective: 5.into(),
+                    execution: 6.into(),
+                    artifact: 7.into(),
+                    index: 0,
+                },
+                area: None,
+            },
+            11.into(),
+            21.into(),
+            31.into(),
+        )
+        .unwrap();
+    assert!(matches!(
+        edit(
+            &two,
+            WorkEnvironmentEdit::Relate {
+                from: 10.into(),
+                to: 10.into(),
+                relation: WorkRelationKind::Supports
+            }
+        ),
+        Err(WorkError::Invalid)
+    ));
+    assert!(edit(
+        &two,
+        WorkEnvironmentEdit::Relate {
+            from: 10.into(),
+            to: 404.into(),
+            relation: WorkRelationKind::Supports
+        }
+    )
+    .is_err());
+    let related = edit(
+        &two,
+        WorkEnvironmentEdit::Relate {
+            from: 10.into(),
+            to: 11.into(),
+            relation: WorkRelationKind::Supports,
+        },
+    )
+    .unwrap();
+    assert_eq!(related.relations.len(), 1);
+    assert_eq!(related.relations[0].origin, WorkRelationOrigin::User);
+    assert!(matches!(
+        edit(
+            &related,
+            WorkEnvironmentEdit::Relate {
+                from: 10.into(),
+                to: 11.into(),
+                relation: WorkRelationKind::Supports
+            }
+        ),
+        Err(WorkError::Conflict)
+    ));
+    let removed = edit(&related, WorkEnvironmentEdit::Remove { element: 11.into() }).unwrap();
+    assert!(removed.relations.is_empty());
+    let unrelated = edit(
+        &related,
+        WorkEnvironmentEdit::Unrelate {
+            relation: 30.into(),
+        },
+    )
+    .unwrap();
+    assert!(unrelated.relations.is_empty());
+    let legacy: WorkEnvironmentSnapshot = serde_json::from_str(
+        r#"{"version":1,"id":"00000000000000000000000001","profile":"00000000000000000000000002","space":"00000000000000000000000003","title":"Old","lifecycle":"active","revision":"1","elements":[],"areas":[],"view":{"revision":"1","x":0,"y":0,"zoom_milli":1000,"placements":[]}}"#,
+    )
+    .unwrap();
+    assert!(legacy.relations.is_empty());
+    legacy.validate().unwrap();
 }

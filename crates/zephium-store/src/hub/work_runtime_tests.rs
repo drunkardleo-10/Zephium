@@ -113,6 +113,7 @@ fn coordination_requires_exact_live_parent_and_complete_children() {
         title: "Proposed checks".into(),
         data: artifact::WorkArtifactDataV1::Document {
             paragraphs: vec!["Review release changes".into()],
+            formatted: None,
         },
         evidence: vec![],
         review: WorkOutputReview::UserAcceptance,

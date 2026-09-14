@@ -194,7 +194,7 @@ impl WorkSynthesisDisclosure {
                 return Err(WorkError::Invalid);
             }
             validate_text(&output.title, 512)?;
-            output.data.validate()?;
+            output.data.validate(output.evidence.len())?;
             bytes += serde_json::to_vec(&output)
                 .map_err(|_| WorkError::Invalid)?
                 .len();
@@ -338,6 +338,7 @@ mod tests {
             title: "Original finding".into(),
             data: WorkArtifactDataV1::Document {
                 paragraphs: vec!["A database uses shared memory.".into()],
+                formatted: None,
             },
             evidence: vec![link.clone()],
             review: WorkOutputReview::SourceMappedNeedsReview,
@@ -368,6 +369,7 @@ mod tests {
             title: "Summary".into(),
             data: WorkArtifactDataV1::Document {
                 paragraphs: vec!["Shared memory requires the same host.".into()],
+                formatted: None,
             },
             evidence: vec![0],
         }
@@ -439,6 +441,7 @@ mod tests {
         let (node, mut source, preview, limits) = fixture();
         source.data = WorkArtifactDataV1::Document {
             paragraphs: vec!["\\".repeat(20_000)],
+            formatted: None,
         };
         assert!(matches!(
             WorkSynthesisDisclosure::try_new(&node, &[source], &[preview], limits),

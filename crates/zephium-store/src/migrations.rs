@@ -1987,6 +1987,10 @@ pub static PROFILE: &[Migration] = &[
         version: 20,
         up: |tx| tx.execute_batch(include_str!("work_environment_checkpoints_v1.sql")),
     },
+    Migration {
+        version: 21,
+        up: |tx| tx.execute_batch(include_str!("user_resources_v21.sql")),
+    },
 ];
 
 #[cfg(test)]
@@ -3113,7 +3117,7 @@ mod tests {
                 .unwrap(),
             14
         );
-        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(20));
+        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(21));
     }
 
     #[test]

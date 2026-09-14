@@ -5,9 +5,9 @@ import * as __TAURI_EVENT from "@tauri-apps/api/event";
 
 /** Commands */
 export const commands = {
-	workCall: (expectedProfile: string, call: WorkCallV1) => __TAURI_INVOKE<WorkResponseV1>("work_call", { expectedProfile, call }),
-	workOperation: (expectedProfile: string, operation: WorkCommandId, input: WorkOperationV1) => __TAURI_INVOKE<WorkOperationResponseV1>("work_operation", { expectedProfile, operation, input }),
-	workOperationStatus: (expectedProfile: string, work: WorkId, operation: WorkCommandId, acknowledge: boolean) => __TAURI_INVOKE<WorkOperationResponseV1>("work_operation_status", { expectedProfile, work, operation, acknowledge }),
+	workCall: (expectedProfile: string, call: WorkCallV1_Deserialize) => __TAURI_INVOKE<WorkResponseV1_Serialize>("work_call", { expectedProfile, call }),
+	workOperation: (expectedProfile: string, operation: WorkCommandId, input: WorkOperationV1_Deserialize) => __TAURI_INVOKE<WorkOperationResponseV1_Serialize>("work_operation", { expectedProfile, operation, input }),
+	workOperationStatus: (expectedProfile: string, work: WorkId, operation: WorkCommandId, acknowledge: boolean) => __TAURI_INVOKE<WorkOperationResponseV1_Serialize>("work_operation_status", { expectedProfile, work, operation, acknowledge }),
 	workActivity: (expectedProfile: string, work: WorkId) => __TAURI_INVOKE<WorkActivityResponseV1>("work_activity", { expectedProfile, work }),
 	tabsBootstrap: () => __TAURI_INVOKE<void>("tabs_bootstrap"),
 	tabsOpen: () => __TAURI_INVOKE<OperationAdmission>("tabs_open"),
@@ -313,15 +313,7 @@ export type DividerView = {
 	vertical: boolean,
 };
 
-export type DocumentAttrs = DocumentAttrs_Serialize | DocumentAttrs_Deserialize;
-
-export type DocumentAttrs_Deserialize = {
-	start?: number | null,
-	level?: number | null,
-	resource?: string | null,
-};
-
-export type DocumentAttrs_Serialize = {
+export type DocumentAttrs = {
 	start?: number | null,
 	level?: number | null,
 	resource?: string | null,
@@ -345,7 +337,7 @@ export type DocumentNode_Deserialize = {
 	type: string,
 	content?: DocumentNode_Deserialize[],
 	text?: string | null,
-	attrs?: DocumentAttrs_Deserialize | null,
+	attrs?: DocumentAttrs | null,
 	marks?: DocumentMark[],
 };
 
@@ -357,7 +349,7 @@ export type DocumentNode_Serialize = {
 	type: string,
 	content?: DocumentNode_Serialize[],
 	text?: string | null,
-	attrs?: DocumentAttrs_Serialize | null,
+	attrs?: DocumentAttrs | null,
 	marks?: DocumentMark[],
 };
 
@@ -864,9 +856,19 @@ export type ResourceCommand_Serialize = {
 
 export type ResourceContent = ResourceContent_Serialize | ResourceContent_Deserialize;
 
-export type ResourceContent_Deserialize = ({ kind: "note"; document: NoteDocument_Deserialize }) & { completed?: never; description?: never; due_date?: never } | ({ kind: "task"; description: string; completed: boolean; due_date: string | null }) & { document?: never };
+export type ResourceContent_Deserialize = ({ kind: "note"; document: NoteDocument_Deserialize }) & { completed?: never; description?: never; due_date?: never; object?: never } | ({ kind: "task"; description: string; completed: boolean; due_date: string | null }) & { document?: never; object?: never } | 
+/**
+ *  A user-owned semantic object: a table, checklist, comparison, chart,
+ *  document, or findings, editable like a note.
+ */
+({ kind: "object"; object: WorkObjectV1_Deserialize }) & { completed?: never; description?: never; document?: never; due_date?: never };
 
-export type ResourceContent_Serialize = ({ kind: "note"; document: NoteDocument_Serialize }) & { completed?: never; description?: never; due_date?: never } | ({ kind: "task"; description: string; completed: boolean; due_date: string | null }) & { document?: never };
+export type ResourceContent_Serialize = ({ kind: "note"; document: NoteDocument_Serialize }) & { completed?: never; description?: never; due_date?: never; object?: never } | ({ kind: "task"; description: string; completed: boolean; due_date: string | null }) & { document?: never; object?: never } | 
+/**
+ *  A user-owned semantic object: a table, checklist, comparison, chart,
+ *  document, or findings, editable like a note.
+ */
+({ kind: "object"; object: WorkObjectV1_Serialize }) & { completed?: never; description?: never; document?: never; due_date?: never };
 
 export type ResourceDraft = ResourceDraft_Serialize | ResourceDraft_Deserialize;
 
@@ -892,11 +894,21 @@ export type ResourceId = string;
 
 export type ResourceIntent = ResourceIntent_Serialize | ResourceIntent_Deserialize;
 
-export type ResourceIntent_Deserialize = ({ kind: "create"; draft: ResourceDraft_Deserialize }) & { expected_revision?: never; id?: never } | { kind: "replace"; id: string; expected_revision: string; draft: ResourceDraft_Deserialize } | ({ kind: "trash"; id: string; expected_revision: string }) & { draft?: never } | ({ kind: "restore"; id: string; expected_revision: string }) & { draft?: never };
+export type ResourceIntent_Deserialize = ({ kind: "create"; draft: ResourceDraft_Deserialize }) & { artifact?: never; basis?: never; execution?: never; expected_revision?: never; id?: never; objective?: never; title?: never } | 
+/**
+ *  Copy an artifact (original or the user's revision) into an Object
+ *  resource. Rust resolves data, evidence, review, and provenance.
+ */
+({ kind: "preserve_artifact"; objective: WorkId; execution: WorkExecutionId; artifact: WorkArtifactId; basis: WorkObjectBasis; title?: string | null }) & { draft?: never; expected_revision?: never; id?: never } | ({ kind: "replace"; id: string; expected_revision: string; draft: ResourceDraft_Deserialize }) & { artifact?: never; basis?: never; execution?: never; objective?: never; title?: never } | ({ kind: "trash"; id: string; expected_revision: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; objective?: never; title?: never } | ({ kind: "restore"; id: string; expected_revision: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; objective?: never; title?: never };
 
-export type ResourceIntent_Serialize = ({ kind: "create"; draft: ResourceDraft_Serialize }) & { expected_revision?: never; id?: never } | { kind: "replace"; id: string; expected_revision: string; draft: ResourceDraft_Serialize } | ({ kind: "trash"; id: string; expected_revision: string }) & { draft?: never } | ({ kind: "restore"; id: string; expected_revision: string }) & { draft?: never };
+export type ResourceIntent_Serialize = ({ kind: "create"; draft: ResourceDraft_Serialize }) & { artifact?: never; basis?: never; execution?: never; expected_revision?: never; id?: never; objective?: never; title?: never } | 
+/**
+ *  Copy an artifact (original or the user's revision) into an Object
+ *  resource. Rust resolves data, evidence, review, and provenance.
+ */
+({ kind: "preserve_artifact"; objective: WorkId; execution: WorkExecutionId; artifact: WorkArtifactId; basis: WorkObjectBasis; title?: string | null }) & { draft?: never; expected_revision?: never; id?: never } | ({ kind: "replace"; id: string; expected_revision: string; draft: ResourceDraft_Serialize }) & { artifact?: never; basis?: never; execution?: never; objective?: never; title?: never } | ({ kind: "trash"; id: string; expected_revision: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; objective?: never; title?: never } | ({ kind: "restore"; id: string; expected_revision: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; objective?: never; title?: never };
 
-export type ResourceKind = "note" | "task";
+export type ResourceKind = "note" | "task" | "object";
 
 export type ResourceQuery = {
 	completed?: boolean | null,
@@ -1130,11 +1142,23 @@ export type WorkAreaPlacement = {
 	height: number,
 };
 
-export type WorkArtifactDataV1 = { kind: "document"; paragraphs: string[] } | { kind: "table"; columns: string[]; rows: string[][] } | { kind: "comparison"; criteria: string[]; alternatives: WorkComparisonAlternative[] } | 
+export type WorkArtifactDataV1 = WorkArtifactDataV1_Serialize | WorkArtifactDataV1_Deserialize;
+
+export type WorkArtifactDataV1_Deserialize = ({ kind: "document"; paragraphs: string[]; formatted?: NoteDocument_Deserialize | null }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; entries?: never; general_knowledge?: never; items?: never; notes?: never; rows?: never; series?: never; subjects?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "table"; columns: string[]; rows: string[][] }) & { alternatives?: never; basis?: never; cells?: never; criteria?: never; entries?: never; formatted?: never; general_knowledge?: never; items?: never; notes?: never; paragraphs?: never; series?: never; subjects?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "comparison"; criteria: string[]; alternatives: WorkComparisonAlternative[] }) & { basis?: never; cells?: never; columns?: never; entries?: never; formatted?: never; general_knowledge?: never; items?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; subjects?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | 
 /**  Decimal strings preserve values independently of renderer floating point. */
-{ kind: "chart"; x_label: string; y_label: string; series: WorkChartSeries[] } | { kind: "checklist"; items: WorkChecklistItem[] } | { kind: "evidence_collection"; summary: string } | 
+({ kind: "chart"; x_label: string; y_label: string; series: WorkChartSeries_Deserialize[]; basis?: WorkMeasurementBasis_Deserialize | null; general_knowledge?: boolean }) & { alternatives?: never; cells?: never; columns?: never; criteria?: never; entries?: never; formatted?: never; items?: never; notes?: never; paragraphs?: never; rows?: never; subjects?: never; summary?: never; title?: never; url?: never } | ({ kind: "checklist"; items: WorkChecklistItem[] }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; entries?: never; formatted?: never; general_knowledge?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; subjects?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "evidence_collection"; summary: string; subjects?: WorkSubject_Deserialize[]; entries?: WorkSourceEntry_Deserialize[] }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; formatted?: never; general_knowledge?: never; items?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "comparison_matrix"; subjects: WorkSubject_Deserialize[]; criteria: WorkCriterion[]; 
+/**  Dense: `cells[subject][criterion]`. */
+cells: WorkCell_Deserialize[][]; notes?: string[] }) & { alternatives?: never; basis?: never; columns?: never; entries?: never; formatted?: never; general_knowledge?: never; items?: never; paragraphs?: never; rows?: never; series?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "findings"; subjects?: WorkSubject_Deserialize[]; items: WorkFinding_Deserialize[] }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; entries?: never; formatted?: never; general_knowledge?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | 
 /**  A descriptive card, not an interactive native context or navigation grant. */
-{ kind: "browser_resource_preview"; title: string; url: string; summary: string };
+({ kind: "browser_resource_preview"; title: string; url: string; summary: string }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; entries?: never; formatted?: never; general_knowledge?: never; items?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; subjects?: never; x_label?: never; y_label?: never };
+
+export type WorkArtifactDataV1_Serialize = ({ kind: "document"; paragraphs: string[]; formatted?: NoteDocument_Serialize | null }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; entries?: never; general_knowledge?: never; items?: never; notes?: never; rows?: never; series?: never; subjects?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "table"; columns: string[]; rows: string[][] }) & { alternatives?: never; basis?: never; cells?: never; criteria?: never; entries?: never; formatted?: never; general_knowledge?: never; items?: never; notes?: never; paragraphs?: never; series?: never; subjects?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "comparison"; criteria: string[]; alternatives: WorkComparisonAlternative[] }) & { basis?: never; cells?: never; columns?: never; entries?: never; formatted?: never; general_knowledge?: never; items?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; subjects?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | 
+/**  Decimal strings preserve values independently of renderer floating point. */
+({ kind: "chart"; x_label: string; y_label: string; series: WorkChartSeries_Serialize[]; basis?: WorkMeasurementBasis_Serialize | null; general_knowledge?: boolean }) & { alternatives?: never; cells?: never; columns?: never; criteria?: never; entries?: never; formatted?: never; items?: never; notes?: never; paragraphs?: never; rows?: never; subjects?: never; summary?: never; title?: never; url?: never } | ({ kind: "checklist"; items: WorkChecklistItem[] }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; entries?: never; formatted?: never; general_knowledge?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; subjects?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "evidence_collection"; summary: string; subjects?: WorkSubject_Serialize[]; entries?: WorkSourceEntry_Serialize[] }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; formatted?: never; general_knowledge?: never; items?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "comparison_matrix"; subjects: WorkSubject_Serialize[]; criteria: WorkCriterion[]; 
+/**  Dense: `cells[subject][criterion]`. */
+cells: WorkCell_Serialize[][]; notes?: string[] }) & { alternatives?: never; basis?: never; columns?: never; entries?: never; formatted?: never; general_knowledge?: never; items?: never; paragraphs?: never; rows?: never; series?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "findings"; subjects?: WorkSubject_Serialize[]; items: WorkFinding_Serialize[] }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; entries?: never; formatted?: never; general_knowledge?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | 
+/**  A descriptive card, not an interactive native context or navigation grant. */
+({ kind: "browser_resource_preview"; title: string; url: string; summary: string }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; entries?: never; formatted?: never; general_knowledge?: never; items?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; subjects?: never; x_label?: never; y_label?: never };
 
 export type WorkArtifactDecision = "accepted" | "rejected";
 
@@ -1143,16 +1167,29 @@ export type WorkArtifactId = string;
 
 export type WorkArtifactPresentationV1 = "automatic" | "compact" | "expanded";
 
-export type WorkArtifactUserState = {
+export type WorkArtifactUserState = WorkArtifactUserState_Serialize | WorkArtifactUserState_Deserialize;
+
+export type WorkArtifactUserState_Deserialize = {
 	artifact: WorkArtifactId,
 	revision: WorkRevision,
 	decision: WorkArtifactDecision | null,
-	edited_data: WorkArtifactDataV1 | null,
+	edited_data: WorkArtifactDataV1_Deserialize | null,
 	/**  Citations for edited content. Original citations remain on the artifact. */
 	evidence: WorkEvidenceLink[],
 };
 
-export type WorkArtifactV1 = {
+export type WorkArtifactUserState_Serialize = {
+	artifact: WorkArtifactId,
+	revision: WorkRevision,
+	decision: WorkArtifactDecision | null,
+	edited_data: WorkArtifactDataV1_Serialize | null,
+	/**  Citations for edited content. Original citations remain on the artifact. */
+	evidence: WorkEvidenceLink[],
+};
+
+export type WorkArtifactV1 = WorkArtifactV1_Serialize | WorkArtifactV1_Deserialize;
+
+export type WorkArtifactV1_Deserialize = {
 	version: number,
 	id: WorkArtifactId,
 	execution: WorkExecutionId,
@@ -1160,7 +1197,21 @@ export type WorkArtifactV1 = {
 	attempt: WorkAttemptId,
 	output: string,
 	title: string,
-	data: WorkArtifactDataV1,
+	data: WorkArtifactDataV1_Deserialize,
+	evidence: WorkEvidenceLink[],
+	review: WorkOutputReview,
+	presentation: WorkArtifactPresentationV1,
+};
+
+export type WorkArtifactV1_Serialize = {
+	version: number,
+	id: WorkArtifactId,
+	execution: WorkExecutionId,
+	node: WorkPlanNodeId,
+	attempt: WorkAttemptId,
+	output: string,
+	title: string,
+	data: WorkArtifactDataV1_Serialize,
 	evidence: WorkEvidenceLink[],
 	review: WorkOutputReview,
 	presentation: WorkArtifactPresentationV1,
@@ -1228,7 +1279,19 @@ export type WorkBrowseScope = {
  *  Durable document operations share a bounded, profile-checked transport.
  *  Provider generation and worker admission have separate lifetimes.
  */
-export type WorkCallV1 = { kind: "environment"; version: number; request: WorkEnvironmentCall } | { kind: "query"; request: WorkQueryV1 } | { kind: "author"; command: WorkAuthoringCommandV1 } | { kind: "execute"; command: WorkCommandV1 };
+export type WorkCallV1 = WorkCallV1_Serialize | WorkCallV1_Deserialize;
+
+/**
+ *  Durable document operations share a bounded, profile-checked transport.
+ *  Provider generation and worker admission have separate lifetimes.
+ */
+export type WorkCallV1_Deserialize = ({ kind: "environment"; version: number; request: WorkEnvironmentCall_Deserialize }) & { command?: never } | ({ kind: "query"; request: WorkQueryV1 }) & { command?: never; version?: never } | ({ kind: "author"; command: WorkAuthoringCommandV1 }) & { request?: never; version?: never } | ({ kind: "execute"; command: WorkCommandV1_Deserialize }) & { request?: never; version?: never };
+
+/**
+ *  Durable document operations share a bounded, profile-checked transport.
+ *  Provider generation and worker admission have separate lifetimes.
+ */
+export type WorkCallV1_Serialize = ({ kind: "environment"; version: number; request: WorkEnvironmentCall_Serialize }) & { command?: never } | ({ kind: "query"; request: WorkQueryV1 }) & { command?: never; version?: never } | ({ kind: "author"; command: WorkAuthoringCommandV1 }) & { request?: never; version?: never } | ({ kind: "execute"; command: WorkCommandV1_Serialize }) & { request?: never; version?: never };
 
 export type WorkCapability = 
 /**  One public provider search, without browser state or attached context. */
@@ -1250,6 +1313,42 @@ export type WorkCapability =
 /**  Structured handoffs from completed plan dependencies only. */
 { kind: "synthesize" };
 
+export type WorkCell = WorkCell_Serialize | WorkCell_Deserialize;
+
+export type WorkCellValue = WorkCellValue_Serialize | WorkCellValue_Deserialize;
+
+export type WorkCellValue_Deserialize = ({ kind: "text"; text: string }) & { amount?: never; currency?: never; observed_at?: never; present?: never; value?: never } | 
+/**  Decimal string; the criterion supplies unit and basis. */
+({ kind: "measurement"; value: string }) & { amount?: never; currency?: never; observed_at?: never; present?: never; text?: never } | ({ kind: "money"; amount: string; currency: string; observed_at?: string | null }) & { present?: never; text?: never; value?: never } | ({ kind: "rating"; value: number }) & { amount?: never; currency?: never; observed_at?: never; present?: never; text?: never } | ({ kind: "presence"; present: boolean }) & { amount?: never; currency?: never; observed_at?: never; text?: never; value?: never } | ({ kind: "unknown" }) & { amount?: never; currency?: never; observed_at?: never; present?: never; text?: never; value?: never };
+
+export type WorkCellValue_Serialize = ({ kind: "text"; text: string }) & { amount?: never; currency?: never; observed_at?: never; present?: never; value?: never } | 
+/**  Decimal string; the criterion supplies unit and basis. */
+({ kind: "measurement"; value: string }) & { amount?: never; currency?: never; observed_at?: never; present?: never; text?: never } | ({ kind: "money"; amount: string; currency: string; observed_at?: string | null }) & { present?: never; text?: never; value?: never } | ({ kind: "rating"; value: number }) & { amount?: never; currency?: never; observed_at?: never; present?: never; text?: never } | ({ kind: "presence"; present: boolean }) & { amount?: never; currency?: never; observed_at?: never; text?: never; value?: never } | ({ kind: "unknown" }) & { amount?: never; currency?: never; observed_at?: never; present?: never; text?: never; value?: never };
+
+export type WorkCell_Deserialize = {
+	value: WorkCellValue_Deserialize,
+	/**  Indices into the artifact evidence array. */
+	evidence?: number[],
+	note?: string | null,
+	/**
+	 *  Well-known general knowledge, labeled as such; never a substitute for
+	 *  evidence on uncertain or web-derived values.
+	 */
+	general_knowledge?: boolean,
+};
+
+export type WorkCell_Serialize = {
+	value: WorkCellValue_Serialize,
+	/**  Indices into the artifact evidence array. */
+	evidence?: number[],
+	note?: string | null,
+	/**
+	 *  Well-known general knowledge, labeled as such; never a substitute for
+	 *  evidence on uncertain or web-derived values.
+	 */
+	general_knowledge?: boolean,
+};
+
 export type WorkChanged = WorkChangedV1;
 
 /**
@@ -1261,14 +1360,30 @@ export type WorkChangedV1 = {
 	work: WorkId,
 };
 
-export type WorkChartPoint = {
+export type WorkChartPoint = WorkChartPoint_Serialize | WorkChartPoint_Deserialize;
+
+export type WorkChartPoint_Deserialize = {
 	label: string,
 	value: string,
+	evidence?: number[],
 };
 
-export type WorkChartSeries = {
+export type WorkChartPoint_Serialize = {
+	label: string,
+	value: string,
+	evidence?: number[],
+};
+
+export type WorkChartSeries = WorkChartSeries_Serialize | WorkChartSeries_Deserialize;
+
+export type WorkChartSeries_Deserialize = {
 	name: string,
-	points: WorkChartPoint[],
+	points: WorkChartPoint_Deserialize[],
+};
+
+export type WorkChartSeries_Serialize = {
+	name: string,
+	points: WorkChartPoint_Serialize[],
 };
 
 export type WorkChecklistItem = {
@@ -1290,18 +1405,47 @@ export type WorkCommandReceipt = {
  *  returns its original receipt plus current facts. Reusing an ID with changed
  *  operands is a conflict. Receipt eviction is never automatic.
  */
-export type WorkCommandV1 = {
+export type WorkCommandV1 = WorkCommandV1_Serialize | WorkCommandV1_Deserialize;
+
+/**
+ *  Retry the same command and expected revision after a lost reply. The Store
+ *  returns its original receipt plus current facts. Reusing an ID with changed
+ *  operands is a conflict. Receipt eviction is never automatic.
+ */
+export type WorkCommandV1_Deserialize = {
 	version: number,
 	work: WorkId,
 	expected_revision: WorkRevision,
 	command: WorkCommandId,
-	intent: WorkRuntimeIntent,
+	intent: WorkRuntimeIntent_Deserialize,
+};
+
+/**
+ *  Retry the same command and expected revision after a lost reply. The Store
+ *  returns its original receipt plus current facts. Reusing an ID with changed
+ *  operands is a conflict. Receipt eviction is never automatic.
+ */
+export type WorkCommandV1_Serialize = {
+	version: number,
+	work: WorkId,
+	expected_revision: WorkRevision,
+	command: WorkCommandId,
+	intent: WorkRuntimeIntent_Serialize,
 };
 
 export type WorkComparisonAlternative = {
 	name: string,
 	values: string[],
 };
+
+export type WorkConfidence = "supported" | "inferred" | "unverified" | "contradicted";
+
+export type WorkCriterion = {
+	name: string,
+	kind: WorkCriterionKind,
+};
+
+export type WorkCriterionKind = { kind: "text" } | { kind: "measurement"; unit: string; basis: string } | { kind: "rating"; rubric: string; scale_max: number } | { kind: "presence" };
 
 /** One resource representation in a Work environment. */
 export type WorkElementId = string;
@@ -1318,11 +1462,19 @@ export type WorkElementPlacement = {
 	height: number,
 };
 
-export type WorkEnvironmentCall = 
+export type WorkEnvironmentCall = WorkEnvironmentCall_Serialize | WorkEnvironmentCall_Deserialize;
+
+export type WorkEnvironmentCall_Deserialize = 
 /**  Revision-scoped presentation save; stale identities never execute again. */
-{ kind: "checkpoint"; id: WorkEnvironmentId; expected: WorkRevision; view: WorkEnvironmentView } | 
+({ kind: "checkpoint"; id: WorkEnvironmentId; expected: WorkRevision; view: WorkEnvironmentView_Deserialize }) & { after?: never; command?: never; intent?: never; limit?: never; space?: never } | 
 /**  Idempotent user selection; updates only the Space's last-opened Work. */
-{ kind: "open"; id: WorkEnvironmentId } | { kind: "read"; id: WorkEnvironmentId } | { kind: "list"; space: SpaceId; after: WorkEnvironmentId | null; limit: number } | { kind: "command"; command: WorkCommandId; intent: WorkEnvironmentIntent };
+({ kind: "open"; id: WorkEnvironmentId }) & { after?: never; command?: never; expected?: never; intent?: never; limit?: never; space?: never; view?: never } | ({ kind: "read"; id: WorkEnvironmentId }) & { after?: never; command?: never; expected?: never; intent?: never; limit?: never; space?: never; view?: never } | ({ kind: "list"; space: SpaceId; after: WorkEnvironmentId | null; limit: number }) & { command?: never; expected?: never; id?: never; intent?: never; view?: never } | ({ kind: "command"; command: WorkCommandId; intent: WorkEnvironmentIntent }) & { after?: never; expected?: never; id?: never; limit?: never; space?: never; view?: never };
+
+export type WorkEnvironmentCall_Serialize = 
+/**  Revision-scoped presentation save; stale identities never execute again. */
+({ kind: "checkpoint"; id: WorkEnvironmentId; expected: WorkRevision; view: WorkEnvironmentView_Serialize }) & { after?: never; command?: never; intent?: never; limit?: never; space?: never } | 
+/**  Idempotent user selection; updates only the Space's last-opened Work. */
+({ kind: "open"; id: WorkEnvironmentId }) & { after?: never; command?: never; expected?: never; intent?: never; limit?: never; space?: never; view?: never } | ({ kind: "read"; id: WorkEnvironmentId }) & { after?: never; command?: never; expected?: never; intent?: never; limit?: never; space?: never; view?: never } | ({ kind: "list"; space: SpaceId; after: WorkEnvironmentId | null; limit: number }) & { command?: never; expected?: never; id?: never; intent?: never; view?: never } | ({ kind: "command"; command: WorkCommandId; intent: WorkEnvironmentIntent }) & { after?: never; expected?: never; id?: never; limit?: never; space?: never; view?: never };
 
 export type WorkEnvironmentChanged = WorkEnvironmentChangedV1;
 
@@ -1331,7 +1483,7 @@ export type WorkEnvironmentChangedV1 = {
 	environment: WorkEnvironmentId,
 };
 
-export type WorkEnvironmentEdit = { kind: "rename"; title: string } | { kind: "set_lifecycle"; lifecycle: WorkLifecycle } | { kind: "add"; reference: WorkEnvironmentReference; area: WorkAreaId | null } | { kind: "remove"; element: WorkElementId } | { kind: "create_area"; title: string } | { kind: "rename_area"; area: WorkAreaId; title: string } | { kind: "remove_area"; area: WorkAreaId } | { kind: "assign_area"; element: WorkElementId; area: WorkAreaId | null };
+export type WorkEnvironmentEdit = { kind: "rename"; title: string } | { kind: "set_lifecycle"; lifecycle: WorkLifecycle } | { kind: "add"; reference: WorkEnvironmentReference; area: WorkAreaId | null } | { kind: "remove"; element: WorkElementId } | { kind: "create_area"; title: string } | { kind: "rename_area"; area: WorkAreaId; title: string } | { kind: "remove_area"; area: WorkAreaId } | { kind: "assign_area"; element: WorkElementId; area: WorkAreaId | null } | { kind: "relate"; from: WorkElementId; to: WorkElementId; relation: WorkRelationKind } | { kind: "unrelate"; relation: WorkRelationId };
 
 export type WorkEnvironmentElement = {
 	id: WorkElementId,
@@ -1349,11 +1501,21 @@ export type WorkEnvironmentReference = { kind: "browser"; tab: ItemId } | { kind
  *  A retained result from one historical execution, not a mutable copy or
  *  a capability to rerun its producer.
  */
-{ kind: "artifact"; objective: WorkId; execution: WorkExecutionId; artifact: WorkArtifactId };
+{ kind: "artifact"; objective: WorkId; execution: WorkExecutionId; artifact: WorkArtifactId } | 
+/**  One subject inside an immutable artifact, addressed by index. */
+{ kind: "subject"; objective: WorkId; execution: WorkExecutionId; artifact: WorkArtifactId; index: number } | 
+/**  One finding inside an immutable artifact, addressed by index. */
+{ kind: "finding"; objective: WorkId; execution: WorkExecutionId; artifact: WorkArtifactId; index: number };
 
-export type WorkEnvironmentReply = { kind: "checkpointed"; expected: WorkRevision; applied_view_revision: WorkRevision; replayed: boolean; snapshot: WorkEnvironmentSnapshot } | { kind: "snapshot"; snapshot: WorkEnvironmentSnapshot } | { kind: "applied"; command: WorkCommandId; applied_revision: WorkRevision; applied_view_revision: WorkRevision; replayed: boolean; snapshot: WorkEnvironmentSnapshot } | { kind: "page"; works: WorkEnvironmentSummary[]; next: WorkEnvironmentId | null; selected: WorkEnvironmentId | null };
+export type WorkEnvironmentReply = WorkEnvironmentReply_Serialize | WorkEnvironmentReply_Deserialize;
 
-export type WorkEnvironmentSnapshot = {
+export type WorkEnvironmentReply_Deserialize = ({ kind: "checkpointed"; expected: WorkRevision; applied_view_revision: WorkRevision; replayed: boolean; snapshot: WorkEnvironmentSnapshot_Deserialize }) & { applied_revision?: never; command?: never; next?: never; selected?: never; works?: never } | ({ kind: "snapshot"; snapshot: WorkEnvironmentSnapshot_Deserialize }) & { applied_revision?: never; applied_view_revision?: never; command?: never; expected?: never; next?: never; replayed?: never; selected?: never; works?: never } | ({ kind: "applied"; command: WorkCommandId; applied_revision: WorkRevision; applied_view_revision: WorkRevision; replayed: boolean; snapshot: WorkEnvironmentSnapshot_Deserialize }) & { expected?: never; next?: never; selected?: never; works?: never } | ({ kind: "page"; works: WorkEnvironmentSummary[]; next: WorkEnvironmentId | null; selected: WorkEnvironmentId | null }) & { applied_revision?: never; applied_view_revision?: never; command?: never; expected?: never; replayed?: never; snapshot?: never };
+
+export type WorkEnvironmentReply_Serialize = ({ kind: "checkpointed"; expected: WorkRevision; applied_view_revision: WorkRevision; replayed: boolean; snapshot: WorkEnvironmentSnapshot_Serialize }) & { applied_revision?: never; command?: never; next?: never; selected?: never; works?: never } | ({ kind: "snapshot"; snapshot: WorkEnvironmentSnapshot_Serialize }) & { applied_revision?: never; applied_view_revision?: never; command?: never; expected?: never; next?: never; replayed?: never; selected?: never; works?: never } | ({ kind: "applied"; command: WorkCommandId; applied_revision: WorkRevision; applied_view_revision: WorkRevision; replayed: boolean; snapshot: WorkEnvironmentSnapshot_Serialize }) & { expected?: never; next?: never; selected?: never; works?: never } | ({ kind: "page"; works: WorkEnvironmentSummary[]; next: WorkEnvironmentId | null; selected: WorkEnvironmentId | null }) & { applied_revision?: never; applied_view_revision?: never; command?: never; expected?: never; replayed?: never; snapshot?: never };
+
+export type WorkEnvironmentSnapshot = WorkEnvironmentSnapshot_Serialize | WorkEnvironmentSnapshot_Deserialize;
+
+export type WorkEnvironmentSnapshot_Deserialize = {
 	version: number,
 	id: WorkEnvironmentId,
 	profile: ProfileId,
@@ -1363,7 +1525,22 @@ export type WorkEnvironmentSnapshot = {
 	revision: WorkRevision,
 	elements: WorkEnvironmentElement[],
 	areas: WorkArea[],
-	view: WorkEnvironmentView,
+	relations?: WorkRelation[],
+	view: WorkEnvironmentView_Deserialize,
+};
+
+export type WorkEnvironmentSnapshot_Serialize = {
+	version: number,
+	id: WorkEnvironmentId,
+	profile: ProfileId,
+	space: SpaceId,
+	title: string,
+	lifecycle: WorkLifecycle,
+	revision: WorkRevision,
+	elements: WorkEnvironmentElement[],
+	areas: WorkArea[],
+	relations?: WorkRelation[],
+	view: WorkEnvironmentView_Serialize,
 };
 
 export type WorkEnvironmentSummary = {
@@ -1374,7 +1551,18 @@ export type WorkEnvironmentSummary = {
 	revision: WorkRevision,
 };
 
-export type WorkEnvironmentView = {
+export type WorkEnvironmentView = WorkEnvironmentView_Serialize | WorkEnvironmentView_Deserialize;
+
+export type WorkEnvironmentView_Deserialize = {
+	revision: WorkRevision,
+	x: number,
+	y: number,
+	zoom_milli: number,
+	placements: WorkElementPlacement[],
+	areas?: WorkAreaPlacement[],
+};
+
+export type WorkEnvironmentView_Serialize = {
 	revision: WorkRevision,
 	x: number,
 	y: number,
@@ -1412,17 +1600,32 @@ export type WorkEvidenceSourceV1 = { kind: "native_extraction" } | { kind: "prov
 
 export type WorkExecutionAuthorization = "reviewed_plan" | "user_directed_public_read";
 
-export type WorkExecutionFact = {
+export type WorkExecutionFact = WorkExecutionFact_Serialize | WorkExecutionFact_Deserialize;
+
+export type WorkExecutionFact_Deserialize = {
 	authorization?: WorkExecutionAuthorization,
 	id: WorkExecutionId,
 	approved_revision: WorkRevision,
 	spec: WorkExecutionSpec,
 	status: WorkExecutionStatus,
 	attempts: WorkAttemptFact[],
-	artifacts: WorkArtifactV1[],
+	artifacts: WorkArtifactV1_Deserialize[],
 	provider_evidence?: WorkProviderSearchRecordV1[],
 	/**  User edits and decisions never overwrite the original agent output. */
-	user_artifacts?: WorkArtifactUserState[],
+	user_artifacts?: WorkArtifactUserState_Deserialize[],
+};
+
+export type WorkExecutionFact_Serialize = {
+	authorization: WorkExecutionAuthorization,
+	id: WorkExecutionId,
+	approved_revision: WorkRevision,
+	spec: WorkExecutionSpec,
+	status: WorkExecutionStatus,
+	attempts: WorkAttemptFact[],
+	artifacts: WorkArtifactV1_Serialize[],
+	provider_evidence: WorkProviderSearchRecordV1[],
+	/**  User edits and decisions never overwrite the original agent output. */
+	user_artifacts: WorkArtifactUserState_Serialize[],
 };
 
 /** Durable execution identity, never a live admission. */
@@ -1458,10 +1661,46 @@ export type WorkExpectedOutput = {
 
 export type WorkFailureV1 = "invalid" | "capacity" | "conflict" | "not_found" | "profile_unavailable" | "unavailable" | "shutdown" | "outcome_unknown";
 
+export type WorkFinding = WorkFinding_Serialize | WorkFinding_Deserialize;
+
+export type WorkFinding_Deserialize = {
+	claim: string,
+	subject?: number | null,
+	evidence?: number[],
+	confidence: WorkConfidence,
+	detail?: string | null,
+	general_knowledge?: boolean,
+};
+
+export type WorkFinding_Serialize = {
+	claim: string,
+	subject?: number | null,
+	evidence?: number[],
+	confidence: WorkConfidence,
+	detail?: string | null,
+	general_knowledge?: boolean,
+};
+
 /** Durable profile-owned Work identity; never an execution capability. */
 export type WorkId = string;
 
 export type WorkLifecycle = "active" | "archived";
+
+export type WorkMeasurementBasis = WorkMeasurementBasis_Serialize | WorkMeasurementBasis_Deserialize;
+
+export type WorkMeasurementBasis_Deserialize = {
+	method: string,
+	conditions?: string | null,
+	versions?: string | null,
+	observed_at?: string | null,
+};
+
+export type WorkMeasurementBasis_Serialize = {
+	method: string,
+	conditions?: string | null,
+	versions?: string | null,
+	observed_at?: string | null,
+};
 
 export type WorkNodeExecutionSpec = {
 	node: WorkPlanNodeId,
@@ -1481,25 +1720,83 @@ export type WorkNodeProposal = {
 	outputs: WorkExpectedOutput[],
 };
 
-export type WorkOperationResponseV1 = {
+export type WorkObjectBasis = { kind: "original" } | { kind: "user_revision"; revision: WorkRevision };
+
+export type WorkObjectProvenance = {
+	objective: WorkId,
+	execution: WorkExecutionId,
+	artifact: WorkArtifactId,
+	basis: WorkObjectBasis,
+	review: WorkOutputReview,
+};
+
+export type WorkObjectV1 = WorkObjectV1_Serialize | WorkObjectV1_Deserialize;
+
+export type WorkObjectV1_Deserialize = {
+	version: number,
+	data: WorkArtifactDataV1_Deserialize,
+	evidence?: WorkEvidenceLink[],
+	/**  Set only by Rust when preserving an artifact; never accepted from callers. */
+	provenance?: WorkObjectProvenance | null,
+};
+
+export type WorkObjectV1_Serialize = {
+	version: number,
+	data: WorkArtifactDataV1_Serialize,
+	evidence?: WorkEvidenceLink[],
+	/**  Set only by Rust when preserving an artifact; never accepted from callers. */
+	provenance?: WorkObjectProvenance | null,
+};
+
+export type WorkOperationResponseV1 = WorkOperationResponseV1_Serialize | WorkOperationResponseV1_Deserialize;
+
+export type WorkOperationResponseV1_Deserialize = {
 	version: number,
 	profile: string,
 	operation: WorkCommandId,
-	state: WorkOperationStateV1,
+	state: WorkOperationStateV1_Deserialize,
 };
 
-export type WorkOperationStateV1 = 
+export type WorkOperationResponseV1_Serialize = {
+	version: number,
+	profile: string,
+	operation: WorkCommandId,
+	state: WorkOperationStateV1_Serialize,
+};
+
+export type WorkOperationStateV1 = WorkOperationStateV1_Serialize | WorkOperationStateV1_Deserialize;
+
+export type WorkOperationStateV1_Deserialize = 
 /**
  *  No retained observation. Reconcile durable Work; do not replay a model
  *  call or reconstruct an execution from this state after a restart.
  */
-{ kind: "unknown" } | { kind: "pending"; work: WorkId } | { kind: "planned"; response: WorkPlanningResponseV1 } | { kind: "settled"; response: WorkResponseV1 } | { kind: "refused"; error: WorkFailureV1 };
+({ kind: "unknown" }) & { error?: never; response?: never; work?: never } | ({ kind: "pending"; work: WorkId }) & { error?: never; response?: never } | ({ kind: "planned"; response: WorkPlanningResponseV1_Deserialize }) & { error?: never; work?: never } | ({ kind: "settled"; response: WorkResponseV1_Deserialize }) & { error?: never; work?: never } | ({ kind: "refused"; error: WorkFailureV1 }) & { response?: never; work?: never };
+
+export type WorkOperationStateV1_Serialize = 
+/**
+ *  No retained observation. Reconcile durable Work; do not replay a model
+ *  call or reconstruct an execution from this state after a restart.
+ */
+({ kind: "unknown" }) & { error?: never; response?: never; work?: never } | ({ kind: "pending"; work: WorkId }) & { error?: never; response?: never } | ({ kind: "planned"; response: WorkPlanningResponseV1_Serialize }) & { error?: never; work?: never } | ({ kind: "settled"; response: WorkResponseV1_Serialize }) & { error?: never; work?: never } | ({ kind: "refused"; error: WorkFailureV1 }) & { response?: never; work?: never };
 
 /**
  *  On-demand operations have an application lifetime independent of a view.
  *  Their correlation IDs do not constitute durable commands or worker handles.
  */
-export type WorkOperationV1 = { kind: "read_public"; command: WorkCommandV1 } | { kind: "plan"; request: WorkPlanRequestV1 } | { kind: "prepare_plan"; request: WorkPlanRequestV1 } | { kind: "prepare"; request: WorkApprovalRequestV1 } | { kind: "start"; request: WorkStartRequestV1 };
+export type WorkOperationV1 = WorkOperationV1_Serialize | WorkOperationV1_Deserialize;
+
+/**
+ *  On-demand operations have an application lifetime independent of a view.
+ *  Their correlation IDs do not constitute durable commands or worker handles.
+ */
+export type WorkOperationV1_Deserialize = ({ kind: "read_public"; command: WorkCommandV1_Deserialize }) & { request?: never } | ({ kind: "plan"; request: WorkPlanRequestV1 }) & { command?: never } | ({ kind: "prepare_plan"; request: WorkPlanRequestV1 }) & { command?: never } | ({ kind: "prepare"; request: WorkApprovalRequestV1 }) & { command?: never } | ({ kind: "start"; request: WorkStartRequestV1 }) & { command?: never };
+
+/**
+ *  On-demand operations have an application lifetime independent of a view.
+ *  Their correlation IDs do not constitute durable commands or worker handles.
+ */
+export type WorkOperationV1_Serialize = ({ kind: "read_public"; command: WorkCommandV1_Serialize }) & { request?: never } | ({ kind: "plan"; request: WorkPlanRequestV1 }) & { command?: never } | ({ kind: "prepare_plan"; request: WorkPlanRequestV1 }) & { command?: never } | ({ kind: "prepare"; request: WorkApprovalRequestV1 }) & { command?: never } | ({ kind: "start"; request: WorkStartRequestV1 }) & { command?: never };
 
 /**  Requested output review level, never evidence that a requirement was met. */
 export type WorkOutputReview = "mechanical" | "source_mapped_needs_review" | "user_acceptance";
@@ -1546,15 +1843,30 @@ export type WorkPlanRevision = {
 
 export type WorkPlanningFailureV1 = { kind: "invalid" } | { kind: "capacity" } | { kind: "unavailable" } | { kind: "cancelled" } | { kind: "timeout" } | { kind: "stale" } | { kind: "needs_input" } | { kind: "privacy" } | { kind: "provider_outcome_unknown" } | { kind: "provider_refused" } | { kind: "store"; error: WorkFailureV1 };
 
-export type WorkPlanningOutcomeV1 = { kind: "settled"; response: WorkResponseV1 } | { kind: "refused"; reason: WorkPlanningFailureV1 };
+export type WorkPlanningOutcomeV1 = WorkPlanningOutcomeV1_Serialize | WorkPlanningOutcomeV1_Deserialize;
 
-export type WorkPlanningResponseV1 = {
+export type WorkPlanningOutcomeV1_Deserialize = ({ kind: "settled"; response: WorkResponseV1_Deserialize }) & { reason?: never } | ({ kind: "refused"; reason: WorkPlanningFailureV1 }) & { response?: never };
+
+export type WorkPlanningOutcomeV1_Serialize = ({ kind: "settled"; response: WorkResponseV1_Serialize }) & { reason?: never } | ({ kind: "refused"; reason: WorkPlanningFailureV1 }) & { response?: never };
+
+export type WorkPlanningResponseV1 = WorkPlanningResponseV1_Serialize | WorkPlanningResponseV1_Deserialize;
+
+export type WorkPlanningResponseV1_Deserialize = {
 	version: number,
 	profile: string,
 	work: WorkId,
 	basis_revision: WorkRevision,
 	usage: WorkPlanningUsageV1 | null,
-	outcome: WorkPlanningOutcomeV1,
+	outcome: WorkPlanningOutcomeV1_Deserialize,
+};
+
+export type WorkPlanningResponseV1_Serialize = {
+	version: number,
+	profile: string,
+	work: WorkId,
+	basis_revision: WorkRevision,
+	usage: WorkPlanningUsageV1 | null,
+	outcome: WorkPlanningOutcomeV1_Serialize,
 };
 
 export type WorkPlanningUsageV1 = {
@@ -1632,16 +1944,51 @@ export type WorkQuestionId = string;
 
 export type WorkQuestionState = "active" | "answered" | "superseded" | "dismissed";
 
-export type WorkReplyV1 = { kind: "public_read_admitted"; projection: WorkRuntimeProjection; receipt: WorkCommandReceipt; replayed: boolean } | { kind: "environment"; reply: WorkEnvironmentReply } | { kind: "approval_draft"; work: WorkId; expected_revision: WorkRevision; spec: WorkExecutionSpec } | { kind: "projection"; projection: WorkRuntimeProjection } | { kind: "authoring_applied"; receipt: WorkAuthoringReceipt } | { kind: "execution_applied"; projection: WorkRuntimeProjection; receipt: WorkCommandReceipt } | { kind: "evidence"; evidence: WorkEvidencePreviewV1 } | { kind: "snapshot"; snapshot: WorkSnapshot } | { kind: "plan"; plan: WorkPlanRevision } | { kind: "plan_history"; revisions: WorkRevision[] } | { kind: "page"; works: WorkSummary[]; next: WorkId | null } | { kind: "error"; error: WorkFailureV1 };
+export type WorkRelation = {
+	id: WorkRelationId,
+	from: WorkElementId,
+	to: WorkElementId,
+	kind: WorkRelationKind,
+	origin: WorkRelationOrigin,
+};
+
+/** Explicit relationship between two canvas elements. */
+export type WorkRelationId = string;
+
+export type WorkRelationKind = "supports" | "uses" | "depends_on" | "same_as" | "contradicts";
+
+export type WorkRelationOrigin = { kind: "user" } | { kind: "agent"; execution: WorkExecutionId };
+
+export type WorkReplyV1 = WorkReplyV1_Serialize | WorkReplyV1_Deserialize;
+
+export type WorkReplyV1_Deserialize = ({ kind: "public_read_admitted"; projection: WorkRuntimeProjection_Deserialize; receipt: WorkCommandReceipt; replayed: boolean }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "environment"; reply: WorkEnvironmentReply_Deserialize }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "approval_draft"; work: WorkId; expected_revision: WorkRevision; spec: WorkExecutionSpec }) & { error?: never; evidence?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; works?: never } | ({ kind: "projection"; projection: WorkRuntimeProjection_Deserialize }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "authoring_applied"; receipt: WorkAuthoringReceipt }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "execution_applied"; projection: WorkRuntimeProjection_Deserialize; receipt: WorkCommandReceipt }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "evidence"; evidence: WorkEvidencePreviewV1 }) & { error?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "snapshot"; snapshot: WorkSnapshot }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; spec?: never; work?: never; works?: never } | ({ kind: "plan"; plan: WorkPlanRevision }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "plan_history"; revisions: WorkRevision[] }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "page"; works: WorkSummary[]; next: WorkId | null }) & { error?: never; evidence?: never; expected_revision?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never } | ({ kind: "error"; error: WorkFailureV1 }) & { evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never };
+
+export type WorkReplyV1_Serialize = ({ kind: "public_read_admitted"; projection: WorkRuntimeProjection_Serialize; receipt: WorkCommandReceipt; replayed: boolean }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "environment"; reply: WorkEnvironmentReply_Serialize }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "approval_draft"; work: WorkId; expected_revision: WorkRevision; spec: WorkExecutionSpec }) & { error?: never; evidence?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; works?: never } | ({ kind: "projection"; projection: WorkRuntimeProjection_Serialize }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "authoring_applied"; receipt: WorkAuthoringReceipt }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "execution_applied"; projection: WorkRuntimeProjection_Serialize; receipt: WorkCommandReceipt }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "evidence"; evidence: WorkEvidencePreviewV1 }) & { error?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "snapshot"; snapshot: WorkSnapshot }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; spec?: never; work?: never; works?: never } | ({ kind: "plan"; plan: WorkPlanRevision }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "plan_history"; revisions: WorkRevision[] }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "page"; works: WorkSummary[]; next: WorkId | null }) & { error?: never; evidence?: never; expected_revision?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never } | ({ kind: "error"; error: WorkFailureV1 }) & { evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never };
 
 /**
  *  Closed product reply grammar: the host-only RuntimeStarted reply cannot
  *  cross this conversion, so a read or JSON round trip cannot mint an attempt.
  */
-export type WorkResponseV1 = {
+export type WorkResponseV1 = WorkResponseV1_Serialize | WorkResponseV1_Deserialize;
+
+/**
+ *  Closed product reply grammar: the host-only RuntimeStarted reply cannot
+ *  cross this conversion, so a read or JSON round trip cannot mint an attempt.
+ */
+export type WorkResponseV1_Deserialize = {
 	version: number,
 	profile: string,
-	reply: WorkReplyV1,
+	reply: WorkReplyV1_Deserialize,
+};
+
+/**
+ *  Closed product reply grammar: the host-only RuntimeStarted reply cannot
+ *  cross this conversion, so a read or JSON round trip cannot mint an attempt.
+ */
+export type WorkResponseV1_Serialize = {
+	version: number,
+	profile: string,
+	reply: WorkReplyV1_Serialize,
 };
 
 /**
@@ -1654,14 +2001,30 @@ export type WorkRevision = string;
  *  Internal Store grammar. User commands and host-only attempt facts have
  *  separate variants at the application edge; IPC never accepts settlements.
  */
-export type WorkRuntimeIntent = { kind: "read_public"; scope: WorkPublicSearchScope; limits: WorkExecutionLimits } | { kind: "review_artifact"; execution: WorkExecutionId; artifact: WorkArtifactId; decision: WorkArtifactDecision } | { kind: "edit_artifact"; execution: WorkExecutionId; artifact: WorkArtifactId; data: WorkArtifactDataV1; evidence: WorkEvidenceLink[] } | { kind: "approve"; spec: WorkExecutionSpec } | { kind: "cancel"; execution: WorkExecutionId } | 
-/**  Explicitly acknowledge that an old owner is gone. Cannot restart it. */
-{ kind: "acknowledge_interruption"; execution: WorkExecutionId };
+export type WorkRuntimeIntent = WorkRuntimeIntent_Serialize | WorkRuntimeIntent_Deserialize;
 
-export type WorkRuntimeProjection = {
+/**
+ *  Internal Store grammar. User commands and host-only attempt facts have
+ *  separate variants at the application edge; IPC never accepts settlements.
+ */
+export type WorkRuntimeIntent_Deserialize = ({ kind: "read_public"; scope: WorkPublicSearchScope; limits: WorkExecutionLimits }) & { artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; spec?: never } | ({ kind: "review_artifact"; execution: WorkExecutionId; artifact: WorkArtifactId; decision: WorkArtifactDecision }) & { data?: never; evidence?: never; limits?: never; scope?: never; spec?: never } | ({ kind: "edit_artifact"; execution: WorkExecutionId; artifact: WorkArtifactId; data: WorkArtifactDataV1_Deserialize; evidence: WorkEvidenceLink[] }) & { decision?: never; limits?: never; scope?: never; spec?: never } | ({ kind: "approve"; spec: WorkExecutionSpec }) & { artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; limits?: never; scope?: never } | ({ kind: "cancel"; execution: WorkExecutionId }) & { artifact?: never; data?: never; decision?: never; evidence?: never; limits?: never; scope?: never; spec?: never } | 
+/**  Explicitly acknowledge that an old owner is gone. Cannot restart it. */
+({ kind: "acknowledge_interruption"; execution: WorkExecutionId }) & { artifact?: never; data?: never; decision?: never; evidence?: never; limits?: never; scope?: never; spec?: never };
+
+/**
+ *  Internal Store grammar. User commands and host-only attempt facts have
+ *  separate variants at the application edge; IPC never accepts settlements.
+ */
+export type WorkRuntimeIntent_Serialize = ({ kind: "read_public"; scope: WorkPublicSearchScope; limits: WorkExecutionLimits }) & { artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; spec?: never } | ({ kind: "review_artifact"; execution: WorkExecutionId; artifact: WorkArtifactId; decision: WorkArtifactDecision }) & { data?: never; evidence?: never; limits?: never; scope?: never; spec?: never } | ({ kind: "edit_artifact"; execution: WorkExecutionId; artifact: WorkArtifactId; data: WorkArtifactDataV1_Serialize; evidence: WorkEvidenceLink[] }) & { decision?: never; limits?: never; scope?: never; spec?: never } | ({ kind: "approve"; spec: WorkExecutionSpec }) & { artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; limits?: never; scope?: never } | ({ kind: "cancel"; execution: WorkExecutionId }) & { artifact?: never; data?: never; decision?: never; evidence?: never; limits?: never; scope?: never; spec?: never } | 
+/**  Explicitly acknowledge that an old owner is gone. Cannot restart it. */
+({ kind: "acknowledge_interruption"; execution: WorkExecutionId }) & { artifact?: never; data?: never; decision?: never; evidence?: never; limits?: never; scope?: never; spec?: never };
+
+export type WorkRuntimeProjection = WorkRuntimeProjection_Serialize | WorkRuntimeProjection_Deserialize;
+
+export type WorkRuntimeProjection_Deserialize = {
 	version: number,
 	work: WorkSnapshot,
-	executions: WorkExecutionFact[],
+	executions: WorkExecutionFact_Deserialize[],
 	/**  Old incarnation has no live authority. Facts and reservations remain. */
 	interrupted: WorkExecutionId[],
 	/**
@@ -1669,6 +2032,19 @@ export type WorkRuntimeProjection = {
 	 *  remain readable, but cannot admit transient activity.
 	 */
 	owners?: WorkExecutionOwnership[],
+};
+
+export type WorkRuntimeProjection_Serialize = {
+	version: number,
+	work: WorkSnapshot,
+	executions: WorkExecutionFact_Serialize[],
+	/**  Old incarnation has no live authority. Facts and reservations remain. */
+	interrupted: WorkExecutionId[],
+	/**
+	 *  Exact original execution owners. Older projections without this field
+	 *  remain readable, but cannot admit transient activity.
+	 */
+	owners: WorkExecutionOwnership[],
 };
 
 /** Store incarnation; never serialized as execution authority. */
@@ -1708,11 +2084,46 @@ export type WorkSnapshot = {
 	questions: WorkQuestion[],
 };
 
+export type WorkSourceEntry = WorkSourceEntry_Serialize | WorkSourceEntry_Deserialize;
+
+export type WorkSourceEntry_Deserialize = {
+	evidence: number,
+	title: string,
+	role: string,
+	subject?: number | null,
+};
+
+export type WorkSourceEntry_Serialize = {
+	evidence: number,
+	title: string,
+	role: string,
+	subject?: number | null,
+};
+
 export type WorkStartRequestV1 = {
 	version: number,
 	work: WorkId,
 	expected_revision: WorkRevision,
 	execution: WorkExecutionId,
+};
+
+/**  A named thing the work is about: a library, a listing, a flight, a concept. */
+export type WorkSubject = WorkSubject_Serialize | WorkSubject_Deserialize;
+
+/**  A named thing the work is about: a library, a listing, a flight, a concept. */
+export type WorkSubject_Deserialize = {
+	name: string,
+	descriptor?: string | null,
+	/**  Descriptive link only; never a navigation grant. */
+	homepage?: string | null,
+};
+
+/**  A named thing the work is about: a library, a listing, a flight, a concept. */
+export type WorkSubject_Serialize = {
+	name: string,
+	descriptor?: string | null,
+	/**  Descriptive link only; never a navigation grant. */
+	homepage?: string | null,
 };
 
 export type WorkSummary = {

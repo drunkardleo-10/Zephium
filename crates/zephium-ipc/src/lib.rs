@@ -1005,6 +1005,9 @@ pub enum Projection {
     OperationProcessed(OperationDisposition),
 }
 
+/// Shared Rust-owned Notes/Tasks wire model.
+pub use zephium_core::resources::{ResourceCall, ResourceReply, ResourceResponse};
+
 #[cfg(test)]
 mod blocker_status_tests {
     use super::*;
@@ -1037,6 +1040,3 @@ mod blocker_status_tests {
         assert_eq!(status.retries_remaining, 0);
     }
 }
-
-/// Shared Rust-owned Notes/Tasks wire model.
-pub use zephium_core::resources::{ResourceCall, ResourceReply, ResourceResponse};

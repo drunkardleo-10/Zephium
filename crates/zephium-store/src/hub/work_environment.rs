@@ -4,7 +4,7 @@ use rusqlite::{params, OptionalExtension, Transaction};
 use sha2::{Digest, Sha256};
 use zephium_core::{
     ids::ProfileId,
-    work::{environment::*, *},
+    work::{artifact::WorkArtifactDataV1, environment::*, *},
 };
 
 fn read(
@@ -114,6 +114,42 @@ fn validate_reference(
             super::runtime_store::validate_artifact_reference(
                 tx, profile, *objective, *execution, *artifact,
             )?;
+        }
+        WorkEnvironmentReference::Subject {
+            objective,
+            execution,
+            artifact,
+            index,
+        } => {
+            let value = super::runtime_store::read_artifact(
+                tx, profile, *objective, *execution, *artifact,
+            )?;
+            let subjects = match &value.data {
+                WorkArtifactDataV1::ComparisonMatrix { subjects, .. }
+                | WorkArtifactDataV1::Findings { subjects, .. }
+                | WorkArtifactDataV1::EvidenceCollection { subjects, .. } => subjects.len(),
+                _ => 0,
+            };
+            if usize::from(*index) >= subjects {
+                return Err(WorkError::NotFound);
+            }
+        }
+        WorkEnvironmentReference::Finding {
+            objective,
+            execution,
+            artifact,
+            index,
+        } => {
+            let value = super::runtime_store::read_artifact(
+                tx, profile, *objective, *execution, *artifact,
+            )?;
+            let items = match &value.data {
+                WorkArtifactDataV1::Findings { items, .. } => items.len(),
+                _ => 0,
+            };
+            if usize::from(*index) >= items {
+                return Err(WorkError::NotFound);
+            }
         }
         // Native tab ownership is validated by the application actor. The Store
         // retains only the ID; it neither opens a URL nor constructs a context.
@@ -299,7 +335,12 @@ fn command_apply(
                 }
                 validate_reference(tx, profile, reference)?;
             }
-            current.edit(edit, WorkElementId::generate(), WorkAreaId::generate())?
+            current.edit(
+                edit,
+                WorkElementId::generate(),
+                WorkAreaId::generate(),
+                WorkRelationId::generate(),
+            )?
         }
     };
     write(tx, &snapshot, creating)?;

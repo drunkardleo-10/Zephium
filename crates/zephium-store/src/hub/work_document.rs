@@ -13,7 +13,7 @@ mod authoring_store;
 #[path = "work_environment.rs"]
 mod environment_store;
 #[path = "work_runtime.rs"]
-mod runtime_store;
+pub(super) mod runtime_store;
 const _: [(); 512] = [(); MAX_WORKS_PER_PROFILE];
 const _: [(); 256] = [(); MAX_ACTIVE_WORKS_PER_PROFILE];
 const _: [(); 32] = [(); MAX_WORK_PLAN_REVISIONS];

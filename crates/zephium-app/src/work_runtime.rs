@@ -658,7 +658,7 @@ fn compact_dependency_artifacts(
             .iter()
             .cloned()
             .map(|mut artifact| {
-                if let WorkArtifactDataV1::EvidenceCollection { summary } = &mut artifact.data {
+                if let WorkArtifactDataV1::EvidenceCollection { summary, .. } = &mut artifact.data {
                     let prefix: String = summary.chars().take(allowance).collect();
                     let truncated = prefix.len() < summary.len();
                     *summary = prefix;

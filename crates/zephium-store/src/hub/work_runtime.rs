@@ -1,7 +1,7 @@
 //! Same actor, same profile transaction, same Work revision as authoring.
 use super::*;
 use sha2::{Digest, Sha256};
-use zephium_core::work::runtime::*;
+use zephium_core::work::{artifact::WorkArtifactV1, runtime::*};
 
 const MAX_EXECUTION_BYTES: usize = 524288;
 const MAX_RUNTIME_BYTES: usize = 2 * 1024 * 1024;
@@ -96,6 +96,24 @@ pub(super) fn validate_artifact_reference(
     execution: WorkExecutionId,
     artifact: WorkArtifactId,
 ) -> Result<(), WorkError> {
+    read_artifact(conn, profile, objective, execution, artifact).map(|_| ())
+}
+pub(super) fn read_artifact(
+    conn: &Connection,
+    profile: ProfileId,
+    objective: WorkId,
+    execution: WorkExecutionId,
+    artifact: WorkArtifactId,
+) -> Result<WorkArtifactV1, WorkError> {
+    read_artifact_fact(conn, profile, objective, execution, artifact).map(|(_, value)| value)
+}
+pub(crate) fn read_artifact_fact(
+    conn: &Connection,
+    profile: ProfileId,
+    objective: WorkId,
+    execution: WorkExecutionId,
+    artifact: WorkArtifactId,
+) -> Result<(WorkExecutionFact, WorkArtifactV1), WorkError> {
     let work = read(conn, profile, objective)?;
     let row = rows(conn, objective)?
         .into_iter()
@@ -105,15 +123,14 @@ pub(super) fn validate_artifact_reference(
         &read_plan(conn, objective, row.fact.spec.plan_revision)?,
         work.revision,
     )?;
-    if !row
+    let value = row
         .fact
         .artifacts
         .iter()
-        .any(|value| value.id == artifact && value.execution == execution)
-    {
-        return Err(WorkError::NotFound);
-    }
-    Ok(())
+        .find(|value| value.id == artifact && value.execution == execution)
+        .cloned()
+        .ok_or(WorkError::NotFound)?;
+    Ok((row.fact, value))
 }
 
 pub(super) fn projection(

@@ -98,6 +98,10 @@ durable_id!(
     "Named spatial group, never execution authority."
 );
 durable_id!(
+    WorkRelationId,
+    "Explicit relationship between two canvas elements."
+);
+durable_id!(
     WorkCommandId,
     "Idempotency correlation only, never an entity capability."
 );

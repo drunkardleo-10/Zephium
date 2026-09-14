@@ -393,6 +393,7 @@ fn map_archive(
             title: output.name.clone(),
             data: WorkArtifactDataV1::Document {
                 paragraphs: vec![value.clone()],
+                formatted: None,
             },
             evidence,
         });

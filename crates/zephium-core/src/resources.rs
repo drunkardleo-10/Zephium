@@ -1,13 +1,13 @@
 //! User knowledge and unfinished work. These records are resources, not system
 //! memory, execution attempts, browser leases or agent capabilities.
 use serde::{Deserialize, Serialize};
-use specta::Type;
 
 pub const MAX_DOCUMENT_BYTES: usize = 256 * 1024;
 pub const MAX_DOCUMENT_NODES: usize = 4096;
 pub const MAX_RESOURCES: usize = 10_000;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(deny_unknown_fields)]
 pub struct NoteDocument {
     pub version: u8,
@@ -16,7 +16,8 @@ pub struct NoteDocument {
 
 /// Constrained ProseMirror JSON. Allowed node/mark/attribute combinations are
 /// checked before persistence, independently from editor-side validation.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(deny_unknown_fields)]
 pub struct DocumentNode {
     #[serde(rename = "type")]
@@ -30,23 +31,26 @@ pub struct DocumentNode {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub marks: Vec<DocumentMark>,
 }
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(deny_unknown_fields)]
 pub struct DocumentAttrs {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub start: Option<i32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub level: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub resource: Option<String>,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(deny_unknown_fields)]
 pub struct DocumentMark {
     #[serde(rename = "type")]
     pub kind: String,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResourceContent {
     Note {
@@ -57,8 +61,61 @@ pub enum ResourceContent {
         completed: bool,
         due_date: Option<String>,
     },
+    /// A user-owned semantic object: a table, checklist, comparison, chart,
+    /// document, or findings, editable like a note.
+    Object {
+        object: WorkObjectV1,
+    },
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[serde(deny_unknown_fields)]
+pub struct WorkObjectV1 {
+    pub version: u16,
+    pub data: crate::work::artifact::WorkArtifactDataV1,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<crate::work::artifact::WorkEvidenceLink>,
+    /// Set only by Rust when preserving an artifact; never accepted from callers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<WorkObjectProvenance>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[serde(deny_unknown_fields)]
+pub struct WorkObjectProvenance {
+    pub objective: crate::work::WorkId,
+    pub execution: crate::work::WorkExecutionId,
+    pub artifact: crate::work::WorkArtifactId,
+    pub basis: WorkObjectBasis,
+    pub review: crate::work::WorkOutputReview,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkObjectBasis {
+    Original,
+    UserRevision { revision: crate::work::WorkRevision },
+}
+impl WorkObjectV1 {
+    pub fn validate(&self) -> bool {
+        use crate::work::artifact::WorkArtifactDataV1;
+        if self.version != 1 || self.evidence.len() > 64 {
+            return false;
+        }
+        let mut unique = std::collections::BTreeSet::new();
+        if !self
+            .evidence
+            .iter()
+            .all(|link| link.source_id != 0 && unique.insert((link.extraction_id, link.source_id)))
+        {
+            return false;
+        }
+        !matches!(self.data, WorkArtifactDataV1::BrowserResourcePreview { .. })
+            && self.data.validate(self.evidence.len()).is_ok()
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(deny_unknown_fields)]
 pub struct ResourceDraft {
     pub title: String,
@@ -67,7 +124,8 @@ pub struct ResourceDraft {
     /// Same-profile resources, never permission grants or copied entities.
     pub related: Vec<String>,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(deny_unknown_fields)]
 pub struct ResourceRecord {
     pub id: String,
@@ -78,11 +136,22 @@ pub struct ResourceRecord {
     pub trashed: bool,
     pub draft: ResourceDraft,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResourceIntent {
     Create {
         draft: ResourceDraft,
+    },
+    /// Copy an artifact (original or the user's revision) into an Object
+    /// resource. Rust resolves data, evidence, review, and provenance.
+    PreserveArtifact {
+        objective: crate::work::WorkId,
+        execution: crate::work::WorkExecutionId,
+        artifact: crate::work::WorkArtifactId,
+        basis: WorkObjectBasis,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
     },
     Replace {
         id: String,
@@ -98,14 +167,16 @@ pub enum ResourceIntent {
         expected_revision: String,
     },
 }
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(deny_unknown_fields)]
 pub struct ResourceCommand {
     pub version: u8,
     pub request_id: String,
     pub intent: ResourceIntent,
 }
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(deny_unknown_fields)]
 pub struct ResourceQuery {
     #[serde(default)]
@@ -116,13 +187,16 @@ pub struct ResourceQuery {
     pub after: Option<String>,
     pub limit: u16,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceKind {
     Note,
     Task,
+    Object,
 }
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 pub struct ResourceSummary {
     pub id: String,
     pub revision: String,
@@ -132,7 +206,8 @@ pub struct ResourceSummary {
     pub completed: Option<bool>,
     pub due_date: Option<String>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ResourceResponse {
     Acknowledged,
@@ -152,7 +227,8 @@ pub enum ResourceResponse {
         error: ResourceError,
     },
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceError {
     Invalid,
@@ -164,10 +240,15 @@ pub enum ResourceError {
 }
 
 impl ResourceDraft {
+    /// Callers never supply provenance; only Rust preservation mints it.
+    pub fn caller_owned(&self) -> bool {
+        !matches!(&self.content, ResourceContent::Object { object } if object.provenance.is_some())
+    }
     pub fn kind(&self) -> ResourceKind {
         match self.content {
             ResourceContent::Note { .. } => ResourceKind::Note,
             ResourceContent::Task { .. } => ResourceKind::Task,
+            ResourceContent::Object { .. } => ResourceKind::Object,
         }
     }
     pub fn validate(&self) -> bool {
@@ -197,6 +278,7 @@ impl ResourceDraft {
                     && !description.contains('\0')
                     && due_date.as_deref().is_none_or(valid_date)
             }
+            ResourceContent::Object { object } => object.validate(),
         }
     }
 }
@@ -373,7 +455,8 @@ fn valid_node(
 #[path = "resources/tests.rs"]
 mod tests;
 
-#[derive(Clone, Serialize, Deserialize, Type)]
+#[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResourceCall {
     ResolveNotes { ids: Vec<String> },
@@ -382,7 +465,8 @@ pub enum ResourceCall {
     Get { id: String },
     Mutate { command: Box<ResourceCommand> },
 }
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 pub struct ResourceReply {
     pub profile: Option<String>,
     pub response: ResourceResponse,
@@ -404,7 +488,12 @@ impl ResourceCall {
                 command.version == 1
                     && valid_request(&command.request_id)
                     && match &command.intent {
-                        ResourceIntent::Create { draft } => draft.validate(),
+                        ResourceIntent::Create { draft } => {
+                            draft.validate() && draft.caller_owned()
+                        }
+                        ResourceIntent::PreserveArtifact { title, .. } => title
+                            .as_deref()
+                            .is_none_or(|t| !t.trim().is_empty() && t.len() <= 1024),
                         ResourceIntent::Replace {
                             id,
                             expected_revision,
@@ -413,6 +502,7 @@ impl ResourceCall {
                             valid_id(id)
                                 && revision(expected_revision).is_some()
                                 && draft.validate()
+                                && draft.caller_owned()
                         }
                         ResourceIntent::Trash {
                             id,

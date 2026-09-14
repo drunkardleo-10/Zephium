@@ -459,6 +459,29 @@ pub enum WorkActivityV1 {
     Finishing,
 }
 
+impl From<planning::WorkPlanningError> for WorkPlanningFailureV1 {
+    fn from(error: planning::WorkPlanningError) -> Self {
+        use planning::WorkPlanningError;
+        match error {
+            WorkPlanningError::Invalid => WorkPlanningFailureV1::Invalid,
+            WorkPlanningError::Capacity => WorkPlanningFailureV1::Capacity,
+            WorkPlanningError::Unavailable => WorkPlanningFailureV1::Unavailable,
+            WorkPlanningError::Cancelled => WorkPlanningFailureV1::Cancelled,
+            WorkPlanningError::Timeout => WorkPlanningFailureV1::Timeout,
+            WorkPlanningError::Stale => WorkPlanningFailureV1::Stale,
+            WorkPlanningError::NeedsInput => WorkPlanningFailureV1::NeedsInput,
+            WorkPlanningError::Privacy => WorkPlanningFailureV1::Privacy,
+            WorkPlanningError::ProviderOutcomeUnknown => {
+                WorkPlanningFailureV1::ProviderOutcomeUnknown
+            }
+            WorkPlanningError::ProviderRefused(_) => WorkPlanningFailureV1::ProviderRefused,
+            WorkPlanningError::Store(error) => WorkPlanningFailureV1::Store {
+                error: error.into(),
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,6 +496,34 @@ mod tests {
         let command: WorkCommandV1 =
             serde_json::from_str(include_str!("../fixtures/work-approve-command-v1.json")).unwrap();
         command.into_request().unwrap().validate().unwrap();
+    }
+
+    #[test]
+    fn subject_and_finding_kinds_round_trip_with_claim_level_evidence() {
+        let state: WorkProjectionV1 =
+            serde_json::from_str(include_str!("../fixtures/work-research-v2-kinds-v1.json"))
+                .unwrap();
+        state.work.validate().unwrap();
+        let execution = &state.executions[0];
+        execution
+            .validate(state.work.plan.as_ref().unwrap(), state.work.revision)
+            .unwrap();
+        let kinds: Vec<&str> = execution
+            .artifacts
+            .iter()
+            .map(|artifact| match &artifact.data {
+                WorkArtifactDataV1::ComparisonMatrix { .. } => "comparison_matrix",
+                WorkArtifactDataV1::Findings { .. } => "findings",
+                _ => "other",
+            })
+            .collect();
+        assert!(kinds.contains(&"comparison_matrix"));
+        let encoded = serde_json::to_string(&state).unwrap();
+        let decoded: WorkProjectionV1 = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            decoded.executions[0].artifacts[0].data,
+            execution.artifacts[0].data
+        );
     }
 
     #[test]
@@ -537,28 +588,5 @@ mod tests {
             .register::<WorkCommandV1>()
             .register::<WorkEvidencePreviewV1>()
             .register::<WorkSignalV1>();
-    }
-}
-
-impl From<planning::WorkPlanningError> for WorkPlanningFailureV1 {
-    fn from(error: planning::WorkPlanningError) -> Self {
-        use planning::WorkPlanningError;
-        match error {
-            WorkPlanningError::Invalid => WorkPlanningFailureV1::Invalid,
-            WorkPlanningError::Capacity => WorkPlanningFailureV1::Capacity,
-            WorkPlanningError::Unavailable => WorkPlanningFailureV1::Unavailable,
-            WorkPlanningError::Cancelled => WorkPlanningFailureV1::Cancelled,
-            WorkPlanningError::Timeout => WorkPlanningFailureV1::Timeout,
-            WorkPlanningError::Stale => WorkPlanningFailureV1::Stale,
-            WorkPlanningError::NeedsInput => WorkPlanningFailureV1::NeedsInput,
-            WorkPlanningError::Privacy => WorkPlanningFailureV1::Privacy,
-            WorkPlanningError::ProviderOutcomeUnknown => {
-                WorkPlanningFailureV1::ProviderOutcomeUnknown
-            }
-            WorkPlanningError::ProviderRefused(_) => WorkPlanningFailureV1::ProviderRefused,
-            WorkPlanningError::Store(error) => WorkPlanningFailureV1::Store {
-                error: error.into(),
-            },
-        }
     }
 }

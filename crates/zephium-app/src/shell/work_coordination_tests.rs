@@ -23,6 +23,7 @@ impl WorkSynthesisProvider for Primary {
                     title: "Release summary".into(),
                     data: WorkArtifactDataV1::Document {
                         paragraphs: vec!["Review changes before release.".into()],
+                        formatted: None,
                     },
                     evidence: vec![],
                 }],
@@ -334,7 +335,7 @@ async fn dependent_research_chain_receives_only_completed_direct_handoffs() {
                     "no undeclared sibling or transitive context"
                 );
                 for expected in wanted {
-                    assert!(sources.iter().any(|source| matches!(&source.data, WorkArtifactDataV1::Document { paragraphs } if paragraphs == &vec![format!("{expected}: issue https://github.com/sveltejs/svelte/issues/123")])));
+                    assert!(sources.iter().any(|source| matches!(&source.data, WorkArtifactDataV1::Document { paragraphs, .. } if paragraphs == &vec![format!("{expected}: issue https://github.com/sveltejs/svelte/issues/123")])));
                 }
                 self.0.lock().unwrap().push(name.into());
                 Ok(WorkSynthesisResult {
@@ -345,6 +346,7 @@ async fn dependent_research_chain_receives_only_completed_direct_handoffs() {
                             paragraphs: vec![format!(
                                 "{name}: issue https://github.com/sveltejs/svelte/issues/123"
                             )],
+                            formatted: None,
                         },
                         evidence: vec![],
                     }],

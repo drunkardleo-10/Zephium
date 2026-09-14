@@ -22,6 +22,7 @@ impl WorkSynthesisProvider for Primary {
                     title: "Summary".into(),
                     data: WorkArtifactDataV1::Document {
                         paragraphs: vec!["Review changes before release.".into()],
+                        formatted: None,
                     },
                     evidence: vec![],
                 }],
@@ -310,6 +311,7 @@ async fn product_commands_execute_review_edit_and_reopen_without_mutating_origin
             artifact,
             data: WorkArtifactDataV1::Document {
                 paragraphs: vec!["User correction".into()],
+                formatted: None,
             },
             evidence: vec![WorkEvidenceLink {
                 extraction_id: WorkArtifactId::generate(),
@@ -335,6 +337,7 @@ async fn product_commands_execute_review_edit_and_reopen_without_mutating_origin
                     artifact,
                     data: WorkArtifactDataV1::Document {
                         paragraphs: vec!["User correction".into()],
+                        formatted: None,
                     },
                     evidence: vec![],
                 },

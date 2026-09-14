@@ -23,7 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .register::<WorkSignalV1>()
         .register::<WorkActivityResponseV1>();
     let mut output =
-        specta_typescript::Typescript::default().export(&types, specta_serde::Format)?;
+        specta_typescript::Typescript::default().export(&types, specta_serde::PhasesFormat)?;
     output.push_str("\nexport type WorkProjectionV1 = WorkRuntimeProjection;\n");
     let output = output
         .lines()

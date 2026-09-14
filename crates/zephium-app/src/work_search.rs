@@ -65,6 +65,8 @@ impl WorkNodeAttempt {
                         title: output.name.clone(),
                         data: WorkArtifactDataV1::EvidenceCollection {
                             summary: result.evidence.answer.clone(),
+                            subjects: vec![],
+                            entries: vec![],
                         },
                         evidence: links.clone(),
                     })

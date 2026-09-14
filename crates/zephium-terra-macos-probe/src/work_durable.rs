@@ -834,7 +834,7 @@ async fn review_product_results(
         return Err("review_completion");
     }
     let primary = original.last().ok_or("review_artifact")?;
-    let WorkArtifactDataV1::Document { paragraphs } = &primary.data else {
+    let WorkArtifactDataV1::Document { paragraphs, .. } = &primary.data else {
         return Err("review_document");
     };
     let mut paragraphs = paragraphs.clone();
@@ -848,7 +848,10 @@ async fn review_product_results(
         intent: WorkRuntimeIntent::EditArtifact {
             execution,
             artifact: primary.id,
-            data: WorkArtifactDataV1::Document { paragraphs },
+            data: WorkArtifactDataV1::Document {
+                paragraphs,
+                formatted: None,
+            },
             evidence: primary.evidence.clone(),
         },
     })

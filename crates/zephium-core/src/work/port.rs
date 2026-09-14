@@ -94,7 +94,7 @@ impl WorkRequest {
                 if evidence.len() > 64 {
                     return Err(WorkError::Capacity);
                 }
-                data.validate()
+                data.validate(evidence.len())
             }
             Self::RuntimeCommand {
                 intent: runtime::WorkRuntimeIntent::ReadPublic { scope, limits },

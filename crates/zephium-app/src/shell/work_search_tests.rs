@@ -552,7 +552,7 @@ impl zephium_core::work::synthesis::WorkSynthesisProvider for LargeSearchPrimary
             for (source, count) in input.context().sources.iter().zip([7, 19, 11]) {
                 assert_eq!(source.evidence.len(), count);
                 assert!(
-                    matches!(&source.data, WorkArtifactDataV1::EvidenceCollection { summary } if summary.contains("Host-truncated dependency summary"))
+                    matches!(&source.data, WorkArtifactDataV1::EvidenceCollection { summary, .. } if summary.contains("Host-truncated dependency summary"))
                 );
             }
             assert!(input
@@ -566,6 +566,7 @@ impl zephium_core::work::synthesis::WorkSynthesisProvider for LargeSearchPrimary
                     title: "Combined evidence".into(),
                     data: WorkArtifactDataV1::Document {
                         paragraphs: vec!["Reviewed public evidence".into()],
+                        formatted: None,
                     },
                     evidence: (0..37).collect(),
                 }],
@@ -722,7 +723,7 @@ async fn delegated_search_large_child_results_keep_exact_sources_and_bounded_syn
             .find(|artifact| artifact.attempt == record.attempt)
             .unwrap();
         assert!(
-            matches!(&artifact.data, WorkArtifactDataV1::EvidenceCollection { summary } if *summary == record.evidence.answer)
+            matches!(&artifact.data, WorkArtifactDataV1::EvidenceCollection { summary, .. } if *summary == record.evidence.answer)
         );
         assert_eq!(artifact.evidence.len(), count);
         assert!(artifact

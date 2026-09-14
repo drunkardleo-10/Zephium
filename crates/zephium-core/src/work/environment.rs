@@ -5,6 +5,7 @@ use crate::ids::{ItemId, ResourceId, SpaceId};
 
 pub const MAX_ENVIRONMENT_ELEMENTS: usize = 500;
 pub const MAX_ENVIRONMENT_AREAS: usize = 64;
+pub const MAX_ENVIRONMENT_RELATIONS: usize = 2000;
 pub const MAX_ENVIRONMENT_TITLE_BYTES: usize = 512;
 pub const MAX_ENVIRONMENT_BODY_BYTES: usize = 262_144;
 
@@ -28,6 +29,48 @@ pub enum WorkEnvironmentReference {
         execution: WorkExecutionId,
         artifact: WorkArtifactId,
     },
+    /// One subject inside an immutable artifact, addressed by index.
+    Subject {
+        objective: WorkId,
+        execution: WorkExecutionId,
+        artifact: WorkArtifactId,
+        index: u16,
+    },
+    /// One finding inside an immutable artifact, addressed by index.
+    Finding {
+        objective: WorkId,
+        execution: WorkExecutionId,
+        artifact: WorkArtifactId,
+        index: u16,
+    },
+}
+
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkRelationKind {
+    Supports,
+    Uses,
+    DependsOn,
+    SameAs,
+    Contradicts,
+}
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkRelationOrigin {
+    User,
+    Agent { execution: WorkExecutionId },
+}
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkRelation {
+    pub id: WorkRelationId,
+    pub from: WorkElementId,
+    pub to: WorkElementId,
+    pub kind: WorkRelationKind,
+    pub origin: WorkRelationOrigin,
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -81,7 +124,7 @@ pub struct WorkEnvironmentView {
     pub y: i32,
     pub zoom_milli: u16,
     pub placements: Vec<WorkElementPlacement>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub areas: Vec<WorkAreaPlacement>,
 }
 impl Default for WorkEnvironmentView {
@@ -146,6 +189,8 @@ pub struct WorkEnvironmentSnapshot {
     pub revision: WorkRevision,
     pub elements: Vec<WorkEnvironmentElement>,
     pub areas: Vec<WorkArea>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relations: Vec<WorkRelation>,
     pub view: WorkEnvironmentView,
 }
 impl WorkEnvironmentSnapshot {
@@ -166,6 +211,7 @@ impl WorkEnvironmentSnapshot {
             revision: WorkRevision::INITIAL,
             elements: vec![],
             areas: vec![],
+            relations: vec![],
             view: Default::default(),
         })
     }
@@ -174,6 +220,7 @@ impl WorkEnvironmentSnapshot {
         if self.version != 1
             || self.elements.len() > MAX_ENVIRONMENT_ELEMENTS
             || self.areas.len() > MAX_ENVIRONMENT_AREAS
+            || self.relations.len() > MAX_ENVIRONMENT_RELATIONS
         {
             return Err(WorkError::Invalid);
         }
@@ -190,6 +237,18 @@ impl WorkEnvironmentSnapshot {
             if !elements.insert(element.id)
                 || !references.insert(&element.reference)
                 || element.area.is_some_and(|id| !areas.contains(&id))
+            {
+                return Err(WorkError::Invalid);
+            }
+        }
+        let mut relation_ids = BTreeSet::new();
+        let mut relation_keys = BTreeSet::new();
+        for relation in &self.relations {
+            if !relation_ids.insert(relation.id)
+                || relation.from == relation.to
+                || !elements.contains(&relation.from)
+                || !elements.contains(&relation.to)
+                || !relation_keys.insert((relation.from, relation.to, relation.kind))
             {
                 return Err(WorkError::Invalid);
             }
@@ -212,6 +271,7 @@ impl WorkEnvironmentSnapshot {
         edit: WorkEnvironmentEdit,
         element_id: WorkElementId,
         area_id: WorkAreaId,
+        relation_id: WorkRelationId,
     ) -> Result<Self, WorkError> {
         edit.validate()?;
         let mut next = self.clone();
@@ -243,7 +303,35 @@ impl WorkEnvironmentSnapshot {
                     return Err(WorkError::NotFound);
                 }
                 next.view.placements.retain(|p| p.element != element);
+                next.relations
+                    .retain(|r| r.from != element && r.to != element);
                 next.view.revision = next.view.revision.next()?;
+            }
+            WorkEnvironmentEdit::Relate { from, to, relation } => {
+                if next.relations.len() >= MAX_ENVIRONMENT_RELATIONS {
+                    return Err(WorkError::Capacity);
+                }
+                if next
+                    .relations
+                    .iter()
+                    .any(|r| r.from == from && r.to == to && r.kind == relation)
+                {
+                    return Err(WorkError::Conflict);
+                }
+                next.relations.push(WorkRelation {
+                    id: relation_id,
+                    from,
+                    to,
+                    kind: relation,
+                    origin: WorkRelationOrigin::User,
+                });
+            }
+            WorkEnvironmentEdit::Unrelate { relation } => {
+                let count = next.relations.len();
+                next.relations.retain(|r| r.id != relation);
+                if count == next.relations.len() {
+                    return Err(WorkError::NotFound);
+                }
             }
             WorkEnvironmentEdit::CreateArea { title } => {
                 if next.areas.len() >= MAX_ENVIRONMENT_AREAS {
@@ -319,6 +407,14 @@ pub enum WorkEnvironmentEdit {
         element: WorkElementId,
         area: Option<WorkAreaId>,
     },
+    Relate {
+        from: WorkElementId,
+        to: WorkElementId,
+        relation: WorkRelationKind,
+    },
+    Unrelate {
+        relation: WorkRelationId,
+    },
 }
 impl WorkEnvironmentEdit {
     pub fn validate(&self) -> Result<(), WorkError> {
@@ -326,6 +422,7 @@ impl WorkEnvironmentEdit {
             Self::Rename { title }
             | Self::CreateArea { title }
             | Self::RenameArea { title, .. } => validate_text(title, MAX_ENVIRONMENT_TITLE_BYTES),
+            Self::Relate { from, to, .. } if from == to => Err(WorkError::Invalid),
             _ => Ok(()),
         }
     }

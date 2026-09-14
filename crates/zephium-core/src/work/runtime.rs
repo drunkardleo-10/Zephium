@@ -622,7 +622,7 @@ impl WorkExecutionFact {
                 return Err(WorkError::Invalid);
             }
             if let Some(data) = &edit.edited_data {
-                data.validate()?;
+                data.validate(edit.evidence.len())?;
             }
         }
         if self.approved_revision <= plan.revision
