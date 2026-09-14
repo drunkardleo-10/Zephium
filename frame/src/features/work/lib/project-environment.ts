@@ -37,6 +37,19 @@ export function environmentItems(
   notes: readonly ResourceSummary[],
   objectives: ReadonlyMap<string, WorkRuntimeProjection> = new Map(),
 ): CanvasItem[] {
+  const decisions = new Map((snapshot.decisions ?? []).map((d) => [d.element, d.choice]));
+  return elementItems(snapshot, tabs, notes, objectives).map((item) => {
+    const decision = decisions.get(item.id);
+    return decision === undefined ? item : { ...item, decision };
+  });
+}
+
+function elementItems(
+  snapshot: WorkEnvironmentSnapshot,
+  tabs: readonly TabView[],
+  notes: readonly ResourceSummary[],
+  objectives: ReadonlyMap<string, WorkRuntimeProjection>,
+): CanvasItem[] {
   return snapshot.elements.map((element) => {
     const area = snapshot.areas.find((area) => area.id === element.area)?.title ?? "";
     if (element.reference.kind === "browser") {

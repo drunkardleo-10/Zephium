@@ -17,6 +17,7 @@
     onremove,
     oncontinue,
     onclose,
+    ondecide,
   }: {
     element: WorkEnvironmentElement;
     item: CanvasItem;
@@ -29,8 +30,11 @@
     onremove: () => void;
     oncontinue?: () => void;
     onclose: () => void;
+    /** Records the user's choice about this element; null clears it. */
+    ondecide?: (choice: string | null) => void;
   } = $props();
   const id = $props.id();
+  let choice = $derived(item.decision ?? "");
   const provenance = $derived.by((): [string, string][] => {
     const reference = element.reference;
     switch (reference.kind) {
@@ -81,6 +85,31 @@
         {#each areas as area (area.id)}<option value={area.id}>{area.title}</option>{/each}
       </select>
     </dd>
+    {#if ondecide}<dt><label for={`${id}-decision`}>{m.work_env_decision()}</label></dt>
+      <dd class="decide">
+        <input
+          id={`${id}-decision`}
+          type="text"
+          maxlength="512"
+          placeholder={m.work_env_decision_placeholder()}
+          disabled={busy}
+          bind:value={choice}
+          onkeydown={(event) => {
+            if (event.key === "Enter" && choice.trim()) ondecide(choice.trim());
+          }}
+        />
+        <span class="decide-actions">
+          <Button
+            size="compact"
+            variant="primary"
+            disabled={busy || !choice.trim() || choice.trim() === item.decision}
+            onclick={() => ondecide(choice.trim())}>{m.work_env_decide()}</Button
+          >
+          {#if item.decision}<Button size="compact" disabled={busy} onclick={() => ondecide(null)}
+              >{m.work_env_clear_decision()}</Button
+            >{/if}
+        </span>
+      </dd>{/if}
     <dt>{m.work_env_provenance()}</dt>
     {#each provenance as [label, value] (label + value)}<dd class="mono">
         <span>{label}</span><code>{value}</code>

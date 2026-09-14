@@ -13,11 +13,12 @@
     artifact: m.work_context_kind_artifact,
     subject: m.work_context_kind_subject,
     finding: m.work_context_kind_finding,
+    decision: m.work_context_kind_decision,
   };
 </script>
 
 <ul class="manifest" class:compact>
-  {#each disclosure.items as item (item.element)}
+  {#each disclosure.items as item (`${item.element}:${item.implicit ? "d" : "s"}`)}
     <li>
       <span class="kind">{kinds[item.kind]()}</span>
       <span class="title">{item.title || m.work_env_untitled_tab()}</span>

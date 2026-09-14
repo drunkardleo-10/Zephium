@@ -62,7 +62,9 @@
       preview.disclosure.items.some((item) => item.visibility === "private"),
   );
   const count = $derived(
-    preview.kind === "admitted" ? preview.disclosure.items.length : selection.items.length,
+    preview.kind === "admitted"
+      ? preview.disclosure.items.filter((item) => !item.implicit).length
+      : selection.items.length,
   );
   const failure = $derived.by(() => {
     if (preview.kind !== "refused") return null;

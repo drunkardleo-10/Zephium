@@ -1154,6 +1154,10 @@
                   void inspectCanvas(id);
                   return;
                 }
+                if (action === "ask") {
+                  composerElement?.querySelector<HTMLElement>("textarea")?.focus();
+                  return;
+                }
                 const reference = results.references.get(id);
                 if (reference) {
                   void saveResult(id);
@@ -1222,6 +1226,12 @@
             else openLift(element.id);
           }}
           onarea={(area) => void session.edit({ kind: "assign_area", element: element.id, area })}
+          ondecide={(choice) =>
+            void session.edit(
+              choice
+                ? { kind: "decide", element: element.id, choice }
+                : { kind: "undecide", element: element.id },
+            )}
           oncontinue={element.reference.kind === "objective"
             ? () => {
                 if (element.reference.kind === "objective")

@@ -4,7 +4,7 @@
   import Icon from "$shared/ui/Icon";
   import type { WorkItemNode } from "../lib/canvas-model";
   import { canvasResize, canvasAction, canvasOpen, canvasFocusResult } from "../lib/canvas-context";
-  import { ArrowUpRight01Icon, MinusSignIcon, Target01Icon } from "../lib/icons";
+  import { ArrowUpRight01Icon, MinusSignIcon, Target01Icon, Tick02Icon } from "../lib/icons";
   import TabCard from "./cards/TabCard.svelte";
   import NoteCard from "./cards/NoteCard.svelte";
   import ObjectiveCard from "./cards/ObjectiveCard.svelte";
@@ -57,6 +57,10 @@
         <Icon icon={Target01Icon} size={14} />{m.work_env_focus_result()}
       </button>{/if}
     <button type="button" onclick={() => action(id, "inspect")}>{m.work_inspect()}</button>
+    {#if type !== "responsibility" && type !== "agent"}<button
+        type="button"
+        onclick={() => action(id, "ask")}>{m.work_env_ask()}</button
+      >{/if}
     {#if type !== "responsibility" && type !== "agent" && !data.actionLabel}<span class="separator"
       ></span><button type="button" class="danger" onclick={() => action(id, "remove")}>
         <Icon icon={MinusSignIcon} size={14} />{m.work_env_remove()}
@@ -64,6 +68,9 @@
   </div>
 </NodeToolbar>
 <div class="node-root" bind:this={root}>
+  {#if data.decision}<span class="decision" title={data.decision}
+      ><Icon icon={Tick02Icon} size={12} />{m.work_env_decided()}</span
+    >{/if}
   {#if type === "tab"}<TabCard item={data} {selected} />
   {:else if type === "subject"}<SubjectCard item={data} {selected} />
   {:else if type === "finding"}<FindingCard item={data} {selected} />
@@ -89,6 +96,25 @@
 <style>
   .node-root {
     display: contents;
+  }
+
+  .decision {
+    position: absolute;
+    inset-block-start: -10px;
+    inset-inline-start: 12px;
+    z-index: 3;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: var(--radius-capsule);
+    background: var(--color-success);
+    color: var(--color-on-primary);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    pointer-events: none;
   }
 
   .bar {

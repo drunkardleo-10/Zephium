@@ -25,6 +25,8 @@ export type CanvasItem = {
   /** Transient agent presence: avatar seed and status. */
   agent?: { seed: number; activity: string; objective: string };
   unavailable?: boolean;
+  /** The user's recorded choice about this element. */
+  decision?: string;
 };
 export type CanvasLink = {
   id: string;
@@ -223,6 +225,7 @@ export function reconcileNodes(
         node.data.actionLabel === item.actionLabel &&
         node.data.subject === item.subject &&
         node.data.finding === item.finding &&
+        node.data.decision === item.decision &&
         JSON.stringify(node.data.agent) === JSON.stringify(item.agent) &&
         JSON.stringify(node.data.responsibility) === JSON.stringify(item.responsibility);
       if (same) return node;
