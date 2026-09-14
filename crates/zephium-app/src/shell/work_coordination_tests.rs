@@ -312,3 +312,196 @@ async fn coordinator_joins_original_child_publication_and_fails_closed_on_loss()
         );
     }
 }
+
+#[tokio::test]
+async fn dependent_research_chain_receives_only_completed_direct_handoffs() {
+    struct ChainProvider(std::sync::Mutex<Vec<String>>);
+    impl WorkSynthesisProvider for ChainProvider {
+        fn produce<'a>(&'a self, input: &'a WorkSynthesisDisclosure) -> WorkSynthesisFuture<'a> {
+            Box::pin(async move {
+                let name = input.context().outputs[0].name.as_str();
+                let wanted: &[&str] = match name {
+                    "identify" => &[],
+                    "investigate" => &["identify"],
+                    "mitigation" => &["investigate"],
+                    "summary" => &["identify", "investigate", "mitigation"],
+                    _ => panic!("unexpected responsibility"),
+                };
+                let sources = &input.context().sources;
+                assert_eq!(
+                    sources.len(),
+                    wanted.len(),
+                    "no undeclared sibling or transitive context"
+                );
+                for expected in wanted {
+                    assert!(sources.iter().any(|source| matches!(&source.data, WorkArtifactDataV1::Document { paragraphs } if paragraphs == &vec![format!("{expected}: issue https://github.com/sveltejs/svelte/issues/123")])));
+                }
+                self.0.lock().unwrap().push(name.into());
+                Ok(WorkSynthesisResult {
+                    outputs: vec![WorkSynthesisOutput {
+                        output: 0,
+                        title: name.into(),
+                        data: WorkArtifactDataV1::Document {
+                            paragraphs: vec![format!(
+                                "{name}: issue https://github.com/sveltejs/svelte/issues/123"
+                            )],
+                        },
+                        evidence: vec![],
+                    }],
+                    usage: WorkUsage {
+                        model_tokens: 20,
+                        cost_micro_usd: 10,
+                        operations: 1,
+                        accounting: WorkUsageAccounting::ConservativeReservation,
+                    },
+                })
+            })
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(zephium_store::SqliteStore::open(dir.path()).unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store.clone());
+    let create = handle
+        .work_document(WorkIntent::Create {
+            objective: "Identify a Svelte issue, investigate it, and assess mitigation".into(),
+        })
+        .unwrap();
+    let work = create.work_id().unwrap();
+    drive(&mut shell, &queue, create).await.unwrap();
+    let nodes = [
+        ("identify", vec![]),
+        ("investigate", vec![0]),
+        ("mitigation", vec![1]),
+        ("summary", vec![0, 1, 2]),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(key, (name, dependencies))| WorkNodeProposal {
+        key: key as u8,
+        objective: name.into(),
+        dependencies,
+        outputs: vec![WorkExpectedOutput {
+            name: name.into(),
+            description: "Compact identified issue and findings".into(),
+            review: WorkOutputReview::UserAcceptance,
+        }],
+    })
+    .collect();
+    let edit = handle
+        .work_document(WorkIntent::Edit {
+            id: work,
+            expected: WorkRevision::INITIAL,
+            edit: WorkUserEdit::ReplaceDraft {
+                proposal: WorkPlanProposal { nodes },
+            },
+        })
+        .unwrap();
+    let WorkReply::Snapshot(planned) = drive(&mut shell, &queue, edit).await.unwrap().reply else {
+        panic!()
+    };
+    let plan = planned.plan.as_ref().unwrap();
+    let root = plan
+        .draft
+        .nodes
+        .iter()
+        .find(|n| n.outputs[0].name == "summary")
+        .unwrap()
+        .id;
+    let limits = WorkExecutionLimits {
+        model_tokens: 8000,
+        cost_micro_usd: 10000,
+        operations: 4,
+        timeout_seconds: 60,
+        max_workers: 2,
+    };
+    use zephium_core::work::execution_proposal::{
+        WorkCapabilityProposal, WorkExecutionProposal, WorkResponsibilityProposal,
+    };
+    let primary_key = plan.draft.nodes.iter().position(|n| n.id == root).unwrap() as u8;
+    let proposal = WorkExecutionProposal {
+        nodes: plan
+            .draft
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(key, node)| WorkResponsibilityProposal {
+                key: key as u8,
+                parent: (node.id != root).then_some(primary_key),
+                capability: if node.id == root {
+                    WorkCapabilityProposal::Coordinate
+                } else {
+                    WorkCapabilityProposal::Synthesize
+                },
+            })
+            .collect(),
+    };
+    let spec = proposal
+        .compile(
+            plan,
+            WorkExecutionLimits {
+                model_tokens: 32000,
+                cost_micro_usd: 40000,
+                operations: 16,
+                ..limits
+            },
+        )
+        .unwrap();
+
+    let approval = handle
+        .work_command(
+            profile,
+            WorkCommandV1 {
+                version: 1,
+                work,
+                expected_revision: planned.revision,
+                command: WorkCommandId::generate(),
+                intent: WorkRuntimeIntent::Approve { spec },
+            },
+        )
+        .unwrap();
+    let WorkReply::RuntimeCommand {
+        projection,
+        receipt,
+    } = drive(&mut shell, &queue, approval).await.unwrap().reply
+    else {
+        panic!()
+    };
+    let provider = ChainProvider(std::sync::Mutex::new(vec![]));
+    let service = crate::work_execution::WorkExecutionService::new(handle.clone());
+    let completed = drive(
+        &mut shell,
+        &queue,
+        service.execute(
+            crate::work_execution::WorkExecutionRequest {
+                profile,
+                work,
+                expected_revision: projection.work.revision,
+                execution: receipt.execution,
+            },
+            &provider,
+            |_| async { panic!("no browser adapter should execute in this handoff fixture") },
+            |_| {},
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        *provider.0.lock().unwrap(),
+        vec!["identify", "investigate", "mitigation", "summary"]
+    );
+    let execution = completed
+        .executions
+        .iter()
+        .find(|e| e.id == receipt.execution)
+        .unwrap();
+    assert!(execution
+        .attempts
+        .iter()
+        .all(|a| a.status == WorkAttemptStatus::Succeeded));
+    assert_eq!(execution.artifacts.len(), 4);
+    drop(shell);
+    assert_eq!(
+        store.shutdown_until(Instant::now() + Duration::from_secs(5)),
+        zephium_core::ports::store::StoreShutdownOutcome::Clean
+    );
+}

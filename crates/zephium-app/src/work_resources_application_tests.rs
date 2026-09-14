@@ -926,6 +926,10 @@ fn failed_mapping_projection(value: &str, error: SemanticExtractionError) {
     assert_eq!(work.phase(), AdmissionPhase::Closing);
     assert_eq!(work.failures(), (Some(expected), None));
     assert!(work.take_extraction().is_none());
+    assert!(
+        work.usage().is_none(),
+        "unacknowledged terminal has no usage"
+    );
     store.release(0);
     poll_until(&mut work, |work| work.phase() == AdmissionPhase::Terminal);
     assert_eq!(
@@ -933,6 +937,17 @@ fn failed_mapping_projection(value: &str, error: SemanticExtractionError) {
         AgentWorkDisposition::Failed
     );
     assert_eq!(work.record().unwrap().debt(), AgentWorkDebt::NONE);
+    let usage = work
+        .usage()
+        .expect("original terminal ACK exposes closed ledger");
+    assert_eq!(usage.model_tokens, 40);
+    assert!(usage.cost_micro_usd > 0 && usage.cost_micro_usd < 250_000);
+    assert!(usage.operations > 0 && usage.operations < 64);
+    assert_eq!(
+        usage.accounting,
+        zephium_core::work::runtime::WorkUsageAccounting::ConservativeReservation,
+        "provider tokens are exact but catalog-priced cost is a ceiling"
+    );
     assert_eq!(work.failures(), (Some(expected), None));
     assert!(work.take_extraction().is_none());
     assert!(!native.global_sealed.load(Ordering::Acquire));
@@ -1185,6 +1200,10 @@ fn timed_out_terminal_acknowledgement_never_reopens_retained_execution() {
     native.join();
     poll_until(&mut work, |work| work.phase() == AdmissionPhase::Uncertain);
     assert!(!work.ready());
+    assert!(
+        work.usage().is_none(),
+        "missing terminal ACK retains original debt"
+    );
     assert!(work.take_extraction().is_none());
     assert!(work
         .submit(
@@ -1214,8 +1233,16 @@ fn timed_out_terminal_acknowledgement_never_reopens_retained_execution() {
     );
     assert!(work.take_extraction().is_none());
     wait_until(|| work.poll_shutdown(now()).unwrap());
+    let closed_usage = work
+        .usage()
+        .expect("exact reconciliation retains joined usage");
     store.release(0); // The old callback cannot select/rewrite the reconciled lane.
     work.poll(now());
+    assert_eq!(
+        work.usage(),
+        Some(closed_usage),
+        "stale callback cannot rewrite usage"
+    );
     assert!(work.poll_shutdown(now()).unwrap());
     for server in servers.lock().unwrap().drain(..) {
         assert_eq!(server.join().unwrap(), 2);
@@ -1708,6 +1735,76 @@ fn refused_scoped_worker_persists_failed_closed_after_running_ack() {
     assert_ne!(work.record().unwrap().debt(), AgentWorkDebt::NONE);
     drop(occupied);
     for server in servers.lock().unwrap().drain(..) {
+        assert_eq!(server.join().unwrap(), 0);
+    }
+}
+
+#[test]
+fn pre_dispatch_failure_releases_unused_budget_only_after_exact_terminal_ack() {
+    if child("pre_dispatch_failure_releases_unused_budget_only_after_exact_terminal_ack") {
+        return;
+    }
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let directory = tempfile::tempdir().unwrap();
+    let (mut work, _native, store) = coordinator(directory.path());
+    let servers = Servers::default();
+    let completed_servers = servers.clone();
+    poll_until(&mut work, RetainedWork::ready);
+    store
+        .hold
+        .store(AgentWorkDisposition::Failed as u8, Ordering::Release);
+    let request = ActorRequest {
+        run: ContextRunId::generate(),
+        deadline: AgentPolicyInstant::from_millis(600_002),
+        prepare: Box::new(move |browser, audit| {
+            let input = input_with_budget(
+                browser.binding(),
+                Arc::new(Clock(AtomicU64::new(2))),
+                browser.binding().storage(),
+                browser.binding().document().clone(),
+                AgentRunBudget::try_new(8, 100_000, 50_000, 1).unwrap(),
+            );
+            let (transport, server) = fixture_provider_responses(Vec::new());
+            servers.lock().unwrap().push(server);
+            StagedActor::for_probe(
+                input,
+                browser,
+                transport,
+                AgentProviderCredential::try_new(
+                    AgentProviderKind::OpenAiResponses,
+                    "fixture-not-a-secret".into(),
+                )
+                .unwrap(),
+                audit,
+                Box::new(task()),
+            )
+        }),
+    };
+    assert!(work.submit(request, now()).is_ok());
+    poll_until(&mut work, |_| store.pending.lock().unwrap().is_some());
+    assert!(work.usage().is_none());
+    store.release(0);
+    poll_until(&mut work, |work| work.phase() == AdmissionPhase::Terminal);
+    assert_eq!(
+        work.record().unwrap().disposition(),
+        AgentWorkDisposition::Failed
+    );
+    let usage = work.usage().expect("original failed terminal ledger");
+    assert_eq!(usage.model_tokens, 0);
+    assert_eq!(usage.cost_micro_usd, 0);
+    assert!(usage.operations < 8);
+    assert_eq!(
+        usage.accounting,
+        zephium_core::work::runtime::WorkUsageAccounting::Exact
+    );
+    assert!(work.shutdown_until(
+        &Clock(AtomicU64::new(2)),
+        Instant::now() + Duration::from_secs(2)
+    ));
+    assert_eq!(work.usage(), Some(usage));
+    for server in completed_servers.lock().unwrap().drain(..) {
         assert_eq!(server.join().unwrap(), 0);
     }
 }

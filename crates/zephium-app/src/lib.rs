@@ -94,5 +94,7 @@ pub mod work_planning;
 #[cfg(feature = "work-runtime")]
 pub mod work_runtime;
 #[cfg(feature = "work-runtime")]
+mod work_search;
+#[cfg(feature = "work-runtime")]
 mod work_synthesis;
 pub use api::ResourceCompletion;

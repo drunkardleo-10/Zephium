@@ -210,6 +210,27 @@ fn browser_page_hides_native_content_and_restores_exact_tab() {
 }
 
 #[test]
+fn disabled_work_rejects_native_entry_without_changing_browse() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, engine, screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    let tab = active_id(&screen);
+    navigate_and_commit(&mut shell, tab, "work-disabled.example");
+    store
+        .work_disabled
+        .store(true, std::sync::atomic::Ordering::Release);
+    let before = engine.calls();
+    let refused = shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Work)));
+    assert_eq!(refused.outcome, OperationOutcome::Rejected);
+    assert_eq!(shell.active_browser_page(), None);
+    assert_eq!(active_id(&screen), tab);
+    assert_eq!(engine.calls(), before);
+    let settings =
+        shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Settings)));
+    assert_eq!(settings.outcome, OperationOutcome::Deferred);
+}
+
+#[test]
 fn browser_page_return_accepts_a_retained_single_leaf_split() {
     let (mut shell, _, screen) = setup();
     shell.handle(Command::Bootstrap);

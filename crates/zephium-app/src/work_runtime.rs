@@ -34,7 +34,8 @@ impl Drop for Permit {
 /// selected textual fields through their own provider policy boundary.
 #[must_use]
 pub struct WorkNodeAttempt {
-    basis_revision: WorkRevision,
+    basis_revision: Mutex<WorkRevision>,
+    owner: WorkRuntimeSessionId,
     progress: Arc<Mutex<Option<zephium_ipc::work::WorkSignalV1>>>,
     handle: crate::Handle,
     profile: ProfileId,
@@ -87,27 +88,27 @@ impl WorkNodeAttempt {
                 combined.push(artifact);
             }
         }
-        if serde_json::to_vec(&combined)
-            .map_err(|_| WorkError::Invalid)?
-            .len()
-            > 6 * 1024
-        {
-            return Err(WorkError::Capacity);
-        }
-        self.dependencies = combined;
+        self.dependencies = compact_dependency_artifacts(combined)?;
         Ok(())
     }
     /// Pure observation; retains neither the attempt nor a browser/resource.
     pub fn observer(&self) -> WorkAttemptObserver {
-        WorkAttemptObserver(self.progress.clone())
+        WorkAttemptObserver {
+            attempt: self.attempt,
+            progress: Arc::downgrade(&self.progress),
+        }
     }
     pub fn record_activity(&self, activity: zephium_ipc::work::WorkActivityV1) {
         if let Ok(mut signal) = self.progress.lock() {
             *signal = Some(zephium_ipc::work::WorkSignalV1 {
                 version: 1,
+                owner: self.owner,
                 profile: self.profile.to_string(),
                 work: self.work,
-                basis_revision: self.basis_revision,
+                basis_revision: *self
+                    .basis_revision
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()),
                 execution: self.execution,
                 node: self.node.id,
                 attempt: self.attempt,
@@ -176,7 +177,29 @@ impl WorkNodeAttempt {
             .iter()
             .find(|e| e.id == self.execution)
             .ok_or(WorkError::NotFound)?;
-        Ok(state.interrupted.contains(&self.execution)
+        let owned = state
+            .owners
+            .iter()
+            .any(|entry| entry.execution == self.execution && entry.owner == self.owner)
+            && execution.attempts.iter().any(|attempt| {
+                attempt.id == self.attempt
+                    && attempt.node == self.node.id
+                    && attempt.status == WorkAttemptStatus::Running
+            });
+        if owned && !state.interrupted.contains(&self.execution) {
+            // Only the original attempt advances its observation basis after a
+            // fresh durable read. Historical projections never mint an observer.
+            if let Ok(mut basis) = self.basis_revision.lock() {
+                *basis = state.work.revision;
+            }
+            if let Ok(mut signal) = self.progress.lock() {
+                if let Some(signal) = signal.as_mut() {
+                    signal.basis_revision = state.work.revision;
+                }
+            }
+        }
+        Ok(!owned
+            || state.interrupted.contains(&self.execution)
             || execution.status == WorkExecutionStatus::CancelRequested
             || execution.status.terminal()
             || execution.attempts.iter().any(|attempt| {
@@ -202,13 +225,22 @@ impl WorkNodeAttempt {
     /// Preserve the original acknowledged publication for an owning parent.
     /// Reads and decoded projections cannot construct this move-only receipt.
     pub async fn settle_owned(
+        self,
+        result: WorkAdapterResult,
+    ) -> Result<WorkNodeSettlement, WorkError> {
+        self.settle_with_provider_evidence(result, None).await
+    }
+
+    pub(crate) async fn settle_with_provider_evidence(
         mut self,
         result: WorkAdapterResult,
+        mut provider_evidence: Option<WorkProviderSearchRecordV1>,
     ) -> Result<WorkNodeSettlement, WorkError> {
         if result.status == WorkAttemptStatus::Running {
             return Err(WorkError::Invalid);
         }
-        let artifacts = result
+        let mut status = result.status;
+        let mut artifacts = result
             .artifacts
             .into_iter()
             .map(|draft| {
@@ -239,12 +271,23 @@ impl WorkNodeAttempt {
         // adapter execution, change the attempt, or retry an uncertain write.
         for _ in 0..4 {
             let state = read(&self.handle, self.profile, self.work).await?;
-            let update = WorkRuntimeUpdate::Settle {
-                execution: self.execution,
-                attempt: self.attempt,
-                status: result.status,
-                usage: result.usage,
-                artifacts: artifacts.clone(),
+            let update = if let Some(evidence) = &provider_evidence {
+                WorkRuntimeUpdate::SettleProviderSearch {
+                    execution: self.execution,
+                    attempt: self.attempt,
+                    status,
+                    usage: result.usage,
+                    artifacts: artifacts.clone(),
+                    evidence: Box::new(evidence.clone()),
+                }
+            } else {
+                WorkRuntimeUpdate::Settle {
+                    execution: self.execution,
+                    attempt: self.attempt,
+                    status,
+                    usage: result.usage,
+                    artifacts: artifacts.clone(),
+                }
             };
             match request(
                 &self.handle,
@@ -269,6 +312,16 @@ impl WorkNodeAttempt {
                     });
                 }
                 Err(WorkError::Conflict) => continue,
+                // A definite capacity refusal rolled back publication. Preserve
+                // the original worker's known usage with a small failed fact;
+                // never repeat provider work or treat an uncertain write this way.
+                Err(WorkError::Capacity)
+                    if status == WorkAttemptStatus::Succeeded && result.usage.is_some() =>
+                {
+                    status = WorkAttemptStatus::Failed;
+                    artifacts.clear();
+                    provider_evidence = None;
+                }
                 Err(error) => return Err(error),
                 Ok(_) => return Err(WorkError::Invalid),
             }
@@ -313,11 +366,20 @@ impl WorkNodeSettlement {
     }
 }
 #[derive(Clone)]
-pub struct WorkAttemptObserver(Arc<Mutex<Option<zephium_ipc::work::WorkSignalV1>>>);
+pub struct WorkAttemptObserver {
+    attempt: WorkAttemptId,
+    progress: std::sync::Weak<Mutex<Option<zephium_ipc::work::WorkSignalV1>>>,
+}
 impl WorkAttemptObserver {
+    pub fn attempt(&self) -> WorkAttemptId {
+        self.attempt
+    }
+    pub fn is_alive(&self) -> bool {
+        self.progress.strong_count() > 0
+    }
     /// At most one replaceable transient signal; idle observers own no timer.
     pub fn latest(&self) -> Option<zephium_ipc::work::WorkSignalV1> {
-        self.0.lock().ok()?.clone()
+        self.progress.upgrade()?.lock().ok()?.clone()
     }
 }
 impl Drop for WorkNodeAttempt {
@@ -467,19 +529,14 @@ impl WorkRuntimeService {
             .and_then(|p| p.draft.nodes.iter().find(|n| n.id == node))
             .cloned()
             .ok_or(WorkError::Invalid)?;
-        let mut dependencies = Vec::new();
-        let mut dependency_bytes = 0;
-        for artifact in &execution_fact.artifacts {
-            if node_plan.dependencies.contains(&artifact.node) {
-                dependency_bytes += serde_json::to_vec(artifact)
-                    .map_err(|_| WorkError::Invalid)?
-                    .len();
-                if dependency_bytes > 6 * 1024 {
-                    return Err(WorkError::Capacity);
-                }
-                dependencies.push(artifact.clone());
-            }
-        }
+        let dependencies = compact_dependency_artifacts(
+            execution_fact
+                .artifacts
+                .iter()
+                .filter(|artifact| node_plan.dependencies.contains(&artifact.node))
+                .cloned()
+                .collect(),
+        )?;
         // Subtract queue/Store time conservatively by anchoring at submission;
         // neither callback latency nor a new worker renews the deadline.
         let deadline = submitted
@@ -489,7 +546,13 @@ impl WorkRuntimeService {
             deadline.min(parent_deadline)
         });
         let owned = WorkNodeAttempt {
-            basis_revision: projection.work.revision,
+            basis_revision: Mutex::new(projection.work.revision),
+            owner: projection
+                .owners
+                .iter()
+                .find(|entry| entry.execution == execution)
+                .ok_or(WorkError::Invalid)?
+                .owner,
             progress: Arc::new(Mutex::new(None)),
             handle: self.handle.clone(),
             profile,
@@ -568,4 +631,57 @@ async fn read(
         WorkReply::Runtime(state) => Ok(*state),
         _ => Err(WorkError::Invalid),
     }
+}
+
+/// Model-facing dependency projection only. Original Store publications and
+/// all identity/evidence joins stay intact; the notice makes lost text explicit.
+fn compact_dependency_artifacts(
+    original: Vec<WorkArtifactV1>,
+) -> Result<Vec<WorkArtifactV1>, WorkError> {
+    const LIMIT: usize = 6 * 1024;
+    const NOTICE: &str =
+        "\n[Host-truncated dependency summary; complete artifact retained in Work.]";
+    let fits = |items: &[WorkArtifactV1]| -> Result<bool, WorkError> {
+        Ok(serde_json::to_vec(items)
+            .map_err(|_| WorkError::Invalid)?
+            .len()
+            <= LIMIT)
+    };
+    if fits(&original)? {
+        return Ok(original);
+    }
+    // Include the notice in the sizing projection even for complete summaries:
+    // this makes the serialized prefix bound monotonic as allowance grows.
+    // The returned projection labels only actual truncation.
+    let project = |allowance: usize, sizing: bool| {
+        original
+            .iter()
+            .cloned()
+            .map(|mut artifact| {
+                if let WorkArtifactDataV1::EvidenceCollection { summary } = &mut artifact.data {
+                    let prefix: String = summary.chars().take(allowance).collect();
+                    let truncated = prefix.len() < summary.len();
+                    *summary = prefix;
+                    if truncated || sizing {
+                        summary.push_str(NOTICE);
+                    }
+                }
+                artifact
+            })
+            .collect::<Vec<_>>()
+    };
+    if !fits(&project(128, true))? {
+        return Err(WorkError::Capacity);
+    }
+    let mut low = 128usize;
+    let mut high = LIMIT;
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        if fits(&project(middle, true))? {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    Ok(project(low, false))
 }

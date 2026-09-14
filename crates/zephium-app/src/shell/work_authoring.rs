@@ -3,7 +3,7 @@ use zephium_core::work::WorkError;
 impl crate::Shell {
     pub(crate) fn work_document(&self, submission: WorkDocumentSubmission) {
         let Some(crate::work_authoring::Payload {
-            request,
+            mut request,
             expected_owner,
             pinned_owner,
             owner,
@@ -32,12 +32,121 @@ impl crate::Shell {
             return;
         }
         let _ = owner.set(profile);
+        if let zephium_core::work::port::WorkRequest::Environment {
+            call,
+            space_available,
+            browser_available,
+        } = &mut request
+        {
+            use zephium_core::work::environment::{
+                WorkEnvironmentCall, WorkEnvironmentEdit, WorkEnvironmentIntent,
+                WorkEnvironmentReference,
+            };
+            *space_available = call.space().is_none_or(|id| {
+                self.spaces
+                    .get(id)
+                    .is_some_and(|space| space.profile == profile)
+            });
+            *browser_available = match call {
+                WorkEnvironmentCall::Command {
+                    intent:
+                        WorkEnvironmentIntent::Edit {
+                            edit:
+                                WorkEnvironmentEdit::Add {
+                                    reference: WorkEnvironmentReference::Browser { tab },
+                                    ..
+                                },
+                            ..
+                        },
+                    ..
+                } => self.items.get(*tab).is_some_and(|item| {
+                    item.tab().is_some()
+                        && match item.placement {
+                            zephium_core::item::Placement::Favorites { profile: owner } => {
+                                owner == profile
+                            }
+                            zephium_core::item::Placement::Space { space, .. } => self
+                                .spaces
+                                .get(space)
+                                .is_some_and(|space| space.profile == profile),
+                        }
+                }),
+                _ => false,
+            };
+        }
         let refused = reply.clone();
+        use zephium_core::work::port::{WorkReply, WorkRequest};
+        let changes = !matches!(
+            &request,
+            WorkRequest::Read { .. }
+                | WorkRequest::Environment {
+                    call: zephium_core::work::environment::WorkEnvironmentCall::Read { .. }
+                        | zephium_core::work::environment::WorkEnvironmentCall::List { .. },
+                    ..
+                }
+                | WorkRequest::List { .. }
+                | WorkRequest::ListPlans { .. }
+                | WorkRequest::ReadPlan { .. }
+                | WorkRequest::RuntimeRead { .. }
+                | WorkRequest::ReadEvidence { .. }
+        );
+        let queue = self.self_queue.clone();
         let result = self.store.work_document(
             profile,
             request,
             Box::new(move |result| {
                 let _permit = permit;
+                if changes {
+                    if let Ok(WorkReply::Environment(
+                        zephium_core::work::environment::WorkEnvironmentReply::Snapshot {
+                            snapshot,
+                        }
+                        | zephium_core::work::environment::WorkEnvironmentReply::Applied {
+                            snapshot,
+                            ..
+                        }
+                        | zephium_core::work::environment::WorkEnvironmentReply::Checkpointed {
+                            snapshot,
+                            ..
+                        },
+                    )) = &result
+                    {
+                        if let Some(queue) = &queue {
+                            let _ = queue.try_push(crate::Command::WorkEnvironmentChanged(
+                                zephium_ipc::work::WorkEnvironmentChangedV1 {
+                                    profile: profile.to_string(),
+                                    environment: snapshot.id,
+                                },
+                            ));
+                        }
+                    }
+                    let work = match &result {
+                        Ok(WorkReply::Snapshot(snapshot)) => Some(snapshot.id),
+                        Ok(
+                            WorkReply::Runtime(state)
+                            | WorkReply::RuntimeCommand {
+                                projection: state, ..
+                            }
+                            | WorkReply::PublicReadAdmitted {
+                                projection: state, ..
+                            }
+                            | WorkReply::RuntimeStarted {
+                                projection: state, ..
+                            },
+                        ) => Some(state.work.id),
+                        Ok(WorkReply::AuthoringCommand(receipt)) => Some(receipt.work),
+                        Ok(WorkReply::Deleted { id }) => Some(*id),
+                        _ => None,
+                    };
+                    if let (Some(queue), Some(work)) = (&queue, work) {
+                        let _ = queue.try_push(crate::Command::WorkChanged(
+                            zephium_ipc::work::WorkChangedV1 {
+                                profile: profile.to_string(),
+                                work,
+                            },
+                        ));
+                    }
+                }
                 reply.try_send(result.map(|reply| WorkDocumentProjection { profile, reply }));
             }),
         );
@@ -118,6 +227,106 @@ mod tests {
         let request = handle.work_document(WorkIntent::Read { id }).unwrap();
         shell.handle(queue.try_recv().unwrap());
         assert!(matches!(wait(&request), Err(WorkError::ProfileUnavailable)));
+        assert_eq!(
+            store.shutdown_until(Instant::now() + Duration::from_secs(5)),
+            zephium_core::ports::store::StoreShutdownOutcome::Clean
+        );
+    }
+    #[test]
+    fn environment_attachment_uses_native_ownership_and_replays_after_tab_retirement() {
+        use zephium_core::work::environment::*;
+        let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+        let mut shell = Shell::new(
+            Arc::new(crate::shell::tests::FakeEngine::default()),
+            store.clone(),
+            Arc::new(crate::shell::tests::FakeChrome),
+            Box::new(|_| {}),
+        );
+        shell.handle(Command::Bootstrap);
+        assert!(store.flush());
+        let window = shell.windows.focused().unwrap();
+        let profile = window.profile;
+        let space = window.space;
+        let tab = window.active.unwrap();
+        let submit = |shell: &Shell, call| {
+            // Deliberately forged flags: the actor must replace them from its
+            // actual selected profile, Space and tab ownership.
+            let (submission, request) = WorkDocumentSubmission::prepare_bound(
+                WorkRequest::Environment {
+                    call,
+                    space_available: true,
+                    browser_available: true,
+                },
+                Some(profile),
+            )
+            .unwrap();
+            shell.work_document(submission);
+            wait(&request).map(|value| value.reply)
+        };
+        assert!(matches!(
+            submit(
+                &shell,
+                WorkEnvironmentCall::Command {
+                    command: WorkCommandId::generate(),
+                    intent: WorkEnvironmentIntent::Create {
+                        space: 999.into(),
+                        title: "Wrong Space".into()
+                    },
+                }
+            ),
+            Err(WorkError::NotFound)
+        ));
+        let WorkReply::Environment(WorkEnvironmentReply::Applied { snapshot, .. }) = submit(
+            &shell,
+            WorkEnvironmentCall::Command {
+                command: WorkCommandId::generate(),
+                intent: WorkEnvironmentIntent::Create {
+                    space,
+                    title: "Native Work".into(),
+                },
+            },
+        )
+        .unwrap() else {
+            panic!("environment")
+        };
+        let foreign = zephium_core::ids::ItemId::from(998_u128);
+        assert!(shell.items.insert_tab(
+            foreign,
+            zephium_core::item::Placement::Favorites {
+                profile: 999.into()
+            }
+        ));
+        let attach = |tab, command| WorkEnvironmentCall::Command {
+            command,
+            intent: WorkEnvironmentIntent::Edit {
+                id: snapshot.id,
+                expected: snapshot.revision,
+                edit: WorkEnvironmentEdit::Add {
+                    reference: WorkEnvironmentReference::Browser { tab },
+                    area: None,
+                },
+            },
+        };
+        assert!(matches!(
+            submit(&shell, attach(foreign, WorkCommandId::generate())),
+            Err(WorkError::NotFound)
+        ));
+        let original = attach(tab, WorkCommandId::generate());
+        assert!(matches!(
+            submit(&shell, original.clone()).unwrap(),
+            WorkReply::Environment(WorkEnvironmentReply::Applied {
+                replayed: false,
+                ..
+            })
+        ));
+        let _ = shell.items.remove(tab);
+        // The original durable receipt survives retirement. It neither creates
+        // a replacement tab nor requires fresh resource authority.
+        assert!(matches!(
+            submit(&shell, original).unwrap(),
+            WorkReply::Environment(WorkEnvironmentReply::Applied { replayed: true, .. })
+        ));
+        assert!(shell.items.get(tab).is_none());
         assert_eq!(
             store.shutdown_until(Instant::now() + Duration::from_secs(5)),
             zephium_core::ports::store::StoreShutdownOutcome::Clean

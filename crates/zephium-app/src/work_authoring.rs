@@ -198,7 +198,7 @@ impl WorkDocumentSubmission {
             | WorkRequest::ReadPlan { id, .. }
             | WorkRequest::ListPlans { id }
             | WorkRequest::Delete { id, .. } => Some(*id),
-            WorkRequest::List { .. } => None,
+            WorkRequest::List { .. } | WorkRequest::Environment { .. } => None,
         };
         PENDING
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {

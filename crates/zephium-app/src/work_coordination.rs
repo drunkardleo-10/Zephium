@@ -1,7 +1,11 @@
 //! Live primary/child ownership over the existing supervisor. Durable facts
 //! describe the approved graph; only the original attempts admit and publish.
 use crate::work_runtime::*;
-use std::{collections::BTreeSet, future::Future, time::Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    future::Future,
+    time::Instant,
+};
 use zephium_agentic::*;
 use zephium_core::work::{runtime::*, synthesis::WorkSynthesisProvider, WorkError, WorkPlanNodeId};
 
@@ -17,7 +21,7 @@ pub struct WorkCoordinator {
     epoch: Instant,
     next_attempt: u64,
     delivered: BTreeSet<WorkPlanNodeId>,
-    in_flight: Option<AgentWorkExecution>,
+    in_flight: BTreeMap<WorkPlanNodeId, AgentWorkExecution>,
     poisoned: bool,
 }
 
@@ -30,6 +34,8 @@ impl WorkNodeAttempt {
             || !matches!(
                 self.specification().capability,
                 WorkCapability::Coordinate { .. }
+                    | WorkCapability::CoordinatePublicDiscovery { .. }
+                    | WorkCapability::CoordinatePublicResearch { .. }
             )
             || self.cancellation_requested().await?
         {
@@ -46,7 +52,12 @@ impl WorkNodeAttempt {
         if spec.nodes.iter().any(|n| {
             n.node != self.node().id
                 && (n.parent != Some(self.node().id)
-                    || matches!(n.capability, WorkCapability::Coordinate { .. }))
+                    || matches!(
+                        n.capability,
+                        WorkCapability::Coordinate { .. }
+                            | WorkCapability::CoordinatePublicDiscovery { .. }
+                            | WorkCapability::CoordinatePublicResearch { .. }
+                    ))
         }) || (spec.nodes.len() > 1 && spec.limits.max_workers < 2)
         {
             return Err(WorkError::Invalid);
@@ -84,7 +95,7 @@ impl WorkNodeAttempt {
             epoch,
             next_attempt: 2,
             delivered: BTreeSet::new(),
-            in_flight: None,
+            in_flight: BTreeMap::new(),
             poisoned: false,
         })
     }
@@ -105,6 +116,8 @@ impl WorkCoordinator {
         Fut: Future<Output = Result<WorkNodeSettlement, WorkError>>,
     {
         if self.poisoned
+            // Initial admission policy; keyed ownership remains independent of this limit.
+            || !self.in_flight.is_empty()
             || self.delivered.contains(&node)
             || !self
                 .spec
@@ -132,14 +145,14 @@ impl WorkCoordinator {
             .owner
             .start(node_id(node), scheduler_attempt, now)
             .map_err(|_| WorkError::Unavailable)?;
-        self.in_flight = Some(child_turn);
+        self.in_flight.insert(node, child_turn);
         let child = self.primary.begin_child(node).await?;
         let attempt = child.attempt();
         let deadline = child.deadline();
         let cleanup = std::time::Duration::from_secs(
             if matches!(
                 child.specification().capability,
-                WorkCapability::PublicBrowse { .. }
+                WorkCapability::PublicBrowse { .. } | WorkCapability::PublicDiscovery { .. }
             ) {
                 30
             } else {
@@ -196,14 +209,14 @@ impl WorkCoordinator {
                 status,
                 WorkAttemptStatus::Failed | WorkAttemptStatus::Cancelled
             ) {
-                let turn = self.in_flight.take().ok_or(WorkError::Invalid)?;
+                let turn = self.in_flight.remove(&node).ok_or(WorkError::Invalid)?;
                 if let Err(refusal) = self.owner.complete(
                     turn,
                     AgentSupervisorCompletion::Failed(AgentSupervisorFailure::ProviderFailed),
                     &[],
                     self.now(),
                 ) {
-                    self.in_flight = Some(refusal.into_execution());
+                    self.in_flight.insert(node, refusal.into_execution());
                 }
             }
             return Err(WorkError::Unavailable);
@@ -221,12 +234,12 @@ impl WorkCoordinator {
         // The supervisor proves scheduling/recipient ownership, not publication.
         // The separate move-only settlement above proves original Store ACK.
         // Do not relabel legacy archives as Work-bound supervisor evidence.
-        let child_turn = self.in_flight.take().ok_or(WorkError::Invalid)?;
+        let child_turn = self.in_flight.remove(&node).ok_or(WorkError::Invalid)?;
         if let Err(refusal) =
             self.owner
                 .complete(child_turn, AgentSupervisorCompletion::Succeeded, &[], now)
         {
-            self.in_flight = Some(refusal.into_execution());
+            self.in_flight.insert(node, refusal.into_execution());
             return Err(WorkError::Unavailable);
         }
         let delivery = self
@@ -267,7 +280,7 @@ impl WorkCoordinator {
                     AgentSupervisorCancellationReason::ParentTerminated,
                 )
                 .map_err(|_| WorkError::Unavailable)?;
-            if self.in_flight.is_none() {
+            if self.in_flight.is_empty() {
                 // Every activated worker already acknowledged its closure, or
                 // none started. Unknown children retain undrained ownership.
                 let _ = self.owner.drain_cancelled(self.turn, cancellation);
@@ -327,23 +340,39 @@ fn compile(
     spec: &WorkExecutionSpec,
     epoch: Instant,
 ) -> Result<AgentRunManifest, WorkError> {
-    let WorkCapability::Coordinate { scope } = &primary.specification().capability else {
-        return Err(WorkError::Invalid);
+    let origins = |capability: &WorkCapability| -> Result<Vec<SemanticOrigin>, WorkError> {
+        match capability {
+            WorkCapability::Coordinate { scope } | WorkCapability::PublicBrowse { scope } => scope
+                .routes
+                .iter()
+                .map(|route| SemanticOrigin::parse(&route.origin).map_err(|_| WorkError::Invalid))
+                .collect::<Result<BTreeSet<_>, _>>()
+                .map(|origins| origins.into_iter().collect()),
+            WorkCapability::PublicDiscovery { .. }
+            | WorkCapability::CoordinatePublicDiscovery { .. } => {
+                Ok(vec![SemanticOrigin::parse("https://www.bing.com")
+                    .map_err(|_| WorkError::Invalid)?])
+            }
+            WorkCapability::PublicSearch { .. } => {
+                Ok(vec![SemanticOrigin::parse("https://api.openai.com")
+                    .map_err(|_| WorkError::Invalid)?])
+            }
+            WorkCapability::CoordinatePublicResearch { .. } => {
+                ["https://api.openai.com", "https://www.bing.com"]
+                    .into_iter()
+                    .map(|origin| SemanticOrigin::parse(origin).map_err(|_| WorkError::Invalid))
+                    .collect()
+            }
+            WorkCapability::Synthesize => Err(WorkError::Invalid),
+        }
     };
-    let origins = |scope: &WorkBrowseScope| -> Result<Vec<SemanticOrigin>, WorkError> {
-        scope
-            .routes
-            .iter()
-            .map(|r| SemanticOrigin::parse(&r.origin).map_err(|_| WorkError::Invalid))
-            .collect::<Result<BTreeSet<_>, _>>()
-            .map(|origins| origins.into_iter().collect())
-    };
+    let parent_origins = origins(&primary.specification().capability)?;
     let effects =
         AgentEffectScope::try_new(&[SemanticEffectClass::Read]).map_err(|_| WorkError::Invalid)?;
     let authority = AgentRunScope::try_new(
         vec![primary.profile()],
         vec![AgentAccountScope::Anonymous],
-        origins(scope)?,
+        parent_origins.clone(),
         SemanticSensitivity::Public,
         effects,
         vec![],
@@ -360,33 +389,31 @@ fn compile(
         return Err(WorkError::Unavailable);
     }
     let expires = AgentPolicyInstant::from_millis(remaining);
-    let nodes =
-        spec.nodes
-            .iter()
-            .map(|n| {
-                let node_scope = match &n.capability {
-                    WorkCapability::PublicBrowse { scope }
-                    | WorkCapability::Coordinate { scope } => scope,
-                    // Supervisor scope is an upper envelope. The Synthesize adapter has
-                    // no browser port and still accepts only structured dependency data.
-                    WorkCapability::Synthesize => scope,
-                };
-                let authority = AgentPlanNodeAuthority::try_new(
-                    vec![primary.profile()],
-                    vec![AgentAccountScope::Anonymous],
-                    origins(node_scope)?,
-                    SemanticSensitivity::Public,
-                    effects,
-                )
-                .map_err(|_| WorkError::Invalid)?;
-                Ok(AgentPlanNodeScope::new(
-                    node_id(n.node),
-                    authority,
-                    budget(n.limits)?,
-                    expires,
-                ))
-            })
-            .collect::<Result<Vec<_>, WorkError>>()?;
+    let nodes = spec
+        .nodes
+        .iter()
+        .map(|n| {
+            let node_origins = if n.capability == WorkCapability::Synthesize {
+                parent_origins.clone()
+            } else {
+                origins(&n.capability)?
+            };
+            let authority = AgentPlanNodeAuthority::try_new(
+                vec![primary.profile()],
+                vec![AgentAccountScope::Anonymous],
+                node_origins,
+                SemanticSensitivity::Public,
+                effects,
+            )
+            .map_err(|_| WorkError::Invalid)?;
+            Ok(AgentPlanNodeScope::new(
+                node_id(n.node),
+                authority,
+                budget(n.limits)?,
+                expires,
+            ))
+        })
+        .collect::<Result<Vec<_>, WorkError>>()?;
     AgentRunManifest::try_new(
         AgentRunManifestId::generate(),
         ContextRunId::generate(),

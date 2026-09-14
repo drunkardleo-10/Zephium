@@ -27,6 +27,11 @@ impl Shell {
         &mut self,
         page: Option<crate::BrowserPage>,
     ) -> OperationDisposition {
+        if page == Some(crate::BrowserPage::Work)
+            && self.store.app_setting("work.enabled").as_deref() == Some("false")
+        {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
+        }
         let Some(window) = self.windows.focused().map(|window| window.id) else {
             return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
         };

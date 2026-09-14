@@ -30,7 +30,11 @@ impl RetainedWork {
         let reusable = resource
             .as_ref()
             .is_some_and(|row| row.reusable.load(Ordering::Acquire));
-        let _ = writeln!(std::io::stdout().lock(), "work-retained-product-resource: phase={phase:?} original_row_healthy={healthy} idle={idle} reusable={reusable} destruction_started={} content=redacted", self.destruction.is_some() || self.destroyed);
+        let _ = writeln!(
+            std::io::stdout().lock(),
+            "work-retained-product-resource: phase={phase:?} original_row_healthy={healthy} idle={idle} reusable={reusable} destruction_started={} content=redacted",
+            self.destruction.is_some() || self.destroyed
+        );
     }
 }
 
@@ -52,7 +56,11 @@ fn write_claim_refusal_diagnostic(
     let ordered = !inventory
         .windows(2)
         .any(|pair| pair[0].key() >= pair[1].key());
-    writeln!(output, "work-retained-product-admission-refused: stage=claim_inventory phase={phase:?} inventory={} ordered={ordered} nonterminal={nonterminal} unresolved_debt={unresolved} current_record={current_record} execution_started={execution_started} content=redacted", inventory.len())
+    writeln!(
+        output,
+        "work-retained-product-admission-refused: stage=claim_inventory phase={phase:?} inventory={} ordered={ordered} nonterminal={nonterminal} unresolved_debt={unresolved} current_record={current_record} execution_started={execution_started} content=redacted",
+        inventory.len()
+    )
 }
 
 impl StagedActor {
@@ -130,7 +138,12 @@ mod tests {
                 false,
             )
             .unwrap();
-            assert_eq!(String::from_utf8(output).unwrap(), format!("work-retained-product-admission-refused: stage=claim_inventory phase=Loading inventory=1 ordered=true nonterminal={nonterminal} unresolved_debt=1 current_record=false execution_started=false content=redacted\n"));
+            assert_eq!(
+                String::from_utf8(output).unwrap(),
+                format!(
+                    "work-retained-product-admission-refused: stage=claim_inventory phase=Loading inventory=1 ordered=true nonterminal={nonterminal} unresolved_debt=1 current_record=false execution_started=false content=redacted\n"
+                )
+            );
             assert_eq!(inventory, vec![record]);
             assert_eq!(inventory[0].debt(), AgentWorkDebt::UNKNOWN);
         }
@@ -148,6 +161,9 @@ mod tests {
             false,
         )
         .unwrap();
-        assert_eq!(String::from_utf8(output).unwrap(), "work-retained-product-admission-refused: stage=claim_inventory phase=Loading inventory=2 ordered=false nonterminal=2 unresolved_debt=2 current_record=false execution_started=false content=redacted\n");
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "work-retained-product-admission-refused: stage=claim_inventory phase=Loading inventory=2 ordered=false nonterminal=2 unresolved_debt=2 current_record=false execution_started=false content=redacted\n"
+        );
     }
 }

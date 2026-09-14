@@ -1393,6 +1393,7 @@ pub(crate) struct FakeStore {
     icon_ages: Mutex<std::collections::HashMap<String, i64>>,
     icons: Mutex<Vec<(String, Vec<u8>)>>,
     reject_settings: std::sync::atomic::AtomicBool,
+    work_disabled: std::sync::atomic::AtomicBool,
     pending_deletions: Mutex<Vec<PendingProfileDeletion>>,
     pending_load_failures: std::sync::atomic::AtomicUsize,
     authorize_outcomes: Mutex<VecDeque<ProfileDeletionAuthorizeOutcome>>,
@@ -1659,8 +1660,12 @@ impl Store for FakeStore {
     fn record_visit(&self, _profile: ProfileId, url: String, _title: String) {
         self.visits.lock().unwrap().push(url);
     }
-    fn app_setting(&self, _key: &str) -> Option<String> {
-        None
+    fn app_setting(&self, key: &str) -> Option<String> {
+        (key == "work.enabled"
+            && self
+                .work_disabled
+                .load(std::sync::atomic::Ordering::Acquire))
+        .then(|| "false".into())
     }
     fn set_app_setting(&self, _key: String, _value: String) -> bool {
         !self
@@ -1909,6 +1914,7 @@ type Screen = Arc<Mutex<ItemsState>>;
 
 fn apply_projection(view: &mut ItemsState, p: Projection) {
     match p {
+        Projection::WorkChanged(_) | Projection::WorkEnvironmentChanged(_) => {}
         Projection::Items(s) => *view = s,
         Projection::Tab(t) => {
             if let Some(slot) = view.tabs.iter_mut().find(|x| x.id == t.id) {

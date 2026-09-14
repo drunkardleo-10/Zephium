@@ -1388,6 +1388,28 @@ fn snapshot_probe_not_ready_consumes_one_dispatch_and_drains_without_provider() 
         AgentWorkFailure::Observation(SemanticRuntimePortFailure::NotReady)
     );
     assert_eq!(closed.policy_settlement().closure().model_calls(), 0);
+    assert!(closed.policy_settlement().model_usage_exact());
+    assert_eq!(
+        closed
+            .policy_settlement()
+            .accounting()
+            .consumed_model_tokens(),
+        0
+    );
+    assert_eq!(
+        closed
+            .policy_settlement()
+            .accounting()
+            .consumed_cost_micro_usd(),
+        0
+    );
+    assert_eq!(
+        closed
+            .policy_settlement()
+            .accounting()
+            .reserved_operations(),
+        0
+    );
     assert_eq!(native.reads.load(Ordering::Acquire), 1);
     assert!(!release.returned().unwrap());
     assert!(matches!(
@@ -1470,12 +1492,18 @@ fn pre_provider_budget_refusal_drains_worker_and_preserves_late_original_reporte
     let Some(AgentWorkRetainedOutcome::ClosedUnsuccessfully(closed)) = outcome else {
         panic!("budget must fail before provider dispatch");
     };
-    assert_eq!(
+    assert!(matches!(
         closed.failure(),
         AgentWorkFailure::Browser(AgentBrowserProviderError::RequestPolicy(
-            AgentPolicyError::Budget
+            AgentPolicyError::ModelInputBudget {
+                call: 1,
+                cost: 77_830,
+                remaining_cost: 50_000,
+                node_scope: false,
+                ..
+            }
         ))
-    );
+    ));
     assert_eq!(closed.policy_settlement().closure().model_calls(), 0);
     assert!(release.returned().unwrap());
     assert!(matches!(

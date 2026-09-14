@@ -172,6 +172,7 @@ pub(super) struct RetainedWork {
     active: Option<ActiveActor>,
     flight: Option<JournalFlight>,
     record: Option<AgentWorkRecord>,
+    terminal_usage: Option<(AgentWorkRecord, zephium_core::work::runtime::WorkUsage)>,
     result_profile: Option<zephium_core::ids::ProfileId>,
     artifact: Option<AgentWorkArtifactDescriptor>,
     archived: Option<AgentWorkArchivedExtraction>,
@@ -250,6 +251,7 @@ impl RetainedWork {
             active: None,
             flight: None,
             record: None,
+            terminal_usage: None,
             result_profile: None,
             artifact: None,
             archived: None,
@@ -353,6 +355,7 @@ impl RetainedWork {
         // Only this exact durable/scoped join retires the previous actor owner.
         self.active.take();
         self.record = None;
+        self.terminal_usage = None;
         self.result_profile = None;
         self.artifact = None;
         self.acquisition = Some(acquisition);
@@ -843,6 +846,24 @@ impl RetainedWork {
                     };
                     match terminal {
                         Ok(terminal) => {
+                            // Only the original equal policy/drain/resource join above
+                            // can mint these descriptive usage facts. ACK gates exposure.
+                            let policy = drained.policy();
+                            let accounting = policy.accounting();
+                            self.terminal_usage = u32::try_from(accounting.consumed_model_tokens())
+                                .ok()
+                                .zip(u32::try_from(accounting.consumed_cost_micro_usd()).ok())
+                                .map(|(model_tokens, cost_micro_usd)| (terminal.next(),
+                                    zephium_core::work::runtime::WorkUsage {
+                                        model_tokens,
+                                        cost_micro_usd,
+                                        operations: accounting.consumed_operations(),
+                                        accounting: if policy.model_usage_exact() {
+                                            zephium_core::work::runtime::WorkUsageAccounting::Exact
+                                        } else {
+                                            zephium_core::work::runtime::WorkUsageAccounting::ConservativeReservation
+                                        },
+                                    }));
                             self.phase = AdmissionPhase::Closing;
                             if terminal.next().disposition() == AgentWorkDisposition::Succeeded
                                 && self.result_profile.is_some()
@@ -989,6 +1010,11 @@ impl RetainedWork {
 
     pub(super) fn record(&self) -> Option<AgentWorkRecord> {
         self.record
+    }
+
+    pub(super) fn usage(&self) -> Option<zephium_core::work::runtime::WorkUsage> {
+        let (record, usage) = self.terminal_usage?;
+        (self.phase == AdmissionPhase::Terminal && self.record == Some(record)).then_some(usage)
     }
 
     pub(super) fn artifact(&self) -> Option<AgentWorkArtifactDescriptor> {

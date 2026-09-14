@@ -368,6 +368,8 @@ impl BrowserPage {
 #[derive(Clone, Debug)]
 pub enum Command {
     WorkDocument(crate::WorkDocumentSubmission),
+    WorkChanged(zephium_ipc::work::WorkChangedV1),
+    WorkEnvironmentChanged(zephium_ipc::work::WorkEnvironmentChangedV1),
     #[cfg(feature = "work-execution")]
     AttachRetainedWork(crate::work_resources::product::RetainedWorkAttachment),
     ResourceCall {
@@ -724,10 +726,9 @@ pub enum Command {
     },
 }
 
+type ResourceCallback = Box<dyn FnOnce(zephium_core::resources::ResourceReply) + Send>;
 #[derive(Clone)]
-pub struct ResourceCompletion(
-    Arc<Mutex<Option<Box<dyn FnOnce(zephium_core::resources::ResourceReply) + Send>>>>,
-);
+pub struct ResourceCompletion(Arc<Mutex<Option<ResourceCallback>>>);
 impl ResourceCompletion {
     pub fn new(done: impl FnOnce(zephium_core::resources::ResourceReply) + Send + 'static) -> Self {
         Self(Arc::new(Mutex::new(Some(Box::new(done)))))

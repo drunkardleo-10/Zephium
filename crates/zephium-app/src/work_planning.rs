@@ -32,6 +32,7 @@ impl Drop for Permit {
 pub struct WorkPlanningService {
     handle: crate::Handle,
     provider: Arc<dyn WorkPlanningProvider>,
+    execution_diagnostic: Option<fn(execution_proposal::WorkExecutionProposalRefusal)>,
 }
 /// Provider usage remains visible even if the final CAS conflicts or its
 /// acknowledgement is lost. Reconcile unknown persistence with a fresh read.
@@ -40,6 +41,151 @@ pub struct WorkPlanningCompletion {
     pub persistence: Result<crate::WorkDocumentProjection, WorkError>,
 }
 impl WorkPlanningService {
+    /// Optional closed structural diagnostic; contains no provider/user text.
+    pub fn with_execution_diagnostic(
+        mut self,
+        diagnostic: fn(execution_proposal::WorkExecutionProposalRefusal),
+    ) -> Self {
+        self.execution_diagnostic = Some(diagnostic);
+        self
+    }
+
+    pub async fn prepare_request(
+        &self,
+        profile: ProfileId,
+        request: zephium_ipc::work::WorkPlanRequestV1,
+    ) -> zephium_ipc::work::WorkPlanningResponseV1 {
+        use zephium_ipc::work::*;
+        let result = self.prepare_execution(profile, &request).await;
+        let usage_view = |usage: WorkPlanningUsage| WorkPlanningUsageV1 {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cost_ceiling_micro_usd: usage.cost_ceiling_micro_usd.to_string(),
+        };
+        let (usage, outcome) = match result {
+            Ok((usage, spec)) => (
+                Some(usage_view(usage)),
+                WorkPlanningOutcomeV1::Settled {
+                    response: WorkResponseV1 {
+                        version: 1,
+                        profile: profile.to_string(),
+                        reply: match spec {
+                            Ok(spec) => WorkReplyV1::ApprovalDraft {
+                                work: request.work,
+                                expected_revision: request.expected_revision,
+                                spec,
+                            },
+                            Err(error) => WorkReplyV1::Error {
+                                error: error.into(),
+                            },
+                        },
+                    },
+                },
+            ),
+            Err(error) => (
+                if let WorkPlanningError::ProviderRefused(usage) = error {
+                    Some(usage_view(usage))
+                } else {
+                    None
+                },
+                WorkPlanningOutcomeV1::Refused {
+                    reason: error.into(),
+                },
+            ),
+        };
+        WorkPlanningResponseV1 {
+            version: 1,
+            profile: profile.to_string(),
+            work: request.work,
+            basis_revision: request.expected_revision,
+            usage,
+            outcome,
+        }
+    }
+    async fn prepare_execution(
+        &self,
+        profile: ProfileId,
+        request: &zephium_ipc::work::WorkPlanRequestV1,
+    ) -> Result<
+        (
+            WorkPlanningUsage,
+            Result<runtime::WorkExecutionSpec, WorkError>,
+        ),
+        WorkPlanningError,
+    > {
+        if request.version != 1 {
+            return Err(WorkPlanningError::Invalid);
+        }
+        let _permit = Permit::acquire((profile, request.work))?;
+        let state = self
+            .approval_basis(profile, request)
+            .await
+            .map_err(WorkPlanningError::Store)?;
+        let disclosure = WorkPlanningDisclosure::from_snapshot(&state.work)?;
+        let result = tokio::time::timeout(
+            Duration::from_secs(180),
+            self.provider.propose_execution(disclosure),
+        )
+        .await
+        .map_err(|_| WorkPlanningError::ProviderOutcomeUnknown)??;
+        // Model completion does not approve anything. Recheck the exact current
+        // plan/profile before exposing a draft; the eventual command has its own CAS.
+        let spec = match self.approval_basis(profile, request).await {
+            Ok(state) => state
+                .work
+                .plan
+                .as_ref()
+                .ok_or(WorkError::Invalid)
+                .and_then(|plan| {
+                    let limits = runtime::WorkExecutionLimits {
+                        model_tokens: 256_000,
+                        cost_micro_usd: 1_000_000,
+                        operations: 256,
+                        timeout_seconds: 900,
+                        max_workers: 4,
+                    };
+                    result
+                        .proposal
+                        .proposed_limits(limits)
+                        .and_then(|limits| result.proposal.compile_diagnosed(plan, limits))
+                        .map_err(|refusal| {
+                            if let Some(diagnostic) = self.execution_diagnostic {
+                                diagnostic(refusal);
+                            }
+                            refusal.work_error()
+                        })
+                }),
+            Err(error) => Err(error),
+        };
+        Ok((result.usage, spec))
+    }
+    async fn approval_basis(
+        &self,
+        profile: ProfileId,
+        request: &zephium_ipc::work::WorkPlanRequestV1,
+    ) -> Result<runtime::WorkRuntimeProjection, WorkError> {
+        let response = tokio::time::timeout(
+            Duration::from_secs(10),
+            self.handle.work_projection(profile, request.work)?,
+        )
+        .await
+        .map_err(|_| WorkError::Unavailable)??;
+        let WorkReply::Runtime(state) = response.reply else {
+            return Err(WorkError::Invalid);
+        };
+        if response.profile != profile
+            || state.work.revision != request.expected_revision
+            || state.work.lifecycle != WorkLifecycle::Active
+            || state.work.status != WorkAuthoringStatus::PlanReady
+            || state
+                .executions
+                .iter()
+                .any(|execution| !execution.status.terminal())
+        {
+            return Err(WorkError::Conflict);
+        }
+        Ok(*state)
+    }
     pub async fn plan_request(
         &self,
         profile: ProfileId,
@@ -79,23 +225,7 @@ impl WorkPlanningService {
                 } else {
                     None
                 };
-                let reason = match error {
-                    WorkPlanningError::Invalid => WorkPlanningFailureV1::Invalid,
-                    WorkPlanningError::Capacity => WorkPlanningFailureV1::Capacity,
-                    WorkPlanningError::Unavailable => WorkPlanningFailureV1::Unavailable,
-                    WorkPlanningError::Cancelled => WorkPlanningFailureV1::Cancelled,
-                    WorkPlanningError::Timeout => WorkPlanningFailureV1::Timeout,
-                    WorkPlanningError::Stale => WorkPlanningFailureV1::Stale,
-                    WorkPlanningError::NeedsInput => WorkPlanningFailureV1::NeedsInput,
-                    WorkPlanningError::Privacy => WorkPlanningFailureV1::Privacy,
-                    WorkPlanningError::ProviderOutcomeUnknown => {
-                        WorkPlanningFailureV1::ProviderOutcomeUnknown
-                    }
-                    WorkPlanningError::ProviderRefused(_) => WorkPlanningFailureV1::ProviderRefused,
-                    WorkPlanningError::Store(error) => WorkPlanningFailureV1::Store {
-                        error: error.into(),
-                    },
-                };
+                let reason = error.into();
                 (usage, WorkPlanningOutcomeV1::Refused { reason })
             }
         };
@@ -109,7 +239,11 @@ impl WorkPlanningService {
         }
     }
     pub fn new(handle: crate::Handle, provider: Arc<dyn WorkPlanningProvider>) -> Self {
-        Self { handle, provider }
+        Self {
+            handle,
+            provider,
+            execution_diagnostic: None,
+        }
     }
     /// Caller identifies the displayed owner and revision; Shell verifies both
     /// owner selections and Store performs the final revision CAS. Dropping this

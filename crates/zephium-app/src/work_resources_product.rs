@@ -158,6 +158,8 @@ pub struct RetainedWorkSnapshot {
     pub phase: RetainedWorkPhase,
     pub run: ContextRunId,
     pub record: Option<AgentWorkRecord>,
+    /// Closed original ledger totals, exposed only after exact terminal acknowledgement.
+    pub usage: Option<zephium_core::work::runtime::WorkUsage>,
     pub failure: Option<AgentWorkFailure>,
     pub persistence_failure: Option<AgentWorkJournalError>,
     /// Atomic durable result identity, present only after publication ACK.
@@ -212,6 +214,7 @@ impl RetainedWorkHandle {
             Err(error) => {
                 let mut snapshot = error.into_inner().snapshot;
                 snapshot.phase = RetainedWorkPhase::Uncertain;
+                snapshot.usage = None;
                 snapshot.failure = Some(AgentWorkFailure::Contract);
                 snapshot
             }
@@ -325,6 +328,7 @@ impl CallbackHandle {
                     phase: RetainedWorkPhase::Attaching,
                     run: prepared.spec.identity.owner(),
                     record: None,
+                    usage: None,
                     failure: None,
                     persistence_failure: None,
                     artifact: None,
@@ -432,12 +436,13 @@ impl ProductWork {
             self.fail();
             return;
         };
-        match owner.construct_with_policy(
+        match owner.construct_isolated(
             WorkBrowserResourceId::generate(),
             prepared.spec.identity.id(),
             prepared.spec.storage,
             prepared.spec.target,
             prepared.spec.document_policy,
+            prepared.spec.isolated_public,
             now,
         ) {
             Ok(pending) => {
@@ -552,6 +557,7 @@ impl ProductWork {
             AdmissionPhase::Uncertain => RetainedWorkPhase::Uncertain,
         };
         projection.snapshot.record = work.record();
+        projection.snapshot.usage = work.usage();
         projection.snapshot.artifact = work.artifact();
         projection.snapshot.artifact_read = work.artifact_read();
         projection.snapshot.last_review = work.last_review();

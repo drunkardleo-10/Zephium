@@ -41,6 +41,8 @@ impl WorkNodeAttempt {
                 && matches!(
                     self.specification().capability,
                     WorkCapability::Coordinate { .. }
+                        | WorkCapability::CoordinatePublicDiscovery { .. }
+                        | WorkCapability::CoordinatePublicResearch { .. }
                 ))
         {
             return self
@@ -56,12 +58,27 @@ impl WorkNodeAttempt {
         .await
         {
             Ok(Ok(input)) => input,
-            _ => {
+            error => {
+                provider.diagnostic(WorkSynthesisDiagnostic::DisclosureFailed {
+                    attempt: self.attempt(),
+                    error: match error {
+                        Ok(Err(error)) => error,
+                        _ => WorkError::Unavailable,
+                    },
+                });
                 return self
                     .settle_owned(empty(WorkAttemptStatus::Failed, Some(WorkUsage::default())))
-                    .await
+                    .await;
             }
         };
+        provider.diagnostic(WorkSynthesisDiagnostic::DisclosureReady {
+            attempt: self.attempt(),
+            bytes: serde_json::to_vec(input.context())
+                .map_err(|_| WorkError::Invalid)?
+                .len(),
+            sources: input.context().sources.len(),
+            evidence: input.context().evidence.len(),
+        });
         if self.cancellation_requested().await? || Instant::now() >= self.deadline() {
             return self
                 .settle_owned(empty(
@@ -84,9 +101,15 @@ impl WorkNodeAttempt {
                 biased;
                 _ = tokio::time::sleep_until(self.deadline().into()) => Err(WorkSynthesisError::OutcomeUnknown),
                 _ = cancelled => Err(WorkSynthesisError::OutcomeUnknown),
-                result = provider.produce(&input) => result,
+                result = provider.produce_owned(&input, WorkSynthesisTrace { work: self.work(), execution: self.execution(), attempt: self.attempt() }) => result,
             }
         };
+        if let Err(error) = &result {
+            provider.diagnostic(WorkSynthesisDiagnostic::ProviderRefused {
+                attempt: self.attempt(),
+                error: *error,
+            });
+        }
         let result = match result {
             Ok(result) => {
                 if !result.usage.within(self.specification().limits) {
@@ -124,7 +147,6 @@ impl WorkNodeAttempt {
     }
     async fn synthesis_disclosure(&self) -> Result<WorkSynthesisDisclosure, WorkError> {
         let mut previews = Vec::<WorkEvidencePreviewV1>::new();
-        let mut bytes = 0;
         for source in self.dependency_artifacts() {
             for link in &source.evidence {
                 if previews.iter().any(|p| p.link == *link) {
@@ -134,10 +156,6 @@ impl WorkNodeAttempt {
                     return Err(WorkError::Capacity);
                 }
                 let preview = self.read_evidence(link.clone()).await?;
-                bytes += preview.text.len();
-                if bytes > MAX_SYNTHESIS_CONTEXT_BYTES {
-                    return Err(WorkError::Capacity);
-                }
                 previews.push(preview);
             }
         }

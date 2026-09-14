@@ -540,6 +540,22 @@ impl Shell {
         }
         match cmd {
             Command::WorkDocument(submission) => self.work_document(submission),
+            Command::WorkEnvironmentChanged(change) => {
+                if self.windows.focused().is_some_and(|window| {
+                    window.profile.to_string() == change.profile
+                        && !self.profile_deletion_quarantines(window.profile)
+                }) {
+                    (self.emit)(Projection::WorkEnvironmentChanged(change));
+                }
+            }
+            Command::WorkChanged(change) => {
+                if self.windows.focused().is_some_and(|window| {
+                    window.profile.to_string() == change.profile
+                        && !self.profile_deletion_quarantines(window.profile)
+                }) {
+                    (self.emit)(Projection::WorkChanged(change));
+                }
+            }
             #[cfg(feature = "work-execution")]
             Command::AttachRetainedWork(attachment) => {
                 if let Some(mut work) =

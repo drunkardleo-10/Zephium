@@ -662,3 +662,6 @@ async fn runtime_application_approves_exact_plan_settles_artifact_and_recovers_d
         zephium_core::ports::store::StoreShutdownOutcome::Clean
     );
 }
+
+#[path = "work_search_tests.rs"]
+mod search_tests;

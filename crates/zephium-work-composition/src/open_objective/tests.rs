@@ -124,6 +124,30 @@ fn production_admission_preserves_navigation_and_enables_bounded_visual_wait_too
     assert!(task.allows_human_request());
 }
 
+#[test]
+fn public_discovery_product_budget_compiles_to_an_isolated_retained_resource() {
+    let mut definition = objective();
+    definition.navigation = AgentNavigationDiscovery::try_new_public_web(
+        ContextNavigationTarget::parse("https://www.bing.com/search?q=Svelte+Flow+compatibility")
+            .unwrap(),
+        usize::from(zephium_core::work::runtime::WORK_PUBLIC_DISCOVERY_MAX_HOPS),
+        2,
+    )
+    .unwrap();
+    let mut limits = settings(PublicReadWorkAccount::Anonymous);
+    limits.budget = AgentRunBudget::try_new(51, 51_200, 200_000, 1).unwrap();
+    limits.deadline = Instant::now() + Duration::from_secs(600);
+    let (input, _) = assemble(
+        identity(),
+        ContextProfileStorageClass::Durable,
+        definition,
+        limits,
+    )
+    .unwrap();
+    assert!(input.retained_resource_spec().unwrap().isolated_public);
+    assert!(input.persist_extraction_result().is_ok());
+}
+
 struct Samples(Arc<Mutex<Option<AgentContextAccountBinding>>>);
 impl AgentWorkAccountSource for Samples {
     fn sample(&self, _: ContextJoin) -> Result<AgentContextAccountBinding, AgentWorkFailure> {

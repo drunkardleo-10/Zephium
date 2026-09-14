@@ -20,6 +20,83 @@ pub struct WorkExecutionService {
     handle: crate::Handle,
 }
 impl WorkExecutionService {
+    /// Explicit public-read submission. Only this original fresh Store callback
+    /// proceeds to Begin; receipt replay and read projections never dispatch.
+    pub async fn read_public<F, Fut, O>(
+        &self,
+        profile: ProfileId,
+        command: zephium_ipc::work::WorkCommandV1,
+        execute: F,
+        mut observe: O,
+    ) -> Result<WorkRuntimeProjection, WorkError>
+    where
+        F: FnOnce(WorkNodeAttempt) -> Fut,
+        Fut: Future<Output = Result<WorkNodeSettlement, WorkError>>,
+        O: FnMut(WorkAttemptObserver),
+    {
+        if command.version != 1 || !matches!(command.intent, WorkRuntimeIntent::ReadPublic { .. }) {
+            return Err(WorkError::Invalid);
+        }
+        let work = command.work;
+        let command_id = command.command;
+        let response = tokio::time::timeout(
+            Duration::from_secs(10),
+            self.handle.work_command(profile, command)?,
+        )
+        .await
+        .map_err(|_| WorkError::OutcomeUnknown)??;
+        if response.profile != profile {
+            return Err(WorkError::ProfileUnavailable);
+        }
+        let WorkReply::PublicReadAdmitted {
+            projection,
+            receipt,
+            replayed,
+        } = response.reply
+        else {
+            return Err(WorkError::Invalid);
+        };
+        if receipt.command != command_id || projection.work.id != work {
+            return Err(WorkError::Invalid);
+        }
+        if replayed {
+            return Ok(*projection);
+        }
+        let execution = projection
+            .executions
+            .iter()
+            .find(|entry| entry.id == receipt.execution)
+            .ok_or(WorkError::Invalid)?;
+        if execution.authorization != WorkExecutionAuthorization::UserDirectedPublicRead
+            || execution.spec.nodes.len() != 1
+            || projection.work.revision != receipt.applied_revision
+        {
+            return Err(WorkError::Invalid);
+        }
+        let node = execution.spec.nodes[0].node;
+        let attempt = WorkRuntimeService::new(self.handle.clone())
+            .begin_node(
+                profile,
+                work,
+                receipt.applied_revision,
+                receipt.execution,
+                node,
+            )
+            .await?;
+        let original = attempt.attempt();
+        observe(attempt.observer());
+        let settlement = execute(attempt).await?;
+        if settlement.profile() != profile
+            || settlement.work() != work
+            || settlement.execution() != receipt.execution
+            || settlement.node() != node
+            || settlement.attempt() != original
+        {
+            return Err(WorkError::Invalid);
+        }
+        Ok(settlement.into_projection())
+    }
+
     pub async fn prepare_public_approval(
         &self,
         profile: ProfileId,
@@ -149,7 +226,9 @@ impl WorkExecutionService {
             .iter()
             .find(|e| e.id == execution)
             .ok_or(WorkError::NotFound)?;
-        if fact.status != WorkExecutionStatus::Approved {
+        if fact.status != WorkExecutionStatus::Approved
+            || fact.authorization == WorkExecutionAuthorization::UserDirectedPublicRead
+        {
             return Err(WorkError::Conflict);
         }
         let plan = state.work.plan.as_ref().ok_or(WorkError::Invalid)?.clone();
@@ -245,7 +324,14 @@ fn supported_primary(spec: &WorkExecutionSpec) -> Result<Option<WorkPlanNodeId>,
     let roots: Vec<_> = spec
         .nodes
         .iter()
-        .filter(|n| matches!(n.capability, WorkCapability::Coordinate { .. }))
+        .filter(|n| {
+            matches!(
+                n.capability,
+                WorkCapability::Coordinate { .. }
+                    | WorkCapability::CoordinatePublicDiscovery { .. }
+                    | WorkCapability::CoordinatePublicResearch { .. }
+            )
+        })
         .collect();
     match roots.as_slice() {
         [] if spec.nodes.iter().all(|n| n.parent.is_none()) => Ok(None),
@@ -273,8 +359,12 @@ where
     Fut: Future<Output = Result<WorkNodeSettlement, WorkError>>,
 {
     match attempt.specification().capability {
-        WorkCapability::PublicBrowse { .. } => browser(attempt).await,
+        WorkCapability::PublicBrowse { .. }
+        | WorkCapability::PublicDiscovery { .. }
+        | WorkCapability::PublicSearch { .. } => browser(attempt).await,
         WorkCapability::Synthesize => attempt.synthesize_owned(provider).await,
-        WorkCapability::Coordinate { .. } => Err(WorkError::Invalid),
+        WorkCapability::Coordinate { .. }
+        | WorkCapability::CoordinatePublicDiscovery { .. }
+        | WorkCapability::CoordinatePublicResearch { .. } => Err(WorkError::Invalid),
     }
 }

@@ -1131,6 +1131,13 @@ fn lost_navigation_callback_preserves_recovery_and_original_resource_debt() {
         prepare(browser, vec![navigation_stream(1, FIRST)]);
     let (handle, lifecycle) = start(controller, scope);
     wait_until(|| native.navigation.lock().unwrap().is_some());
+    native
+        .reporters
+        .lock()
+        .unwrap()
+        .get(&resource.identity().context())
+        .unwrap()
+        .invalidate();
     handle.stop_and_seal(AgentRuntimeStopReason::Cancelled);
     drop(native.navigation.lock().unwrap().take());
     assert!(matches!(
@@ -1248,6 +1255,94 @@ fn journal_clock_failure_after_native_decision_accounts_native_debt_but_refuses_
             lifecycle.drain_until(Instant::now() + Duration::from_secs(2)),
             AgentRuntimeScopedDrain::Unproven
         ));
+        native.join();
+        let mut destroy = owner.destroy(&resource).unwrap();
+        assert!(destroy.poll(now()).unwrap().is_some());
+        owner.seal_resources().unwrap();
+        assert!(owner.locally_retired());
+        assert_eq!(server.join().unwrap(), 1);
+    }
+}
+
+#[test]
+fn revoked_health_before_navigation_terminal_still_accounts_original_receipt() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for delayed in [false, true] {
+        let (owner, native, resource, browser) = setup();
+        native.discovery.store(true, Ordering::Release);
+        native.hold_navigation.store(true, Ordering::Release);
+        if !delayed {
+            let trigger = native.clone();
+            let context = resource.identity().context();
+            *native.after_navigation.lock().unwrap() = Some(Box::new(move || {
+                trigger
+                    .reporters
+                    .lock()
+                    .unwrap()
+                    .get(&context)
+                    .unwrap()
+                    .invalidate();
+                let (request, callback) = trigger.navigation.lock().unwrap().take().unwrap();
+                callback(
+                    request
+                        .into_completion()
+                        .settle(Err(ContextPortFailure::NativeRefused)),
+                );
+            }));
+        }
+        let (controller, mut result, scope, server, _) =
+            prepare(browser, vec![navigation_stream(1, FIRST)]);
+        let (_, lifecycle) = start(controller, scope);
+        if delayed {
+            wait_until(|| native.navigation.lock().unwrap().is_some());
+            native
+                .reporters
+                .lock()
+                .unwrap()
+                .get(&resource.identity().context())
+                .unwrap()
+                .invalidate();
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(
+                result.take_outcome().is_none(),
+                "health loss cannot abandon original callback debt"
+            );
+            assert_eq!(
+                owner
+                    .shared
+                    .resource(&resource)
+                    .unwrap()
+                    .navigations
+                    .load(Ordering::Acquire),
+                1
+            );
+            let (request, callback) = native.navigation.lock().unwrap().take().unwrap();
+            callback(
+                request
+                    .into_completion()
+                    .settle(Err(ContextPortFailure::NativeRefused)),
+            );
+        }
+        // Quarantined health still requires resource recovery; accounting a
+        // callback is not a replacement terminal revocation proof.
+        assert!(matches!(
+            finish(&mut result),
+            AgentWorkRetainedOutcome::Recovery(_)
+        ));
+        assert_eq!(native.reads.load(Ordering::Acquire), 1);
+        assert_eq!(native.navigation_count.load(Ordering::Acquire), 1);
+        assert_eq!(
+            owner
+                .shared
+                .resource(&resource)
+                .unwrap()
+                .navigations
+                .load(Ordering::Acquire),
+            0
+        );
+        let _ = lifecycle.drain_until(Instant::now() + Duration::from_secs(2));
         native.join();
         let mut destroy = owner.destroy(&resource).unwrap();
         assert!(destroy.poll(now()).unwrap().is_some());

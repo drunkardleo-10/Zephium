@@ -769,6 +769,14 @@ impl Drop for Handle {
 }
 
 impl Handle {
+    pub fn work_call(
+        &self,
+        profile: zephium_core::ids::ProfileId,
+        call: zephium_ipc::work::WorkCallV1,
+    ) -> Result<crate::WorkDocumentRequest, zephium_core::work::WorkError> {
+        self.submit_work_document(call.into_request()?, Some(profile))
+    }
+
     pub fn work_authoring_command(
         &self,
         profile: zephium_core::ids::ProfileId,

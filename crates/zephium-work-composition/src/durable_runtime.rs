@@ -27,11 +27,33 @@ pub struct WorkBrowserAdapterSettings {
     pub resource_diagnostic: Option<fn(Option<zephium_engine::WorkResourceFailureCause>)>,
     /// Diagnostic observation only, excluded from optimized product builds.
     #[cfg(feature = "public-qualification")]
-    pub diagnostic: Option<fn(zephium_app::RetainedWorkSnapshot)>,
+    pub diagnostic:
+        Option<fn(zephium_core::work::WorkAttemptId, zephium_app::RetainedWorkSnapshot)>,
     pub profile: AgentWorkProfileBinding,
     pub model: AgentBrowserModel,
     pub config: AgentWorkApplicationConfig,
     pub credential: AgentProviderCredential,
+}
+impl WorkBrowserAdapterSettings {
+    pub fn new(
+        profile: AgentWorkProfileBinding,
+        model: AgentBrowserModel,
+        config: AgentWorkApplicationConfig,
+        credential: AgentProviderCredential,
+    ) -> Self {
+        Self {
+            #[cfg(feature = "public-qualification")]
+            retain_public_responses: false,
+            #[cfg(feature = "retained-lifetime-diagnostic")]
+            resource_diagnostic: None,
+            #[cfg(feature = "public-qualification")]
+            diagnostic: None,
+            profile,
+            model,
+            config,
+            credential,
+        }
+    }
 }
 
 struct NativeGuard(RetainedWorkHandle);
@@ -134,7 +156,7 @@ impl MacosWorkComposition {
                     diagnostic(self.retained_resource_failure_cause(&guard.0));
                 }
                 if let Some(diagnostic) = diagnostic {
-                    diagnostic(snapshot);
+                    diagnostic(attempt.attempt(), snapshot);
                 }
             }
             match snapshot.phase {
@@ -184,15 +206,14 @@ impl MacosWorkComposition {
             }
             if guard.0.is_closed() {
                 let limits = attempt.specification().limits;
-                // The terminal public event stream is not the policy ledger.
-                // Retain its approved ceiling explicitly rather than deriving
-                // falsely exact total usage from partial progress events.
-                let usage = Some(WorkUsage {
+                // Closed usage comes from the original policy/drain/resource and
+                // terminal ACK join, never the lossy public progress stream.
+                let usage = Some(snapshot.usage.unwrap_or(WorkUsage {
                     model_tokens: limits.model_tokens,
                     cost_micro_usd: limits.cost_micro_usd,
                     operations: limits.operations,
                     accounting: WorkUsageAccounting::ConservativeReservation,
-                });
+                }));
                 let (status, artifacts) = match (disposition, archived) {
                     (Some(AgentWorkDisposition::Succeeded), Some(archive)) => (
                         WorkAttemptStatus::Succeeded,
@@ -224,9 +245,6 @@ fn compile(
     attempt: &WorkNodeAttempt,
     settings: WorkBrowserAdapterSettings,
 ) -> Result<crate::TrustedWorkRequest, WorkError> {
-    let WorkCapability::PublicBrowse { scope } = &attempt.specification().capability else {
-        return Err(WorkError::Invalid);
-    };
     attempt.specification().capability.validate()?;
     if settings.profile.profile() != attempt.profile()
         || attempt
@@ -237,26 +255,38 @@ fn compile(
     {
         return Err(WorkError::Invalid);
     }
-    let rules = scope
-        .routes
-        .iter()
-        .map(|route| {
-            AgentNavigationOriginRule::try_new(
-                SemanticOrigin::parse(&route.origin).map_err(|_| WorkError::Invalid)?,
-                route.path_prefix.clone(),
-                true,
-                false,
+    let navigation = match &attempt.specification().capability {
+        WorkCapability::PublicDiscovery { scope } => AgentNavigationDiscovery::try_new_public_web(
+            ContextNavigationTarget::parse(scope.start_url()?.as_str())
+                .map_err(|_| WorkError::Invalid)?,
+            usize::from(scope.max_hops),
+            2,
+        )
+        .map_err(|_| WorkError::Invalid)?,
+        WorkCapability::PublicBrowse { scope } => {
+            let rules = scope
+                .routes
+                .iter()
+                .map(|route| {
+                    AgentNavigationOriginRule::try_new(
+                        SemanticOrigin::parse(&route.origin).map_err(|_| WorkError::Invalid)?,
+                        route.path_prefix.clone(),
+                        true,
+                        false,
+                    )
+                    .map_err(|_| WorkError::Invalid)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            AgentNavigationDiscovery::try_new_production(
+                ContextNavigationTarget::parse(&scope.start_url).map_err(|_| WorkError::Invalid)?,
+                rules,
+                usize::from(scope.max_hops),
+                2,
             )
-            .map_err(|_| WorkError::Invalid)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let navigation = AgentNavigationDiscovery::try_new_production(
-        ContextNavigationTarget::parse(&scope.start_url).map_err(|_| WorkError::Invalid)?,
-        rules,
-        usize::from(scope.max_hops),
-        2,
-    )
-    .map_err(|_| WorkError::Invalid)?;
+            .map_err(|_| WorkError::Invalid)?
+        }
+        _ => return Err(WorkError::Invalid),
+    };
     let output_fields = attempt
         .node()
         .outputs

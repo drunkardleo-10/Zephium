@@ -351,13 +351,31 @@ impl WorkResourceOwner {
         policy: zephium_agentic::WorkBrowserDocumentPolicy,
         now: AgentPolicyInstant,
     ) -> Result<PendingLifecycle, Refusal> {
+        self.construct_isolated(id, context, storage, target, policy, false, now)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn construct_isolated(
+        &self,
+        id: WorkBrowserResourceId,
+        context: ContextId,
+        storage: ContextProfileStorageClass,
+        target: ContextNavigationTarget,
+        policy: zephium_agentic::WorkBrowserDocumentPolicy,
+        isolated_public: bool,
+        now: AgentPolicyInstant,
+    ) -> Result<PendingLifecycle, Refusal> {
         if !self.shared.global_current() {
             return Err(Refusal::Uncertain);
         }
-        let request = self
-            .shared
-            .lock_rows()?
-            .construct_document_with_policy(id, context, storage, target, policy, now)?;
+        let request = self.shared.lock_rows()?.construct_document_with_isolation(
+            id,
+            context,
+            storage,
+            target,
+            policy,
+            isolated_public,
+            now,
+        )?;
         let (request, mut health) = request
             .track_resource_health()
             .map_err(|_| Refusal::Uncertain)?;
