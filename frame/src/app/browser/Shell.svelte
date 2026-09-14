@@ -92,57 +92,57 @@
   data-zephium-active-tab={tabs.activeId() ?? ""}
   data-zephium-surface={browserPage.currentPage() === "settings" ? "settings" : "browse"}
 >
-  <Sidebar
-    >{#snippet browserBody(compact)}
-      <AddressField {compact}>{#snippet shield()}<BlockerShield />{/snippet}</AddressField>
-      {#if compact}
-        <ExtensionActions compact />
-        <EssentialsRail entries={railEssentials} onSelect={selectTab} />
-        <TabRail entries={railTabs} onSelect={selectTab} />
-      {:else}
-        <ExtensionActions />
-        {#if tree.favorites.length > 0 || tabDrag.draggedId() !== null}<div
-            class="essentials-drop-zone shrink-0 pb-1"
-            data-essentials-drop
-            data-over={tabDrag.overEssentials()}
-          >
-            {#if tree.favorites.length === 0}<div class="essential-drop-hint">
-                {m.essential_drop_hint()}
-              </div>{/if}
-            <TabList
-              entries={tree.favorites}
-              section="favorites"
-              variant="essentials"
-              label={m.essentials()}
-              {splitting}
-              onSelect={selectTab}
-              >{#snippet essentialTile(props)}<EssentialTile {...props} />{/snippet}</TabList
+  {#if browserPage.currentPage() !== "work"}<Sidebar
+      >{#snippet browserBody(compact)}
+        <AddressField {compact}>{#snippet shield()}<BlockerShield />{/snippet}</AddressField>
+        {#if compact}
+          <ExtensionActions compact />
+          <EssentialsRail entries={railEssentials} onSelect={selectTab} />
+          <TabRail entries={railTabs} onSelect={selectTab} />
+        {:else}
+          <ExtensionActions />
+          {#if tree.favorites.length > 0 || tabDrag.draggedId() !== null}<div
+              class="essentials-drop-zone shrink-0 pb-1"
+              data-essentials-drop
+              data-over={tabDrag.overEssentials()}
             >
-          </div>{/if}
-        {#if tabDrag.moveFailed()}<p class="sidebar-move-error" role="alert">
-            {m.essential_move_failed()}
-          </p>{/if}
-        <SpaceHeader />
-        {#if splitting}<p class="shrink-0 px-3 pb-1 text-[12px] text-accent" aria-live="polite">
-            {m.choose_split()}
-          </p>{/if}
-        <SidebarBody pinned={tree.pinned} today={tree.today} {splitting} onSelect={selectTab} />
-      {/if}
-    {/snippet}{#snippet settingsNavigation()}<SettingsNavigation />{/snippet}{#snippet toolPanel(
-      kind,
-    )}<LazyView
-        loader={loadToolSlot}
-        loadingLabel={m.surface_loading()}
-        failureLabel={m.surface_render_failed()}
-        retryLabel={m.surface_retry()}
-        >{#snippet children(View)}<View
-            tool={kind}
-            profile={tabs.profile()?.id ?? "unbound"}
-            host="sidebar"
-            onclose={toolHost.close}
-          />{/snippet}</LazyView
-      >{/snippet}</Sidebar
-  >
+              {#if tree.favorites.length === 0}<div class="essential-drop-hint">
+                  {m.essential_drop_hint()}
+                </div>{/if}
+              <TabList
+                entries={tree.favorites}
+                section="favorites"
+                variant="essentials"
+                label={m.essentials()}
+                {splitting}
+                onSelect={selectTab}
+                >{#snippet essentialTile(props)}<EssentialTile {...props} />{/snippet}</TabList
+              >
+            </div>{/if}
+          {#if tabDrag.moveFailed()}<p class="sidebar-move-error" role="alert">
+              {m.essential_move_failed()}
+            </p>{/if}
+          <SpaceHeader />
+          {#if splitting}<p class="shrink-0 px-3 pb-1 text-[12px] text-accent" aria-live="polite">
+              {m.choose_split()}
+            </p>{/if}
+          <SidebarBody pinned={tree.pinned} today={tree.today} {splitting} onSelect={selectTab} />
+        {/if}
+      {/snippet}{#snippet settingsNavigation()}<SettingsNavigation />{/snippet}{#snippet toolPanel(
+        kind,
+      )}<LazyView
+          loader={loadToolSlot}
+          loadingLabel={m.surface_loading()}
+          failureLabel={m.surface_render_failed()}
+          retryLabel={m.surface_retry()}
+          >{#snippet children(View)}<View
+              tool={kind}
+              profile={tabs.profile()?.id ?? "unbound"}
+              host="sidebar"
+              onclose={toolHost.close}
+            />{/snippet}</LazyView
+        >{/snippet}</Sidebar
+    >{/if}
   {#if browserPage.navigationFailed()}<div class="navigation-error" role="alert">
       {m.browser_nav_failed()}
     </div>{/if}
@@ -164,7 +164,7 @@
     </main>
   {/if}
   {#if browserPage.currentPage() !== null}
-    <main class="internal-stage">
+    <main class="internal-stage" class:work-stage={browserPage.currentPage() === "work"}>
       <RenderBoundary title={m.surface_render_failed()} retryLabel={m.surface_retry()}>
         {#if browserPage.currentPage() === "settings"}
           <LazyView
@@ -187,3 +187,9 @@
     </main>
   {/if}
 </div>
+
+<style>
+  .work-stage {
+    padding-inline-start: 0;
+  }
+</style>

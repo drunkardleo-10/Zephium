@@ -27,6 +27,11 @@ export default defineConfig({
   },
   build: {
     target: "es2022",
+    // Bundled assets have no network latency. Eagerly preloading the whole
+    // module graph can overflow the native protocol's 32-request admission
+    // limit before the main stylesheet loads. Native module imports schedule
+    // their dependencies; Vite still loads CSS before each lazy destination.
+    modulePreload: false,
     rolldownOptions: {
       input: {
         browser: fileURLToPath(new URL("./browser.html", import.meta.url)),

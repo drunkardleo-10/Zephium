@@ -13,7 +13,12 @@
   let {
     artifact,
     onevidence,
-  }: { artifact: ArtifactView; onevidence?: (reference: EvidenceReference) => void } = $props();
+    embedded = false,
+  }: {
+    artifact: ArtifactView;
+    onevidence?: (reference: EvidenceReference) => void;
+    embedded?: boolean;
+  } = $props();
   let valid = $derived(artifactRenderable(artifact));
   let content = $derived(artifact.content);
   const labels = {
@@ -30,10 +35,10 @@
 </script>
 
 <article aria-label={artifact.title} class="artifact">
-  <header>
-    <h2>{artifact.title}</h2>
-    <p class="review">{artifact.reviewLabel}</p>
-  </header>
+  {#if !embedded}<header>
+      <h2>{artifact.title}</h2>
+      <p class="review">{artifact.reviewLabel}</p>
+    </header>{/if}
   {#if !valid}<p role="alert">{m.work_artifact_unavailable()}</p>
   {:else if content.kind === "document"}<div class="document">
       {#each content.paragraphs as paragraph, i (i)}<p>{paragraph}</p>{:else}<p>
@@ -42,6 +47,7 @@
     </div>
   {:else if content.kind === "table"}<DataTable
       caption={artifact.title}
+      showCaption={!embedded}
       columns={content.columns.map((label, i) => ({ key: String(i), label }))}
       rows={content.rows.map((row, i) => ({
         key: String(i),
@@ -52,6 +58,7 @@
     />
   {:else if content.kind === "comparison"}<DataTable
       caption={artifact.title}
+      showCaption={!embedded}
       columns={content.criteria.map((label, i) => ({ key: String(i), label }))}
       rows={content.alternatives.map((row, i) => ({
         key: String(i),

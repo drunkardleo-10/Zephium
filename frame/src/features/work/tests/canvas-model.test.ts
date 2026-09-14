@@ -36,7 +36,7 @@ test("invalid persisted geometry cannot reach the canvas", () => {
   expect(validViewport({ x: Infinity, y: 0, zoom: 1 })).toBeUndefined();
   expect(validViewport({ x: 0, y: 0, zoom: 9 })).toBeUndefined();
   const nodes = reconcileNodes([], [item("a")], { a: { x: NaN, y: 1 } });
-  expect(nodes[0]!.position).toEqual({ x: 0, y: 0 });
+  expect(nodes[0]!.position).toEqual({ x: 80, y: 120 });
 });
 test("a large unchanged scene shares all its node objects", () => {
   const items = Array.from({ length: 500 }, (_, i) => item(String(i)));
@@ -49,4 +49,10 @@ test("new items do not overlap retained arrangements after another item is remov
   const next = reconcileNodes(previous, [item("b"), item("c")]);
   expect(next[0]).toBe(previous[1]);
   expect(next[1]!.position).not.toEqual(next[0]!.position);
+});
+
+test("restored origin remains user-owned while new placements clear chrome", () => {
+  const nodes = reconcileNodes([], [item("saved"), item("new")], { saved: { x: 0, y: 0 } });
+  expect(nodes[0]!.position).toEqual({ x: 0, y: 0 });
+  expect(nodes[1]!.position.y).toBeGreaterThanOrEqual(120);
 });

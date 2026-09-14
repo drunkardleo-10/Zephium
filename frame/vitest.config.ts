@@ -1,6 +1,7 @@
 import { defineConfig } from "vitest/config";
 import { playwright } from "@vitest/browser-playwright";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
+import tailwindcss from "@tailwindcss/vite";
 import { alias } from "./aliases";
 
 export default defineConfig({
@@ -20,7 +21,7 @@ export default defineConfig({
       },
       {
         resolve: { alias },
-        plugins: [svelte()],
+        plugins: [tailwindcss(), svelte()],
         optimizeDeps: {
           include: [
             "layerchart/svg",

@@ -18,6 +18,12 @@ test("renders SVG on demand and retains exact values when a plot is unavailable"
     ],
   });
   await expect.poll(() => screen.container.querySelector("svg")).not.toBeNull();
+  await expect.poll(() => screen.container.querySelectorAll(".lc-bar").length).toBe(2);
+  const bars = [...screen.container.querySelectorAll(".lc-bar")].map((bar) =>
+    bar.getBoundingClientRect(),
+  );
+  expect(bars[0]?.height).toBeGreaterThan(0);
+  expect(bars[1]?.height).toBeGreaterThan(bars[0]?.height ?? 0);
   await screen.getByText("Exact values", { exact: true }).click();
   await expect.element(screen.getByRole("cell", { name: "2.5000" })).toBeVisible();
   await screen.rerender({

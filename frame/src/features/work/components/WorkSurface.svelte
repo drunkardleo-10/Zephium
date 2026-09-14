@@ -23,8 +23,16 @@
     onviewchange,
     onevidence,
     resources,
+    artifactActions,
+    objectiveDraft,
+    answerDraft,
+    ondraft,
   }: {
     resources?: Snippet;
+    artifactActions?: Snippet<[string]>;
+    objectiveDraft?: string;
+    answerDraft?: (question: string) => string | undefined;
+    ondraft?: (field: "objective" | `question:${string}`, text: string) => void;
     view: WorkSurfaceView;
     active?: boolean;
     request: WorkRequestView;
@@ -34,10 +42,22 @@
     onviewchange?: (view: CanvasView) => void;
     onevidence?: (reference: EvidenceReference) => void;
   } = $props();
-  // The host keys this component by Work/profile identity. Drafts stay local and
-  // must be handed to its draft owner before navigation once persistence is wired.
+  // Standalone presentations may own drafts locally; the product host supplies
+  // a profile-scoped draft owner and its original durable revision.
   let objective = $state(untrack(() => view.objective));
   const answers = new SvelteMap<string, string>();
+  const objectiveText = $derived(ondraft ? (objectiveDraft ?? view.objective) : objective);
+  function answerText(question: string) {
+    return answerDraft ? (answerDraft(question) ?? "") : (answers.get(question) ?? "");
+  }
+  function editObjective(text: string) {
+    if (ondraft) ondraft("objective", text);
+    else objective = text;
+  }
+  function editAnswer(question: string, text: string) {
+    if (ondraft) ondraft(`question:${question}`, text);
+    else answers.set(question, text);
+  }
   let selected = $state<string | null>(null);
   let inspectorFocus = $state<HTMLButtonElement>();
   let returnFocus: HTMLElement | null = null;
@@ -127,19 +147,19 @@
         <form
           onsubmit={(event) => {
             event.preventDefault();
-            if (objective.trim()) submit({ kind: "objective", text: objective.trim() });
+            if (objectiveText.trim()) submit({ kind: "objective", text: objectiveText.trim() });
           }}
         >
           <label for={`${instanceId}-objective`}>{m.work_objective()}</label>
           <div class="objective-row">
             <textarea
               id={`${instanceId}-objective`}
-              bind:value={objective}
+              bind:value={() => objectiveText, editObjective}
               maxlength={16384}
               rows="2"
               disabled={blocked}></textarea><Button
               type="submit"
-              disabled={blocked || !objective.trim() || objective === view.objective}
+              disabled={blocked || !objectiveText.trim() || objectiveText === view.objective}
               >{m.work_submit_objective()}</Button
             >
           </div>
@@ -148,7 +168,7 @@
             class="question"
             onsubmit={(event) => {
               event.preventDefault();
-              const text = answers.get(question.key)?.trim();
+              const text = answerText(question.key).trim();
               if (text) submit({ kind: "answer", question: question.key, text });
             }}
           >
@@ -157,8 +177,8 @@
                 {#each question.options as option, i (i)}<Button
                     size="compact"
                     disabled={blocked}
-                    aria-pressed={answers.get(question.key) === option}
-                    onclick={() => answers.set(question.key, option)}>{option}</Button
+                    aria-pressed={answerText(question.key) === option}
+                    onclick={() => editAnswer(question.key, option)}>{option}</Button
                   >{/each}
               </div>{/if}
             <div class="objective-row">
@@ -166,10 +186,10 @@
                 id={`${instanceId}-question-${question.key}`}
                 maxlength={4096}
                 bind:value={
-                  () => answers.get(question.key) ?? "", (value) => answers.set(question.key, value)
+                  () => answerText(question.key), (value) => editAnswer(question.key, value)
                 }
                 disabled={blocked}
-              /><Button type="submit" disabled={blocked || !answers.get(question.key)?.trim()}
+              /><Button type="submit" disabled={blocked || !answerText(question.key).trim()}
                 >{m.work_submit_answer()}</Button
               >
             </div>
@@ -226,7 +246,8 @@
           {#if selectedItem}<aside class="inspector" aria-label={m.work_inspector()}>
               <Button bind:ref={inspectorFocus} size="compact" onclick={closeInspector}
                 >{m.work_close_inspector()}</Button
-              >{#if artifact}<Artifact {artifact} {onevidence} />{:else}<h2>
+              >{#if artifact}<Artifact {artifact} {onevidence} />
+                {@render artifactActions?.(artifact.key)}{:else}<h2>
                   {selectedItem.title}
                 </h2>
                 <p>{selectedItem.detail}</p>

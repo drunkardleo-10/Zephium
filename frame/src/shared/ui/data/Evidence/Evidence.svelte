@@ -1,7 +1,8 @@
 <script lang="ts">
   import type { EvidenceView } from "./evidence";
   import * as m from "$shared/i18n/messages";
-  let { evidence }: { evidence: EvidenceView } = $props();
+  import Button from "$shared/ui/Button";
+  let { evidence, onopen }: { evidence: EvidenceView; onopen?: (url: string) => void } = $props();
   let valid = $derived(
     evidence.state !== "ready" ||
       (evidence.text.length <= 8192 &&
@@ -21,7 +22,21 @@
       <h2>{evidence.title}</h2>
       <p>{evidence.origin} · {evidence.role}</p>
     </header>
-    <p class="historical">{m.work_historical_source()}</p>
+    {#if evidence.citation}<p>
+        {m.work_provider_citation({
+          provider: evidence.citation.provider,
+          model: evidence.citation.model,
+        })}
+      </p>
+      <p>{evidence.citation.title}</p>
+      <p>{evidence.citation.url}</p>
+      <p class="historical">{m.work_provider_citation_history()}</p>
+      {#if onopen && /^https?:\/\//iu.test(evidence.citation.url)}<Button
+          onclick={() => {
+            if (evidence.state === "ready" && evidence.citation) onopen?.(evidence.citation.url);
+          }}>{m.work_open_source_browse()}</Button
+        >{/if}
+    {:else}<p class="historical">{m.work_historical_source()}</p>{/if}
     <blockquote>{evidence.text}</blockquote>
     <p class="extent">
       {evidence.truncated ? m.work_source_truncated() : m.work_source_complete()} · {m.work_source_bytes(

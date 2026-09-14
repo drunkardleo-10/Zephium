@@ -1,58 +1,58 @@
 {
   "browser": {
-    "js": 290526,
+    "js": 295000,
     "css": 81564
   },
   "panel": {
-    "js": 133500,
+    "js": 138000,
     "css": 26345
   },
   "lazy:features/settings/components/sections/AboutPage.svelte": {
-    "js": 423504,
+    "js": 430000,
     "css": 90838
   },
   "lazy:features/settings/components/sections/AccountPage.svelte": {
-    "js": 343864,
+    "js": 349000,
     "css": 84110
   },
   "lazy:features/tools/components/previews/ChatView.svelte": {
-    "js": 98063,
+    "js": 101000,
     "css": 6463
   },
   "lazy:features/settings/components/sections/DeveloperPage.svelte": {
-    "js": 298468,
+    "js": 305000,
     "css": 84802
   },
   "lazy:features/settings/components/sections/DocumentationPage.svelte": {
-    "js": 138000,
+    "js": 143000,
     "css": 3491
   },
   "lazy:features/settings/components/sections/DownloadsPage.svelte": {
-    "js": 415089,
+    "js": 422000,
     "css": 90293
   },
   "lazy:features/tools/components/previews/DownloadsView.svelte": {
-    "js": 97028,
+    "js": 100000,
     "css": 6463
   },
   "lazy:features/settings/components/sections/FocusPage.svelte": {
-    "js": 417929,
+    "js": 425000,
     "css": 90293
   },
   "lazy:features/settings/components/sections/GeneralPage.svelte": {
-    "js": 429832,
+    "js": 437000,
     "css": 92134
   },
   "lazy:features/tools/components/previews/HistoryView.svelte": {
-    "js": 97026,
+    "js": 100000,
     "css": 6463
   },
   "lazy:features/settings/components/sections/KeyboardPage.svelte": {
-    "js": 419516,
+    "js": 426000,
     "css": 90293
   },
   "lazy:features/settings/components/sections/LanguagesPage.svelte": {
-    "js": 424842,
+    "js": 432000,
     "css": 90838
   },
   "lazy:features/tools/components/previews/NotesView.svelte": {
@@ -60,31 +60,31 @@
     "css": 12558
   },
   "lazy:features/settings/components/sections/PasswordsPage.svelte": {
-    "js": 352103,
+    "js": 359000,
     "css": 86098
   },
   "lazy:features/settings/components/sections/PerformancePage.svelte": {
-    "js": 418161,
+    "js": 425000,
     "css": 90293
   },
   "lazy:features/settings/components/sections/PrivacyPage.svelte": {
-    "js": 428128,
+    "js": 435000,
     "css": 92134
   },
   "lazy:features/settings/components/sections/ProfilesPage.svelte": {
-    "js": 415977,
+    "js": 421000,
     "css": 90943
   },
   "lazy:features/settings/components/sections/SearchPage.svelte": {
-    "js": 418036,
+    "js": 425000,
     "css": 90293
   },
   "lazy:features/settings/components/Settings.svelte": {
-    "js": 422000,
+    "js": 429000,
     "css": 93000
   },
   "lazy:features/settings/components/sections/TabsPage.svelte": {
-    "js": 404110,
+    "js": 411000,
     "css": 91684
   },
   "lazy:features/tools/components/previews/TasksView.svelte": {
@@ -92,11 +92,11 @@
     "css": 11250
   },
   "lazy:features/tools/components/previews/TimeView.svelte": {
-    "js": 97224,
+    "js": 100000,
     "css": 6463
   },
   "lazy:features/tools/components/ToolSlot.svelte": {
-    "js": 93684,
+    "js": 97000,
     "css": 353
   },
   "lazy:features/notes/components/Notes.svelte": {
@@ -112,11 +112,41 @@
     "css": 12000
   },
   "lazy:app/browser/WorkWorkspace.svelte": {
-    "js": 325000,
-    "css": 88000
+    "js": 326000,
+    "css": 88000,
+    "description": "Measured 325466 JS bytes with shared direct-public-read session and operation reconciliation."
   },
   "lazy:features/work/components/WorkCanvas.svelte": {
-    "js": 470000,
-    "css": 96000
+    "js": 480000,
+    "css": 97000,
+    "description": "Measured 96624 CSS bytes with compact responsibility and expected-output chips; JavaScript cap unchanged."
+  },
+  "lazy:shared/ui/data/Chart/Chart.svelte": {
+    "js": 415000,
+    "css": 8000
+  },
+  "lazy:dependency/d3-quadtree/src/index.js": {
+    "js": 6000,
+    "css": 0
+  },
+  "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
+    "js": 477000,
+    "css": 90000,
+    "description": "Measured 475938 JS bytes with explicit objective-only public research selection, disclosure and captured submission identity."
+  },
+  "lazy:features/work/components/WorkObjectiveInspector.svelte": {
+    "js": 133000,
+    "css": 12000,
+    "description": "Measured 132194 JS bytes after shared artifact chunk movement for readable result focus/list rendering; exact provider scope and citations retained."
+  },
+  "lazy:features/work/components/WorkInteraction.svelte": {
+    "js": 117000,
+    "css": 6500,
+    "description": "Measured 115615 JS bytes with direct-public-read outcomes; headroom includes the required no-resume guard for admitted unstarted reads."
+  },
+  "lazy:features/work/components/WorkResultInspector.svelte": {
+    "js": 74000,
+    "css": 5000,
+    "description": "Measured 72990 JS and 4691 CSS bytes for exact retained evidence and result edit/review; no plan editor."
   }
 }

@@ -7,6 +7,7 @@
     rows,
     labels,
     pageSize = 25,
+    showCaption = true,
     actions,
   }: {
     caption: string;
@@ -14,6 +15,7 @@
     rows: readonly TableRow[];
     labels: TableLabels;
     pageSize?: number;
+    showCaption?: boolean;
     actions?: Snippet<[TableRow]>;
   } = $props();
   let page = $state(0);
@@ -33,7 +35,7 @@
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
   <div class="table-scroll" role="region" aria-label={caption} tabindex="0">
     <table>
-      <caption>{caption}</caption>
+      <caption class:sr-only={!showCaption}>{caption}</caption>
       <thead
         ><tr
           ><th scope="col">{labels.rowHeading}</th>{#each columns as column (column.key)}<th
@@ -95,6 +97,7 @@
 
   th,
   td {
+    min-inline-size: 160px;
     padding: 10px 14px;
     border-block-start: 1px solid var(--color-border);
     text-align: start;

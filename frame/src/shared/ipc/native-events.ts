@@ -1,4 +1,6 @@
 import type {
+  WorkEnvironmentChanged,
+  WorkChanged,
   PanelState,
   ResourceChanged,
   BlockerStatusChanged,
@@ -38,6 +40,8 @@ function scopedEvent<T>(name: string) {
 // with @tauri-apps/api/event: its listen command accepts a caller-selected
 // target, which would let the launcher panel subscribe to main-window state.
 export const nativeEventNames = {
+  workEnvironmentChanged: "zephium:work-environment-changed",
+  workChanged: "zephium:work-changed",
   panelState: "zephium:panel-state",
   resourceChanged: "zephium:resource-changed",
   resourceClose: "zephium:resource-close",
@@ -64,6 +68,10 @@ export const nativeEventNames = {
 } as const;
 
 export const events = {
+  workEnvironmentChanged: scopedEvent<WorkEnvironmentChanged>(
+    nativeEventNames.workEnvironmentChanged,
+  ),
+  workChanged: scopedEvent<WorkChanged>(nativeEventNames.workChanged),
   resourceClose: scopedEvent<string>(nativeEventNames.resourceClose),
   resourceCloseCancelled: scopedEvent<string>(nativeEventNames.resourceCloseCancelled),
   resourceChanged: scopedEvent<ResourceChanged>(nativeEventNames.resourceChanged),

@@ -11,6 +11,8 @@ const defaults = {
   "ui.reduce-motion": "false",
   "ui.newtab-logo": "true",
   "ui.newtab-shortcuts": "false",
+  "ai.enabled": "true",
+  "work.enabled": "true",
 } as const;
 export type PreferenceKey = keyof typeof defaults;
 const values = $state<Record<PreferenceKey, string>>({ ...defaults });
