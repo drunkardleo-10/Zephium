@@ -53,21 +53,28 @@ export function environmentItems(
       }
       return {
         id: element.id,
+        type: "tab",
+        area: element.area,
         kind: m.work_env_browser_resource(),
         title: tab?.title || m.work_env_unavailable_tab(),
         detail: origin,
         status: tab ? area : m.work_env_tab_unavailable(),
         favicon: tab?.favicon ?? null,
+        unavailable: !tab,
       };
     }
     if (element.reference.kind === "resource") {
       const resourceId = element.reference.resource;
+      const note = notes.find((note) => note.id === resourceId);
       return {
         id: element.id,
+        type: "note",
+        area: element.area,
         kind: m.work_env_notes(),
-        title: notes.find((note) => note.id === resourceId)?.title || m.work_env_saved_resource(),
-        detail: m.work_env_resource_reference(),
+        title: note?.title || m.work_env_saved_resource(),
+        detail: note?.updated_at ?? "",
         status: area,
+        unavailable: !note,
       };
     }
     const projection = objectives.get(element.reference.objective);
@@ -80,6 +87,8 @@ export function environmentItems(
       const view = artifact && execution ? artifactView(artifact, execution) : undefined;
       return {
         id: element.id,
+        type: "result",
+        area: element.area,
         kind: m.work_env_result(),
         title: artifact?.title ?? m.work_artifact_unavailable(),
         detail: "",
@@ -90,6 +99,8 @@ export function environmentItems(
     }
     return {
       id: element.id,
+      type: "objective",
+      area: element.area,
       kind: m.work_env_objective(),
       title: projection?.work.objective.slice(0, 512) ?? m.work_env_objective(),
       detail: projection

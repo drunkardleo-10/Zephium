@@ -30,9 +30,12 @@ test("explicit result focus restores readable zoom without moving nodes and supp
   const onviewchange = vi.fn();
   const oninspect = vi.fn();
   const onevidence = vi.fn();
+  const onaction = vi.fn();
   const screen = await render(WorkCanvas, {
     items,
     links: [],
+    authoritative: new Set(["result"]),
+    onaction,
     initialView: {
       positions: { result: { x: 800, y: 400 } },
       sizes: { result: { width: 480, height: 360 } },
@@ -45,6 +48,7 @@ test("explicit result focus restores readable zoom without moving nodes and supp
   });
   screen.container.style.width = "1100px";
   screen.container.style.height = "750px";
+  await screen.getByText("Research", { exact: true }).click();
   await screen.getByRole("button", { name: "Focus result", exact: true }).click();
   await expect.poll(() => onviewchange.mock.lastCall?.[0].viewport.zoom).toBe(1);
   expect(onviewchange.mock.lastCall?.[0].positions.result).toEqual({ x: 800, y: 400 });
@@ -54,6 +58,7 @@ test("explicit result focus restores readable zoom without moving nodes and supp
   const scroll = screen.container.querySelector(".artifact-body")!;
   expect(scroll.scrollHeight).toBeGreaterThan(scroll.clientHeight);
   expect(scroll.textContent).toContain(paragraphs.at(-1));
+  oninspect.mockClear();
   await screen.getByText(paragraphs[0]!, { exact: true }).click();
   expect(oninspect).not.toHaveBeenCalled();
   await screen.getByRole("button", { name: "Source 1", exact: true }).click();
@@ -62,8 +67,9 @@ test("explicit result focus restores readable zoom without moving nodes and supp
     label: "Source 1",
   });
   expect(oninspect).not.toHaveBeenCalled();
-  await screen.getByRole("button", { name: "Inspect Research", exact: true }).click();
-  expect(oninspect).toHaveBeenCalledExactlyOnceWith("result");
+  await screen.getByRole("button", { name: "Inspect", exact: true }).click();
+  expect(onaction).toHaveBeenCalledExactlyOnceWith("result", "inspect");
+  expect(oninspect).not.toHaveBeenCalled();
   await screen.unmount();
 });
 
@@ -113,6 +119,7 @@ test("a nine-column comparison stays readable and scrollable with one visible ca
   const screen = await render(WorkCanvas, {
     items: [item],
     links: [],
+    authoritative: new Set(["comparison"]),
     initialView: {
       positions: { comparison: { x: 100, y: 100 } },
       viewport: { x: 0, y: 0, zoom: 0.5 },
@@ -122,6 +129,7 @@ test("a nine-column comparison stays readable and scrollable with one visible ca
   });
   screen.container.style.width = "1100px";
   screen.container.style.height = "750px";
+  await screen.container.querySelector<HTMLElement>(".work-drag-handle")!.click();
   await screen.getByRole("button", { name: "Focus result", exact: true }).click();
   const table = screen.getByRole("table", { name: title, exact: true });
   await expect.element(table).toBeVisible();

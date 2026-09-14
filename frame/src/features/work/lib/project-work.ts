@@ -8,7 +8,27 @@ import type {
 } from "$domain/work";
 import type { ArtifactView, ArtifactContent } from "$shared/ui/data/Artifact";
 import * as m from "$shared/i18n/messages";
-import type { WorkSurfaceView } from "./work-surface";
+import type { CanvasItem, CanvasLink } from "./canvas-model";
+
+/** Display derivation of one objective; neither WorkProjectionV1 nor a store. */
+export type ProjectedWork = {
+  key: string;
+  title: string;
+  objective: string;
+  phase: string;
+  notice?: { title: string; detail: string };
+  questions: readonly { key: string; prompt: string; options: readonly string[] }[];
+  items: readonly (CanvasItem & { artifactKey?: string })[];
+  links: readonly CanvasLink[];
+  artifacts: readonly ArtifactView[];
+  actions: readonly {
+    key: string;
+    label: string;
+    scope: string;
+    consequence: string;
+    disabledReason?: string;
+  }[];
+};
 
 function content(data: WorkArtifactDataV1): ArtifactContent {
   switch (data.kind) {
@@ -54,7 +74,7 @@ export function projectWork(
   plan: WorkPlanRevision | null,
   executionId: string | null,
   activity: readonly WorkSignalV1[] = [],
-): WorkSurfaceView {
+): ProjectedWork {
   const execution = state.executions.find((item) => item.id === executionId);
   const interrupted = !!execution && state.interrupted.includes(execution.id);
   const exactPlan =
@@ -66,7 +86,7 @@ export function projectWork(
     ["approved", "running", "cancel_requested"].includes(execution.status) &&
     !interrupted;
   const nodeIds = new Set(nodes.map((node) => node.id));
-  const items: WorkSurfaceView["items"][number][] = nodes.map((node) => {
+  const items: ProjectedWork["items"][number][] = nodes.map((node) => {
     const attempts = execution?.attempts.filter((attempt) => attempt.node === node.id) ?? [];
     const signal = activity.find(
       (entry) => entry.execution === execution?.id && entry.node === node.id,
@@ -94,7 +114,7 @@ export function projectWork(
           : (attempts.at(-1)?.status ?? m.work_not_started()),
     };
   });
-  const links: WorkSurfaceView["links"][number][] = nodes.flatMap((node) =>
+  const links: ProjectedWork["links"][number][] = nodes.flatMap((node) =>
     node.dependencies
       .filter((id) => nodeIds.has(id))
       .map((id) => ({
@@ -130,7 +150,7 @@ export function projectWork(
         kind: "reference",
       });
   }
-  const actions: WorkSurfaceView["actions"][number][] = [];
+  const actions: ProjectedWork["actions"][number][] = [];
   if (live && execution.status !== "cancel_requested")
     actions.push({
       key: `cancel:${execution.id}`,

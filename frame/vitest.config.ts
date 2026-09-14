@@ -40,6 +40,7 @@ export default defineConfig({
             "@tiptap/extension-blockquote",
             "@tiptap/extension-code-block",
             "@tiptap/extension-hard-break",
+            "@hugeicons/core-free-icons/*",
           ],
         },
         test: {

@@ -84,7 +84,7 @@
     min-width: 0;
     min-height: 0;
     overflow: hidden;
-    background: var(--color-canvas);
+    background: transparent;
   }
 
   .navigation-error {

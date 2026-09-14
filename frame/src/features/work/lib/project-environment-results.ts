@@ -62,6 +62,7 @@ export function environmentResults(
     });
     items.push({
       id,
+      type: "result",
       title: artifact.title,
       kind: m.work_env_result(),
       detail: "",

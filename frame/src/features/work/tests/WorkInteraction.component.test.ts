@@ -243,10 +243,9 @@ test("admitted public research never offers ordinary Start after a lost dispatch
     .not.toBeInTheDocument();
   await expect
     .element(
-      screen.getByText(
-        "Public research has not started. Review or cancel this execution.",
-        { exact: true },
-      ),
+      screen.getByText("Public research has not started. Review or cancel this execution.", {
+        exact: true,
+      }),
     )
     .toBeVisible();
   await expect

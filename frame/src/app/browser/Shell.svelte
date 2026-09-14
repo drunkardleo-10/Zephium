@@ -190,6 +190,6 @@
 
 <style>
   .work-stage {
-    padding-inline-start: 0;
+    padding: 0;
   }
 </style>

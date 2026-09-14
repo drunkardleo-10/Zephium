@@ -1,13 +1,16 @@
 import type { ArtifactView } from "$shared/ui/data/Artifact";
 import type { Node } from "@xyflow/svelte";
 
+type CanvasKind = "tab" | "note" | "objective" | "responsibility" | "result" | "agent";
 /** Display values only; deliberately independent from the generated Work wire contract. */
 export type CanvasItem = {
   id: string;
   title: string;
   kind: string;
+  type?: CanvasKind;
   detail: string;
   status: string;
+  area?: string | null;
   /** Fixed-raster native favicon only; never a remote image URL. */
   favicon?: string | null;
   artifact?: ArtifactView;
@@ -15,6 +18,7 @@ export type CanvasItem = {
   actionLabel?: string;
   /** Planned output names only; these are not produced artifact resources. */
   responsibility?: { outputs: string[] };
+  unavailable?: boolean;
 };
 export type CanvasLink = {
   id: string;
@@ -30,6 +34,40 @@ export type CanvasView = {
 };
 export type WorkNode = Node<CanvasItem, "work">;
 const CANVAS_ITEM_LIMIT = 500;
+export function defaultSize(item: CanvasItem): { width: number; height: number } {
+  if (item.artifact) {
+    switch (item.artifact.content.kind) {
+      case "comparison":
+        return { width: 640, height: 360 };
+      case "table":
+        return { width: 560, height: 320 };
+      case "chart":
+        return { width: 480, height: 320 };
+      case "checklist":
+        return { width: 360, height: 300 };
+      case "sources":
+        return { width: 320, height: 240 };
+      case "browser":
+        return { width: 320, height: 180 };
+      default:
+        return { width: 480, height: 360 };
+    }
+  }
+  switch (item.type) {
+    case "tab":
+      return { width: 280, height: 96 };
+    case "note":
+      return { width: 300, height: 200 };
+    case "objective":
+      return { width: 320, height: 150 };
+    case "responsibility":
+      return { width: 280, height: 150 };
+    case "agent":
+      return { width: 220, height: 84 };
+    default:
+      return { width: 280, height: 160 };
+  }
+}
 const CANVAS_LINK_LIMIT = 2000;
 
 export function validScene(items: readonly CanvasItem[], links: readonly CanvasLink[]): boolean {
@@ -88,6 +126,9 @@ export function reconcileNodes(
       const same =
         node.data.title === item.title &&
         node.data.kind === item.kind &&
+        node.data.type === item.type &&
+        node.data.area === item.area &&
+        node.data.unavailable === item.unavailable &&
         node.data.detail === item.detail &&
         node.data.status === item.status &&
         node.data.favicon === item.favicon &&
@@ -123,8 +164,8 @@ export function reconcileNodes(
       type: "work",
       position,
       data: item,
-      width: restoredSize?.width ?? (item.layout === "artifact" ? 480 : 280),
-      height: restoredSize?.height ?? (item.layout === "artifact" ? 360 : 160),
+      width: restoredSize?.width ?? defaultSize(item).width,
+      height: restoredSize?.height ?? defaultSize(item).height,
       dragHandle: ".work-drag-handle",
       deletable: false,
       connectable: false,
@@ -134,6 +175,48 @@ export function reconcileNodes(
   return next.length === previous.length && next.every((node, index) => node === previous[index])
     ? previous
     : next;
+}
+
+const validPosition = (p: CanvasPosition | undefined) =>
+  !!p &&
+  Number.isFinite(p.x) &&
+  Number.isFinite(p.y) &&
+  Math.abs(p.x) <= 1_000_000 &&
+  Math.abs(p.y) <= 1_000_000;
+const validSize = (s: { width: number; height: number } | undefined) =>
+  !!s &&
+  Number.isInteger(s.width) &&
+  Number.isInteger(s.height) &&
+  s.width >= 120 &&
+  s.width <= 4096 &&
+  s.height >= 80 &&
+  s.height <= 4096;
+
+/** Applies a remote view to existing nodes in place; dragging and derived nodes keep local geometry. */
+export function applyRemoteView(
+  previous: WorkNode[],
+  view: CanvasView,
+  authoritative: ReadonlySet<string>,
+): WorkNode[] {
+  let changed = false;
+  const next = previous.map((node) => {
+    if (!authoritative.has(node.id) || node.dragging) return node;
+    const position = view.positions[node.id];
+    const size = view.sizes?.[node.id];
+    const samePosition =
+      !validPosition(position) ||
+      (node.position.x === position!.x && node.position.y === position!.y);
+    const sameSize =
+      !validSize(size) || (node.width === size!.width && node.height === size!.height);
+    if (samePosition && sameSize) return node;
+    changed = true;
+    return {
+      ...node,
+      ...(samePosition ? {} : { position: { ...position! } }),
+      ...(sameSize ? {} : { width: size!.width, height: size!.height }),
+    };
+  });
+  return changed ? next : previous;
 }
 
 /** Invalid saved geometry never reaches XYFlow. User arrangement is view state only. */

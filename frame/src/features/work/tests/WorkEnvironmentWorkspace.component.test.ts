@@ -1,7 +1,7 @@
 import "$styles/global.css";
 import { expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
-import { page } from "vitest/browser";
+import { page, userEvent } from "vitest/browser";
 import { WorkEnvironmentSession } from "$domain/work-environment";
 import type { WorkCallV1, WorkEnvironmentSnapshot } from "$shared/ipc/bindings";
 import { tabFixture } from "$shared/testing/fixtures";
@@ -113,8 +113,13 @@ test("the production manual environment attaches a real tab and opens only its e
     .toEqual({ kind: "browser", tab: "retained-tab" });
   expect(onopen).not.toHaveBeenCalled();
   await screen.getByRole("button", { name: "Tabs", exact: true }).click();
-  await screen.getByRole("button", { name: "Inspect Research tab" }).click();
-  await screen.getByRole("button", { name: "Open in Browse", exact: true }).click();
+  await expect.poll(() => screen.container.querySelectorAll(".work-drag-handle").length).toBe(1);
+  await screen.container.querySelector<HTMLElement>(".work-drag-handle")!.click();
+  await screen.getByRole("button", { name: "Inspect", exact: true }).click();
+  await screen
+    .getByRole("region", { name: "Details", exact: true })
+    .getByRole("button", { name: "Open in Browse", exact: true })
+    .click();
   expect(onopen).toHaveBeenCalledExactlyOnceWith("retained-tab");
   await expect
     .element(screen.getByRole("textbox", { name: "Start a new objective" }))
@@ -123,7 +128,7 @@ test("the production manual environment attaches a real tab and opens only its e
   session.dispose();
 });
 
-test("opening an objective replaces selection controls and focuses its visible inspector", async () => {
+test("opening an objective lifts it over the canvas and returns on close", async () => {
   const { workSession } = await import("$domain/work");
   const { projection, snapshot } = await import("./environment-fixtures");
   const environment = new WorkEnvironmentSession(snapshot.profile, snapshot.space);
@@ -156,13 +161,15 @@ test("opening an objective replaces selection controls and focuses its visible i
   const root = screen.container.querySelector(".environment") as HTMLElement;
   root.style.height = "720px";
   root.style.width = "1100px";
-  await screen.getByRole("button", { name: "Inspect Objective", exact: true }).click();
-  await screen.getByRole("button", { name: "Open resource", exact: true }).click();
-  const panel = screen.getByRole("region", { name: "Objective", exact: true });
+  await expect.poll(() => screen.container.querySelectorAll(".work-drag-handle").length).toBe(2);
+  await screen.container.querySelector<HTMLElement>(".work-drag-handle")!.click();
+  await screen.getByRole("button", { name: "Open", exact: true }).click();
+  const panel = screen.getByRole("dialog", { name: "Objective", exact: true });
   await expect.element(panel).toBeVisible();
   await expect.element(panel).toHaveFocus();
   expect(screen.container.querySelector(".inspector")).toBeNull();
-  await screen.getByRole("button", { name: "Back to canvas", exact: true }).click();
+  await userEvent.keyboard("{Escape}");
+  await expect.element(panel).not.toBeInTheDocument();
   expect(screen.container.querySelector(".inspector")).toBeNull();
   await screen.unmount();
   environment.dispose();
@@ -256,14 +263,10 @@ test("a real attached objective expands its historical responsibilities directly
   root.style.height = "720px";
   root.style.width = "1400px";
   await screen.getByRole("button", { name: "Show plan", exact: true }).click();
-  await expect
-    .element(screen.getByRole("button", { name: "Inspect Read evidence", exact: true }))
-    .toBeVisible();
-  await expect
-    .element(screen.getByRole("button", { name: "Inspect Compare findings", exact: true }))
-    .toBeVisible();
+  await expect.element(screen.getByText("Read evidence", { exact: true })).toBeVisible();
+  await expect.element(screen.getByText("Compare findings", { exact: true })).toBeVisible();
   await expect.element(screen.getByText("Evidence shortlist", { exact: true })).toBeVisible();
-  expect(screen.container.querySelectorAll("article.responsibility")).toHaveLength(2);
+  expect(screen.container.querySelectorAll(".svelte-flow__node")).toHaveLength(4);
   expect(screen.container.textContent).not.toContain(
     "Operational prose should stay in optional details",
   );
@@ -275,13 +278,9 @@ test("a real attached objective expands its historical responsibilities directly
   expect(dependency?.getAttribute("tabindex")).toBeNull();
   expect(dependency?.getAttribute("aria-describedby")).toBeNull();
   await screen.getByRole("button", { name: "Collapse plan", exact: true }).click();
-  await expect
-    .element(screen.getByRole("button", { name: "Inspect Read evidence", exact: true }))
-    .not.toBeInTheDocument();
+  await expect.element(screen.getByText("Read evidence", { exact: true })).not.toBeInTheDocument();
   await screen.getByRole("button", { name: "Show plan", exact: true }).click();
-  await expect
-    .element(screen.getByRole("button", { name: "Inspect Read evidence", exact: true }))
-    .toBeVisible();
+  await expect.element(screen.getByText("Read evidence", { exact: true })).toBeVisible();
   await environment.flushView();
   await screen.unmount();
   environment.dispose();
@@ -347,7 +346,7 @@ test("prompt submission keeps work on canvas and clarification choices above the
   const longObjective =
     "Find a keyboard with quiet switches and compare available options, delivery dates, prices, and compatibility for my workspace.";
   await composer.fill(longObjective);
-  await screen.getByRole("button", { name: "Start new work", exact: true }).click();
+  await screen.getByRole("button", { name: "Send", exact: true }).click();
   await expect.poll(() => create.mock.calls).toEqual([[longObjective, expect.any(String)]]);
   await expect
     .poll(() => planning.mock.calls)
@@ -385,7 +384,7 @@ test("prompt submission keeps work on canvas and clarification choices above the
   expect(objective.draft("question:budget")).toBe("Under 150");
   await expect.element(composer).toBeVisible();
   const question = screen.container.querySelector(".interaction input")!;
-  const prompt = screen.container.querySelector(".input-panel textarea")!;
+  const prompt = screen.container.querySelector(".panel textarea")!;
   expect(question.compareDocumentPosition(prompt) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(question.getBoundingClientRect().bottom).toBeLessThan(prompt.getBoundingClientRect().top);
   const save = vi.spyOn(objective, "saveDraft").mockResolvedValue(false);
@@ -447,9 +446,7 @@ test("prompt submission keeps work on canvas and clarification choices above the
     .poll(() => screen.container.querySelector(".interaction.settled") !== null)
     .toBe(true);
   await expect
-    .poll(
-      () => screen.container.querySelector(".interaction-stack")!.getBoundingClientRect().height,
-    )
+    .poll(() => screen.container.querySelector(".above")!.getBoundingClientRect().height)
     .toBeLessThan(110);
   const details = screen.getByRole("button", { name: "Plan details", exact: true });
   await expect.element(details).toBeVisible();
@@ -461,15 +458,6 @@ test("prompt submission keeps work on canvas and clarification choices above the
     header.getBoundingClientRect().right,
   );
   expect(button.getBoundingClientRect().right).toBeLessThanOrEqual(1100);
-  await screen.getByRole("navigation").getByRole("button", { name: "Create", exact: true }).click();
-  await screen.getByRole("button", { name: "List view", exact: true }).click();
-  await screen
-    .getByRole("navigation")
-    .getByRole("button", { name: "Create", exact: true, expanded: true })
-    .click();
-  await expect
-    .poll(() => screen.container.querySelector(".list-view")?.textContent)
-    .toContain("Reviewed findings");
   await expect.element(screen.getByRole("button", { name: "Source 1", exact: true })).toBeEnabled();
   await screen.getByRole("button", { name: "View 1 other results", exact: true }).click();
   await expect
@@ -526,7 +514,7 @@ test("public research is explicit, validates without truncation, and submits onl
   root.style.width = "1100px";
   const composer = screen.getByRole("textbox", { name: "Start a new objective", exact: true });
   await composer.fill("🔬".repeat(513));
-  await screen.getByRole("checkbox", { name: "Research public web", exact: true }).click();
+  await screen.getByRole("button", { name: "Research public web", exact: true }).click();
   await expect
     .element(
       screen.getByText(
@@ -535,12 +523,12 @@ test("public research is explicit, validates without truncation, and submits onl
       ),
     )
     .toBeVisible();
-  await screen.getByRole("button", { name: "Research public web", exact: true }).click();
+  await screen.getByRole("button", { name: "Send", exact: true }).click();
   await expect.element(screen.getByRole("alert")).toBeVisible();
   expect(create).not.toHaveBeenCalled();
   expect(environment.composer).toBe("🔬".repeat(513));
   await composer.fill("  Find cafés in Łódź 🔬  ");
-  await screen.getByRole("button", { name: "Research public web", exact: true }).click();
+  await screen.getByRole("button", { name: "Send", exact: true }).click();
   await expect.poll(() => operation.mock.calls.length).toBe(1);
   expect(create).toHaveBeenCalledExactlyOnceWith("Find cafés in Łódź 🔬", expect.any(String));
   expect(operation.mock.calls[0]![0]).toEqual({

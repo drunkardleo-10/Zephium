@@ -85,6 +85,7 @@ export function environmentPlan(
       items.push({
         ...node,
         id,
+        type: "responsibility",
         title: node.title.slice(0, 120),
         detail: "",
         responsibility: {

@@ -28,7 +28,8 @@ export class WorkEnvironmentSession {
   failure = $state<string | null>(null);
   loading = $state(false);
   tabsIntroduced = false;
-  canvasRevision = $state(0);
+  remoteView = $state.raw<{ sequence: number; view: WorkEnvironmentView } | null>(null);
+  private remoteSequence = 0;
   composer = $state("");
   publicResearch = $state(false);
   objectiveSubmission = $state.raw<{
@@ -163,7 +164,7 @@ export class WorkEnvironmentSession {
       !this.viewDraft &&
       !this.pending
     )
-      this.canvasRevision++;
+      this.publishRemoteView(snapshot.view);
     this.snapshot = snapshot;
     this.selected = snapshot.id;
     this.works = [
@@ -248,8 +249,11 @@ export class WorkEnvironmentSession {
     this.viewDraft = null;
     this.delivery = "ready";
     const okay = await this.refresh();
-    if (okay) this.canvasRevision++;
+    if (okay && this.snapshot) this.publishRemoteView(this.snapshot.view);
     return okay;
+  }
+  private publishRemoteView(view: WorkEnvironmentView) {
+    this.remoteView = { sequence: ++this.remoteSequence, view };
   }
   async create(title: string) {
     if (!(await this.flushView())) return false;
@@ -304,7 +308,7 @@ export class WorkEnvironmentSession {
         this.pending = null;
         if (draft?.view === pending.view) {
           this.viewDraft = null;
-          if (advanced) this.canvasRevision++;
+          if (advanced) this.publishRemoteView(receipt.snapshot.view);
         } else if (draft?.id === pending.id) {
           // New local gestures were based on this checkpoint. A later remote view
           // cannot be silently replaced merely because its earlier receipt replayed.

@@ -117,9 +117,9 @@
     "description": "Measured 325466 JS bytes with shared direct-public-read session and operation reconciliation."
   },
   "lazy:features/work/components/WorkCanvas.svelte": {
-    "js": 480000,
-    "css": 97000,
-    "description": "Measured 96624 CSS bytes with compact responsibility and expected-output chips; JavaScript cap unchanged."
+    "js": 505000,
+    "css": 102000,
+    "description": "Measured 96624 CSS bytes with compact responsibility and expected-output chips; JavaScript cap unchanged. M1 canvas: in-place remote reconcile, gesture config, per-icon imports."
   },
   "lazy:shared/ui/data/Chart/Chart.svelte": {
     "js": 415000,
@@ -148,5 +148,10 @@
     "js": 74000,
     "css": 5000,
     "description": "Measured 72990 JS and 4691 CSS bytes for exact retained evidence and result edit/review; no plan editor."
+  },
+  "lazy:features/notes/components/NoteEditorHost.svelte": {
+    "js": 96000,
+    "css": 7000,
+    "description": "Single-note editor host for the Work lift; shares the Notes editor graph."
   }
 }
