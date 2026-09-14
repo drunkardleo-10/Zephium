@@ -97,6 +97,11 @@ pub struct WorkSubject {
     /// Descriptive link only; never a navigation grant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub homepage: Option<String>,
+    /// Public HTTPS image URLs from cited sources that depict the subject.
+    /// Candidates only: Rust fetches, bounds, decodes, and stores an admitted
+    /// copy with provenance before anything renders.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_candidates: Vec<String>,
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -345,6 +350,13 @@ fn validate_subjects(
         if let Some(homepage) = &subject.homepage {
             budget.text(homepage)?;
             super::runtime::validate_public_url(homepage)?;
+        }
+        if subject.image_candidates.len() > 3 {
+            return Err(WorkError::Invalid);
+        }
+        for candidate in &subject.image_candidates {
+            budget.text(candidate)?;
+            super::runtime::validate_public_url(candidate)?;
         }
     }
     Ok(())
@@ -830,6 +842,7 @@ mod tests {
             name: name.into(),
             descriptor: None,
             homepage: None,
+            image_candidates: vec![],
         }
     }
     #[test]

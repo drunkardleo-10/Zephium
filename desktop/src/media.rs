@@ -276,3 +276,262 @@ mod tests {
         assert_eq!(sniff_image(b""), None);
     }
 }
+
+fn civil_date_today() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = (secs / 86_400) as i64;
+    // Howard Hinnant's civil-from-days.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+fn image_name(url: &tauri::Url) -> String {
+    url.path_segments()
+        .and_then(|mut segments| segments.rfind(|s| !s.is_empty()).map(str::to_owned))
+        .filter(|name| name.len() <= 120)
+        .unwrap_or_else(|| "image".into())
+}
+
+#[cfg(feature = "work-product")]
+async fn environment_snapshot(
+    shell: &zephium_app::Handle,
+    profile: ProfileId,
+    id: zephium_core::work::WorkEnvironmentId,
+) -> Result<zephium_core::work::environment::WorkEnvironmentSnapshot, ResourceError> {
+    use zephium_core::work::{environment::*, port::*};
+    let request = shell
+        .work_call(
+            profile,
+            zephium_ipc::work::WorkCallV1::Environment {
+                version: 1,
+                request: WorkEnvironmentCall::Read { id },
+            },
+        )
+        .map_err(|_| ResourceError::Unavailable)?;
+    let projection = tokio::time::timeout(Duration::from_secs(8), request)
+        .await
+        .map_err(|_| ResourceError::Unavailable)?
+        .map_err(|_| ResourceError::NotFound)?;
+    match projection.reply {
+        WorkReply::Environment(WorkEnvironmentReply::Snapshot { snapshot })
+            if projection.profile == profile =>
+        {
+            Ok(*snapshot)
+        }
+        _ => Err(ResourceError::NotFound),
+    }
+}
+
+#[cfg(feature = "work-product")]
+async fn environment_edit(
+    shell: &zephium_app::Handle,
+    profile: ProfileId,
+    id: zephium_core::work::WorkEnvironmentId,
+    expected: zephium_core::work::WorkRevision,
+    edit: zephium_core::work::environment::WorkEnvironmentEdit,
+) -> Result<zephium_core::work::environment::WorkEnvironmentSnapshot, ResourceError> {
+    use zephium_core::work::{environment::*, port::*, WorkCommandId};
+    let request = shell
+        .work_call(
+            profile,
+            zephium_ipc::work::WorkCallV1::Environment {
+                version: 1,
+                request: WorkEnvironmentCall::Command {
+                    command: WorkCommandId::generate(),
+                    intent: WorkEnvironmentIntent::Edit { id, expected, edit },
+                },
+            },
+        )
+        .map_err(|_| ResourceError::Unavailable)?;
+    let projection = tokio::time::timeout(Duration::from_secs(8), request)
+        .await
+        .map_err(|_| ResourceError::Unavailable)?
+        .map_err(|_| ResourceError::Conflict)?;
+    match projection.reply {
+        WorkReply::Environment(WorkEnvironmentReply::Applied { snapshot, .. })
+            if projection.profile == profile =>
+        {
+            Ok(*snapshot)
+        }
+        _ => Err(ResourceError::Conflict),
+    }
+}
+
+/// Admits one public image for a subject already on the canvas: fetch
+/// without cookies, bound and decode in the store, mint the Media resource,
+/// add it next to the subject, and relate subject → media.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn media_admit_remote(
+    caller: WebviewWindow,
+    app: AppHandle,
+    shell: State<'_, zephium_app::Handle>,
+    expected_profile: String,
+    environment: String,
+    element: String,
+    url: String,
+) -> Result<zephium_ipc::MediaAdmitV1, ()> {
+    use zephium_ipc::MediaAdmitV1;
+    let refused = |error| Ok(MediaAdmitV1::Refused { error });
+    if !super::authorize(&caller, super::CallerPolicy::Main, "media_admit_remote")
+        || super::shutdown_started(&app)
+    {
+        return refused(ResourceError::Unavailable);
+    }
+    let Some(profile) = profile_of(&expected_profile) else {
+        return refused(ResourceError::Invalid);
+    };
+    #[cfg(not(feature = "work-product"))]
+    {
+        let _ = (shell, environment, element, url);
+        refused(ResourceError::Unavailable)
+    }
+    #[cfg(feature = "work-product")]
+    {
+        use zephium_core::work::environment::*;
+        use zephium_core::work::{WorkElementId, WorkEnvironmentId};
+        let (Some(environment), Some(element)) = (
+            WorkEnvironmentId::parse(&environment),
+            WorkElementId::parse(&element),
+        ) else {
+            return refused(ResourceError::Invalid);
+        };
+        let Ok(parsed) = tauri::Url::parse(&url) else {
+            return refused(ResourceError::Invalid);
+        };
+        if !zephium_agentic::public_asset::public_https(&parsed) {
+            return refused(ResourceError::Invalid);
+        }
+        let snapshot = match environment_snapshot(&shell, profile, environment).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => return refused(error),
+        };
+        let Some(subject) = snapshot
+            .elements
+            .iter()
+            .find(|candidate| candidate.id == element)
+        else {
+            return refused(ResourceError::NotFound);
+        };
+        if !matches!(subject.reference, WorkEnvironmentReference::Subject { .. }) {
+            return refused(ResourceError::Invalid);
+        }
+        let area = subject.area;
+        let bytes = match zephium_agentic::public_asset::fetch_public_image(parsed.as_str()).await {
+            Ok(bytes) => bytes,
+            Err(zephium_agentic::public_asset::PublicAssetError::TooLarge) => {
+                return refused(ResourceError::Capacity)
+            }
+            Err(_) => return refused(ResourceError::Unavailable),
+        };
+        let receiver = shell.import_media(
+            profile,
+            MediaImport {
+                request_id: format!("media-admit-{}", ResourceId::generate()),
+                name: image_name(&parsed),
+                origin: MediaOrigin::Fetched {
+                    url: parsed.to_string(),
+                    observed_at: civil_date_today(),
+                },
+                bytes: std::sync::Arc::new(bytes),
+            },
+        );
+        let reply =
+            tokio::task::spawn_blocking(move || receiver.recv_timeout(Duration::from_secs(30)))
+                .await
+                .map_err(|_| ())?;
+        let record = match reply.map(|reply| reply.response) {
+            Ok(ResourceResponse::Applied { record, .. }) => record,
+            Ok(ResourceResponse::Error { error }) => return refused(error),
+            _ => return refused(ResourceError::OutcomeUnknown),
+        };
+        super::emit_resource_changed(&app, &profile.to_string(), &record.id, &record.revision);
+        let Some(resource) = ResourceId::parse(&record.id) else {
+            return refused(ResourceError::Invalid);
+        };
+        let reference = WorkEnvironmentReference::Resource { resource };
+        let current = match snapshot
+            .elements
+            .iter()
+            .find(|candidate| candidate.reference == reference)
+        {
+            Some(existing) => (snapshot.clone(), existing.id),
+            None => {
+                let added = match environment_edit(
+                    &shell,
+                    profile,
+                    environment,
+                    snapshot.revision,
+                    WorkEnvironmentEdit::Add {
+                        reference: reference.clone(),
+                        area,
+                    },
+                )
+                .await
+                {
+                    Ok(added) => added,
+                    Err(error) => return refused(error),
+                };
+                let Some(media) = added
+                    .elements
+                    .iter()
+                    .find(|candidate| candidate.reference == reference)
+                else {
+                    return refused(ResourceError::OutcomeUnknown);
+                };
+                let id = media.id;
+                (added, id)
+            }
+        };
+        let (snapshot, media_element) = current;
+        let related = snapshot.relations.iter().any(|relation| {
+            relation.from == element
+                && relation.to == media_element
+                && relation.kind == WorkRelationKind::Uses
+        });
+        if !related
+            && environment_edit(
+                &shell,
+                profile,
+                environment,
+                snapshot.revision,
+                WorkEnvironmentEdit::Relate {
+                    from: element,
+                    to: media_element,
+                    relation: WorkRelationKind::Uses,
+                },
+            )
+            .await
+            .is_err()
+        {
+            return refused(ResourceError::Conflict);
+        }
+        Ok(MediaAdmitV1::Admitted {
+            element: media_element,
+        })
+    }
+}
+
+#[cfg(test)]
+mod date_tests {
+    #[test]
+    fn civil_date_is_iso_shaped() {
+        let today = super::civil_date_today();
+        assert_eq!(today.len(), 10);
+        assert!(today.starts_with("20"));
+        assert_eq!(&today[4..5], "-");
+        assert_eq!(&today[7..8], "-");
+    }
+}

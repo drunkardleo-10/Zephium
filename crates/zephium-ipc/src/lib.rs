@@ -635,6 +635,19 @@ pub enum MediaImportV1 {
     },
 }
 
+/// Outcome of admitting one public image for a subject on the canvas.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MediaAdmitV1 {
+    /// The media element now on the canvas, related to the subject.
+    Admitted {
+        element: zephium_core::work::WorkElementId,
+    },
+    Refused {
+        error: zephium_core::resources::ResourceError,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 pub struct LayoutState {
     pub dividers: Vec<DividerView>,

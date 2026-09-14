@@ -1588,6 +1588,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             work_product::work_context_preview,
             media::media_import,
             media::media_open,
+            media::media_admit_remote,
             work_product::work_activity,
             tabs_bootstrap,
             tabs_open,

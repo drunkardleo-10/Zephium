@@ -16,6 +16,12 @@ export const commands = {
 	 *  profile's own snapshot; nothing outside the media store is reachable.
 	 */
 	mediaOpen: (expectedProfile: string, id: string) => typedError<boolean, null>(__TAURI_INVOKE("media_open", { expectedProfile, id })),
+	/**
+	 *  Admits one public image for a subject already on the canvas: fetch
+	 *  without cookies, bound and decode in the store, mint the Media resource,
+	 *  add it next to the subject, and relate subject → media.
+	 */
+	mediaAdmitRemote: (expectedProfile: string, environment: string, element: string, url: string) => typedError<MediaAdmitV1, null>(__TAURI_INVOKE("media_admit_remote", { expectedProfile, environment, element, url })),
 	workActivity: (expectedProfile: string, work: WorkId) => __TAURI_INVOKE<WorkActivityResponseV1>("work_activity", { expectedProfile, work }),
 	tabsBootstrap: () => __TAURI_INVOKE<void>("tabs_bootstrap"),
 	tabsOpen: () => __TAURI_INVOKE<OperationAdmission>("tabs_open"),
@@ -741,6 +747,11 @@ export type LayoutState = {
 };
 
 export type Material = "none" | "vibrancy" | "liquid_glass" | "acrylic" | "mica";
+
+/**  Outcome of admitting one public image for a subject on the canvas. */
+export type MediaAdmitV1 = 
+/**  The media element now on the canvas, related to the subject. */
+{ kind: "admitted"; element: WorkElementId } | { kind: "refused"; error: ResourceError };
 
 export type MediaAssetV1 = MediaAssetV1_Serialize | MediaAssetV1_Deserialize;
 
@@ -2434,6 +2445,12 @@ export type WorkSubject_Deserialize = {
 	descriptor?: string | null,
 	/**  Descriptive link only; never a navigation grant. */
 	homepage?: string | null,
+	/**
+	 *  Public HTTPS image URLs from cited sources that depict the subject.
+	 *  Candidates only: Rust fetches, bounds, decodes, and stores an admitted
+	 *  copy with provenance before anything renders.
+	 */
+	image_candidates?: string[],
 };
 
 /**  A named thing the work is about: a library, a listing, a flight, a concept. */
@@ -2442,6 +2459,12 @@ export type WorkSubject_Serialize = {
 	descriptor?: string | null,
 	/**  Descriptive link only; never a navigation grant. */
 	homepage?: string | null,
+	/**
+	 *  Public HTTPS image URLs from cited sources that depict the subject.
+	 *  Candidates only: Rust fetches, bounds, decodes, and stores an admitted
+	 *  copy with provenance before anything renders.
+	 */
+	image_candidates?: string[],
 };
 
 export type WorkSummary = {

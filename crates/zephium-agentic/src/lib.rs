@@ -104,6 +104,8 @@ mod profile_lease;
 mod protocol;
 #[cfg(feature = "provider-transport")]
 mod provider_transport;
+#[cfg(feature = "provider-transport")]
+pub mod public_asset;
 mod semantic;
 mod semantic_action;
 mod semantic_action_batch_result;
