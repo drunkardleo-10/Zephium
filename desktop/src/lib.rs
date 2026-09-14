@@ -69,6 +69,7 @@ mod linux_shortcut_portal;
 #[cfg(any(target_os = "linux", test))]
 mod linux_x11_shortcut;
 mod material;
+mod media;
 mod overlay;
 #[cfg(target_os = "macos")]
 mod panel;
@@ -1585,6 +1586,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             work_product::work_operation,
             work_product::work_operation_status,
             work_product::work_context_preview,
+            media::media_import,
+            media::media_open,
             work_product::work_activity,
             tabs_bootstrap,
             tabs_open,
@@ -1830,6 +1833,22 @@ fn try_emit_to_privileged<T: Serialize>(
         return false;
     }
     true
+}
+
+pub(crate) fn emit_resource_changed(
+    app: &tauri::AppHandle,
+    profile: &str,
+    id: &str,
+    revision: &str,
+) {
+    let event = ResourceChanged {
+        profile: profile.to_owned(),
+        id: id.to_owned(),
+        revision: revision.to_owned(),
+    };
+    for label in [MAIN_LABEL, overlay::PANEL_LABEL] {
+        emit_to_privileged(app, label, "zephium:resource-changed", &event);
+    }
 }
 
 fn emit_to_privileged<T: Serialize>(app: &tauri::AppHandle, label: &str, event: &str, payload: &T) {
@@ -4527,6 +4546,7 @@ pub fn run() {
         // Every Tauri-managed webview is zone 2. It may load only the bundled
         // application origin (or the exact Vite origin in debug builds).
         .plugin(navigation_lock())
+        .register_uri_scheme_protocol(media::SCHEME, media::serve)
         .plugin(tauri_plugin_dialog::init())
         // Must register first: a second launch (file association, dock, a
         // stale instance holding the global hotkey and the profile dbs)
@@ -4611,6 +4631,9 @@ pub fn run() {
                 // fail before either privileged chrome or raw content creates
                 // native renderer state.
                 let store = Arc::new(SqliteStore::open(&data_dir)?);
+                app.manage(media::MediaBlobs(zephium_store::MediaStore::new(
+                    data_dir.join("media"),
+                )));
                 let startup_store = app.try_state::<StartupStore>().ok_or_else(|| {
                     std::io::Error::other("startup storage cleanup owner is unavailable")
                 })?;
@@ -7385,7 +7408,10 @@ mod tests {
             "privileged IPC origins must remain exact"
         );
         assert_eq!(directive("style-src"), "'self' 'unsafe-inline'");
-        assert_eq!(directive("img-src"), "'self' data:");
+        assert_eq!(
+            directive("img-src"),
+            "'self' data: zephium-media: http://zephium-media.localhost"
+        );
         assert_eq!(directive("font-src"), "'self' data:");
 
         for name in [

@@ -390,6 +390,13 @@ pub enum Command {
         call: Arc<zephium_core::resources::ResourceCall>,
         done: ResourceCompletion,
     },
+    /// Bytes the desktop read on the user's behalf; the store sniffs, bounds,
+    /// and mints the Media resource. Never constructed from IPC.
+    ImportMedia {
+        expected_profile: ProfileId,
+        import: Box<zephium_core::resources::MediaImport>,
+        done: ResourceCompletion,
+    },
     #[cfg(feature = "work-execution")]
     AttachWork(crate::work::WorkAttachment),
     #[cfg(feature = "work-execution")]

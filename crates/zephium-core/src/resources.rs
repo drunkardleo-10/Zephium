@@ -77,6 +77,119 @@ pub enum ResourceContent {
     Object {
         object: WorkObjectV1,
     },
+    /// An imported or admitted file. Bytes live in the profile's
+    /// content-addressed media store; this row is its provenance and shape.
+    /// Only Rust mints it, after bounded sniffing and decoding.
+    Media {
+        asset: MediaAssetV1,
+    },
+}
+
+pub const MAX_MEDIA_IMAGE_BYTES: u32 = 8 * 1024 * 1024;
+pub const MAX_MEDIA_FETCHED_IMAGE_BYTES: u32 = 2 * 1024 * 1024;
+pub const MAX_MEDIA_FILE_BYTES: u32 = 32 * 1024 * 1024;
+pub const MAX_MEDIA_DIMENSION: u32 = 8192;
+pub const MAX_MEDIA_NAME_BYTES: usize = 255;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
+pub enum MediaKind {
+    Image,
+    Pdf,
+    File,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MediaOrigin {
+    /// A snapshot of a file the user picked; the source path is not retained.
+    Imported,
+    /// Fetched by Rust from a public HTTPS URL without cookies.
+    Fetched { url: String, observed_at: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[serde(deny_unknown_fields)]
+pub struct MediaAssetV1 {
+    pub version: u16,
+    pub kind: MediaKind,
+    /// Sniffed from bytes, never taken from a file name or a server.
+    pub mime: String,
+    pub bytes: u32,
+    /// Hex SHA-256 of the stored bytes; also the blob's address.
+    pub digest: String,
+    pub name: String,
+    pub origin: MediaOrigin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+}
+impl MediaAssetV1 {
+    pub fn validate(&self) -> bool {
+        let mime_ok = match self.kind {
+            MediaKind::Image => matches!(
+                self.mime.as_str(),
+                "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+            ),
+            MediaKind::Pdf => self.mime == "application/pdf",
+            MediaKind::File => self.mime == "application/octet-stream",
+        };
+        let size_ok = self.bytes > 0
+            && match (self.kind, &self.origin) {
+                (MediaKind::Image, MediaOrigin::Fetched { .. }) => {
+                    self.bytes <= MAX_MEDIA_FETCHED_IMAGE_BYTES
+                }
+                (MediaKind::Image, MediaOrigin::Imported) => self.bytes <= MAX_MEDIA_IMAGE_BYTES,
+                (_, MediaOrigin::Fetched { .. }) => false,
+                _ => self.bytes <= MAX_MEDIA_FILE_BYTES,
+            };
+        let dimensions_ok = match self.kind {
+            MediaKind::Image => {
+                matches!((self.width, self.height), (Some(w), Some(h)) if (1..=MAX_MEDIA_DIMENSION).contains(&w) && (1..=MAX_MEDIA_DIMENSION).contains(&h))
+            }
+            _ => self.width.is_none() && self.height.is_none(),
+        };
+        let origin_ok = match &self.origin {
+            MediaOrigin::Imported => true,
+            MediaOrigin::Fetched { url, observed_at } => {
+                url.len() <= 4096
+                    && url.starts_with("https://")
+                    && !url.chars().any(char::is_control)
+                    && valid_date(observed_at)
+            }
+        };
+        self.version == 1
+            && mime_ok
+            && size_ok
+            && dimensions_ok
+            && origin_ok
+            && self.digest.len() == 64
+            && self.digest.bytes().all(|b| b.is_ascii_hexdigit())
+            && !self.name.is_empty()
+            && self.name.len() <= MAX_MEDIA_NAME_BYTES
+            && !self
+                .name
+                .chars()
+                .any(|c| c.is_control() || c == '/' || c == '\\')
+    }
+}
+
+/// A Rust-owned import request: the bytes never cross the IPC boundary.
+#[derive(Clone)]
+pub struct MediaImport {
+    pub request_id: String,
+    pub name: String,
+    pub origin: MediaOrigin,
+    pub bytes: std::sync::Arc<Vec<u8>>,
+}
+impl std::fmt::Debug for MediaImport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MediaImport([redacted])")
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -205,6 +318,7 @@ pub enum ResourceKind {
     Note,
     Task,
     Object,
+    Media,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -251,15 +365,20 @@ pub enum ResourceError {
 }
 
 impl ResourceDraft {
-    /// Callers never supply provenance; only Rust preservation mints it.
+    /// Callers never supply provenance or media; only Rust admission mints them.
     pub fn caller_owned(&self) -> bool {
-        !matches!(&self.content, ResourceContent::Object { object } if object.provenance.is_some())
+        match &self.content {
+            ResourceContent::Object { object } => object.provenance.is_none(),
+            ResourceContent::Media { .. } => false,
+            _ => true,
+        }
     }
     pub fn kind(&self) -> ResourceKind {
         match self.content {
             ResourceContent::Note { .. } => ResourceKind::Note,
             ResourceContent::Task { .. } => ResourceKind::Task,
             ResourceContent::Object { .. } => ResourceKind::Object,
+            ResourceContent::Media { .. } => ResourceKind::Media,
         }
     }
     pub fn validate(&self) -> bool {
@@ -290,6 +409,7 @@ impl ResourceDraft {
                     && due_date.as_deref().is_none_or(valid_date)
             }
             ResourceContent::Object { object } => object.validate(),
+            ResourceContent::Media { asset } => asset.validate(),
         }
     }
 }

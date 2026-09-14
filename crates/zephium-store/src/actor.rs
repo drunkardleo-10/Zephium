@@ -627,6 +627,12 @@ enum Cmd {
         zephium_core::resources::ResourceDone,
         ResourcePermit,
     ),
+    ImportMedia(
+        ProfileId,
+        zephium_core::resources::MediaImport,
+        zephium_core::resources::ResourceDone,
+        ResourcePermit,
+    ),
     #[cfg(feature = "work-execution")]
     AgentWork(
         zephium_agentic::AgentWorkJournalRequest,
@@ -2464,6 +2470,42 @@ impl Store for SqliteStore {
         }
     }
 
+    fn import_media(
+        &self,
+        profile: ProfileId,
+        import: zephium_core::resources::MediaImport,
+        done: zephium_core::resources::ResourceDone,
+    ) {
+        use zephium_core::resources::{ResourceError, ResourceResponse};
+        if self
+            .resource_admission
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < 4).then_some(n + 1)
+            })
+            .is_err()
+        {
+            done(ResourceResponse::Error {
+                error: ResourceError::Capacity,
+            });
+            return;
+        }
+        if let Err(error) = self.tx.try_send(Cmd::ImportMedia(
+            profile,
+            import,
+            done,
+            ResourcePermit(self.resource_admission.clone()),
+        )) {
+            let command = match error {
+                mpsc::TrySendError::Full(c) | mpsc::TrySendError::Disconnected(c) => c,
+            };
+            if let Cmd::ImportMedia(_, _, done, _) = command {
+                done(ResourceResponse::Error {
+                    error: ResourceError::Unavailable,
+                });
+            }
+        }
+    }
+
     fn save_session(&self, session: SessionState) {
         if !admissible_session(&session) {
             return;
@@ -3578,6 +3620,17 @@ fn actor(
                     }
                 } else {
                     hub.resource_call(profile, call)
+                };
+                drop(admission);
+                done(response);
+            }
+            Some(Cmd::ImportMedia(profile, import, done, admission)) => {
+                let response = if !hub.knows(profile) && !flush(&mut hub, &mut pending) {
+                    zephium_core::resources::ResourceResponse::Error {
+                        error: zephium_core::resources::ResourceError::Unavailable,
+                    }
+                } else {
+                    hub.import_media(profile, import)
                 };
                 drop(admission);
                 done(response);

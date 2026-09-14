@@ -634,6 +634,19 @@ pub trait Store {
         Err(crate::work::WorkError::Unavailable)
     }
 
+    /// Admits bytes the desktop read on the user's behalf into the profile's
+    /// media store and mints the Media resource that describes them.
+    fn import_media(
+        &self,
+        _profile: ProfileId,
+        _import: crate::resources::MediaImport,
+        done: crate::resources::ResourceDone,
+    ) {
+        done(crate::resources::ResourceResponse::Error {
+            error: crate::resources::ResourceError::Unavailable,
+        });
+    }
+
     /// Bounded asynchronous access to durable Notes/Tasks. Caller owns authorization.
     fn resource_call(
         &self,

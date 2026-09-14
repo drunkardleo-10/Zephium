@@ -622,6 +622,19 @@ pub enum WorkPaneTarget {
     Url { url: String },
 }
 
+/// Outcome of a native file import into the profile's media store.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MediaImportV1 {
+    Imported {
+        record: Box<zephium_core::resources::ResourceRecord>,
+    },
+    Cancelled,
+    Refused {
+        error: zephium_core::resources::ResourceError,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 pub struct LayoutState {
     pub dividers: Vec<DividerView>,

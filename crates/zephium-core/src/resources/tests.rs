@@ -131,3 +131,69 @@ fn callers_cannot_mint_object_provenance_or_preview_objects() {
     );
     assert!(!preview.validate());
 }
+
+#[test]
+fn media_assets_are_shaped_by_kind_origin_and_bounds() {
+    let asset = |kind: MediaKind, mime: &str, bytes: u32, origin: MediaOrigin| MediaAssetV1 {
+        version: 1,
+        kind,
+        mime: mime.into(),
+        bytes,
+        digest: "a".repeat(64),
+        name: "shot.png".into(),
+        origin,
+        width: (kind == MediaKind::Image).then_some(64),
+        height: (kind == MediaKind::Image).then_some(48),
+    };
+    let fetched = MediaOrigin::Fetched {
+        url: "https://cdn.example/a.png".into(),
+        observed_at: "2026-09-14".into(),
+    };
+    assert!(asset(MediaKind::Image, "image/png", 1024, MediaOrigin::Imported).validate());
+    assert!(asset(
+        MediaKind::Image,
+        "image/webp",
+        MAX_MEDIA_FETCHED_IMAGE_BYTES,
+        fetched.clone()
+    )
+    .validate());
+    assert!(!asset(
+        MediaKind::Image,
+        "image/webp",
+        MAX_MEDIA_FETCHED_IMAGE_BYTES + 1,
+        fetched.clone()
+    )
+    .validate());
+    assert!(!asset(MediaKind::Pdf, "application/pdf", 10, fetched).validate());
+    assert!(asset(MediaKind::Pdf, "application/pdf", 10, MediaOrigin::Imported).validate());
+    assert!(!asset(MediaKind::Image, "image/svg+xml", 10, MediaOrigin::Imported).validate());
+    assert!(!asset(
+        MediaKind::File,
+        "application/octet-stream",
+        0,
+        MediaOrigin::Imported
+    )
+    .validate());
+    let mut bad_name = asset(
+        MediaKind::File,
+        "application/octet-stream",
+        5,
+        MediaOrigin::Imported,
+    );
+    bad_name.name = "a/b".into();
+    assert!(!bad_name.validate());
+    let mut bad_dims = asset(MediaKind::Image, "image/png", 5, MediaOrigin::Imported);
+    bad_dims.width = Some(MAX_MEDIA_DIMENSION + 1);
+    assert!(!bad_dims.validate());
+    let draft = ResourceDraft {
+        title: "shot".into(),
+        pinned: false,
+        content: ResourceContent::Media {
+            asset: asset(MediaKind::Image, "image/png", 5, MediaOrigin::Imported),
+        },
+        related: vec![],
+    };
+    assert!(draft.validate());
+    assert_eq!(draft.kind(), ResourceKind::Media);
+    assert!(!draft.caller_owned(), "media is minted by Rust only");
+}

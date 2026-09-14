@@ -14,6 +14,7 @@ fn kind(value: ResourceKind) -> &'static str {
         ResourceKind::Note => "note",
         ResourceKind::Task => "task",
         ResourceKind::Object => "object",
+        ResourceKind::Media => "media",
     }
 }
 fn get(conn: &Connection, id: &str) -> rusqlite::Result<Option<ResourceRecord>> {
@@ -60,6 +61,10 @@ fn search_text(draft: &ResourceDraft) -> String {
             }
         }
         ResourceContent::Object { object } => text.push_str(&object.data.plain_text()),
+        ResourceContent::Media { asset } => {
+            text.push('\n');
+            text.push_str(&asset.name);
+        }
     }
     text.to_lowercase()
 }
@@ -204,7 +209,7 @@ fn preserve_artifact(
     })
 }
 
-fn mutate(
+pub(super) fn mutate(
     conn: &mut Connection,
     profile: ProfileId,
     command: ResourceCommand,

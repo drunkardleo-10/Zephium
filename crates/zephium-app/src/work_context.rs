@@ -264,6 +264,10 @@ impl WorkContextAdmission {
             ResourceContent::Object { object } => {
                 (WorkContextItemKind::Object, object.data.plain_text())
             }
+            ResourceContent::Media { asset } => (
+                WorkContextItemKind::Object,
+                format!("{} ({}, {} bytes)", asset.name, asset.mime, asset.bytes),
+            ),
         };
         Ok(WorkContextSource {
             element,

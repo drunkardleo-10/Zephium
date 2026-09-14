@@ -838,6 +838,37 @@ impl Shell {
                     });
                 }
             }
+            Command::ImportMedia {
+                expected_profile,
+                import,
+                done,
+            } => {
+                use zephium_core::resources::{ResourceError, ResourceReply, ResourceResponse};
+                if let Some(profile) = self
+                    .windows
+                    .focused()
+                    .map(|window| window.profile)
+                    .filter(|profile| *profile == expected_profile)
+                {
+                    self.store.import_media(
+                        profile,
+                        *import,
+                        Box::new(move |response| {
+                            done.finish(ResourceReply {
+                                profile: Some(profile.to_string()),
+                                response,
+                            })
+                        }),
+                    );
+                } else {
+                    done.finish(ResourceReply {
+                        profile: None,
+                        response: ResourceResponse::Error {
+                            error: ResourceError::Unavailable,
+                        },
+                    });
+                }
+            }
             Command::DragOver { point } => {
                 if let Some(win) = self.windows.focused().map(|w| w.id) {
                     let zone = point

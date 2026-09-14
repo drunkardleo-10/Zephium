@@ -3,6 +3,7 @@
 mod actor;
 mod bounded_json;
 mod hub;
+pub use hub::media::{admit as admit_media, MediaAdmissionError, MediaStore};
 mod legacy;
 mod migrations;
 mod pane;

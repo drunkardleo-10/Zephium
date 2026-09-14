@@ -184,6 +184,7 @@ async fn synthesis_case(
                 command: WorkCommandId::generate(),
                 intent: WorkRuntimeIntent::Approve {
                     spec: WorkExecutionSpec {
+                        context: None,
                         plan_revision: plan.revision,
                         limits,
                         nodes: vec![WorkNodeExecutionSpec {
@@ -429,6 +430,7 @@ async fn runtime_application_approves_exact_plan_settles_artifact_and_recovers_d
         max_workers: 1,
     };
     let spec = WorkExecutionSpec {
+        context: None,
         plan_revision: plan.revision,
         limits,
         nodes: plan

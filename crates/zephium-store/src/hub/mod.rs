@@ -16,6 +16,7 @@ mod extensions;
 mod favicons;
 mod filesystem;
 mod history;
+pub mod media;
 mod native_ownership;
 mod page_permissions;
 mod resources;
@@ -76,6 +77,7 @@ pub struct Hub {
     #[cfg(feature = "work-execution")]
     work: Option<std::sync::Arc<agent_work::WorkOwnership>>,
     dir: Option<PathBuf>,
+    media: Option<media::MediaStore>,
     meta: Connection,
     profiles: HashMap<ProfileId, Connection>,
     registry: HashSet<ProfileId>,
@@ -146,6 +148,7 @@ impl Hub {
             #[cfg(feature = "work-execution")]
             work: None,
             dir: Some(dir.clone()),
+            media: Some(media::MediaStore::new(dir.join("media"))),
             meta,
             profiles: HashMap::new(),
             registry: HashSet::new(),
@@ -251,6 +254,7 @@ impl Hub {
             #[cfg(feature = "work-execution")]
             work: None,
             dir: None,
+            media: None,
             meta,
             profiles: HashMap::new(),
             registry: HashSet::new(),

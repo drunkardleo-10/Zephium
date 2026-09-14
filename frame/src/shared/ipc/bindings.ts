@@ -10,6 +10,12 @@ export const commands = {
 	workOperationStatus: (expectedProfile: string, work: WorkId, operation: WorkCommandId, acknowledge: boolean) => __TAURI_INVOKE<WorkOperationResponseV1_Serialize>("work_operation_status", { expectedProfile, work, operation, acknowledge }),
 	/**  Manifest preview for the composer. Bodies never cross this boundary. */
 	workContextPreview: (expectedProfile: string, purpose: WorkContextPurpose, selection: WorkContextSelectionV1) => __TAURI_INVOKE<WorkContextPreviewV1_Serialize>("work_context_preview", { expectedProfile, purpose, selection }),
+	mediaImport: (expectedProfile: string) => typedError<MediaImportV1_Serialize, null>(__TAURI_INVOKE("media_import", { expectedProfile })),
+	/**
+	 *  Opens a non-image asset with the OS default application. The blob is the
+	 *  profile's own snapshot; nothing outside the media store is reachable.
+	 */
+	mediaOpen: (expectedProfile: string, id: string) => typedError<boolean, null>(__TAURI_INVOKE("media_open", { expectedProfile, id })),
 	workActivity: (expectedProfile: string, work: WorkId) => __TAURI_INVOKE<WorkActivityResponseV1>("work_activity", { expectedProfile, work }),
 	tabsBootstrap: () => __TAURI_INVOKE<void>("tabs_bootstrap"),
 	tabsOpen: () => __TAURI_INVOKE<OperationAdmission>("tabs_open"),
@@ -736,6 +742,53 @@ export type LayoutState = {
 
 export type Material = "none" | "vibrancy" | "liquid_glass" | "acrylic" | "mica";
 
+export type MediaAssetV1 = MediaAssetV1_Serialize | MediaAssetV1_Deserialize;
+
+export type MediaAssetV1_Deserialize = {
+	version: number,
+	kind: MediaKind,
+	/**  Sniffed from bytes, never taken from a file name or a server. */
+	mime: string,
+	bytes: number,
+	/**  Hex SHA-256 of the stored bytes; also the blob's address. */
+	digest: string,
+	name: string,
+	origin: MediaOrigin,
+	width?: number | null,
+	height?: number | null,
+};
+
+export type MediaAssetV1_Serialize = {
+	version: number,
+	kind: MediaKind,
+	/**  Sniffed from bytes, never taken from a file name or a server. */
+	mime: string,
+	bytes: number,
+	/**  Hex SHA-256 of the stored bytes; also the blob's address. */
+	digest: string,
+	name: string,
+	origin: MediaOrigin,
+	width?: number | null,
+	height?: number | null,
+};
+
+/**  Outcome of a native file import into the profile's media store. */
+export type MediaImportV1 = MediaImportV1_Serialize | MediaImportV1_Deserialize;
+
+/**  Outcome of a native file import into the profile's media store. */
+export type MediaImportV1_Deserialize = ({ kind: "imported"; record: ResourceRecord_Deserialize }) & { error?: never } | ({ kind: "cancelled" }) & { error?: never; record?: never } | ({ kind: "refused"; error: ResourceError }) & { record?: never };
+
+/**  Outcome of a native file import into the profile's media store. */
+export type MediaImportV1_Serialize = ({ kind: "imported"; record: ResourceRecord_Serialize }) & { error?: never } | ({ kind: "cancelled" }) & { error?: never; record?: never } | ({ kind: "refused"; error: ResourceError }) & { record?: never };
+
+export type MediaKind = "image" | "pdf" | "file";
+
+export type MediaOrigin = 
+/**  A snapshot of a file the user picked; the source path is not retained. */
+{ kind: "imported" } | 
+/**  Fetched by Rust from a public HTTPS URL without cookies. */
+{ kind: "fetched"; url: string; observed_at: string };
+
 export type NoteDocument = NoteDocument_Serialize | NoteDocument_Deserialize;
 
 export type NoteDocument_Deserialize = {
@@ -896,19 +949,31 @@ export type ResourceCommand_Serialize = {
 
 export type ResourceContent = ResourceContent_Serialize | ResourceContent_Deserialize;
 
-export type ResourceContent_Deserialize = ({ kind: "note"; document: NoteDocument_Deserialize }) & { completed?: never; description?: never; due_date?: never; object?: never } | ({ kind: "task"; description: string; completed: boolean; due_date: string | null }) & { document?: never; object?: never } | 
+export type ResourceContent_Deserialize = ({ kind: "note"; document: NoteDocument_Deserialize }) & { asset?: never; completed?: never; description?: never; due_date?: never; object?: never } | ({ kind: "task"; description: string; completed: boolean; due_date: string | null }) & { asset?: never; document?: never; object?: never } | 
 /**
  *  A user-owned semantic object: a table, checklist, comparison, chart,
  *  document, or findings, editable like a note.
  */
-({ kind: "object"; object: WorkObjectV1_Deserialize }) & { completed?: never; description?: never; document?: never; due_date?: never };
+({ kind: "object"; object: WorkObjectV1_Deserialize }) & { asset?: never; completed?: never; description?: never; document?: never; due_date?: never } | 
+/**
+ *  An imported or admitted file. Bytes live in the profile's
+ *  content-addressed media store; this row is its provenance and shape.
+ *  Only Rust mints it, after bounded sniffing and decoding.
+ */
+({ kind: "media"; asset: MediaAssetV1_Deserialize }) & { completed?: never; description?: never; document?: never; due_date?: never; object?: never };
 
-export type ResourceContent_Serialize = ({ kind: "note"; document: NoteDocument_Serialize }) & { completed?: never; description?: never; due_date?: never; object?: never } | ({ kind: "task"; description: string; completed: boolean; due_date: string | null }) & { document?: never; object?: never } | 
+export type ResourceContent_Serialize = ({ kind: "note"; document: NoteDocument_Serialize }) & { asset?: never; completed?: never; description?: never; due_date?: never; object?: never } | ({ kind: "task"; description: string; completed: boolean; due_date: string | null }) & { asset?: never; document?: never; object?: never } | 
 /**
  *  A user-owned semantic object: a table, checklist, comparison, chart,
  *  document, or findings, editable like a note.
  */
-({ kind: "object"; object: WorkObjectV1_Serialize }) & { completed?: never; description?: never; document?: never; due_date?: never };
+({ kind: "object"; object: WorkObjectV1_Serialize }) & { asset?: never; completed?: never; description?: never; document?: never; due_date?: never } | 
+/**
+ *  An imported or admitted file. Bytes live in the profile's
+ *  content-addressed media store; this row is its provenance and shape.
+ *  Only Rust mints it, after bounded sniffing and decoding.
+ */
+({ kind: "media"; asset: MediaAssetV1_Serialize }) & { completed?: never; description?: never; document?: never; due_date?: never; object?: never };
 
 export type ResourceDraft = ResourceDraft_Serialize | ResourceDraft_Deserialize;
 
@@ -948,7 +1013,7 @@ export type ResourceIntent_Serialize = ({ kind: "create"; draft: ResourceDraft_S
  */
 ({ kind: "preserve_artifact"; objective: WorkId; execution: WorkExecutionId; artifact: WorkArtifactId; basis: WorkObjectBasis; title?: string | null }) & { draft?: never; expected_revision?: never; id?: never } | ({ kind: "replace"; id: string; expected_revision: string; draft: ResourceDraft_Serialize }) & { artifact?: never; basis?: never; execution?: never; objective?: never; title?: never } | ({ kind: "trash"; id: string; expected_revision: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; objective?: never; title?: never } | ({ kind: "restore"; id: string; expected_revision: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; objective?: never; title?: never };
 
-export type ResourceKind = "note" | "task" | "object";
+export type ResourceKind = "note" | "task" | "object" | "media";
 
 export type ResourceQuery = {
 	completed?: boolean | null,

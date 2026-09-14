@@ -155,6 +155,7 @@ async fn search_case(mode: u8) {
                 command: WorkCommandId::generate(),
                 intent: WorkRuntimeIntent::Approve {
                     spec: WorkExecutionSpec {
+                        context: None,
                         plan_revision: plan.revision,
                         limits,
                         nodes: vec![WorkNodeExecutionSpec {
@@ -409,6 +410,7 @@ async fn original_search_worker_capacity_failure_retains_usage_and_first_publica
                 command: WorkCommandId::generate(),
                 intent: WorkRuntimeIntent::Approve {
                     spec: WorkExecutionSpec {
+                        context: None,
                         plan_revision: plan.revision,
                         limits,
                         nodes: nodes
@@ -639,6 +641,7 @@ async fn delegated_search_large_child_results_keep_exact_sources_and_bounded_syn
                 command: WorkCommandId::generate(),
                 intent: WorkRuntimeIntent::Approve {
                     spec: WorkExecutionSpec {
+                        context: None,
                         plan_revision: plan.revision,
                         limits,
                         nodes: nodes

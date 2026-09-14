@@ -1,0 +1,278 @@
+//! Media & Files: native import into the profile's media store, bounded
+//! serving of admitted images to privileged chrome, and OS open for the rest.
+use std::borrow::Cow;
+use std::time::Duration;
+use tauri::{AppHandle, Manager, State, WebviewWindow};
+use tauri_plugin_dialog::DialogExt;
+use zephium_core::ids::{ProfileId, ResourceId};
+use zephium_core::resources::{
+    MediaAssetV1, MediaImport, MediaKind, MediaOrigin, ResourceCall, ResourceContent,
+    ResourceError, ResourceResponse, MAX_MEDIA_FILE_BYTES, MAX_MEDIA_IMAGE_BYTES,
+};
+use zephium_ipc::MediaImportV1;
+
+pub(crate) const SCHEME: &str = "zephium-media";
+
+/// Blob paths for the custom scheme; bytes are admitted only through the
+/// store actor.
+pub(crate) struct MediaBlobs(pub(crate) zephium_store::MediaStore);
+
+fn profile_of(value: &str) -> Option<ProfileId> {
+    ProfileId::parse(value).filter(|id| id.to_string() == value)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn media_import(
+    caller: WebviewWindow,
+    app: AppHandle,
+    shell: State<'_, zephium_app::Handle>,
+    expected_profile: String,
+) -> Result<MediaImportV1, ()> {
+    let refused = |error| Ok(MediaImportV1::Refused { error });
+    if !super::authorize(&caller, super::CallerPolicy::Main, "media_import")
+        || super::shutdown_started(&app)
+    {
+        return refused(ResourceError::Unavailable);
+    }
+    let Some(profile) = profile_of(&expected_profile) else {
+        return refused(ResourceError::Invalid);
+    };
+    let picker = app.clone();
+    let picked = tokio::task::spawn_blocking(move || {
+        picker
+            .dialog()
+            .file()
+            .set_title("Add to Work")
+            .blocking_pick_file()
+    })
+    .await
+    .map_err(|_| ())?;
+    let Some(picked) = picked else {
+        return Ok(MediaImportV1::Cancelled);
+    };
+    let path = match picked {
+        tauri_plugin_dialog::FilePath::Path(path) => path,
+        tauri_plugin_dialog::FilePath::Url(url) => match url.to_file_path() {
+            Ok(path) => path,
+            Err(()) => return refused(ResourceError::Invalid),
+        },
+    };
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".into());
+    let read = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, ResourceError> {
+        let metadata = std::fs::metadata(&path).map_err(|_| ResourceError::NotFound)?;
+        if !metadata.is_file() {
+            return Err(ResourceError::Invalid);
+        }
+        if metadata.len() > u64::from(MAX_MEDIA_FILE_BYTES) {
+            return Err(ResourceError::Capacity);
+        }
+        std::fs::read(&path).map_err(|_| ResourceError::Unavailable)
+    })
+    .await
+    .map_err(|_| ())?;
+    let bytes = match read {
+        Ok(bytes) => bytes,
+        Err(error) => return refused(error),
+    };
+    let receiver = shell.import_media(
+        profile,
+        MediaImport {
+            request_id: format!("media-import-{}", ResourceId::generate()),
+            name,
+            origin: MediaOrigin::Imported,
+            bytes: std::sync::Arc::new(bytes),
+        },
+    );
+    let reply = tokio::task::spawn_blocking(move || receiver.recv_timeout(Duration::from_secs(30)))
+        .await
+        .map_err(|_| ())?;
+    let Ok(reply) = reply else {
+        return refused(ResourceError::OutcomeUnknown);
+    };
+    match reply.response {
+        ResourceResponse::Applied { record, .. } => {
+            super::emit_resource_changed(&app, &profile.to_string(), &record.id, &record.revision);
+            Ok(MediaImportV1::Imported {
+                record: Box::new(record),
+            })
+        }
+        ResourceResponse::Error { error } => refused(error),
+        _ => refused(ResourceError::Invalid),
+    }
+}
+
+async fn media_asset(
+    shell: &zephium_app::Handle,
+    profile: ProfileId,
+    id: &str,
+) -> Result<MediaAssetV1, ResourceError> {
+    if !zephium_core::resources::valid_id(id) {
+        return Err(ResourceError::Invalid);
+    }
+    let receiver = shell.resource_call(profile, ResourceCall::Get { id: id.to_owned() });
+    let reply = tokio::task::spawn_blocking(move || receiver.recv_timeout(Duration::from_secs(8)))
+        .await
+        .map_err(|_| ResourceError::Unavailable)?
+        .map_err(|_| ResourceError::Unavailable)?;
+    match reply.response {
+        ResourceResponse::Record { record } => match record.draft.content {
+            ResourceContent::Media { asset } if !record.trashed => Ok(asset),
+            _ => Err(ResourceError::NotFound),
+        },
+        ResourceResponse::Error { error } => Err(error),
+        _ => Err(ResourceError::Invalid),
+    }
+}
+
+/// Opens a non-image asset with the OS default application. The blob is the
+/// profile's own snapshot; nothing outside the media store is reachable.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn media_open(
+    caller: WebviewWindow,
+    app: AppHandle,
+    shell: State<'_, zephium_app::Handle>,
+    expected_profile: String,
+    id: String,
+) -> Result<bool, ()> {
+    if !super::authorize(&caller, super::CallerPolicy::Main, "media_open")
+        || super::shutdown_started(&app)
+    {
+        return Ok(false);
+    }
+    let Some(profile) = profile_of(&expected_profile) else {
+        return Ok(false);
+    };
+    let Ok(asset) = media_asset(&shell, profile, &id).await else {
+        return Ok(false);
+    };
+    let Some(blobs) = app.try_state::<MediaBlobs>() else {
+        return Ok(false);
+    };
+    let Some(path) = blobs.0.blob_path(profile, &asset.digest) else {
+        return Ok(false);
+    };
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let opened = tokio::task::spawn_blocking(move || open_with_os(&path))
+        .await
+        .unwrap_or(false);
+    Ok(opened)
+}
+
+fn open_with_os(path: &std::path::Path) -> bool {
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = std::process::Command::new("open");
+        command.arg(path);
+        command
+    };
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = std::process::Command::new("cmd");
+        command.args(["/C", "start", ""]).arg(path);
+        command
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut command = {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(path);
+        command
+    };
+    command
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+fn respond(
+    status: u16,
+    body: Vec<u8>,
+    content_type: &str,
+) -> tauri::http::Response<Cow<'static, [u8]>> {
+    tauri::http::Response::builder()
+        .status(status)
+        .header("Content-Type", content_type)
+        .header("X-Content-Type-Options", "nosniff")
+        .header("Cache-Control", "private, max-age=31536000, immutable")
+        .header("Content-Security-Policy", "default-src 'none'; sandbox")
+        .body(Cow::Owned(body))
+        .unwrap_or_else(|_| tauri::http::Response::new(Cow::Borrowed(b"" as &[u8])))
+}
+
+/// `zephium-media://localhost/<profile>/<digest>` from privileged main chrome
+/// only. Serves admitted image blobs; every other request is 404.
+pub(crate) fn serve(
+    ctx: tauri::UriSchemeContext<'_, tauri::Wry>,
+    request: tauri::http::Request<Vec<u8>>,
+) -> tauri::http::Response<Cow<'static, [u8]>> {
+    if ctx.webview_label() != super::MAIN_LABEL {
+        return respond(403, Vec::new(), "text/plain");
+    }
+    let path = request.uri().path().trim_start_matches('/');
+    let Some((profile, digest)) = path.split_once('/') else {
+        return respond(404, Vec::new(), "text/plain");
+    };
+    let Some(profile) = profile_of(profile) else {
+        return respond(404, Vec::new(), "text/plain");
+    };
+    let Some(blobs) = ctx.app_handle().try_state::<MediaBlobs>() else {
+        return respond(503, Vec::new(), "text/plain");
+    };
+    let Some(bytes) = blobs
+        .0
+        .read(profile, digest, MAX_MEDIA_IMAGE_BYTES as usize)
+    else {
+        return respond(404, Vec::new(), "text/plain");
+    };
+    match sniff_image(&bytes) {
+        Some(mime) => respond(200, bytes, mime),
+        None => respond(404, Vec::new(), "text/plain"),
+    }
+}
+
+#[allow(dead_code)]
+fn kind_is_image(asset: &MediaAssetV1) -> bool {
+    asset.kind == MediaKind::Image
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_sniffing_recognizes_only_admitted_raster_formats() {
+        assert_eq!(sniff_image(b"\x89PNG\r\n\x1a\nrest"), Some("image/png"));
+        assert_eq!(sniff_image(&[0xFF, 0xD8, 0xFF, 0xE0]), Some("image/jpeg"));
+        assert_eq!(sniff_image(b"GIF89a...."), Some("image/gif"));
+        assert_eq!(
+            sniff_image(b"RIFF\x00\x00\x00\x00WEBPVP8 "),
+            Some("image/webp")
+        );
+        assert_eq!(
+            sniff_image(b"<svg xmlns='http://www.w3.org/2000/svg'/>"),
+            None
+        );
+        assert_eq!(sniff_image(b"%PDF-1.7"), None);
+        assert_eq!(sniff_image(b""), None);
+    }
+}

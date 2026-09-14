@@ -1023,6 +1023,32 @@ impl Handle {
         receiver
     }
 
+    /// Admits desktop-read bytes as a Media resource of the focused profile.
+    pub fn import_media(
+        &self,
+        profile: ProfileId,
+        import: zephium_core::resources::MediaImport,
+    ) -> Receiver<zephium_core::resources::ResourceReply> {
+        let (sender, receiver) = sync_channel(1);
+        let done = crate::ResourceCompletion::new(move |reply| {
+            let _ = sender.send(reply);
+        });
+        let command = Command::ImportMedia {
+            expected_profile: profile,
+            import: Box::new(import),
+            done,
+        };
+        if let Err(
+            TryPushError::Full(command)
+            | TryPushError::Sealed(command)
+            | TryPushError::Closed(command),
+        ) = self.queue.try_push(command)
+        {
+            finish_unprocessed_command(command, ShutdownOutcome::Unclean);
+        }
+        receiver
+    }
+
     /// One profile-checked resource read or mutation, settled by the actor.
     pub fn resource_call(
         &self,
