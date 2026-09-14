@@ -34,18 +34,6 @@
       navigationError = true;
     }
   }
-  async function openCitation(url: string) {
-    const current = session;
-    if (!current || !(await current.flushView())) return;
-    navigationError = false;
-    try {
-      const result = await settle(commands.tabsOpenUrl(url));
-      if (result.outcome === "applied" || result.outcome === "no_op") await surface.open(null);
-      else if (result.outcome !== "deferred") navigationError = true;
-    } catch {
-      navigationError = true;
-    }
-  }
 </script>
 
 <section class="workspace" aria-label={m.mode_work()}>
@@ -68,7 +56,6 @@
             onopen={(id: string) => void browse(id)}
             onnewtab={() => void browse()}
             onsettings={() => void surface.open("settings")}
-            onopencitation={(url: string) => void openCitation(url)}
           />{/snippet}</LazyView
       >
     {/key}{:else}<p>{m.work_regular_profile()}</p>{/if}

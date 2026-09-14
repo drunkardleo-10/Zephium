@@ -1,6 +1,8 @@
 export { default as Archive01Icon } from "@hugeicons/core-free-icons/Archive01Icon";
 export { default as ArrowDown01Icon } from "@hugeicons/core-free-icons/ArrowDown01Icon";
 export { default as ArrowLeft02Icon } from "@hugeicons/core-free-icons/ArrowLeft02Icon";
+export { default as ArrowReloadHorizontalIcon } from "@hugeicons/core-free-icons/ArrowReloadHorizontalIcon";
+export { default as ArrowRight02Icon } from "@hugeicons/core-free-icons/ArrowRight02Icon";
 export { default as ArrowUp02Icon } from "@hugeicons/core-free-icons/ArrowUp02Icon";
 export { default as ArrowUpRight01Icon } from "@hugeicons/core-free-icons/ArrowUpRight01Icon";
 export { default as BrowserIcon } from "@hugeicons/core-free-icons/BrowserIcon";
@@ -13,6 +15,7 @@ export { default as GitCompareIcon } from "@hugeicons/core-free-icons/GitCompare
 export { default as GlobalIcon } from "@hugeicons/core-free-icons/GlobalIcon";
 export { default as LayoutGridIcon } from "@hugeicons/core-free-icons/LayoutGridIcon";
 export { default as Link04Icon } from "@hugeicons/core-free-icons/Link04Icon";
+export { default as LockIcon } from "@hugeicons/core-free-icons/LockIcon";
 export { default as Mic01Icon } from "@hugeicons/core-free-icons/Mic01Icon";
 export { default as MinusSignIcon } from "@hugeicons/core-free-icons/MinusSignIcon";
 export { default as Note01Icon } from "@hugeicons/core-free-icons/Note01Icon";

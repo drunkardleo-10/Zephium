@@ -10,7 +10,6 @@
     attachedTabIds = [],
     pending = false,
     status = "",
-    openInBrowse = false,
     onattach,
     onopen,
     onnewtab,
@@ -20,7 +19,6 @@
     spaceName: string;
     attachedTabIds?: readonly TabView["id"][];
     pending?: boolean;
-    openInBrowse?: boolean;
     status?: string;
     onattach: (ids: TabView["id"][]) => void;
     onopen: (id: TabView["id"]) => void;
@@ -77,11 +75,8 @@
         <Button
           size="compact"
           disabled={pending}
-          aria-label={openInBrowse
-            ? m.work_env_open_tab_browse({ title: tab.title || m.work_env_untitled_tab() })
-            : m.work_env_open_tab({ title: tab.title || m.work_env_untitled_tab() })}
-          onclick={() => onopen(tab.id)}
-          >{openInBrowse ? m.work_env_open_browse() : m.work_env_open_here()}</Button
+          aria-label={m.work_env_open_tab({ title: tab.title || m.work_env_untitled_tab() })}
+          onclick={() => onopen(tab.id)}>{m.work_env_open_here()}</Button
         >
       </li>
     {:else}<li class="empty">{query ? m.work_env_no_matches() : m.work_env_no_tabs()}</li>{/each}

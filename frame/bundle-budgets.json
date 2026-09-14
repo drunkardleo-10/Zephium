@@ -130,9 +130,9 @@
     "css": 0
   },
   "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
-    "js": 477000,
-    "css": 90000,
-    "description": "Measured 475938 JS bytes with explicit objective-only public research selection, disclosure and captured submission identity."
+    "js": 560000,
+    "css": 116000,
+    "description": "Measured 540883 JS and 111429 CSS bytes with the floating browser pane: pane frame, operation settlement, layout store, icon buttons."
   },
   "lazy:features/work/components/WorkObjectiveInspector.svelte": {
     "js": 148000,

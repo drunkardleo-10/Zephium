@@ -6,13 +6,26 @@ import { WorkEnvironmentSession } from "$domain/work-environment";
 import type { WorkCallV1, WorkEnvironmentSnapshot } from "$shared/ipc/bindings";
 import { tabFixture } from "$shared/testing/fixtures";
 import WorkEnvironmentWorkspace from "../components/WorkEnvironmentWorkspace.svelte";
-const native = vi.hoisted(() => ({ call: vi.fn() }));
+const native = vi.hoisted(() => ({
+  call: vi.fn(),
+  paneShow: vi.fn(),
+  paneHide: vi.fn(),
+  paneRect: vi.fn(),
+}));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
-  return mockBindings({ workCall: native.call });
+  return mockBindings({
+    workCall: native.call,
+    workPaneShow: native.paneShow,
+    workPaneHide: native.paneHide,
+    workPaneSetRect: native.paneRect,
+  });
 });
 
-test("the production manual environment attaches a real tab and opens only its explicit Browse action", async () => {
+test("the production manual environment attaches a real tab, opens it in the pane, and hands off to Browse only explicitly", async () => {
+  const { emitNativeEvent } = await import("$shared/testing/native-events");
+  await page.viewport(1200, 800);
+  native.paneShow.mockResolvedValue({ accepted: true, operation_id: null });
   const profile = "00000000000000000000000001";
   const space = "00000000000000000000000002";
   const id = "00000000000000000000000003";
@@ -118,9 +131,30 @@ test("the production manual environment attaches a real tab and opens only its e
   await screen.getByRole("button", { name: "Inspect", exact: true }).click();
   await screen
     .getByRole("region", { name: "Details", exact: true })
-    .getByRole("button", { name: "Open in Browse", exact: true })
+    .getByRole("button", { name: "Open here", exact: true })
     .click();
-  expect(onopen).toHaveBeenCalledExactlyOnceWith("retained-tab");
+  await expect.poll(() => native.paneShow.mock.calls.length).toBe(1);
+  expect(native.paneShow.mock.lastCall?.[0]).toEqual({ kind: "tab", id: "retained-tab" });
+  const hole = native.paneShow.mock.lastCall?.[1];
+  expect(hole.width).toBeGreaterThanOrEqual(480);
+  expect(onopen).not.toHaveBeenCalled();
+  const row = screen.container.querySelector<HTMLElement>("[data-zephium-tab-id]")!;
+  expect(row.dataset.zephiumTabId).toBe("retained-tab");
+  emitNativeEvent("layoutChanged", {
+    dividers: [],
+    work_pane: { tab: "retained-tab", ...hole, presented: true, generation: 1 },
+  });
+  await expect.element(screen.getByRole("toolbar", { name: "Move pane" })).toBeVisible();
+  const handoff = screen
+    .getByRole("region", { name: "Browser pane", exact: true })
+    .getByRole("button", { name: "Open in Browse", exact: true });
+  await expect.element(handoff).toBeEnabled();
+  await handoff.click();
+  await expect.poll(() => onopen.mock.calls).toEqual([["retained-tab"]]);
+  emitNativeEvent("layoutChanged", { dividers: [], work_pane: null });
+  await expect
+    .element(screen.getByRole("region", { name: "Browser pane", exact: true }))
+    .not.toBeInTheDocument();
   await expect
     .element(screen.getByRole("textbox", { name: "Start a new objective" }))
     .not.toBeInTheDocument();

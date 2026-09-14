@@ -5,6 +5,9 @@
   import { commandId, workSession, type WorkSession } from "$domain/work";
   import { resourceSession, type ResourceSession } from "$domain/resources";
   import type { TabView, WorkExecutionFact, WorkRuntimeProjection } from "$shared/ipc/bindings";
+  import { commands } from "$shared/ipc/bindings";
+  import { layout } from "$domain/layout";
+  import { workPane, type WorkPaneRect, type WorkPaneTarget } from "$domain/work-pane";
   import { preferences } from "$domain/preferences";
   import { loadNotes, loadNoteEditorHost } from "$features/notes";
   import { loadTasks } from "$features/tasks";
@@ -26,6 +29,7 @@
   import TasksCapsule from "./chrome/TasksCapsule.svelte";
   import Composer from "./composer/Composer.svelte";
   import WorkTabPicker from "./WorkTabPicker.svelte";
+  import BrowserPane from "./pane/BrowserPane.svelte";
   import Lift from "./Lift.svelte";
   import Inspector from "./Inspector.svelte";
   import { defaultSize } from "../lib/canvas-model";
@@ -52,7 +56,6 @@
     onopen,
     onnewtab,
     onsettings,
-    onopencitation,
   }: {
     session: WorkEnvironmentSession;
     tabs: readonly TabView[];
@@ -60,10 +63,10 @@
     profileLabel: string;
     aiEnabled?: boolean;
     onreturn: () => void;
+    /** Explicit Browse handoff for one Space tab; the pane is the default way to look at a page. */
     onopen: (id: string) => void;
     onnewtab: () => void;
     onsettings: () => void;
-    onopencitation?: (url: string) => void;
   } = $props();
   const context = untrack(() => new WorkEnvironmentContext(session.profile));
   onMount(() => {
@@ -112,9 +115,122 @@
   });
   function openLift(id: string) {
     if (!items.some((item) => item.id === id)) return;
+    const reference = session.snapshot?.elements.find((element) => element.id === id)?.reference;
+    if (reference?.kind === "browser") {
+      if (tabs.some((tab) => tab.id === reference.tab))
+        openPane({ kind: "tab", id: reference.tab }, id);
+      return;
+    }
     chrome?.close();
     inspected = null;
     lifted = { id, origin: canvasRef?.screenRect(id) ?? null };
+  }
+  // The floating browser pane: Rust owns the native hole, this owns the frame.
+  let pane = $state.raw<{
+    target: WorkPaneTarget;
+    origin: DOMRect | null;
+    phase: "opening" | "shown" | "failed";
+    restore: HTMLElement | null;
+  } | null>(null);
+  let paneRequest: Promise<void> | null = null;
+  let paneRect: WorkPaneRect | null = null;
+  let paneSent: WorkPaneTarget | null = null;
+  let paneDeadline: ReturnType<typeof setTimeout> | undefined;
+  let paneSeen = false;
+  const paneLayout = $derived(layout.workPane());
+  const paneTab = $derived.by(() => {
+    const current = pane;
+    const id = paneLayout?.tab ?? (current?.target.kind === "tab" ? current.target.id : null);
+    return id ? tabs.find((tab) => tab.id === id) : undefined;
+  });
+  const paneAdded = $derived(
+    !!paneTab &&
+      !!session.snapshot?.elements.some(
+        (element) => element.reference.kind === "browser" && element.reference.tab === paneTab.id,
+      ),
+  );
+  onMount(() => void layout.init());
+  $effect(() => {
+    const applied = paneLayout;
+    const current = pane;
+    if (applied) {
+      paneSeen = true;
+      clearTimeout(paneDeadline);
+      if (current && current.phase === "opening") pane = { ...current, phase: "shown" };
+      return;
+    }
+    if (paneSeen && current?.phase === "shown") {
+      // Rust cleared the pane (return, tab close, scope change): drop the frame with it.
+      paneSeen = false;
+      paneSent = null;
+      pane = null;
+      current.restore?.focus({ preventScroll: true });
+    }
+  });
+  function openPane(target: WorkPaneTarget, originId: string | null) {
+    chrome?.close();
+    lifted = null;
+    const restore =
+      pane?.restore ??
+      (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    const origin = originId ? (canvasRef?.screenRect(originId) ?? null) : null;
+    const rect = paneRect;
+    pane = { target, origin: pane ? pane.origin : origin, phase: "opening", restore };
+    if (rect && paneLayout) void requestPane(target, rect);
+  }
+  async function requestPane(target: WorkPaneTarget, rect: WorkPaneRect) {
+    if (paneRequest || paneSent === target) return;
+    paneSent = target;
+    const request = (async () => {
+      const okay = await workPane.show(target, rect).then(
+        (result) =>
+          result.outcome === "applied" ||
+          result.outcome === "deferred" ||
+          result.outcome === "no_op",
+        () => false,
+      );
+      const current = pane;
+      if (!current || current.target !== target) return;
+      if (!okay) failPane(current);
+      else {
+        // Admission is not presentation: the layout projection confirms the hole.
+        clearTimeout(paneDeadline);
+        paneDeadline = setTimeout(() => {
+          if (pane?.target === target && pane.phase === "opening") failPane(pane);
+        }, 8000);
+      }
+    })();
+    paneRequest = request;
+    try {
+      await request;
+    } finally {
+      if (paneRequest === request) paneRequest = null;
+    }
+  }
+  function failPane(current: NonNullable<typeof pane>) {
+    pane = { ...current, phase: "failed" };
+    setTimeout(() => {
+      if (pane?.phase === "failed") closePane();
+    }, 1600);
+  }
+  function paneMeasured(rect: WorkPaneRect) {
+    paneRect = rect;
+    const current = pane;
+    if (!current) return;
+    if (current.phase === "opening") void requestPane(current.target, rect);
+    else if (paneLayout) workPane.setRect(rect, paneLayout.generation);
+  }
+  function closePane() {
+    const current = pane;
+    pane = null;
+    paneSeen = false;
+    paneSent = null;
+    clearTimeout(paneDeadline);
+    if (paneLayout) void workPane.hide();
+    current?.restore?.focus({ preventScroll: true });
+  }
+  function openCitation(url: string) {
+    openPane({ kind: "url", url }, null);
   }
   function liftSize(item: CanvasItem | undefined) {
     if (!item) return { width: 720, height: 520 };
@@ -443,7 +559,8 @@
     const reference = element?.reference;
     if (!reference) return;
     if (reference.kind === "browser") {
-      if (tabs.some((tab) => tab.id === reference.tab)) onopen(reference.tab);
+      if (tabs.some((tab) => tab.id === reference.tab))
+        openPane({ kind: "tab", id: reference.tab }, element?.id ?? null);
     } else if (reference.kind === "resource") {
       const current = notes;
       if (!current) return;
@@ -671,9 +788,8 @@
     {spaceName}
     attachedTabIds={attachedTabs}
     pending={busy}
-    openInBrowse
     onattach={(ids) => void attach(ids)}
-    {onopen}
+    onopen={(id) => openPane({ kind: "tab", id }, null)}
     {onnewtab}
   />{/snippet}
 {#snippet switcher()}
@@ -1057,7 +1173,7 @@
           areas={snapshot?.areas ?? []}
           {busy}
           openLabel={element.reference.kind === "browser"
-            ? m.work_env_open_browse()
+            ? m.work_env_open_here()
             : m.work_env_open()}
           openDisabled={element.reference.kind === "browser" &&
             !tabs.some(
@@ -1098,7 +1214,7 @@
                 session={objectiveSession!}
                 reference={resultSelection!}
                 source={resultSource}
-                onopen={onopencitation}
+                onopen={openCitation}
               />{/key}{/snippet}</LazyView
         >
       </section>{/if}
@@ -1124,7 +1240,7 @@
                 showCurrentPlan={inspectCurrentPlan}
                 session={objectiveSession!}
                 attached={snapshot?.elements.map((element) => element.reference) ?? []}
-                {onopencitation}
+                onopencitation={openCitation}
                 onattach={(reference) => void session.edit({ kind: "add", reference, area: null })}
               />{/key}{/snippet}</LazyView
         >
@@ -1163,7 +1279,7 @@
               showCurrentPlan
               session={objectiveSession!}
               attached={snapshot?.elements.map((element) => element.reference) ?? []}
-              {onopencitation}
+              onopencitation={openCitation}
               onattach={(reference) => void session.edit({ kind: "add", reference, area: null })}
             />{/snippet}</LazyView
         >
@@ -1180,7 +1296,7 @@
                   session={objectiveSession!}
                   reference={results.references.get(liftedItem!.id)!}
                   source={null}
-                  onopen={onopencitation}
+                  onopen={openCitation}
                 />{/snippet}</LazyView
             >
           {/if}
@@ -1196,11 +1312,41 @@
               onclick={() => {
                 lifted = null;
                 void inspectReference();
-              }}>{m.work_env_open_browse()}</Button
+              }}>{m.work_env_open_here()}</Button
             >{/if}
         </div>
       {/if}
     </Lift>
+  {/if}
+  {#if pane && cardBounds}
+    <BrowserPane
+      tab={paneTab}
+      applied={paneLayout}
+      bounds={cardBounds}
+      origin={pane.origin}
+      phase={pane.phase}
+      added={paneAdded}
+      onmeasure={paneMeasured}
+      onnavigate={(input) => {
+        if (paneTab) void commands.tabsNavigate(paneTab.id, input);
+      }}
+      onback={() => {
+        if (paneTab) void commands.tabsBack(paneTab.id);
+      }}
+      onforward={() => {
+        if (paneTab) void commands.tabsForward(paneTab.id);
+      }}
+      onreload={() => {
+        if (paneTab) void commands.tabsReload(paneTab.id);
+      }}
+      onopenbrowse={() => {
+        if (paneTab) onopen(paneTab.id);
+      }}
+      onadd={() => {
+        if (paneTab) void attach([paneTab.id]);
+      }}
+      onclose={closePane}
+    />
   {/if}
   <WorkChrome
     bind:this={chrome}
