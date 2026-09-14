@@ -3113,7 +3113,7 @@ mod tests {
                 .unwrap(),
             14
         );
-        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(18));
+        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(20));
     }
 
     #[test]
