@@ -71,6 +71,7 @@ impl fmt::Debug for AgentNavigationOriginRule {
 enum DiscoveryProfile {
     Restrictive,
     Production,
+    PublicWeb,
 }
 
 /// Read-only navigation scope. Destinations are selected from the current
@@ -88,6 +89,37 @@ pub struct AgentNavigationDiscovery {
 }
 
 impl AgentNavigationDiscovery {
+    /// A separately approved anonymous, read-only public-web capability.
+    /// Every successor must still be a non-sensitive link in the acknowledged
+    /// document. Native admission must use an isolated website data store.
+    pub fn try_new_public_web(
+        departure: crate::ContextNavigationTarget,
+        max_hops: usize,
+        max_visits_per_destination: usize,
+    ) -> Result<Self, AgentManifestContractError> {
+        if !public_destination(&departure) {
+            return Err(AgentManifestContractError::NavigationRoute);
+        }
+        let origin = SemanticOrigin::parse(departure.as_url().as_str())
+            .map_err(|_| AgentManifestContractError::NavigationRoute)?;
+        let mut scope = Self::try_new_production(
+            departure,
+            vec![AgentNavigationOriginRule::try_new(
+                origin,
+                "/".into(),
+                true,
+                false,
+            )?],
+            max_hops,
+            max_visits_per_destination,
+        )?;
+        scope.profile = DiscoveryProfile::PublicWeb;
+        Ok(scope)
+    }
+    /// This capability never permits authenticated state or effects.
+    pub const fn is_public_web(&self) -> bool {
+        matches!(self.profile, DiscoveryProfile::PublicWeb)
+    }
     /// Approves the legacy restrictive same-origin subtree.
     pub fn try_new(
         departure: crate::ContextNavigationTarget,
@@ -208,7 +240,10 @@ impl AgentNavigationDiscovery {
     }
     /// Whether this is the separately authorized production profile.
     pub const fn is_production(&self) -> bool {
-        matches!(self.profile, DiscoveryProfile::Production)
+        matches!(
+            self.profile,
+            DiscoveryProfile::Production | DiscoveryProfile::PublicWeb
+        )
     }
     /// Canonical production rules; restrictive profiles contain one equivalent rule.
     pub fn rules(&self) -> &[AgentNavigationOriginRule] {
@@ -220,14 +255,111 @@ impl AgentNavigationDiscovery {
     }
     /// Tests whether an origin was explicitly named.
     pub fn admits_origin(&self, origin: &SemanticOrigin) -> bool {
+        if self.is_public_web() {
+            return crate::ContextNavigationTarget::parse(origin.as_url().as_str())
+                .is_ok_and(|target| public_destination(&target));
+        }
         self.rules.iter().any(|rule| rule.origin() == origin)
     }
     /// Scope-only check; policy also requires a current public link and exact history budgets.
     pub fn admits(&self, target: &crate::ContextNavigationTarget) -> bool {
+        if self.is_public_web() {
+            return public_destination(target) && safe_path(target.as_url().path());
+        }
         target.as_url().as_str().len() <= crate::MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES
             && self.rules.iter().any(|rule| rule.admits(target))
             && (self.is_production() || !target.as_url().path().contains('%'))
             && (self.is_production() || target != &self.departure)
+    }
+}
+
+fn public_destination(target: &crate::ContextNavigationTarget) -> bool {
+    let url = target.as_url();
+    url.scheme() == "https"
+        && url.port().is_none_or(|port| port == 443)
+        && url.as_str().len() <= crate::MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES
+        && url.fragment().is_none()
+        && crate::semantic_wire::model_safe_public_url(target)
+        && matches!(url.host(), Some(url::Host::Domain(host)) if {
+            let host = host.trim_end_matches('.');
+            host.contains('.') && !["localhost", "local", "internal", "lan", "home", "test", "invalid", "example", "onion"].iter()
+                .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")))
+        })
+}
+
+#[cfg(test)]
+mod public_tests {
+    use super::*;
+    #[test]
+    fn public_discovery_requires_safe_https_destinations_without_origin_predeclaration() {
+        let scope = AgentNavigationDiscovery::try_new_public_web(
+            crate::ContextNavigationTarget::parse("https://www.bing.com/search?q=svelte").unwrap(),
+            8,
+            2,
+        )
+        .unwrap();
+        assert!(scope.is_public_web());
+        assert!(scope.admits(
+            &crate::ContextNavigationTarget::parse("https://github.com/sveltejs/svelte/issues")
+                .unwrap()
+        ));
+        for url in [
+            "http://github.com/",
+            "https://127.0.0.1/",
+            "https://[::1]/",
+            "https://10.0.0.1/",
+            "https://intranet/",
+            "https://app.internal/",
+            "https://app.local/",
+            "https://app.local./",
+            "https://github.com:444/",
+            "https://github.com/?access_token=secret",
+            "https://github.com/#access_token=secret",
+        ] {
+            if let Ok(target) = crate::ContextNavigationTarget::parse(url) {
+                assert!(!scope.admits(&target), "{url}");
+            }
+        }
+    }
+    #[test]
+    fn public_discovery_cannot_attach_to_authenticated_or_effectful_authority() {
+        let origin = SemanticOrigin::parse("https://www.bing.com").unwrap();
+        let scope = AgentNavigationDiscovery::try_new_public_web(
+            crate::ContextNavigationTarget::parse("https://www.bing.com/search?q=rust").unwrap(),
+            8,
+            2,
+        )
+        .unwrap();
+        for (account, effects, admitted) in [
+            (
+                AgentAccountScope::Anonymous,
+                vec![SemanticEffectClass::Read],
+                true,
+            ),
+            (
+                AgentAccountScope::Anonymous,
+                vec![SemanticEffectClass::Read, SemanticEffectClass::LocalWrite],
+                false,
+            ),
+            (
+                AgentAccountScope::Authenticated(crate::AgentAccountId::generate()),
+                vec![SemanticEffectClass::Read],
+                false,
+            ),
+        ] {
+            let authority = AgentPlanNodeAuthority::try_new(
+                vec![1.into()],
+                vec![account],
+                vec![origin.clone()],
+                SemanticSensitivity::Public,
+                AgentEffectScope::try_new(&effects).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                authority.with_navigation_discovery(scope.clone()).is_ok(),
+                admitted
+            );
+        }
     }
 }
 

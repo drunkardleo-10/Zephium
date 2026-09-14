@@ -87,6 +87,7 @@ pub(crate) struct WorkResourceGuard {
     admission: std::sync::Weak<AgentPortAdmission>,
     resource: WorkBrowserResourceJoin,
     storage: ContextProfileStorageClass,
+    isolated_public: bool,
     document: Option<ContextNavigationTarget>,
     document_policy: zephium_agentic::WorkBrowserDocumentPolicy,
     state: Mutex<State>,
@@ -124,6 +125,7 @@ impl WorkResourceGuard {
             admission: Arc::downgrade(admission),
             resource: request.resource().clone(),
             storage: request.storage(),
+            isolated_public: request.isolated_public(),
             document: request.document().cloned(),
             document_policy: request.document_policy(),
             health: None,
@@ -195,6 +197,9 @@ impl WorkResourceGuard {
             })
         })
     }
+    pub(crate) fn isolated_public(&self) -> bool {
+        self.isolated_public
+    }
     pub(crate) fn storage(&self) -> ContextProfileStorageClass {
         self.storage
     }
@@ -265,6 +270,7 @@ impl WorkResourceGuard {
     ) -> Result<(), ContextPortFailure> {
         if request.resource() != &self.resource
             || request.storage() != self.storage
+            || request.isolated_public() != self.isolated_public
             || request.document() != self.document.as_ref()
             || request.document_policy() != self.document_policy
         {

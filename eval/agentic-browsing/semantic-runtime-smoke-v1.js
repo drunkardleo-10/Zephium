@@ -742,6 +742,7 @@ assert(
 );
 const mainNode = initial.n.find((node) => node.r === "landmark");
 assert(mainNode, "landmark missing");
+assert(mainNode.lm === "main" && mainNode.n === "Account", "native landmark subtype must remain distinct from accessible name");
 
 const expansionWire = invoke(8, 2, { k: "region", a: mainNode.k }, { n: 64, t: 8192, w: 32768, x: 4096, geo: false });
 assert(!expansionWire.startsWith("E1:"), expansionWire);
@@ -1563,6 +1564,9 @@ async function finish() {
   page.append(new Element("button", { "aria-label": "q".repeat(513) }));
   document._root = page; setOwner(page, document);
   const beforeRegion = JSON.parse(invoke(115, 115, { k: "initial" }));
+  assert(beforeRegion.n.find(node => node.n === "Workspace").lm === "main" &&
+    beforeRegion.n.find(node => node.n === "Reference index").lm === "navigation",
+    "initial capture lost the difference between main content and navigation");
   const parentKey = beforeRegion.n.find(node => node.n === "Workspace").k;
   const regionWire = invoke(116, 116, { k: "region", a: parentKey }, { n: 128 });
   const region = JSON.parse(regionWire);
@@ -1570,6 +1574,8 @@ async function finish() {
   assert(region.c === "scope_boundary" && region.n.some(node => node.n === "Reference index") && region.n.some(node => node.n === "Independent article"), "region omission lost truthful boundaries or expandable anchors");
   assert(region.n.some(node => node.n === "q".repeat(512) && node.fc === false),
     "region fixture did not exercise field clipping alongside structural omission");
+  assert(region.n.find(node => node.n === "Reference index").lm === "navigation",
+    "scoped capture lost nested landmark subtype");
   const nestedKey = region.n.find(node => node.n === "Independent article").k;
   assert(invoke(117, 117, { k: "region", a: nestedKey }).includes("Nested article evidence"), "nested region anchor cannot be independently inspected");
   const restored = JSON.parse(invoke(118, 118, { k: "initial" }));

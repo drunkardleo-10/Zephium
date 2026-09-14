@@ -761,6 +761,8 @@ pub enum SemanticTruncation {
     InspectionLimit,
     /// Fixed encoded response ceiling omitted a suffix of otherwise valid nodes.
     WireLimit,
+    /// Trusted host omitted whole trailing nodes to fit the model projection budget.
+    ModelProjectionLimit,
     /// Requested progressive-observation boundary reached.
     ScopeBoundary,
     /// Child frame could not be observed safely.
@@ -958,6 +960,43 @@ impl SemanticEditableStructure {
     }
 }
 
+/// Descriptive native/ARIA landmark subtype. This never grants an operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticLandmarkKind {
+    /// Primary page content.
+    Main,
+    /// Navigation region.
+    Navigation,
+    /// Header/banner region.
+    Banner,
+    /// Complementary/aside content.
+    Complementary,
+    /// Footer/content information.
+    Contentinfo,
+    /// Named form region.
+    Form,
+    /// Search region.
+    Search,
+    /// Other explicitly named region.
+    Region,
+}
+impl SemanticLandmarkKind {
+    /// Closed model label, distinct from the page's accessible name.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Navigation => "navigation",
+            Self::Banner => "banner",
+            Self::Complementary => "complementary",
+            Self::Contentinfo => "contentinfo",
+            Self::Form => "form",
+            Self::Search => "search",
+            Self::Region => "region",
+        }
+    }
+}
+
 /// One bounded allowlisted semantic node.
 #[derive(Clone, Eq, PartialEq)]
 pub struct SemanticNode {
@@ -966,6 +1005,7 @@ pub struct SemanticNode {
     depth: u8,
     role: SemanticRole,
     heading_level: Option<SemanticHeadingLevel>,
+    landmark_kind: Option<SemanticLandmarkKind>,
     link_destination: Option<crate::ContextNavigationTarget>,
     name: Option<SemanticText>,
     text: Option<SemanticText>,
@@ -995,6 +1035,11 @@ impl SemanticNode {
     /// Allowlisted semantic role.
     pub const fn role(&self) -> SemanticRole {
         self.role
+    }
+
+    /// Optional descriptive subtype; absent on legacy captures.
+    pub const fn landmark_kind(&self) -> Option<SemanticLandmarkKind> {
+        self.landmark_kind
     }
 
     /// Heading level, present exactly for heading nodes.
@@ -1083,6 +1128,7 @@ impl fmt::Debug for SemanticNode {
             .field("depth", &self.depth)
             .field("role", &self.role)
             .field("heading_level", &self.heading_level)
+            .field("landmark_kind", &self.landmark_kind)
             .field("has_link_destination", &self.link_destination.is_some())
             .field("name_bytes", &self.name.as_ref().map(SemanticText::len))
             .field("text_bytes", &self.text.as_ref().map(SemanticText::len))
@@ -1103,6 +1149,7 @@ pub(crate) struct SemanticNodeInput {
     pub(crate) depth: u8,
     pub(crate) role: SemanticRole,
     pub(crate) heading_level: Option<SemanticHeadingLevel>,
+    pub(crate) landmark_kind: Option<SemanticLandmarkKind>,
     pub(crate) link_destination: Option<crate::ContextNavigationTarget>,
     pub(crate) name: Option<SemanticText>,
     pub(crate) text: Option<SemanticText>,
@@ -1131,6 +1178,29 @@ pub struct SemanticSnapshot {
 }
 
 impl SemanticSnapshot {
+    pub(crate) fn retain_model_prefix(&mut self, count: usize) {
+        self.nodes.truncate(count);
+        self.references.truncate(count);
+        self.completeness =
+            SemanticCompleteness::Truncated(SemanticTruncation::ModelProjectionLimit);
+        self.total_text_bytes = self
+            .nodes
+            .iter()
+            .map(|node| {
+                node.name.as_ref().map_or(0, SemanticText::len)
+                    + node.text.as_ref().map_or(0, SemanticText::len)
+                    + node
+                        .link_destination
+                        .as_ref()
+                        .map_or(0, |target| target.as_url().as_str().len())
+                    + match node.value.as_ref() {
+                        Some(SemanticValueSummary::Text(text)) => text.len(),
+                        _ => 0,
+                    }
+            })
+            .sum::<usize>() as u32;
+    }
+
     /// Local positive evidence can survive unrelated field clipping. Any
     /// structural/global truncation still refuses action evidence, and legacy
     /// records without an explicit local witness remain closed on FieldLimit.
@@ -1299,6 +1369,7 @@ impl SemanticSnapshot {
                 depth: input.depth,
                 role: input.role,
                 heading_level: input.heading_level,
+                landmark_kind: input.landmark_kind,
                 link_destination: input.link_destination,
                 name: input.name,
                 text: input.text,
@@ -1448,6 +1519,7 @@ mod tests {
             depth: 0,
             role: SemanticRole::Button,
             heading_level: None,
+            landmark_kind: None,
             link_destination: None,
             name: Some(SemanticText::try_new("Save".to_owned(), 10).expect("name")),
             text: None,

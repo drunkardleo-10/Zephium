@@ -196,6 +196,11 @@ pub fn decode_semantic_snapshot(
             }
             (_, None) => None,
         };
+        let landmark_kind = match (role, raw_node.landmark_kind) {
+            (SemanticRole::Landmark, kind) => kind,
+            (_, None) => None,
+            _ => return Err(SemanticDecodeError::NodeContract),
+        };
         let states = SemanticStates::from_bits(raw_node.states)
             .map_err(|_| SemanticDecodeError::NodeContract)?;
         let operations = SemanticOperations::from_bits(raw_node.operations)
@@ -351,6 +356,7 @@ pub fn decode_semantic_snapshot(
             depth,
             role,
             heading_level,
+            landmark_kind,
             link_destination,
             name: raw_name,
             text: raw_text,
@@ -872,6 +878,8 @@ struct RawNode {
     role: RawRole,
     #[serde(rename = "l", default)]
     heading_level: Option<u8>,
+    #[serde(rename = "lm", default)]
+    landmark_kind: Option<crate::SemanticLandmarkKind>,
     #[serde(rename = "u", default)]
     link_destination: Option<String>,
     #[serde(rename = "n", default)]
@@ -1244,6 +1252,38 @@ mod tests {
             2
         );
         assert_eq!(snapshot.total_text_bytes(), 12);
+    }
+
+    #[test]
+    fn landmark_subtypes_are_optional_closed_descriptions_not_names_or_roles() {
+        let bytes = payload(serde_json::json!([
+            {"k":1,"r":"document"},
+            {"k":2,"p":0,"r":"landmark","lm":"main"},
+            {"k":3,"p":0,"r":"landmark","lm":"navigation"},
+            {"k":4,"p":0,"r":"landmark"}
+        ]));
+        let snapshot = decode_semantic_snapshot(decode_context(), &bytes).unwrap();
+        assert_eq!(
+            snapshot.nodes()[1].landmark_kind(),
+            Some(crate::SemanticLandmarkKind::Main)
+        );
+        assert_eq!(
+            snapshot.nodes()[2].landmark_kind(),
+            Some(crate::SemanticLandmarkKind::Navigation)
+        );
+        assert_eq!(snapshot.nodes()[3].landmark_kind(), None);
+        assert!(snapshot
+            .nodes()
+            .iter()
+            .all(|node| node.name().is_none() && node.operations().is_empty()));
+        for (role, kind) in [
+            ("button", "main"),
+            ("landmark", "arbitrary page label"),
+            ("landmark", ""),
+        ] {
+            let bytes = payload(serde_json::json!([{"k":1,"r":role,"lm":kind}]));
+            assert!(decode_semantic_snapshot(decode_context(), &bytes).is_err());
+        }
     }
 
     #[test]

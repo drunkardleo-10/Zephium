@@ -410,6 +410,13 @@ impl AgentWorkRunInput {
         Ok(AgentWorkRetainedResourceSpec {
             identity: self.context.identity,
             storage: self.context.storage,
+            isolated_public: self
+                .manifest
+                .plan_node(self.lease.node())
+                .is_some_and(|node| {
+                    node.navigation_discovery()
+                        .is_some_and(|scope| scope.is_public_web())
+                }),
             target: self.context.target.clone(),
             document_policy: self.context.document_policy,
             clock: self.settings.clock.clone(),
@@ -535,6 +542,8 @@ pub struct AgentWorkRetainedResourceSpec {
     pub identity: ContextIdentity,
     /// Original selected session persistence class.
     pub storage: ContextProfileStorageClass,
+    /// Frozen public discovery must never inherit profile cookies.
+    pub isolated_public: bool,
     /// Exact approved initial document, not navigation authority.
     pub target: ContextNavigationTarget,
     /// Trusted initial-document construction policy, frozen before native work.
@@ -1048,6 +1057,13 @@ impl AgentWorkController {
         retention: AgentBrowserRetention,
         retained: Option<Box<dyn AgentWorkRetainedBrowser>>,
     ) -> Result<(Self, AgentWorkHandle), AgentWorkFailure> {
+        if input.retained_resource_spec()?.isolated_public
+            && !retained
+                .as_ref()
+                .is_some_and(|browser| browser.binding().isolated_public())
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
         let extraction_schema = task.extraction_schema().cloned();
         let actions_before_extraction = task.allows_actions_before_extraction();
         let subtree_extraction = task.allows_subtree_extraction();
@@ -2305,7 +2321,9 @@ impl AgentWorkController {
         browser: &WorkBrowser<'_>,
     ) -> Result<(), AgentWorkFailure> {
         let state = self.state.as_mut().ok_or(AgentWorkFailure::Contract)?;
-        let mut observation = Self::observe_initial_ready(state, worker, browser).await?;
+        let mut observation = Self::fit_model_observation(
+            Self::observe_initial_ready(state, worker, browser).await?,
+        )?;
         let mut captured_at = SemanticCaptureInstant::from_millis(
             state
                 .journal_mut()?
@@ -2527,6 +2545,60 @@ impl AgentWorkController {
                 continue;
             }
             let step = turn;
+            // A model can miscopy a public link. Refuse before policy admission,
+            // retaining the exact observation/call and the original budgets.
+            // Broken authority and out-of-scope targets still fail closed.
+            let unobserved_navigation = match step.turn.proposal() {
+                AgentBrowserToolProposal::Navigate(target) => {
+                    state
+                        .navigation_discovery
+                        .as_ref()
+                        .is_some_and(|scope| scope.admits(target))
+                        && !observation
+                            .frames()
+                            .iter()
+                            .flat_map(|frame| frame.nodes())
+                            .any(|node| {
+                                node.role() == SemanticRole::Link
+                                    && node.sensitivity() == SemanticSensitivity::Public
+                                    && node.link_destination() == Some(target)
+                            })
+                }
+                _ => false,
+            };
+            if unobserved_navigation {
+                state.native.check_control(worker, browser)?;
+                state.refresh_account(worker, browser)?;
+                state.journal_mut()?.emit(AgentWorkEventKind::ToolProposed(
+                    AgentBrowserToolKind::Navigate,
+                ))?;
+                state
+                    .journal_mut()?
+                    .emit(AgentWorkEventKind::NavigationRefused)?;
+                let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+                if session.turns.saturating_add(2) > session.max_model_calls {
+                    return Err(AgentWorkFailure::Browser(
+                        AgentBrowserProviderError::TurnLimit,
+                    ));
+                }
+                let refusal = step
+                    .into_tool_turn()
+                    .into_parts()
+                    .1
+                    .refuse_unobserved_navigation(&observation, &session.config)
+                    .map_err(|_| {
+                        AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation)
+                    })?;
+                turn = Self::provider(
+                    &mut state.native,
+                    worker,
+                    browser,
+                    session.cancellation.clone(),
+                    session.continue_after_navigation_refusal(refusal, &observation),
+                )
+                .await?;
+                continue;
+            }
             if matches!(
                 step.turn.proposal().kind(),
                 AgentBrowserToolKind::Navigate | AgentBrowserToolKind::Back
@@ -4131,6 +4203,8 @@ pub enum AgentWorkEventKind {
     /// Snapshot scope was incompatible with the delivered baseline. No native
     /// capture ran; one budgeted provider turn can select a different operation.
     InspectionRefused,
+    /// A model URL absent from the current observation was refused before dispatch.
+    NavigationRefused,
     /// A model action failed binding before preparation, policy, or dispatch.
     /// Correcting the proposal consumes another ordinary budgeted model call.
     ActionProposalRefused(SemanticActionBindingError),

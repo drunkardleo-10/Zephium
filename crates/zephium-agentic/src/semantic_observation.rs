@@ -934,6 +934,22 @@ pub struct SemanticObservation {
 }
 
 impl SemanticObservation {
+    pub(crate) fn model_prefix(&self, count: usize) -> Option<Self> {
+        // The Work controller owns one main frame. A multi-frame projection
+        // needs a separate frame-boundary proof and is not inferred here.
+        if self.frames.len() != 1 || count == 0 || count >= usize::from(self.node_count) {
+            return None;
+        }
+        let mut next = self.clone();
+        next.frames[0].retain_model_prefix(count);
+        next.reference_locations.truncate(count);
+        next.boundaries
+            .retain(|boundary| boundary.reference.get() as usize <= count);
+        next.node_count = count as u16;
+        next.total_text_bytes = next.frames[0].total_text_bytes();
+        Some(next)
+    }
+
     /// Exact request and context authority represented by this result.
     pub const fn request(&self) -> &SemanticObservationRequest {
         &self.request

@@ -183,6 +183,8 @@ pub enum SemanticNodeChange {
     HeadingLevel,
     /// Observed public link destination changed.
     LinkDestination,
+    /// Descriptive landmark subtype changed.
+    LandmarkKind,
 }
 
 impl SemanticNodeChange {
@@ -995,6 +997,10 @@ fn changed_fields(previous: &SemanticNode, current: &SemanticNode) -> SemanticNo
             SemanticNodeChange::Geometry,
         ),
         (
+            previous.landmark_kind() != current.landmark_kind(),
+            SemanticNodeChange::LandmarkKind,
+        ),
+        (
             previous.heading_level() != current.heading_level(),
             SemanticNodeChange::HeadingLevel,
         ),
@@ -1218,6 +1224,10 @@ fn hash_node(hasher: &mut FingerprintHasher, node: &SemanticNode) {
         }
         None => hasher.byte(0),
     }
+    if let Some(kind) = node.landmark_kind() {
+        hasher.byte(0xfa);
+        hasher.byte(kind as u8);
+    }
     hash_text(hasher, node.name().map(|value| value.as_str()));
     hash_text(
         hasher,
@@ -1285,7 +1295,8 @@ fn hash_completeness(hasher: &mut FingerprintHasher, completeness: SemanticCompl
         SemanticCompleteness::Truncated(SemanticTruncation::UnsupportedFrame) => 6,
         SemanticCompleteness::Truncated(SemanticTruncation::InspectionLimit) => 7,
         SemanticCompleteness::Truncated(SemanticTruncation::WireLimit) => 8,
-        SemanticCompleteness::Truncated(SemanticTruncation::FieldLimit) => 9,
+        SemanticCompleteness::Truncated(SemanticTruncation::ModelProjectionLimit) => 9,
+        SemanticCompleteness::Truncated(SemanticTruncation::FieldLimit) => 10,
     });
 }
 

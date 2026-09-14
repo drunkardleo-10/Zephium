@@ -12,6 +12,7 @@ default = []
 provider-transport = [
     "dep:futures-util",
     "dep:reqwest",
+    "dep:rig-core",
     "dep:tokio",
     "dep:zeroize",
     "dep:security-framework",
@@ -37,6 +38,7 @@ base64.workspace = true
 crc32fast.workspace = true
 futures-util = { version = "=0.3.32", default-features = false, features = ["std"], optional = true }
 reqwest = { version = "=0.13.4", default-features = false, features = ["http2", "rustls", "stream", "system-proxy"], optional = true }
+rig-core = { version = "=0.42.0", default-features = false, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "=0.10.9"

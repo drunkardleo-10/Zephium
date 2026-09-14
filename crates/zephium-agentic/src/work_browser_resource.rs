@@ -215,6 +215,7 @@ struct OperationJoin {
 pub struct WorkBrowserResourceRequest {
     operation: OperationJoin,
     storage: ContextProfileStorageClass,
+    isolated_public: bool,
     document: Option<Arc<ContextNavigationTarget>>,
     document_policy: crate::WorkBrowserDocumentPolicy,
     delivery: Option<delivery::DeliveryDispatch>,
@@ -251,6 +252,10 @@ impl WorkBrowserResourceRequest {
     /// Immutable selected-profile persistence class; never inferred by a model.
     pub const fn storage(&self) -> ContextProfileStorageClass {
         self.storage
+    }
+    /// A fresh per-resource nonpersistent store, separate from profile cookies.
+    pub const fn isolated_public(&self) -> bool {
+        self.isolated_public
     }
     /// Admission-frozen initial document, absent for an empty resource. Native
     /// construction must install selected-profile policy before loading it and
@@ -412,6 +417,7 @@ pub enum WorkBrowserResourceEvent {
 struct Resource {
     join: WorkBrowserResourceJoin,
     storage: ContextProfileStorageClass,
+    isolated_public: bool,
     phase: WorkBrowserResourcePhase,
     pending: Option<OperationJoin>,
     destruction: Option<OperationJoin>,
@@ -512,6 +518,7 @@ impl WorkBrowserResources {
             None,
             crate::WorkBrowserDocumentPolicy::Exact,
             now,
+            false,
         )
     }
     /// Reserve one exact initial document at the trusted application edge.
@@ -545,6 +552,23 @@ impl WorkBrowserResources {
         policy: crate::WorkBrowserDocumentPolicy,
         now: AgentPolicyInstant,
     ) -> Result<WorkBrowserResourceRequest, WorkBrowserResourceError> {
+        self.construct_document_with_isolation(
+            resource, context, storage, document, policy, false, now,
+        )
+    }
+    /// Trusted public-discovery admission; the isolation operand is frozen in
+    /// every lifecycle request and cannot change when a worker is replaced.
+    #[allow(clippy::too_many_arguments)]
+    pub fn construct_document_with_isolation(
+        &mut self,
+        resource: WorkBrowserResourceId,
+        context: ContextId,
+        storage: ContextProfileStorageClass,
+        document: ContextNavigationTarget,
+        policy: crate::WorkBrowserDocumentPolicy,
+        isolated_public: bool,
+        now: AgentPolicyInstant,
+    ) -> Result<WorkBrowserResourceRequest, WorkBrowserResourceError> {
         crate::SemanticOrigin::parse(document.as_url().as_str())
             .map_err(|_| WorkBrowserResourceError::Source)?;
         if !policy.admits_request(&document) {
@@ -557,6 +581,7 @@ impl WorkBrowserResources {
             Some(Arc::new(document)),
             policy,
             now,
+            isolated_public,
         )
     }
     #[allow(clippy::too_many_arguments)]
@@ -568,6 +593,7 @@ impl WorkBrowserResources {
         document: Option<Arc<ContextNavigationTarget>>,
         document_policy: crate::WorkBrowserDocumentPolicy,
         now: AgentPolicyInstant,
+        isolated_public: bool,
     ) -> Result<WorkBrowserResourceRequest, WorkBrowserResourceError> {
         if self.sealed {
             return Err(WorkBrowserResourceError::Sealed);
@@ -605,6 +631,7 @@ impl WorkBrowserResources {
             Resource {
                 join,
                 storage,
+                isolated_public,
                 phase: WorkBrowserResourcePhase::Constructing,
                 pending: Some(operation.clone()),
                 destruction: None,
@@ -629,6 +656,7 @@ impl WorkBrowserResources {
         Ok(WorkBrowserResourceRequest {
             operation,
             storage,
+            isolated_public,
             document,
             document_policy,
             delivery: None,
@@ -687,6 +715,7 @@ impl WorkBrowserResources {
         Ok(WorkBrowserResourceRequest {
             operation,
             storage: row.storage,
+            isolated_public: row.isolated_public,
             document: row.document.clone(),
             document_policy: row.document_policy,
             delivery: None,
@@ -747,6 +776,7 @@ impl WorkBrowserResources {
         Ok(WorkBrowserResourceRequest {
             operation,
             storage: row.storage,
+            isolated_public: row.isolated_public,
             document: row.document.clone(),
             document_policy: row.document_policy,
             delivery: None,
@@ -811,6 +841,7 @@ impl WorkBrowserResources {
         Ok(WorkBrowserResourceRequest {
             operation,
             storage: row.storage,
+            isolated_public: row.isolated_public,
             document: row.document.clone(),
             document_policy: row.document_policy,
             delivery: None,

@@ -1,6 +1,8 @@
 //! Task-scoped document checkpoints through the original Work owners.
 
 use super::*;
+#[cfg(feature = "probe-harness")]
+use std::io::Write as _;
 
 pub(super) struct NavigationTerminal {
     receipt: AgentNavigationReceipt,
@@ -117,6 +119,15 @@ impl AgentWorkController {
                 AgentBrowserProviderError::TurnLimit,
             ));
         }
+        #[cfg(feature = "probe-harness")]
+        let navigation_diagnostics = (
+            proposed_target
+                .as_ref()
+                .is_some_and(|target| discovery.is_some_and(|scope| scope.admits(target))),
+            proposed_target
+                .as_ref()
+                .is_some_and(|target| discovery.is_some_and(|scope| scope.departure() == target)),
+        );
         state.refresh_account(worker, browser)?;
         state
             .journal_mut()?
@@ -188,7 +199,14 @@ impl AgentWorkController {
                 proposed_target.as_ref().ok_or(AgentWorkFailure::Contract)?,
             )
         }
-        .map_err(|error| AgentWorkFailure::Browser(AgentBrowserProviderError::Navigation(error)))?;
+        .map_err(|error| {
+            #[cfg(feature = "probe-harness")]
+            let _ = writeln!(std::io::stderr(), "work-navigation: stage=authorize error={error:?} scope_admitted={} observed_link={} same_document={}",
+                navigation_diagnostics.0,
+                proposed_target.as_ref().is_some_and(|target| observation.frames().iter().flat_map(|frame| frame.nodes()).any(|node| node.role() == SemanticRole::Link && node.sensitivity() == SemanticSensitivity::Public && node.link_destination() == Some(target))),
+                navigation_diagnostics.1);
+            AgentWorkFailure::Browser(AgentBrowserProviderError::Navigation(error))
+        })?;
         let target = permit.target().clone();
         let checkpoint = if is_back {
             continuation.retire_for_history_back(observation, &target, &session.config)
@@ -238,6 +256,11 @@ impl AgentWorkController {
             .policy
             .dispatch_navigation(permit, operation, now)
             .map_err(|error| {
+                #[cfg(feature = "probe-harness")]
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "work-navigation: stage=dispatch error={error:?}"
+                );
                 AgentWorkFailure::Browser(AgentBrowserProviderError::Navigation(error))
             });
         let active = match active {
@@ -375,7 +398,7 @@ impl AgentWorkController {
                 })?;
         }
         state.navigation_hops += 1;
-        let fresh = Self::observe(state, worker, browser).await?;
+        let fresh = Self::fit_model_observation(Self::observe(state, worker, browser).await?)?;
         let captured_at = SemanticCaptureInstant::from_millis(
             state
                 .journal_mut()?
@@ -438,6 +461,11 @@ impl AgentBrowserSession {
             .policy
             .settle_navigation(active, terminal, now)
             .map_err(|error| {
+                #[cfg(feature = "probe-harness")]
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "work-navigation: stage=settle error={error:?}"
+                );
                 AgentWorkFailure::Browser(AgentBrowserProviderError::Navigation(error))
             })?;
         Ok(self.record_navigation_terminal(receipt))

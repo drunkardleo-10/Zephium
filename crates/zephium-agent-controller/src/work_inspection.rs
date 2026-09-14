@@ -2,6 +2,18 @@
 use super::*;
 
 impl AgentWorkController {
+    pub(super) fn fit_model_observation(
+        observation: SemanticObservation,
+    ) -> Result<SemanticObservation, AgentWorkFailure> {
+        fit_semantic_observation_for_model(
+            observation,
+            SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .map_err(|error| {
+            AgentWorkFailure::Browser(AgentBrowserProviderError::InitialEncoding(error))
+        })
+    }
+
     pub(super) async fn inspect_current(
         state: &mut WorkState,
         worker: &mut AgentRuntimeWorker,
@@ -90,6 +102,7 @@ impl AgentWorkController {
                 .map_err(|_| AgentWorkFailure::Contract)?
                 .millis(),
         );
+        let current = Self::fit_model_observation(current)?;
         let progress = state.task_progress(&current)?;
         state.refresh_account(worker, browser)?;
         let action_authority = state
@@ -119,6 +132,32 @@ impl AgentWorkController {
 }
 
 impl AgentBrowserSession {
+    pub(super) async fn continue_after_navigation_refusal(
+        &mut self,
+        refusal: AgentProviderNavigationRefusal,
+        observation: &SemanticObservation,
+    ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
+        self.check_live()?;
+        let request = self.next_model_call_request()?;
+        let payload = encode_semantic_observation(
+            observation,
+            SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
+        .map_err(AgentBrowserProviderError::InitialEncoding)?;
+        let prepared =
+            AgentPreparedObservationRequest::try_navigation_refusal_for_provider_exact_count(
+                &mut self.policy,
+                request,
+                observation,
+                payload,
+                self.config.clone(),
+                refusal,
+            )
+            .map_err(AgentBrowserProviderError::from_request)?;
+        self.drive(prepared.into_transport_input()).await
+    }
+
     pub(super) async fn continue_after_action_refusal(
         &mut self,
         refusal: AgentProviderActionRefusal,

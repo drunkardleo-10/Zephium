@@ -6,11 +6,29 @@ use std::sync::atomic::AtomicBool;
 #[path = "work_route_tests.rs"]
 pub(super) mod route_tests;
 
+const REDIRECT_LINK: &str = "https://work-fixture.invalid/arrival?u=a1aHR0cHM6Ly9naXRodWIuY29tL3N2ZWx0ZWpzL3N2ZWx0ZS9pc3N1ZXMvMTIz&ntb=1";
+
 pub(super) fn discovery_scope() -> AgentNavigationDiscovery {
     AgentNavigationDiscovery::try_new(
         ContextNavigationTarget::parse("https://work-fixture.invalid/").unwrap(),
         "/".into(),
         2,
+    )
+    .unwrap()
+}
+
+pub(super) fn query_discovery_scope() -> AgentNavigationDiscovery {
+    AgentNavigationDiscovery::try_new_production(
+        ContextNavigationTarget::parse("https://work-fixture.invalid/").unwrap(),
+        vec![zephium_agentic::AgentNavigationOriginRule::try_new(
+            SemanticOrigin::parse("https://work-fixture.invalid/").unwrap(),
+            "/".into(),
+            true,
+            false,
+        )
+        .unwrap()],
+        2,
+        1,
     )
     .unwrap()
 }
@@ -156,6 +174,14 @@ fn discovery_returns_invalid_search_scope_without_capture_and_preserves_budgets(
 }
 
 #[test]
+fn oversized_inspection_projects_before_continuation_and_evidence_joins() {
+    let _serial = lock(&SERIAL);
+    provider_fixture(ProviderFault::Navigation(
+        NavigationFault::DiscoveryScopeRefusal(4),
+    ));
+}
+
+#[test]
 fn per_run_model_call_allowance_cannot_widen_product_limits() {
     for limit in [0, 1, 65, u8::MAX] {
         assert!(input().settings.with_max_model_calls(limit).is_err());
@@ -275,6 +301,7 @@ pub(super) enum NavigationFault {
     DiscoveryTwoHops,
     DiscoveryTwoHopsBlockedFrame,
     DiscoveryMissingLink,
+    DiscoveryNavigationRefusal(u8),
     Route(route_tests::RouteFault),
     None,
     PriorLocate,
@@ -322,6 +349,16 @@ impl NavigationFault {
     }
     pub(super) fn requests(self) -> u8 {
         match self {
+            Self::DiscoveryNavigationRefusal(case) => {
+                if case == 0 || case == 4 {
+                    8
+                } else if case == 2 {
+                    10
+                } else {
+                    6
+                }
+            }
+            Self::DiscoveryMissingLink => 6,
             Self::DiscoveryAction(_) => 8,
             Self::DiscoveryActionRefusal(repeat) => {
                 if repeat {
@@ -360,6 +397,48 @@ impl NavigationFault {
         self == Self::CancelMapCount && turns == 2 && count
     }
     pub(super) fn stream(self, turn: u8) -> String {
+        if self == Self::DiscoveryMissingLink || matches!(self, Self::DiscoveryNavigationRefusal(_))
+        {
+            let case = match self {
+                Self::DiscoveryNavigationRefusal(case) => case,
+                _ => 1,
+            };
+            if turn == 1 || matches!(case, 2 | 3) {
+                return named_tool_stream(
+                    turn,
+                    "navigate",
+                    &format!(
+                        r#"{{\"url\":\"{}\"}}"#,
+                        if case == 4 {
+                            "https://work-fixture.invalid/arrival"
+                        } else {
+                            "https://work-fixture.invalid/unobserved"
+                        }
+                    ),
+                );
+            }
+            if case == 0 || case == 4 {
+                let phase = turn - 1;
+                return Self::Discovery
+                    .stream(phase)
+                    .replace(&format!("resp_{phase}"), &format!("resp_{turn}"))
+                    .replace(&format!("msg_{phase}"), &format!("msg_{turn}"))
+                    .replace(&format!("fc_{phase}"), &format!("fc_{turn}"))
+                    .replace(&format!("call_{phase}"), &format!("call_{turn}"))
+                    .replace(
+                        "https://work-fixture.invalid/arrival",
+                        if case == 4 {
+                            REDIRECT_LINK
+                        } else {
+                            "https://work-fixture.invalid/arrival"
+                        },
+                    );
+            }
+            return Self::Discovery
+                .stream(turn)
+                .replace("Arrival certificate", "Departure certificate");
+        }
+
         if let Self::DiscoveryActionRefusal(repeat) = self {
             if turn == 1 || repeat {
                 return tool_stream(turn, true).replace("@a2", "@a1");
@@ -388,6 +467,11 @@ impl NavigationFault {
         if let Self::DiscoveryScopeRefusal(case) = self {
             return match turn {
                 1 => Self::Discovery.stream(1),
+                2 if case == 4 => named_tool_stream(
+                    turn,
+                    "snapshot",
+                    r#"{\"scope\":{\"kind\":\"subtree\",\"target\":\"@a2\"}}"#,
+                ),
                 2 => named_tool_stream(
                     turn,
                     "snapshot",
@@ -529,6 +613,61 @@ impl NavigationFault {
         }
     }
     pub(super) fn check_request(self, bytes: &[u8], turns: u8) {
+        if self == Self::DiscoveryMissingLink || matches!(self, Self::DiscoveryNavigationRefusal(_))
+        {
+            let case = match self {
+                Self::DiscoveryNavigationRefusal(case) => case,
+                _ => 1,
+            };
+            if turns == 1 || (matches!(case, 2 | 3) && turns > 0) {
+                let body: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+                let items = body["input"].as_array().unwrap();
+                let result = items
+                    .iter()
+                    .rfind(|item| item["type"] == "function_call_output")
+                    .unwrap();
+                assert_eq!(result["call_id"], format!("call_{turns}"));
+                let proposal = items
+                    .iter()
+                    .find(|item| {
+                        item["type"] == "function_call" && item["call_id"] == result["call_id"]
+                    })
+                    .unwrap();
+                assert_eq!(proposal["name"], "navigate");
+                let operands: serde_json::Value =
+                    serde_json::from_str(proposal["arguments"].as_str().unwrap()).unwrap();
+                assert_eq!(
+                    operands["url"],
+                    if case == 4 {
+                        "https://work-fixture.invalid/arrival"
+                    } else {
+                        "https://work-fixture.invalid/unobserved"
+                    }
+                );
+                if case == 4 {
+                    assert!(
+                        std::str::from_utf8(bytes).unwrap().contains(REDIRECT_LINK),
+                        "exact opaque query survives refusal"
+                    );
+                }
+                let error: serde_json::Value =
+                    serde_json::from_str(result["output"].as_str().unwrap()).unwrap();
+                assert_eq!(error["code"], "unobserved_navigation_target");
+                assert_eq!(error["status"], "refused");
+                assert_eq!(error["executed"], false);
+                assert_eq!(error["observation_unchanged"], true);
+                let text = std::str::from_utf8(bytes).unwrap();
+                assert_eq!(text.matches("ZSEM3").count(), 1);
+                assert!(text.contains("Departure certificate"));
+                assert!(!text.contains("Arrival certificate"));
+                assert!(text.contains(&format!(
+                    "decision_calls_remaining_including_this={}",
+                    if case == 3 { 3 - turns } else { 5 - turns }
+                )));
+            }
+            return;
+        }
+
         if let Self::DiscoveryActionRefusal(repeat) = self {
             if turns == 1 || (repeat && turns > 0) {
                 let body: serde_json::Value = serde_json::from_slice(bytes).unwrap();
@@ -587,9 +726,18 @@ impl NavigationFault {
                 assert_eq!(error["observation_unchanged"], true);
                 assert!(error.get("observation").is_none());
                 let observation = body["input"][1]["content"][0]["text"].as_str().unwrap();
-                assert!(observation.contains("scope=surrounding_text"));
+                assert!(observation.contains(if case == 4 {
+                    "scope=subtree"
+                } else {
+                    "scope=surrounding_text"
+                }));
                 assert!(observation.contains("r=heading"));
                 assert!(observation.contains("Arrival certificate"));
+                if case == 4 {
+                    assert!(observation.contains("truncated_model_projection"));
+                    assert!(observation.len() <= 16 * 1024);
+                    assert!(!observation.contains("public.example.test/71/"));
+                }
                 assert_eq!(
                     std::str::from_utf8(bytes).unwrap().matches("ZSEM3").count(),
                     1,
@@ -874,7 +1022,11 @@ pub(super) fn navigate(
         .store(true, Ordering::Relaxed);
     assert_eq!(
         request.target().as_url().as_str(),
-        "https://work-fixture.invalid/arrival"
+        if fault == NavigationFault::DiscoveryNavigationRefusal(4) {
+            REDIRECT_LINK
+        } else {
+            "https://work-fixture.invalid/arrival"
+        }
     );
     assert!(request.redirect_policy().is_none());
     if matches!(
@@ -986,6 +1138,7 @@ pub(super) fn capture(
         && matches!(
             fault,
             NavigationFault::Discovery
+                | NavigationFault::DiscoveryNavigationRefusal(_)
                 | NavigationFault::DiscoveryAction(_)
                 | NavigationFault::DiscoveryActionRefusal(_)
                 | NavigationFault::DiscoveryBudget(..)
@@ -993,6 +1146,11 @@ pub(super) fn capture(
                 | NavigationFault::DiscoveryScopeRefusal(_)
         ) {
         wire.replace("]}", r#",{"k":3,"p":0,"r":"link","n":"A relevant source","u":"https://work-fixture.invalid/arrival"}]}"#)
+    } else {
+        wire
+    };
+    let wire = if fault == NavigationFault::DiscoveryNavigationRefusal(4) {
+        wire.replace("https://work-fixture.invalid/arrival", REDIRECT_LINK)
     } else {
         wire
     };
@@ -1015,6 +1173,23 @@ pub(super) fn capture(
             correlation.invocation().get(),
             correlation.snapshot_generation().get()
         )
+    } else {
+        wire
+    };
+    let wire = if fault == NavigationFault::DiscoveryScopeRefusal(4)
+        && correlation.snapshot_generation().get() > 1
+    {
+        let mut value: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        let nodes = value["n"].as_array_mut().unwrap();
+        nodes[1]["p"] = serde_json::json!(0);
+        for index in 0..72 {
+            nodes.push(serde_json::json!({
+                "k": 100 + index, "p": 0, "r": "link",
+                "n": format!("Result {index}"),
+                "u": format!("https://public.example.test/{index}/{}", "a".repeat(170))
+            }));
+        }
+        serde_json::to_string(&value).unwrap()
     } else {
         wire
     };
@@ -1092,6 +1267,63 @@ pub(super) fn assert_outcome(
     calls: &[u8],
     events: &[AgentWorkEvent],
 ) {
+    if fault == NavigationFault::DiscoveryMissingLink
+        || matches!(fault, NavigationFault::DiscoveryNavigationRefusal(_))
+    {
+        let case = match fault {
+            NavigationFault::DiscoveryNavigationRefusal(case) => case,
+            _ => 1,
+        };
+        let expected_calls = if case == 0 || case == 4 {
+            4
+        } else if case == 2 {
+            5
+        } else {
+            3
+        };
+        if matches!(case, 2 | 3) {
+            let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+                panic!("{outcome:?}")
+            };
+            assert_eq!(
+                closed.policy_settlement().closure().model_calls(),
+                expected_calls
+            );
+            assert!(
+                closed.policy_settlement().closure().operations() <= if case == 3 { 4 } else { 24 }
+            );
+            assert_eq!(closed.policy_settlement().closure().navigations(), 0);
+        } else {
+            let AgentWorkOutcome::Succeeded(mut success) = outcome else {
+                panic!("{outcome:?}")
+            };
+            assert_eq!(success.closure().model_calls(), expected_calls);
+            assert_eq!(
+                success.closure().navigations(),
+                if case == 0 || case == 4 { 1 } else { 0 }
+            );
+            assert!(success.take_extraction().is_some());
+        }
+        assert_eq!(
+            calls.iter().filter(|call| **call == 9).count(),
+            if case == 0 || case == 4 { 1 } else { 0 },
+            "only the corrected observed URL can navigate"
+        );
+        assert!(!calls.contains(&7));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind() == AgentWorkEventKind::NavigationRefused)
+                .count(),
+            if matches!(case, 2 | 3) {
+                expected_calls as usize - 1
+            } else {
+                1
+            }
+        );
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        return;
+    }
     if let NavigationFault::DiscoveryActionRefusal(repeat) = fault {
         if repeat {
             let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
@@ -1420,5 +1652,15 @@ pub(super) fn assert_outcome(
             closure.operations(),
             closure.model_calls() + closure.navigations()
         );
+    }
+}
+
+#[test]
+fn unobserved_navigation_feedback_corrects_or_extracts_and_preserves_original_budgets() {
+    let _serial = lock(&SERIAL);
+    for case in 0..5 {
+        provider_fixture(ProviderFault::Navigation(
+            NavigationFault::DiscoveryNavigationRefusal(case),
+        ));
     }
 }

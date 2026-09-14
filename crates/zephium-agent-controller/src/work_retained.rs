@@ -547,6 +547,7 @@ impl AgentWorkRetainedController {
                 .document_policy
                 .admits_final_document(binding.requested_document(), binding.document())
             || binding.storage() != input.context.storage
+            || binding.isolated_public() != input.retained_resource_spec()?.isolated_public
             || binding.lease().deadline()
                 > input
                     .manifest
@@ -691,11 +692,9 @@ impl WorkNative {
         browser: &WorkBrowser<'_>,
         action: Option<SemanticActionExecutionInstant>,
     ) -> Result<AgentRuntimeEvent, AgentWorkFailure> {
-        if action.is_some() {
-            self.check_stop(worker, browser)?;
-        } else {
-            self.check_control(worker, browser)?;
-        }
+        // Both operations already own native callback debt. Revoked document
+        // health cannot prevent reconciliation of their original terminal.
+        self.check_stop(worker, browser)?;
         let clock = self
             .clock
             .as_ref()
@@ -735,7 +734,9 @@ impl WorkNative {
                                 terminal.map(AgentRuntimeEvent::SemanticActionTerminal)
                             })
                         } else {
-                            retained.check_health(now)?;
+                            // As with actions, wait for the original receipt even
+                            // if health failed before its publication. Absence
+                            // remains pending under the original deadline.
                             retained.poll_navigation(now).map(|terminal| {
                                 terminal.map(|terminal| {
                                     AgentRuntimeEvent::NativeTerminal(

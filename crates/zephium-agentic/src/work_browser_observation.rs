@@ -63,6 +63,7 @@ pub struct WorkBrowserReadBinding {
     current_requested_document: Arc<ContextNavigationTarget>,
     document_policy: crate::WorkBrowserDocumentPolicy,
     storage: ContextProfileStorageClass,
+    isolated_public: bool,
 }
 
 impl WorkBrowserReadBinding {
@@ -91,6 +92,10 @@ impl WorkBrowserReadBinding {
     /// Original trusted initial-document policy from the retained resource.
     pub const fn document_policy(&self) -> crate::WorkBrowserDocumentPolicy {
         self.document_policy
+    }
+    /// Original construction isolated this resource from all profile cookies.
+    pub const fn isolated_public(&self) -> bool {
+        self.isolated_public
     }
     /// Immutable selected-profile persistence class from the original row.
     pub const fn storage(&self) -> ContextProfileStorageClass {
@@ -229,6 +234,7 @@ impl WorkBrowserResources {
                 .ok_or(WorkBrowserResourceError::Phase)?,
             document_policy: row.document_policy,
             storage: row.storage,
+            isolated_public: row.isolated_public,
         })
     }
 

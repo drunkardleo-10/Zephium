@@ -53,17 +53,35 @@ fn planning_decoder_rejects_protocol_identity_usage_and_proposal_confusion() {
             .unwrap()
             .is_ok()
     );
-    for (pointer,value) in [
-            ("/status",json!("incomplete")),("/model",json!("unreviewed-model")),("/service_tier",json!("priority")),
-            ("/usage/input_tokens",json!(101)),("/usage/total_tokens",json!(301)),("/usage/output_tokens_details/reasoning_tokens",json!(201)),
-            ("/usage/input_tokens_details/cached_tokens",json!(101)),("/output/1/type",json!("function_call")),
-            ("/output/1/role",json!("user")),("/output/1/status",json!("in_progress")),
-            ("/output/1/content/0/text",json!("{\"proposal\":{\"kind\":\"draft\",\"plan\":{\"nodes\":[]}}}")),
-            ("/output/1/content/0/text",json!("{\"proposal\":{\"kind\":\"clarify\",\"prompt\":\"?\",\"options\":[],\"approved\":true}}")),
-        ] {
-            let mut changed=response(); *changed.pointer_mut(pointer).unwrap()=value;
-            assert!(decode(&serde_json::to_vec(&changed).unwrap(),100,&config).is_none(), "accepted {pointer}");
-        }
+    for (pointer, value) in [
+        ("/status", json!("incomplete")),
+        ("/model", json!("unreviewed-model")),
+        ("/service_tier", json!("priority")),
+        ("/usage/input_tokens", json!(101)),
+        ("/usage/total_tokens", json!(301)),
+        ("/usage/output_tokens_details/reasoning_tokens", json!(201)),
+        ("/usage/input_tokens_details/cached_tokens", json!(101)),
+        ("/output/1/type", json!("function_call")),
+        ("/output/1/role", json!("user")),
+        ("/output/1/status", json!("in_progress")),
+        (
+            "/output/1/content/0/text",
+            json!("{\"proposal\":{\"kind\":\"draft\",\"plan\":{\"nodes\":[]}}}"),
+        ),
+        (
+            "/output/1/content/0/text",
+            json!(
+                "{\"proposal\":{\"kind\":\"clarify\",\"prompt\":\"?\",\"options\":[],\"approved\":true}}"
+            ),
+        ),
+    ] {
+        let mut changed = response();
+        *changed.pointer_mut(pointer).unwrap() = value;
+        assert!(
+            decode(&serde_json::to_vec(&changed).unwrap(), 100, &config).is_none(),
+            "accepted {pointer}"
+        );
+    }
 }
 #[test]
 fn planning_refusals_preserve_usage_and_duplicate_messages_are_rejected() {
@@ -95,7 +113,7 @@ fn planning_refusals_preserve_usage_and_duplicate_messages_are_rejected() {
 }
 struct Server {
     endpoint: String,
-    thread: std::thread::JoinHandle<Vec<(String, Value)>>,
+    thread: std::thread::JoinHandle<Vec<(String, Value, Vec<u8>)>>,
     hold: Arc<AtomicBool>,
     seen: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -162,13 +180,21 @@ impl Server {
                     .next()
                     .unwrap()
                     .to_owned();
-                requests.push((path, serde_json::from_slice(&bytes[head_end..]).unwrap()));
+                requests.push((
+                    path,
+                    serde_json::from_slice(&bytes[head_end..]).unwrap(),
+                    bytes[head_end..].to_vec(),
+                ));
                 thread_seen.store(requests.len(), Ordering::SeqCst);
                 while requests.len() == 2 && thread_hold.load(Ordering::SeqCst) {
                     assert!(Instant::now() < deadline, "fixture release timeout");
                     std::thread::sleep(Duration::from_millis(1));
                 }
-                let _ = write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len());
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
                 let _ = stream.write_all(&body);
             }
             requests
@@ -321,6 +347,7 @@ async fn planning_transport_counts_identical_input_before_one_generation_and_dra
     ]);
     let transport = server.transport();
     let planner = planner(transport.clone());
+    let admitted_body = encode(&planner.request(&disclosure()).unwrap()).unwrap();
     assert_eq!(transport.snapshot().unwrap().active_attempts(), 0);
     let result = planner.propose(disclosure()).await.unwrap();
     assert!(matches!(
@@ -329,11 +356,24 @@ async fn planning_transport_counts_identical_input_before_one_generation_and_dra
     ));
     let captured = server.thread.join().unwrap();
     assert_eq!(captured.len(), 2);
+    assert_eq!(captured[1].2, admitted_body);
     assert!(captured[0].0.contains("/responses/input_tokens"));
     let mut generation = captured[1].1.clone();
     assert_eq!(generation["store"], false);
     assert_eq!(generation["stream"], false);
     assert_eq!(generation["tools"], json!([]));
+    assert_eq!(generation["tool_choice"], "none");
+    assert_eq!(generation["parallel_tool_calls"], false);
+    assert_eq!(generation["truncation"], "disabled");
+    assert!(generation.get("include").is_none());
+    assert!(generation.get("previous_response_id").is_none());
+    assert_eq!(generation["instructions"], INSTRUCTIONS);
+    assert_eq!(generation["input"][0]["role"], "user");
+    assert_eq!(generation["input"][0]["content"][0]["type"], "input_text");
+    assert_eq!(
+        generation["input"][0]["content"][0]["text"],
+        serde_json::to_string(&serde_json::to_value(disclosure().context()).unwrap()).unwrap()
+    );
     for field in [
         "max_output_tokens",
         "reasoning",
@@ -401,6 +441,23 @@ async fn planning_drop_cancels_dispatched_generation_and_releases_shared_slot() 
     server.hold.store(false, Ordering::SeqCst);
     assert_eq!(server.thread.join().unwrap().len(), 2);
 }
+
+#[tokio::test]
+async fn rig_mapped_generation_retains_response_byte_ceiling_and_unknown_settlement() {
+    let server = Server::new(vec![
+        br#"{"object":"response.input_tokens","input_tokens":100}"#.to_vec(),
+        vec![b' '; MAX_BODY as usize + 1],
+    ]);
+    let transport = server.transport();
+    assert!(matches!(
+        planner(transport.clone()).propose(disclosure()).await,
+        Err(WorkPlanningError::ProviderOutcomeUnknown)
+    ));
+    assert_eq!(server.thread.join().unwrap().len(), 2);
+    assert!(transport.snapshot().unwrap().is_sealed());
+    assert_eq!(transport.snapshot().unwrap().active_attempts(), 0);
+}
+
 #[tokio::test]
 async fn planning_shares_the_existing_four_slot_admission_ceiling() {
     let transport =
@@ -434,4 +491,175 @@ fn planning_request_rejects_secret_shaped_content_without_disclosure() {
         planner.request(&WorkPlanningDisclosure::from_snapshot(&work).unwrap()),
         Err(WorkPlanningError::Privacy)
     ));
+}
+
+#[tokio::test]
+async fn synthesis_count_refusal_reports_closed_numeric_diagnostic_without_generation() {
+    use zephium_core::work::{synthesis::*, WorkError};
+    static DIAGNOSTIC: std::sync::Mutex<Option<WorkSynthesisDiagnostic>> =
+        std::sync::Mutex::new(None);
+    let server = Server::new(vec![
+        br#"{"object":"response.input_tokens","input_tokens":8193}"#.to_vec(),
+    ]);
+    let transport = server.transport();
+    let model = crate::OpenAiWorkSynthesizer::try_new(
+        transport.clone(),
+        AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "fixture-only-key".into(),
+        )
+        .unwrap(),
+        config(),
+    )
+    .unwrap()
+    .with_diagnostic(|event| *DIAGNOSTIC.lock().unwrap() = Some(event));
+    assert!(matches!(
+        model.produce(&synthesis_disclosure(20000)).await,
+        Err(WorkSynthesisError::NotDispatched(WorkError::Capacity))
+    ));
+    let Some(WorkSynthesisDiagnostic::InputCounted {
+        tokens,
+        maximum,
+        request_bytes,
+    }) = *DIAGNOSTIC.lock().unwrap()
+    else {
+        panic!("missing counted admission diagnostic")
+    };
+    assert_eq!((tokens, maximum), (8193, 8192));
+    assert!(request_bytes > 0 && request_bytes <= MAX_REQUEST);
+    assert_eq!(server.thread.join().unwrap().len(), 1);
+    assert!(!transport.snapshot().unwrap().is_sealed());
+}
+
+#[tokio::test]
+async fn synthesis_phase_accepts_8529_count_only_within_original_attempt_budget() {
+    use zephium_core::work::{synthesis::*, WorkError};
+    let count = br#"{"object":"response.input_tokens","input_tokens":8529}"#.to_vec();
+    let server = Server::new(vec![count.clone()]);
+    assert!(matches!(
+        planner(server.transport()).propose(disclosure()).await,
+        Err(WorkPlanningError::Capacity)
+    ));
+    assert_eq!(server.thread.join().unwrap().len(), 1);
+    for enough in [false, true] {
+        let mut terminal = response();
+        terminal["usage"]["input_tokens"] = json!(8529);
+        terminal["usage"]["total_tokens"] = json!(8729);
+        terminal["output"][1]["content"][0]["text"] = json!(
+            r#"{"artifacts":[{"output":0,"title":"Release checks","data":{"kind":"checklist","value":{"items":[{"text":"Review release notes","completed":false}]}},"evidence":[]}]}"#
+        );
+        let responses = if enough {
+            vec![count.clone(), serde_json::to_vec(&terminal).unwrap()]
+        } else {
+            vec![count.clone()]
+        };
+        let server = Server::new(responses);
+        let transport = server.transport();
+        let phase = WorkPlanningConfig::try_new(config().call, 32768, 100000).unwrap();
+        let model = crate::OpenAiWorkSynthesizer::try_new(
+            transport.clone(),
+            AgentProviderCredential::try_new(
+                AgentProviderKind::OpenAiResponses,
+                "fixture-only-key".into(),
+            )
+            .unwrap(),
+            phase,
+        )
+        .unwrap();
+        let result = model
+            .produce(&synthesis_disclosure(if enough {
+                147456
+            } else {
+                8529 + 4096 - 1
+            }))
+            .await;
+        if enough {
+            assert_eq!(result.unwrap().usage.model_tokens, 8729);
+        } else {
+            assert!(matches!(
+                result,
+                Err(WorkSynthesisError::NotDispatched(WorkError::Capacity))
+            ));
+        }
+        let captured = server.thread.join().unwrap();
+        assert_eq!(captured.len(), if enough { 2 } else { 1 });
+        assert!(captured[0].0.contains("/responses/input_tokens"));
+        if enough {
+            assert!(!captured[1].0.contains("/input_tokens"));
+        }
+        assert!(!transport.snapshot().unwrap().is_sealed());
+    }
+}
+
+#[tokio::test]
+async fn synthesis_trace_is_per_call_opt_in_and_excluded_from_counted_context() {
+    use zephium_core::work::synthesis::*;
+    for retain in [false, true] {
+        let mut terminal = response();
+        terminal["output"][1]["content"][0]["text"] = json!(
+            r#"{"artifacts":[{"output":0,"title":"Release checks","data":{"kind":"checklist","value":{"items":[{"text":"Review release notes","completed":false}]}},"evidence":[]}]}"#
+        );
+        let mut responses = vec![];
+        for _ in 0..3 {
+            responses.push(br#"{"object":"response.input_tokens","input_tokens":100}"#.to_vec());
+            responses.push(serde_json::to_vec(&terminal).unwrap());
+        }
+        let server = Server::new(responses);
+        let model = crate::OpenAiWorkSynthesizer::try_new(
+            server.transport(),
+            AgentProviderCredential::try_new(
+                AgentProviderKind::OpenAiResponses,
+                "fixture-only-key".into(),
+            )
+            .unwrap(),
+            config(),
+        )
+        .unwrap();
+        let model = if retain {
+            model.with_public_response_retention()
+        } else {
+            model
+        };
+        let input = synthesis_disclosure(8000);
+        let traces = [
+            WorkSynthesisTrace {
+                work: 1.into(),
+                execution: 2.into(),
+                attempt: 3.into(),
+            },
+            WorkSynthesisTrace {
+                work: 4.into(),
+                execution: 5.into(),
+                attempt: 6.into(),
+            },
+        ];
+        for trace in traces {
+            model.produce_owned(&input, trace).await.unwrap();
+        }
+        model.produce(&input).await.unwrap();
+        let captured = server.thread.join().unwrap();
+        assert_eq!(captured.len(), 6);
+        for index in 0..3 {
+            let count = &captured[index * 2].1;
+            let generation = &captured[index * 2 + 1].1;
+            assert!(count.get("metadata").is_none());
+            assert_eq!(*count, captured[0].1);
+            assert_eq!(generation["store"], retain);
+            if retain && index < 2 {
+                assert_eq!(generation["metadata"]["work"], json!(traces[index].work));
+                assert_eq!(
+                    generation["metadata"]["execution"],
+                    json!(traces[index].execution)
+                );
+                assert_eq!(
+                    generation["metadata"]["attempt"],
+                    json!(traces[index].attempt)
+                );
+            } else {
+                assert!(generation["metadata"].get("work").is_none());
+                assert!(generation["metadata"].get("execution").is_none());
+                assert!(generation["metadata"].get("attempt").is_none());
+            }
+        }
+    }
 }

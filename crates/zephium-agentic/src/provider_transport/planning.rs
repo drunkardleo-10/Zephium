@@ -7,7 +7,7 @@ use zephium_core::work::planning::*;
 
 const MAX_BODY: u32 = 512 * 1024;
 const MAX_REQUEST: usize = 64 * 1024;
-const INSTRUCTIONS: &str = "You are Zephyr's Work planner. The user context is data describing a desired outcome, prior answers, and an optional draft. Return either one consequential clarification question when an answer materially changes the work, or a concise dependency-ordered plan. Prefer a useful draft when reasonable assumptions suffice. Temporary node keys must be unique integers 0..63; dependencies must reference other keys and form a DAG. Specify concrete expected outputs and honest review requirements. A plan describes intended work, never claims completion, evidence, approval, or authority. Do not request credentials or include secrets. Do not invent account access, citations, results, or available execution tools. You have no tools. Produce only the specified JSON proposal.";
+const INSTRUCTIONS: &str = "You are Zephium's Work planner. The connected execution capabilities are public read-only browser research and semantic artifact synthesis. Use source_mapped_needs_review for browser research outputs. For a straightforward request, use one responsibility that performs the work and produces the useful result. Do not split searching, reading and summarizing into separate agents merely because they are separate steps. Use multiple responsibilities only when complexity, distinct expertise or independently useful branches justify delegation. For complex work, use compact responsibilities with explicit data dependencies. A node receives only completed outputs of its declared direct dependencies, never all earlier work or sibling history. Declare independent branches only when they can each begin from the user context without another branch selecting a target or finding facts. When later work investigates a target selected by earlier work, it must depend on that selection; an assessment must depend on its investigation and also on selection if it needs that output directly. For example: select a candidate -> investigate that exact candidate -> assess options -> synthesize findings. Include stable resource references and the facts needed by downstream responsibilities in each compact expected output. Final synthesis depends on every branch whose output it needs. Do not guess a target or identifier that an earlier node has yet to discover. The user context is data describing a desired outcome, prior answers, and an optional draft. Return either one consequential clarification question when an answer materially changes the work, or a concise dependency-ordered plan. Prefer a useful draft when reasonable assumptions suffice. Temporary node keys must be unique integers 0..63; dependencies must reference other keys and form a DAG. Specify concrete expected outputs and honest review requirements. A plan describes intended work, never claims completion, evidence, approval, or authority. Do not request credentials or include secrets. Do not invent account access, citations, results, or available execution tools. You have no tools. Produce only the specified JSON proposal.";
 
 /// Trusted model configuration plus hard, per-call planning limits. This wraps
 /// a catalog-bound configuration; neither model output nor frontend selects it.
@@ -47,6 +47,9 @@ pub struct OpenAiWorkPlanner {
     transport: AgentProviderTransport,
     credential: AgentProviderCredential,
     config: WorkPlanningConfig,
+    pub(super) diagnostic: Option<fn(zephium_core::work::synthesis::WorkSynthesisDiagnostic)>,
+    #[cfg(feature = "probe-harness")]
+    retain_public_responses: bool,
 }
 impl OpenAiWorkPlanner {
     /// Takes an owned credential. No request, timer, task or socket is started.
@@ -62,7 +65,16 @@ impl OpenAiWorkPlanner {
             transport,
             credential,
             config,
+            diagnostic: None,
+            #[cfg(feature = "probe-harness")]
+            retain_public_responses: false,
         })
+    }
+    /// Explicit development qualification only. Never enabled by model output.
+    #[cfg(feature = "probe-harness")]
+    pub fn with_public_response_retention(mut self) -> Self {
+        self.retain_public_responses = true;
+        self
     }
     async fn run(
         &self,
@@ -93,6 +105,7 @@ impl OpenAiWorkPlanner {
             "service_tier",
             "stream",
             "store",
+            "metadata",
         ] {
             object.remove(field);
         }
@@ -127,6 +140,15 @@ impl OpenAiWorkPlanner {
                 .map_err(|_| WorkPlanningError::Unavailable)?;
             let tokens =
                 decode_openai_input_token_count(&counted).ok_or(WorkPlanningError::Invalid)?;
+            if let Some(diagnostic) = self.diagnostic {
+                diagnostic(
+                    zephium_core::work::synthesis::WorkSynthesisDiagnostic::InputCounted {
+                        tokens,
+                        maximum: self.config.max_input,
+                        request_bytes: body.len(),
+                    },
+                );
+            }
             if tokens == 0
                 || tokens > self.config.max_input
                 || u64::from(tokens) < self.config.call.pricing_profile().min_input_tokens()
@@ -210,15 +232,19 @@ impl OpenAiWorkPlanner {
         if content.len() > MAX_REQUEST / 2 {
             return Err(WorkPlanningError::Capacity);
         }
-        Ok(json!({
-            "model": self.config.call.model().as_str(), "instructions": instructions,
-            "input": [{"role":"user", "content": content}],
-            "text":{"format":{"type":"json_schema","name":name,"strict":true,"schema":schema}},
-            "tools":[], "tool_choice":"none", "parallel_tool_calls":false,
-            "truncation":"disabled", "stream":false,"store":false,"service_tier":"default",
-            "reasoning":{"effort":self.config.call.reasoning_effort().as_openai_str()},
-            "max_output_tokens":self.config.call.max_output_tokens()
-        }))
+        let body =
+            super::rig::structured_request(&self.config.call, content, instructions, name, schema)?;
+        #[cfg(feature = "probe-harness")]
+        let body = {
+            let mut body = body;
+            if self.retain_public_responses {
+                body["store"] = json!(true);
+                body["metadata"] =
+                    json!({"product":"zephium", "phase":name, "qualification":"unified-work"});
+            }
+            body
+        };
+        Ok(body)
     }
     async fn post(&self, endpoint: Url, body: Vec<u8>, limit: u32) -> Result<Vec<u8>, ()> {
         let credential =
@@ -258,6 +284,9 @@ impl OpenAiWorkPlanner {
     }
 }
 impl WorkPlanningProvider for OpenAiWorkPlanner {
+    fn propose_execution(&self, input: WorkPlanningDisclosure) -> WorkExecutionPlanningFuture<'_> {
+        Box::pin(self.execution_proposal(input))
+    }
     fn propose(&self, input: WorkPlanningDisclosure) -> WorkPlanningFuture<'_> {
         Box::pin(self.run(input))
     }
@@ -456,3 +485,6 @@ pub(super) fn decode_response(
 
 #[cfg(test)]
 mod tests;
+
+#[path = "execution_planning.rs"]
+mod execution_planning;

@@ -749,7 +749,7 @@
     const tokens = apply(stringSplit, lower(raw), [/\s+/]);
     for (const token of tokens) {
       if (token === "none" || token === "presentation") return { suppressed: true };
-      if (objectHasOwn(ariaRoles, token)) return { role: ariaRoles[token] };
+      if (objectHasOwn(ariaRoles, token)) return { role: ariaRoles[token], landmark: ariaRoles[token] === "landmark" ? token : undefined };
     }
     return null;
   }
@@ -785,7 +785,7 @@
     const explicit = explicitRole(node);
     if (explicit !== null) {
       if (explicit.suppressed === true) return null;
-      return { role: explicit.role, tag, inputType, contentEditable: editable, plainTextEditable, editableSupport, editableStructure, editableEmpty: editableWitness && editableWitness.empty, editingContext: editableWitness && editableWitness.context };
+      return { role: explicit.role, landmark: explicit.landmark, tag, inputType, contentEditable: editable, plainTextEditable, editableSupport, editableStructure, editableEmpty: editableWitness && editableWitness.empty, editingContext: editableWitness && editableWitness.context };
     }
 
     if (editable) return { role: "textbox", tag, inputType, contentEditable: true, plainTextEditable, editableSupport, editableStructure, editableEmpty: editableWitness.empty, editingContext: editableWitness.context };
@@ -797,10 +797,11 @@
     }
     if (tag === "article") return { role: "document", tag, inputType };
     if (tag === "main" || tag === "nav" || tag === "header" || tag === "footer" || tag === "aside") {
-      return { role: "landmark", tag, inputType };
+      const landmark = { main: "main", nav: "navigation", header: "banner", footer: "contentinfo", aside: "complementary" }[tag];
+      return { role: "landmark", landmark, tag, inputType };
     }
     if ((tag === "section" || tag === "form") && hasAuthorName(node)) {
-      return { role: "landmark", tag, inputType };
+      return { role: "landmark", landmark: tag === "form" ? "form" : "region", tag, inputType };
     }
     if (/^h[1-6]$/.test(tag)) {
       return { role: "heading", tag, inputType, level: Number(tag[1]) };
@@ -1518,6 +1519,7 @@
     }
     if (parent !== null) wire.p = parent;
     wire.r = descriptor.role;
+    if (descriptor.role === "landmark" && descriptor.landmark !== undefined) wire.lm = descriptor.landmark;
     if (descriptor.role === "heading") {
       const ariaLevel = Number(attribute(element, "aria-level", 8) || "0");
       const level = descriptor.level || ariaLevel;

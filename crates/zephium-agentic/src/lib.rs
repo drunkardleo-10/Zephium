@@ -228,8 +228,8 @@ pub use agent_provider::{
     AgentProviderInputMetrics, AgentProviderInputOutcome, AgentProviderInputTokenBinding,
     AgentProviderInputTokenCount, AgentProviderInputTokenRequest, AgentProviderKind,
     AgentProviderLocalInputTokenCounter, AgentProviderLocateRequestDraft,
-    AgentProviderModelRevision, AgentProviderNavigationCheckpoint, AgentProviderObjective,
-    AgentProviderObjectiveError, AgentProviderObservationCheckpoint,
+    AgentProviderModelRevision, AgentProviderNavigationCheckpoint, AgentProviderNavigationRefusal,
+    AgentProviderObjective, AgentProviderObjectiveError, AgentProviderObservationCheckpoint,
     AgentProviderObservationRefusal, AgentProviderObservationResolution,
     AgentProviderPricingAttribution, AgentProviderPricingContractError, AgentProviderPricingError,
     AgentProviderPricingProfile, AgentProviderPricingRevision, AgentProviderPricingSchedule,
@@ -422,8 +422,8 @@ pub use protocol::{
 pub use semantic::{
     SemanticCompleteness, SemanticContractError, SemanticEditableStructure, SemanticFillSupport,
     SemanticFrameJoin, SemanticFrameTrust, SemanticHeadingLevel, SemanticInvocationId,
-    SemanticNode, SemanticOperationClass, SemanticOperations, SemanticOrigin, SemanticRect,
-    SemanticReference, SemanticReferenceError, SemanticReferenceId, SemanticRole,
+    SemanticLandmarkKind, SemanticNode, SemanticOperationClass, SemanticOperations, SemanticOrigin,
+    SemanticRect, SemanticReference, SemanticReferenceError, SemanticReferenceId, SemanticRole,
     SemanticSensitivity, SemanticSnapshot, SemanticSnapshotGeneration, SemanticState,
     SemanticStates, SemanticText, SemanticTruncation, SemanticTrust, SemanticValuePreview,
     SemanticValueSummary, SemanticValueText, MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_FRAMES,
@@ -515,15 +515,16 @@ pub use semantic_extract_model::{
     SemanticExtractionModelPayload, SEMANTIC_EXTRACTION_MODEL_SCHEMA_VERSION,
 };
 pub use semantic_model::{
-    encode_semantic_observation, SemanticEncodedObservation, SemanticEncodingStats,
-    SemanticModelDeliveryError, SemanticModelDeliverySettlement, SemanticModelEncodingBudget,
-    SemanticModelEncodingError, SemanticModelPayload, SemanticTokenCountQuality,
-    SemanticTokenCountRequirement, SemanticTokenCounter, SemanticTokenCounterError,
-    SemanticTokenMeasurement, SemanticTokenMeasurementError, SemanticTokenizerRevision,
-    SemanticTokenizerRevisionError, ACTION_DIFF_PROVIDER_EXACT_CONSERVATIVE_TOKEN_CEILING,
-    ACTION_SEMANTIC_DIFF_TOKEN_TARGET, INITIAL_SEMANTIC_MODEL_TOKEN_TARGET,
-    MAX_SEMANTIC_MODEL_BYTES, MAX_SEMANTIC_MODEL_TOKENS, MAX_SEMANTIC_TOKENIZER_REVISION_BYTES,
-    SEMANTIC_LOCATE_RESULT_TOKEN_CEILING, SEMANTIC_MODEL_SCHEMA_VERSION,
+    encode_semantic_observation, fit_semantic_observation_for_model, SemanticEncodedObservation,
+    SemanticEncodingStats, SemanticModelDeliveryError, SemanticModelDeliverySettlement,
+    SemanticModelEncodingBudget, SemanticModelEncodingError, SemanticModelPayload,
+    SemanticTokenCountQuality, SemanticTokenCountRequirement, SemanticTokenCounter,
+    SemanticTokenCounterError, SemanticTokenMeasurement, SemanticTokenMeasurementError,
+    SemanticTokenizerRevision, SemanticTokenizerRevisionError,
+    ACTION_DIFF_PROVIDER_EXACT_CONSERVATIVE_TOKEN_CEILING, ACTION_SEMANTIC_DIFF_TOKEN_TARGET,
+    INITIAL_SEMANTIC_MODEL_TOKEN_TARGET, MAX_SEMANTIC_MODEL_BYTES, MAX_SEMANTIC_MODEL_TOKENS,
+    MAX_SEMANTIC_TOKENIZER_REVISION_BYTES, SEMANTIC_LOCATE_RESULT_TOKEN_CEILING,
+    SEMANTIC_MODEL_SCHEMA_VERSION,
 };
 pub use semantic_observation::{
     SemanticExpansionKind, SemanticFrameBoundary, SemanticFrameBoundaryStatus,
@@ -628,3 +629,9 @@ pub use sign_in_handoff::{
 pub use provider_transport::planning::{OpenAiWorkPlanner, WorkPlanningConfig};
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::synthesis::OpenAiWorkSynthesizer;
+
+#[cfg(feature = "provider-transport")]
+pub use provider_transport::search::{
+    OpenAiPublicSearch, OpenAiPublicSearchCitation, OpenAiPublicSearchConfig,
+    OpenAiPublicSearchResult,
+};

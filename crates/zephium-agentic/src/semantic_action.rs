@@ -1832,6 +1832,9 @@ fn structural_digest(node: &crate::SemanticNode, parent_key: Option<u64>) -> [u8
     hasher.update(b"ZEPHIUM-SEMANTIC-ACTION-GUARD-1\0");
     hasher.update([role_code(node.role())]);
     hasher.update([node.heading_level().map_or(0, |level| level.get())]);
+    if let Some(kind) = node.landmark_kind() {
+        hasher.update([0xfa, kind as u8]);
+    }
     hasher.update([node.operations().bits()]);
     hasher.update([sensitivity_code(node.sensitivity())]);
     hasher.update([trust_code(node.trust())]);

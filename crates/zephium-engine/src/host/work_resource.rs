@@ -708,31 +708,40 @@ impl EngineHost {
             .native_resources
             .try_acquire(NativeResourceClass::TransientConstruction)
             .map_err(|_| ContextPortFailure::ResourceExhausted)?;
-        let store = match guard.storage() {
-            ContextProfileStorageClass::Durable => None,
-            ContextProfileStorageClass::Ephemeral => {
-                if self.macos_ephemeral_data_stores.len() >= MAX_PROFILE_PERSISTENCE_BINDINGS
-                    && !self.macos_ephemeral_data_stores.contains_key(&profile)
-                {
-                    return Err(ContextPortFailure::ProfileUnavailable);
+        // Public discovery owns a fresh store for this one resource. It is
+        // never inserted into the profile cookie cache or reused by another run.
+        let store = if guard.isolated_public() {
+            Some(
+                crate::platform::imp::new_ephemeral_data_store()
+                    .map_err(|_| ContextPortFailure::NativeRefused)?,
+            )
+        } else {
+            match guard.storage() {
+                ContextProfileStorageClass::Durable => None,
+                ContextProfileStorageClass::Ephemeral => {
+                    if self.macos_ephemeral_data_stores.len() >= MAX_PROFILE_PERSISTENCE_BINDINGS
+                        && !self.macos_ephemeral_data_stores.contains_key(&profile)
+                    {
+                        return Err(ContextPortFailure::ProfileUnavailable);
+                    }
+                    let store = profile_scoped_value(
+                        &mut self.macos_ephemeral_data_stores,
+                        profile,
+                        crate::platform::imp::new_ephemeral_data_store,
+                    )
+                    .map_err(|_| ContextPortFailure::ProfileUnavailable)?;
+                    if !profile_value_is_isolated(
+                        &self.macos_ephemeral_data_stores,
+                        profile,
+                        &store,
+                        |left, right| {
+                            objc2::rc::Retained::as_ptr(left) == objc2::rc::Retained::as_ptr(right)
+                        },
+                    ) {
+                        return Err(ContextPortFailure::ProfileUnavailable);
+                    }
+                    Some(store)
                 }
-                let store = profile_scoped_value(
-                    &mut self.macos_ephemeral_data_stores,
-                    profile,
-                    crate::platform::imp::new_ephemeral_data_store,
-                )
-                .map_err(|_| ContextPortFailure::ProfileUnavailable)?;
-                if !profile_value_is_isolated(
-                    &self.macos_ephemeral_data_stores,
-                    profile,
-                    &store,
-                    |left, right| {
-                        objc2::rc::Retained::as_ptr(left) == objc2::rc::Retained::as_ptr(right)
-                    },
-                ) {
-                    return Err(ContextPortFailure::ProfileUnavailable);
-                }
-                Some(store)
             }
         };
         let legacy = guard.clone();
@@ -813,7 +822,11 @@ impl EngineHost {
             &self.parent,
             ContextOwnedViewport::STANDARD,
             profile,
-            guard.storage(),
+            if guard.isolated_public() {
+                ContextProfileStorageClass::Ephemeral
+            } else {
+                guard.storage()
+            },
             store.as_ref(),
             callbacks,
         );

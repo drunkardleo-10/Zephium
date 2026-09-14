@@ -11,6 +11,11 @@
     deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)
 )]
 
+mod public_search;
+pub use public_search::{
+    try_public_search_provider_exact_call_config, PublicSearchModelCatalogError,
+};
+
 use std::error::Error;
 use std::fmt;
 use std::sync::OnceLock;

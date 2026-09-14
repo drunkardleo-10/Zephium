@@ -2338,6 +2338,7 @@ fn provider_fixture_with_discovery_account(
                 | NavigationFault::DiscoveryTwoHops
                 | NavigationFault::DiscoveryTwoHopsBlockedFrame
                 | NavigationFault::DiscoveryMissingLink
+                | NavigationFault::DiscoveryNavigationRefusal(_)
         )
     ) {
         input_with_navigation_account(
@@ -2353,9 +2354,18 @@ fn provider_fixture_with_discovery_account(
                 &[SemanticEffectClass::Read]
             },
             None,
-            Some(navigation_tests::discovery_scope()),
+            Some(
+                if fault
+                    == ProviderFault::Navigation(NavigationFault::DiscoveryNavigationRefusal(4))
+                {
+                    navigation_tests::query_discovery_scope()
+                } else {
+                    navigation_tests::discovery_scope()
+                },
+            ),
             match fault {
                 ProviderFault::Navigation(NavigationFault::DiscoveryScopeRefusal(3)) => 6,
+                ProviderFault::Navigation(NavigationFault::DiscoveryNavigationRefusal(3)) => 4,
                 ProviderFault::Navigation(NavigationFault::DiscoveryBudget(_, _, operations)) => {
                     operations
                 }
@@ -2396,7 +2406,12 @@ fn provider_fixture_with_discovery_account(
     }
     let navigation_schedule = if let ProviderFault::Navigation(fault) = fault {
         if matches!(fault, NavigationFault::DiscoveryScopeRefusal(case) if case != 3)
-            || matches!(fault, NavigationFault::DiscoveryActionRefusal(_))
+            || matches!(
+                fault,
+                NavigationFault::DiscoveryActionRefusal(_)
+                    | NavigationFault::DiscoveryNavigationRefusal(_)
+                    | NavigationFault::DiscoveryMissingLink
+            )
         {
             approved.settings = approved.settings.with_max_model_calls(6).unwrap();
         }
@@ -2442,6 +2457,7 @@ fn provider_fixture_with_discovery_account(
                 | NavigationFault::DiscoveryTwoHops
                 | NavigationFault::DiscoveryTwoHopsBlockedFrame
                 | NavigationFault::DiscoveryMissingLink
+                | NavigationFault::DiscoveryNavigationRefusal(_)
         ) {
             let fields =
                 vec![SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap()];
@@ -2466,7 +2482,11 @@ fn provider_fixture_with_discovery_account(
                 }
                 crate::AgentWorkDiscoveryTask::try_new_with_account_source(
                     approved.context.identity,
-                    navigation_tests::discovery_scope(),
+                    if fault == NavigationFault::DiscoveryNavigationRefusal(4) {
+                        navigation_tests::query_discovery_scope()
+                    } else {
+                        navigation_tests::discovery_scope()
+                    },
                     fields,
                     account,
                     Box::new(Source {
@@ -2478,7 +2498,11 @@ fn provider_fixture_with_discovery_account(
             } else {
                 crate::AgentWorkDiscoveryTask::try_new(
                     approved.context.identity,
-                    navigation_tests::discovery_scope(),
+                    if fault == NavigationFault::DiscoveryNavigationRefusal(4) {
+                        navigation_tests::query_discovery_scope()
+                    } else {
+                        navigation_tests::discovery_scope()
+                    },
                     fields,
                 )
                 .unwrap()

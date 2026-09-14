@@ -710,6 +710,9 @@ impl AgentPlanNodeAuthority {
     ) -> Result<Self, AgentManifestContractError> {
         if self.navigation_route.is_some()
             || self.navigation_discovery.is_some()
+            || (discovery.is_public_web()
+                && (self.accounts != [AgentAccountScope::Anonymous]
+                    || self.effects != AgentEffectScope::try_new(&[SemanticEffectClass::Read])?))
             || discovery
                 .origins()
                 .any(|origin| self.origins.binary_search(origin).is_err())
@@ -1201,6 +1204,9 @@ fn manifest_guard(
         hasher.update((discovered as u64).to_be_bytes());
         for node in nodes {
             if let Some(discovery) = node.navigation_discovery() {
+                if discovery.is_public_web() {
+                    hasher.update(b"ZEPHIUM-PUBLIC-WEB-ISOLATED-1\0");
+                }
                 hasher.update(node.id().bytes());
                 hasher.update((discovery.max_hops() as u64).to_be_bytes());
                 hasher.update([match discovery.document_policy() {

@@ -33,6 +33,9 @@ use super::{
 };
 #[path = "action_refusal.rs"]
 mod action_refusal;
+#[path = "navigation_refusal.rs"]
+mod navigation_refusal;
+pub use navigation_refusal::AgentProviderNavigationRefusal;
 #[path = "observation_checkpoint.rs"]
 mod observation_checkpoint;
 #[cfg(any(test, feature = "provider-transport"))]
@@ -2807,6 +2810,87 @@ mod tests {
         }
         .join_terminal_tool(completion(prior, 2), correlation)
         .expect("screenshot terminal join")
+    }
+
+    #[test]
+    fn navigation_refusal_preserves_exact_correlation_and_cannot_rebind_observations() {
+        for provider in [
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderKind::AnthropicMessages,
+        ] {
+            let observed = observation_with_nodes(
+                context(),
+                1,
+                1,
+                1,
+                json!([
+                    {"k":1,"r":"document","o":16},
+                    {"k":2,"p":0,"r":"link","n":"Current link","u":"https://continuation.example.test/observed"}
+                ]),
+            );
+            let config = config(provider).restrict_to_navigation_and_extraction();
+            let make = |url: &str| {
+                let prior = call(1);
+                let arguments = json!({"url":url}).to_string();
+                let tool = match provider {
+                    AgentProviderKind::OpenAiResponses => {
+                        super::super::AgentBrowserToolCall::decode_openai(
+                            prior,
+                            "fc_nav_1".into(),
+                            "call_nav_1".into(),
+                            "navigate",
+                            arguments.clone(),
+                        )
+                    }
+                    AgentProviderKind::AnthropicMessages => {
+                        super::super::AgentBrowserToolCall::decode(
+                            prior,
+                            "toolu_nav_1".into(),
+                            "navigate",
+                            arguments.clone(),
+                        )
+                    }
+                }
+                .unwrap();
+                AgentProviderContinuationSeed {
+                    call: prior,
+                    config: config.clone(),
+                    baseline: SemanticObservationAcknowledgement::from_fingerprint(
+                        SemanticObservationFingerprint::from_observation(&observed),
+                    ),
+                    transcript: transcript(),
+                }
+                .join_terminal_tool(
+                    completion(prior, arguments.len() as u32),
+                    tool.into_continuation_parts().0,
+                )
+                .unwrap()
+            };
+            let refusal = make("https://continuation.example.test/guessed")
+                .refuse_unobserved_navigation(&observed, &config)
+                .unwrap();
+            let (prior, bound) = refusal
+                .bind(&observed, &config, "current observation".into())
+                .unwrap();
+            assert_eq!(prior, call(1));
+            let result: serde_json::Value =
+                serde_json::from_str(bound.latest().tool_result()).unwrap();
+            assert_eq!(result["code"], "unobserved_navigation_target");
+            assert_eq!(result["executed"], false);
+            assert!(make("https://continuation.example.test/observed")
+                .refuse_unobserved_navigation(&observed, &config)
+                .is_err());
+            let changed = observation(context(), 2, 2, 2, "changed document");
+            assert!(make("https://continuation.example.test/guessed")
+                .refuse_unobserved_navigation(&changed, &config)
+                .is_err());
+            let refusal = make("https://continuation.example.test/guessed")
+                .refuse_unobserved_navigation(&observed, &config)
+                .unwrap();
+            assert!(refusal
+                .bind(&changed, &config, "changed observation".into())
+                .is_err());
+        }
     }
 
     fn snapshot_scope_continuation(

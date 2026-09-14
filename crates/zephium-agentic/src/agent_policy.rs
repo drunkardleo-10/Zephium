@@ -396,6 +396,7 @@ impl AgentPolicyAccounting {
 pub struct AgentRunPolicySettlement {
     closure: AgentRunMetricClosure,
     accounting: AgentPolicyAccounting,
+    model_usage_exact: bool,
 }
 
 const _: () = assert!(
@@ -440,6 +441,12 @@ impl AgentRunPolicySettlement {
     /// Exact terminal metric closure joined before consuming the policy.
     pub const fn closure(self) -> AgentRunMetricClosure {
         self.closure
+    }
+
+    /// True only when every closed model receipt carries exact tokens and cost.
+    /// Zero model calls are exact zero; priced or reservation ceilings are not exact.
+    pub const fn model_usage_exact(self) -> bool {
+        self.model_usage_exact
     }
 
     /// Final consumed accounting with every reservation proven zero.
@@ -1223,6 +1230,30 @@ impl AgentRunPolicy {
         )
     }
 
+    /// Unreserved model tokens under both the run and the exact lease node.
+    /// Advisory only: every request still requires its original reservation.
+    pub fn remaining_model_tokens(&self, lease: AgentPlanLeaseId) -> Result<u64, AgentPolicyError> {
+        let index = self.lease_index(lease).ok_or(AgentPolicyError::Lease)?;
+        let node = self
+            .manifest
+            .plan_node(self.leases[index].binding.node())
+            .ok_or(AgentPolicyError::Invariant)?;
+        let remaining = |budget: AgentRunBudget, accounting: AgentPolicyAccounting| {
+            budget
+                .model_tokens()
+                .checked_sub(accounting.consumed_model_tokens())
+                .and_then(|value| value.checked_sub(accounting.reserved_model_tokens()))
+                .ok_or(AgentPolicyError::Budget)
+        };
+        Ok(
+            remaining(self.manifest.budget(), self.accounting())?.min(remaining(
+                node.budget(),
+                self.lease_accounting(lease)
+                    .ok_or(AgentPolicyError::Invariant)?,
+            )?),
+        )
+    }
+
     /// Consumed and reserved accounting for one exact plan lease.
     pub fn lease_accounting(&self, lease: AgentPlanLeaseId) -> Option<AgentPolicyAccounting> {
         let state = self
@@ -1256,6 +1287,8 @@ impl AgentRunPolicy {
             Ok(accounting) => Ok(AgentRunPolicySettlement {
                 closure,
                 accounting,
+                model_usage_exact: metrics.snapshot().model().exact()
+                    == metrics.snapshot().model().calls(),
             }),
             Err(error) => Err(Box::new(AgentRunPolicySettlementRefusal {
                 error,
@@ -1992,7 +2025,17 @@ impl AgentRunPolicy {
             run_accounting,
             reserved_tokens,
             budget.cost_micro_usd(),
-        )?;
+        )
+        .map_err(|error| {
+            model_budget_error(
+                error,
+                request,
+                input_token_limit,
+                self.manifest.budget(),
+                run_accounting,
+                false,
+            )
+        })?;
         let lease_accounting = self
             .lease_accounting(lease)
             .ok_or(AgentPolicyError::Invariant)?;
@@ -2001,7 +2044,17 @@ impl AgentRunPolicy {
             lease_accounting,
             reserved_tokens,
             budget.cost_micro_usd(),
-        )?;
+        )
+        .map_err(|error| {
+            model_budget_error(
+                error,
+                request,
+                input_token_limit,
+                node.budget(),
+                lease_accounting,
+                true,
+            )
+        })?;
         let (projected_cohorts, projected_references) =
             projected_taint_usage(&self.taints, &self.calls, &candidates)?;
         if projected_cohorts > MAX_AGENT_TAINT_COHORTS {
@@ -2308,6 +2361,27 @@ pub enum AgentPolicyError {
     /// Run or node operation/token/cost budget could not reserve the call.
     #[error("agent policy budget is exhausted")]
     Budget,
+    /// Development-only numeric facts from the exact model-input reservation refusal.
+    #[cfg(feature = "probe-harness")]
+    #[error("model input reservation exceeds the original budget")]
+    ModelInputBudget {
+        /// Monotonic model-call number, not a provider or user identity.
+        call: u64,
+        /// Complete structured input reservation (conservative before counting).
+        input: u64,
+        /// Maximum reserved model output tokens.
+        output: u32,
+        /// Requested conservative micro-USD reservation.
+        cost: u64,
+        /// Tokens still unconsumed and unreserved in the failing envelope.
+        remaining_tokens: u64,
+        /// Micro-USD still unconsumed and unreserved in the failing envelope.
+        remaining_cost: u64,
+        /// Operations still unconsumed and unreserved in the failing envelope.
+        remaining_operations: u32,
+        /// True for the lease-node envelope; false for the whole run.
+        node_scope: bool,
+    },
     /// Admission/active token, source receipt, or call state mismatched.
     #[error("agent policy model-call admission mismatch")]
     AdmissionMismatch,
@@ -2385,12 +2459,14 @@ fn validate_context_scope_with_history(
         if (candidate.context != context && !historical_contexts.contains(&candidate.context))
             || candidate.profile() != profile
             || candidate.account != account.account()
-            || manifest
+            || (!node.navigation_discovery().is_some_and(|scope| {
+                scope.is_public_web() && scope.admits_origin(&candidate.origin)
+            }) && (manifest
                 .scope()
                 .origins()
                 .binary_search(&candidate.origin)
                 .is_err()
-            || node.origins().binary_search(&candidate.origin).is_err()
+                || node.origins().binary_search(&candidate.origin).is_err()))
         {
             return Err(AgentPolicyError::SourceOutsideScope);
         }
@@ -2864,6 +2940,41 @@ fn projected_taint_usage(
             .ok_or(AgentPolicyError::TaintReferenceLimit)
     })?;
     Ok((projected.len(), references))
+}
+
+fn model_budget_error(
+    error: AgentPolicyError,
+    request: AgentModelCallRequest,
+    input: u64,
+    envelope: AgentRunBudget,
+    accounting: AgentPolicyAccounting,
+    node_scope: bool,
+) -> AgentPolicyError {
+    #[cfg(feature = "probe-harness")]
+    if error == AgentPolicyError::Budget {
+        return AgentPolicyError::ModelInputBudget {
+            call: request.id().get(),
+            input,
+            output: request.budget().output_tokens(),
+            cost: request.budget().cost_micro_usd(),
+            remaining_tokens: envelope
+                .model_tokens()
+                .saturating_sub(accounting.consumed_model_tokens())
+                .saturating_sub(accounting.reserved_model_tokens()),
+            remaining_cost: envelope
+                .cost_micro_usd()
+                .saturating_sub(accounting.consumed_cost_micro_usd())
+                .saturating_sub(accounting.reserved_cost_micro_usd()),
+            remaining_operations: envelope
+                .operations()
+                .saturating_sub(accounting.consumed_operations())
+                .saturating_sub(accounting.reserved_operations()),
+            node_scope,
+        };
+    }
+    #[cfg(not(feature = "probe-harness"))]
+    let _ = (request, input, envelope, accounting, node_scope);
+    error
 }
 
 fn ensure_budget(
@@ -4035,6 +4146,16 @@ mod tests {
         );
         assert_eq!(fixture.policy.remaining_operations(fixture.lease), Ok(3));
         assert_eq!(
+            fixture.policy.remaining_model_tokens(fixture.lease),
+            Ok(1_000)
+        );
+        assert_eq!(
+            fixture
+                .policy
+                .remaining_model_tokens(AgentPlanLeaseId::from_raw(999)),
+            Err(AgentPolicyError::Lease)
+        );
+        assert_eq!(
             fixture
                 .policy
                 .remaining_operations(AgentPlanLeaseId::from_raw(999)),
@@ -4052,6 +4173,10 @@ mod tests {
         assert_eq!(admission.input_token_limit(), 60);
         assert_eq!(admission.output_token_limit(), 20);
         assert_eq!(admission.cost_limit_micro_usd(), 100);
+        assert_eq!(
+            fixture.policy.remaining_model_tokens(fixture.lease),
+            Ok(920)
+        );
         let admission_debug = format!("{admission:?}");
 
         assert_eq!(fixture.policy.pending_model_calls(), 1);
@@ -6916,7 +7041,25 @@ mod tests {
                     &observation_payload(&observation, 21),
                 )
                 .expect_err("aggregate token budget"),
-            AgentPolicyError::Budget
+            {
+                #[cfg(feature = "probe-harness")]
+                {
+                    AgentPolicyError::ModelInputBudget {
+                        call: 2,
+                        input: 21,
+                        output: 0,
+                        cost: 1,
+                        remaining_tokens: 20,
+                        remaining_cost: 40,
+                        remaining_operations: 1,
+                        node_scope: false,
+                    }
+                }
+                #[cfg(not(feature = "probe-harness"))]
+                {
+                    AgentPolicyError::Budget
+                }
+            }
         );
         budgeted
             .policy
@@ -6939,7 +7082,25 @@ mod tests {
                     &payload,
                 )
                 .expect_err("aggregate cost budget"),
-            AgentPolicyError::Budget
+            {
+                #[cfg(feature = "probe-harness")]
+                {
+                    AgentPolicyError::ModelInputBudget {
+                        call: 4,
+                        input: 10,
+                        output: 0,
+                        cost: 1,
+                        remaining_tokens: 90,
+                        remaining_cost: 0,
+                        remaining_operations: 1,
+                        node_scope: false,
+                    }
+                }
+                #[cfg(not(feature = "probe-harness"))]
+                {
+                    AgentPolicyError::Budget
+                }
+            }
         );
         budgeted
             .policy

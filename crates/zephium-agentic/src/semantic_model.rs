@@ -639,6 +639,44 @@ pub enum SemanticModelDeliveryError {
     Cancelled,
 }
 
+/// Fits one captured main-frame observation without altering any retained node or ref.
+/// Whole trailing nodes are omitted only when necessary; their absence is explicitly
+/// classified as host projection truncation. The returned observation must replace
+/// the original for all model, policy, evidence and continuation joins.
+/// A smallest-root refusal remains explicit; this never increases the byte budget.
+pub fn fit_semantic_observation_for_model(
+    observation: SemanticObservation,
+    budget: SemanticModelEncodingBudget,
+) -> Result<SemanticObservation, SemanticModelEncodingError> {
+    match encode_semantic_observation(&observation, budget) {
+        Ok(_) => return Ok(observation),
+        Err(SemanticModelEncodingError::OutputLimit) => {}
+        Err(error) => return Err(error),
+    }
+    let mut low = 1usize;
+    let mut high = usize::from(observation.node_count()).saturating_sub(1);
+    let mut best = None;
+    // Preorder prefixes retain every ancestor; exact encoding grows monotonically
+    // with retained nodes. At most log2(node_count) bounded encodings are needed.
+    while low <= high {
+        let count = low + (high - low) / 2;
+        let candidate = observation
+            .model_prefix(count)
+            .ok_or(SemanticModelEncodingError::OutputLimit)?;
+        match encode_semantic_observation(&candidate, budget) {
+            Ok(_) => {
+                best = Some(candidate);
+                low = count + 1;
+            }
+            Err(SemanticModelEncodingError::OutputLimit) => {
+                high = count - 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    best.ok_or(SemanticModelEncodingError::OutputLimit)
+}
+
 /// Encodes one complete observation into deterministic compact `ZSEM3` lines.
 pub fn encode_semantic_observation(
     observation: &SemanticObservation,
@@ -726,6 +764,9 @@ pub fn encode_semantic_observation(
             )?;
             if let Some(level) = node.heading_level() {
                 checked_write(&mut output, format_args!(" level={}", level.get()))?;
+            }
+            if let Some(kind) = node.landmark_kind() {
+                checked_write(&mut output, format_args!(" landmark={}", kind.label()))?;
             }
             if let Some(target) = node.link_destination() {
                 output.push(" destination=")?;
@@ -1048,6 +1089,9 @@ fn completeness_label(completeness: SemanticCompleteness) -> &'static str {
             "truncated_inspection"
         }
         SemanticCompleteness::Truncated(SemanticTruncation::WireLimit) => "truncated_wire",
+        SemanticCompleteness::Truncated(SemanticTruncation::ModelProjectionLimit) => {
+            "truncated_model_projection"
+        }
         SemanticCompleteness::Truncated(SemanticTruncation::ScopeBoundary) => "truncated_scope",
         SemanticCompleteness::Truncated(SemanticTruncation::UnsupportedFrame) => "truncated_frame",
     }

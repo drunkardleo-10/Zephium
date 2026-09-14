@@ -1239,6 +1239,7 @@ mod tests {
             .settle_metric_closure(closure, &fixture.accounting, fixture.ledger)
             .expect("clean policy settlement");
         assert_eq!(settlement.closure(), closure);
+        assert!(settlement.model_usage_exact());
         assert_eq!(settlement.accounting().consumed_operations(), 2);
         assert_eq!(settlement.accounting().reserved_operations(), 0);
         assert_eq!(settlement.accounting().reserved_model_tokens(), 0);
