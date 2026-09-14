@@ -28,6 +28,22 @@ the isolated app builds from `desktop/tauri.work-integration.conf.json`.
 Remaining milestones: in-Work browser pane (M2), context admission, typed
 documents, media, account-scoped work (M3), qualification (M4).
 
+**2026-09-14 M2 checkpoint (commits `c04c3a4d`, `df0c299e`).** Pages open
+inside Work in a transient floating browser pane. Rust owns the native hole:
+`shell/work_pane.rs` keeps one Space tab (existing or freshly navigated) in a
+clamped, session-only rect above full-window chrome, `visible_tree()` replaces
+the split tree in every lifecycle path so the pane leaf is discard-protected and
+recreated after a crash, modal prompts remove the page while the pane persists,
+and return, page switch, tab close, and scope changes clear it.
+`LayoutState.work_pane` carries the applied rect, presentation, and generation;
+chrome reports its measured hole through `work_pane_set_rect` (coalesced, stale
+generations ignored). Pane dismissal keys are menu bindings enabled only while a
+pane is shown; `Cmd+W` hides the pane inside Work. The frontend pane renders the
+presentation sentinels for its tab, follows the applied rect (echoes are
+distinguished from native clamps), and reports opening, failed, and unavailable
+states honestly. Native qualification of Escape-from-page, focus after dismiss,
+and geometry after resize/reopen is pending user review.
+
 [`product-system.md`](product-system.md) now records the agreed full product
 direction: Profile → Space → Work → Area, objective-independent manual Works,
 the canvas as the primary environment, a centered Tabs toolbar popover opening
