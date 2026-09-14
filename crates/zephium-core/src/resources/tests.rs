@@ -58,3 +58,19 @@ fn document_limits_bound_depth_and_node_count() {
     }
     assert!(!doc.validate());
 }
+
+#[test]
+fn boxed_mutation_preserves_json_and_specta_contract() {
+    let wire = serde_json::json!({"kind":"mutate","command":{
+        "version":1,"request_id":"request-0000000000000001",
+        "intent":{"kind":"trash","id":"resource-1","expected_revision":"1"}
+    }});
+    let call: ResourceCall = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(call).unwrap(), wire);
+    let mut types = specta::Types::default();
+    assert_eq!(
+        ResourceCommand::definition(&mut types),
+        Box::<ResourceCommand>::definition(&mut types)
+    );
+    assert!(std::mem::size_of::<ResourceCall>() < std::mem::size_of::<ResourceCommand>());
+}

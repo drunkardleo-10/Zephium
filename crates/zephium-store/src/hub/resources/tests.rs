@@ -125,7 +125,7 @@ fn unknown_profiles_and_cross_profile_links_fail_closed() {
     let a = ProfileId::from(1);
     let b = ProfileId::from(2);
     let call = ResourceCall::Mutate {
-        command: command("a", ResourceIntent::Create { draft: task() }),
+        command: Box::new(command("a", ResourceIntent::Create { draft: task() })),
     };
     assert!(matches!(
         hub.resource_call(a, call.clone()),
@@ -153,7 +153,7 @@ fn unknown_profiles_and_cross_profile_links_fail_closed() {
         hub.resource_call(
             b,
             ResourceCall::Mutate {
-                command: command("b", ResourceIntent::Create { draft })
+                command: Box::new(command("b", ResourceIntent::Create { draft }))
             }
         ),
         ResourceResponse::Error {
@@ -170,7 +170,7 @@ fn acknowledged_updates_still_cannot_reapply_an_old_revision() {
     let first = applied(hub.resource_call(
         profile,
         ResourceCall::Mutate {
-            command: create.clone(),
+            command: Box::new(create.clone()),
         },
     ));
     hub.resource_call(
@@ -180,7 +180,13 @@ fn acknowledged_updates_still_cannot_reapply_an_old_revision() {
         },
     );
     assert_eq!(
-        applied(hub.resource_call(profile, ResourceCall::Mutate { command: create })).id,
+        applied(hub.resource_call(
+            profile,
+            ResourceCall::Mutate {
+                command: Box::new(create)
+            }
+        ))
+        .id,
         first.id
     );
     let update = command(
@@ -194,7 +200,7 @@ fn acknowledged_updates_still_cannot_reapply_an_old_revision() {
     hub.resource_call(
         profile,
         ResourceCall::Mutate {
-            command: update.clone(),
+            command: Box::new(update.clone()),
         },
     );
     hub.resource_call(
@@ -204,7 +210,12 @@ fn acknowledged_updates_still_cannot_reapply_an_old_revision() {
         },
     );
     assert!(matches!(
-        hub.resource_call(profile, ResourceCall::Mutate { command: update }),
+        hub.resource_call(
+            profile,
+            ResourceCall::Mutate {
+                command: Box::new(update)
+            }
+        ),
         ResourceResponse::Error {
             error: ResourceError::Conflict
         }

@@ -380,7 +380,7 @@ pub enum ResourceCall {
     Acknowledge { request_id: String },
     List { query: ResourceQuery },
     Get { id: String },
-    Mutate { command: ResourceCommand },
+    Mutate { command: Box<ResourceCommand> },
 }
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
 pub struct ResourceReply {
