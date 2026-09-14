@@ -5,6 +5,7 @@ import type {
 } from "$shared/ipc/bindings";
 import type { CanvasItem, CanvasLink, CanvasPosition } from "./canvas-model";
 import { projectWork } from "./project-work";
+import { isAgentExecution } from "./agent-steps";
 import * as m from "$shared/i18n/messages";
 
 /** One expanded objective at a time. Derived IDs and geometry never become Store entities. */
@@ -24,6 +25,8 @@ export function environmentPlan(
     if (element.reference.kind !== "objective") continue;
     const state = objectives.get(element.reference.objective);
     const latest = state?.executions.at(-1);
+    // Agent runs place real objects while they run; they have no plan to show.
+    if (latest && isAgentExecution(latest)) continue;
     const newerDraft =
       state?.work.plan &&
       latest &&

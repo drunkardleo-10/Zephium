@@ -37,6 +37,8 @@ export class WorkEnvironmentSession {
     objective: string;
     command: string;
     attached: boolean;
+    /** Selected context is connected to the goal card once; retries skip it. */
+    related?: boolean;
     context: WorkContextSelectionV1 | null;
     /** The attached tab whose signed-in session the request should use. */
     account?: { element: string; effect: WorkAccountEffectV1 } | null;

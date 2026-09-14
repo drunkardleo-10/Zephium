@@ -48,7 +48,8 @@ export type CanvasLink = {
   id: string;
   source: string;
   target: string;
-  kind: "dependency" | "reference" | RelationKind;
+  /** `working` is the transient tie between an agent and what it acts on now. */
+  kind: "dependency" | "reference" | "working" | RelationKind;
   label?: string;
 };
 export type CanvasPosition = { x: number; y: number };
@@ -253,8 +254,21 @@ export function reconcileNodes(
         node.data.image?.digest === item.image?.digest &&
         JSON.stringify(node.data.agent) === JSON.stringify(item.agent) &&
         JSON.stringify(node.data.responsibility) === JSON.stringify(item.responsibility);
-      if (same) return node;
-      if (!reparented) return { ...node, data: item, ariaLabel: `${item.title}. ${item.status}` };
+      // Agents follow their work: a fresh computed position moves the node.
+      const moved = item.agent ? positions[item.id] : undefined;
+      const relocated =
+        !!moved &&
+        validPosition(moved) &&
+        !node.dragging &&
+        (node.position.x !== moved.x || node.position.y !== moved.y);
+      if (same && !relocated) return node;
+      if (!reparented)
+        return {
+          ...node,
+          data: item,
+          ariaLabel: `${item.title}. ${item.status}`,
+          ...(relocated ? { position: { ...moved } } : {}),
+        };
       const absolute = absolutePosition(node, previous);
       return {
         ...node,
@@ -294,6 +308,7 @@ export function reconcileNodes(
       dragHandle: ".work-drag-handle",
       deletable: false,
       connectable: false,
+      ...(item.agent ? { class: "agent-node" } : {}),
       ariaLabel: `${item.title}. ${item.status}`,
     };
   });

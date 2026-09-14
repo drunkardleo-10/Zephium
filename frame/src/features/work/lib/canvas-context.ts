@@ -6,3 +6,4 @@ export const canvasEvidence = Symbol("canvas-evidence");
 export const canvasFocusResult = Symbol("canvas-focus-result");
 export const canvasOpen = Symbol("canvas-open");
 export const canvasOpenLink = Symbol("canvas-open-link");
+export const canvasAreas = Symbol("canvas-areas");

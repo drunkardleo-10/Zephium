@@ -10,6 +10,7 @@
     canvasFocusResult,
     canvasOpen,
     canvasOpenLink,
+    canvasAreas,
   } from "../lib/canvas-context";
   import CanvasNode from "./CanvasNode.svelte";
   import AreaNode from "./AreaNode.svelte";
@@ -82,6 +83,11 @@
   setContext(canvasOpenLink, (href: string) => onopenlink?.(href));
   setContext(canvasInspection, (id: string) => oninspect(id));
   setContext(canvasOpen, (id: string) => onopen?.(id));
+  setContext(canvasAreas, {
+    get list() {
+      return areas;
+    },
+  });
   let resizing = $state(false);
   setContext(canvasResize, (active: boolean) => (resizing = active));
   let nodes = $state.raw<WorkNode[]>([]);
@@ -382,6 +388,25 @@
 
   .work-canvas :global(.work-edge.kind-contradicts) {
     stroke: var(--color-danger);
+  }
+
+  /* An agent moves to its work; the tie to it is transient and alive. */
+  /* stylelint-disable-next-line selector-class-pattern */
+  .work-canvas :global(.svelte-flow__node.agent-node) {
+    transition: transform 700ms var(--ease-smooth);
+  }
+
+  .work-canvas :global(.work-edge.kind-working) {
+    stroke: var(--color-accent);
+    stroke-dasharray: 4 6;
+    opacity: 0.9;
+    animation: work-edge-flow 1.2s linear infinite;
+  }
+
+  @keyframes work-edge-flow {
+    to {
+      stroke-dashoffset: -20;
+    }
   }
 
   .work-canvas :global(.work-edge.kind-supports.active) {

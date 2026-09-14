@@ -1,7 +1,7 @@
 import "$styles/global.css";
 import { expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
-import { page, userEvent } from "vitest/browser";
+import { page } from "vitest/browser";
 import { WorkEnvironmentSession } from "$domain/work-environment";
 import type { WorkCallV1, WorkEnvironmentSnapshot } from "$shared/ipc/bindings";
 import { tabFixture } from "$shared/testing/fixtures";
@@ -151,13 +151,10 @@ test("a decision is recorded on the element, shown on the card, and disclosed as
   root.style.width = "1100px";
   await expect.poll(() => screen.container.querySelectorAll(".work-drag-handle").length).toBe(1);
   await screen.container.querySelector<HTMLElement>(".work-drag-handle")!.click();
-  await screen.getByRole("button", { name: "Inspect", exact: true }).click();
-  const input = screen.getByRole("textbox", { name: "Decision", exact: true });
-  await userEvent.fill(input, "Buy this one");
-  await screen.getByRole("button", { name: "Record decision", exact: true }).click();
+  await screen.getByRole("button", { name: "Choose", exact: true }).click();
   await expect
     .poll(() => intents.at(-1))
-    .toEqual({ kind: "decide", element: "00000000000000000000000004", choice: "Buy this one" });
+    .toEqual({ kind: "decide", element: "00000000000000000000000004", choice: "Chosen" });
   await expect.poll(() => session.snapshot?.decisions?.length ?? 0).toBe(1);
   await expect.element(screen.getByText("Decided", { exact: true })).toBeVisible();
   await expect
@@ -169,7 +166,8 @@ test("a decision is recorded on the element, shown on the card, and disclosed as
   await expect
     .element(screen.getByRole("textbox", { name: "Start a new objective" }))
     .toHaveFocus();
-  await screen.getByRole("button", { name: "Clear", exact: true }).click();
+  await screen.container.querySelector<HTMLElement>(".work-drag-handle")!.click();
+  await screen.getByRole("button", { name: "Unchoose", exact: true }).click();
   await expect
     .poll(() => intents.at(-1))
     .toEqual({

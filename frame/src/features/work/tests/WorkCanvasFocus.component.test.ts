@@ -67,9 +67,10 @@ test("explicit result focus restores readable zoom without moving nodes and supp
     label: "Source 1",
   });
   expect(oninspect).not.toHaveBeenCalled();
-  await screen.getByRole("button", { name: "Inspect", exact: true }).click();
-  expect(onaction).toHaveBeenCalledExactlyOnceWith("result", "inspect");
-  expect(oninspect).not.toHaveBeenCalled();
+  await expect
+    .element(screen.getByRole("button", { name: "Inspect", exact: true }))
+    .not.toBeInTheDocument();
+  expect(onaction).not.toHaveBeenCalled();
   await screen.unmount();
 });
 

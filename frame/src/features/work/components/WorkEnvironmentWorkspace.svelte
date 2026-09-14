@@ -41,7 +41,6 @@
   import { mediaUrl } from "$domain/resources";
   import BrowserPane from "./pane/BrowserPane.svelte";
   import Lift from "./Lift.svelte";
-  import Inspector from "./Inspector.svelte";
   import { defaultSize } from "../lib/canvas-model";
   import { environmentPlan } from "../lib/project-environment-plan";
   import {
@@ -579,8 +578,6 @@
       objectiveOpen = true;
     }
   }
-  const element = $derived(snapshot?.elements.find((element) => element.id === inspected));
-  const item = $derived(items.find((item) => item.id === inspected));
   const busy = $derived(!!session.pending || session.loading || objectivePending);
   const attachedTabs = $derived(
     snapshot?.elements.flatMap((element) =>
@@ -652,42 +649,6 @@
     chrome?.close();
     notesOpen = true;
   }
-  async function inspectReference() {
-    inspectionExecution = null;
-    inspectCurrentPlan = false;
-    const reference = element?.reference;
-    if (!reference) return;
-    if (reference.kind === "browser") {
-      if (tabs.some((tab) => tab.id === reference.tab))
-        openPane({ kind: "tab", id: reference.tab }, element?.id ?? null);
-    } else if (reference.kind === "resource") {
-      if (item?.media) {
-        if (element) openLift(element.id);
-        return;
-      }
-      const current = notes;
-      if (!current) return;
-      await current.start();
-      await current.open(reference.resource);
-      notesOpen = true;
-    } else {
-      const current = workSession(session.profile);
-      if (!current) return;
-      objectiveSession = current;
-      await current.start();
-      if (await current.open(reference.objective)) objectiveOpen = true;
-    }
-  }
-  async function continueObjective(objective: string) {
-    const current = workSession(session.profile);
-    if (!current) return;
-    objectiveSession = current;
-    await current.start();
-    if (await current.open(objective)) {
-      objectiveOpen = false;
-      inspected = null;
-    }
-  }
   async function createObjective() {
     if (!session.composer.trim() || objectivePending || busy) return;
     const current = workSession(session.profile);
@@ -750,6 +711,29 @@
         )
           return;
         submission.attached = true;
+      }
+      if (submission.context && !submission.related) {
+        const goal = session.snapshot?.elements.find(
+          (element) =>
+            element.reference.kind === "objective" && element.reference.objective === objectiveId,
+        );
+        for (const item of submission.context.items) {
+          if (!goal || item.element === goal.id) continue;
+          const known = (session.snapshot?.relations ?? []).some(
+            (relation) => relation.from === goal.id && relation.to === item.element,
+          );
+          if (known) continue;
+          if (
+            !(await session.edit({
+              kind: "relate",
+              from: goal.id,
+              to: item.element,
+              relation: "uses",
+            }))
+          )
+            return;
+        }
+        submission.related = true;
       }
       if (!(await current.open(objectiveId))) return;
       const basis = current.projection?.work;
@@ -1275,8 +1259,20 @@
                     });
                   return;
                 }
-                if (action === "inspect") {
-                  void inspectCanvas(id);
+                if (action === "choose" || action === "unchoose") {
+                  void session.edit(
+                    action === "choose"
+                      ? { kind: "decide", element: id, choice: m.work_env_chosen() }
+                      : { kind: "undecide", element: id },
+                  );
+                  return;
+                }
+                if (action?.startsWith("area:")) {
+                  void session.edit({
+                    kind: "assign_area",
+                    element: id,
+                    area: action.slice(5) || null,
+                  });
                   return;
                 }
                 if (action === "ask") {
@@ -1340,45 +1336,6 @@
             objectiveOpen = true;
           }}>{m.work_env_other_results({ count: results.remaining.count })}</Button
         >
-      </div>{/if}
-    {#if element && item && !objectiveOpen && !notesOpen && !resultSelection && !lifted}<div
-        class="inspector"
-      >
-        <Inspector
-          {element}
-          {item}
-          areas={snapshot?.areas ?? []}
-          {busy}
-          openDisabled={element.reference.kind === "browser" &&
-            !tabs.some(
-              (tab) => element.reference.kind === "browser" && tab.id === element.reference.tab,
-            )}
-          onopen={() => {
-            if (element.reference.kind === "browser") void inspectReference();
-            else openLift(element.id);
-          }}
-          openLabel={element.reference.kind === "browser" || element.reference.kind === "source"
-            ? m.work_env_open_here()
-            : m.work_env_open()}
-          onarea={(area) => void session.edit({ kind: "assign_area", element: element.id, area })}
-          ondecide={(choice) =>
-            void session.edit(
-              choice
-                ? { kind: "decide", element: element.id, choice }
-                : { kind: "undecide", element: element.id },
-            )}
-          oncontinue={element.reference.kind === "objective"
-            ? () => {
-                if (element.reference.kind === "objective")
-                  void continueObjective(element.reference.objective);
-              }
-            : undefined}
-          onremove={() =>
-            void session.edit({ kind: "remove", element: element.id }).then((okay) => {
-              if (okay) inspected = null;
-            })}
-          onclose={() => (inspected = null)}
-        />
       </div>{/if}
     {#if resultSelection && objectiveSession && !objectiveOpen && !notesOpen}<section
         class="inspector"
@@ -1514,8 +1471,11 @@
           {#if liftedElement?.reference.kind === "browser"}<Button
               size="compact"
               onclick={() => {
+                const reference = liftedElement?.reference;
+                const id = liftedElement?.id ?? null;
                 lifted = null;
-                void inspectReference();
+                if (reference?.kind === "browser" && tabs.some((tab) => tab.id === reference.tab))
+                  openPane({ kind: "tab", id: reference.tab }, id);
               }}>{m.work_env_open_here()}</Button
             >{/if}
         </div>

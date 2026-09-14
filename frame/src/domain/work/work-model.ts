@@ -18,7 +18,7 @@ export const AGENT_LIMITS: WorkExecutionLimits = {
   cost_micro_usd: 1_500_000,
   operations: 64,
   timeout_seconds: 1800,
-  max_workers: 2,
+  max_workers: 4,
 };
 
 const identity = (value: string) => /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/u.test(value);

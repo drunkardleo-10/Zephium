@@ -3,7 +3,13 @@
   import { getContext, tick } from "svelte";
   import Icon from "$shared/ui/Icon";
   import type { WorkItemNode } from "../lib/canvas-model";
-  import { canvasResize, canvasAction, canvasOpen, canvasFocusResult } from "../lib/canvas-context";
+  import {
+    canvasResize,
+    canvasAction,
+    canvasOpen,
+    canvasFocusResult,
+    canvasAreas,
+  } from "../lib/canvas-context";
   import { ArrowUpRight01Icon, MinusSignIcon, Target01Icon, Tick02Icon } from "../lib/icons";
   import TabCard from "./cards/TabCard.svelte";
   import NoteCard from "./cards/NoteCard.svelte";
@@ -20,6 +26,9 @@
   const action = getContext<(id: string, action?: string) => void>(canvasAction);
   const resize = getContext<(active: boolean) => void>(canvasResize);
   const focusResult = getContext<(id: string) => void>(canvasFocusResult);
+  const areas = getContext<{ readonly list: readonly { id: string; title: string }[] }>(
+    canvasAreas,
+  );
   let { id, data, selected }: NodeProps<WorkItemNode> = $props();
   let root = $state<HTMLDivElement>();
   const type = $derived(data.type ?? (data.artifact ? "result" : "objective"));
@@ -58,11 +67,24 @@
       >
         <Icon icon={Target01Icon} size={14} />{m.work_env_focus_result()}
       </button>{/if}
-    <button type="button" onclick={() => action(id, "inspect")}>{m.work_inspect()}</button>
     {#if type !== "responsibility" && type !== "agent"}<button
         type="button"
         onclick={() => action(id, "ask")}>{m.work_env_ask()}</button
       >{/if}
+    {#if type !== "responsibility" && type !== "agent" && !data.actionLabel}<button
+        type="button"
+        class:on={!!data.decision}
+        onclick={() => action(id, data.decision ? "unchoose" : "choose")}
+        >{data.decision ? m.work_env_unchoose() : m.work_env_choose()}</button
+      >{#if areas?.list.length}<select
+          class="area nodrag nopan"
+          aria-label={m.work_env_area_select()}
+          value={data.area ?? ""}
+          onchange={(event) => action(id, `area:${event.currentTarget.value}`)}
+        >
+          <option value="">{m.work_env_no_area()}</option>
+          {#each areas.list as area (area.id)}<option value={area.id}>{area.title}</option>{/each}
+        </select>{/if}{/if}
     {#if type === "tab" && !data.unavailable && data.detail}<button
         type="button"
         onclick={() => action(id, "account")}>{m.work_account_ask()}</button
@@ -159,6 +181,26 @@
 
   .bar button.danger:hover {
     color: var(--color-danger);
+  }
+
+  .bar button.on {
+    color: var(--color-success);
+  }
+
+  .bar .area {
+    block-size: 28px;
+    max-inline-size: 140px;
+    padding: 0 8px;
+    border: 0;
+    border-radius: var(--radius-control-compact);
+    background: transparent;
+    color: var(--color-text);
+    font: inherit;
+    font-size: var(--text-label);
+  }
+
+  .bar .area:hover {
+    background: var(--color-control-hover);
   }
 
   .separator {

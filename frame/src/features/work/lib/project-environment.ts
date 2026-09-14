@@ -287,6 +287,7 @@ const relationLabels: Record<CanvasLink["kind"], () => string> = {
   depends_on: m.work_env_relation_depends_on,
   same_as: m.work_env_relation_same_as,
   contradicts: m.work_env_relation_contradicts,
+  working: m.work_env_relation_working,
 };
 export function environmentLinks(snapshot: WorkEnvironmentSnapshot): CanvasLink[] {
   const ids = new Set(snapshot.elements.map((element) => element.id));
@@ -366,66 +367,92 @@ export function environmentAgents(
       },
     });
     const anchor = snapshot.view.placements.find((place) => place.element === element.id);
-    if (anchor) positions[id] = { x: anchor.x + anchor.width + 48, y: anchor.y };
+    const placement = (target: string) =>
+      snapshot.view.placements.find((place) => place.element === target);
+    const beside = (target: string, dy = 0) => {
+      const place = placement(target);
+      return place ? { x: place.x + place.width + 40, y: place.y + dy } : undefined;
+    };
+    const home = anchor ? { x: anchor.x + anchor.width + 48, y: anchor.y } : undefined;
     const steps = execution.steps ?? [];
+    const elementsOf = (artifacts: readonly string[]) =>
+      snapshot.elements.filter(
+        (candidate) =>
+          "artifact" in candidate.reference &&
+          candidate.reference.execution === execution.id &&
+          artifacts.includes(candidate.reference.artifact),
+      );
+    // The agent stands beside what it acts on now: the objects it just placed,
+    // the sources it is reading, or the goal while it thinks or searches.
+    const working = new Set<string>();
+    const lastPublish = [...steps].reverse().find((step) => step.kind.kind === "publish");
+    const latestTurn = Math.max(0, ...steps.map((step) => step.turn));
+    const reading = steps.find(
+      (step) =>
+        step.status === "running" && (step.kind.kind === "read" || step.kind.kind === "discover"),
+    );
+    let stand = home;
+    if (lastPublish && lastPublish.turn === latestTurn) {
+      const placed = elementsOf(lastPublish.artifacts ?? []);
+      for (const target of placed) working.add(target.id);
+      const newest = placed
+        .map((target) => placement(target.id))
+        .filter((place): place is NonNullable<typeof place> => !!place)
+        .sort((a, b) => b.y - a.y)[0];
+      if (newest) stand = { x: newest.x + newest.width + 40, y: newest.y };
+    }
     const searches = steps.filter(
       (step) => step.kind.kind === "search" && (step.artifacts?.length ?? 0) > 0,
     );
-    const latestTurn = Math.max(0, ...searches.map((step) => step.turn));
+    const latestSearchTurn = Math.max(0, ...searches.map((step) => step.turn));
     const recent = new Set(
-      searches.filter((step) => step.turn === latestTurn).flatMap((step) => step.artifacts ?? []),
+      searches
+        .filter((step) => step.turn === latestSearchTurn)
+        .flatMap((step) => step.artifacts ?? []),
     );
     const sources = snapshot.elements.filter(
       (candidate) =>
         candidate.reference.kind === "source" && candidate.reference.execution === execution.id,
     );
+    let newestSource: { x: number; y: number; width: number } | undefined;
     for (const source of sources) {
       if (source.reference.kind !== "source" || !recent.has(source.reference.artifact)) continue;
-      links.push({
-        id: `agent-source:${source.id}`,
-        source: id,
-        target: source.id,
-        kind: "reference",
-      });
+      if (latestTurn === latestSearchTurn) working.add(source.id);
+      const place = placement(source.id);
+      if (place && (!newestSource || place.y > newestSource.y)) newestSource = place;
     }
+    if (newestSource && !(lastPublish && lastPublish.turn === latestTurn))
+      stand = { x: newestSource.x + newestSource.width + 40, y: newestSource.y };
+    if (reading?.kind.kind === "read") {
+      const target = sources.find((source) => {
+        const citation =
+          source.reference.kind === "source"
+            ? sourceCitation(projection, source.reference)
+            : undefined;
+        return citation?.url === reading.kind.url;
+      });
+      if (target) {
+        working.add(target.id);
+        stand = beside(target.id, -8) ?? stand;
+      }
+    }
+    if (stand) positions[id] = stand;
+    for (const target of working)
+      links.push({ id: `working:${target}`, source: id, target, kind: "working" });
     for (const step of steps) {
-      if (step.status !== "running" || (step.kind.kind !== "read" && step.kind.kind !== "discover"))
-        continue;
+      if (step.status !== "running" || step.kind.kind !== "discover") continue;
       const worker = `${id}:${step.id}`;
-      const reading = step.kind.kind === "read" ? step.kind.url : undefined;
       items.push({
         id: worker,
         type: "agent",
         kind: m.work_env_worker(),
         title: m.work_env_worker(),
         detail: "",
-        status: reading
-          ? m.work_env_reading_host({ host: host(reading) || reading })
-          : m.work_env_browsing(),
+        status: m.work_env_browsing(),
         agent: { seed: seed + 1, activity: "reading", objective: projection.work.id, worker: true },
       });
-      links.push({ id: `agent-worker:${worker}`, source: id, target: worker, kind: "reference" });
-      const target = reading
-        ? sources.find((source) => {
-            const citation =
-              source.reference.kind === "source"
-                ? sourceCitation(projection, source.reference)
-                : undefined;
-            return citation?.url === reading;
-          })
-        : undefined;
-      const place = target
-        ? snapshot.view.placements.find((place) => place.element === target.id)
-        : undefined;
-      if (target) {
-        links.push({
-          id: `worker-source:${worker}`,
-          source: worker,
-          target: target.id,
-          kind: "reference",
-        });
-        if (place) positions[worker] = { x: place.x + place.width + 32, y: place.y + 10 };
-      } else if (anchor) positions[worker] = { x: anchor.x + anchor.width + 48, y: anchor.y + 140 };
+      links.push({ id: `agent-worker:${worker}`, source: id, target: worker, kind: "working" });
+      if (stand) positions[worker] = { x: stand.x, y: stand.y + 140 };
     }
   }
   return { items, links, positions };

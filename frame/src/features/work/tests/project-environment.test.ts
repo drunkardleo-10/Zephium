@@ -209,14 +209,17 @@ test("source elements read their citation and the running agent links to them", 
   expect(source.title).toBe("Review A");
   expect(source.detail).toBe("a.example");
   expect(source.source).toEqual({ url: "https://a.example/review", role: "source" });
+  // The agent stands beside the source it reads, tied to it by a working link.
   const agents = environmentAgents(withSource, objectives, () => "reading");
-  expect(agents.items.map((item) => item.agent?.worker ?? false)).toEqual([false, true]);
+  expect(agents.items.map((item) => item.agent?.worker ?? false)).toEqual([false]);
   expect(agents.items[0]?.agent?.line).toBe("Reading the review.");
-  expect(agents.items[1]?.status).toBe("Reading a.example");
-  expect(agents.links.map((link) => [link.source, link.target])).toEqual([
-    [`agent:${objectiveElement.id}`, "source-1"],
-    [`agent:${objectiveElement.id}`, `agent:${objectiveElement.id}:read`],
-    [`agent:${objectiveElement.id}:read`, "source-1"],
+  expect(agents.links).toEqual([
+    {
+      id: "working:source-1",
+      source: `agent:${objectiveElement.id}`,
+      target: "source-1",
+      kind: "working",
+    },
   ]);
-  expect(agents.positions[`agent:${objectiveElement.id}:read`]).toEqual({ x: 692, y: 10 });
+  expect(agents.positions[`agent:${objectiveElement.id}`]).toEqual({ x: 700, y: -8 });
 });

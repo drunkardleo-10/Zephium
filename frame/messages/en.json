@@ -1136,5 +1136,10 @@
   "work_env_worker": "Worker",
   "work_env_reading_host": "Reading {host}",
   "work_env_browsing": "Browsing the web",
-  "work_context_kind_source": "Source"
+  "work_context_kind_source": "Source",
+  "work_env_choose": "Choose",
+  "work_env_unchoose": "Unchoose",
+  "work_env_chosen": "Chosen",
+  "work_env_relation_working": "working on",
+  "work_env_area_select": "Area"
 }

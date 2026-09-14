@@ -129,11 +129,7 @@ test("the production manual environment attaches a real tab, opens it in the pan
   await screen.getByRole("button", { name: "Tabs", exact: true }).click();
   await expect.poll(() => screen.container.querySelectorAll(".work-drag-handle").length).toBe(1);
   await screen.container.querySelector<HTMLElement>(".work-drag-handle")!.click();
-  await screen.getByRole("button", { name: "Inspect", exact: true }).click();
-  await screen
-    .getByRole("region", { name: "Details", exact: true })
-    .getByRole("button", { name: "Open here", exact: true })
-    .click();
+  await screen.getByRole("button", { name: "Open", exact: true }).click();
   await expect.poll(() => native.paneShow.mock.calls.length).toBe(1);
   expect(native.paneShow.mock.lastCall?.[0]).toEqual({ kind: "tab", id: "retained-tab" });
   const hole = native.paneShow.mock.lastCall?.[1];
