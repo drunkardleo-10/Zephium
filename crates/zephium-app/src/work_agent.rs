@@ -44,6 +44,7 @@ pub enum WorkAgentDiagnostic {
     TurnAdmitted {
         turn: u8,
         artifacts: usize,
+        dropped: usize,
         fetches: usize,
         asks: bool,
         finish: bool,
@@ -192,6 +193,9 @@ impl WorkAgentService {
             failed_turns: 0,
             intervention: None,
             diagnostic: self.diagnostic,
+            notices: Vec::new(),
+            published: 0,
+            finish_refusals: 0,
         };
         let outcome = driver.drive(&attempt, &providers, &mut browser).await;
         let (status, usage) = match outcome {
@@ -237,6 +241,10 @@ struct Driver {
     failed_turns: u8,
     intervention: Option<WorkInterventionV1>,
     diagnostic: Option<fn(WorkAgentDiagnostic)>,
+    /// Closed feedback for the next turn: what was refused and why.
+    notices: Vec<String>,
+    published: usize,
+    finish_refusals: u8,
 }
 
 enum Fetched {
@@ -423,6 +431,7 @@ impl Driver {
                     browse_available: true,
                 },
                 self.remaining(),
+                std::mem::take(&mut self.notices),
             ) {
                 Ok(disclosure) => disclosure,
                 Err(_) => return Ok(WorkAttemptStatus::Failed),
@@ -472,6 +481,7 @@ impl Driver {
                 Some(turn) => self.report(WorkAgentDiagnostic::TurnAdmitted {
                     turn: self.turn,
                     artifacts: turn.artifacts.len(),
+                    dropped: turn.dropped,
                     fetches: turn.fetch.len(),
                     asks: turn.ask.is_some(),
                     finish: turn.finish,
@@ -486,6 +496,15 @@ impl Driver {
                 continue;
             };
             self.failed_turns = 0;
+            for refusal in &turn.refusals {
+                let notice = format!(
+                    "A proposed object was refused last turn: it {}.",
+                    refusal.notice()
+                );
+                if !self.notices.contains(&notice) && self.notices.len() < 8 {
+                    self.notices.push(notice);
+                }
+            }
             if !turn.artifacts.is_empty() {
                 self.probe
                     .record_activity(WorkActivityV1::ProducingArtifact);
@@ -509,6 +528,7 @@ impl Driver {
                     let mut step = self.step(WorkStepKindV1::Publish, WorkStepStatus::Succeeded);
                     step.artifacts = artifacts.iter().map(|a| a.id).collect();
                     step.note = Some(publish_note(&artifacts));
+                    self.published += artifacts.len();
                     self.begin(step, artifacts, None).await?;
                 }
             }
@@ -534,6 +554,16 @@ impl Driver {
                     return Ok(status);
                 }
             }
+            if turn.finish && self.published == 0 && self.finish_refusals < 2 {
+                // A research run is not finished until something is on the
+                // canvas; the model hears why and gets another turn.
+                self.finish_refusals += 1;
+                self.notices.push(
+                    "Finish was refused: nothing is on the canvas yet. Publish cited findings, subjects, or a comparison from the sources first, then finish."
+                        .into(),
+                );
+                continue;
+            }
             if turn.finish {
                 self.probe.record_activity(WorkActivityV1::Finishing);
                 let step = self.step(WorkStepKindV1::Finish, WorkStepStatus::Succeeded);
@@ -556,33 +586,42 @@ impl Driver {
         B: FnMut(WorkAttemptProbe, WorkAgentBrowseRequest) -> Fut,
         Fut: Future<Output = Result<WorkBrowserOutcome, WorkError>>,
     {
-        let mut begun = Vec::new();
-        for kind in fetches {
-            if self.steps + 2 > u32::from(self.grant.max_steps) {
-                break;
-            }
-            let step = self.step(kind.clone(), WorkStepStatus::Running);
-            let id = self.begin(step, vec![], None).await?;
-            begun.push((id, kind));
-        }
-        let mut searches: Vec<Pin<Box<dyn Future<Output = Fetched> + Send + '_>>> = Vec::new();
-        let mut browses = Vec::new();
-        let remaining = self.remaining();
+        let cap = usize::from(self.limits.max_workers).max(1);
+        let (searches, browses): (Vec<_>, Vec<_>) = fetches
+            .into_iter()
+            .partition(|kind| matches!(kind, WorkStepKindV1::Search { .. }));
         let per_search = WorkExecutionLimits {
             max_workers: 1,
-            ..remaining
+            ..self.remaining()
         };
-        for (id, kind) in begun {
-            match kind {
-                WorkStepKindV1::Search { query } => {
-                    let scope = WorkPublicSearchScope {
+        // Searches run together up to the worker cap; each batch settles before
+        // the next begins, so the durable running count never exceeds the cap.
+        for batch in searches.chunks(cap) {
+            let mut running = Vec::new();
+            for kind in batch {
+                if self.steps + 2 > u32::from(self.grant.max_steps) {
+                    break;
+                }
+                let WorkStepKindV1::Search { query } = kind else {
+                    continue;
+                };
+                let step = self.step(kind.clone(), WorkStepStatus::Running);
+                let id = self.begin(step, vec![], None).await?;
+                running.push((
+                    id,
+                    WorkPublicSearchScope {
                         provider: self.grant.provider,
                         model: self.grant.model.clone(),
-                        query,
-                    };
+                        query: query.clone(),
+                    },
+                ));
+            }
+            let futures: Vec<Pin<Box<dyn Future<Output = Fetched> + Send + '_>>> = running
+                .into_iter()
+                .map(|(id, scope)| {
                     let probe = self.probe.clone();
                     let search = providers.search;
-                    searches.push(Box::pin(async move {
+                    Box::pin(async move {
                         let outcome = probe.run_search(search, &scope, &[], per_search).await;
                         Fetched::Search(
                             id,
@@ -599,15 +638,25 @@ impl Driver {
                                 },
                             },
                         )
-                    }));
-                }
-                kind => browses.push((id, kind)),
+                    }) as Pin<Box<dyn Future<Output = Fetched> + Send + '_>>
+                })
+                .collect();
+            let mut terminal = None;
+            for fetched in join_all(futures).await {
+                terminal = terminal.or(self.settle_fetched(attempt, fetched).await?);
+            }
+            if terminal.is_some() {
+                return Ok(terminal);
             }
         }
-        let mut results = join_all(searches).await;
-        for (id, kind) in browses {
-            if self.cancelled().await {
-                results.push(Fetched::Browse(
+        for kind in browses {
+            if self.steps + 2 > u32::from(self.grant.max_steps) {
+                break;
+            }
+            let step = self.step(kind.clone(), WorkStepStatus::Running);
+            let id = self.begin(step, vec![], None).await?;
+            let fetched = if self.cancelled().await {
+                Fetched::Browse(
                     id,
                     Ok(WorkBrowserOutcome {
                         status: WorkStepStatus::Cancelled,
@@ -615,25 +664,37 @@ impl Driver {
                         artifacts: vec![],
                         intervention: None,
                     }),
-                ));
-                continue;
-            }
-            self.probe.record_activity(WorkActivityV1::Reading);
-            let request = WorkAgentBrowseRequest {
-                step: kind,
-                hops: self.grant.browse_hops,
-                objective: self.objective.clone(),
-                output: self.output.clone(),
-                limits: WorkExecutionLimits {
-                    max_workers: 1,
-                    ..self.remaining()
-                },
+                )
+            } else {
+                self.probe.record_activity(WorkActivityV1::Reading);
+                let request = WorkAgentBrowseRequest {
+                    step: kind,
+                    hops: self.grant.browse_hops,
+                    objective: self.objective.clone(),
+                    output: self.output.clone(),
+                    limits: WorkExecutionLimits {
+                        max_workers: 1,
+                        ..self.remaining()
+                    },
+                };
+                Fetched::Browse(id, browser(self.probe.clone(), request).await)
             };
-            let outcome = browser(self.probe.clone(), request).await;
-            results.push(Fetched::Browse(id, outcome));
+            if let Some(terminal) = self.settle_fetched(attempt, fetched).await? {
+                return Ok(Some(terminal));
+            }
         }
+        Ok(None)
+    }
+
+    /// Commits one fetched outcome. Returns a terminal attempt status when the
+    /// run cannot continue (unknown provider outcome, intervention).
+    async fn settle_fetched(
+        &mut self,
+        attempt: &WorkNodeAttempt,
+        fetched: Fetched,
+    ) -> Result<Option<WorkAttemptStatus>, WorkError> {
         let mut terminal = None;
-        for fetched in results {
+        {
             match fetched {
                 Fetched::Search(id, outcome) => {
                     if let Some(usage) = outcome.usage {

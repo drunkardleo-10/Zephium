@@ -757,6 +757,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
             browse_available: true,
         },
         limits,
+        vec![],
     )
     .unwrap();
     assert_eq!(
@@ -823,7 +824,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
     let mut uncited = output(vec![], None, true);
     uncited.artifacts[0].evidence.clear();
     let finished = disclosure.resolve(uncited).unwrap();
-    assert!(finished.artifacts.is_empty() && finished.finish);
+    assert!(finished.artifacts.is_empty() && finished.finish && finished.dropped == 1);
     let mut only_uncited = output(vec![], None, false);
     only_uncited.artifacts[0].evidence.clear();
     assert!(disclosure.resolve(only_uncited).is_err());

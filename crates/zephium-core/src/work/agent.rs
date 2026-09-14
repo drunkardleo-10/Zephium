@@ -50,6 +50,9 @@ pub struct WorkAgentTurnContext {
     pub sources: Vec<WorkAgentSourceView>,
     pub artifacts: Vec<WorkAgentArtifactView>,
     pub budget: WorkAgentBudget,
+    /// What the application refused last turn, in closed wording.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<String>,
 }
 
 /// Disclosure data, never an execution token.
@@ -70,8 +73,12 @@ impl WorkAgentTurnDisclosure {
         artifacts: &[WorkArtifactV1],
         budget: WorkAgentBudget,
         limits: WorkExecutionLimits,
+        notices: Vec<String>,
     ) -> Result<Self, WorkError> {
         limits.validate()?;
+        if notices.len() > 8 || notices.iter().any(|notice| notice.len() > 512) {
+            return Err(WorkError::Invalid);
+        }
         validate_text(objective, MAX_WORK_TEXT_BYTES)?;
         if previews.len() > 128 || artifacts.len() > MAX_WORK_ARTIFACTS {
             return Err(WorkError::Capacity);
@@ -164,6 +171,7 @@ impl WorkAgentTurnDisclosure {
             sources,
             artifacts,
             budget,
+            notices,
         };
         let fits = |context: &WorkAgentTurnContext| -> Result<bool, WorkError> {
             Ok(serde_json::to_vec(context)
@@ -251,11 +259,14 @@ impl WorkAgentTurnDisclosure {
         // other operations still run and the next turn shows what landed.
         let proposed = output.artifacts.len();
         let mut artifacts = Vec::new();
+        let mut refusals = Vec::new();
         for artifact in output.artifacts {
-            if let Ok(artifact) = self.resolve_artifact(artifact) {
-                artifacts.push(artifact);
+            match self.resolve_artifact(artifact) {
+                Ok(artifact) => artifacts.push(artifact),
+                Err(refusal) => refusals.push(refusal),
             }
         }
+        let dropped = proposed - artifacts.len();
         if artifacts.is_empty()
             && proposed > 0
             && !output.finish
@@ -316,22 +327,56 @@ impl WorkAgentTurnDisclosure {
         Ok(WorkAgentTurn {
             say,
             artifacts,
+            dropped,
+            refusals,
             fetch,
             ask,
             finish: output.finish,
         })
     }
 }
+/// Why one proposed object was refused; wording for the model is closed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkAgentArtifactRefusal {
+    Uncited,
+    UnknownEvidenceKey,
+    UnlistedLink,
+    Malformed,
+}
+impl WorkAgentArtifactRefusal {
+    pub fn notice(self) -> &'static str {
+        match self {
+            Self::Uncited => "cites no evidence keys",
+            Self::UnknownEvidenceKey => "cites an evidence key that is not in the sources list",
+            Self::UnlistedLink => "links to a URL that is not a listed source",
+            Self::Malformed => "has invalid content (check cell evidence indexes, subject indexes, and text limits)",
+        }
+    }
+}
 impl WorkAgentTurnDisclosure {
     fn resolve_artifact(
         &self,
         artifact: WorkAgentArtifactOutput,
-    ) -> Result<WorkSynthesisArtifact, WorkError> {
-        validate_text(&artifact.title, 512)?;
-        if artifact.evidence.is_empty() || artifact.evidence.len() > 64 {
-            return Err(WorkError::Invalid);
+    ) -> Result<WorkSynthesisArtifact, WorkAgentArtifactRefusal> {
+        use WorkAgentArtifactRefusal as Refusal;
+        validate_text(&artifact.title, 512).map_err(|_| Refusal::Malformed)?;
+        if artifact.evidence.is_empty() {
+            return Err(Refusal::Uncited);
         }
-        artifact.data.validate(artifact.evidence.len())?;
+        if artifact.evidence.len() > 64 {
+            return Err(Refusal::Malformed);
+        }
+        if artifact
+            .evidence
+            .iter()
+            .any(|key| usize::from(*key) >= self.links.len())
+        {
+            return Err(Refusal::UnknownEvidenceKey);
+        }
+        artifact
+            .data
+            .validate(artifact.evidence.len())
+            .map_err(|_| Refusal::Malformed)?;
         if let WorkArtifactDataV1::Document {
             formatted: Some(document),
             ..
@@ -341,7 +386,7 @@ impl WorkAgentTurnDisclosure {
                 .iter()
                 .any(|href| !self.urls.iter().any(|url| url == href))
             {
-                return Err(WorkError::Invalid);
+                return Err(Refusal::UnlistedLink);
             }
         }
         let mut cited = BTreeSet::new();
@@ -350,12 +395,12 @@ impl WorkAgentTurnDisclosure {
             .into_iter()
             .map(|key| {
                 if !cited.insert(key) {
-                    return Err(WorkError::Invalid);
+                    return Err(Refusal::Malformed);
                 }
                 self.links
                     .get(usize::from(key))
                     .cloned()
-                    .ok_or(WorkError::Invalid)
+                    .ok_or(Refusal::UnknownEvidenceKey)
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(WorkSynthesisArtifact {
@@ -424,6 +469,9 @@ pub struct WorkAgentTurnOutput {
 pub struct WorkAgentTurn {
     pub say: Option<String>,
     pub artifacts: Vec<WorkSynthesisArtifact>,
+    /// Proposed objects refused on their own (uncited or malformed).
+    pub dropped: usize,
+    pub refusals: Vec<WorkAgentArtifactRefusal>,
     pub fetch: Vec<WorkStepKindV1>,
     pub ask: Option<WorkAgentQuestion>,
     pub finish: bool,
