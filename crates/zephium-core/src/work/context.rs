@@ -55,6 +55,8 @@ pub enum WorkContextItemKind {
     Artifact,
     Subject,
     Finding,
+    /// The user's recorded choice about an element; added by Rust, not selected.
+    Decision,
 }
 impl WorkContextItemKind {
     pub fn label(self) -> &'static str {
@@ -67,6 +69,7 @@ impl WorkContextItemKind {
             Self::Artifact => "result",
             Self::Subject => "subject",
             Self::Finding => "finding",
+            Self::Decision => "decision",
         }
     }
 }
@@ -102,6 +105,9 @@ pub struct WorkContextItemV1 {
     pub bytes: u32,
     pub truncated: bool,
     pub visibility: WorkContextVisibility,
+    /// Added by Rust from durable Work state (decisions), not by selection.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub implicit: bool,
 }
 
 /// The persisted manifest: bound to the plan revision or execution spec it
@@ -125,7 +131,7 @@ impl WorkContextDisclosureV1 {
         let mut seen = std::collections::HashSet::new();
         let mut total = 0u64;
         for item in &self.items {
-            if !seen.insert(item.element)
+            if !seen.insert((item.element, item.implicit))
                 || item.title.len() > MAX_WORK_TEXT_BYTES
                 || item.revision.len() > MAX_CONTEXT_REVISION_BYTES
                 || item.digest.len() != 64
@@ -186,21 +192,33 @@ impl WorkAdmittedContext {
         purpose: WorkContextPurpose,
         selection: &WorkContextSelectionV1,
         sources: Vec<WorkContextSource>,
+        implicit: Vec<WorkContextSource>,
     ) -> Result<Self, WorkError> {
         selection.validate()?;
         if sources.len() != selection.items.len() {
             return Err(WorkError::NotFound);
         }
-        let mut items = Vec::with_capacity(sources.len());
-        let mut bodies = Vec::with_capacity(sources.len());
+        if selection.items.len() + implicit.len() > MAX_CONTEXT_ITEMS {
+            return Err(WorkError::Capacity);
+        }
+        let mut items = Vec::with_capacity(sources.len() + implicit.len());
+        let mut bodies = Vec::with_capacity(sources.len() + implicit.len());
         let mut total = 0usize;
-        for (source, selected) in sources.into_iter().zip(&selection.items) {
-            if source.element != selected.element {
-                return Err(WorkError::Invalid);
-            }
-            if source.revision != selected.revision {
-                return Err(WorkError::Conflict);
-            }
+        let selected = sources
+            .into_iter()
+            .zip(&selection.items)
+            .map(|(source, selected)| {
+                if source.element != selected.element {
+                    return Err(WorkError::Invalid);
+                }
+                if source.revision != selected.revision {
+                    return Err(WorkError::Conflict);
+                }
+                Ok((source, false))
+            });
+        let implicit = implicit.into_iter().map(|source| Ok((source, true)));
+        for entry in selected.chain(implicit) {
+            let (source, implicit) = entry?;
             let (text, truncated) = truncate(&source.text, MAX_CONTEXT_ITEM_BYTES);
             total += text.len();
             if total > MAX_CONTEXT_TOTAL_BYTES {
@@ -216,6 +234,7 @@ impl WorkAdmittedContext {
                 bytes: text.len() as u32,
                 truncated,
                 visibility: source.visibility,
+                implicit,
             });
             bodies.push(WorkContextBody {
                 kind: source.kind,
@@ -392,6 +411,7 @@ mod tests {
                 source(1, "r1", "  hello  ", WorkContextVisibility::Private),
                 source(2, "r2", &long, WorkContextVisibility::Public),
             ],
+            vec![],
         )
         .unwrap();
         assert_eq!(admitted.bodies[0].text, "hello");
@@ -421,6 +441,7 @@ mod tests {
             WorkContextPurpose::Planning,
             &selection(&[(1, "seen")]),
             vec![source(1, "now", "body", WorkContextVisibility::Private)],
+            vec![],
         );
         assert!(matches!(stale, Err(WorkError::Conflict)));
         let private = WorkAdmittedContext::admit(
@@ -429,6 +450,7 @@ mod tests {
             WorkContextPurpose::PublicRead,
             &selection(&[(1, "r")]),
             vec![source(1, "r", "body", WorkContextVisibility::Private)],
+            vec![],
         );
         assert!(matches!(private, Err(WorkError::ReviewRequired)));
         let public = WorkAdmittedContext::admit(
@@ -437,6 +459,7 @@ mod tests {
             WorkContextPurpose::PublicRead,
             &selection(&[(1, "r")]),
             vec![source(1, "r", "body", WorkContextVisibility::Public)],
+            vec![],
         );
         assert!(public.is_ok());
         let items: Vec<(u128, &str)> = (1..=4).map(|i| (i, "r")).collect();
@@ -456,9 +479,60 @@ mod tests {
             WorkContextPurpose::Planning,
             &selection(&items),
             sources,
+            vec![],
         );
         assert!(matches!(oversized, Err(WorkError::Capacity)));
         assert!(selection(&[]).validate().is_err());
         assert!(selection(&[(1, "a"), (1, "b")]).validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod implicit_tests {
+    use super::*;
+
+    #[test]
+    fn decisions_join_the_manifest_as_implicit_items_and_keep_selected_identity() {
+        let element = WorkElementId::from(5);
+        let selection = WorkContextSelectionV1 {
+            environment: WorkEnvironmentId::from(1),
+            items: vec![WorkContextSelectionItem {
+                element,
+                revision: "art-1".into(),
+            }],
+        };
+        let source = |kind, revision: &str, text: &str| WorkContextSource {
+            element,
+            kind,
+            title: "Keychron K2".into(),
+            revision: revision.into(),
+            visibility: WorkContextVisibility::Public,
+            text: text.into(),
+        };
+        let admitted = WorkAdmittedContext::admit(
+            WorkEnvironmentId::from(1),
+            WorkRevision::INITIAL,
+            WorkContextPurpose::Planning,
+            &selection,
+            vec![source(WorkContextItemKind::Subject, "art-1", "75% layout")],
+            vec![WorkContextSource {
+                visibility: WorkContextVisibility::Private,
+                ..source(WorkContextItemKind::Decision, "", "Buy this one")
+            }],
+        )
+        .unwrap();
+        assert_eq!(admitted.disclosure.items.len(), 2);
+        assert!(!admitted.disclosure.items[0].implicit);
+        assert!(admitted.disclosure.items[1].implicit);
+        assert_eq!(
+            admitted.disclosure.items[1].kind,
+            WorkContextItemKind::Decision
+        );
+        assert_eq!(admitted.bodies[1].text, "Buy this one");
+        assert!(admitted.disclosure.requires_review());
+        let json = serde_json::to_string(&admitted.disclosure).unwrap();
+        assert_eq!(json.matches("\"implicit\":true").count(), 1);
+        let restored: WorkContextDisclosureV1 = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, admitted.disclosure);
     }
 }

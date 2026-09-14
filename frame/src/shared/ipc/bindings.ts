@@ -9,7 +9,7 @@ export const commands = {
 	workOperation: (expectedProfile: string, operation: WorkCommandId, input: WorkOperationV1_Deserialize) => __TAURI_INVOKE<WorkOperationResponseV1_Serialize>("work_operation", { expectedProfile, operation, input }),
 	workOperationStatus: (expectedProfile: string, work: WorkId, operation: WorkCommandId, acknowledge: boolean) => __TAURI_INVOKE<WorkOperationResponseV1_Serialize>("work_operation_status", { expectedProfile, work, operation, acknowledge }),
 	/**  Manifest preview for the composer. Bodies never cross this boundary. */
-	workContextPreview: (expectedProfile: string, purpose: WorkContextPurpose, selection: WorkContextSelectionV1) => __TAURI_INVOKE<WorkContextPreviewV1>("work_context_preview", { expectedProfile, purpose, selection }),
+	workContextPreview: (expectedProfile: string, purpose: WorkContextPurpose, selection: WorkContextSelectionV1) => __TAURI_INVOKE<WorkContextPreviewV1_Serialize>("work_context_preview", { expectedProfile, purpose, selection }),
 	workActivity: (expectedProfile: string, work: WorkId) => __TAURI_INVOKE<WorkActivityResponseV1>("work_activity", { expectedProfile, work }),
 	tabsBootstrap: () => __TAURI_INVOKE<void>("tabs_bootstrap"),
 	tabsOpen: () => __TAURI_INVOKE<OperationAdmission>("tabs_open"),
@@ -1454,18 +1454,41 @@ export type WorkConfidence = "supported" | "inferred" | "unverified" | "contradi
  *  The persisted manifest: bound to the plan revision or execution spec it
  *  informed, renderable by chrome before dispatch from the same struct.
  */
-export type WorkContextDisclosureV1 = {
+export type WorkContextDisclosureV1 = WorkContextDisclosureV1_Serialize | WorkContextDisclosureV1_Deserialize;
+
+/**
+ *  The persisted manifest: bound to the plan revision or execution spec it
+ *  informed, renderable by chrome before dispatch from the same struct.
+ */
+export type WorkContextDisclosureV1_Deserialize = {
 	version: number,
 	environment: WorkEnvironmentId,
 	environment_revision: WorkRevision,
 	purpose: WorkContextPurpose,
-	items: WorkContextItemV1[],
+	items: WorkContextItemV1_Deserialize[],
 	total_bytes: number,
 };
 
-export type WorkContextItemKind = "note" | "task" | "object" | "tab" | "objective" | "artifact" | "subject" | "finding";
+/**
+ *  The persisted manifest: bound to the plan revision or execution spec it
+ *  informed, renderable by chrome before dispatch from the same struct.
+ */
+export type WorkContextDisclosureV1_Serialize = {
+	version: number,
+	environment: WorkEnvironmentId,
+	environment_revision: WorkRevision,
+	purpose: WorkContextPurpose,
+	items: WorkContextItemV1_Serialize[],
+	total_bytes: number,
+};
 
-export type WorkContextItemV1 = {
+export type WorkContextItemKind = "note" | "task" | "object" | "tab" | "objective" | "artifact" | "subject" | "finding" | 
+/**  The user's recorded choice about an element; added by Rust, not selected. */
+"decision";
+
+export type WorkContextItemV1 = WorkContextItemV1_Serialize | WorkContextItemV1_Deserialize;
+
+export type WorkContextItemV1_Deserialize = {
 	element: WorkElementId,
 	kind: WorkContextItemKind,
 	title: string,
@@ -1475,13 +1498,41 @@ export type WorkContextItemV1 = {
 	bytes: number,
 	truncated: boolean,
 	visibility: WorkContextVisibility,
+	/**  Added by Rust from durable Work state (decisions), not by selection. */
+	implicit?: boolean,
+};
+
+export type WorkContextItemV1_Serialize = {
+	element: WorkElementId,
+	kind: WorkContextItemKind,
+	title: string,
+	revision: string,
+	/**  Hex SHA-256 of the admitted body after truncation. */
+	digest: string,
+	bytes: number,
+	truncated: boolean,
+	visibility: WorkContextVisibility,
+	/**  Added by Rust from durable Work state (decisions), not by selection. */
+	implicit?: boolean,
 };
 
 /**
  *  The manifest chrome renders before dispatch, computed by the same
  *  admission that later binds it to the operation.
  */
-export type WorkContextPreviewV1 = { kind: "admitted"; disclosure: WorkContextDisclosureV1 } | { kind: "refused"; error: WorkFailureV1 };
+export type WorkContextPreviewV1 = WorkContextPreviewV1_Serialize | WorkContextPreviewV1_Deserialize;
+
+/**
+ *  The manifest chrome renders before dispatch, computed by the same
+ *  admission that later binds it to the operation.
+ */
+export type WorkContextPreviewV1_Deserialize = ({ kind: "admitted"; disclosure: WorkContextDisclosureV1_Deserialize }) & { error?: never } | ({ kind: "refused"; error: WorkFailureV1 }) & { disclosure?: never };
+
+/**
+ *  The manifest chrome renders before dispatch, computed by the same
+ *  admission that later binds it to the operation.
+ */
+export type WorkContextPreviewV1_Serialize = ({ kind: "admitted"; disclosure: WorkContextDisclosureV1_Serialize }) & { error?: never } | ({ kind: "refused"; error: WorkFailureV1 }) & { disclosure?: never };
 
 export type WorkContextPurpose = "planning" | "public_read";
 
@@ -1511,6 +1562,16 @@ export type WorkCriterion = {
 };
 
 export type WorkCriterionKind = { kind: "text" } | { kind: "measurement"; unit: string; basis: string } | { kind: "rating"; rubric: string; scale_max: number } | { kind: "presence" };
+
+/**
+ *  A user's durable choice about one element: the selected product, the
+ *  preferred option, the rejected candidate. Context for later work, never a
+ *  permission or an executed effect.
+ */
+export type WorkDecision = {
+	element: WorkElementId,
+	choice: string,
+};
 
 /** One resource representation in a Work environment. */
 export type WorkElementId = string;
@@ -1548,7 +1609,9 @@ export type WorkEnvironmentChangedV1 = {
 	environment: WorkEnvironmentId,
 };
 
-export type WorkEnvironmentEdit = { kind: "rename"; title: string } | { kind: "set_lifecycle"; lifecycle: WorkLifecycle } | { kind: "add"; reference: WorkEnvironmentReference; area: WorkAreaId | null } | { kind: "remove"; element: WorkElementId } | { kind: "create_area"; title: string } | { kind: "rename_area"; area: WorkAreaId; title: string } | { kind: "remove_area"; area: WorkAreaId } | { kind: "assign_area"; element: WorkElementId; area: WorkAreaId | null } | { kind: "relate"; from: WorkElementId; to: WorkElementId; relation: WorkRelationKind } | { kind: "unrelate"; relation: WorkRelationId };
+export type WorkEnvironmentEdit = { kind: "rename"; title: string } | { kind: "set_lifecycle"; lifecycle: WorkLifecycle } | { kind: "add"; reference: WorkEnvironmentReference; area: WorkAreaId | null } | { kind: "remove"; element: WorkElementId } | { kind: "create_area"; title: string } | { kind: "rename_area"; area: WorkAreaId; title: string } | { kind: "remove_area"; area: WorkAreaId } | { kind: "assign_area"; element: WorkElementId; area: WorkAreaId | null } | { kind: "relate"; from: WorkElementId; to: WorkElementId; relation: WorkRelationKind } | { kind: "unrelate"; relation: WorkRelationId } | 
+/**  Records or replaces the user's choice about one element. */
+{ kind: "decide"; element: WorkElementId; choice: string } | { kind: "undecide"; element: WorkElementId };
 
 export type WorkEnvironmentElement = {
 	id: WorkElementId,
@@ -1591,6 +1654,7 @@ export type WorkEnvironmentSnapshot_Deserialize = {
 	elements: WorkEnvironmentElement[],
 	areas: WorkArea[],
 	relations?: WorkRelation[],
+	decisions?: WorkDecision[],
 	view: WorkEnvironmentView_Deserialize,
 };
 
@@ -1605,6 +1669,7 @@ export type WorkEnvironmentSnapshot_Serialize = {
 	elements: WorkEnvironmentElement[],
 	areas: WorkArea[],
 	relations?: WorkRelation[],
+	decisions?: WorkDecision[],
 	view: WorkEnvironmentView_Serialize,
 };
 
@@ -1717,7 +1782,7 @@ export type WorkExecutionSpec_Deserialize = {
 	limits: WorkExecutionLimits,
 	nodes: WorkNodeExecutionSpec[],
 	/**  Admitted canvas context disclosed to this execution's provider calls. */
-	context?: WorkContextDisclosureV1 | null,
+	context?: WorkContextDisclosureV1_Deserialize | null,
 };
 
 export type WorkExecutionSpec_Serialize = {
@@ -1725,7 +1790,7 @@ export type WorkExecutionSpec_Serialize = {
 	limits: WorkExecutionLimits,
 	nodes: WorkNodeExecutionSpec[],
 	/**  Admitted canvas context disclosed to this execution's provider calls. */
-	context?: WorkContextDisclosureV1 | null,
+	context?: WorkContextDisclosureV1_Serialize | null,
 };
 
 export type WorkExecutionStatus = "approved" | "running" | "cancel_requested" | "completed" | "needs_review" | "cancelled" | "failed" | "interrupted";
@@ -1967,7 +2032,7 @@ export type WorkPlanRevision_Deserialize = {
 	basis_revision: WorkRevision,
 	draft: WorkPlanDraft,
 	/**  The manifest of admitted canvas context the planner saw, if any. */
-	context?: WorkContextDisclosureV1 | null,
+	context?: WorkContextDisclosureV1_Deserialize | null,
 };
 
 export type WorkPlanRevision_Serialize = {
@@ -1977,7 +2042,7 @@ export type WorkPlanRevision_Serialize = {
 	basis_revision: WorkRevision,
 	draft: WorkPlanDraft,
 	/**  The manifest of admitted canvas context the planner saw, if any. */
-	context?: WorkContextDisclosureV1 | null,
+	context?: WorkContextDisclosureV1_Serialize | null,
 };
 
 export type WorkPlanningFailureV1 = { kind: "invalid" } | { kind: "capacity" } | { kind: "unavailable" } | { kind: "cancelled" } | { kind: "timeout" } | { kind: "stale" } | { kind: "needs_input" } | { kind: "privacy" } | { kind: "provider_outcome_unknown" } | { kind: "provider_refused" } | { kind: "store"; error: WorkFailureV1 };

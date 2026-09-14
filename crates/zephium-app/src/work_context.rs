@@ -59,12 +59,41 @@ impl WorkContextAdmission {
                 .ok_or(WorkError::NotFound)?;
             sources.push(self.resolve(profile, element).await?);
         }
+        // Decisions are durable user context for reviewed work. They never ride
+        // a public search query.
+        let mut implicit = Vec::new();
+        if purpose == WorkContextPurpose::Planning {
+            let mut decisions: Vec<_> = environment.decisions.iter().collect();
+            decisions.sort_by_key(|decision| decision.element);
+            for decision in decisions {
+                let Some(element) = environment
+                    .elements
+                    .iter()
+                    .find(|element| element.id == decision.element)
+                else {
+                    continue;
+                };
+                let title = match sources.iter().find(|source| source.element == element.id) {
+                    Some(source) => source.title.clone(),
+                    None => self.resolve(profile, element).await?.title,
+                };
+                implicit.push(WorkContextSource {
+                    element: element.id,
+                    kind: WorkContextItemKind::Decision,
+                    title,
+                    revision: String::new(),
+                    visibility: WorkContextVisibility::Private,
+                    text: decision.choice.clone(),
+                });
+            }
+        }
         WorkAdmittedContext::admit(
             environment.id,
             environment.revision,
             purpose,
             selection,
             sources,
+            implicit,
         )
     }
 

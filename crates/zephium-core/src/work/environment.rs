@@ -6,6 +6,8 @@ use crate::ids::{ItemId, ResourceId, SpaceId};
 pub const MAX_ENVIRONMENT_ELEMENTS: usize = 500;
 pub const MAX_ENVIRONMENT_AREAS: usize = 64;
 pub const MAX_ENVIRONMENT_RELATIONS: usize = 2000;
+pub const MAX_ENVIRONMENT_DECISIONS: usize = 200;
+pub const MAX_DECISION_BYTES: usize = 512;
 pub const MAX_ENVIRONMENT_TITLE_BYTES: usize = 512;
 pub const MAX_ENVIRONMENT_BODY_BYTES: usize = 262_144;
 
@@ -71,6 +73,17 @@ pub struct WorkRelation {
     pub to: WorkElementId,
     pub kind: WorkRelationKind,
     pub origin: WorkRelationOrigin,
+}
+
+/// A user's durable choice about one element: the selected product, the
+/// preferred option, the rejected candidate. Context for later work, never a
+/// permission or an executed effect.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkDecision {
+    pub element: WorkElementId,
+    pub choice: String,
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -191,6 +204,8 @@ pub struct WorkEnvironmentSnapshot {
     pub areas: Vec<WorkArea>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relations: Vec<WorkRelation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<WorkDecision>,
     pub view: WorkEnvironmentView,
 }
 impl WorkEnvironmentSnapshot {
@@ -212,6 +227,7 @@ impl WorkEnvironmentSnapshot {
             elements: vec![],
             areas: vec![],
             relations: vec![],
+            decisions: vec![],
             view: Default::default(),
         })
     }
@@ -221,6 +237,7 @@ impl WorkEnvironmentSnapshot {
             || self.elements.len() > MAX_ENVIRONMENT_ELEMENTS
             || self.areas.len() > MAX_ENVIRONMENT_AREAS
             || self.relations.len() > MAX_ENVIRONMENT_RELATIONS
+            || self.decisions.len() > MAX_ENVIRONMENT_DECISIONS
         {
             return Err(WorkError::Invalid);
         }
@@ -250,6 +267,13 @@ impl WorkEnvironmentSnapshot {
                 || !elements.contains(&relation.to)
                 || !relation_keys.insert((relation.from, relation.to, relation.kind))
             {
+                return Err(WorkError::Invalid);
+            }
+        }
+        let mut decided = BTreeSet::new();
+        for decision in &self.decisions {
+            validate_text(&decision.choice, MAX_DECISION_BYTES)?;
+            if !elements.contains(&decision.element) || !decided.insert(decision.element) {
                 return Err(WorkError::Invalid);
             }
         }
@@ -305,7 +329,28 @@ impl WorkEnvironmentSnapshot {
                 next.view.placements.retain(|p| p.element != element);
                 next.relations
                     .retain(|r| r.from != element && r.to != element);
+                next.decisions.retain(|d| d.element != element);
                 next.view.revision = next.view.revision.next()?;
+            }
+            WorkEnvironmentEdit::Decide { element, choice } => {
+                if !next.elements.iter().any(|e| e.id == element) {
+                    return Err(WorkError::NotFound);
+                }
+                if let Some(existing) = next.decisions.iter_mut().find(|d| d.element == element) {
+                    existing.choice = choice;
+                } else {
+                    if next.decisions.len() >= MAX_ENVIRONMENT_DECISIONS {
+                        return Err(WorkError::Capacity);
+                    }
+                    next.decisions.push(WorkDecision { element, choice });
+                }
+            }
+            WorkEnvironmentEdit::Undecide { element } => {
+                let count = next.decisions.len();
+                next.decisions.retain(|d| d.element != element);
+                if count == next.decisions.len() {
+                    return Err(WorkError::NotFound);
+                }
             }
             WorkEnvironmentEdit::Relate { from, to, relation } => {
                 if next.relations.len() >= MAX_ENVIRONMENT_RELATIONS {
@@ -415,6 +460,14 @@ pub enum WorkEnvironmentEdit {
     Unrelate {
         relation: WorkRelationId,
     },
+    /// Records or replaces the user's choice about one element.
+    Decide {
+        element: WorkElementId,
+        choice: String,
+    },
+    Undecide {
+        element: WorkElementId,
+    },
 }
 impl WorkEnvironmentEdit {
     pub fn validate(&self) -> Result<(), WorkError> {
@@ -422,6 +475,7 @@ impl WorkEnvironmentEdit {
             Self::Rename { title }
             | Self::CreateArea { title }
             | Self::RenameArea { title, .. } => validate_text(title, MAX_ENVIRONMENT_TITLE_BYTES),
+            Self::Decide { choice, .. } => validate_text(choice, MAX_DECISION_BYTES),
             Self::Relate { from, to, .. } if from == to => Err(WorkError::Invalid),
             _ => Ok(()),
         }

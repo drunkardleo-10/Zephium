@@ -261,6 +261,7 @@ impl WorkExecutionService {
             items: manifest
                 .items
                 .iter()
+                .filter(|item| !item.implicit)
                 .map(|item| context::WorkContextSelectionItem {
                     element: item.element,
                     revision: item.revision.clone(),

@@ -239,6 +239,51 @@ async fn context_admission_binds_digests_and_refuses_stale_or_private_public_rea
     .await;
     assert!(matches!(refused, Err(WorkError::Conflict)));
 
+    // A recorded decision rides reviewed work as an implicit private item and
+    // never a public read.
+    let decided = environment(
+        &mut shell,
+        &queue,
+        &handle,
+        profile,
+        WorkEnvironmentCall::Command {
+            command: WorkCommandId::generate(),
+            intent: WorkEnvironmentIntent::Edit {
+                id: created.id,
+                expected: snapshot.revision,
+                edit: WorkEnvironmentEdit::Decide {
+                    element: element("tab"),
+                    choice: "Follow this guide".into(),
+                },
+            },
+        },
+    )
+    .await;
+    assert_eq!(decided.decisions.len(), 1);
+    let with_decision = drive(
+        &mut shell,
+        &queue,
+        admission.admit(profile, WorkContextPurpose::Planning, &selection),
+    )
+    .await
+    .unwrap();
+    assert_eq!(with_decision.disclosure.items.len(), 3);
+    let decision = &with_decision.disclosure.items[2];
+    assert!(decision.implicit);
+    assert_eq!(decision.kind, WorkContextItemKind::Decision);
+    assert_eq!(decision.element, element("tab"));
+    assert_eq!(decision.title, "Guide");
+    assert_eq!(with_decision.bodies[2].text, "Follow this guide");
+    assert_eq!(
+        with_decision.disclosure.environment_revision,
+        decided.revision
+    );
+    let public_only = WorkContextSelectionV1 {
+        environment: snapshot.id,
+        items: vec![],
+    };
+    assert!(public_only.validate().is_err());
+
     let missing = WorkContextSelectionV1 {
         environment: snapshot.id,
         items: vec![WorkContextSelectionItem {

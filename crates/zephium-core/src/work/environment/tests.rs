@@ -426,3 +426,76 @@ fn relations_join_existing_elements_and_leave_with_them() {
     assert!(legacy.relations.is_empty());
     legacy.validate().unwrap();
 }
+
+#[test]
+fn decisions_bind_to_existing_elements_replace_in_place_and_leave_with_them() {
+    let with_tab = edit(
+        &empty(),
+        WorkEnvironmentEdit::Add {
+            reference: WorkEnvironmentReference::Browser { tab: 7.into() },
+            area: None,
+        },
+    )
+    .unwrap();
+    let element = with_tab.elements[0].id;
+    assert_eq!(
+        edit(
+            &with_tab,
+            WorkEnvironmentEdit::Decide {
+                element: 99.into(),
+                choice: "chosen".into(),
+            },
+        )
+        .err(),
+        Some(WorkError::NotFound)
+    );
+    assert_eq!(
+        edit(
+            &with_tab,
+            WorkEnvironmentEdit::Decide {
+                element,
+                choice: " ".into(),
+            },
+        )
+        .err(),
+        Some(WorkError::Invalid)
+    );
+    let decided = edit(
+        &with_tab,
+        WorkEnvironmentEdit::Decide {
+            element,
+            choice: "Buy this one".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(decided.decisions.len(), 1);
+    assert_eq!(decided.decisions[0].choice, "Buy this one");
+    let replaced = edit(
+        &decided,
+        WorkEnvironmentEdit::Decide {
+            element,
+            choice: "Shortlist only".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(replaced.decisions.len(), 1);
+    assert_eq!(replaced.decisions[0].choice, "Shortlist only");
+    let bytes = serde_json::to_vec(&replaced).unwrap();
+    let restored: WorkEnvironmentSnapshot = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(replaced, restored);
+    let removed = edit(&replaced, WorkEnvironmentEdit::Remove { element }).unwrap();
+    assert!(removed.decisions.is_empty());
+    assert_eq!(
+        edit(
+            &replaced,
+            WorkEnvironmentEdit::Undecide { element: 99.into() }
+        )
+        .err(),
+        Some(WorkError::NotFound)
+    );
+    let cleared = edit(&replaced, WorkEnvironmentEdit::Undecide { element }).unwrap();
+    assert!(cleared.decisions.is_empty());
+    let mut dangling = replaced.clone();
+    dangling.decisions[0].element = 99.into();
+    assert_eq!(dangling.validate(), Err(WorkError::Invalid));
+}
