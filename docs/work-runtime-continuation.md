@@ -10,6 +10,24 @@ Integrated baseline: `c5a7b08e` (`Integrate Work runtime and frontend foundation
 
 ## Current integration checkpoint — read first
 
+**2026-09-14 M1 checkpoint (branch `work-mode-integration`, commits through
+`22e82359`).** The Work shell was rebuilt: full-bleed chrome on the native window
+material, vertical icon tools with Tabs centred, a docked composer, a tasks
+capsule, per-kind cards, a FLIP lift editor, an inspector, two-finger pan and
+pinch zoom, in-place remote view reconcile, and Areas as parent nodes with
+persisted placements (`WorkEnvironmentView.areas`). Semantics were extended
+additively at artifact `version` 1 under the profile schema gate (now 21):
+`ComparisonMatrix`, `Findings`, structured `EvidenceCollection` entries, chart
+measurement bases, claim-level evidence indices, `Subject`/`Finding` environment
+references, explicit relations, and the `Object` resource kind with
+Rust-resolved `PreserveArtifact`. The synthesis schema offers the new kinds.
+The frontend renders matrices, findings, and titled sources, shows an agent
+avatar during execution, and organises newly published results around the
+objective. Native qualification of this checkpoint is pending user review;
+the isolated app builds from `desktop/tauri.work-integration.conf.json`.
+Remaining milestones: in-Work browser pane (M2), context admission, typed
+documents, media, account-scoped work (M3), qualification (M4).
+
 [`product-system.md`](product-system.md) now records the agreed full product
 direction: Profile → Space → Work → Area, objective-independent manual Works,
 the canvas as the primary environment, a centered Tabs toolbar popover opening
