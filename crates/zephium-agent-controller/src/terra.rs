@@ -4098,10 +4098,15 @@ mod tests {
                 session.config.clone(),
             );
             if cost < LUNA_PROVIDER_EXACT_RESERVATION_COST_MICRO_USD {
-                assert!(matches!(
-                    prepared,
-                    Err(AgentProviderRequestError::Policy(AgentPolicyError::Budget))
-                ));
+                let Err(AgentProviderRequestError::Policy(error)) = prepared else {
+                    panic!("expected budget refusal")
+                };
+                #[cfg(not(feature = "probe-harness"))]
+                assert_eq!(error, AgentPolicyError::Budget);
+                #[cfg(feature = "probe-harness")]
+                assert!(
+                    matches!(error, AgentPolicyError::ModelInputBudget { call: 1, input, output: 8192, cost: requested, remaining_tokens: 100_000, remaining_cost, remaining_operations: 8, node_scope: false } if input > 0 && requested == LUNA_PROVIDER_EXACT_RESERVATION_COST_MICRO_USD && remaining_cost == cost)
+                );
                 assert_eq!(session.policy.pending_model_calls(), 0);
             } else {
                 let prepared = prepared.unwrap();
