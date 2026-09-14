@@ -195,8 +195,10 @@ impl WorkProviders {
                     #[cfg(feature = "work-development-traces")]
                     let agent = agent.with_public_response_retention().with_diagnostic(|event| {
                         use zephium_core::work::synthesis::WorkSynthesisDiagnostic;
-                        if let WorkSynthesisDiagnostic::InputCounted { tokens, maximum, request_bytes } = event {
-                            record_diagnostic(format_args!("work: phase=agent_turn input_counted tokens={tokens} maximum={maximum} request_bytes={request_bytes}"));
+                        match event {
+                            WorkSynthesisDiagnostic::InputCounted { tokens, maximum, request_bytes } => record_diagnostic(format_args!("work: phase=agent_turn input_counted tokens={tokens} maximum={maximum} request_bytes={request_bytes}")),
+                            WorkSynthesisDiagnostic::ProviderTransport { http_status, body_bytes, decoded, elapsed_millis } => record_diagnostic(format_args!("work: phase=agent_turn provider_transport http_status={http_status:?} body_bytes={body_bytes} decoded={decoded} elapsed_ms={elapsed_millis}")),
+                            _ => {}
                         }
                     });
                     let search_transport =
@@ -219,7 +221,12 @@ impl WorkProviders {
                     let callback = shell.callback_handle();
                     let work = command.work;
                     let started = std::time::Instant::now();
-                    let projection = WorkAgentService::new(shell)
+                    let service = WorkAgentService::new(shell);
+                    #[cfg(feature = "work-development-traces")]
+                    let service = service.with_diagnostic(|event| {
+                        record_diagnostic(format_args!("work: phase=agent loop={event:?}"));
+                    });
+                    let projection = service
                         .run(
                             profile,
                             command,
@@ -374,6 +381,7 @@ impl WorkProviders {
                                     WorkSynthesisDiagnostic::DisclosureFailed { attempt, error } => record_diagnostic(format_args!("work: attempt={attempt} phase=synthesis disclosure_failed error={error:?}")),
                                     WorkSynthesisDiagnostic::ProviderRefused { attempt, error } => record_diagnostic(format_args!("work: attempt={attempt} phase=synthesis provider_refused error={error:?}")),
                                     WorkSynthesisDiagnostic::InputCounted { tokens, maximum, request_bytes } => record_diagnostic(format_args!("work: phase=synthesis input_counted tokens={tokens} maximum={maximum} request_bytes={request_bytes}")),
+                                    WorkSynthesisDiagnostic::ProviderTransport { http_status, body_bytes, decoded, elapsed_millis } => record_diagnostic(format_args!("work: phase=synthesis provider_transport http_status={http_status:?} body_bytes={body_bytes} decoded={decoded} elapsed_ms={elapsed_millis}")),
                                 }
                             });
                     let callback = shell.callback_handle();
