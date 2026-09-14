@@ -1130,5 +1130,11 @@
   "work_step_read": "Read {host}",
   "work_step_browsed": "Browsed: {query}",
   "work_step_published": "Placed objects on the canvas",
-  "work_step_finished": "Finished"
+  "work_step_finished": "Finished",
+  "work_env_source": "Source",
+  "work_env_from_run": "Placed by the agent from cited sources",
+  "work_env_worker": "Worker",
+  "work_env_reading_host": "Reading {host}",
+  "work_env_browsing": "Browsing the web",
+  "work_context_kind_source": "Source"
 }

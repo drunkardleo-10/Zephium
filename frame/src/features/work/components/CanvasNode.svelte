@@ -13,6 +13,7 @@
   import ResultCard from "./cards/ResultCard.svelte";
   import SubjectCard from "./cards/SubjectCard.svelte";
   import FindingCard from "./cards/FindingCard.svelte";
+  import SourceCard from "./cards/SourceCard.svelte";
   import AgentCard from "./cards/AgentCard.svelte";
   import * as m from "$shared/i18n/messages";
   const open = getContext<(id: string) => void>(canvasOpen);
@@ -79,6 +80,7 @@
   {#if type === "tab"}<TabCard item={data} {selected} />
   {:else if type === "subject"}<SubjectCard item={data} {selected} />
   {:else if type === "finding"}<FindingCard item={data} {selected} />
+  {:else if type === "source"}<SourceCard item={data} {selected} />
   {:else if type === "agent"}<AgentCard item={data} {selected} />
   {:else if type === "note"}<NoteCard item={data} {selected} />
   {:else if type === "media"}<MediaCard item={data} {selected} />

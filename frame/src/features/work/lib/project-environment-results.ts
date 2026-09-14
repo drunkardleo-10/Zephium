@@ -5,6 +5,7 @@ import type {
 } from "$shared/ipc/bindings";
 import type { CanvasItem } from "./canvas-model";
 import { artifactView } from "./project-work";
+import { isAgentExecution } from "./agent-steps";
 import * as m from "$shared/i18n/messages";
 export type ResultReference = Extract<WorkEnvironmentReference, { kind: "artifact" }>;
 /** Exact transient result projections; only an explicit save creates an environment element. */
@@ -27,7 +28,8 @@ export function environmentResults(
   )
     return { items, references, remaining };
   const execution = state.executions.at(-1);
-  if (!execution) return { items, references, remaining };
+  // Agent runs land as real objects while they run; nothing transient here.
+  if (!execution || isAgentExecution(execution)) return { items, references, remaining };
   const attached = new Set(
     [...references.values()]
       .filter(

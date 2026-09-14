@@ -100,3 +100,123 @@ test("a subject takes its picture from a uses relation to an admitted image", as
   expect(note.type).toBe("note");
   expect(note.image).toBeUndefined();
 });
+
+test("source elements read their citation and the running agent links to them", async () => {
+  const { environmentAgents } = await import("../lib/project-environment");
+  const state = structuredClone(projection);
+  const execution = state.executions[0]!;
+  execution.status = "running";
+  execution.authorization = "user_directed_agent";
+  execution.spec.nodes[0]!.capability = {
+    kind: "agent",
+    grant: {
+      provider: "open_ai",
+      model: "gpt-5.6-luna",
+      max_turns: 10,
+      max_steps: 32,
+      browse_hops: 4,
+    },
+  };
+  execution.provider_evidence = [
+    {
+      id: "record",
+      node: "node",
+      attempt: "attempt",
+      evidence: {
+        version: 1,
+        provider: "open_ai",
+        model: "gpt-5.6-luna",
+        response_model: "gpt-5.6-luna",
+        response_id: "resp_1",
+        search_call_id: "ws_1",
+        answer: "One review",
+        citations: [
+          { url: "https://a.example/review", title: "Review A", start_index: 0, end_index: 3 },
+        ],
+        actual_input_tokens: 10,
+        actual_output_tokens: 5,
+      },
+    },
+  ];
+  execution.artifacts = [
+    {
+      ...execution.artifacts[0]!,
+      id: "sources",
+      data: {
+        kind: "evidence_collection",
+        summary: "One review",
+        subjects: [],
+        entries: [{ evidence: 0, title: "Review A", role: "source", subject: null }],
+      },
+      evidence: [{ extraction_id: "record", source_id: 1 }],
+    },
+  ];
+  execution.steps = [
+    {
+      id: "turn",
+      turn: 1,
+      kind: { kind: "turn" },
+      status: "succeeded",
+      usage: { model_tokens: 1, cost_micro_usd: 1, operations: 1, accounting: "exact" },
+      note: "Reading the review.",
+    },
+    {
+      id: "search",
+      turn: 1,
+      kind: { kind: "search", query: "keyboards" },
+      status: "succeeded",
+      usage: { model_tokens: 1, cost_micro_usd: 1, operations: 1, accounting: "exact" },
+      artifacts: ["sources"],
+      evidence: "record",
+    },
+    {
+      id: "read",
+      turn: 2,
+      kind: { kind: "read", url: "https://a.example/review" },
+      status: "running",
+    },
+  ];
+  const objectiveElement = snapshot.elements.find(
+    (element) => element.reference.kind === "objective",
+  )!;
+  const withSource = {
+    ...snapshot,
+    elements: [
+      objectiveElement,
+      {
+        id: "source-1",
+        area: null,
+        reference: {
+          kind: "source" as const,
+          objective: "objective",
+          execution: "execution",
+          artifact: "sources",
+          index: 0,
+        },
+      },
+    ],
+    view: {
+      ...snapshot.view,
+      placements: [
+        { element: objectiveElement.id, x: 0, y: 0, width: 320, height: 150 },
+        { element: "source-1", x: 400, y: 0, width: 260, height: 84 },
+      ],
+    },
+  };
+  const objectives = new Map([["objective", state]]);
+  const items = environmentItems(withSource, [], [], objectives);
+  const source = items.find((item) => item.type === "source")!;
+  expect(source.title).toBe("Review A");
+  expect(source.detail).toBe("a.example");
+  expect(source.source).toEqual({ url: "https://a.example/review", role: "source" });
+  const agents = environmentAgents(withSource, objectives, () => "reading");
+  expect(agents.items.map((item) => item.agent?.worker ?? false)).toEqual([false, true]);
+  expect(agents.items[0]?.agent?.line).toBe("Reading the review.");
+  expect(agents.items[1]?.status).toBe("Reading a.example");
+  expect(agents.links.map((link) => [link.source, link.target])).toEqual([
+    [`agent:${objectiveElement.id}`, "source-1"],
+    [`agent:${objectiveElement.id}`, `agent:${objectiveElement.id}:read`],
+    [`agent:${objectiveElement.id}:read`, "source-1"],
+  ]);
+  expect(agents.positions[`agent:${objectiveElement.id}:read`]).toEqual({ x: 692, y: 10 });
+});

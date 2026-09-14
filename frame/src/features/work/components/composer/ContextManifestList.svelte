@@ -13,6 +13,7 @@
     artifact: m.work_context_kind_artifact,
     subject: m.work_context_kind_subject,
     finding: m.work_context_kind_finding,
+    source: m.work_context_kind_source,
     decision: m.work_context_kind_decision,
   };
 </script>

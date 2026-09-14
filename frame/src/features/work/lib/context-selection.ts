@@ -45,6 +45,7 @@ export function contextSelection(
       case "artifact":
       case "subject":
       case "finding":
+      case "source":
         revision = reference.artifact;
         break;
     }

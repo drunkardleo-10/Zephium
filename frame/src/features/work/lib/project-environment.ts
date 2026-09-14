@@ -1,4 +1,5 @@
 import type {
+  WorkEnvironmentReference,
   WorkEnvironmentSnapshot,
   TabView,
   ResourceSummary,
@@ -6,7 +7,32 @@ import type {
 } from "$shared/ipc/bindings";
 import { artifactView } from "./project-work";
 import { agentLine, isAgentExecution } from "./agent-steps";
-import type { CanvasItem, CanvasLink, CanvasView } from "./canvas-model";
+
+function host(url: string | undefined): string {
+  if (!url) return "";
+  try {
+    return new URL(url).host;
+  } catch {
+    return "";
+  }
+}
+/** The cited URL and title behind one source entry, from the provider record. */
+function sourceCitation(
+  projection: WorkRuntimeProjection | undefined,
+  reference: Extract<WorkEnvironmentReference, { kind: "source" }>,
+) {
+  const execution = projection?.executions.find((entry) => entry.id === reference.execution);
+  const artifact = execution?.artifacts.find((entry) => entry.id === reference.artifact);
+  if (!execution || artifact?.data.kind !== "evidence_collection") return undefined;
+  const entry = artifact.data.entries?.[reference.index];
+  const link = entry ? artifact.evidence[entry.evidence] : undefined;
+  const record = link
+    ? execution.provider_evidence?.find((record) => record.id === link.extraction_id)
+    : undefined;
+  const citation = link ? record?.evidence.citations[link.source_id - 1] : undefined;
+  return entry ? { entry, url: citation?.url, title: citation?.title } : undefined;
+}
+import type { CanvasItem, CanvasLink, CanvasPosition, CanvasView } from "./canvas-model";
 import type { MediaAssetV1 } from "$domain/resources";
 import * as m from "$shared/i18n/messages";
 
@@ -133,6 +159,20 @@ function elementItems(
       };
     }
     const projection = objectives.get(element.reference.objective);
+    if (element.reference.kind === "source") {
+      const citation = sourceCitation(projection, element.reference);
+      return {
+        id: element.id,
+        type: "source",
+        area: element.area,
+        kind: m.work_env_source(),
+        title: citation?.entry.title ?? m.work_artifact_unavailable(),
+        detail: host(citation?.url),
+        status: area,
+        ...(citation?.url ? { source: { url: citation.url, role: citation.entry.role } } : {}),
+        unavailable: !citation,
+      };
+    }
     if (element.reference.kind === "subject" || element.reference.kind === "finding") {
       const reference = element.reference;
       const execution = projection?.executions.find(
@@ -266,13 +306,17 @@ const agentLabels: Record<string, () => string> = {
   cancelling: m.work_activity_cancelling,
   finishing: m.work_activity_finishing,
 };
-/** Transient agent presence for objectives with live executions; never persisted. */
+/** Transient agent presence for objectives with live executions; never persisted.
+ * The primary avatar links to the sources of its latest turn; a worker avatar
+ * appears beside the source a native step is reading. */
 export function environmentAgents(
   snapshot: WorkEnvironmentSnapshot,
   objectives: ReadonlyMap<string, WorkRuntimeProjection>,
   activity: (objective: string) => string | undefined,
-): CanvasItem[] {
+): { items: CanvasItem[]; links: CanvasLink[]; positions: Record<string, CanvasPosition> } {
   const items: CanvasItem[] = [];
+  const links: CanvasLink[] = [];
+  const positions: Record<string, CanvasPosition> = {};
   for (const element of snapshot.elements) {
     if (element.reference.kind !== "objective") continue;
     const projection = objectives.get(element.reference.objective);
@@ -288,8 +332,10 @@ export function environmentAgents(
     const label = signal ? agentLabels[signal]?.() : undefined;
     let seed = 0;
     for (const char of projection.work.id) seed = (seed * 31 + char.charCodeAt(0)) % 9973;
+    const id = `agent:${element.id}`;
+    const line = agentLine(execution);
     items.push({
-      id: `agent:${element.id}`,
+      id,
       type: "agent",
       kind: m.work_env_agent(),
       title: m.work_env_agent(),
@@ -305,9 +351,71 @@ export function environmentAgents(
         seed,
         activity: signal ?? "",
         objective: projection.work.id,
-        ...(agentLine(execution) ? { line: agentLine(execution)! } : {}),
+        ...(line ? { line } : {}),
       },
     });
+    const anchor = snapshot.view.placements.find((place) => place.element === element.id);
+    if (anchor) positions[id] = { x: anchor.x + anchor.width + 48, y: anchor.y };
+    const steps = execution.steps ?? [];
+    const searches = steps.filter(
+      (step) => step.kind.kind === "search" && (step.artifacts?.length ?? 0) > 0,
+    );
+    const latestTurn = Math.max(0, ...searches.map((step) => step.turn));
+    const recent = new Set(
+      searches.filter((step) => step.turn === latestTurn).flatMap((step) => step.artifacts ?? []),
+    );
+    const sources = snapshot.elements.filter(
+      (candidate) =>
+        candidate.reference.kind === "source" && candidate.reference.execution === execution.id,
+    );
+    for (const source of sources) {
+      if (source.reference.kind !== "source" || !recent.has(source.reference.artifact)) continue;
+      links.push({
+        id: `agent-source:${source.id}`,
+        source: id,
+        target: source.id,
+        kind: "reference",
+      });
+    }
+    for (const step of steps) {
+      if (step.status !== "running" || (step.kind.kind !== "read" && step.kind.kind !== "discover"))
+        continue;
+      const worker = `${id}:${step.id}`;
+      const reading = step.kind.kind === "read" ? step.kind.url : undefined;
+      items.push({
+        id: worker,
+        type: "agent",
+        kind: m.work_env_worker(),
+        title: m.work_env_worker(),
+        detail: "",
+        status: reading
+          ? m.work_env_reading_host({ host: host(reading) || reading })
+          : m.work_env_browsing(),
+        agent: { seed: seed + 1, activity: "reading", objective: projection.work.id, worker: true },
+      });
+      links.push({ id: `agent-worker:${worker}`, source: id, target: worker, kind: "reference" });
+      const target = reading
+        ? sources.find((source) => {
+            const citation =
+              source.reference.kind === "source"
+                ? sourceCitation(projection, source.reference)
+                : undefined;
+            return citation?.url === reading;
+          })
+        : undefined;
+      const place = target
+        ? snapshot.view.placements.find((place) => place.element === target.id)
+        : undefined;
+      if (target) {
+        links.push({
+          id: `worker-source:${worker}`,
+          source: worker,
+          target: target.id,
+          kind: "reference",
+        });
+        if (place) positions[worker] = { x: place.x + place.width + 32, y: place.y + 10 };
+      } else if (anchor) positions[worker] = { x: anchor.x + anchor.width + 48, y: anchor.y + 140 };
+    }
   }
-  return items;
+  return { items, links, positions };
 }

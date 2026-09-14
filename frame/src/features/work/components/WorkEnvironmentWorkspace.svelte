@@ -132,11 +132,16 @@
     return () => observer.disconnect();
   });
   function openLift(id: string) {
-    if (!items.some((item) => item.id === id)) return;
+    const item = items.find((item) => item.id === id);
+    if (!item) return;
     const reference = session.snapshot?.elements.find((element) => element.id === id)?.reference;
     if (reference?.kind === "browser") {
       if (tabs.some((tab) => tab.id === reference.tab))
         openPane({ kind: "tab", id: reference.tab }, id);
+      return;
+    }
+    if (reference?.kind === "source") {
+      if (item.source) openPane({ kind: "url", url: item.source.url }, id);
       return;
     }
     chrome?.close();
@@ -329,10 +334,14 @@
             ? objectiveSession.activity.at(-1)?.activity
             : undefined,
         )
-      : [],
+      : { items: [], links: [], positions: {} },
   );
-  const items = $derived([...results.items, ...agents]);
-  const links = $derived([...scene.links, ...(snapshot ? environmentLinks(snapshot) : [])]);
+  const items = $derived([...results.items, ...agents.items]);
+  const links = $derived([
+    ...scene.links,
+    ...(snapshot ? environmentLinks(snapshot) : []),
+    ...agents.links,
+  ]);
   const organizing = new SvelteSet<string>();
   $effect(() => {
     const current = snapshot;
@@ -347,7 +356,9 @@
       organizing.add(execution.id);
       const place = current.view.placements.find((place) => place.element === element.id);
       const anchor = place ? { x: place.x, y: place.y + place.height + 48 } : { x: 80, y: 320 };
-      void untrack(() => organize(projection, execution, anchor));
+      void untrack(() =>
+        organize(projection, execution, anchor).finally(() => organizing.delete(execution.id)),
+      );
     }
   });
   async function organize(
@@ -355,7 +366,8 @@
     execution: WorkExecutionFact,
     anchor: { x: number; y: number },
   ) {
-    const plan = organizeExecution(projection, execution, anchor);
+    if (!session.snapshot) return;
+    const plan = organizeExecution(projection, execution, anchor, session.snapshot);
     if (!plan.adds.length || !(await session.flushView())) return;
     for (const add of plan.adds) {
       if (session.snapshot && elementFor(session.snapshot, add.reference)) continue;
@@ -367,6 +379,13 @@
       const from = elementFor(latest, relation.from);
       const to = elementFor(latest, relation.to);
       if (!from || !to) continue;
+      if (
+        (latest.relations ?? []).some(
+          (existing) =>
+            existing.from === from.id && existing.to === to.id && existing.kind === relation.kind,
+        )
+      )
+        continue;
       if (
         !(await session.edit({
           kind: "relate",
@@ -493,6 +512,7 @@
           ...environmentView(snapshot),
           positions: {
             ...scene.positions,
+            ...agents.positions,
             ...planGeometry.positions,
             ...savedResultPositions,
             ...environmentView(snapshot).positions,
@@ -1329,9 +1349,6 @@
           {item}
           areas={snapshot?.areas ?? []}
           {busy}
-          openLabel={element.reference.kind === "browser"
-            ? m.work_env_open_here()
-            : m.work_env_open()}
           openDisabled={element.reference.kind === "browser" &&
             !tabs.some(
               (tab) => element.reference.kind === "browser" && tab.id === element.reference.tab,
@@ -1340,6 +1357,9 @@
             if (element.reference.kind === "browser") void inspectReference();
             else openLift(element.id);
           }}
+          openLabel={element.reference.kind === "browser" || element.reference.kind === "source"
+            ? m.work_env_open_here()
+            : m.work_env_open()}
           onarea={(area) => void session.edit({ kind: "assign_area", element: element.id, area })}
           ondecide={(choice) =>
             void session.edit(

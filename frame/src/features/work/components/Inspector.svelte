@@ -39,18 +39,17 @@
     const reference = element.reference;
     switch (reference.kind) {
       case "browser":
-        return [[m.work_env_tabs(), reference.tab]];
+        return [[m.work_env_tabs(), item.detail || item.title]];
       case "resource":
-        return [[m.work_env_notes(), reference.resource]];
+        return [[m.work_env_notes(), item.title]];
       case "objective":
-        return [[m.work_env_objective(), reference.objective]];
+        return [[m.work_env_objective(), item.title]];
+      case "source":
+        return [[m.work_env_source(), item.source?.url ?? item.detail]];
       case "artifact":
       case "subject":
       case "finding":
-        return [
-          [m.work_env_objective(), reference.objective],
-          [m.work_env_results(), reference.artifact],
-        ];
+        return [[m.work_env_agent(), m.work_env_from_run()]];
     }
   });
 </script>
@@ -112,7 +111,7 @@
       </dd>{/if}
     <dt>{m.work_env_provenance()}</dt>
     {#each provenance as [label, value] (label + value)}<dd class="mono">
-        <span>{label}</span><code>{value}</code>
+        <span>{label}</span><span class="value">{value}</span>
       </dd>{/each}
   </dl>
   <footer>
@@ -214,12 +213,11 @@
     color: var(--color-muted);
   }
 
-  code {
+  .value {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-family: var(--font-mono);
-    font-size: 10.5px;
+    color: var(--color-text);
   }
 
   footer {

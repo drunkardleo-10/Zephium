@@ -133,9 +133,9 @@
     "description": "Measured 328183 JS bytes with the agent run operation, step labels, and the agent line on the canvas card in the shared graph."
   },
   "lazy:features/work/components/WorkCanvas.svelte": {
-    "js": 532000,
+    "js": 536000,
     "css": 112000,
-    "description": "Measured 96624 CSS bytes with compact responsibility and expected-output chips; JavaScript cap unchanged. M1 canvas: in-place remote reconcile, gesture config, per-icon imports. Media cards and the media tool add to the shared Work graph and message catalog."
+    "description": "Measured 532576 JS bytes with the source card and agent worker avatars in the node graph."
   },
   "lazy:shared/ui/data/Chart/Chart.svelte": {
     "js": 415000,
@@ -146,9 +146,9 @@
     "css": 0
   },
   "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
-    "js": 574000,
+    "js": 580000,
     "css": 119000,
-    "description": "Account-scoped approvals, the signed-in composer chip, and intervention controls add to the Work graph and message catalog."
+    "description": "Measured 575663 JS bytes with incremental agent-run organization, source elements, and worker links."
   },
   "lazy:features/work/components/WorkObjectiveInspector.svelte": {
     "js": 162000,

@@ -11,6 +11,7 @@ type CanvasKind =
   | "result"
   | "subject"
   | "finding"
+  | "source"
   | "agent";
 type RelationKind = "supports" | "uses" | "depends_on" | "same_as" | "contradicts";
 /** Display values only; deliberately independent from the generated Work wire contract. */
@@ -32,7 +33,9 @@ export type CanvasItem = {
   subject?: SubjectView;
   finding?: FindingView;
   /** Transient agent presence: avatar seed, status, and its latest line. */
-  agent?: { seed: number; activity: string; objective: string; line?: string };
+  agent?: { seed: number; activity: string; objective: string; line?: string; worker?: boolean };
+  /** A cited public source; opening it goes through the pane. */
+  source?: { url: string; role: string };
   unavailable?: boolean;
   /** The user's recorded choice about this element. */
   decision?: string;
@@ -113,6 +116,8 @@ export function defaultSize(item: CanvasItem): { width: number; height: number }
       return { width: 240, height: 112 };
     case "finding":
       return { width: 300, height: 140 };
+    case "source":
+      return { width: 260, height: 84 };
     case "note":
       return { width: 300, height: 200 };
     case "media":
@@ -122,7 +127,9 @@ export function defaultSize(item: CanvasItem): { width: number; height: number }
     case "responsibility":
       return { width: 280, height: 150 };
     case "agent":
-      return { width: 260, height: item.agent?.line ? 104 : 84 };
+      return item.agent?.worker
+        ? { width: 200, height: 64 }
+        : { width: 260, height: item.agent?.line ? 104 : 84 };
     default:
       return { width: 280, height: 160 };
   }
@@ -241,6 +248,7 @@ export function reconcileNodes(
         node.data.subject === item.subject &&
         node.data.finding === item.finding &&
         node.data.decision === item.decision &&
+        JSON.stringify(node.data.source) === JSON.stringify(item.source) &&
         node.data.media?.asset.digest === item.media?.asset.digest &&
         node.data.image?.digest === item.image?.digest &&
         JSON.stringify(node.data.agent) === JSON.stringify(item.agent) &&
