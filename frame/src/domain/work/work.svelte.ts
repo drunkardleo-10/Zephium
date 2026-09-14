@@ -12,6 +12,7 @@ import type {
   WorkPlanProposal,
   WorkSignalV1,
   WorkArtifactDataV1,
+  WorkContextSelectionV1,
 } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
 import { observe } from "$shared/lib/observe";
@@ -387,11 +388,12 @@ export class WorkSession {
       },
     });
   }
-  async readPublic() {
+  async readPublic(context: WorkContextSelectionV1 | null = null) {
     const work = this.projection?.work;
     if (!work || this.pending || this.operations.busy(work.id)) return;
     await this.operations.begin({
       kind: "read_public",
+      ...(context ? { context } : {}),
       command: {
         version: 1,
         work: work.id,

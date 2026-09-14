@@ -28,6 +28,8 @@
   import WorkChrome from "./chrome/WorkChrome.svelte";
   import TasksCapsule from "./chrome/TasksCapsule.svelte";
   import Composer from "./composer/Composer.svelte";
+  import ContextManifest from "./composer/ContextManifest.svelte";
+  import { contextSelection } from "../lib/context-selection";
   import WorkTabPicker from "./WorkTabPicker.svelte";
   import BrowserPane from "./pane/BrowserPane.svelte";
   import Lift from "./Lift.svelte";
@@ -102,6 +104,14 @@
     } | null;
   }>();
   let selectionCount = $state(0);
+  let selectedIds = $state.raw<string[]>([]);
+  let contextReview = $state(false);
+  const contextSel = $derived(
+    contextSelection(session.snapshot, selectedIds, tabs, {
+      notes: context.notes,
+      objectives: context.objectives,
+    }),
+  );
   let cardHost = $state<HTMLElement>();
   let cardBounds = $state.raw<DOMRect | null>(null);
   $effect(() => {
@@ -264,6 +274,7 @@
   let areaTitle = $state("");
   let objectivePending = $state(false);
   let composerFailure = $state<"limit" | "changed" | null>(null);
+  let contextRouted = $state(false);
   let composerElement = $state<HTMLElement>();
   let composerHeight = $state(0);
   let chrome = $state<WorkChrome>();
@@ -592,9 +603,13 @@
     const submission = session.objectiveSubmission ?? {
       objective: session.composer.trim(),
       command: commandId(),
-      research: session.publicResearch,
+      // Private context never rides a public search; Rust refuses it, and the
+      // reviewed plan shows the same manifest before anything is sent.
+      research: session.publicResearch && !(contextSel && contextReview),
       attached: false,
+      context: contextSel,
     };
+    contextRouted = !!(session.publicResearch && contextSel && contextReview);
     composerFailure =
       submission.research && !publicResearchQueryValid(submission.objective) ? "limit" : null;
     if (composerFailure) return;
@@ -649,11 +664,16 @@
       session.composer = "";
       session.objectiveToAttach = null;
       session.objectiveSubmission = null;
-      if (submission.research) await current.readPublic();
+      if (submission.research) await current.readPublic(submission.context);
       else
         await current.operations.begin({
           kind: "plan",
-          request: { version: 1, work: objectiveId, expected_revision: basis.revision },
+          request: {
+            version: 1,
+            work: objectiveId,
+            expected_revision: basis.revision,
+            ...(submission.context ? { context: submission.context } : {}),
+          },
         });
     } finally {
       objectivePending = false;
@@ -1050,9 +1070,25 @@
         ? m.work_env_public_query_limit()
         : m.work_env_public_query_changed()}
     </p>{/if}
+  {#if contextRouted && (objectivePending || session.objectiveSubmission)}<p
+      class="composer-alert"
+      role="status"
+    >
+      {m.work_context_routed()}
+    </p>{/if}
   {#if objectiveSession?.failure}<p class="composer-alert" role="status">
       {m.work_request_failed({ reason: objectiveSession.failure })}
     </p>{/if}
+{/snippet}
+{#snippet composerContext()}
+  {#if contextSel}
+    <ContextManifest
+      profile={session.profile}
+      selection={contextSel}
+      purpose={session.publicResearch ? "public_read" : "planning"}
+      onreview={(required) => (contextReview = required)}
+    />
+  {/if}
 {/snippet}
 {#snippet composerFooter()}
   <button
@@ -1097,7 +1133,9 @@
               }}
               onopen={openLift}
               onselectionchange={(ids: string[]) => {
-                selectionCount = ids.filter((id) => authoritative.has(id)).length;
+                const owned = ids.filter((id) => authoritative.has(id));
+                selectionCount = owned.length;
+                selectedIds = owned;
                 if (!ids.length) inspected = null;
               }}
               onareachange={(id: string, area: string | null) =>
@@ -1383,6 +1421,7 @@
         disabled={objectivePending || !!session.objectiveSubmission}
         {busy}
         above={composerAbove}
+        context={contextSel ? composerContext : undefined}
         footer={composerFooter}
         onsubmit={() => void createObjective()}
       />

@@ -1,5 +1,6 @@
 import { commands } from "$shared/ipc/bindings";
 import type {
+  WorkContextSelectionV1,
   WorkEnvironmentCall,
   WorkEnvironmentIntent,
   WorkEnvironmentEdit,
@@ -37,6 +38,7 @@ export class WorkEnvironmentSession {
     command: string;
     research: boolean;
     attached: boolean;
+    context: WorkContextSelectionV1 | null;
   } | null>(null);
   objectiveToAttach = $state<string | null>(null);
   viewDraft = $state.raw<{ id: string; expected: string; view: WorkEnvironmentView } | null>(null);

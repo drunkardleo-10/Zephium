@@ -3,6 +3,7 @@
   import { preferences } from "$domain/preferences";
   import { preparationFailure } from "../lib/preparation-failure";
   import Button from "$shared/ui/Button";
+  import ContextManifestList from "./composer/ContextManifestList.svelte";
   import * as m from "$shared/i18n/messages";
   let { session, compact = false }: { session: WorkSession; compact?: boolean } = $props();
   const work = $derived(session.projection?.work);
@@ -97,6 +98,10 @@
         <summary>{m.work_env_review_scope()}</summary>
         <h2>{m.work_execution_review()}</h2>
         <p>{m.work_exact_approval_explanation()}</p>
+        {#if approval.spec.context}<div class="context">
+            <h3>{m.work_context_disclosed()}</h3>
+            <ContextManifestList disclosure={approval.spec.context} />
+          </div>{/if}
         <dl class="limits">
           <div>
             <dt>{m.work_cost_limit()}</dt>

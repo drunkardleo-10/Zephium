@@ -10,6 +10,7 @@
   import Button from "$shared/ui/Button";
   import WorkPlanEditor from "./WorkPlanEditor.svelte";
   import WorkExecutionReview from "./WorkExecutionReview.svelte";
+  import ContextManifestList from "./composer/ContextManifestList.svelte";
   import * as m from "$shared/i18n/messages";
   let {
     session,
@@ -178,7 +179,11 @@
       </p>{/if}
     {#if plan && !session.planDraft}<ol>
         {#each plan.draft.nodes as node (node.id)}<li>{node.objective}</li>{/each}
-      </ol>{/if}
+      </ol>
+      {#if plan.context}<details class="context">
+          <summary>{m.work_context_disclosed()}</summary>
+          <ContextManifestList disclosure={plan.context} />
+        </details>{/if}{/if}
     <WorkPlanEditor {session} />
     <WorkExecutionReview {session} />
     {#if projection && execution && projection.executions.length > 1}<label

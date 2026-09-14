@@ -135,14 +135,14 @@
     "description": "Measured 540883 JS and 111429 CSS bytes with the floating browser pane: pane frame, operation settlement, layout store, icon buttons."
   },
   "lazy:features/work/components/WorkObjectiveInspector.svelte": {
-    "js": 148000,
+    "js": 156000,
     "css": 18000,
-    "description": "Measured 132194 JS bytes after shared artifact chunk movement for readable result focus/list rendering; exact provider scope and citations retained. M1 semantics: matrix/findings/source renderers."
+    "description": "Measured 150473 JS bytes with the disclosed-context manifest on plan revisions and approval specs; matrix/findings/source renderers retained."
   },
   "lazy:features/work/components/WorkInteraction.svelte": {
-    "js": 117000,
-    "css": 6500,
-    "description": "Measured 115615 JS bytes with direct-public-read outcomes; headroom includes the required no-resume guard for admitted unstarted reads."
+    "js": 123000,
+    "css": 7000,
+    "description": "Measured 119472 JS and 6728 CSS bytes; shared Work chunk grew with context-selection tokens and manifest rendering."
   },
   "lazy:features/work/components/WorkResultInspector.svelte": {
     "js": 74000,
