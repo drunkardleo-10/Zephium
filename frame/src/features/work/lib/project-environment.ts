@@ -30,7 +30,18 @@ function sourceCitation(
     ? execution.provider_evidence?.find((record) => record.id === link.extraction_id)
     : undefined;
   const citation = link ? record?.evidence.citations[link.source_id - 1] : undefined;
-  return entry ? { entry, url: citation?.url, title: citation?.title } : undefined;
+  return entry ? { entry, url: cleanUrl(citation?.url), title: citation?.title } : undefined;
+}
+/** The provider's tracking parameter is not part of the page the card opens. */
+function cleanUrl(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  try {
+    const parsed = new URL(url);
+    parsed.searchParams.delete("utm_source");
+    return parsed.toString();
+  } catch {
+    return url;
+  }
 }
 import type { CanvasItem, CanvasLink, CanvasPosition, CanvasView } from "./canvas-model";
 import type { MediaAssetV1 } from "$domain/resources";

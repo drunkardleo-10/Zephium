@@ -129,9 +129,19 @@ config in `desktop/src/work_provider.rs`. Canvas: `WorkEnvironmentReference::Sou
 while they run (sources per search, subjects as hubs, findings per claim,
 relations source→finding→subject, subject→matrix), and
 `environmentAgents` links the primary avatar to its latest search sources and
-shows a worker avatar beside the source a native step is reading. Deferred:
-parallel native workers, live page cards, history and memory retrieval on
-turn zero.
+shows a worker avatar beside the source a native step is reading. Live evidence (2026-09-14, `zephium-terra-macos-probe --live-agent-work` and
+`--live-agent-read-work`, real OpenAI development key, real WKWebView, temp
+store): a public comparison ran two turns with two parallel searches, one
+publish (two subjects with homepages, six supported findings, explicit
+"no reliable figure" claims) and finish for about $0.03; a read-heavy
+objective ran search → native read of sqlite.org/wal.html → cited findings →
+finish for about $0.03; both reopened from the store identical. Lessons kept in
+code: the model may narrate several turns in one response, so the agent
+decoder takes the first message and the instructions say one turn per
+response; an uncited object is dropped alone, never the whole turn; a search
+without citations settles with no card; the provider cites the same page twice,
+so sources are keyed by URL without `utm_source`. Deferred: parallel native
+workers, live page cards, history and memory retrieval on turn zero.
 
 [`product-system.md`](product-system.md) now records the agreed full product
 direction: Profile → Space → Work → Area, objective-independent manual Works,
