@@ -213,6 +213,12 @@ fn write(tx: &Transaction<'_>, id: WorkId, fact: &WorkExecutionFact) -> Result<(
     Ok(())
 }
 
+/// A runtime intent with the Rust-admitted context manifest it may carry.
+pub(super) struct RuntimeIntentInput {
+    pub(super) intent: WorkRuntimeIntent,
+    pub(super) context: Option<zephium_core::work::context::WorkContextDisclosureV1>,
+}
+
 pub(super) fn command(
     tx: &Transaction<'_>,
     profile: ProfileId,
@@ -220,11 +226,16 @@ pub(super) fn command(
     id: WorkId,
     expected: WorkRevision,
     command: WorkCommandId,
-    intent: WorkRuntimeIntent,
+    input: RuntimeIntentInput,
 ) -> Result<(WorkReply, bool), WorkError> {
+    let RuntimeIntentInput { intent, context } = input;
     let mut current = read(tx, profile, id)?;
     let direct = matches!(intent, WorkRuntimeIntent::ReadPublic { .. });
-    let input = serde_json::to_vec(&(expected, &intent)).map_err(|_| WorkError::Invalid)?;
+    if context.is_some() && !direct {
+        return Err(WorkError::Invalid);
+    }
+    let input =
+        serde_json::to_vec(&(expected, &intent, &context)).map_err(|_| WorkError::Invalid)?;
     if input.len() > MAX_WORK_REQUEST_BYTES {
         return Err(WorkError::Capacity);
     }
@@ -304,6 +315,7 @@ pub(super) fn command(
                     capability: WorkCapability::PublicSearch { scope },
                     limits,
                 }],
+                context,
             },
         }
     } else {

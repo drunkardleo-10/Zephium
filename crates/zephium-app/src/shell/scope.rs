@@ -67,6 +67,24 @@ impl Shell {
         }
     }
 
+    pub(super) fn tab_metadata(
+        &self,
+        profile: ProfileId,
+        ids: &[ItemId],
+    ) -> Vec<crate::TabMetadata> {
+        ids.iter()
+            .filter(|id| self.profile_of_item(**id) == Some(profile))
+            .filter_map(|id| {
+                let tab = self.items.tab(*id)?;
+                Some(crate::TabMetadata {
+                    id: *id,
+                    title: tab.title.clone(),
+                    url: tab.url.as_ref().map(|url| url.to_string()),
+                })
+            })
+            .collect()
+    }
+
     pub(super) fn today_tabs(&self, space: SpaceId) -> Vec<ItemId> {
         self.items
             .roots(Placement::Space {

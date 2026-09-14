@@ -137,6 +137,9 @@ pub struct WorkExecutionSpec {
     pub plan_revision: WorkRevision,
     pub limits: WorkExecutionLimits,
     pub nodes: Vec<WorkNodeExecutionSpec>,
+    /// Admitted canvas context disclosed to this execution's provider calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<super::context::WorkContextDisclosureV1>,
 }
 impl WorkExecutionSpec {
     /// First product adapter: explicit public browsing scope, optionally with
@@ -163,6 +166,7 @@ impl WorkExecutionSpec {
         }
         let count = plan.draft.nodes.len() as u32;
         let spec = Self {
+            context: None,
             plan_revision: plan.revision,
             limits,
             nodes: plan

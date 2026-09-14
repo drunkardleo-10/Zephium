@@ -43,7 +43,7 @@ fn response() -> Value {
 }
 #[test]
 fn request_contains_only_public_query_and_closed_native_search_controls() {
-    let b = request(&config(), "public query").unwrap();
+    let b = request(&config(), "public query", &[]).unwrap();
     let b: Value = serde_json::from_slice(&b).unwrap();
     assert_eq!(b["input"][0]["content"][0]["text"], "public query");
     assert_eq!(
@@ -66,7 +66,7 @@ fn request_contains_only_public_query_and_closed_native_search_controls() {
         assert!(b.get(key).is_none(), "{key}");
     }
     for query in ["", "\nprivate", &"x".repeat(513)] {
-        assert!(request(&config(), query).is_err());
+        assert!(request(&config(), query, &[]).is_err());
     }
 }
 #[test]
@@ -165,7 +165,7 @@ async fn insufficient_budget_is_not_dispatched() {
     let mut low = limits();
     low.model_tokens = 1000;
     assert!(matches!(
-        provider.search("public query", low).await,
+        provider.search("public query", &[], low).await,
         Err(WorkPublicSearchError::NotDispatched(WorkError::Capacity))
     ));
     assert!(!provider.transport.shared.shutdown.is_cancelled());
@@ -174,7 +174,7 @@ async fn insufficient_budget_is_not_dispatched() {
 async fn dispatched_transport_failure_is_unknown_and_seals_transport() {
     let provider = adapter("http://127.0.0.1:9/v1/responses");
     assert!(matches!(
-        provider.search("public query", limits()).await,
+        provider.search("public query", &[], limits()).await,
         Err(WorkPublicSearchError::OutcomeUnknown)
     ));
     assert!(provider.transport.shared.shutdown.is_cancelled());
@@ -240,8 +240,11 @@ fn server(
 async fn exact_frozen_public_bytes_reach_fixed_transport_and_citations_return() {
     let (endpoint, server, _seen, _release) = server(false);
     let provider = adapter(&endpoint);
-    let expected = request(&provider.config, "public query").unwrap();
-    let result = provider.search("public query", limits()).await.unwrap();
+    let expected = request(&provider.config, "public query", &[]).unwrap();
+    let result = provider
+        .search("public query", &[], limits())
+        .await
+        .unwrap();
     assert_eq!(server.join().unwrap(), expected);
     assert_eq!(result.citations.len(), 1);
     assert!(!provider.transport.shared.shutdown.is_cancelled());
@@ -251,7 +254,8 @@ async fn dropping_after_dispatch_seals_instead_of_refunding() {
     let (endpoint, server, seen, release) = server(true);
     let provider = Arc::new(adapter(&endpoint));
     let task_provider = provider.clone();
-    let task = tokio::spawn(async move { task_provider.search("public query", limits()).await });
+    let task =
+        tokio::spawn(async move { task_provider.search("public query", &[], limits()).await });
     let deadline = Instant::now() + Duration::from_secs(30);
     while seen.try_recv().is_err() {
         assert!(Instant::now() < deadline);
@@ -267,7 +271,7 @@ async fn dropping_after_dispatch_seals_instead_of_refunding() {
 #[test]
 fn actual_context_and_fixed_billed_content_have_separate_reservations() {
     let config = config();
-    let bytes = request(&config, "public query").unwrap().len() as u32;
+    let bytes = request(&config, "public query", &[]).unwrap().len() as u32;
     let reserve = config.reservation(bytes).unwrap();
     assert_eq!(
         reserve.model_tokens,
@@ -304,7 +308,7 @@ async fn typed_scope_yields_valid_durable_provider_evidence() {
         model: "gpt-4.1-mini".into(),
         query: "public query".into(),
     };
-    let result = WorkPublicSearchProvider::search(&provider, &scope, limits())
+    let result = WorkPublicSearchProvider::search(&provider, &scope, &[], limits())
         .await
         .unwrap();
     result.evidence.validate().unwrap();
@@ -320,14 +324,17 @@ async fn typed_scope_yields_valid_durable_provider_evidence() {
 #[test]
 fn public_qualification_retention_is_opt_in_and_counted_in_exact_body() {
     let provider = adapter("http://127.0.0.1:9/v1/responses");
-    let ordinary = request(&provider.config, "public query").unwrap();
+    let ordinary = request(&provider.config, "public query", &[]).unwrap();
     let work = zephium_core::work::WorkId::generate();
     let execution = zephium_core::work::WorkExecutionId::generate();
     let attempt = zephium_core::work::WorkAttemptId::generate();
     let provider = provider.with_public_work_trace(work, execution, attempt);
-    assert_eq!(request(&provider.config, "public query").unwrap(), ordinary);
+    assert_eq!(
+        request(&provider.config, "public query", &[]).unwrap(),
+        ordinary
+    );
     let provider = provider.with_public_response_retention();
-    let retained = request(&provider.config, "public query").unwrap();
+    let retained = request(&provider.config, "public query", &[]).unwrap();
     let body: Value = serde_json::from_slice(&retained).unwrap();
     assert_eq!(body["store"], true);
     assert_eq!(body["metadata"]["phase"], "public_search");
@@ -416,7 +423,7 @@ fn answer_newline_and_tab_remain_usable() {
 #[test]
 fn luna_search_preserves_reasoning_and_prices_actual_input_with_one_tool_fee() {
     let cfg = config_for("gpt-5.6-luna");
-    let body: Value = serde_json::from_slice(&request(&cfg, "public query").unwrap()).unwrap();
+    let body: Value = serde_json::from_slice(&request(&cfg, "public query", &[]).unwrap()).unwrap();
     assert_eq!(body["model"], "gpt-5.6-luna");
     assert_eq!(body["reasoning"]["effort"], "medium");
     assert_eq!(body["max_tool_calls"], 1);
@@ -461,13 +468,13 @@ fn unicode_query_boundary_matches_core_and_preserves_exact_serialized_input() {
         let query = character.to_string().repeat(PUBLIC_SEARCH_MAX_QUERY_CHARS);
         assert!(validate_public_search_query(&query).is_ok());
         let cfg = config();
-        let bytes = request(&cfg, &query).unwrap();
+        let bytes = request(&cfg, &query, &[]).unwrap();
         assert!(bytes.len() <= MAX_REQUEST_BYTES as usize);
         let body: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["input"][0]["content"][0]["text"], query);
         assert!(cfg.reservation(bytes.len() as u32).is_ok());
         let over = format!("{query}{character}");
         assert!(validate_public_search_query(&over).is_err());
-        assert!(request(&cfg, &over).is_err());
+        assert!(request(&cfg, &over, &[]).is_err());
     }
 }

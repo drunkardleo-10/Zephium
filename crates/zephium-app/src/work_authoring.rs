@@ -192,6 +192,7 @@ impl WorkDocumentSubmission {
             | WorkRequest::RuntimeAbandon { id, .. }
             | WorkRequest::RuntimeRead { id }
             | WorkRequest::RuntimeCommand { id, .. }
+            | WorkRequest::RuntimeCommandDisclosed { id, .. }
             | WorkRequest::RuntimeUpdate { id, .. }
             | WorkRequest::Edit { id, .. }
             | WorkRequest::Read { id }

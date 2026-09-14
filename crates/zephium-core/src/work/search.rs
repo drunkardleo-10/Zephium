@@ -197,9 +197,11 @@ pub type WorkPublicSearchFuture<'a> = Pin<
     Box<dyn Future<Output = Result<WorkPublicSearchResult, WorkPublicSearchError>> + Send + 'a>,
 >;
 pub trait WorkPublicSearchProvider: Send + Sync {
+    /// `context` carries only Rust-admitted public bodies for this attempt.
     fn search<'a>(
         &'a self,
         scope: &'a WorkPublicSearchScope,
+        context: &'a [super::context::WorkContextBody],
         limits: WorkExecutionLimits,
     ) -> WorkPublicSearchFuture<'a>;
 }

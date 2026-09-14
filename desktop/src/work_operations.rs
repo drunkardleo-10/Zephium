@@ -313,6 +313,7 @@ mod tests {
                 version: 1,
                 work: WorkId::from(id),
                 expected_revision: WorkRevision::INITIAL,
+                context: None,
             },
         }
     }

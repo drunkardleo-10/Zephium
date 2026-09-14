@@ -73,8 +73,11 @@ pub use api::{
     ChromePresentation, ChromePresentationCallback, ChromePresentationDispatch, Command,
     ContentPolicyStatusQueryOutcome, EmitFn, ExtensionLifecycle, PagePermissionPromptDecision,
     PresentationChrome, SharedBlocker, SharedChrome, SharedEngine, SharedStore,
-    ShellTerminalFailure, ShellTerminalFailureCallback, ShutdownOutcome, WorkPaneTarget,
+    ShellTerminalFailure, ShellTerminalFailureCallback, ShutdownOutcome, TabMetadata,
+    WorkPaneTarget,
 };
+#[cfg(feature = "work-planning")]
+pub mod work_context;
 pub use shell::Shell;
 
 #[doc(hidden)]

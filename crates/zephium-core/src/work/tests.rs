@@ -36,6 +36,7 @@ fn coordination_rejects_combined_completion_deadlocks_and_scope_widening() {
         max_hops: 1,
     };
     let mut spec = WorkExecutionSpec {
+        context: None,
         plan_revision: plan.revision,
         limits: WorkExecutionLimits {
             model_tokens: 4000,

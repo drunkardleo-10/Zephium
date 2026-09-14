@@ -335,6 +335,25 @@ fn valid_date(value: &str) -> bool {
     year >= 1 && (1..=12).contains(&month) && (1..=days[month - 1]).contains(&day)
 }
 impl NoteDocument {
+    /// Text content in document order; headings and paragraphs separated by newlines.
+    pub fn plain_text(&self) -> String {
+        let mut text = String::new();
+        let mut pending = vec![&self.document];
+        while let Some(node) = pending.pop() {
+            if let Some(value) = &node.text {
+                text.push_str(value);
+            } else if matches!(
+                node.kind.as_str(),
+                "paragraph" | "heading" | "listItem" | "codeBlock" | "blockquote"
+            ) && !text.is_empty()
+                && !text.ends_with('\n')
+            {
+                text.push('\n');
+            }
+            pending.extend(node.content.iter().rev());
+        }
+        text
+    }
     pub fn validate(&self) -> bool {
         let mut count = 0;
         let mut bytes = 0;

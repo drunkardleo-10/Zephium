@@ -365,6 +365,13 @@ impl BrowserPage {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TabMetadata {
+    pub id: ItemId,
+    pub title: String,
+    pub url: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum WorkPaneTarget {
     Tab(ItemId),
@@ -665,6 +672,13 @@ pub enum Command {
     #[cfg(feature = "work-execution")]
     WorkProfileBinding {
         reply: SyncSender<crate::AgentWorkProfileReadiness>,
+    },
+    /// Title and URL of Space tabs owned by `profile`, for context admission.
+    /// Never page content; a page read is a separately authorized capability.
+    TabMetadata {
+        profile: ProfileId,
+        ids: Vec<ItemId>,
+        reply: SyncSender<Vec<TabMetadata>>,
     },
     /// Bounded retry for the renderer-owned asynchronous favicon decode.
     FaviconPoll {

@@ -16,6 +16,9 @@ pub struct PlanningContext {
     pub objective: String,
     pub answers: Vec<PlanningAnswer>,
     pub current_draft: Option<WorkPlanProposal>,
+    /// Admitted canvas objects the user selected as context, bodies included.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub context: Vec<super::context::WorkContextBody>,
 }
 /// Rust owns the source join. Only `context()` is provider-facing; no profile,
 /// Work, plan, question, or node identity is serialized into a model request.
@@ -24,9 +27,17 @@ pub struct WorkPlanningDisclosure {
     work: WorkId,
     revision: WorkRevision,
     context: PlanningContext,
+    admitted: Option<super::context::WorkContextDisclosureV1>,
 }
 impl WorkPlanningDisclosure {
     pub fn from_snapshot(snapshot: &WorkSnapshot) -> Result<Self, WorkPlanningError> {
+        Self::from_snapshot_with_context(snapshot, None)
+    }
+    /// Adds admitted canvas context inside the same byte ceiling.
+    pub fn from_snapshot_with_context(
+        snapshot: &WorkSnapshot,
+        admitted: Option<&super::context::WorkAdmittedContext>,
+    ) -> Result<Self, WorkPlanningError> {
         snapshot.validate().map_err(WorkPlanningError::Store)?;
         if snapshot.lifecycle != WorkLifecycle::Active {
             return Err(WorkPlanningError::Stale);
@@ -34,7 +45,7 @@ impl WorkPlanningDisclosure {
         if snapshot.status == WorkAuthoringStatus::NeedsInput {
             return Err(WorkPlanningError::NeedsInput);
         }
-        let mut bytes = snapshot.objective.len();
+        let mut bytes = snapshot.objective.len() + admitted.map_or(0, |a| a.bytes());
         for question in snapshot.current_questions() {
             if let Some(answer) = &question.answer {
                 bytes += question.prompt.len() + answer.len();
@@ -95,16 +106,22 @@ impl WorkPlanningDisclosure {
             objective: snapshot.objective.clone(),
             answers,
             current_draft,
+            context: admitted.map(|a| a.bodies.clone()).unwrap_or_default(),
         };
         Ok(Self {
             profile: snapshot.profile,
             work: snapshot.id,
             revision: snapshot.revision,
             context,
+            admitted: admitted.map(|a| a.disclosure.clone()),
         })
     }
     pub fn context(&self) -> &PlanningContext {
         &self.context
+    }
+    /// The manifest to persist with whatever this disclosure produced.
+    pub fn admitted(&self) -> Option<&super::context::WorkContextDisclosureV1> {
+        self.admitted.as_ref()
     }
     pub fn profile(&self) -> ProfileId {
         self.profile
@@ -150,6 +167,13 @@ impl WorkPlanningProposal {
     }
     /// Trusted application use only, after the provider result is validated.
     pub fn into_edit(self) -> Result<WorkEdit, WorkPlanningError> {
+        self.into_edit_disclosed(None)
+    }
+    /// Binds the admitted-context manifest to an accepted draft.
+    pub fn into_edit_disclosed(
+        self,
+        context: Option<super::context::WorkContextDisclosureV1>,
+    ) -> Result<WorkEdit, WorkPlanningError> {
         self.validate()?;
         Ok(match self {
             Self::Clarify { prompt, options } => WorkEdit::OpenQuestion {
@@ -157,9 +181,13 @@ impl WorkPlanningProposal {
                 prompt,
                 options,
             },
-            Self::Draft { plan } => WorkEdit::ReplaceDraft {
-                draft: plan.mint().map_err(WorkPlanningError::Store)?,
-            },
+            Self::Draft { plan } => {
+                let draft = plan.mint().map_err(WorkPlanningError::Store)?;
+                match context {
+                    Some(context) => WorkEdit::ReplaceDraftDisclosed { draft, context },
+                    None => WorkEdit::ReplaceDraft { draft },
+                }
+            }
         })
     }
 }

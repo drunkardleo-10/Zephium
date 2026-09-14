@@ -121,7 +121,12 @@ impl WorkPlanningService {
             .approval_basis(profile, request)
             .await
             .map_err(WorkPlanningError::Store)?;
-        let disclosure = WorkPlanningDisclosure::from_snapshot(&state.work)?;
+        let admitted = self
+            .admit_context(profile, request.context.as_ref())
+            .await?;
+        let disclosure =
+            WorkPlanningDisclosure::from_snapshot_with_context(&state.work, admitted.as_ref())?;
+        let manifest = disclosure.admitted().cloned();
         let result = tokio::time::timeout(
             Duration::from_secs(180),
             self.provider.propose_execution(disclosure),
@@ -148,6 +153,10 @@ impl WorkPlanningService {
                         .proposal
                         .proposed_limits(limits)
                         .and_then(|limits| result.proposal.compile_diagnosed(plan, limits))
+                        .map(|mut spec| {
+                            spec.context = manifest.clone().or_else(|| plan.context.clone());
+                            spec
+                        })
                         .map_err(|refusal| {
                             if let Some(diagnostic) = self.execution_diagnostic {
                                 diagnostic(refusal);
@@ -193,8 +202,13 @@ impl WorkPlanningService {
     ) -> zephium_ipc::work::WorkPlanningResponseV1 {
         use zephium_ipc::work::*;
         let result = if request.version == 1 {
-            self.plan(profile, request.work, request.expected_revision)
-                .await
+            self.plan(
+                profile,
+                request.work,
+                request.expected_revision,
+                request.context.as_ref(),
+            )
+            .await
         } else {
             Err(WorkPlanningError::Invalid)
         };
@@ -245,6 +259,24 @@ impl WorkPlanningService {
             execution_diagnostic: None,
         }
     }
+    async fn admit_context(
+        &self,
+        profile: ProfileId,
+        selection: Option<&context::WorkContextSelectionV1>,
+    ) -> Result<Option<context::WorkAdmittedContext>, WorkPlanningError> {
+        let Some(selection) = selection else {
+            return Ok(None);
+        };
+        crate::work_context::WorkContextAdmission::new(self.handle.clone())
+            .admit(profile, context::WorkContextPurpose::Planning, selection)
+            .await
+            .map(Some)
+            .map_err(|error| match error {
+                WorkError::Conflict => WorkPlanningError::Stale,
+                WorkError::Capacity => WorkPlanningError::Capacity,
+                error => WorkPlanningError::Store(error),
+            })
+    }
     /// Caller identifies the displayed owner and revision; Shell verifies both
     /// owner selections and Store performs the final revision CAS. Dropping this
     /// future cancels local provider I/O. Once the final edit is queued, it may
@@ -254,6 +286,7 @@ impl WorkPlanningService {
         profile: ProfileId,
         id: WorkId,
         expected: WorkRevision,
+        context: Option<&context::WorkContextSelectionV1>,
     ) -> Result<WorkPlanningCompletion, WorkPlanningError> {
         let _permit = Permit::acquire((profile, id))?;
         let read = self
@@ -274,12 +307,15 @@ impl WorkPlanningService {
         {
             return Err(WorkPlanningError::Stale);
         }
-        let disclosure = WorkPlanningDisclosure::from_snapshot(&snapshot)?;
+        let admitted = self.admit_context(profile, context).await?;
+        let disclosure =
+            WorkPlanningDisclosure::from_snapshot_with_context(&snapshot, admitted.as_ref())?;
+        let manifest = disclosure.admitted().cloned();
         let result =
             tokio::time::timeout(Duration::from_secs(180), self.provider.propose(disclosure))
                 .await
                 .map_err(|_| WorkPlanningError::ProviderOutcomeUnknown)??;
-        let edit = result.proposal.into_edit()?;
+        let edit = result.proposal.into_edit_disclosed(manifest)?;
         let request = WorkRequest::Edit {
             id,
             expected,

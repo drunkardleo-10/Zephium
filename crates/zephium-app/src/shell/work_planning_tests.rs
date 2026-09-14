@@ -142,7 +142,7 @@ async fn planning_application_persists_questions_answers_and_agent_drafts_across
     let result = drive(
         &mut shell,
         &queue,
-        service.plan(profile, id, WorkRevision::INITIAL),
+        service.plan(profile, id, WorkRevision::INITIAL, None),
     )
     .await
     .unwrap();
@@ -166,9 +166,13 @@ async fn planning_application_persists_questions_answers_and_agent_drafts_across
     let work = read(&mut shell, &queue, &handle, id).await;
     assert_eq!(work.questions[0].answer_author, Some(WorkAuthor::User));
     let service = WorkPlanningService::new(handle.clone(), scripted(Some(draft())));
-    let completion = drive(&mut shell, &queue, service.plan(profile, id, work.revision))
-        .await
-        .unwrap();
+    let completion = drive(
+        &mut shell,
+        &queue,
+        service.plan(profile, id, work.revision, None),
+    )
+    .await
+    .unwrap();
     assert_eq!(completion.usage.output_tokens, 200);
     let WorkReply::Snapshot(planned) = completion.persistence.unwrap().reply else {
         panic!()
@@ -212,7 +216,7 @@ async fn planning_application_refuses_stale_private_and_cancelled_results() {
         drive(
             &mut shell,
             &queue,
-            service.plan(profile, id, WorkRevision::new(99).unwrap())
+            service.plan(profile, id, WorkRevision::new(99).unwrap(), None)
         )
         .await,
         Err(WorkPlanningError::Stale)
@@ -236,7 +240,7 @@ async fn planning_application_refuses_stale_private_and_cancelled_results() {
     let completion = drive(
         &mut shell,
         &queue,
-        service.plan(profile, id, WorkRevision::INITIAL),
+        service.plan(profile, id, WorkRevision::INITIAL, None),
     )
     .await
     .unwrap();
@@ -250,7 +254,7 @@ async fn planning_application_refuses_stale_private_and_cancelled_results() {
     let completion = drive_with(
         &mut shell,
         &queue,
-        service.plan(profile, id, work.revision),
+        service.plan(profile, id, work.revision, None),
         |shell, _| {
             dispatched += 1;
             if dispatched == 2 {
@@ -271,7 +275,7 @@ async fn planning_application_refuses_stale_private_and_cancelled_results() {
     assert!(shell.profiles.insert(selected));
     let provider = scripted(None);
     let service = WorkPlanningService::new(handle.clone(), provider.clone());
-    let mut pending = Box::pin(service.plan(profile, id, work.revision));
+    let mut pending = Box::pin(service.plan(profile, id, work.revision, None));
     assert!(tokio::time::timeout(
         Duration::from_millis(50),
         drive(&mut shell, &queue, &mut pending)
@@ -280,15 +284,19 @@ async fn planning_application_refuses_stale_private_and_cancelled_results() {
     .is_err());
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     assert!(matches!(
-        service.plan(profile, id, work.revision).await,
+        service.plan(profile, id, work.revision, None).await,
         Err(WorkPlanningError::Capacity)
     ));
     // Drop the actual future, not just its Pin reference.
     drop(pending);
     let resumed = WorkPlanningService::new(handle.clone(), scripted(Some(draft())));
-    let completion = drive(&mut shell, &queue, resumed.plan(profile, id, work.revision))
-        .await
-        .unwrap();
+    let completion = drive(
+        &mut shell,
+        &queue,
+        resumed.plan(profile, id, work.revision, None),
+    )
+    .await
+    .unwrap();
     assert!(completion.persistence.is_ok());
     assert!(read(&mut shell, &queue, &handle, id).await.plan.is_some());
     assert_eq!(
@@ -331,7 +339,7 @@ async fn planning_live_openai_through_application_and_reopened_store() {
     let completion = drive(
         &mut shell,
         &queue,
-        service.plan(profile, id, WorkRevision::INITIAL),
+        service.plan(profile, id, WorkRevision::INITIAL, None),
     )
     .await
     .unwrap();

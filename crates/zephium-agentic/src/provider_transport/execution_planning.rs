@@ -158,6 +158,7 @@ mod tests {
             .all(|node| node.parent == Some(3)));
         let draft = draft.mint().unwrap();
         let plan = WorkPlanRevision {
+            context: None,
             author: WorkAuthor::PrimaryAgent,
             revision: WorkRevision::INITIAL,
             basis_revision: WorkRevision::INITIAL,

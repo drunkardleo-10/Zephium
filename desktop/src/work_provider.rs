@@ -83,10 +83,10 @@ impl WorkProviders {
             work_execution::WorkExecutionService, work_planning::WorkPlanningService,
         };
         match input {
-            WorkOperationV1::ReadPublic { command } => {
+            WorkOperationV1::ReadPublic { command, context } => {
                 #[cfg(not(target_os = "macos"))]
                 {
-                    let _ = command;
+                    let _ = (command, context);
                     Err(WorkError::Unavailable)
                 }
                 #[cfg(target_os = "macos")]
@@ -117,12 +117,12 @@ impl WorkProviders {
                         credential().await?,
                         config,
                     )?;
-                    let projection = WorkExecutionService::new(shell).read_public(profile, command, |attempt| async move {
+                    let projection = WorkExecutionService::new(shell).read_public_with_context(profile, command, context, |attempt, bodies| async move {
                         #[cfg(feature = "work-development-traces")]
                         let provider = provider.with_public_response_retention().with_public_work_trace(attempt.work(),attempt.execution(),attempt.attempt());
                         let attempt_id = attempt.attempt();
                         let started = std::time::Instant::now();
-                        let result = attempt.search_public_owned(&provider).await;
+                        let result = attempt.search_public_owned_with_context(&provider, &bodies).await;
                         match &result {
                             Ok(settlement) => {
                                 if let Some(fact) = settlement.projection().executions.iter().find(|fact| fact.id == settlement.execution()).and_then(|fact| fact.attempts.iter().find(|fact| fact.id == attempt_id)) {

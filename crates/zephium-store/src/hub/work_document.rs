@@ -181,7 +181,36 @@ fn apply(
             expected,
             command,
             intent,
-        } => runtime_store::command(tx, profile, runtime_session, id, expected, command, intent)?,
+        } => runtime_store::command(
+            tx,
+            profile,
+            runtime_session,
+            id,
+            expected,
+            command,
+            runtime_store::RuntimeIntentInput {
+                intent,
+                context: None,
+            },
+        )?,
+        WorkRequest::RuntimeCommandDisclosed {
+            id,
+            expected,
+            command,
+            intent,
+            context,
+        } => runtime_store::command(
+            tx,
+            profile,
+            runtime_session,
+            id,
+            expected,
+            command,
+            runtime_store::RuntimeIntentInput {
+                intent,
+                context: Some(context),
+            },
+        )?,
         WorkRequest::RuntimeUpdate {
             id,
             expected,
@@ -558,6 +587,7 @@ fn read_plan(
         nodes.push(node);
     }
     let plan = WorkPlanRevision {
+        context: None,
         author: parse_author(&author)?,
         revision: rev,
         basis_revision: revision(basis)?,

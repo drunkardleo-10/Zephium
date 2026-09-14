@@ -69,6 +69,9 @@ pub struct WorkPlanRequestV1 {
     pub version: u16,
     pub work: WorkId,
     pub expected_revision: WorkRevision,
+    /// Selected canvas objects to admit as planning context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<context::WorkContextSelectionV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
@@ -85,21 +88,47 @@ pub struct WorkStartRequestV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkOperationV1 {
-    ReadPublic { command: WorkCommandV1 },
-    Plan { request: WorkPlanRequestV1 },
-    PreparePlan { request: WorkPlanRequestV1 },
-    Prepare { request: WorkApprovalRequestV1 },
-    Start { request: WorkStartRequestV1 },
+    ReadPublic {
+        command: WorkCommandV1,
+        /// Selected public canvas objects to accompany the query.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<context::WorkContextSelectionV1>,
+    },
+    Plan {
+        request: WorkPlanRequestV1,
+    },
+    PreparePlan {
+        request: WorkPlanRequestV1,
+    },
+    Prepare {
+        request: WorkApprovalRequestV1,
+    },
+    Start {
+        request: WorkStartRequestV1,
+    },
 }
 impl WorkOperationV1 {
     pub fn work(&self) -> WorkId {
         match self {
-            Self::ReadPublic { command } => command.work,
+            Self::ReadPublic { command, .. } => command.work,
             Self::Plan { request } | Self::PreparePlan { request } => request.work,
             Self::Prepare { request } => request.work,
             Self::Start { request } => request.work,
         }
     }
+}
+
+/// The manifest chrome renders before dispatch, computed by the same
+/// admission that later binds it to the operation.
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkContextPreviewV1 {
+    Admitted {
+        disclosure: context::WorkContextDisclosureV1,
+    },
+    Refused {
+        error: WorkFailureV1,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
@@ -326,6 +355,7 @@ pub enum WorkFailureV1 {
     Unavailable,
     Shutdown,
     OutcomeUnknown,
+    ReviewRequired,
 }
 impl From<WorkError> for WorkFailureV1 {
     fn from(value: WorkError) -> Self {
@@ -338,6 +368,7 @@ impl From<WorkError> for WorkFailureV1 {
             WorkError::Unavailable => Self::Unavailable,
             WorkError::Shutdown => Self::Shutdown,
             WorkError::OutcomeUnknown => Self::OutcomeUnknown,
+            WorkError::ReviewRequired => Self::ReviewRequired,
         }
     }
 }

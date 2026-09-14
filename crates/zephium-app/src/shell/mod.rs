@@ -957,6 +957,13 @@ impl Shell {
             Command::WorkProfileBinding { reply } => {
                 let _ = reply.send(self.work_profile_binding());
             }
+            Command::TabMetadata {
+                profile,
+                ids,
+                reply,
+            } => {
+                let _ = reply.send(self.tab_metadata(profile, &ids));
+            }
             Command::FaviconPoll { id, attempt } => self.poll_favicon(id, attempt),
             Command::PresentationFallback {
                 id,
@@ -1585,6 +1592,8 @@ impl Shell {
 #[cfg(test)]
 pub(crate) mod tests;
 
+#[cfg(all(test, feature = "work-planning"))]
+mod work_context_tests;
 #[cfg(all(test, feature = "work-runtime"))]
 mod work_coordination_tests;
 #[cfg(all(test, feature = "work-planning"))]

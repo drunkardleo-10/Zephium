@@ -278,6 +278,7 @@ impl WorkExecutionProposal {
             _ => return Err(Refusal::DelegationTopology),
         }
         let spec = WorkExecutionSpec {
+            context: None,
             plan_revision: plan.revision,
             limits,
             nodes,

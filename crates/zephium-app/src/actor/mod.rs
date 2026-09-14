@@ -22,7 +22,7 @@ use crate::{
     Command, ContentPolicyStatusQueryOutcome, EmitFn, ExtensionLifecycle, SharedBlocker,
     SharedChrome, SharedEngine, SharedStore, ShellTerminalFailureCallback, ShutdownOutcome,
 };
-use zephium_core::ids::ProfileId;
+use zephium_core::ids::{ItemId, ProfileId};
 use zephium_core::ports::extensions::{
     ExtensionAcquiredCatalogActivationCallback, ExtensionAcquiredCatalogActivationRequest,
     ExtensionAcquiredPackageProvisioningCallback, ExtensionAcquiredPackageProvisioningRequest,
@@ -997,6 +997,56 @@ impl Handle {
             }
         }
         crate::AgentWorkProfileRequest(receiver)
+    }
+
+    /// Tab titles and URLs for context admission; an unprocessed request
+    /// disconnects the receiver instead of inventing an empty answer.
+    pub fn tab_metadata(
+        &self,
+        profile: ProfileId,
+        ids: Vec<ItemId>,
+    ) -> std::sync::mpsc::Receiver<Vec<crate::TabMetadata>> {
+        let (reply, receiver) = sync_channel(1);
+        let command = Command::TabMetadata {
+            profile,
+            ids,
+            reply,
+        };
+        if let Err(
+            TryPushError::Full(command)
+            | TryPushError::Sealed(command)
+            | TryPushError::Closed(command),
+        ) = self.queue.try_push(command)
+        {
+            finish_unprocessed_command(command, ShutdownOutcome::Unclean);
+        }
+        receiver
+    }
+
+    /// One profile-checked resource read or mutation, settled by the actor.
+    pub fn resource_call(
+        &self,
+        profile: ProfileId,
+        call: zephium_core::resources::ResourceCall,
+    ) -> Receiver<zephium_core::resources::ResourceReply> {
+        let (sender, receiver) = sync_channel(1);
+        let done = crate::ResourceCompletion::new(move |reply| {
+            let _ = sender.send(reply);
+        });
+        let command = Command::ResourceCall {
+            expected_profile: profile,
+            call: Arc::new(call),
+            done,
+        };
+        if let Err(
+            TryPushError::Full(command)
+            | TryPushError::Sealed(command)
+            | TryPushError::Closed(command),
+        ) = self.queue.try_push(command)
+        {
+            finish_unprocessed_command(command, ShutdownOutcome::Unclean);
+        }
+        receiver
     }
 
     /// Requests an ordered shutdown without waiting for queue capacity on the

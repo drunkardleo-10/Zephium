@@ -21,20 +21,30 @@ impl WorkNodeAttempt {
         self,
         provider: &dyn WorkSynthesisProvider,
     ) -> Result<WorkNodeSettlement, WorkError> {
-        self.produce_artifacts(provider, false).await
+        self.produce_artifacts(provider, false, &[]).await
+    }
+
+    /// `context` must be the bodies re-admitted for this execution's manifest.
+    pub async fn synthesize_owned_with_context(
+        self,
+        provider: &dyn WorkSynthesisProvider,
+        context: &[context::WorkContextBody],
+    ) -> Result<WorkNodeSettlement, WorkError> {
+        self.produce_artifacts(provider, false, context).await
     }
 
     pub(crate) async fn synthesize_primary_owned(
         self,
         provider: &dyn WorkSynthesisProvider,
     ) -> Result<WorkNodeSettlement, WorkError> {
-        self.produce_artifacts(provider, true).await
+        self.produce_artifacts(provider, true, &[]).await
     }
 
     async fn produce_artifacts(
         self,
         provider: &dyn WorkSynthesisProvider,
         coordinated: bool,
+        context: &[context::WorkContextBody],
     ) -> Result<WorkNodeSettlement, WorkError> {
         if !(matches!(self.specification().capability, WorkCapability::Synthesize)
             || coordinated
@@ -53,7 +63,7 @@ impl WorkNodeAttempt {
         // model. Its entire lifetime is inside the original node deadline.
         let input = match tokio::time::timeout_at(
             self.deadline().into(),
-            self.synthesis_disclosure(),
+            self.synthesis_disclosure(context),
         )
         .await
         {
@@ -145,7 +155,10 @@ impl WorkNodeAttempt {
         };
         self.settle_owned(result).await
     }
-    async fn synthesis_disclosure(&self) -> Result<WorkSynthesisDisclosure, WorkError> {
+    async fn synthesis_disclosure(
+        &self,
+        context: &[context::WorkContextBody],
+    ) -> Result<WorkSynthesisDisclosure, WorkError> {
         let mut previews = Vec::<WorkEvidencePreviewV1>::new();
         for source in self.dependency_artifacts() {
             for link in &source.evidence {
@@ -166,7 +179,8 @@ impl WorkNodeAttempt {
             self.dependency_artifacts(),
             &previews,
             self.specification().limits,
-        )
+        )?
+        .with_context(context.to_vec())
     }
 }
 fn empty(status: WorkAttemptStatus, usage: Option<WorkUsage>) -> WorkAdapterResult {

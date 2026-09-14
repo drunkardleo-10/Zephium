@@ -28,6 +28,9 @@ pub struct WorkSynthesisContext {
     pub outputs: Vec<WorkExpectedOutput>,
     pub sources: Vec<WorkSynthesisSource>,
     pub evidence: Vec<WorkSynthesisEvidence>,
+    /// User-selected canvas objects admitted for this execution.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub context: Vec<super::context::WorkContextBody>,
 }
 
 /// Disclosure data, never an execution token. The application admits the exact
@@ -122,6 +125,7 @@ impl WorkSynthesisDisclosure {
             outputs: node.outputs.clone(),
             sources: selected,
             evidence,
+            context: Vec::new(),
         };
         let fits = |context: &WorkSynthesisContext| -> Result<bool, WorkError> {
             Ok(serde_json::to_vec(context)
@@ -168,6 +172,20 @@ impl WorkSynthesisDisclosure {
     }
     pub fn context(&self) -> &WorkSynthesisContext {
         &self.context
+    }
+    /// Adds re-admitted context bodies within their own ceiling.
+    pub fn with_context(
+        mut self,
+        bodies: Vec<super::context::WorkContextBody>,
+    ) -> Result<Self, WorkError> {
+        if bodies.len() > super::context::MAX_CONTEXT_ITEMS
+            || bodies.iter().map(|body| body.text.len()).sum::<usize>()
+                > super::context::MAX_CONTEXT_TOTAL_BYTES
+        {
+            return Err(WorkError::Capacity);
+        }
+        self.context.context = bodies;
+        Ok(self)
     }
     pub fn limits(&self) -> WorkExecutionLimits {
         self.limits

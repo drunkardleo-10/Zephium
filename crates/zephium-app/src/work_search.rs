@@ -9,6 +9,16 @@ impl WorkNodeAttempt {
         self,
         provider: &dyn WorkPublicSearchProvider,
     ) -> Result<WorkNodeSettlement, WorkError> {
+        self.search_public_owned_with_context(provider, &[]).await
+    }
+
+    /// `context` must be the bodies admitted for this exact execution; the
+    /// persisted spec carries their manifest.
+    pub async fn search_public_owned_with_context(
+        self,
+        provider: &dyn WorkPublicSearchProvider,
+        context: &[zephium_core::work::context::WorkContextBody],
+    ) -> Result<WorkNodeSettlement, WorkError> {
         let WorkCapability::PublicSearch { scope } = &self.specification().capability else {
             return self
                 .settle_owned(empty(WorkAttemptStatus::Failed, Some(WorkUsage::default())))
@@ -36,7 +46,7 @@ impl WorkNodeAttempt {
                 biased;
                 _ = tokio::time::sleep_until(self.deadline().into()) => Err(WorkPublicSearchError::OutcomeUnknown),
                 _ = cancelled => Err(WorkPublicSearchError::OutcomeUnknown),
-                result = provider.search(scope, self.specification().limits) => result,
+                result = provider.search(scope, context, self.specification().limits) => result,
             }
         };
         let result = match result {

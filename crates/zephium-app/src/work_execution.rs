@@ -6,7 +6,12 @@ use crate::work_runtime::{
 use std::{collections::BTreeSet, future::Future, time::Duration};
 use zephium_core::{
     ids::ProfileId,
-    work::{port::WorkReply, runtime::*, synthesis::WorkSynthesisProvider, *},
+    work::{
+        port::{WorkReply, WorkRequest},
+        runtime::*,
+        synthesis::WorkSynthesisProvider,
+        *,
+    },
 };
 
 pub struct WorkExecutionRequest {
@@ -27,10 +32,35 @@ impl WorkExecutionService {
         profile: ProfileId,
         command: zephium_ipc::work::WorkCommandV1,
         execute: F,
-        mut observe: O,
+        observe: O,
     ) -> Result<WorkRuntimeProjection, WorkError>
     where
         F: FnOnce(WorkNodeAttempt) -> Fut,
+        Fut: Future<Output = Result<WorkNodeSettlement, WorkError>>,
+        O: FnMut(WorkAttemptObserver),
+    {
+        self.read_public_with_context(
+            profile,
+            command,
+            None,
+            |attempt, _| execute(attempt),
+            observe,
+        )
+        .await
+    }
+
+    /// Public read with Rust-admitted public context. The manifest is bound
+    /// to the execution spec; the bodies reach only this original attempt.
+    pub async fn read_public_with_context<F, Fut, O>(
+        &self,
+        profile: ProfileId,
+        command: zephium_ipc::work::WorkCommandV1,
+        selection: Option<context::WorkContextSelectionV1>,
+        execute: F,
+        mut observe: O,
+    ) -> Result<WorkRuntimeProjection, WorkError>
+    where
+        F: FnOnce(WorkNodeAttempt, Vec<context::WorkContextBody>) -> Fut,
         Fut: Future<Output = Result<WorkNodeSettlement, WorkError>>,
         O: FnMut(WorkAttemptObserver),
     {
@@ -39,9 +69,35 @@ impl WorkExecutionService {
         }
         let work = command.work;
         let command_id = command.command;
+        let (request, bodies) = match selection {
+            Some(selection) => {
+                let admitted = crate::work_context::WorkContextAdmission::new(self.handle.clone())
+                    .admit(profile, context::WorkContextPurpose::PublicRead, &selection)
+                    .await?;
+                let zephium_ipc::work::WorkCommandV1 {
+                    work,
+                    expected_revision,
+                    command,
+                    intent,
+                    ..
+                } = command;
+                (
+                    WorkRequest::RuntimeCommandDisclosed {
+                        id: work,
+                        expected: expected_revision,
+                        command,
+                        intent,
+                        context: admitted.disclosure,
+                    },
+                    admitted.bodies,
+                )
+            }
+            None => (command.into_request()?, Vec::new()),
+        };
+        request.validate()?;
         let response = tokio::time::timeout(
             Duration::from_secs(10),
-            self.handle.work_command(profile, command)?,
+            self.handle.submit_work_document(request, Some(profile))?,
         )
         .await
         .map_err(|_| WorkError::OutcomeUnknown)??;
@@ -85,7 +141,7 @@ impl WorkExecutionService {
             .await?;
         let original = attempt.attempt();
         observe(attempt.observer());
-        let settlement = execute(attempt).await?;
+        let settlement = execute(attempt, bodies).await?;
         if settlement.profile() != profile
             || settlement.work() != work
             || settlement.execution() != receipt.execution
@@ -122,12 +178,17 @@ impl WorkExecutionService {
         {
             return Err(WorkError::Conflict);
         }
-        let spec = WorkExecutionSpec::public_research(
+        let mut spec = WorkExecutionSpec::public_research(
             state.work.plan.as_ref().ok_or(WorkError::Invalid)?,
             request.limits,
             request.scope,
             request.primary,
         )?;
+        spec.context = state
+            .work
+            .plan
+            .as_ref()
+            .and_then(|plan| plan.context.clone());
         let decisions = crate::work_runtime::decision_context(&state.work);
         for node in &state
             .work
@@ -184,6 +245,44 @@ impl WorkExecutionService {
         Self { handle }
     }
 
+    /// Re-resolves the approved manifest right before execution. Any body
+    /// whose digest moved since approval refuses the start instead of
+    /// disclosing content the user never reviewed.
+    async fn readmit_context(
+        &self,
+        profile: ProfileId,
+        manifest: Option<&context::WorkContextDisclosureV1>,
+    ) -> Result<Vec<context::WorkContextBody>, WorkError> {
+        let Some(manifest) = manifest else {
+            return Ok(Vec::new());
+        };
+        let selection = context::WorkContextSelectionV1 {
+            environment: manifest.environment,
+            items: manifest
+                .items
+                .iter()
+                .map(|item| context::WorkContextSelectionItem {
+                    element: item.element,
+                    revision: item.revision.clone(),
+                })
+                .collect(),
+        };
+        let admitted = crate::work_context::WorkContextAdmission::new(self.handle.clone())
+            .admit(profile, context::WorkContextPurpose::Planning, &selection)
+            .await?;
+        let same = admitted.disclosure.items.len() == manifest.items.len()
+            && admitted
+                .disclosure
+                .items
+                .iter()
+                .zip(&manifest.items)
+                .all(|(now, then)| now.element == then.element && now.digest == then.digest);
+        if !same {
+            return Err(WorkError::Conflict);
+        }
+        Ok(admitted.bodies)
+    }
+
     /// The host supplies the native adapter and configured provider. The UI
     /// supplies only the displayed Work/execution/revision. Unsupported topology
     /// is rejected before any attempt or model is started. Lost observers never
@@ -235,6 +334,7 @@ impl WorkExecutionService {
         let spec = fact.spec.clone();
         spec.validate(&plan)?;
         let primary = supported_primary(&spec)?;
+        let context = self.readmit_context(profile, spec.context.as_ref()).await?;
         let runtime = WorkRuntimeService::new(self.handle.clone());
         if let Some(primary) = primary {
             let attempt = runtime
@@ -259,7 +359,7 @@ impl WorkExecutionService {
                 let result = coordinator
                     .execute_child(node, |attempt| {
                         observe(attempt.observer());
-                        execute_node(attempt, provider, &mut browser)
+                        execute_node(attempt, provider, &mut browser, &context)
                     })
                     .await;
                 if result.is_err() {
@@ -295,7 +395,7 @@ impl WorkExecutionService {
                 .await?;
             observe(attempt.observer());
             let original_attempt = attempt.attempt();
-            let settlement = execute_node(attempt, provider, &mut browser).await?;
+            let settlement = execute_node(attempt, provider, &mut browser, &context).await?;
             if settlement.profile() != profile
                 || settlement.work() != work
                 || settlement.execution() != execution
@@ -349,10 +449,13 @@ fn supported_primary(spec: &WorkExecutionSpec) -> Result<Option<WorkPlanNodeId>,
     }
 }
 
+/// Public search and browsing never receive context bodies: a reviewed plan's
+/// approval covers disclosure to the configured model, not to web queries.
 async fn execute_node<F, Fut>(
     attempt: WorkNodeAttempt,
     provider: &dyn WorkSynthesisProvider,
     browser: &mut F,
+    context: &[context::WorkContextBody],
 ) -> Result<WorkNodeSettlement, WorkError>
 where
     F: FnMut(WorkNodeAttempt) -> Fut,
@@ -362,7 +465,11 @@ where
         WorkCapability::PublicBrowse { .. }
         | WorkCapability::PublicDiscovery { .. }
         | WorkCapability::PublicSearch { .. } => browser(attempt).await,
-        WorkCapability::Synthesize => attempt.synthesize_owned(provider).await,
+        WorkCapability::Synthesize => {
+            attempt
+                .synthesize_owned_with_context(provider, context)
+                .await
+        }
         WorkCapability::Coordinate { .. }
         | WorkCapability::CoordinatePublicDiscovery { .. }
         | WorkCapability::CoordinatePublicResearch { .. } => Err(WorkError::Invalid),

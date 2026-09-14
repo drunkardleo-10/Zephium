@@ -25,6 +25,7 @@ impl WorkPublicSearchProvider for SearchFixture {
     fn search<'a>(
         &'a self,
         actual: &'a WorkPublicSearchScope,
+        _: &'a [zephium_core::work::context::WorkContextBody],
         _: WorkExecutionLimits,
     ) -> WorkPublicSearchFuture<'a> {
         Box::pin(async move {

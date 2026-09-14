@@ -37,6 +37,15 @@ pub enum WorkRequest {
         command: WorkCommandId,
         intent: runtime::WorkRuntimeIntent,
     },
+    /// A user-directed public read carrying the Rust-admitted context
+    /// manifest it may disclose. Never constructed from IPC.
+    RuntimeCommandDisclosed {
+        id: WorkId,
+        expected: WorkRevision,
+        command: WorkCommandId,
+        intent: runtime::WorkRuntimeIntent,
+        context: context::WorkContextDisclosureV1,
+    },
     /// Host-only, never decoded from IPC or model output.
     RuntimeUpdate {
         id: WorkId,
@@ -100,6 +109,20 @@ impl WorkRequest {
                 intent: runtime::WorkRuntimeIntent::ReadPublic { scope, limits },
                 ..
             } => search::validate_direct_public_read(scope, *limits),
+            Self::RuntimeCommandDisclosed {
+                intent, context, ..
+            } => {
+                let runtime::WorkRuntimeIntent::ReadPublic { scope, limits } = intent else {
+                    return Err(WorkError::Invalid);
+                };
+                if context.purpose != context::WorkContextPurpose::PublicRead
+                    || context.requires_review()
+                {
+                    return Err(WorkError::Invalid);
+                }
+                context.validate()?;
+                search::validate_direct_public_read(scope, *limits)
+            }
             Self::RuntimeCommand {
                 intent: runtime::WorkRuntimeIntent::Approve { spec },
                 ..

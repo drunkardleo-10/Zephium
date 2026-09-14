@@ -1584,6 +1584,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             work_product::work_call,
             work_product::work_operation,
             work_product::work_operation_status,
+            work_product::work_context_preview,
             work_product::work_activity,
             tabs_bootstrap,
             tabs_open,
@@ -7605,7 +7606,10 @@ mod tests {
         assert!(!super::trusted_web_url("https://user:pw@example.com"));
         assert!(!super::trusted_web_url("file:///etc/hosts"));
         assert!(!super::trusted_web_url("https://example.com/\u{7}"));
-        assert!(!super::trusted_web_url(&format!("https://example.com/{}", "a".repeat(8192))));
+        assert!(!super::trusted_web_url(&format!(
+            "https://example.com/{}",
+            "a".repeat(8192)
+        )));
     }
 
     #[test]

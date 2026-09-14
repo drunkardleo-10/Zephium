@@ -172,6 +172,53 @@ pub(crate) async fn work_operation(
     }
 }
 
+/// Manifest preview for the composer. Bodies never cross this boundary.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn work_context_preview(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    expected_profile: String,
+    purpose: zephium_core::work::context::WorkContextPurpose,
+    selection: zephium_core::work::context::WorkContextSelectionV1,
+) -> zephium_ipc::work::WorkContextPreviewV1 {
+    use zephium_ipc::work::WorkContextPreviewV1;
+    let result = async {
+        if !super::authorize(&caller, super::CallerPolicy::Main, "work_context_preview")
+            || super::shutdown_started(&app)
+        {
+            return Err(WorkError::Unavailable);
+        }
+        let profile = ProfileId::parse(&expected_profile)
+            .filter(|id| id.to_string() == expected_profile)
+            .ok_or(WorkError::Invalid)?;
+        selection.validate()?;
+        #[cfg(feature = "work-product")]
+        {
+            let shell = app.state::<zephium_app::Handle>().inner().clone();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                zephium_app::work_context::WorkContextAdmission::new(shell)
+                    .preview(profile, purpose, &selection),
+            )
+            .await
+            .map_err(|_| WorkError::Unavailable)?
+        }
+        #[cfg(not(feature = "work-product"))]
+        {
+            let _ = (profile, purpose);
+            Err(WorkError::Unavailable)
+        }
+    }
+    .await;
+    match result {
+        Ok(disclosure) => WorkContextPreviewV1::Admitted { disclosure },
+        Err(error) => WorkContextPreviewV1::Refused {
+            error: error.into(),
+        },
+    }
+}
+
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn work_operation_status(

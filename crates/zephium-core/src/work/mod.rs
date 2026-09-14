@@ -4,6 +4,7 @@
 
 pub mod artifact;
 pub mod authoring;
+pub mod context;
 pub mod environment;
 pub mod execution_proposal;
 mod ids;
@@ -79,6 +80,9 @@ pub enum WorkError {
     Unavailable,
     Shutdown,
     OutcomeUnknown,
+    /// Private context was selected for a route that discloses public data
+    /// only; the request needs the reviewed-plan path and one approval.
+    ReviewRequired,
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -211,6 +215,9 @@ pub struct WorkPlanRevision {
     /// Exact Work context from which the proposal was accepted.
     pub basis_revision: WorkRevision,
     pub draft: WorkPlanDraft,
+    /// The manifest of admitted canvas context the planner saw, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<context::WorkContextDisclosureV1>,
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -375,6 +382,12 @@ impl WorkSnapshot {
         }
         let mut next = self.clone();
         next.revision = self.revision.next()?;
+        let (edit, disclosed) = match edit {
+            WorkEdit::ReplaceDraftDisclosed { draft, context } => {
+                (WorkEdit::ReplaceDraft { draft }, Some(context))
+            }
+            edit => (edit, None),
+        };
         let event = match edit {
             WorkEdit::SetObjective { objective } => {
                 next.objective = objective;
@@ -441,9 +454,11 @@ impl WorkSnapshot {
                     revision: next.revision,
                     basis_revision: self.revision,
                     draft,
+                    context: disclosed,
                 });
                 WorkEventKind::DraftReplaced
             }
+            WorkEdit::ReplaceDraftDisclosed { .. } => return Err(WorkError::Invalid),
             WorkEdit::DismissQuestion { id } => {
                 let question = next
                     .questions
@@ -513,6 +528,12 @@ pub enum WorkEdit {
     ReplaceDraft {
         draft: WorkPlanDraft,
     },
+    /// A planner draft accepted together with the exact admitted-context
+    /// manifest it was produced from. Only trusted Rust constructs this.
+    ReplaceDraftDisclosed {
+        draft: WorkPlanDraft,
+        context: context::WorkContextDisclosureV1,
+    },
 }
 impl WorkEdit {
     pub fn validate(&self) -> Result<(), WorkError> {
@@ -536,6 +557,10 @@ impl WorkEdit {
             }
             Self::AnswerQuestion { answer, .. } => validate_text(answer, MAX_WORK_TEXT_BYTES),
             Self::ReplaceDraft { draft } => draft.validate(),
+            Self::ReplaceDraftDisclosed { draft, context } => {
+                draft.validate()?;
+                context.validate()
+            }
             Self::Archive | Self::Restore | Self::CompactHistory | Self::DismissQuestion { .. } => {
                 Ok(())
             }

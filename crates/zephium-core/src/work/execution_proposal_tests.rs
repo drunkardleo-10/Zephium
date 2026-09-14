@@ -10,6 +10,7 @@ fn limits() -> WorkExecutionLimits {
 }
 fn fixture(count: u8, searches: u8, delegated: bool) -> (WorkPlanRevision, WorkExecutionProposal) {
     let plan = WorkPlanRevision {
+        context: None,
         author: WorkAuthor::User,
         revision: WorkRevision::INITIAL,
         basis_revision: WorkRevision::INITIAL,
