@@ -592,6 +592,7 @@ async fn synthesis_phase_accepts_8529_count_only_within_original_attempt_budget(
 }
 
 #[tokio::test]
+#[cfg(feature = "probe-harness")]
 async fn synthesis_trace_is_per_call_opt_in_and_excluded_from_counted_context() {
     use zephium_core::work::synthesis::*;
     for retain in [false, true] {

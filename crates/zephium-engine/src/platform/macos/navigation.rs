@@ -158,6 +158,27 @@ impl NavigationObserver {
     }
 }
 
+impl Drop for NavigationObserver {
+    fn drop(&mut self) {
+        // ObservedView drops this field before its WebView field, so the weak
+        // upgrade normally succeeds. It can legitimately fail if native
+        // teardown already deallocated the view; zeroing weak references make
+        // that case a safe no-op.
+        let Some(webview) = self.ivars().webview.load() else {
+            return;
+        };
+        unsafe {
+            for key in [
+                ns_string!("URL"),
+                ns_string!("canGoBack"),
+                ns_string!("canGoForward"),
+            ] {
+                webview.removeObserver_forKeyPath(self, key);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,26 +199,5 @@ mod tests {
             NavigationObservationKind::from_key_path(ns_string!("title")),
             None
         );
-    }
-}
-
-impl Drop for NavigationObserver {
-    fn drop(&mut self) {
-        // ObservedView drops this field before its WebView field, so the weak
-        // upgrade normally succeeds. It can legitimately fail if native
-        // teardown already deallocated the view; zeroing weak references make
-        // that case a safe no-op.
-        let Some(webview) = self.ivars().webview.load() else {
-            return;
-        };
-        unsafe {
-            for key in [
-                ns_string!("URL"),
-                ns_string!("canGoBack"),
-                ns_string!("canGoForward"),
-            ] {
-                webview.removeObserver_forKeyPath(self, key);
-            }
-        }
     }
 }

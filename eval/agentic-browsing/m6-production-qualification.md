@@ -8,6 +8,34 @@ reviewed aggregate evidence and points to executable gates. It must not contain
 raw probe JSONL, page content, screenshots, profiles, credentials, provider
 responses, machine-local paths, or native traces.
 
+## 2026-09-15: Work record collection slice
+
+The release-excluded `--live-agent-collection-work` probe now exercises the
+native public LEGO catalog with a three-record schema and durable comparison
+mapping. Its main-agent assignment is fixed (provider search, admitted source
+read, finish); the Luna browser worker chooses the actual inspection steps.
+This qualifies neither autonomous Work planning nor the normal canvas routing.
+
+One run returned three names and displayed prices with separate native item
+citations, resolved again after Store reopen and clean resource shutdown.
+Later runs completed extraction but omitted price evidence; the strengthened
+acceptance check rejects those incomplete results. Earlier attempts exposed
+initial query-finalization failure, two Snapshot/Scope contract refusals and a
+Locate/Query refusal for a currency symbol. Same-load public query finalization
+and literal symbol lookup are fixed; Snapshot/Scope and consistent price
+collection remain unresolved. No reliability or latency target is met. Reported
+usage is conservative reservation accounting, not measured billed token usage.
+No sign-in, cart operation or purchase was exercised.
+
+Affected library, integration and documentation checks: 1,812 passed, two
+pre-existing ignored; workspace
+Clippy passed. Separate architecture checks still stop at unchanged dependency
+and controller-source expectations. B1/B2 and production qualification remain
+open: typed money/URLs/images, the full worker port, action workflows and
+Windows qualification are not delivered by this slice.
+
+## Earlier qualification evidence
+
 The physical-Windows procedure now has a checked-in, source-gated two-phase
 PowerShell orchestrator. It requires a clean exact checkout, create-new source
 and debugger-binary hash stamps, an exact result inventory, the x86-64 MSVC

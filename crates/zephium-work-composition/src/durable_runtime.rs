@@ -1,5 +1,8 @@
 //! Narrow browser executor for a live durable Work attempt. It compiles only
 //! explicit Public reading scope and uses the original retained native owner.
+mod collection;
+pub use collection::WorkBrowseCollectionSchema;
+
 use crate::{
     MacosWorkComposition, PublicReadWorkAccount, PublicReadWorkInvocation, PublicReadWorkObjective,
     PublicReadWorkSettings,
@@ -110,6 +113,7 @@ impl MacosWorkComposition {
                 intervention_origin,
                 attempt.specification().limits,
                 &outputs,
+                None,
                 diagnostics,
             )
             .await?;
@@ -134,6 +138,31 @@ impl MacosWorkComposition {
         request: WorkAgentBrowseRequest,
         settings: WorkBrowserAdapterSettings,
     ) -> Result<WorkBrowserOutcome, WorkError> {
+        self.run_agent_step_inner(shell, probe, request, settings, None)
+            .await
+    }
+
+    /// Extracts cited records directly into a comparison artifact on the same admitted read step.
+    pub async fn run_collection_step(
+        &self,
+        shell: &CallbackHandle,
+        probe: &WorkAttemptProbe,
+        request: WorkAgentBrowseRequest,
+        settings: WorkBrowserAdapterSettings,
+        schema: WorkBrowseCollectionSchema,
+    ) -> Result<WorkBrowserOutcome, WorkError> {
+        self.run_agent_step_inner(shell, probe, request, settings, Some(schema))
+            .await
+    }
+
+    async fn run_agent_step_inner(
+        &self,
+        shell: &CallbackHandle,
+        probe: &WorkAttemptProbe,
+        request: WorkAgentBrowseRequest,
+        settings: WorkBrowserAdapterSettings,
+        collection: Option<WorkBrowseCollectionSchema>,
+    ) -> Result<WorkBrowserOutcome, WorkError> {
         let diagnostics = Diagnostics::from(&settings);
         let outputs = vec![request.output.clone()];
         let limits = request.limits;
@@ -144,7 +173,7 @@ impl MacosWorkComposition {
             WorkStepKindV1::Discover { .. } => Some("the web".to_owned()),
             _ => None,
         };
-        let invocation = compile_step(probe, request, settings)?;
+        let invocation = compile_step(probe, request, settings, collection.as_ref())?;
         let mut run = self
             .run_retained(
                 shell,
@@ -153,10 +182,11 @@ impl MacosWorkComposition {
                 None,
                 limits,
                 &outputs,
+                collection.as_ref(),
                 diagnostics,
             )
             .await?;
-        if let Some(host) = host {
+        if let Some(host) = host.filter(|_| collection.is_none()) {
             for artifact in &mut run.artifacts {
                 artifact.title = format!("Notes from {host}");
             }
@@ -184,6 +214,7 @@ impl MacosWorkComposition {
         intervention_origin: Option<String>,
         limits: WorkExecutionLimits,
         outputs: &[String],
+        collection: Option<&WorkBrowseCollectionSchema>,
         diagnostics: Diagnostics,
     ) -> Result<BrowserRun, WorkError> {
         #[cfg(feature = "public-qualification")]
@@ -348,7 +379,14 @@ impl MacosWorkComposition {
                 let (status, artifacts) = match (disposition, archived) {
                     (Some(AgentWorkDisposition::Succeeded), Some(archive)) => (
                         WorkAttemptStatus::Succeeded,
-                        map_archive(attempt.profile(), outputs, &archive)?,
+                        match collection {
+                            Some(schema) => vec![schema.artifact(
+                                attempt.profile(),
+                                outputs.first().ok_or(WorkError::Invalid)?,
+                                &archive,
+                            )?],
+                            None => map_archive(attempt.profile(), outputs, &archive)?,
+                        },
                     ),
                     (Some(AgentWorkDisposition::Cancelled), _) => {
                         (WorkAttemptStatus::Cancelled, vec![])
@@ -407,6 +445,7 @@ fn compile_step(
     probe: &WorkAttemptProbe,
     request: WorkAgentBrowseRequest,
     settings: WorkBrowserAdapterSettings,
+    collection: Option<&WorkBrowseCollectionSchema>,
 ) -> Result<crate::TrustedWorkRequest, WorkError> {
     if settings.profile.profile() != probe.profile() {
         return Err(WorkError::Invalid);
@@ -452,15 +491,18 @@ fn compile_step(
     let mut objective = request.objective;
     objective.push_str("\n\nThis step: ");
     objective.push_str(&task);
-    objective.push_str("\noutput_0: findings from the visited pages, as plain text.");
+    objective.push_str(match collection {
+        Some(_) => "\noutput_0: distinct records matching the requested collection schema. Preserve exact displayed values. Omit unsupported optional fields. Do not turn missing evidence into a negative or zero, mix different items into one record, or treat the visible subset as the complete catalog.",
+        None => "\noutput_0: findings from the visited pages, as plain text.",
+    });
     if objective.len() > zephium_core::work::MAX_WORK_TEXT_BYTES {
         return Err(WorkError::Capacity);
     }
-    let output_fields =
-        vec![
-            SemanticExtractionFieldSchema::try_text("output_0".into(), true, 4096)
-                .map_err(|_| WorkError::Invalid)?,
-        ];
+    let output_fields = vec![match collection {
+        Some(schema) => schema.extraction_field()?,
+        None => SemanticExtractionFieldSchema::try_text("output_0".into(), true, 4096)
+            .map_err(|_| WorkError::Invalid)?,
+    }];
     let invocation = PublicReadWorkInvocation::new(
         PublicReadWorkObjective {
             objective,

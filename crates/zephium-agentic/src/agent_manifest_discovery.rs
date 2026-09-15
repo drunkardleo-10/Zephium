@@ -114,6 +114,7 @@ impl AgentNavigationDiscovery {
             max_visits_per_destination,
         )?;
         scope.profile = DiscoveryProfile::PublicWeb;
+        scope.document_policy = crate::WorkBrowserDocumentPolicy::PublicQueryFinalization;
         Ok(scope)
     }
     /// This capability never permits authenticated state or effects.

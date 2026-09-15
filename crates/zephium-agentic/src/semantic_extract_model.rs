@@ -426,50 +426,7 @@ pub fn encode_semantic_extraction_request(
         ),
     )?;
     for field in schema.fields() {
-        checked_write(&mut output, format_args!("S name="))?;
-        write_quoted(&mut output, field.name())?;
-        checked_write(
-            &mut output,
-            format_args!(
-                " required={} kind={}",
-                field.required(),
-                extraction_kind_label(field.kind()),
-            ),
-        )?;
-        match field.kind() {
-            SemanticExtractionValueKind::Text => checked_write(
-                &mut output,
-                format_args!(
-                    " max_bytes={}",
-                    field
-                        .max_text_bytes()
-                        .ok_or(SemanticModelEncodingError::Invariant)?
-                ),
-            )?,
-            SemanticExtractionValueKind::Boolean => {}
-            SemanticExtractionValueKind::Unsigned => checked_write(
-                &mut output,
-                format_args!(
-                    " maximum={}",
-                    field
-                        .maximum_unsigned()
-                        .ok_or(SemanticModelEncodingError::Invariant)?
-                ),
-            )?,
-            SemanticExtractionValueKind::TextList => checked_write(
-                &mut output,
-                format_args!(
-                    " max_items={} max_item_bytes={}",
-                    field
-                        .max_list_items()
-                        .ok_or(SemanticModelEncodingError::Invariant)?,
-                    field
-                        .max_list_item_bytes()
-                        .ok_or(SemanticModelEncodingError::Invariant)?,
-                ),
-            )?,
-        }
-        checked_write(&mut output, format_args!("\n"))?;
+        encode_field(&mut output, field, None)?;
     }
     checked_write(&mut output, format_args!("EVIDENCE\n{}", read.content))?;
     let content = output.finish();
@@ -500,12 +457,84 @@ pub fn encode_semantic_extraction_request(
     })
 }
 
+fn encode_field(
+    output: &mut BoundedModelBuffer,
+    field: &crate::SemanticExtractionFieldSchema,
+    parent: Option<&str>,
+) -> Result<(), SemanticModelEncodingError> {
+    checked_write(output, format_args!("S"))?;
+    if let Some(parent) = parent {
+        checked_write(output, format_args!(" parent="))?;
+        write_quoted(output, parent)?;
+    }
+    checked_write(output, format_args!(" name="))?;
+    write_quoted(output, field.name())?;
+    checked_write(
+        output,
+        format_args!(
+            " required={} kind={}",
+            field.required(),
+            extraction_kind_label(field.kind()),
+        ),
+    )?;
+    match field.kind() {
+        SemanticExtractionValueKind::Text => checked_write(
+            output,
+            format_args!(
+                " max_bytes={}",
+                field
+                    .max_text_bytes()
+                    .ok_or(SemanticModelEncodingError::Invariant)?
+            ),
+        )?,
+        SemanticExtractionValueKind::Rows => checked_write(
+            output,
+            format_args!(
+                " max_items={}",
+                field
+                    .max_list_items()
+                    .ok_or(SemanticModelEncodingError::Invariant)?
+            ),
+        )?,
+        SemanticExtractionValueKind::Boolean => {}
+        SemanticExtractionValueKind::Unsigned => checked_write(
+            output,
+            format_args!(
+                " maximum={}",
+                field
+                    .maximum_unsigned()
+                    .ok_or(SemanticModelEncodingError::Invariant)?
+            ),
+        )?,
+        SemanticExtractionValueKind::TextList => checked_write(
+            output,
+            format_args!(
+                " max_items={} max_item_bytes={}",
+                field
+                    .max_list_items()
+                    .ok_or(SemanticModelEncodingError::Invariant)?,
+                field
+                    .max_list_item_bytes()
+                    .ok_or(SemanticModelEncodingError::Invariant)?,
+            ),
+        )?,
+    }
+    checked_write(output, format_args!("\n"))?;
+    if let Some(children) = field.row_fields() {
+        for child in children {
+            encode_field(output, child, Some(field.name()))?;
+        }
+    }
+    Ok(())
+}
+
 fn extraction_kind_label(kind: SemanticExtractionValueKind) -> &'static str {
     match kind {
         SemanticExtractionValueKind::Text => "text",
         SemanticExtractionValueKind::Boolean => "boolean",
         SemanticExtractionValueKind::Unsigned => "unsigned",
         SemanticExtractionValueKind::TextList => "text_list",
+        SemanticExtractionValueKind::Rows => "rows",
     }
 }
 
@@ -516,33 +545,44 @@ fn extraction_schema_guard(schema: &SemanticExtractionSchema) -> [u8; 32] {
     hasher.update(schema.source_roles().bits().to_be_bytes());
     hasher.update((schema.fields().len() as u64).to_be_bytes());
     for field in schema.fields() {
-        hasher.update((field.name().len() as u64).to_be_bytes());
-        hasher.update(field.name().as_bytes());
-        hasher.update([u8::from(field.required())]);
-        hasher.update([match field.kind() {
-            SemanticExtractionValueKind::Text => 1,
-            SemanticExtractionValueKind::Boolean => 2,
-            SemanticExtractionValueKind::Unsigned => 3,
-            SemanticExtractionValueKind::TextList => 4,
-        }]);
-        hasher.update(
-            u64::try_from(field.max_text_bytes().unwrap_or_default())
-                .unwrap_or(u64::MAX)
-                .to_be_bytes(),
-        );
-        hasher.update(field.maximum_unsigned().unwrap_or_default().to_be_bytes());
-        hasher.update(
-            u64::try_from(field.max_list_items().unwrap_or_default())
-                .unwrap_or(u64::MAX)
-                .to_be_bytes(),
-        );
-        hasher.update(
-            u64::try_from(field.max_list_item_bytes().unwrap_or_default())
-                .unwrap_or(u64::MAX)
-                .to_be_bytes(),
-        );
+        hash_field(&mut hasher, field);
     }
     hasher.finalize().into()
+}
+
+fn hash_field(hasher: &mut Sha256, field: &crate::SemanticExtractionFieldSchema) {
+    hasher.update((field.name().len() as u64).to_be_bytes());
+    hasher.update(field.name().as_bytes());
+    hasher.update([u8::from(field.required())]);
+    hasher.update([match field.kind() {
+        SemanticExtractionValueKind::Text => 1,
+        SemanticExtractionValueKind::Boolean => 2,
+        SemanticExtractionValueKind::Unsigned => 3,
+        SemanticExtractionValueKind::TextList => 4,
+        SemanticExtractionValueKind::Rows => 5,
+    }]);
+    hasher.update(
+        u64::try_from(field.max_text_bytes().unwrap_or_default())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    hasher.update(field.maximum_unsigned().unwrap_or_default().to_be_bytes());
+    hasher.update(
+        u64::try_from(field.max_list_items().unwrap_or_default())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    hasher.update(
+        u64::try_from(field.max_list_item_bytes().unwrap_or_default())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    if let Some(children) = field.row_fields() {
+        hasher.update((children.len() as u64).to_be_bytes());
+        for child in children {
+            hash_field(hasher, child);
+        }
+    }
 }
 
 fn extraction_request_guard(
@@ -932,6 +972,59 @@ mod tests {
         assert!(receipt.matches(&selected_schema, &selected));
         assert!(!receipt.matches(&alternative, &same_fragments));
         assert!(!receipt.matches(&schema, &all));
+    }
+
+    #[test]
+    fn row_child_contract_changes_invalidate_the_delivery_receipt() {
+        let (observation, original) = fixture();
+        let read = read_semantic_observation(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(45),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .unwrap();
+        let schema = |name: &str, required, bytes, rows| {
+            SemanticExtractionSchema::try_new(
+                original.id(),
+                vec![SemanticExtractionFieldSchema::try_rows(
+                    "items".into(),
+                    true,
+                    vec![
+                        SemanticExtractionFieldSchema::try_text(name.into(), required, bytes)
+                            .unwrap(),
+                    ],
+                    rows,
+                )
+                .unwrap()],
+            )
+            .unwrap()
+        };
+        let original = schema("name", true, 64, 3);
+        let encoded = encode_semantic_extraction_request(
+            &original,
+            &read,
+            SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .unwrap();
+        assert!(encoded.content.contains("parent=\"items\""));
+        let payload = encoded
+            .admit_conservative_utf8(
+                &SemanticTokenizerRevision::try_new("row-schema-v1".into()).unwrap(),
+            )
+            .unwrap();
+        let (_, _, delivery) = payload.into_provider_parts();
+        let receipt = delivery.commit();
+        assert!(receipt.matches(&original, &read));
+        for changed in [
+            schema("title", true, 64, 3),
+            schema("name", false, 64, 3),
+            schema("name", true, 63, 3),
+            schema("name", true, 64, 2),
+        ] {
+            assert!(!receipt.matches(&changed, &read));
+        }
     }
 
     #[test]

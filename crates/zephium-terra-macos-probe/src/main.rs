@@ -79,6 +79,10 @@ fn main() {
         [argument] if argument == "--live-agent-work" => work_durable::run_agent(),
         #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-read-work" => work_durable::run_agent_read(),
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-collection-work" => {
+            work_durable::run_agent_collection()
+        }
         [argument] if argument == "--live-public-luna-work-application-inspectable" => {
             work_application::run()
         }
@@ -322,7 +326,8 @@ impl ProbeFailure {
                 _,
             )) => "provider_model_protocol_unsupported_output",
             Self::Provider(TerraProbeProviderError::ModelProtocol(
-                AgentProviderProtocolError::ToolCall,
+                AgentProviderProtocolError::ToolCall
+                | AgentProviderProtocolError::ToolContract(_, _),
                 _,
             )) => "provider_model_protocol_tool_call",
             Self::Provider(TerraProbeProviderError::ModelProtocol(

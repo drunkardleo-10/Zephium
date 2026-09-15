@@ -139,7 +139,7 @@ pub(crate) fn request(
     let batch = SemanticActionBatch::bind(
         SemanticActionBatchId::new(1).unwrap(),
         &observation,
-        &[frame.clone()],
+        std::slice::from_ref(&frame),
         vec![proposal],
     )
     .unwrap();

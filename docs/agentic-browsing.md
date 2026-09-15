@@ -576,6 +576,17 @@ the reservation. An explicit frozen `with_baseline_read` provider configuration
 adds only this initial-scope tool to the restricted capability profiles; no
 other profile capability or continuation budget changes.
 
+Host-selected extraction schemas also admit one bounded `Rows` level with
+text, boolean and unsigned cells. Child declarations share the schema guard;
+each cell retains its own source edges under the existing aggregate limits.
+Row archives use version 3; scalar archives remain version 2. The Work adapter
+can map these rows directly to comparison cells, preserving missing optional
+values as unknown. This does not yet provide typed money, images or collection
+completeness. Symbol-only `locate` queries match literal retained substrings.
+Public-web discovery may finalize an initial query rewrite on the same exact
+HTTPS origin/path and native committed load, then freezes that URL; it grants
+no redirect or subsequent location-change authority.
+
 `extract` now consumes that bounded read through a distinct, terminal mapping
 turn. Only the exact prior tool-only `extract` correlation selecting the same
 trusted schema ID may bind a strictly newer same-plan call. Deterministic

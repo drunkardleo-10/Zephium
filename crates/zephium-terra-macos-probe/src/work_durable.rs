@@ -29,6 +29,7 @@ use zephium_work_composition::{durable_runtime::WorkBrowserAdapterSettings, Maco
 const OBJECTIVE: &str = "Find SQLite's official explanation of why WAL mode does not work when clients on different machines share a database over a network filesystem. Produce one concise source-backed note as a single plan responsibility. Use only public documentation at sqlite.org or www.sqlite.org. No account, writes, installations, or external communication are needed. Every factual output needs source-mapped human review.";
 const COORDINATED_OBJECTIVE: &str = "Explain SQLite's official reason that WAL mode does not work when clients on different machines share a database over a network filesystem. Use exactly two plan responsibilities: a delegated public-documentation research worker with one source-backed findings output, then a primary agent that depends on those findings and produces one concise source-backed explanation. Both outputs require source_mapped_needs_review. Use only sqlite.org or www.sqlite.org. No accounts, writes, installations or external communication are needed.";
 
+const AGENT_COLLECTION_OBJECTIVE: &str = "Read https://www.lego.com/en-us/themes/architecture in the browser and collect three distinct Architecture sets with their displayed prices and useful distinguishing details. Return a cited comparison of the observed products. Do not buy, sign in, change locale, or use search snippets as a substitute for inspecting the actual catalog. Omit details that the page does not establish.";
 const AGENT_READ_OBJECTIVE: &str = "From SQLite's official WAL documentation page, list every situation in which WAL mode does not work or has drawbacks, as cited findings with the page itself as the source. Read the actual page rather than relying on search snippets; use only sqlite.org.";
 const AGENT_OBJECTIVE: &str = "Compare Svelte Flow and React Flow as the canvas library for a desktop app: bundle size, license, and how actively each is maintained in 2026. Place the two libraries as subjects with cited findings, and finish with a short comparison.";
 
@@ -47,6 +48,7 @@ enum Mode {
     Agent,
     /// The same loop on an objective that needs a native page read.
     AgentRead,
+    AgentCollection,
 }
 
 pub(super) fn run() -> Result<(), super::ProbeFailure> {
@@ -67,6 +69,10 @@ pub(super) fn run_cancelled() -> Result<(), super::ProbeFailure> {
 
 pub(super) fn run_agent() -> Result<(), super::ProbeFailure> {
     run_mode(Mode::Agent)
+}
+
+pub(super) fn run_agent_collection() -> Result<(), super::ProbeFailure> {
+    run_mode(Mode::AgentCollection)
 }
 
 pub(super) fn run_agent_read() -> Result<(), super::ProbeFailure> {
@@ -121,11 +127,12 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     };
     // Credentials never enter Work, model context, diagnostics or serialized reports.
     let planning_key = load_macos_development_openai_credential().map_err(|_| Error::Keychain)?;
-    let browser_keys = (0..if matches!(mode, Mode::Agent | Mode::AgentRead) {
-        6
-    } else {
-        4
-    })
+    let browser_keys = (0
+        ..if matches!(mode, Mode::Agent | Mode::AgentRead | Mode::AgentCollection) {
+            6
+        } else {
+            4
+        })
         .map(|_| load_macos_development_openai_credential())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| Error::Keychain)?;
@@ -175,7 +182,9 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
                             runtime.block_on(async {
                                 tokio::time::timeout(
                                     Duration::from_secs(match mode {
-                                        Mode::Agent | Mode::AgentRead => 720,
+                                        Mode::Agent | Mode::AgentRead | Mode::AgentCollection => {
+                                            720
+                                        }
                                         Mode::Public => 160,
                                         _ => 240,
                                     }),
@@ -315,6 +324,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         return Ok(());
     }
     if let Some(failure) = failure {
+        std::fs::create_dir_all("target/work-runtime-proof").map_err(|_| Error::Output)?;
         // Reopening failed facts is useful evidence, but never a successful
         // research report. Native host shutdown has already acknowledged its
         // original owners; unknown attempt outcomes remain unknown in Store.
@@ -342,7 +352,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     } else {
         WorkExecutionStatus::NeedsReview
     };
-    if matches!(mode, Mode::Agent | Mode::AgentRead) {
+    if matches!(mode, Mode::Agent | Mode::AgentRead | Mode::AgentCollection) {
         let execution = &state.executions[0];
         let counts = |kind: &str| {
             execution
@@ -376,6 +386,13 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     if state.executions[0].status != expected_status || state.executions[0].artifacts.is_empty() {
         return Err(Error::Runtime);
     }
+    let collection_accepted = mode != Mode::AgentCollection || state.executions[0].artifacts.iter().any(|artifact| {
+        artifact.title == "Observed Architecture sets"
+            && matches!(&artifact.data, zephium_core::work::artifact::WorkArtifactDataV1::ComparisonMatrix { subjects, cells, .. }
+                if subjects.len() == 3 && cells.len() == 3 && cells.iter().all(|row| row.first().is_some_and(|cell|
+                    matches!(&cell.value, zephium_core::work::artifact::WorkCellValue::Text { text } if !text.is_empty()) && !cell.evidence.is_empty())))
+            && !artifact.evidence.is_empty()
+    });
     let mut evidence = Vec::new();
     for link in state.executions[0]
         .artifacts
@@ -407,7 +424,11 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     let output = std::path::Path::new("target/work-runtime-proof");
     std::fs::create_dir_all(output).map_err(|_| Error::Output)?;
     std::fs::write(
-        output.join(if mode == Mode::AgentRead {
+        output.join(if !collection_accepted {
+            "agent-collection-incomplete.json"
+        } else if mode == Mode::AgentCollection {
+            "agent-collection-run.json"
+        } else if mode == Mode::AgentRead {
             "agent-read-run.json"
         } else if mode == Mode::Agent {
             "agent-run.json"
@@ -419,6 +440,8 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             "public-research.json"
         }),
         serde_json::to_vec_pretty(&serde_json::json!({
+            "fixed_collection_assignment": mode == Mode::AgentCollection,
+            "collection_accepted": collection_accepted,
             "projection": state,
             "historical_evidence": evidence,
         }))
@@ -430,7 +453,10 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     {
         return Err(Error::Runtime);
     }
-    writeln!(std::io::stdout().lock(), "durable-work: model_plan=true; exact_approval=true; native_browser=true; artifacts={}; resource_closed=true; reopened=true; semantic_status={:?}; content=redacted", state.executions[0].artifacts.len(), state.executions[0].status).map_err(|_| Error::Output)?;
+    if !collection_accepted {
+        return Err(Error::Runtime);
+    }
+    writeln!(std::io::stdout().lock(), "durable-work: fixed_collection_assignment={}; native_browser=true; artifacts={}; resource_closed=true; reopened=true; semantic_status={:?}; content=redacted", mode == Mode::AgentCollection, state.executions[0].artifacts.len(), state.executions[0].status).map_err(|_| Error::Output)?;
     Ok(())
 }
 
@@ -470,7 +496,7 @@ async fn workflow(
             _ => return Err("profile_not_ready"),
         }
     };
-    if matches!(mode, Mode::Agent | Mode::AgentRead) {
+    if matches!(mode, Mode::Agent | Mode::AgentRead | Mode::AgentCollection) {
         return agent_workflow(
             handle,
             composition,
@@ -478,11 +504,7 @@ async fn workflow(
             binding,
             planning_key,
             browser_keys,
-            if mode == Mode::AgentRead {
-                AGENT_READ_OBJECTIVE
-            } else {
-                AGENT_OBJECTIVE
-            },
+            mode,
         )
         .await;
     }
@@ -991,8 +1013,14 @@ async fn agent_workflow(
     binding: zephium_app::AgentWorkProfileBinding,
     turn_key: zephium_agentic::AgentProviderCredential,
     mut browser_keys: Vec<zephium_agentic::AgentProviderCredential>,
-    objective: &str,
+    mode: Mode,
 ) -> Result<WorkflowResult, &'static str> {
+    let collection = mode == Mode::AgentCollection;
+    let objective = match mode {
+        Mode::AgentCollection => AGENT_COLLECTION_OBJECTIVE,
+        Mode::AgentRead => AGENT_READ_OBJECTIVE,
+        _ => AGENT_OBJECTIVE,
+    };
     let created = handle
         .work_authoring_command(
             profile,
@@ -1062,6 +1090,7 @@ async fn agent_workflow(
     };
     let keys = Arc::new(Mutex::new(browser_keys));
     let callback = handle.callback_handle();
+    let collection_assignment = CollectionAssignment;
     let state = WorkAgentService::new(handle.clone())
         .with_diagnostic(|event| {
             let _ = writeln!(std::io::stdout().lock(), "agent-work: loop={event:?}");
@@ -1077,7 +1106,7 @@ async fn agent_workflow(
             },
             None,
             WorkAgentProviders {
-                turn: &agent,
+                turn: if collection { &collection_assignment } else { &agent },
                 search: &search,
             },
             |probe, request| {
@@ -1093,9 +1122,20 @@ async fn agent_workflow(
                             .and_then(|value| value["kind"].as_str().map(str::to_owned))
                             .unwrap_or_default()
                     );
-                    composition
-                        .run_agent_step(callback, &probe, request, browser_settings(binding, key))
-                        .await
+                    if collection {
+                        use zephium_agentic::SemanticExtractionFieldSchema as Field;
+                        let schema = zephium_work_composition::durable_runtime::WorkBrowseCollectionSchema::try_new(
+                            "Observed Architecture sets".into(),
+                            vec![
+                                Field::try_text("name".into(), true, 256).map_err(|_| WorkError::Invalid)?,
+                                Field::try_text("displayed_price".into(), false, 128).map_err(|_| WorkError::Invalid)?,
+                                Field::try_text("details".into(), false, 768).map_err(|_| WorkError::Invalid)?,
+                            ], 3,
+                        )?;
+                        composition.run_collection_step(callback, &probe, request, browser_settings(binding, key), schema).await
+                    } else {
+                        composition.run_agent_step(callback, &probe, request, browser_settings(binding, key)).await
+                    }
                 }
             },
             |_| {},
@@ -1127,6 +1167,62 @@ async fn agent_workflow(
         || execution.artifacts.is_empty())
     .then_some("agent_outcome");
     Ok(WorkflowResult { state, failure })
+}
+
+// Qualify the live browser worker independently of main-agent planning quality.
+struct CollectionAssignment;
+impl zephium_core::work::agent::WorkAgentTurnProvider for CollectionAssignment {
+    fn turn<'a>(
+        &'a self,
+        input: &'a zephium_core::work::agent::WorkAgentTurnDisclosure,
+        _trace: zephium_core::work::synthesis::WorkSynthesisTrace,
+    ) -> zephium_core::work::agent::WorkAgentTurnFuture<'a> {
+        use zephium_core::work::agent::*;
+        Box::pin(async move {
+            let context = input.context();
+            let fetch = if context.steps.iter().any(|step| step.kind == "read") {
+                if !context
+                    .artifacts
+                    .iter()
+                    .any(|artifact| artifact.kind == "comparison_matrix")
+                {
+                    return Err(
+                        zephium_core::work::synthesis::WorkSynthesisError::NotDispatched(
+                            WorkError::Unavailable,
+                        ),
+                    );
+                }
+                vec![]
+            } else if let Some(source) = context.sources.iter().find(|source| {
+                zephium_agentic::ContextNavigationTarget::parse(&source.url).is_ok_and(|target| {
+                    target.as_url().host_str() == Some("www.lego.com")
+                        && target.as_url().path() == "/en-us/themes/architecture"
+                })
+            }) {
+                vec![WorkAgentFetch::Read {
+                    url: source.url.clone(),
+                }]
+            } else if context.steps.iter().any(|step| step.kind == "search") {
+                return Err(
+                    zephium_core::work::synthesis::WorkSynthesisError::NotDispatched(
+                        WorkError::Unavailable,
+                    ),
+                );
+            } else {
+                vec![WorkAgentFetch::Search { query: "site:lego.com/en-us/themes/architecture LEGO Architecture sets official catalog".into() }]
+            };
+            Ok(WorkAgentTurnResult {
+                output: WorkAgentTurnOutput {
+                    say: None,
+                    artifacts: vec![],
+                    finish: fetch.is_empty(),
+                    fetch,
+                    ask: None,
+                },
+                usage: WorkUsage::default(),
+            })
+        })
+    }
 }
 
 fn browser_settings(

@@ -2181,6 +2181,9 @@ pub enum AgentProviderProtocolError {
     /// A complete client tool call failed the closed browser-tool contract.
     #[error("agent provider tool call is invalid")]
     ToolCall,
+    /// A known tool failed a closed argument contract; carries no model text.
+    #[error("agent provider tool contract is invalid ({0:?}, {1:?})")]
+    ToolContract(AgentBrowserToolKind, AgentBrowserToolContractError),
     /// Terminal provider usage was absent or internally inconsistent.
     #[error("agent provider terminal usage is invalid")]
     Usage,

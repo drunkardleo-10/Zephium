@@ -151,7 +151,9 @@ const AGENT_EXTRACTION_INSTRUCTIONS_V1: &str = concat!(
     "Preserve schema field order, omit only fields marked ",
     "required=false when evidence is insufficient, and cite one through four exact @rN evidence ",
     "tokens in each value's sources array, in strictly increasing numeric order, for every ",
-    "scalar, collection, and list item. Printed inline markers are not citations: put all ",
+    "scalar, text_list collection, and text_list item. For rows, S parent lines define each record: ",
+    "cite each field separately, omit unsupported optional fields, and use an empty items array when no records are supported. ",
+    "Printed inline markers are not citations: put all ",
     "supporting refs in sources, and split claims into list items when they need different ",
     "evidence. Every factual assertion in a value, including a summary or list item, must ",
     "be supported by that value's own cited evidence; citations elsewhere do not cover it. ",
@@ -5678,9 +5680,15 @@ pub(super) fn bound_extraction_output_schema(schema: &SemanticExtractionSchema) 
     // The private bound continuation is constructed only after the exact schema/read
     // payload join. Provider constraints improve generation, never replace Rust admission.
     let mut output = extraction_output_schema().clone();
-    let variants = &output["properties"]["fields"]["items"]["properties"]["value"]["anyOf"];
-    let fields = schema
-        .fields()
+    output["properties"]["schema"] = json!({"type":"integer","enum":[schema.id().get()]});
+    output["properties"]["fields"] = bound_extraction_fields(schema.fields());
+    output
+}
+
+fn bound_extraction_fields(fields: &[crate::SemanticExtractionFieldSchema]) -> Value {
+    let variants = &extraction_output_schema()["properties"]["fields"]["items"]["properties"]
+        ["value"]["anyOf"];
+    let choices = fields
         .iter()
         .map(|field| {
             let index = match field.kind() {
@@ -5688,6 +5696,7 @@ pub(super) fn bound_extraction_output_schema(schema: &SemanticExtractionSchema) 
                 crate::SemanticExtractionValueKind::Boolean => 1,
                 crate::SemanticExtractionValueKind::Unsigned => 2,
                 crate::SemanticExtractionValueKind::TextList => 3,
+                crate::SemanticExtractionValueKind::Rows => 4,
             };
             let mut value = variants[index].clone();
             match field.kind() {
@@ -5703,6 +5712,17 @@ pub(super) fn bound_extraction_output_schema(schema: &SemanticExtractionSchema) 
                     value["properties"]["items"]["items"]["properties"]["value"]["maxLength"] =
                         json!(field.max_list_item_bytes());
                 }
+                crate::SemanticExtractionValueKind::Rows => {
+                    value["properties"]["items"]["maxItems"] = json!(field.max_list_items());
+                    let fields = field.row_fields().unwrap_or_default();
+                    let mut row = bound_extraction_fields(fields);
+                    row["minItems"] = json!(fields
+                        .iter()
+                        .filter(|field| field.required())
+                        .count()
+                        .max(1));
+                    value["properties"]["items"]["items"]["properties"]["fields"] = row;
+                }
             }
             strict_object(vec![
                 ("name", json!({"type":"string","enum":[field.name()]})),
@@ -5710,15 +5730,7 @@ pub(super) fn bound_extraction_output_schema(schema: &SemanticExtractionSchema) 
             ])
         })
         .collect();
-    output["properties"]["schema"] = json!({"type":"integer","enum":[schema.id().get()]});
-    output["properties"]["fields"]["items"] = any_of(fields);
-    output["properties"]["fields"]["maxItems"] = json!(schema.fields().len());
-    output["properties"]["fields"]["minItems"] = json!(schema
-        .fields()
-        .iter()
-        .filter(|field| field.required())
-        .count());
-    output
+    json!({"type":"array", "minItems":fields.iter().filter(|field| field.required()).count(), "maxItems":fields.len(), "items":any_of(choices)})
 }
 
 // Provider generation aid for SemanticText's control-character refusal, not a
@@ -5800,6 +5812,25 @@ fn build_extraction_output_schema() -> Value {
             }),
         ),
         ("value", any_of(vec![text, boolean, unsigned, text_list])),
+    ]);
+    let rows = extraction_tagged_object(
+        "rows",
+        vec![(
+            "items",
+            json!({
+                "type":"array", "maxItems":crate::MAX_SEMANTIC_EXTRACTION_LIST_ITEMS,
+                "items":strict_object(vec![("fields", json!({"type":"array", "minItems":1, "maxItems":crate::MAX_SEMANTIC_EXTRACTION_FIELDS, "items":field.clone()}))])
+            }),
+        )],
+    );
+    let mut field = field;
+    let scalar_variants = &field["properties"]["value"]["anyOf"];
+    field["properties"]["value"] = any_of(vec![
+        scalar_variants[0].clone(),
+        scalar_variants[1].clone(),
+        scalar_variants[2].clone(),
+        scalar_variants[3].clone(),
+        rows,
     ]);
     strict_object(vec![
         (
@@ -5903,7 +5934,7 @@ fn tool_description(kind: AgentBrowserToolKind) -> &'static str {
             "Capture fresh bounded semantic state. initial is viewport-oriented; subtree expands an already observed container beyond that initial selection. Use its current reference to inspect more of a long page or list."
         }
         AgentBrowserToolKind::Locate => {
-            "Search current retained semantics only. No matches is recoverable, not page-wide absence: simplify the query or snapshot a different/narrower scope. Use current refs, never selectors or guessed refs."
+            "Search retained semantics. Symbol-only queries ($, €, %) match literal substrings, never regex or wildcards. No matches is limited to this observation. Use current refs; snapshot another scope for missing content."
         }
         AgentBrowserToolKind::Act => {
             "Propose one bounded, homogeneous semantic action batch. Classify the action's effect, not the objective: read explores without changing form values; local_write changes reversible local page/form state, including search input and selection. Edits saved to a service require external_write; sending, buying and deleting require their corresponding stronger effects. The host independently assesses effects and permission."
@@ -8222,7 +8253,7 @@ mod tests {
                 (AgentBrowserToolKind::Forward, 197),
                 (AgentBrowserToolKind::Reload, 201),
                 (AgentBrowserToolKind::Snapshot, 1_682),
-                (AgentBrowserToolKind::Locate, 2_357),
+                (AgentBrowserToolKind::Locate, 2_373),
                 (AgentBrowserToolKind::Act, 11_001),
                 (AgentBrowserToolKind::Wait, 2_152),
                 (AgentBrowserToolKind::Read, 1_510),
@@ -8232,7 +8263,38 @@ mod tests {
                 (AgentBrowserToolKind::ResumeAfterHuman, 204),
             ]
         );
-        assert_eq!(sizes.iter().map(|(_, bytes)| bytes).sum::<usize>(), 22_244);
+        assert_eq!(sizes.iter().map(|(_, bytes)| bytes).sum::<usize>(), 22_260);
+    }
+
+    #[test]
+    fn bound_record_schema_constrains_columns_and_cell_types() {
+        use crate::{SemanticExtractionFieldSchema as Field, SemanticExtractionSchemaId};
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![Field::try_rows(
+                "records".into(),
+                true,
+                vec![
+                    Field::try_text("name".into(), true, 100).unwrap(),
+                    Field::try_unsigned("count".into(), false, 7).unwrap(),
+                ],
+                3,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let output = bound_extraction_output_schema(&schema);
+        validate_strict_schema(&output);
+        let rows = &output["properties"]["fields"]["items"]["anyOf"][0]["properties"]["value"]
+            ["properties"]["items"];
+        assert_eq!(rows["maxItems"], 3);
+        let fields = &rows["items"]["properties"]["fields"];
+        assert_eq!(fields["minItems"], 1);
+        assert_eq!(fields["maxItems"], 2);
+        assert_eq!(
+            fields["items"]["anyOf"][1]["properties"]["value"]["properties"]["value"]["maximum"],
+            7
+        );
     }
 
     #[test]

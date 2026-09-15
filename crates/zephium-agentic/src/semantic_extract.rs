@@ -1,9 +1,9 @@
 //! Closed, bounded structured extraction over committed semantic-read evidence.
 //!
-//! The model may map already-delivered `@rN` read fragments into one flat,
+//! The model may map already-delivered `@rN` read fragments into one bounded,
 //! versioned record. Rust owns the schema, bounds, source resolution,
 //! sensitivity checks, secret scanning, and result admission. This contract
-//! cannot express arbitrary JSON Schema, nested objects, DOM identity,
+//! cannot express arbitrary JSON Schema, arbitrarily nested objects, DOM identity,
 //! selectors, script, native handles, or generated markup.
 
 use std::collections::BTreeSet;
@@ -83,10 +83,16 @@ pub enum SemanticExtractionValueKind {
     Unsigned,
     /// One bounded list of bounded text items.
     TextList,
+    /// Bounded records with individually cited fields.
+    Rows,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum SemanticExtractionFieldSpec {
+    Rows {
+        fields: Vec<SemanticExtractionFieldSchema>,
+        max_items: usize,
+    },
     Text {
         max_bytes: usize,
     },
@@ -177,6 +183,41 @@ impl SemanticExtractionFieldSchema {
         })
     }
 
+    /// Constructs bounded rows of scalar fields; nested rows and lists refuse.
+    pub fn try_rows(
+        name: String,
+        required: bool,
+        fields: Vec<Self>,
+        max_items: usize,
+    ) -> Result<Self, SemanticExtractionSchemaError> {
+        validate_field_name(&name)?;
+        if max_items == 0 || max_items > MAX_SEMANTIC_EXTRACTION_LIST_ITEMS {
+            return Err(SemanticExtractionSchemaError::ListLimit);
+        }
+        if fields.iter().any(|field| {
+            matches!(
+                field.kind(),
+                SemanticExtractionValueKind::Rows | SemanticExtractionValueKind::TextList
+            )
+        }) {
+            return Err(SemanticExtractionSchemaError::NestedCollection);
+        }
+        validate_schema_fields(&fields)?;
+        Ok(Self {
+            name,
+            required,
+            spec: SemanticExtractionFieldSpec::Rows { fields, max_items },
+        })
+    }
+
+    /// Fields of each row, in schema order.
+    pub fn row_fields(&self) -> Option<&[Self]> {
+        match &self.spec {
+            SemanticExtractionFieldSpec::Rows { fields, .. } => Some(fields),
+            _ => None,
+        }
+    }
+
     /// Exact ASCII identifier used in the fixed output record.
     pub fn name(&self) -> &str {
         &self.name
@@ -189,42 +230,44 @@ impl SemanticExtractionFieldSchema {
 
     /// Closed value shape for this field.
     pub const fn kind(&self) -> SemanticExtractionValueKind {
-        match self.spec {
+        match &self.spec {
             SemanticExtractionFieldSpec::Text { .. } => SemanticExtractionValueKind::Text,
             SemanticExtractionFieldSpec::Boolean => SemanticExtractionValueKind::Boolean,
             SemanticExtractionFieldSpec::Unsigned { .. } => SemanticExtractionValueKind::Unsigned,
             SemanticExtractionFieldSpec::TextList { .. } => SemanticExtractionValueKind::TextList,
+            SemanticExtractionFieldSpec::Rows { .. } => SemanticExtractionValueKind::Rows,
         }
     }
 
     /// Per-value text byte limit, when this is a text field.
     pub const fn max_text_bytes(&self) -> Option<usize> {
-        match self.spec {
-            SemanticExtractionFieldSpec::Text { max_bytes } => Some(max_bytes),
+        match &self.spec {
+            SemanticExtractionFieldSpec::Text { max_bytes } => Some(*max_bytes),
             _ => None,
         }
     }
 
     /// Inclusive numeric maximum, when this is an unsigned field.
     pub const fn maximum_unsigned(&self) -> Option<u64> {
-        match self.spec {
-            SemanticExtractionFieldSpec::Unsigned { maximum } => Some(maximum),
+        match &self.spec {
+            SemanticExtractionFieldSpec::Unsigned { maximum } => Some(*maximum),
             _ => None,
         }
     }
 
     /// Per-list item-count limit, when this is a text-list field.
     pub const fn max_list_items(&self) -> Option<usize> {
-        match self.spec {
-            SemanticExtractionFieldSpec::TextList { max_items, .. } => Some(max_items),
+        match &self.spec {
+            SemanticExtractionFieldSpec::TextList { max_items, .. }
+            | SemanticExtractionFieldSpec::Rows { max_items, .. } => Some(*max_items),
             _ => None,
         }
     }
 
     /// Per-item text byte limit, when this is a text-list field.
     pub const fn max_list_item_bytes(&self) -> Option<usize> {
-        match self.spec {
-            SemanticExtractionFieldSpec::TextList { max_item_bytes, .. } => Some(max_item_bytes),
+        match &self.spec {
+            SemanticExtractionFieldSpec::TextList { max_item_bytes, .. } => Some(*max_item_bytes),
             _ => None,
         }
     }
@@ -255,22 +298,29 @@ impl SemanticExtractionSchema {
         id: SemanticExtractionSchemaId,
         fields: Vec<SemanticExtractionFieldSchema>,
     ) -> Result<Self, SemanticExtractionSchemaError> {
-        if fields.is_empty() || fields.len() > MAX_SEMANTIC_EXTRACTION_FIELDS {
+        validate_schema_fields(&fields)?;
+        let declared = fields.len()
+            + fields
+                .iter()
+                .filter_map(SemanticExtractionFieldSchema::row_fields)
+                .map(<[_]>::len)
+                .sum::<usize>();
+        let names = fields
+            .iter()
+            .map(|field| {
+                field.name.len()
+                    + field
+                        .row_fields()
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|child| child.name.len())
+                        .sum::<usize>()
+            })
+            .sum::<usize>();
+        if declared > MAX_SEMANTIC_EXTRACTION_FIELDS
+            || names > MAX_SEMANTIC_EXTRACTION_SCHEMA_NAME_BYTES
+        {
             return Err(SemanticExtractionSchemaError::FieldLimit);
-        }
-        let mut names = BTreeSet::new();
-        let mut name_bytes = 0_usize;
-        for field in &fields {
-            validate_field_name(field.name())?;
-            if !names.insert(field.name()) {
-                return Err(SemanticExtractionSchemaError::DuplicateField);
-            }
-            name_bytes = name_bytes
-                .checked_add(field.name().len())
-                .ok_or(SemanticExtractionSchemaError::NameLimit)?;
-            if name_bytes > MAX_SEMANTIC_EXTRACTION_SCHEMA_NAME_BYTES {
-                return Err(SemanticExtractionSchemaError::NameLimit);
-            }
         }
         Ok(Self {
             id,
@@ -317,6 +367,9 @@ impl fmt::Debug for SemanticExtractionSchema {
 /// Refusal to construct an invalid trusted extraction schema.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum SemanticExtractionSchemaError {
+    /// Rows contain only scalar fields.
+    #[error("nested extraction collection refused")]
+    NestedCollection,
     /// The schema was empty or exceeded the field ceiling.
     #[error("semantic extraction schema field ceiling is invalid")]
     FieldLimit,
@@ -335,6 +388,27 @@ pub enum SemanticExtractionSchemaError {
     /// A list ceiling was zero or exceeded its hard maximum.
     #[error("semantic extraction schema list ceiling is invalid")]
     ListLimit,
+}
+
+fn validate_schema_fields(
+    fields: &[SemanticExtractionFieldSchema],
+) -> Result<(), SemanticExtractionSchemaError> {
+    if fields.is_empty() || fields.len() > MAX_SEMANTIC_EXTRACTION_FIELDS {
+        return Err(SemanticExtractionSchemaError::FieldLimit);
+    }
+    let mut names = BTreeSet::new();
+    let mut name_bytes = 0;
+    for field in fields {
+        validate_field_name(field.name())?;
+        if !names.insert(field.name()) {
+            return Err(SemanticExtractionSchemaError::DuplicateField);
+        }
+        name_bytes += field.name().len();
+        if name_bytes > MAX_SEMANTIC_EXTRACTION_SCHEMA_NAME_BYTES {
+            return Err(SemanticExtractionSchemaError::NameLimit);
+        }
+    }
+    Ok(())
 }
 
 fn validate_field_name(name: &str) -> Result<(), SemanticExtractionSchemaError> {
@@ -540,9 +614,49 @@ impl fmt::Debug for SemanticExtractedTextList {
     }
 }
 
+/// One record with independently cited, schema-ordered fields.
+#[derive(Eq, PartialEq)]
+pub struct SemanticExtractedRow {
+    fields: Vec<SemanticExtractedField>,
+}
+impl SemanticExtractedRow {
+    /// Validated fields; absent optional fields remain absent.
+    pub fn fields(&self) -> &[SemanticExtractedField] {
+        &self.fields
+    }
+}
+impl fmt::Debug for SemanticExtractedRow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SemanticExtractedRow")
+            .field("fields", &self.fields.len())
+            .finish()
+    }
+}
+
+/// Bounded record collection; collection completeness remains in the read evidence.
+#[derive(Eq, PartialEq)]
+pub struct SemanticExtractedRows {
+    items: Vec<SemanticExtractedRow>,
+}
+impl SemanticExtractedRows {
+    /// Records in the observed/model-mapped order.
+    pub fn items(&self) -> &[SemanticExtractedRow] {
+        &self.items
+    }
+}
+impl fmt::Debug for SemanticExtractedRows {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SemanticExtractedRows")
+            .field("items", &self.items.len())
+            .finish()
+    }
+}
+
 /// One closed admitted extraction value.
 #[derive(Eq, PartialEq)]
 pub enum SemanticExtractedValue {
+    /// Record collection with field-level provenance.
+    Rows(SemanticExtractedRows),
     /// Bounded text scalar.
     Text(SemanticExtractedText),
     /// Boolean scalar.
@@ -561,6 +675,7 @@ impl SemanticExtractedValue {
             Self::Boolean(_) => SemanticExtractionValueKind::Boolean,
             Self::Unsigned(_) => SemanticExtractionValueKind::Unsigned,
             Self::TextList(_) => SemanticExtractionValueKind::TextList,
+            Self::Rows(_) => SemanticExtractionValueKind::Rows,
         }
     }
 }
@@ -572,6 +687,7 @@ impl fmt::Debug for SemanticExtractedValue {
             Self::Boolean(value) => value.fmt(formatter),
             Self::Unsigned(value) => value.fmt(formatter),
             Self::TextList(value) => value.fmt(formatter),
+            Self::Rows(value) => value.fmt(formatter),
         }
     }
 }
@@ -1068,54 +1184,16 @@ fn extract_semantic_read_inner<'a>(
         return Err(SemanticExtractionError::FieldLimit);
     }
 
-    let mut names = BTreeSet::new();
-    for field in &raw.fields {
-        validate_field_name(&field.name).map_err(|_| SemanticExtractionError::FieldName)?;
-        if !names.insert(field.name.as_str()) {
-            return Err(SemanticExtractionError::DuplicateField);
-        }
-    }
-
-    let mut present = vec![false; schema.fields().len()];
-    let mut previous_schema_index = None;
-    let mut fields = Vec::with_capacity(raw.fields.len());
     let mut sources = Vec::new();
     let mut counters = ExtractionCounters::new(result_guard);
-    for raw_field in raw.fields {
-        let Some(schema_index) = schema
-            .fields()
-            .iter()
-            .position(|field| field.name() == raw_field.name)
-        else {
-            return Err(SemanticExtractionError::UnexpectedField);
-        };
-        if previous_schema_index.is_some_and(|previous| schema_index <= previous) {
-            return Err(SemanticExtractionError::FieldOrder);
-        }
-        previous_schema_index = Some(schema_index);
-        present[schema_index] = true;
-        let field_schema = &schema.fields()[schema_index];
-        let value = admit_value(
-            field_schema,
-            raw_field.value,
-            read,
-            sensitivity_limit,
-            &mut sources,
-            &mut counters,
-        )?;
-        fields.push(SemanticExtractedField {
-            name: field_schema.name().to_owned(),
-            value,
-        });
-    }
-    if schema
-        .fields()
-        .iter()
-        .zip(present)
-        .any(|(field, present)| field.required() && !present)
-    {
-        return Err(SemanticExtractionError::MissingRequiredField);
-    }
+    let fields = admit_fields(
+        schema.fields(),
+        raw.fields,
+        read,
+        sensitivity_limit,
+        &mut sources,
+        &mut counters,
+    )?;
 
     let stats = SemanticExtractionStats {
         fields: u8::try_from(fields.len()).map_err(|_| SemanticExtractionError::Invariant)?,
@@ -1139,6 +1217,65 @@ fn extract_semantic_read_inner<'a>(
         read_omissions: read.omissions(),
         read_stats: read.stats(),
     })
+}
+
+fn admit_fields<'a>(
+    schemas: &[SemanticExtractionFieldSchema],
+    raw_fields: Vec<RawField>,
+    read: &SemanticReadResult<'a>,
+    sensitivity_limit: SemanticReadSensitivityLimit,
+    sources: &mut Vec<SemanticExtractionSource<'a>>,
+    counters: &mut ExtractionCounters,
+) -> Result<Vec<SemanticExtractedField>, SemanticExtractionError> {
+    if raw_fields.len() > MAX_SEMANTIC_EXTRACTION_FIELDS {
+        return Err(SemanticExtractionError::FieldLimit);
+    }
+    let mut names = BTreeSet::new();
+    for field in &raw_fields {
+        validate_field_name(&field.name).map_err(|_| SemanticExtractionError::FieldName)?;
+        if !names.insert(field.name.as_str()) {
+            return Err(SemanticExtractionError::DuplicateField);
+        }
+    }
+
+    let mut present = vec![false; schemas.len()];
+    let mut previous_schema_index = None;
+    let mut fields = Vec::with_capacity(raw_fields.len());
+    for raw_field in raw_fields {
+        let Some(schema_index) = schemas
+            .iter()
+            .position(|field| field.name() == raw_field.name)
+        else {
+            return Err(SemanticExtractionError::UnexpectedField);
+        };
+        if previous_schema_index.is_some_and(|previous| schema_index <= previous) {
+            return Err(SemanticExtractionError::FieldOrder);
+        }
+        previous_schema_index = Some(schema_index);
+        present[schema_index] = true;
+        let field_schema = &schemas[schema_index];
+        let value = admit_value(
+            field_schema,
+            raw_field.value,
+            read,
+            sensitivity_limit,
+            sources,
+            counters,
+        )?;
+        fields.push(SemanticExtractedField {
+            name: field_schema.name().to_owned(),
+            value,
+        });
+    }
+    if schemas
+        .iter()
+        .zip(present)
+        .any(|(field, present)| field.required() && !present)
+    {
+        return Err(SemanticExtractionError::MissingRequiredField);
+    }
+
+    Ok(fields)
 }
 
 struct ExtractionCounters {
@@ -1167,7 +1304,30 @@ fn admit_value<'a>(
     sources: &mut Vec<SemanticExtractionSource<'a>>,
     counters: &mut ExtractionCounters,
 ) -> Result<SemanticExtractedValue, SemanticExtractionError> {
-    match (field.spec, raw) {
+    match (&field.spec, raw) {
+        (SemanticExtractionFieldSpec::Rows { fields, max_items }, RawValue::Rows { items }) => {
+            if items.len() > *max_items {
+                return Err(SemanticExtractionError::ListLimit);
+            }
+            let mut rows = Vec::with_capacity(items.len());
+            for row in items {
+                if row.fields.is_empty() {
+                    return Err(SemanticExtractionError::MissingRequiredField);
+                }
+                let fields = admit_fields(
+                    fields,
+                    row.fields,
+                    read,
+                    sensitivity_limit,
+                    sources,
+                    counters,
+                )?;
+                rows.push(SemanticExtractedRow { fields });
+            }
+            Ok(SemanticExtractedValue::Rows(SemanticExtractedRows {
+                items: rows,
+            }))
+        }
         (
             SemanticExtractionFieldSpec::Text { max_bytes },
             RawValue::Text {
@@ -1176,7 +1336,7 @@ fn admit_value<'a>(
             },
         ) => Ok(SemanticExtractedValue::Text(admit_text(
             value,
-            max_bytes,
+            *max_bytes,
             raw_sources,
             read,
             sensitivity_limit,
@@ -1205,7 +1365,7 @@ fn admit_value<'a>(
                 sources: raw_sources,
             },
         ) => {
-            if value > maximum {
+            if value > *maximum {
                 return Err(SemanticExtractionError::UnsignedLimit);
             }
             add_value(counters)?;
@@ -1228,7 +1388,7 @@ fn admit_value<'a>(
                 sources: raw_sources,
             },
         ) => {
-            if items.len() > max_items || items.len() > MAX_SEMANTIC_EXTRACTION_LIST_ITEMS {
+            if items.len() > *max_items || items.len() > MAX_SEMANTIC_EXTRACTION_LIST_ITEMS {
                 return Err(SemanticExtractionError::ListLimit);
             }
             let source_span =
@@ -1237,7 +1397,7 @@ fn admit_value<'a>(
             for item in items {
                 admitted_items.push(admit_text(
                     item.value,
-                    max_item_bytes,
+                    *max_item_bytes,
                     item.sources,
                     read,
                     sensitivity_limit,
@@ -1400,6 +1560,8 @@ struct RawField {
 #[derive(Deserialize)]
 #[serde(tag = "k", deny_unknown_fields)]
 enum RawValue {
+    #[serde(rename = "rows")]
+    Rows { items: Vec<RawRow> },
     #[serde(rename = "text")]
     Text { value: String, sources: Vec<String> },
     #[serde(rename = "boolean")]
@@ -1411,6 +1573,12 @@ enum RawValue {
         items: Vec<RawTextItem>,
         sources: Vec<String>,
     },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRow {
+    fields: Vec<RawField>,
 }
 
 #[derive(Deserialize)]
@@ -1613,6 +1781,119 @@ mod tests {
             &serde_json::to_vec(output).expect("output"),
         )
         .expect_err("output must fail")
+    }
+
+    #[test]
+    fn record_collection_preserves_optional_fields_and_per_cell_provenance() {
+        let observation = observation();
+        let read = read(&observation, 31);
+        let delivery = delivered(&read);
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(29).unwrap(),
+            vec![SemanticExtractionFieldSchema::try_rows(
+                "records".into(),
+                true,
+                vec![
+                    SemanticExtractionFieldSchema::try_text("name".into(), true, 64).unwrap(),
+                    SemanticExtractionFieldSchema::try_unsigned("count".into(), false, 100)
+                        .unwrap(),
+                ],
+                2,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let output = json!({"v":1,"schema":29,"fields":[{"name":"records","value":{"k":"rows","items":[
+            {"fields":[{"name":"name","value":{"k":"text","value":"Quarterly summary","sources":["@r1"]}},{"name":"count","value":{"k":"unsigned","value":42,"sources":["@r2"]}}]},
+            {"fields":[{"name":"name","value":{"k":"text","value":"Another record","sources":["@r1"]}}]}
+        ]}}]});
+        let extract = |value: &Value| {
+            extract_semantic_read(
+                &schema,
+                &read,
+                &delivery,
+                SemanticReadSensitivityLimit::PublicOnly,
+                &serde_json::to_vec(value).unwrap(),
+            )
+        };
+        let result = extract(&output).unwrap().into_owned().unwrap();
+        let SemanticExtractedValue::Rows(rows) = result.fields()[0].value() else {
+            panic!()
+        };
+        assert_eq!(rows.items().len(), 2);
+        assert_eq!(rows.items()[1].fields().len(), 1);
+        let SemanticExtractedValue::Unsigned(count) = rows.items()[0].fields()[1].value() else {
+            panic!()
+        };
+        assert_eq!(
+            result
+                .sources(count.source_span())
+                .unwrap()
+                .next()
+                .unwrap()
+                .id
+                .get(),
+            2
+        );
+        assert_eq!(result.stats().values(), 3);
+        assert!(!format!("{rows:?}").contains("Quarterly"));
+        let mut missing = output.clone();
+        missing["fields"][0]["value"]["items"][0]["fields"] = json!([]);
+        assert_eq!(
+            extract(&missing).unwrap_err(),
+            SemanticExtractionError::MissingRequiredField
+        );
+        let mut foreign = output.clone();
+        foreign["fields"][0]["value"]["items"][0]["fields"][1]["value"]["sources"] =
+            json!(["@r999"]);
+        assert_eq!(
+            extract(&foreign).unwrap_err(),
+            SemanticExtractionError::SourceMissing
+        );
+        let mut sensitive = output.clone();
+        sensitive["fields"][0]["value"]["items"][0]["fields"][1]["value"]["sources"] =
+            json!(["@r5"]);
+        assert_eq!(
+            extract(&sensitive).unwrap_err(),
+            SemanticExtractionError::Sensitivity
+        );
+        let mut excess = output.clone();
+        excess["fields"][0]["value"]["items"]
+            .as_array_mut()
+            .unwrap()
+            .push(output["fields"][0]["value"]["items"][0].clone());
+        assert_eq!(
+            extract(&excess).unwrap_err(),
+            SemanticExtractionError::ListLimit
+        );
+    }
+
+    #[test]
+    fn record_schema_rejects_nested_collections_and_charges_child_fields() {
+        let field = SemanticExtractionFieldSchema::try_text("name".into(), true, 64).unwrap();
+        let row =
+            SemanticExtractionFieldSchema::try_rows("rows".into(), true, vec![field.clone()], 2)
+                .unwrap();
+        assert_eq!(
+            SemanticExtractionFieldSchema::try_rows("nested".into(), true, vec![row], 2)
+                .unwrap_err(),
+            SemanticExtractionSchemaError::NestedCollection
+        );
+        let children = (0..64)
+            .map(|i| {
+                SemanticExtractionFieldSchema::try_text(format!("field_{i}"), false, 64).unwrap()
+            })
+            .collect();
+        let row =
+            SemanticExtractionFieldSchema::try_rows("rows".into(), true, children, 2).unwrap();
+        assert_eq!(
+            SemanticExtractionSchema::try_new(
+                SemanticExtractionSchemaId::new(29).unwrap(),
+                vec![row]
+            )
+            .unwrap_err(),
+            SemanticExtractionSchemaError::FieldLimit
+        );
     }
 
     #[test]

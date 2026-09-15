@@ -259,3 +259,46 @@ fn preview_provenance_rejects_false_truncation_and_kind_joins() {
         );
     }
 }
+
+#[test]
+fn record_archive_roundtrip_preserves_cells_and_refuses_nesting_or_foreign_sources() {
+    let mut doc = document();
+    doc.version = 3;
+    for source in &mut doc.sources {
+        source.observation = Some(4);
+        source.observation_generation = Some(1);
+        source.captured_millis = Some(5);
+    }
+    let row = doc.fields.drain(..3).collect::<Vec<_>>();
+    doc.fields = vec![ArchivedField {
+        name: "records".into(),
+        value: ArchivedValue::Rows { items: vec![row] },
+    }];
+    let (descriptor, bytes) = encode(&doc);
+    let archive = AgentWorkArchivedExtraction::decode(descriptor, &bytes).unwrap();
+    let ArchivedValue::Rows { items } = archive.fields()[0].value() else {
+        panic!()
+    };
+    assert_eq!(items[0].len(), 3);
+    let ArchivedValue::Unsigned { value, sources } = items[0][2].value() else {
+        panic!()
+    };
+    assert_eq!(*value, 12);
+    assert!(archive.source(sources[0]).is_some());
+    doc.version = 2;
+    assert!(doc.validate().is_err());
+    doc.version = 3;
+    let ArchivedValue::Rows { items } = &mut doc.fields[0].value else {
+        panic!()
+    };
+    items[0][2].value = ArchivedValue::Unsigned {
+        value: 12,
+        sources: vec![999],
+    };
+    assert!(doc.validate().is_err());
+    let ArchivedValue::Rows { items } = &mut doc.fields[0].value else {
+        panic!()
+    };
+    items[0][2].value = ArchivedValue::Rows { items: vec![] };
+    assert!(doc.validate().is_err());
+}

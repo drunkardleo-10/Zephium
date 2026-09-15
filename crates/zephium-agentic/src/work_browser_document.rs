@@ -15,12 +15,21 @@ pub enum WorkBrowserDocumentPolicy {
     /// finalization. May also be frozen into an explicitly authorized successor
     /// operation. Each operation owns its own finalization and exact receipt.
     DocumentQueryFinalization,
+    /// Public browsing may rewrite its query during initial page setup. Freeze
+    /// one safe native URL on the exact same origin/path and committed load;
+    /// this grants neither a redirect nor any subsequent location change.
+    PublicQueryFinalization,
 }
 
 impl WorkBrowserDocumentPolicy {
     /// Checks trusted admission, before any request is sent to the native port.
     pub fn admits_request(self, requested: &ContextNavigationTarget) -> bool {
         let url = requested.as_url();
+        if self == Self::PublicQueryFinalization {
+            return url.scheme() == "https"
+                && url.fragment().is_none()
+                && crate::semantic_wire::model_safe_public_url(requested);
+        }
         self == Self::Exact
             || (url.scheme() == "https"
                 && url.query().is_none()
@@ -42,6 +51,11 @@ impl WorkBrowserDocumentPolicy {
         if requested == effective {
             return true;
         }
+        if self == Self::PublicQueryFinalization {
+            return self.admits_request(effective)
+                && requested.as_url().as_str().split('?').next()
+                    == effective.as_url().as_str().split('?').next();
+        }
         matches!(
             self,
             Self::InitialQueryFinalization | Self::DocumentQueryFinalization
@@ -62,6 +76,32 @@ impl WorkBrowserDocumentPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn public_finalization_preserves_the_exact_base_and_refuses_secret_locations() {
+        let policy = WorkBrowserDocumentPolicy::PublicQueryFinalization;
+        let requested =
+            ContextNavigationTarget::parse("https://example.test/catalog?sort=price").unwrap();
+        for changed in [
+            "https://example.test/catalog",
+            "https://example.test/catalog?sort=price&page=1",
+            "https://example.test/catalog?sort=name",
+        ] {
+            let effective = ContextNavigationTarget::parse(changed).unwrap();
+            assert!(policy.admits_final_document(&requested, &effective));
+            assert!(!WorkBrowserDocumentPolicy::Exact.admits_final_document(&requested, &effective));
+        }
+        for changed in [
+            "https://example.test/other?sort=price",
+            "https://other.test/catalog?sort=price",
+            "http://example.test/catalog?sort=price",
+            "https://example.test:444/catalog?sort=price",
+            "https://example.test/catalog?sort=price#fragment",
+            "https://example.test/catalog?access_token=private-value",
+        ] {
+            let effective = ContextNavigationTarget::parse(changed).unwrap();
+            assert!(!policy.admits_final_document(&requested, &effective));
+        }
+    }
     #[test]
     fn startup_relation_is_opaque_but_never_a_url_or_navigation_substitution() {
         let source = ContextNavigationTarget::parse("https://example.test/product").unwrap();

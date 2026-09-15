@@ -1006,6 +1006,8 @@ impl OpenAiResponsesStreamDecoder {
             return Err(AgentProviderProtocolError::Sequence);
         }
         let guard: [u8; 32] = Sha256::digest(arguments.as_bytes()).into();
+        #[cfg(feature = "probe-harness")]
+        let retained_arguments = self.config.store_response.then(|| arguments.clone());
         let call = AgentBrowserToolCall::decode_openai_with_replay(
             self.call,
             tool.item_id.clone(),
@@ -1014,7 +1016,24 @@ impl OpenAiResponsesStreamDecoder {
             arguments,
             None,
         )
-        .map_err(|_| AgentProviderProtocolError::ToolCall)?;
+        .map_err(|error| {
+            #[cfg(feature = "probe-harness")]
+            if let Some(arguments) = retained_arguments {
+                let _ = std::fs::create_dir_all("target/work-runtime-proof");
+                let body = serde_json::json!({
+                    "tool": tool.name.as_str(),
+                    "arguments": arguments,
+                    "error": format!("{error:?}"),
+                });
+                if let Ok(bytes) = serde_json::to_vec(&body) {
+                    let _ = std::fs::write(
+                        "target/work-runtime-proof/refused-browser-tool.json",
+                        bytes,
+                    );
+                }
+            }
+            AgentProviderProtocolError::ToolContract(tool.name, error)
+        })?;
         tool.argument_guard = Some(guard);
         tool.call = Some(call);
         Ok(())
@@ -2747,10 +2766,13 @@ mod tests {
                 &config_with_effective_models(64, &["gpt-5.6-terra", "gpt-5.6-luna"]),
             )
             .expect("decoder");
-            assert_eq!(
+            assert!(matches!(
                 decoder.push(encode_test_events(&events[..5]).as_bytes()),
-                Err(AgentProviderProtocolError::ToolCall)
-            );
+                Err(AgentProviderProtocolError::ToolContract(
+                    AgentBrowserToolKind::Locate,
+                    _
+                ))
+            ));
             assert!(decoder.finish().is_err());
         }
     }
@@ -2810,9 +2832,18 @@ mod tests {
         );
         assert_eq!(
             decoder.push(done.as_bytes()),
-            Err(AgentProviderProtocolError::ToolCall)
+            Err(AgentProviderProtocolError::ToolContract(
+                AgentBrowserToolKind::Navigate,
+                super::super::AgentBrowserToolContractError::Arguments
+            ))
         );
-        assert_eq!(decoder.push(b""), Err(AgentProviderProtocolError::ToolCall));
+        assert_eq!(
+            decoder.push(b""),
+            Err(AgentProviderProtocolError::ToolContract(
+                AgentBrowserToolKind::Navigate,
+                super::super::AgentBrowserToolContractError::Arguments
+            ))
+        );
         assert!(!format!("{decoder:?}").contains("#secret"));
     }
 

@@ -147,6 +147,14 @@ impl SemanticLocateQuery {
         }
         let mut normalized = String::with_capacity(source.len());
         normalize_into(&mut normalized, &source);
+        if normalized.is_empty() && !source.trim().is_empty() {
+            return Ok(Self {
+                normalized: source.trim().to_owned(),
+                source,
+                terms: Vec::new(),
+                required_terms: QueryTermBits::default(),
+            });
+        }
         if normalized.is_empty() || normalized.len() > MAX_SEMANTIC_LOCATE_NORMALIZED_QUERY_BYTES {
             return Err(SemanticLocateError::Query);
         }
@@ -186,7 +194,7 @@ impl SemanticLocateQuery {
         self.source.len()
     }
 
-    /// Number of distinct normalized lookup terms.
+    /// Number of normalized lookup terms; zero denotes a literal symbol query.
     pub fn term_count(&self) -> usize {
         self.terms.len()
     }
@@ -859,6 +867,35 @@ fn match_node(
     inherited: QueryTermBits,
     ancestor_contribution: &mut QueryTermBits,
 ) -> Option<NodeMatch> {
+    if query.terms.is_empty() {
+        *ancestor_contribution = QueryTermBits::default();
+        let literal = query.normalized.as_str();
+        let name = node.name().map(|name| name.as_str());
+        let text = node.text().map(|text| text.as_str());
+        let value = match node.value() {
+            Some(SemanticValueSummary::Text(value)) => Some(value.preview().text()),
+            _ => None,
+        };
+        let quality = if name == Some(literal) {
+            SemanticLocateMatchQuality::ExactName
+        } else if text == Some(literal) {
+            SemanticLocateMatchQuality::ExactText
+        } else if value == Some(literal) {
+            SemanticLocateMatchQuality::ExactValue
+        } else if name.is_some_and(|name| name.contains(literal)) {
+            SemanticLocateMatchQuality::NamePhrase
+        } else if text.is_some_and(|text| text.contains(literal)) {
+            SemanticLocateMatchQuality::TextPhrase
+        } else if value.is_some_and(|value| value.contains(literal)) {
+            SemanticLocateMatchQuality::PartialSemantics
+        } else {
+            return None;
+        };
+        return Some(NodeMatch {
+            quality,
+            unmatched_terms: 0,
+        });
+    }
     let required = query.required_term_bits();
     let mut across = QueryTermBits::default();
     let mut name_bits = QueryTermBits::default();
@@ -1784,13 +1821,38 @@ mod tests {
     }
 
     #[test]
+    fn symbol_queries_find_retained_prices_without_wildcards_or_scope_expansion() {
+        let observation = observation(1200, "Price $159.99 or €149.99");
+        for query in ["$", " € "] {
+            let result = locate(&observation, 1, query, SemanticLocateScope::Initial, 8);
+            assert_eq!(result.matches().len(), 1);
+            assert_eq!(
+                result.matches()[0].reference(),
+                observation.frames()[0].nodes()[2].reference()
+            );
+        }
+        for query in ["*", ".*", "---", "£"] {
+            assert!(
+                locate(&observation, 1, query, SemanticLocateScope::Initial, 8)
+                    .matches()
+                    .is_empty()
+            );
+        }
+        let elsewhere =
+            SemanticLocateScope::Subtree(observation.frames()[0].nodes()[4].reference());
+        assert!(locate(&observation, 1, "$", elsewhere, 8)
+            .matches()
+            .is_empty());
+    }
+
+    #[test]
     fn query_and_budget_limits_are_explicit() {
         assert_eq!(
             SemanticLocateQuery::try_new(String::new()).expect_err("empty"),
             SemanticLocateError::Query
         );
         assert_eq!(
-            SemanticLocateQuery::try_new("---".to_owned()).expect_err("no terms"),
+            SemanticLocateQuery::try_new(" \t ".to_owned()).expect_err("no terms"),
             SemanticLocateError::Query
         );
         assert_eq!(

@@ -158,42 +158,17 @@ impl AgentWorkArtifactPublication {
                 })
                 .collect()
         };
-        let mut fields = Vec::new();
-        for field in result.fields() {
-            let value = match field.value() {
-                SemanticExtractedValue::Text(value) => ArchivedValue::Text {
-                    value: value.as_str().to_owned(),
-                    sources: cite(value.source_span())?,
-                },
-                SemanticExtractedValue::Boolean(value) => ArchivedValue::Boolean {
-                    value: value.value(),
-                    sources: cite(value.source_span())?,
-                },
-                SemanticExtractedValue::Unsigned(value) => ArchivedValue::Unsigned {
-                    value: value.value(),
-                    sources: cite(value.source_span())?,
-                },
-                SemanticExtractedValue::TextList(value) => ArchivedValue::TextList {
-                    sources: cite(value.source_span())?,
-                    items: value
-                        .items()
-                        .iter()
-                        .map(|item| {
-                            Ok(ArchivedText {
-                                value: item.as_str().to_owned(),
-                                sources: cite(item.source_span())?,
-                            })
-                        })
-                        .collect::<Result<_, AgentWorkJournalError>>()?,
-                },
-            };
-            fields.push(ArchivedField {
-                name: field.name().to_owned(),
-                value,
-            });
-        }
+        let fields = archive_fields(result.fields(), &mut cite)?;
         let document = ArchivedDocument {
-            version: 2,
+            version: if result
+                .fields()
+                .iter()
+                .any(|field| field.value().kind() == SemanticExtractionValueKind::Rows)
+            {
+                3
+            } else {
+                2
+            },
             id: ulid::Ulid::new().0.to_be_bytes(),
             profile,
             key: mutation.next().key(),
@@ -241,6 +216,54 @@ impl fmt::Debug for AgentWorkArtifactPublication {
     }
 }
 
+fn archive_fields(
+    input: &[SemanticExtractedField],
+    cite: &mut impl FnMut(SemanticExtractionSourceSpan) -> Result<Vec<u16>, AgentWorkJournalError>,
+) -> Result<Vec<ArchivedField>, AgentWorkJournalError> {
+    let mut fields = Vec::new();
+    for field in input {
+        let value = match field.value() {
+            SemanticExtractedValue::Rows(value) => ArchivedValue::Rows {
+                items: value
+                    .items()
+                    .iter()
+                    .map(|row| archive_fields(row.fields(), cite))
+                    .collect::<Result<_, _>>()?,
+            },
+            SemanticExtractedValue::Text(value) => ArchivedValue::Text {
+                value: value.as_str().to_owned(),
+                sources: cite(value.source_span())?,
+            },
+            SemanticExtractedValue::Boolean(value) => ArchivedValue::Boolean {
+                value: value.value(),
+                sources: cite(value.source_span())?,
+            },
+            SemanticExtractedValue::Unsigned(value) => ArchivedValue::Unsigned {
+                value: value.value(),
+                sources: cite(value.source_span())?,
+            },
+            SemanticExtractedValue::TextList(value) => ArchivedValue::TextList {
+                sources: cite(value.source_span())?,
+                items: value
+                    .items()
+                    .iter()
+                    .map(|item| {
+                        Ok(ArchivedText {
+                            value: item.as_str().to_owned(),
+                            sources: cite(item.source_span())?,
+                        })
+                    })
+                    .collect::<Result<_, AgentWorkJournalError>>()?,
+            },
+        };
+        fields.push(ArchivedField {
+            name: field.name().to_owned(),
+            value,
+        });
+    }
+    Ok(fields)
+}
+
 /// A schema field from archived, untrusted model-mapped data.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -262,6 +285,11 @@ impl ArchivedField {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ArchivedValue {
+    /// Bounded rows with per-field historical citations.
+    Rows {
+        /// Records in their original order.
+        items: Vec<Vec<ArchivedField>>,
+    },
     /// Text and read-local citation identities.
     Text {
         #[doc = "Bounded hostile text."]
@@ -470,7 +498,7 @@ impl fmt::Debug for AgentWorkArchivedExtraction {
 impl ArchivedDocument {
     fn validate(&self) -> Result<(), AgentWorkJournalError> {
         let invalid = AgentWorkJournalError::Uncertain;
-        if !matches!(self.version, 1 | 2)
+        if !matches!(self.version, 1..=3)
             || self.id == [0; 16]
             || self.schema == 0
             || self.observation == 0
@@ -487,7 +515,7 @@ impl ArchivedDocument {
                 && (source.observation.is_some()
                     || source.observation_generation.is_some()
                     || source.captured_millis.is_some()))
-                || (self.version == 2
+                || (self.version >= 2
                     && (source.observation.is_none_or(|id| id == 0)
                         || source.observation_generation.is_none_or(|id| id == 0)
                         || source.captured_millis.is_none()))
@@ -564,7 +592,7 @@ impl ArchivedDocument {
         if source_bytes > 32 * 1024 {
             return Err(AgentWorkJournalError::Capacity);
         }
-        let (mut text_bytes, mut edges, mut values, mut name_bytes) = (0, 0, 0, 0);
+        let (mut text_bytes, mut edges, mut values) = (0, 0, 0);
         let mut names = std::collections::BTreeSet::new();
         let mut cite = |ids: &[u16]| -> Result<(), AgentWorkJournalError> {
             if ids.is_empty()
@@ -578,36 +606,63 @@ impl ArchivedDocument {
             edges += ids.len();
             Ok(())
         };
+        let mut groups: Vec<&[ArchivedField]> = vec![&self.fields];
         for field in &self.fields {
-            name_bytes += field.name.len();
-            if SemanticExtractionFieldSchema::try_boolean(field.name.clone(), false).is_err()
-                || name_bytes > MAX_SEMANTIC_EXTRACTION_SCHEMA_NAME_BYTES
-                || !names.insert(&field.name)
-            {
-                return Err(invalid);
-            }
-            match &field.value {
-                ArchivedValue::Text { value, sources } => {
-                    valid_text(value, MAX_SEMANTIC_EXTRACTION_TEXT_BYTES)?;
-                    text_bytes += value.len();
-                    values += 1;
-                    cite(sources)?;
+            if let ArchivedValue::Rows { items } = &field.value {
+                if self.version < 3 || items.len() > MAX_SEMANTIC_EXTRACTION_LIST_ITEMS {
+                    return Err(invalid);
                 }
-                ArchivedValue::Boolean { sources, .. }
-                | ArchivedValue::Unsigned { sources, .. } => {
-                    values += 1;
-                    cite(sources)?;
-                }
-                ArchivedValue::TextList { items, sources } => {
-                    if items.len() > MAX_SEMANTIC_EXTRACTION_LIST_ITEMS {
+                for row in items {
+                    if row.is_empty()
+                        || row.len() > MAX_SEMANTIC_EXTRACTION_FIELDS
+                        || row.iter().any(|field| {
+                            matches!(
+                                field.value,
+                                ArchivedValue::Rows { .. } | ArchivedValue::TextList { .. }
+                            )
+                        })
+                    {
                         return Err(invalid);
                     }
-                    cite(sources)?;
-                    for item in items {
-                        valid_text(&item.value, MAX_SEMANTIC_EXTRACTION_LIST_ITEM_BYTES)?;
-                        text_bytes += item.value.len();
+                    groups.push(row);
+                }
+            }
+        }
+        for group in groups {
+            names.clear();
+            let mut name_bytes = 0;
+            for field in group {
+                name_bytes += field.name.len();
+                if SemanticExtractionFieldSchema::try_boolean(field.name.clone(), false).is_err()
+                    || name_bytes > MAX_SEMANTIC_EXTRACTION_SCHEMA_NAME_BYTES
+                    || !names.insert(&field.name)
+                {
+                    return Err(invalid);
+                }
+                match &field.value {
+                    ArchivedValue::Rows { .. } => {}
+                    ArchivedValue::Text { value, sources } => {
+                        valid_text(value, MAX_SEMANTIC_EXTRACTION_TEXT_BYTES)?;
+                        text_bytes += value.len();
                         values += 1;
-                        cite(&item.sources)?;
+                        cite(sources)?;
+                    }
+                    ArchivedValue::Boolean { sources, .. }
+                    | ArchivedValue::Unsigned { sources, .. } => {
+                        values += 1;
+                        cite(sources)?;
+                    }
+                    ArchivedValue::TextList { items, sources } => {
+                        if items.len() > MAX_SEMANTIC_EXTRACTION_LIST_ITEMS {
+                            return Err(invalid);
+                        }
+                        cite(sources)?;
+                        for item in items {
+                            valid_text(&item.value, MAX_SEMANTIC_EXTRACTION_LIST_ITEM_BYTES)?;
+                            text_bytes += item.value.len();
+                            values += 1;
+                            cite(&item.sources)?;
+                        }
                     }
                 }
             }

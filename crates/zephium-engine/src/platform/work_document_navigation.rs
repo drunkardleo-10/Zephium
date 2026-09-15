@@ -1257,6 +1257,35 @@ mod tests {
     }
 
     #[test]
+    fn public_query_finalization_seals_one_native_document_and_then_remains_exact() {
+        let requested = "https://example.test/catalog?sort=price";
+        let effective = "https://example.test/catalog?sort=price&page=1";
+        let gate = WorkDocumentNavigation::default();
+        assert!(gate.allows("about:blank"));
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(99, phase, "about:blank")).unwrap();
+        }
+        gate.arm_with_policy(
+            ContextNavigationTarget::parse(requested).unwrap(),
+            zephium_agentic::WorkBrowserDocumentPolicy::PublicQueryFinalization,
+        )
+        .unwrap();
+        assert!(gate.allows(requested));
+        for phase in [E::Started, E::Committed] {
+            gate.observe(event(1, phase, requested)).unwrap();
+        }
+        assert_eq!(gate.location_changed(Some(effective)), Ok(false));
+        gate.observe(event(1, E::Finished, requested)).unwrap();
+        assert!(!gate.ready(Some(effective)));
+        let frozen = gate.finalize(|| Some(effective.into())).unwrap();
+        assert_eq!(frozen.as_url().as_str(), effective);
+        assert!(gate.ready(Some(effective)));
+        assert!(!gate.allows(effective));
+        assert_eq!(gate.location_changed(Some(requested)), Ok(true));
+        assert!(gate.failed());
+    }
+
+    #[test]
     fn finalization_sampling_remains_revision_fenced_by_equal_url_observation() {
         let finalizing = finalizing();
         assert!(finalizing
