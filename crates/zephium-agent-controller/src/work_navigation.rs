@@ -162,13 +162,13 @@ impl AgentWorkController {
                 .extraction_schema
                 .as_ref()
                 .ok_or(AgentWorkFailure::Contract)?;
-            let read = read_selected_semantic_observation(
+            let read = read_semantic_observation_for_schema(
                 observation,
                 SemanticReadAuthority::Acknowledged(continuation.baseline()),
                 captured_at,
                 SemanticReadSensitivityLimit::PublicOnly,
                 SemanticReadBudget::STANDARD,
-                schema.source_roles(),
+                schema,
             )
             .map_err(|error| AgentWorkFailure::Browser(AgentBrowserProviderError::Read(error)))?;
             state

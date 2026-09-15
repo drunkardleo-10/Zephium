@@ -82,6 +82,37 @@ loopback sockets; the authorized rerun passed. No signed-in form, cart, purchase
 parallel page, image/typed-money record or Windows workflow was qualified.
 B1/B2 and the remaining release blockers stay open.
 
+## 2026-09-15: Source-backed product URLs
+
+Typed URL fields now reach terminal mapping, version 4 storage and Work subject
+links. Only declared URL schemas add native destination fragments; default reads
+retain their previous projection. Source selection, exact public URL screening,
+matching destination citations and archive reload are independently checked.
+The collection adapter selects the subject URL by a trusted field name.
+
+One authorized public macOS/Luna catalog run returned three product names,
+displayed prices and product URLs. The reopened comparison linked each URL to
+native destination evidence and product identity; all three corresponded to the
+observed product routes. Resource failure and persistence failure were absent,
+with clean closure and Store reopen. The main assignment remains fixed; only
+the browser worker is model-directed. No follow-up navigation or action is
+qualified by a historical URL.
+
+There were three browser model calls: 19,229 input / 830 output tokens,
+4,367 micro-USD catalog-ceiling accounting and 12,310 ms summed model elapsed
+time. The terminal mapper used 4,030 input / 520 output tokens, 16,337 request
+bytes and 9,792 semantic bytes. These include the new URL evidence; no broader
+speed or reliability claim follows. Work's aggregate accounting is still
+conservative reservation. No provider bodies or page quotes are recorded here.
+
+Affected tests: 1,820 passed, two pre-existing ignored; workspace Clippy,
+durable-runtime composition Clippy, native build, formatting and diff checks
+passed. Cases include guessed URLs, prose-only URL citations, sensitive links,
+source-selection substitution, downgraded archives, destination substitution,
+and host-selected subject mapping. Typed currency, images, full worker-port
+integration, the Work citation-mapping fix and the remaining release blockers
+remain open.
+
 ## Earlier qualification evidence
 
 The physical-Windows procedure now has a checked-in, source-gated two-phase

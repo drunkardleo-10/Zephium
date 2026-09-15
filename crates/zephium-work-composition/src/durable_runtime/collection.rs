@@ -6,6 +6,7 @@ pub struct WorkBrowseCollectionSchema {
     title: String,
     fields: Vec<SemanticExtractionFieldSchema>,
     max_items: usize,
+    subject_url_field: Option<String>,
 }
 
 impl WorkBrowseCollectionSchema {
@@ -36,9 +37,23 @@ impl WorkBrowseCollectionSchema {
             title,
             fields,
             max_items,
+            subject_url_field: None,
         };
         schema.extraction_field()?;
         Ok(schema)
+    }
+
+    /// Selects which source-backed URL identifies a subject in Work.
+    pub fn with_subject_url_field(mut self, name: &str) -> Result<Self, WorkError> {
+        if !self
+            .fields
+            .iter()
+            .any(|field| field.name() == name && field.kind() == SemanticExtractionValueKind::Url)
+        {
+            return Err(WorkError::Invalid);
+        }
+        self.subject_url_field = Some(name.to_owned());
+        Ok(self)
     }
 
     pub(super) fn extraction_field(&self) -> Result<SemanticExtractionFieldSchema, WorkError> {
@@ -160,6 +175,18 @@ impl WorkBrowseCollectionSchema {
                             text: value.clone(),
                         }
                     }
+                    Some(ArchivedValue::Url { value, sources })
+                        if field.kind() == SemanticExtractionValueKind::Url =>
+                    {
+                        cell_evidence.extend(cite(sources)?);
+                        if self.subject_url_field.as_deref() == Some(field.name()) {
+                            subjects.last_mut().ok_or(WorkError::Invalid)?.homepage =
+                                Some(value.clone());
+                        }
+                        WorkCellValue::Text {
+                            text: value.clone(),
+                        }
+                    }
                     Some(ArchivedValue::Boolean { value, sources })
                         if field.kind() == SemanticExtractionValueKind::Boolean =>
                     {
@@ -216,6 +243,40 @@ impl WorkBrowseCollectionSchema {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subject_url_is_host_selected_and_keeps_identity_and_destination_citations() {
+        let schema = WorkBrowseCollectionSchema::try_new(
+            "Items".into(),
+            vec![
+                SemanticExtractionFieldSchema::try_text("name".into(), true, 256).unwrap(),
+                SemanticExtractionFieldSchema::try_url("product_url".into(), true, 512).unwrap(),
+            ],
+            3,
+        )
+        .unwrap();
+        assert!(schema.clone().with_subject_url_field("name").is_err());
+        let schema = schema.with_subject_url_field("product_url").unwrap();
+        let rows: Vec<Vec<ArchivedField>> = serde_json::from_value(serde_json::json!([[
+            {"name":"name","value":{"kind":"text","value":"Item A","sources":[1]}},
+            {"name":"product_url","value":{"kind":"url","value":"https://shop.example.test/a","sources":[2]}}
+        ]])).unwrap();
+        let data = schema
+            .comparison(&rows, &mut |ids| Ok(ids.iter().map(|id| id - 1).collect()))
+            .unwrap();
+        data.validate(2).unwrap();
+        let WorkArtifactDataV1::ComparisonMatrix {
+            subjects, cells, ..
+        } = data
+        else {
+            panic!()
+        };
+        assert_eq!(
+            subjects[0].homepage.as_deref(),
+            Some("https://shop.example.test/a")
+        );
+        assert_eq!(cells[0][0].evidence, [0, 1]);
+    }
 
     #[test]
     fn collection_keeps_row_identity_citations_and_missing_values_distinct() {

@@ -117,6 +117,7 @@ impl Capture {
 /// browser operation, codec, persistence, or provider-disclosure authority.
 #[derive(Default)]
 pub struct SemanticRetainedReadEvidence {
+    link_destinations: Option<bool>,
     context: Option<ContextJoin>,
     roles: Option<SemanticReadRoleSelection>,
     captures: Vec<Capture>,
@@ -182,6 +183,9 @@ impl SemanticRetainedReadEvidence {
                 .context
                 .is_some_and(|context| context != read.context())
             || self.roles.is_some_and(|roles| roles != read.source_roles())
+            || self
+                .link_destinations
+                .is_some_and(|links| links != read.includes_link_destinations())
             || read
                 .fragments()
                 .iter()
@@ -201,6 +205,7 @@ impl SemanticRetainedReadEvidence {
         }
         self.context = Some(read.context());
         self.roles = Some(read.source_roles());
+        self.link_destinations = Some(read.includes_link_destinations());
         if let Some(stats) = self.last_empty.take() {
             merge_omitted_stats(&mut self.dropped_stats, stats);
         }
@@ -314,6 +319,9 @@ impl SemanticRetainedReadEvidence {
             || self
                 .roles
                 .is_some_and(|roles| roles != current.source_roles())
+            || self
+                .link_destinations
+                .is_some_and(|links| links != current.includes_link_destinations())
         {
             return Err(SemanticReadError::AuthorityMismatch);
         }
@@ -417,6 +425,7 @@ impl SemanticRetainedReadEvidence {
             current.omissions,
             current.stats,
             current.roles,
+            current.link_destinations,
         );
         let mut hasher = Sha256::new();
         hasher.update(b"ZEPHIUM-RETAINED-READ-1\0");

@@ -409,7 +409,9 @@ pub fn encode_semantic_extraction_request(
     read: &SemanticReadResult<'_>,
     budget: SemanticModelEncodingBudget,
 ) -> Result<SemanticEncodedExtractionRequest, SemanticModelEncodingError> {
-    if schema.source_roles() != read.source_roles() {
+    if schema.source_roles() != read.source_roles()
+        || schema.includes_link_destinations() != read.includes_link_destinations()
+    {
         return Err(SemanticModelEncodingError::Invariant);
     }
     let read = encode_semantic_read(read, budget)?.into_extraction_parts();
@@ -478,7 +480,7 @@ fn encode_field(
         ),
     )?;
     match field.kind() {
-        SemanticExtractionValueKind::Text => checked_write(
+        SemanticExtractionValueKind::Text | SemanticExtractionValueKind::Url => checked_write(
             output,
             format_args!(
                 " max_bytes={}",
@@ -531,6 +533,7 @@ fn encode_field(
 fn extraction_kind_label(kind: SemanticExtractionValueKind) -> &'static str {
     match kind {
         SemanticExtractionValueKind::Text => "text",
+        SemanticExtractionValueKind::Url => "url",
         SemanticExtractionValueKind::Boolean => "boolean",
         SemanticExtractionValueKind::Unsigned => "unsigned",
         SemanticExtractionValueKind::TextList => "text_list",
@@ -556,6 +559,7 @@ fn hash_field(hasher: &mut Sha256, field: &crate::SemanticExtractionFieldSchema)
     hasher.update([u8::from(field.required())]);
     hasher.update([match field.kind() {
         SemanticExtractionValueKind::Text => 1,
+        SemanticExtractionValueKind::Url => 6,
         SemanticExtractionValueKind::Boolean => 2,
         SemanticExtractionValueKind::Unsigned => 3,
         SemanticExtractionValueKind::TextList => 4,

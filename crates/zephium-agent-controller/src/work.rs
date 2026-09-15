@@ -2438,13 +2438,13 @@ impl AgentWorkController {
                             let session =
                                 state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
                             session.check_live().map_err(AgentWorkFailure::Browser)?;
-                            let read = read_selected_semantic_observation(
+                            let read = read_semantic_observation_for_schema(
                                 &observation,
                                 SemanticReadAuthority::Acknowledged(checkpoint.baseline()),
                                 captured_at,
                                 SemanticReadSensitivityLimit::PublicOnly,
                                 SemanticReadBudget::STANDARD,
-                                schema.source_roles(),
+                                schema,
                             )
                             .map_err(|error| {
                                 AgentWorkFailure::Browser(AgentBrowserProviderError::Read(error))

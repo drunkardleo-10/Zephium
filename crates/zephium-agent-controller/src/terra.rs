@@ -2631,7 +2631,7 @@ impl AgentBrowserSession {
                 ))
                 .map_err(|_| AgentBrowserProviderError::Journal)?;
         }
-        let read = zephium_agentic::read_selected_semantic_observation(
+        let read = zephium_agentic::read_semantic_observation_for_schema(
             observation,
             match previous {
                 Some(previous) => SemanticReadAuthority::AcknowledgedExpansion {
@@ -2643,7 +2643,7 @@ impl AgentBrowserSession {
             captured_at,
             SemanticReadSensitivityLimit::PublicOnly,
             SemanticReadBudget::STANDARD,
-            schema.source_roles(),
+            schema,
         )
         .map_err(AgentBrowserProviderError::Read)?;
         let read = match evidence {

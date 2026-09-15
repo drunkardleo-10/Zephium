@@ -389,7 +389,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     let collection_accepted = mode != Mode::AgentCollection || state.executions[0].artifacts.iter().any(|artifact| {
         artifact.title == "Observed Architecture sets"
             && matches!(&artifact.data, zephium_core::work::artifact::WorkArtifactDataV1::ComparisonMatrix { subjects, cells, .. }
-                if subjects.len() == 3 && cells.len() == 3 && cells.iter().all(|row| row.first().is_some_and(|cell|
+                if subjects.len() == 3 && subjects.iter().all(|subject| subject.homepage.is_some()) && cells.len() == 3 && cells.iter().all(|row| row.first().is_some_and(|cell|
                     matches!(&cell.value, zephium_core::work::artifact::WorkCellValue::Text { text } if !text.is_empty()) && !cell.evidence.is_empty())))
             && !artifact.evidence.is_empty()
     });
@@ -1130,8 +1130,9 @@ async fn agent_workflow(
                                 Field::try_text("name".into(), true, 256).map_err(|_| WorkError::Invalid)?,
                                 Field::try_text("displayed_price".into(), false, 128).map_err(|_| WorkError::Invalid)?,
                                 Field::try_text("details".into(), false, 768).map_err(|_| WorkError::Invalid)?,
+                                Field::try_url("product_url".into(), true, 2048).map_err(|_| WorkError::Invalid)?,
                             ], 3,
-                        )?;
+                        )?.with_subject_url_field("product_url")?;
                         composition.run_collection_step(callback, &probe, request, browser_settings(binding, key), schema).await
                     } else {
                         composition.run_agent_step(callback, &probe, request, browser_settings(binding, key)).await

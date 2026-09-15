@@ -118,6 +118,7 @@ impl AgentWorkArtifactPublication {
                                 SemanticReadField::TextValue => 3,
                                 SemanticReadField::BooleanValue => 4,
                                 SemanticReadField::OrdinalValue => 5,
+                                SemanticReadField::LinkDestination => 6,
                             },
                             context: identity.id().bytes(),
                             context_generation: source.frame.context().context_generation().get(),
@@ -160,7 +161,9 @@ impl AgentWorkArtifactPublication {
         };
         let fields = archive_fields(result.fields(), &mut cite)?;
         let document = ArchivedDocument {
-            version: if result
+            version: if sources.values().any(|source| source.field == 6) {
+                4
+            } else if result
                 .fields()
                 .iter()
                 .any(|field| field.value().kind() == SemanticExtractionValueKind::Rows)
@@ -234,6 +237,10 @@ fn archive_fields(
                 value: value.as_str().to_owned(),
                 sources: cite(value.source_span())?,
             },
+            SemanticExtractedValue::Url(value) => ArchivedValue::Url {
+                value: value.as_str().to_owned(),
+                sources: cite(value.source_span())?,
+            },
             SemanticExtractedValue::Boolean(value) => ArchivedValue::Boolean {
                 value: value.value(),
                 sources: cite(value.source_span())?,
@@ -285,6 +292,13 @@ impl ArchivedField {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ArchivedValue {
+    /// Historical exact observed URL, with no live navigation authority.
+    Url {
+        /// Screened destination copied from a cited source.
+        value: String,
+        /// Historical read-local citations.
+        sources: Vec<u16>,
+    },
     /// Bounded rows with per-field historical citations.
     Rows {
         /// Records in their original order.
@@ -498,7 +512,7 @@ impl fmt::Debug for AgentWorkArchivedExtraction {
 impl ArchivedDocument {
     fn validate(&self) -> Result<(), AgentWorkJournalError> {
         let invalid = AgentWorkJournalError::Uncertain;
-        if !matches!(self.version, 1..=3)
+        if !matches!(self.version, 1..=4)
             || self.id == [0; 16]
             || self.schema == 0
             || self.observation == 0
@@ -584,6 +598,19 @@ impl ArchivedDocument {
                     }
                     source_bytes += value.len();
                 }
+                ArchivedSourceContent::Preview {
+                    value,
+                    source_bytes: original,
+                    truncated,
+                } if source.field == 6 && self.version >= 4 && source.role == "link" => {
+                    if *truncated
+                        || *original != value.len() as u64
+                        || !crate::semantic_extract::exact_public_url(value)
+                    {
+                        return Err(invalid);
+                    }
+                    source_bytes += value.len();
+                }
                 ArchivedSourceContent::Boolean { .. } if source.field == 4 => {}
                 ArchivedSourceContent::Ordinal { .. } if source.field == 5 => {}
                 _ => return Err(invalid),
@@ -643,6 +670,18 @@ impl ArchivedDocument {
                     ArchivedValue::Rows { .. } => {}
                     ArchivedValue::Text { value, sources } => {
                         valid_text(value, MAX_SEMANTIC_EXTRACTION_TEXT_BYTES)?;
+                        text_bytes += value.len();
+                        values += 1;
+                        cite(sources)?;
+                    }
+                    ArchivedValue::Url { value, sources } => {
+                        if self.version < 4 || !crate::semantic_extract::exact_public_url(value)
+                            || !sources.iter().any(|id| self.sources.iter().any(|source|
+                                source.id == *id && source.field == 6 && matches!(&source.content,
+                                    ArchivedSourceContent::Preview { value: observed, .. } if observed == value))) {
+                            return Err(invalid);
+                        }
+                        valid_text(value, crate::semantic::MAX_SEMANTIC_LINK_DESTINATION_BYTES)?;
                         text_bytes += value.len();
                         values += 1;
                         cite(sources)?;

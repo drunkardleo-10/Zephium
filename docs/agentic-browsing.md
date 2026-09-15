@@ -577,9 +577,9 @@ adds only this initial-scope tool to the restricted capability profiles; no
 other profile capability or continuation budget changes.
 
 Host-selected extraction schemas also admit one bounded `Rows` level with
-text, boolean and unsigned cells. Child declarations share the schema guard;
+text, boolean, unsigned and source-backed URL cells. Child declarations share the schema guard;
 each cell retains its own source edges under the existing aggregate limits.
-Row archives use version 3; scalar archives remain version 2. The Work adapter
+Row archives use version 3; scalar archives remain version 2 when no URL evidence is present. The Work adapter
 can map these rows directly to comparison cells, preserving missing optional
 values as unknown. This does not yet provide typed money, images or collection
 completeness. Ordinary Work read/discovery steps now return up to 16 individually
@@ -587,6 +587,17 @@ cited findings (1,024 bytes each), mapped directly to finding artifacts. Scalar
 node outputs remain compatible. A collection-level citation never substitutes
 for a finding's own sources; empty findings return unavailable.
 Symbol-only `locate` queries match literal retained substrings.
+URL fields require an exact public link destination from the native semantic
+observation; prose containing a URL is insufficient. The existing URL screen
+rejects credentials and sensitive embedded state. Schema-driven reads include
+`link_destination` fragments only when a URL field is declared, within the
+same fragment and byte budgets. The field selection is bound to read guards,
+retention and extraction admission. Version 4 archives independently revalidate
+the URL, source kind, exact cited value and capture provenance; readers retain
+versions 1–3. A host-selected URL field can populate a Work subject's homepage
+and its comparison cell keeps both identity and destination citations. None of
+these historical URLs supplies navigation or action authority.
+
 Public-web discovery may finalize an initial query rewrite on the same exact
 HTTPS origin/path and native committed load, then freezes that URL; it grants
 no redirect or subsequent location-change authority.

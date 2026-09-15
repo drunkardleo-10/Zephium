@@ -552,13 +552,13 @@ pub use semantic_probe_evidence::{
     WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION,
 };
 pub use semantic_read::{
-    read_selected_semantic_observation, read_semantic_observation, SemanticCaptureInstant,
-    SemanticReadAuthority, SemanticReadBudget, SemanticReadBudgetError, SemanticReadContent,
-    SemanticReadError, SemanticReadField, SemanticReadFragment, SemanticReadFragmentId,
-    SemanticReadOmission, SemanticReadOmissions, SemanticReadProvenance, SemanticReadResult,
-    SemanticReadRoleSelection, SemanticReadRoleSelectionError, SemanticReadSensitivityLimit,
-    SemanticReadStats, SemanticRetainedReadEvidence, MAX_SEMANTIC_READ_BYTES,
-    MAX_SEMANTIC_READ_ITEMS,
+    read_selected_semantic_observation, read_semantic_observation,
+    read_semantic_observation_for_schema, SemanticCaptureInstant, SemanticReadAuthority,
+    SemanticReadBudget, SemanticReadBudgetError, SemanticReadContent, SemanticReadError,
+    SemanticReadField, SemanticReadFragment, SemanticReadFragmentId, SemanticReadOmission,
+    SemanticReadOmissions, SemanticReadProvenance, SemanticReadResult, SemanticReadRoleSelection,
+    SemanticReadRoleSelectionError, SemanticReadSensitivityLimit, SemanticReadStats,
+    SemanticRetainedReadEvidence, MAX_SEMANTIC_READ_BYTES, MAX_SEMANTIC_READ_ITEMS,
 };
 pub use semantic_read_model::{
     encode_semantic_read, SemanticEncodedRead, SemanticReadDeliveryReceipt,

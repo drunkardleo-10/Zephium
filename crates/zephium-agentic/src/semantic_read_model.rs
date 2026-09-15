@@ -446,6 +446,9 @@ pub fn encode_semantic_read(
             format_args!(" retained_history=true refs=historical_read_only provenance=cohorts_v1"),
         )?;
     }
+    if read.includes_link_destinations() {
+        checked_write(&mut output, format_args!(" link_destinations=true"))?;
+    }
     if read.source_roles() != crate::SemanticReadRoleSelection::ALL {
         checked_write(&mut output, format_args!(" selected_roles="))?;
         for (index, role) in read.source_roles().roles().enumerate() {
@@ -700,6 +703,7 @@ const fn field_label(field: SemanticReadField) -> &'static str {
         SemanticReadField::TextValue => "text_value",
         SemanticReadField::BooleanValue => "boolean_value",
         SemanticReadField::OrdinalValue => "ordinal_value",
+        SemanticReadField::LinkDestination => "link_destination",
     }
 }
 
@@ -710,7 +714,7 @@ const fn field_matches_content(field: SemanticReadField, content: SemanticReadCo
             SemanticReadField::AccessibleName | SemanticReadField::VisibleText,
             SemanticReadContent::Text(_)
         ) | (
-            SemanticReadField::TextValue,
+            SemanticReadField::TextValue | SemanticReadField::LinkDestination,
             SemanticReadContent::ValuePreview(_)
         ) | (
             SemanticReadField::BooleanValue,

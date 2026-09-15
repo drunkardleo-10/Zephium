@@ -303,6 +303,8 @@ pub enum SemanticReadField {
     BooleanValue,
     /// Bounded ordinal form/control value.
     OrdinalValue,
+    /// Exact native-observed public link destination.
+    LinkDestination,
 }
 
 /// Non-actionable model-facing identity for one read fragment.
@@ -621,6 +623,7 @@ impl SemanticReadStats {
 
 /// Bounded borrowed readable projection of one exact semantic observation.
 pub struct SemanticReadResult<'a> {
+    link_destinations: bool,
     roles: SemanticReadRoleSelection,
     observation: SemanticObservationId,
     observation_generation: SemanticObservationGeneration,
@@ -646,7 +649,11 @@ struct SemanticReadSubtreeProof {
 }
 
 impl<'a> SemanticReadResult<'a> {
-    /// Exact trusted role selection used by this projection and its guard.
+    pub(crate) const fn includes_link_destinations(&self) -> bool {
+        self.link_destinations
+    }
+
+    /// Immutable trusted role selection for this read.
     pub const fn source_roles(&self) -> SemanticReadRoleSelection {
         self.roles
     }
@@ -797,8 +804,49 @@ pub fn read_selected_semantic_observation<'a>(
     budget: SemanticReadBudget,
     roles: SemanticReadRoleSelection,
 ) -> Result<SemanticReadResult<'a>, SemanticReadError> {
+    read_projection(
+        observation,
+        authority,
+        captured_at,
+        sensitivity,
+        budget,
+        roles,
+        false,
+    )
+}
+
+/// Uses the trusted schema to include URL evidence only when needed.
+pub fn read_semantic_observation_for_schema<'a>(
+    observation: &'a SemanticObservation,
+    authority: SemanticReadAuthority<'_>,
+    captured_at: SemanticCaptureInstant,
+    sensitivity: SemanticReadSensitivityLimit,
+    budget: SemanticReadBudget,
+    schema: &crate::SemanticExtractionSchema,
+) -> Result<SemanticReadResult<'a>, SemanticReadError> {
+    read_projection(
+        observation,
+        authority,
+        captured_at,
+        sensitivity,
+        budget,
+        schema.source_roles(),
+        schema.includes_link_destinations(),
+    )
+}
+
+fn read_projection<'a>(
+    observation: &'a SemanticObservation,
+    authority: SemanticReadAuthority<'_>,
+    captured_at: SemanticCaptureInstant,
+    sensitivity: SemanticReadSensitivityLimit,
+    budget: SemanticReadBudget,
+    roles: SemanticReadRoleSelection,
+    link_destinations: bool,
+) -> Result<SemanticReadResult<'a>, SemanticReadError> {
     let subtree = validate_authority(observation, authority)?;
     let mut builder = SemanticReadBuilder::new(observation, captured_at, budget, roles);
+    builder.link_destinations = link_destinations;
     for snapshot in observation.frames() {
         let omitted_child = observation.frame_boundaries().iter().any(|boundary| {
             boundary.parent_frame() == snapshot.frame().frame()
@@ -903,6 +951,7 @@ fn validate_authority(
 }
 
 struct SemanticReadBuilder<'a> {
+    link_destinations: bool,
     roles: SemanticReadRoleSelection,
     observation: &'a SemanticObservation,
     captured_at: SemanticCaptureInstant,
@@ -920,6 +969,7 @@ impl<'a> SemanticReadBuilder<'a> {
         roles: SemanticReadRoleSelection,
     ) -> Self {
         Self {
+            link_destinations: false,
             roles,
             observation,
             captured_at,
@@ -946,7 +996,8 @@ impl<'a> SemanticReadBuilder<'a> {
         node: &'a SemanticNode,
         limit: SemanticReadSensitivityLimit,
     ) {
-        let available = readable_field_count(node);
+        let available = readable_field_count(node)
+            + u16::from(self.link_destinations && node.link_destination().is_some());
         if node.sensitivity() == SemanticSensitivity::Secret {
             self.omissions.insert(SemanticReadOmission::Secret);
             self.stats.secret_nodes = self.stats.secret_nodes.saturating_add(1);
@@ -994,6 +1045,21 @@ impl<'a> SemanticReadBuilder<'a> {
                 SemanticReadField::VisibleText,
                 SemanticReadContent::Text(text),
             );
+        }
+        if self.link_destinations {
+            if let Some(target) = node.link_destination() {
+                let value = target.as_url().as_str();
+                self.admit(
+                    snapshot,
+                    node,
+                    SemanticReadField::LinkDestination,
+                    SemanticReadContent::ValuePreview(SemanticValuePreview::retained(
+                        value,
+                        value.len(),
+                        false,
+                    )),
+                );
+            }
         }
         match node.value() {
             Some(SemanticValueSummary::Text(value)) if !value.is_empty() => {
@@ -1106,6 +1172,7 @@ impl<'a> SemanticReadBuilder<'a> {
             self.omissions,
             self.stats,
             self.roles,
+            self.link_destinations,
         );
         if let Some(proof) = &subtree {
             let mut hasher = Sha256::new();
@@ -1116,6 +1183,7 @@ impl<'a> SemanticReadBuilder<'a> {
             guard = hasher.finalize().into();
         }
         SemanticReadResult {
+            link_destinations: self.link_destinations,
             roles: self.roles,
             observation: self.observation.request().id(),
             observation_generation: self.observation.request().generation(),
@@ -1153,9 +1221,13 @@ fn read_guard(
     omissions: SemanticReadOmissions,
     stats: SemanticReadStats,
     roles: SemanticReadRoleSelection,
+    link_destinations: bool,
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"ZEPHIUM-SEMANTIC-READ-GUARD-3\0");
+    if link_destinations {
+        hasher.update(b"LINK-DESTINATIONS-1\0");
+    }
     hasher.update(roles.bits().to_be_bytes());
     hasher.update(fingerprint.digest());
     hasher.update(captured_at.millis().to_be_bytes());
@@ -1218,6 +1290,7 @@ const fn read_field_code(field: SemanticReadField) -> u8 {
         SemanticReadField::TextValue => 3,
         SemanticReadField::BooleanValue => 4,
         SemanticReadField::OrdinalValue => 5,
+        SemanticReadField::LinkDestination => 6,
     }
 }
 

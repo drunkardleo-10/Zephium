@@ -151,7 +151,7 @@ const AGENT_EXTRACTION_INSTRUCTIONS_V1: &str = concat!(
     "Preserve schema field order, omit only fields marked ",
     "required=false when evidence is insufficient, and cite one through four exact @rN evidence ",
     "tokens in each value's sources array, in strictly increasing numeric order, for every ",
-    "scalar, text_list collection, and text_list item. For rows, S parent lines define each record: ",
+    "scalar, text_list collection, and text_list item. URL values must exactly copy a cited link_destination fragment; never construct or normalize a URL. For rows, S parent lines define each record: ",
     "cite each field separately, omit unsupported optional fields, and use an empty items array when no records are supported. ",
     "Printed inline markers are not citations: put all ",
     "supporting refs in sources, and split claims into list items when they need different ",
@@ -5606,10 +5606,12 @@ fn bound_extraction_fields(fields: &[crate::SemanticExtractionFieldSchema]) -> V
                 crate::SemanticExtractionValueKind::Unsigned => 2,
                 crate::SemanticExtractionValueKind::TextList => 3,
                 crate::SemanticExtractionValueKind::Rows => 4,
+                crate::SemanticExtractionValueKind::Url => 5,
             };
             let mut value = variants[index].clone();
             match field.kind() {
-                crate::SemanticExtractionValueKind::Text => {
+                crate::SemanticExtractionValueKind::Text
+                | crate::SemanticExtractionValueKind::Url => {
                     value["properties"]["value"]["maxLength"] = json!(field.max_text_bytes());
                 }
                 crate::SemanticExtractionValueKind::Boolean => {}
@@ -5674,6 +5676,17 @@ fn build_extraction_output_schema() -> Value {
             ("sources", sources()),
         ],
     );
+    let url = extraction_tagged_object(
+        "url",
+        vec![
+            (
+                "value",
+                json!({"type":"string", "pattern":EXTRACTION_TEXT_PATTERN,
+            "maxLength":crate::semantic::MAX_SEMANTIC_LINK_DESTINATION_BYTES}),
+            ),
+            ("sources", sources()),
+        ],
+    );
     let boolean = extraction_tagged_object(
         "boolean",
         vec![("value", json!({"type":"boolean"})), ("sources", sources())],
@@ -5720,7 +5733,10 @@ fn build_extraction_output_schema() -> Value {
                 "pattern":"^[A-Za-z][A-Za-z0-9_]*$"
             }),
         ),
-        ("value", any_of(vec![text, boolean, unsigned, text_list])),
+        (
+            "value",
+            any_of(vec![text, boolean, unsigned, text_list, url]),
+        ),
     ]);
     let rows = extraction_tagged_object(
         "rows",
@@ -5740,6 +5756,7 @@ fn build_extraction_output_schema() -> Value {
         scalar_variants[2].clone(),
         scalar_variants[3].clone(),
         rows,
+        scalar_variants[4].clone(),
     ]);
     strict_object(vec![
         (
@@ -8186,6 +8203,7 @@ mod tests {
                 vec![
                     Field::try_text("name".into(), true, 100).unwrap(),
                     Field::try_unsigned("count".into(), false, 7).unwrap(),
+                    Field::try_url("url".into(), false, 512).unwrap(),
                 ],
                 3,
             )
@@ -8199,7 +8217,10 @@ mod tests {
         assert_eq!(rows["maxItems"], 3);
         let fields = &rows["items"]["properties"]["fields"];
         assert_eq!(fields["minItems"], 1);
-        assert_eq!(fields["maxItems"], 2);
+        assert_eq!(fields["maxItems"], 3);
+        let url = &fields["items"]["anyOf"][2]["properties"]["value"]["properties"];
+        assert_eq!(url["k"]["enum"], json!(["url"]));
+        assert_eq!(url["value"]["maxLength"], 512);
         assert_eq!(
             fields["items"]["anyOf"][1]["properties"]["value"]["properties"]["value"]["maximum"],
             7

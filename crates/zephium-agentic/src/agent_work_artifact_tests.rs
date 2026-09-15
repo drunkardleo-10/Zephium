@@ -302,3 +302,44 @@ fn record_archive_roundtrip_preserves_cells_and_refuses_nesting_or_foreign_sourc
     items[0][2].value = ArchivedValue::Rows { items: vec![] };
     assert!(doc.validate().is_err());
 }
+
+#[test]
+fn url_archive_roundtrip_revalidates_version_destination_and_source_kind() {
+    let mut d = document();
+    d.version = 4;
+    let url = "https://shop.example.test/product/42";
+    d.fields = vec![ArchivedField {
+        name: "url".into(),
+        value: ArchivedValue::Url {
+            value: url.into(),
+            sources: vec![1],
+        },
+    }];
+    let source = &mut d.sources[0];
+    source.observation = Some(4);
+    source.observation_generation = Some(1);
+    source.captured_millis = Some(5);
+    source.role = "link".into();
+    source.field = 6;
+    source.content = ArchivedSourceContent::Preview {
+        value: url.into(),
+        source_bytes: url.len() as u64,
+        truncated: false,
+    };
+    let (descriptor, bytes) = encode(&d);
+    let decoded = AgentWorkArchivedExtraction::decode(descriptor, &bytes).unwrap();
+    assert!(
+        matches!(decoded.fields()[0].value(), ArchivedValue::Url { value, .. } if value == url)
+    );
+    d.version = 3;
+    assert!(d.validate().is_err());
+    d.version = 4;
+    d.sources[0].field = 3;
+    assert!(d.validate().is_err());
+    d.sources[0].field = 6;
+    d.fields[0].value = ArchivedValue::Url {
+        value: "https://shop.example.test/product/43".into(),
+        sources: vec![1],
+    };
+    assert!(d.validate().is_err());
+}

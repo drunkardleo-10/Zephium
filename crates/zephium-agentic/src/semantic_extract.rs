@@ -77,6 +77,8 @@ impl fmt::Debug for SemanticExtractionSchemaId {
 pub enum SemanticExtractionValueKind {
     /// One bounded text scalar.
     Text,
+    /// One exact observed public link destination.
+    Url,
     /// One Boolean scalar.
     Boolean,
     /// One unsigned integer scalar.
@@ -94,6 +96,9 @@ enum SemanticExtractionFieldSpec {
         max_items: usize,
     },
     Text {
+        max_bytes: usize,
+    },
+    Url {
         max_bytes: usize,
     },
     Boolean,
@@ -129,6 +134,23 @@ impl SemanticExtractionFieldSchema {
             name,
             required,
             spec: SemanticExtractionFieldSpec::Text { max_bytes },
+        })
+    }
+
+    /// Requires an exact cited, public, credential-free observed link destination.
+    pub fn try_url(
+        name: String,
+        required: bool,
+        max_bytes: usize,
+    ) -> Result<Self, SemanticExtractionSchemaError> {
+        validate_field_name(&name)?;
+        if max_bytes == 0 || max_bytes > crate::semantic::MAX_SEMANTIC_LINK_DESTINATION_BYTES {
+            return Err(SemanticExtractionSchemaError::TextLimit);
+        }
+        Ok(Self {
+            name,
+            required,
+            spec: SemanticExtractionFieldSpec::Url { max_bytes },
         })
     }
 
@@ -232,6 +254,7 @@ impl SemanticExtractionFieldSchema {
     pub const fn kind(&self) -> SemanticExtractionValueKind {
         match &self.spec {
             SemanticExtractionFieldSpec::Text { .. } => SemanticExtractionValueKind::Text,
+            SemanticExtractionFieldSpec::Url { .. } => SemanticExtractionValueKind::Url,
             SemanticExtractionFieldSpec::Boolean => SemanticExtractionValueKind::Boolean,
             SemanticExtractionFieldSpec::Unsigned { .. } => SemanticExtractionValueKind::Unsigned,
             SemanticExtractionFieldSpec::TextList { .. } => SemanticExtractionValueKind::TextList,
@@ -242,7 +265,8 @@ impl SemanticExtractionFieldSchema {
     /// Per-value text byte limit, when this is a text field.
     pub const fn max_text_bytes(&self) -> Option<usize> {
         match &self.spec {
-            SemanticExtractionFieldSpec::Text { max_bytes } => Some(*max_bytes),
+            SemanticExtractionFieldSpec::Text { max_bytes }
+            | SemanticExtractionFieldSpec::Url { max_bytes } => Some(*max_bytes),
             _ => None,
         }
     }
@@ -340,6 +364,18 @@ impl SemanticExtractionSchema {
     /// Immutable trusted evidence selection bound to this schema.
     pub const fn source_roles(&self) -> SemanticReadRoleSelection {
         self.source_roles
+    }
+
+    /// URL evidence is disclosed only when a field requests it.
+    pub fn includes_link_destinations(&self) -> bool {
+        self.fields.iter().any(|field| {
+            field.kind() == SemanticExtractionValueKind::Url
+                || field.row_fields().is_some_and(|fields| {
+                    fields
+                        .iter()
+                        .any(|field| field.kind() == SemanticExtractionValueKind::Url)
+                })
+        })
     }
 
     /// Exact trusted schema identity expected in model output.
@@ -659,6 +695,8 @@ pub enum SemanticExtractedValue {
     Rows(SemanticExtractedRows),
     /// Bounded text scalar.
     Text(SemanticExtractedText),
+    /// Exact observed URL; historical data, never navigation authority.
+    Url(SemanticExtractedText),
     /// Boolean scalar.
     Boolean(SemanticExtractedBoolean),
     /// Unsigned integer scalar.
@@ -672,6 +710,7 @@ impl SemanticExtractedValue {
     pub const fn kind(&self) -> SemanticExtractionValueKind {
         match self {
             Self::Text(_) => SemanticExtractionValueKind::Text,
+            Self::Url(_) => SemanticExtractionValueKind::Url,
             Self::Boolean(_) => SemanticExtractionValueKind::Boolean,
             Self::Unsigned(_) => SemanticExtractionValueKind::Unsigned,
             Self::TextList(_) => SemanticExtractionValueKind::TextList,
@@ -683,7 +722,7 @@ impl SemanticExtractedValue {
 impl fmt::Debug for SemanticExtractedValue {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Text(value) => value.fmt(formatter),
+            Self::Text(value) | Self::Url(value) => value.fmt(formatter),
             Self::Boolean(value) => value.fmt(formatter),
             Self::Unsigned(value) => value.fmt(formatter),
             Self::TextList(value) => value.fmt(formatter),
@@ -1165,7 +1204,9 @@ fn extract_semantic_read_inner<'a>(
     sensitivity_limit: SemanticReadSensitivityLimit,
     model_output: &[u8],
 ) -> Result<SemanticExtractionResult<'a>, SemanticExtractionError> {
-    if schema.source_roles() != read.source_roles() {
+    if schema.source_roles() != read.source_roles()
+        || schema.includes_link_destinations() != read.includes_link_destinations()
+    {
         return Err(SemanticExtractionError::SchemaMismatch);
     }
     if model_output.len() > MAX_SEMANTIC_EXTRACTION_INPUT_BYTES {
@@ -1343,6 +1384,37 @@ fn admit_value<'a>(
             sources,
             counters,
         )?)),
+        (
+            SemanticExtractionFieldSpec::Url { max_bytes },
+            RawValue::Url {
+                value,
+                sources: raw_sources,
+            },
+        ) => {
+            if !exact_public_url(&value)
+                || !raw_sources.iter().any(|token| {
+                    SemanticReadFragmentId::parse_model_token(token)
+                        .and_then(|id| read.fragment(id))
+                        .is_some_and(|source| {
+                            source.field() == crate::SemanticReadField::LinkDestination
+                                && source.content().value_preview().is_some_and(|preview| {
+                                    !preview.truncated() && preview.text() == value
+                                })
+                        })
+                })
+            {
+                return Err(SemanticExtractionError::SourceInvalid);
+            }
+            Ok(SemanticExtractedValue::Url(admit_text(
+                value,
+                *max_bytes,
+                raw_sources,
+                read,
+                sensitivity_limit,
+                sources,
+                counters,
+            )?))
+        }
         (
             SemanticExtractionFieldSpec::Boolean,
             RawValue::Boolean {
@@ -1541,6 +1613,14 @@ fn extraction_result_guard(
     hasher.finalize().into()
 }
 
+pub(crate) fn exact_public_url(value: &str) -> bool {
+    value.len() <= crate::semantic::MAX_SEMANTIC_LINK_DESTINATION_BYTES
+        && crate::ContextNavigationTarget::parse(value).is_ok_and(|target| {
+            target.as_url().as_str() == value
+                && crate::semantic_wire::model_safe_public_url(&target)
+        })
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawExtraction {
@@ -1564,6 +1644,8 @@ enum RawValue {
     Rows { items: Vec<RawRow> },
     #[serde(rename = "text")]
     Text { value: String, sources: Vec<String> },
+    #[serde(rename = "url")]
+    Url { value: String, sources: Vec<String> },
     #[serde(rename = "boolean")]
     Boolean { value: bool, sources: Vec<String> },
     #[serde(rename = "unsigned")]
@@ -1607,6 +1689,20 @@ mod tests {
     use zephium_core::ids::ProfileId;
 
     fn observation() -> SemanticObservation {
+        observation_with_nodes(json!([
+            {"k": 1, "r": "document", "o": 16},
+            {"k": 2, "p": 0, "r": "paragraph", "t": "Quarterly summary"},
+            {"k": 3, "p": 0, "r": "paragraph", "t": "42"},
+            {"k": 4, "p": 0, "r": "checkbox", "n": "Active",
+             "v": {"k": "boolean", "value": true}, "o": 1},
+            {"k": 5, "p": 0, "r": "paragraph", "t": "Private customer note",
+             "q": "sensitive"},
+            {"k": 6, "p": 0, "r": "password", "n": "Password",
+             "v": {"k": "redacted"}, "q": "secret"}
+        ]))
+    }
+
+    fn observation_with_nodes(nodes: Value) -> SemanticObservation {
         let identity = ContextIdentity::new(
             ContextId::from_raw(731),
             ContextRunId::from_raw(732),
@@ -1643,17 +1739,7 @@ mod tests {
             "i": 17,
             "g": 19,
             "c": "complete",
-            "n": [
-                {"k": 1, "r": "document", "o": 16},
-                {"k": 2, "p": 0, "r": "paragraph", "t": "Quarterly summary"},
-                {"k": 3, "p": 0, "r": "paragraph", "t": "42"},
-                {"k": 4, "p": 0, "r": "checkbox", "n": "Active",
-                 "v": {"k": "boolean", "value": true}, "o": 1},
-                {"k": 5, "p": 0, "r": "paragraph", "t": "Private customer note",
-                 "q": "sensitive"},
-                {"k": 6, "p": 0, "r": "password", "n": "Password",
-                 "v": {"k": "redacted"}, "q": "secret"}
-            ]
+            "n": nodes
         }))
         .expect("wire");
         let snapshot = decode_semantic_snapshot(
@@ -1781,6 +1867,86 @@ mod tests {
             &serde_json::to_vec(output).expect("output"),
         )
         .expect_err("output must fail")
+    }
+
+    #[test]
+    fn url_extraction_requires_exact_screened_destination_evidence_and_schema_selection() {
+        let url = "https://shop.example.test/item/42?variant=blue";
+        let observation = observation_with_nodes(json!([
+            {"k":1,"r":"document","o":16},
+            {"k":2,"p":0,"r":"paragraph","t":url},
+            {"k":3,"p":0,"r":"link","n":"Example item","u":url},
+            {"k":4,"p":0,"r":"link","n":"Private","u":"https://shop.example.test/?token=private-token"}
+        ]));
+        let plain = read(&observation, 31);
+        assert!(!plain
+            .fragments()
+            .iter()
+            .any(|source| source.field() == crate::SemanticReadField::LinkDestination));
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(29).unwrap(),
+            vec![SemanticExtractionFieldSchema::try_url("product_url".into(), true, 512).unwrap()],
+        )
+        .unwrap();
+        let read = crate::read_semantic_observation_for_schema(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(31),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+            &schema,
+        )
+        .unwrap();
+        let urls: Vec<_> = read
+            .fragments()
+            .iter()
+            .filter(|source| source.field() == crate::SemanticReadField::LinkDestination)
+            .collect();
+        assert_eq!(urls.len(), 1);
+        let token = urls[0].id().model_token();
+        let delivery = delivered(&read);
+        let output = |value: &str, sources: Vec<&str>| {
+            serde_json::to_vec(&json!({"v":1,"schema":29,
+            "fields":[{"name":"product_url","value":{"k":"url","value":value,"sources":sources}}]}))
+            .unwrap()
+        };
+        let accepted = extract_semantic_read(
+            &schema,
+            &read,
+            &delivery,
+            SemanticReadSensitivityLimit::PublicOnly,
+            &output(url, vec![&token]),
+        )
+        .unwrap();
+        assert!(
+            matches!(accepted.fields()[0].value(), SemanticExtractedValue::Url(value) if value.as_str() == url)
+        );
+        for (value, source) in [
+            ("https://shop.example.test/item/43", token.as_str()),
+            (url, "@r1"),
+            ("https://shop.example.test/?token=secret", token.as_str()),
+        ] {
+            assert!(extract_semantic_read(
+                &schema,
+                &read,
+                &delivery,
+                SemanticReadSensitivityLimit::PublicOnly,
+                &output(value, vec![source])
+            )
+            .is_err());
+        }
+        assert!(crate::encode_semantic_extraction_request(
+            &schema,
+            &plain,
+            crate::SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE
+        )
+        .is_err());
+        let mut retained = crate::SemanticRetainedReadEvidence::default();
+        let ack = crate::SemanticObservationAcknowledgement::from_fingerprint(
+            crate::semantic_diff::SemanticObservationFingerprint::from_observation(&observation),
+        );
+        retained.retain(&read, &ack).unwrap();
+        assert!(retained.merge_for_extraction(plain).is_err());
     }
 
     #[test]
