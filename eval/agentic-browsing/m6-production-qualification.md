@@ -2446,3 +2446,24 @@ scheduling policy and does not retrospectively prove this public-site cause.
   migration, and stable Work-port audits beyond the dormant Shell seam.
 
 None of these pending items is represented as zero, passing, or non-blocking.
+
+### Image sources and focused evidence retention (2026-09-15)
+
+The live macOS collection qualifier returned three LEGO Architecture products
+with displayed prices, exact product links and matching native image sources.
+Each image cell retained identity and image citations. The stored comparison
+reopened successfully; native failure and persistence error were absent.
+
+Two browser model calls consumed 12,102 input / 976 output tokens, with 2,572
+micro-USD catalog-ceiling accounting and 19,022 ms summed model elapsed time.
+The terminal mapper used 4,636 input / 888 output tokens, an 18,449-byte request
+and 11,340 bytes of semantic evidence. Work aggregate accounting remained
+conservative (21,717 tokens, 14,852 micro-USD, eight operations).
+
+Affected checks: 1,824 tests passed, two pre-existing ignored; workspace and
+durable composition Clippy, native probe build and JS smoke passed. Source
+getter substitution, image-only field selection, exact citations, archive
+tampering and focused/current evidence retention are covered. This is a fixed
+main assignment with a real browser model, not autonomous Work routing, image
+rendering qualification or a whole-system production claim. CPU/RSS and total
+workflow wall time were not measured.

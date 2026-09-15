@@ -577,11 +577,11 @@ adds only this initial-scope tool to the restricted capability profiles; no
 other profile capability or continuation budget changes.
 
 Host-selected extraction schemas also admit one bounded `Rows` level with
-text, boolean, unsigned and source-backed URL cells. Child declarations share the schema guard;
+text, boolean, unsigned and source-backed link/image URL cells. Child declarations share the schema guard;
 each cell retains its own source edges under the existing aggregate limits.
 Row archives use version 3; scalar archives remain version 2 when no URL evidence is present. The Work adapter
 can map these rows directly to comparison cells, preserving missing optional
-values as unknown. This does not yet provide typed money, images or collection
+values as unknown. This does not yet provide typed money or collection
 completeness. Ordinary Work read/discovery steps now return up to 16 individually
 cited findings (1,024 bytes each), mapped directly to finding artifacts. Scalar
 node outputs remain compatible. A collection-level citation never substitutes
@@ -597,6 +597,11 @@ the URL, source kind, exact cited value and capture provenance; readers retain
 versions 1–3. A host-selected URL field can populate a Work subject's homepage
 and its comparison cell keeps both identity and destination citations. None of
 these historical URLs supplies navigation or action authority.
+Image fields use the captured native `currentSrc` getter (with `src` fallback),
+screened and bounded like link destinations. Only image-selected schemas expose
+`image_source` fragments. Exact image citations survive version 5 archives and
+can populate host-selected Work subject image candidates; readers retain versions
+1–5. Candidates are not downloaded or decoded images and grant no fetch authority.
 
 Public-web discovery may finalize an initial query rewrite on the same exact
 HTTPS origin/path and native committed load, then freezes that URL; it grants
@@ -643,8 +648,10 @@ equal values from different nodes and changed values remain distinct. Under the
 unchanged eight-capture/128-fragment/32-KiB limits, coarse capture cost favors
 focused evidence, with newest duplicate provenance preferred on ties. Broad
 captures cannot erase focused duplicate sources before being evicted. Terminal
-reads reserve at most half the existing budget for historical evidence and mark
-all budget omissions. Private node keys confer no current action authority.
+reads reserve at most half the existing budget for focused history or a prior
+page. Same-page initial viewport history uses only leftover capacity, so stale
+navigation chrome cannot displace current product evidence. All budget omissions
+remain explicit. Private node keys confer no current action authority.
 
 Visible article prose now includes ordinary descendant text across structural
 wrappers, while hidden, editable and secret boundaries still exclude content.

@@ -446,6 +446,9 @@ pub fn encode_semantic_read(
             format_args!(" retained_history=true refs=historical_read_only provenance=cohorts_v1"),
         )?;
     }
+    if read.includes_image_sources() {
+        checked_write(&mut output, format_args!(" image_sources=true"))?;
+    }
     if read.includes_link_destinations() {
         checked_write(&mut output, format_args!(" link_destinations=true"))?;
     }
@@ -704,6 +707,7 @@ const fn field_label(field: SemanticReadField) -> &'static str {
         SemanticReadField::BooleanValue => "boolean_value",
         SemanticReadField::OrdinalValue => "ordinal_value",
         SemanticReadField::LinkDestination => "link_destination",
+        SemanticReadField::ImageSource => "image_source",
     }
 }
 
@@ -714,7 +718,9 @@ const fn field_matches_content(field: SemanticReadField, content: SemanticReadCo
             SemanticReadField::AccessibleName | SemanticReadField::VisibleText,
             SemanticReadContent::Text(_)
         ) | (
-            SemanticReadField::TextValue | SemanticReadField::LinkDestination,
+            SemanticReadField::TextValue
+                | SemanticReadField::LinkDestination
+                | SemanticReadField::ImageSource,
             SemanticReadContent::ValuePreview(_)
         ) | (
             SemanticReadField::BooleanValue,

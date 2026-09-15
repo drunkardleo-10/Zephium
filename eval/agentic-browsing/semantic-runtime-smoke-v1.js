@@ -209,6 +209,18 @@ class HTMLAnchorElement extends Element {
   }
 }
 
+class HTMLImageElement extends Element {
+  constructor(attributes = {}) { super("img", attributes); }
+  get currentSrc() {
+    if (!(this instanceof HTMLImageElement)) throw new TypeError("Image receiver required");
+    return this.attributes.currentSrc || "";
+  }
+  get src() {
+    if (!(this instanceof HTMLImageElement)) throw new TypeError("Image receiver required");
+    return this.attributes.src || "";
+  }
+}
+
 class HTMLTextAreaElement extends Element {
   constructor(attributes = {}, value = "") {
     super("textarea", attributes);
@@ -320,6 +332,7 @@ Object.assign(globalThis, {
   ShadowRoot,
   HTMLInputElement,
   HTMLAnchorElement,
+  HTMLImageElement,
   HTMLTextAreaElement,
   HTMLSelectElement,
   HTMLOptionElement,
@@ -1437,6 +1450,20 @@ async function finish() {
   const catalogUrlState = JSON.parse(invoke(106, 106, { k: "initial" }, { lu: true }));
   assert(catalogUrlState.n.some((node) => node.n === "Search result" && node.u === "https://example.test/search?q=fixture#result"),
     "host-authorized semantic projection dropped exact query or fragment URL state");
+  const selectedImage = catalog.append(new HTMLImageElement({ alt: "Product photo", currentSrc: "https://images.example.test/selected.webp", src: "https://images.example.test/fallback.webp" }));
+  catalog.append(new HTMLImageElement({ alt: "Fallback photo", src: "https://images.example.test/fallback.webp" }));
+  catalog.append(new HTMLImageElement({ alt: "Hidden photo", hidden: "", src: "https://images.example.test/hidden.webp" }));
+  catalog.append(new HTMLImageElement({ alt: "Data photo", src: "data:image/png;base64,AAAA" }));
+  setOwner(catalog, document);
+  const imageGetter = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, "currentSrc");
+  Object.defineProperty(selectedImage, "currentSrc", { get() { throw new Error("page-owned image getter"); } });
+  Object.defineProperty(HTMLImageElement.prototype, "currentSrc", { configurable: true, get() { throw new Error("replaced image getter"); } });
+  const imageWire = invoke(107, 107, { k: "initial" });
+  Object.defineProperty(HTMLImageElement.prototype, "currentSrc", imageGetter);
+  const imageSnapshot = JSON.parse(imageWire);
+  assert(imageSnapshot.n.some((node) => node.r === "image" && node.m === "https://images.example.test/selected.webp"), "selected image source did not use captured native getter");
+  assert(imageSnapshot.n.some((node) => node.r === "image" && node.n === "Fallback photo" && node.m === "https://images.example.test/fallback.webp"), "unloaded image lost its exact src fallback");
+  assert(!imageWire.includes("hidden.webp") && !imageWire.includes("data:image"), "unsupported or hidden image source escaped");
   assert(catalogSnapshot.n.some((node) => node.r === "heading" && node.n === "Fixture Cup"), "nested heading was discarded");
   assert(catalogSnapshot.n.some((node) => node.r === "paragraph" && node.t === "$15.00 USD"), "nested price was discarded");
   assert(catalogSnapshot.n.some((node) => node.r === "link" && node.n === "Explicit product"), "explicit accessible name was overwritten");

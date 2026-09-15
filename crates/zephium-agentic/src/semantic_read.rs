@@ -305,6 +305,8 @@ pub enum SemanticReadField {
     OrdinalValue,
     /// Exact native-observed public link destination.
     LinkDestination,
+    /// Exact native-observed public image source.
+    ImageSource,
 }
 
 /// Non-actionable model-facing identity for one read fragment.
@@ -623,7 +625,8 @@ impl SemanticReadStats {
 
 /// Bounded borrowed readable projection of one exact semantic observation.
 pub struct SemanticReadResult<'a> {
-    link_destinations: bool,
+    focused: bool,
+    url_sources: u8,
     roles: SemanticReadRoleSelection,
     observation: SemanticObservationId,
     observation_generation: SemanticObservationGeneration,
@@ -649,8 +652,14 @@ struct SemanticReadSubtreeProof {
 }
 
 impl<'a> SemanticReadResult<'a> {
+    pub(crate) const fn url_sources(&self) -> u8 {
+        self.url_sources
+    }
     pub(crate) const fn includes_link_destinations(&self) -> bool {
-        self.link_destinations
+        self.url_sources & 1 != 0
+    }
+    pub(crate) const fn includes_image_sources(&self) -> bool {
+        self.url_sources & 2 != 0
     }
 
     /// Immutable trusted role selection for this read.
@@ -811,7 +820,7 @@ pub fn read_selected_semantic_observation<'a>(
         sensitivity,
         budget,
         roles,
-        false,
+        0,
     )
 }
 
@@ -831,7 +840,7 @@ pub fn read_semantic_observation_for_schema<'a>(
         sensitivity,
         budget,
         schema.source_roles(),
-        schema.includes_link_destinations(),
+        schema.url_sources(),
     )
 }
 
@@ -842,11 +851,11 @@ fn read_projection<'a>(
     sensitivity: SemanticReadSensitivityLimit,
     budget: SemanticReadBudget,
     roles: SemanticReadRoleSelection,
-    link_destinations: bool,
+    url_sources: u8,
 ) -> Result<SemanticReadResult<'a>, SemanticReadError> {
     let subtree = validate_authority(observation, authority)?;
     let mut builder = SemanticReadBuilder::new(observation, captured_at, budget, roles);
-    builder.link_destinations = link_destinations;
+    builder.url_sources = url_sources;
     for snapshot in observation.frames() {
         let omitted_child = observation.frame_boundaries().iter().any(|boundary| {
             boundary.parent_frame() == snapshot.frame().frame()
@@ -951,7 +960,7 @@ fn validate_authority(
 }
 
 struct SemanticReadBuilder<'a> {
-    link_destinations: bool,
+    url_sources: u8,
     roles: SemanticReadRoleSelection,
     observation: &'a SemanticObservation,
     captured_at: SemanticCaptureInstant,
@@ -969,7 +978,7 @@ impl<'a> SemanticReadBuilder<'a> {
         roles: SemanticReadRoleSelection,
     ) -> Self {
         Self {
-            link_destinations: false,
+            url_sources: 0,
             roles,
             observation,
             captured_at,
@@ -997,7 +1006,8 @@ impl<'a> SemanticReadBuilder<'a> {
         limit: SemanticReadSensitivityLimit,
     ) {
         let available = readable_field_count(node)
-            + u16::from(self.link_destinations && node.link_destination().is_some());
+            + u16::from(self.url_sources & 1 != 0 && node.link_destination().is_some())
+            + u16::from(self.url_sources & 2 != 0 && node.image_source().is_some());
         if node.sensitivity() == SemanticSensitivity::Secret {
             self.omissions.insert(SemanticReadOmission::Secret);
             self.stats.secret_nodes = self.stats.secret_nodes.saturating_add(1);
@@ -1046,13 +1056,28 @@ impl<'a> SemanticReadBuilder<'a> {
                 SemanticReadContent::Text(text),
             );
         }
-        if self.link_destinations {
+        if self.url_sources & 1 != 0 {
             if let Some(target) = node.link_destination() {
                 let value = target.as_url().as_str();
                 self.admit(
                     snapshot,
                     node,
                     SemanticReadField::LinkDestination,
+                    SemanticReadContent::ValuePreview(SemanticValuePreview::retained(
+                        value,
+                        value.len(),
+                        false,
+                    )),
+                );
+            }
+        }
+        if self.url_sources & 2 != 0 {
+            if let Some(target) = node.image_source() {
+                let value = target.as_url().as_str();
+                self.admit(
+                    snapshot,
+                    node,
+                    SemanticReadField::ImageSource,
                     SemanticReadContent::ValuePreview(SemanticValuePreview::retained(
                         value,
                         value.len(),
@@ -1172,7 +1197,7 @@ impl<'a> SemanticReadBuilder<'a> {
             self.omissions,
             self.stats,
             self.roles,
-            self.link_destinations,
+            self.url_sources,
         );
         if let Some(proof) = &subtree {
             let mut hasher = Sha256::new();
@@ -1183,7 +1208,11 @@ impl<'a> SemanticReadBuilder<'a> {
             guard = hasher.finalize().into();
         }
         SemanticReadResult {
-            link_destinations: self.link_destinations,
+            focused: !matches!(
+                self.observation.request().scope(),
+                crate::SemanticScope::Initial
+            ),
+            url_sources: self.url_sources,
             roles: self.roles,
             observation: self.observation.request().id(),
             observation_generation: self.observation.request().generation(),
@@ -1221,12 +1250,15 @@ fn read_guard(
     omissions: SemanticReadOmissions,
     stats: SemanticReadStats,
     roles: SemanticReadRoleSelection,
-    link_destinations: bool,
+    url_sources: u8,
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"ZEPHIUM-SEMANTIC-READ-GUARD-3\0");
-    if link_destinations {
+    if url_sources & 1 != 0 {
         hasher.update(b"LINK-DESTINATIONS-1\0");
+    }
+    if url_sources & 2 != 0 {
+        hasher.update(b"IMAGE-SOURCES-1\0");
     }
     hasher.update(roles.bits().to_be_bytes());
     hasher.update(fingerprint.digest());
@@ -1291,6 +1323,7 @@ const fn read_field_code(field: SemanticReadField) -> u8 {
         SemanticReadField::BooleanValue => 4,
         SemanticReadField::OrdinalValue => 5,
         SemanticReadField::LinkDestination => 6,
+        SemanticReadField::ImageSource => 7,
     }
 }
 
@@ -1804,6 +1837,51 @@ mod tests {
     }
 
     #[test]
+    fn focused_current_capture_does_not_reserve_half_for_old_viewport_chrome() {
+        let chrome = retained_observation(
+            1,
+            json!([
+                {"k":1,"r":"document","o":16},
+                {"k":2,"p":0,"r":"paragraph","t":"Navigation banner"},
+            {"k":131,"p":0,"r":"paragraph","t":"Navigation footer"}
+            ]),
+        );
+        let mut nodes = vec![json!({"k":1,"r":"document","o":16})];
+        for key in 3..=129 {
+            nodes.push(json!({"k":key,"p":0,"r":"paragraph","t":format!("Product fact {key}")}));
+        }
+        let detail = retained_observation(2, json!(nodes));
+        let read = |observation, ack| {
+            read_semantic_observation(
+                observation,
+                SemanticReadAuthority::Acknowledged(ack),
+                SemanticCaptureInstant::from_millis(1),
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::STANDARD,
+            )
+            .unwrap()
+        };
+        let chrome_ack = acknowledgement(&chrome);
+        let detail_ack = acknowledgement(&detail);
+        let mut evidence = SemanticRetainedReadEvidence::default();
+        evidence
+            .retain(&read(&chrome, &chrome_ack), &chrome_ack)
+            .unwrap();
+        let mut detail_read = read(&detail, &detail_ack);
+        detail_read.focused = true;
+        evidence.retain(&detail_read, &detail_ack).unwrap();
+        let merged = evidence.merge_for_extraction(detail_read).unwrap();
+        assert_eq!(merged.fragments().len(), 127);
+        assert!(!merged.has_retained_evidence());
+        assert!(merged.fragments().iter().all(|fragment| fragment
+            .provenance()
+            .observation()
+            .get()
+            == 2));
+        assert!(merged.omissions().contains(SemanticReadOmission::ItemLimit));
+    }
+
+    #[test]
     fn broad_capture_preserves_focused_evidence_with_original_provenance() {
         let detail = retained_observation(
             1,
@@ -1830,7 +1908,8 @@ mod tests {
             )
             .unwrap()
         };
-        let detail_read = read(&detail, &detail_ack);
+        let mut detail_read = read(&detail, &detail_ack);
+        detail_read.focused = true;
         let broad_read = read(&broad, &broad_ack);
         let mut evidence = SemanticRetainedReadEvidence::default();
         evidence.retain(&detail_read, &detail_ack).unwrap();

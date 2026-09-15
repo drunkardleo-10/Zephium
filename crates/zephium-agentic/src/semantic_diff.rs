@@ -185,6 +185,8 @@ pub enum SemanticNodeChange {
     LinkDestination,
     /// Descriptive landmark subtype changed.
     LandmarkKind,
+    /// Exact public image source changed.
+    ImageSource,
 }
 
 impl SemanticNodeChange {
@@ -970,6 +972,10 @@ fn changed_fields(previous: &SemanticNode, current: &SemanticNode) -> SemanticNo
             previous.link_destination() != current.link_destination(),
             SemanticNodeChange::LinkDestination,
         ),
+        (
+            previous.image_source() != current.image_source(),
+            SemanticNodeChange::ImageSource,
+        ),
         (previous.name() != current.name(), SemanticNodeChange::Name),
         (previous.text() != current.text(), SemanticNodeChange::Text),
         (
@@ -1234,6 +1240,10 @@ fn hash_node(hasher: &mut FingerprintHasher, node: &SemanticNode) {
         node.link_destination()
             .map(|target| target.as_url().as_str()),
     );
+    if let Some(source) = node.image_source() {
+        hasher.byte(0xfb);
+        hash_text(hasher, Some(source.as_url().as_str()));
+    }
     hash_text(hasher, node.text().map(|value| value.as_str()));
     match node.value() {
         None => hasher.byte(0),
@@ -1749,6 +1759,44 @@ mod tests {
             &swapped.frames()[0].nodes()[1],
         );
         assert!(changes.contains(SemanticNodeChange::LinkDestination));
+        assert_eq!(changes.len(), 1);
+        assert!(
+            SemanticObservationFingerprint::from_observation(&first)
+                != SemanticObservationFingerprint::from_observation(&swapped)
+        );
+    }
+
+    #[test]
+    fn image_source_changes_revoke_acknowledgement_and_are_projected_as_changes() {
+        let context = context(2);
+        let nodes = |destination: &str| {
+            json!([
+                {"k":1,"r":"document"}, {"k":2,"p":0,"r":"image","n":"Source","m":destination}
+            ])
+        };
+        let first = observation(
+            context,
+            20,
+            200,
+            21,
+            "complete",
+            nodes("https://example.test/first"),
+        );
+        let swapped = observation(
+            context,
+            20,
+            200,
+            21,
+            "complete",
+            nodes("https://example.test/second"),
+        );
+        let acknowledgement = acknowledge(&first);
+        assert!(!acknowledgement.matches(&swapped));
+        let changes = changed_fields(
+            &first.frames()[0].nodes()[1],
+            &swapped.frames()[0].nodes()[1],
+        );
+        assert!(changes.contains(SemanticNodeChange::ImageSource));
         assert_eq!(changes.len(), 1);
         assert!(
             SemanticObservationFingerprint::from_observation(&first)

@@ -73,6 +73,7 @@ struct Fragment {
 }
 
 struct Capture {
+    focused: bool,
     acknowledgement: SemanticObservationAcknowledgement,
     captured_at: SemanticCaptureInstant,
     fragments: Vec<Fragment>,
@@ -81,6 +82,10 @@ struct Capture {
 }
 
 impl Capture {
+    fn retention_cost(&self) -> (u8, u32) {
+        (u8::from(!self.focused), self.cost_bucket())
+    }
+
     fn cost_bucket(&self) -> u32 {
         u32::from(self.stats.items)
             .div_ceil(16)
@@ -117,7 +122,7 @@ impl Capture {
 /// browser operation, codec, persistence, or provider-disclosure authority.
 #[derive(Default)]
 pub struct SemanticRetainedReadEvidence {
-    link_destinations: Option<bool>,
+    url_sources: Option<u8>,
     context: Option<ContextJoin>,
     roles: Option<SemanticReadRoleSelection>,
     captures: Vec<Capture>,
@@ -184,8 +189,8 @@ impl SemanticRetainedReadEvidence {
                 .is_some_and(|context| context != read.context())
             || self.roles.is_some_and(|roles| roles != read.source_roles())
             || self
-                .link_destinations
-                .is_some_and(|links| links != read.includes_link_destinations())
+                .url_sources
+                .is_some_and(|links| links != read.url_sources())
             || read
                 .fragments()
                 .iter()
@@ -205,7 +210,7 @@ impl SemanticRetainedReadEvidence {
         }
         self.context = Some(read.context());
         self.roles = Some(read.source_roles());
-        self.link_destinations = Some(read.includes_link_destinations());
+        self.url_sources = Some(read.url_sources());
         if let Some(stats) = self.last_empty.take() {
             merge_omitted_stats(&mut self.dropped_stats, stats);
         }
@@ -217,6 +222,7 @@ impl SemanticRetainedReadEvidence {
         }
         let mut frames: Vec<Arc<SemanticFrameJoin>> = Vec::new();
         let mut capture = Capture {
+            focused: read.focused,
             acknowledgement: acknowledgement.clone(),
             captured_at: read.captured_at(),
             fragments: read
@@ -250,7 +256,7 @@ impl SemanticRetainedReadEvidence {
         };
         for prior in &mut self.captures {
             // Keep duplicates in the capture least likely to be evicted; newest wins ties.
-            if prior.cost_bucket() < capture.cost_bucket() {
+            if prior.retention_cost() < capture.retention_cost() {
                 capture.remove_duplicates(prior);
             } else {
                 prior.remove_duplicates(&capture);
@@ -282,7 +288,7 @@ impl SemanticRetainedReadEvidence {
                     .iter()
                     .enumerate()
                     .max_by_key(|(index, capture)| {
-                        (capture.cost_bucket(), std::cmp::Reverse(*index))
+                        (capture.retention_cost(), std::cmp::Reverse(*index))
                     })
                     .map(|(index, _)| index)
                     .expect("nonempty over-budget captures")
@@ -320,8 +326,8 @@ impl SemanticRetainedReadEvidence {
                 .roles
                 .is_some_and(|roles| roles != current.source_roles())
             || self
-                .link_destinations
-                .is_some_and(|links| links != current.includes_link_destinations())
+                .url_sources
+                .is_some_and(|links| links != current.url_sources())
         {
             return Err(SemanticReadError::AuthorityMismatch);
         }
@@ -336,12 +342,12 @@ impl SemanticRetainedReadEvidence {
                 merge_omitted_stats(&mut current.stats, stats);
             }
         }
-        // A broad current snapshot must not crowd every earlier detail out of
-        // terminal evidence. Reserve at most half for independently cited history.
-        let history = self
-            .captures
-            .iter()
-            .filter(|capture| !current.matches_acknowledgement(&capture.acknowledgement));
+        // Preserve focused details and earlier pages; old same-page viewport chrome
+        // gets only unused space after current facts.
+        let history = self.captures.iter().filter(|capture| {
+            !current.matches_acknowledgement(&capture.acknowledgement)
+                && (capture.focused || capture.acknowledgement.context() != current.context())
+        });
         let (history_items, history_bytes) =
             history.fold((0_u16, 0_u32), |(items, bytes), capture| {
                 (
@@ -425,7 +431,7 @@ impl SemanticRetainedReadEvidence {
             current.omissions,
             current.stats,
             current.roles,
-            current.link_destinations,
+            current.url_sources,
         );
         let mut hasher = Sha256::new();
         hasher.update(b"ZEPHIUM-RETAINED-READ-1\0");

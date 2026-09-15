@@ -634,6 +634,12 @@ fn write_changed_fields(
                 .map(|target| target.as_url().as_str()),
         )?;
     }
+    if changes.contains(SemanticNodeChange::ImageSource) {
+        checked_write(
+            output,
+            format_args!(" image_source_available={}", node.image_source().is_some()),
+        )?;
+    }
     if changes.contains(SemanticNodeChange::Text) {
         output.push(" text=")?;
         write_optional_text(output, node.text().map(|value| value.as_str()))?;
@@ -747,7 +753,7 @@ fn write_operation_inventory(
     Ok(())
 }
 
-fn change_labels() -> [(SemanticNodeChange, &'static str); 11] {
+fn change_labels() -> [(SemanticNodeChange, &'static str); 12] {
     [
         (SemanticNodeChange::Name, "name"),
         (SemanticNodeChange::Text, "text"),
@@ -760,6 +766,7 @@ fn change_labels() -> [(SemanticNodeChange, &'static str); 11] {
         (SemanticNodeChange::HeadingLevel, "heading_level"),
         (SemanticNodeChange::LandmarkKind, "landmark_kind"),
         (SemanticNodeChange::LinkDestination, "link_destination"),
+        (SemanticNodeChange::ImageSource, "image_source"),
     ]
 }
 

@@ -121,6 +121,8 @@
     typeof HTMLInputElement === "function" ? getter(HTMLInputElement.prototype, "value") : null;
   const anchorHrefGetter =
     typeof HTMLAnchorElement === "function" ? getter(HTMLAnchorElement.prototype, "href") : null;
+  const imageCurrentSrcGetter = typeof HTMLImageElement === "function" ? getter(HTMLImageElement.prototype, "currentSrc") : null;
+  const imageSrcGetter = typeof HTMLImageElement === "function" ? getter(HTMLImageElement.prototype, "src") : null;
   const inputCheckedGetter =
     typeof HTMLInputElement === "function" ? getter(HTMLInputElement.prototype, "checked") : null;
   const inputLabelsGetter =
@@ -1555,11 +1557,13 @@
       if (name !== null && name !== "") addName(record, name, state);
       record.sink = recordSink(descriptor, wire.n !== undefined);
       if (record.sink === "value") record.sinkBytes = 0;
-      if (descriptor.role === "link" && descriptor.tag === "a" && record.sensitivity === "public") {
-        // Use the captured native getter, never an element-owned accessor or
-        // a click. Exact URL bytes share the original text/wire ceilings.
+      const imageSource = descriptor.role === "image" && descriptor.tag === "img";
+      if (((descriptor.role === "link" && descriptor.tag === "a") || imageSource) && record.sensitivity === "public") {
         let destination;
-        try { destination = read(anchorHrefGetter, element); } catch (_) { destination = undefined; }
+        try {
+          destination = read(imageSource ? imageCurrentSrcGetter : anchorHrefGetter, element);
+          if (imageSource && !destination) destination = read(imageSrcGetter, element);
+        } catch (_) { destination = undefined; }
         if (typeof destination === "string" && destination !== "" &&
             utf8Length(destination, 2049) <= 2048 &&
             (apply(stringStartsWith, destination, ["https://"]) || apply(stringStartsWith, destination, ["http://"])) &&
@@ -1567,7 +1571,7 @@
               (!apply(stringIncludes, destination, ["?"]) && !apply(stringIncludes, destination, ["#"]))) &&
             !apply(stringIncludes, destination, ["@"])) {
           const field = consumeField(destination, 2048, state);
-          if (!field.secret && field.value === destination) wire.u = destination;
+          if (!field.secret && field.value === destination) wire[imageSource ? "m" : "u"] = destination;
         }
       }
 

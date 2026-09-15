@@ -119,6 +119,7 @@ impl AgentWorkArtifactPublication {
                                 SemanticReadField::BooleanValue => 4,
                                 SemanticReadField::OrdinalValue => 5,
                                 SemanticReadField::LinkDestination => 6,
+                                SemanticReadField::ImageSource => 7,
                             },
                             context: identity.id().bytes(),
                             context_generation: source.frame.context().context_generation().get(),
@@ -161,7 +162,9 @@ impl AgentWorkArtifactPublication {
         };
         let fields = archive_fields(result.fields(), &mut cite)?;
         let document = ArchivedDocument {
-            version: if sources.values().any(|source| source.field == 6) {
+            version: if sources.values().any(|source| source.field == 7) {
+                5
+            } else if sources.values().any(|source| source.field == 6) {
                 4
             } else if result
                 .fields()
@@ -241,6 +244,10 @@ fn archive_fields(
                 value: value.as_str().to_owned(),
                 sources: cite(value.source_span())?,
             },
+            SemanticExtractedValue::ImageUrl(value) => ArchivedValue::ImageUrl {
+                value: value.as_str().to_owned(),
+                sources: cite(value.source_span())?,
+            },
             SemanticExtractedValue::Boolean(value) => ArchivedValue::Boolean {
                 value: value.value(),
                 sources: cite(value.source_span())?,
@@ -292,6 +299,13 @@ impl ArchivedField {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ArchivedValue {
+    /// Historical image source without fetch authority.
+    ImageUrl {
+        /// Exact observed, screened source URL.
+        value: String,
+        /// Historical read-local citations.
+        sources: Vec<u16>,
+    },
     /// Historical exact observed URL, with no live navigation authority.
     Url {
         /// Screened destination copied from a cited source.
@@ -512,7 +526,7 @@ impl fmt::Debug for AgentWorkArchivedExtraction {
 impl ArchivedDocument {
     fn validate(&self) -> Result<(), AgentWorkJournalError> {
         let invalid = AgentWorkJournalError::Uncertain;
-        if !matches!(self.version, 1..=4)
+        if !matches!(self.version, 1..=5)
             || self.id == [0; 16]
             || self.schema == 0
             || self.observation == 0
@@ -602,7 +616,9 @@ impl ArchivedDocument {
                     value,
                     source_bytes: original,
                     truncated,
-                } if source.field == 6 && self.version >= 4 && source.role == "link" => {
+                } if (source.field == 6 && self.version >= 4 && source.role == "link")
+                    || (source.field == 7 && self.version >= 5 && source.role == "image") =>
+                {
                     if *truncated
                         || *original != value.len() as u64
                         || !crate::semantic_extract::exact_public_url(value)
@@ -674,10 +690,12 @@ impl ArchivedDocument {
                         values += 1;
                         cite(sources)?;
                     }
-                    ArchivedValue::Url { value, sources } => {
-                        if self.version < 4 || !crate::semantic_extract::exact_public_url(value)
+                    ArchivedValue::Url { value, sources }
+                    | ArchivedValue::ImageUrl { value, sources } => {
+                        let image = matches!(field.value, ArchivedValue::ImageUrl { .. });
+                        if self.version < if image { 5 } else { 4 } || !crate::semantic_extract::exact_public_url(value)
                             || !sources.iter().any(|id| self.sources.iter().any(|source|
-                                source.id == *id && source.field == 6 && matches!(&source.content,
+                                source.id == *id && source.field == if image { 7 } else { 6 } && matches!(&source.content,
                                     ArchivedSourceContent::Preview { value: observed, .. } if observed == value))) {
                             return Err(invalid);
                         }

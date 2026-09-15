@@ -1007,6 +1007,7 @@ pub struct SemanticNode {
     heading_level: Option<SemanticHeadingLevel>,
     landmark_kind: Option<SemanticLandmarkKind>,
     link_destination: Option<crate::ContextNavigationTarget>,
+    image_source: Option<crate::ContextNavigationTarget>,
     name: Option<SemanticText>,
     text: Option<SemanticText>,
     value: Option<SemanticValueSummary>,
@@ -1051,6 +1052,11 @@ impl SemanticNode {
     /// Page data, never a navigation permit.
     pub const fn link_destination(&self) -> Option<&crate::ContextNavigationTarget> {
         self.link_destination.as_ref()
+    }
+
+    /// Exact observed public image URL; data only, never a navigation target grant.
+    pub const fn image_source(&self) -> Option<&crate::ContextNavigationTarget> {
+        self.image_source.as_ref()
     }
 
     /// Bounded accessible name.
@@ -1130,6 +1136,7 @@ impl fmt::Debug for SemanticNode {
             .field("heading_level", &self.heading_level)
             .field("landmark_kind", &self.landmark_kind)
             .field("has_link_destination", &self.link_destination.is_some())
+            .field("has_image_source", &self.image_source.is_some())
             .field("name_bytes", &self.name.as_ref().map(SemanticText::len))
             .field("text_bytes", &self.text.as_ref().map(SemanticText::len))
             .field("has_value", &self.value.is_some())
@@ -1151,6 +1158,7 @@ pub(crate) struct SemanticNodeInput {
     pub(crate) heading_level: Option<SemanticHeadingLevel>,
     pub(crate) landmark_kind: Option<SemanticLandmarkKind>,
     pub(crate) link_destination: Option<crate::ContextNavigationTarget>,
+    pub(crate) image_source: Option<crate::ContextNavigationTarget>,
     pub(crate) name: Option<SemanticText>,
     pub(crate) text: Option<SemanticText>,
     pub(crate) value: Option<SemanticValueSummary>,
@@ -1191,6 +1199,10 @@ impl SemanticSnapshot {
                     + node.text.as_ref().map_or(0, SemanticText::len)
                     + node
                         .link_destination
+                        .as_ref()
+                        .map_or(0, |target| target.as_url().as_str().len())
+                    + node
+                        .image_source
                         .as_ref()
                         .map_or(0, |target| target.as_url().as_str().len())
                     + match node.value.as_ref() {
@@ -1371,6 +1383,7 @@ impl SemanticSnapshot {
                 heading_level: input.heading_level,
                 landmark_kind: input.landmark_kind,
                 link_destination: input.link_destination,
+                image_source: input.image_source,
                 name: input.name,
                 text: input.text,
                 value: input.value,
@@ -1521,6 +1534,7 @@ mod tests {
             heading_level: None,
             landmark_kind: None,
             link_destination: None,
+            image_source: None,
             name: Some(SemanticText::try_new("Save".to_owned(), 10).expect("name")),
             text: None,
             value: None,

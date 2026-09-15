@@ -7,6 +7,7 @@ pub struct WorkBrowseCollectionSchema {
     fields: Vec<SemanticExtractionFieldSchema>,
     max_items: usize,
     subject_url_field: Option<String>,
+    subject_image_fields: Vec<String>,
 }
 
 impl WorkBrowseCollectionSchema {
@@ -38,6 +39,7 @@ impl WorkBrowseCollectionSchema {
             fields,
             max_items,
             subject_url_field: None,
+            subject_image_fields: vec![],
         };
         schema.extraction_field()?;
         Ok(schema)
@@ -53,6 +55,20 @@ impl WorkBrowseCollectionSchema {
             return Err(WorkError::Invalid);
         }
         self.subject_url_field = Some(name.to_owned());
+        Ok(self)
+    }
+
+    /// Selects an observed image field for Work's bounded image candidates.
+    pub fn with_subject_image_field(mut self, name: &str) -> Result<Self, WorkError> {
+        if self.subject_image_fields.len() >= 3
+            || self.subject_image_fields.iter().any(|field| field == name)
+            || !self.fields.iter().any(|field| {
+                field.name() == name && field.kind() == SemanticExtractionValueKind::ImageUrl
+            })
+        {
+            return Err(WorkError::Invalid);
+        }
+        self.subject_image_fields.push(name.to_owned());
         Ok(self)
     }
 
@@ -187,6 +203,27 @@ impl WorkBrowseCollectionSchema {
                             text: value.clone(),
                         }
                     }
+                    Some(ArchivedValue::ImageUrl { value, sources })
+                        if field.kind() == SemanticExtractionValueKind::ImageUrl =>
+                    {
+                        cell_evidence.extend(cite(sources)?);
+                        if self
+                            .subject_image_fields
+                            .iter()
+                            .any(|name| name == field.name())
+                        {
+                            let images = &mut subjects
+                                .last_mut()
+                                .ok_or(WorkError::Invalid)?
+                                .image_candidates;
+                            if !images.contains(value) {
+                                images.push(value.clone());
+                            }
+                        }
+                        WorkCellValue::Text {
+                            text: value.clone(),
+                        }
+                    }
                     Some(ArchivedValue::Boolean { value, sources })
                         if field.kind() == SemanticExtractionValueKind::Boolean =>
                     {
@@ -251,20 +288,26 @@ mod tests {
             vec![
                 SemanticExtractionFieldSchema::try_text("name".into(), true, 256).unwrap(),
                 SemanticExtractionFieldSchema::try_url("product_url".into(), true, 512).unwrap(),
+                SemanticExtractionFieldSchema::try_image_url("image".into(), true, 512).unwrap(),
             ],
             3,
         )
         .unwrap();
         assert!(schema.clone().with_subject_url_field("name").is_err());
-        let schema = schema.with_subject_url_field("product_url").unwrap();
+        let schema = schema
+            .with_subject_url_field("product_url")
+            .unwrap()
+            .with_subject_image_field("image")
+            .unwrap();
         let rows: Vec<Vec<ArchivedField>> = serde_json::from_value(serde_json::json!([[
             {"name":"name","value":{"kind":"text","value":"Item A","sources":[1]}},
-            {"name":"product_url","value":{"kind":"url","value":"https://shop.example.test/a","sources":[2]}}
+            {"name":"product_url","value":{"kind":"url","value":"https://shop.example.test/a","sources":[2]}},
+            {"name":"image","value":{"kind":"image_url","value":"https://images.example.test/a.webp","sources":[3]}}
         ]])).unwrap();
         let data = schema
             .comparison(&rows, &mut |ids| Ok(ids.iter().map(|id| id - 1).collect()))
             .unwrap();
-        data.validate(2).unwrap();
+        data.validate(3).unwrap();
         let WorkArtifactDataV1::ComparisonMatrix {
             subjects, cells, ..
         } = data
@@ -276,6 +319,11 @@ mod tests {
             Some("https://shop.example.test/a")
         );
         assert_eq!(cells[0][0].evidence, [0, 1]);
+        assert_eq!(cells[0][1].evidence, [0, 2]);
+        assert_eq!(
+            subjects[0].image_candidates,
+            ["https://images.example.test/a.webp"]
+        );
     }
 
     #[test]

@@ -264,6 +264,14 @@ pub fn decode_semantic_snapshot(
         if raw_destination.is_some() && role != SemanticRole::Link {
             return Err(SemanticDecodeError::NodeContract);
         }
+        let raw_image = validate_optional_text(
+            raw_node.image_source,
+            crate::semantic::MAX_SEMANTIC_LINK_DESTINATION_BYTES,
+            &mut wire_text_bytes,
+        )?;
+        if raw_image.is_some() && role != SemanticRole::Image {
+            return Err(SemanticDecodeError::NodeContract);
+        }
         let (mut value, value_was_secret) =
             decode_value(role, raw_node.value, &mut wire_text_bytes)?;
 
@@ -316,6 +324,20 @@ pub fn decode_semantic_snapshot(
                 (target.as_url().as_str() == value.as_str() && model_safe_public_url(&target))
                     .then_some(target)
             });
+        let image_source = raw_image
+            .filter(|_| sensitivity == SemanticSensitivity::Public)
+            .and_then(|value| {
+                let target = crate::ContextNavigationTarget::parse(value.as_str()).ok()?;
+                (target.as_url().as_str() == value.as_str() && model_safe_public_url(&target))
+                    .then_some(target)
+            });
+        retained_text_bytes = retained_text_bytes
+            .checked_add(
+                image_source
+                    .as_ref()
+                    .map_or(0, |target| target.as_url().as_str().len()),
+            )
+            .ok_or(SemanticDecodeError::TextLimit)?;
         retained_text_bytes = retained_text_bytes
             .checked_add(
                 link_destination
@@ -358,6 +380,7 @@ pub fn decode_semantic_snapshot(
             heading_level,
             landmark_kind,
             link_destination,
+            image_source,
             name: raw_name,
             text: raw_text,
             value,
@@ -882,6 +905,8 @@ struct RawNode {
     landmark_kind: Option<crate::SemanticLandmarkKind>,
     #[serde(rename = "u", default)]
     link_destination: Option<String>,
+    #[serde(rename = "m", default)]
+    image_source: Option<String>,
     #[serde(rename = "n", default)]
     name: Option<String>,
     #[serde(rename = "t", default)]

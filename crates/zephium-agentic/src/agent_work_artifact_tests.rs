@@ -343,3 +343,43 @@ fn url_archive_roundtrip_revalidates_version_destination_and_source_kind() {
     };
     assert!(d.validate().is_err());
 }
+#[test]
+fn image_archive_roundtrip_revalidates_version_destination_and_source_kind() {
+    let mut d = document();
+    d.version = 5;
+    let url = "https://shop.example.test/product/42";
+    d.fields = vec![ArchivedField {
+        name: "url".into(),
+        value: ArchivedValue::ImageUrl {
+            value: url.into(),
+            sources: vec![1],
+        },
+    }];
+    let source = &mut d.sources[0];
+    source.observation = Some(4);
+    source.observation_generation = Some(1);
+    source.captured_millis = Some(5);
+    source.role = "image".into();
+    source.field = 7;
+    source.content = ArchivedSourceContent::Preview {
+        value: url.into(),
+        source_bytes: url.len() as u64,
+        truncated: false,
+    };
+    let (descriptor, bytes) = encode(&d);
+    let decoded = AgentWorkArchivedExtraction::decode(descriptor, &bytes).unwrap();
+    assert!(
+        matches!(decoded.fields()[0].value(), ArchivedValue::ImageUrl { value, .. } if value == url)
+    );
+    d.version = 4;
+    assert!(d.validate().is_err());
+    d.version = 5;
+    d.sources[0].field = 3;
+    assert!(d.validate().is_err());
+    d.sources[0].field = 7;
+    d.fields[0].value = ArchivedValue::ImageUrl {
+        value: "https://shop.example.test/product/43".into(),
+        sources: vec![1],
+    };
+    assert!(d.validate().is_err());
+}
