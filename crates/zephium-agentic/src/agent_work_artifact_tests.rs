@@ -44,6 +44,7 @@ fn document() -> ArchivedDocument {
             },
         ],
         sources: vec![ArchivedSource {
+            fields_complete: None,
             observation: None,
             observation_generation: None,
             captured_millis: None,
@@ -380,6 +381,53 @@ fn image_archive_roundtrip_revalidates_version_destination_and_source_kind() {
     d.fields[0].value = ArchivedValue::ImageUrl {
         value: "https://shop.example.test/product/43".into(),
         sources: vec![1],
+    };
+    assert!(d.validate().is_err());
+}
+
+#[test]
+fn money_archive_revalidates_amount_currency_version_and_citations() {
+    let mut d = document();
+    d.version = 6;
+    d.fields = vec![ArchivedField {
+        name: "price".into(),
+        value: ArchivedValue::Money {
+            amount: "20.00".into(),
+            currency: "USD".into(),
+            sources: vec![1],
+        },
+    }];
+    let source = &mut d.sources[0];
+    source.fields_complete = Some(true);
+    source.observation = Some(4);
+    source.observation_generation = Some(1);
+    source.captured_millis = Some(5);
+    source.content = ArchivedSourceContent::Text {
+        value: "$20.00 USD".into(),
+    };
+    let (descriptor, bytes) = encode(&d);
+    let decoded = AgentWorkArchivedExtraction::decode(descriptor, &bytes).unwrap();
+    assert!(
+        matches!(decoded.fields()[0].value(), ArchivedValue::Money { amount, currency, .. } if amount == "20.00" && currency == "USD")
+    );
+    d.sources[0].fields_complete = None;
+    assert!(d.validate().is_err());
+    d.sources[0].fields_complete = Some(false);
+    assert!(d.validate().is_err());
+    d.sources[0].fields_complete = Some(true);
+    d.version = 5;
+    assert!(d.validate().is_err());
+    d.version = 6;
+    d.sources[0].content = ArchivedSourceContent::Text {
+        value: "$20.00".into(),
+    };
+    assert!(d.validate().is_err());
+    d.sources[0].content = ArchivedSourceContent::Text {
+        value: "$21.00 USD".into(),
+    };
+    assert!(d.validate().is_err());
+    d.sources[0].content = ArchivedSourceContent::Text {
+        value: "$20.00 EUR".into(),
     };
     assert!(d.validate().is_err());
 }

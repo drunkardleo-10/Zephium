@@ -96,6 +96,29 @@ impl MacosWorkComposition {
         attempt: WorkNodeAttempt,
         settings: WorkBrowserAdapterSettings,
     ) -> Result<WorkNodeSettlement, WorkError> {
+        self.execute_node_owned(shell, attempt, settings, None)
+            .await
+    }
+
+    /// One schema-driven public read under the original durable attempt and scope.
+    pub async fn execute_collection_node_owned(
+        &self,
+        shell: &CallbackHandle,
+        attempt: WorkNodeAttempt,
+        settings: WorkBrowserAdapterSettings,
+        schema: WorkBrowseCollectionSchema,
+    ) -> Result<WorkNodeSettlement, WorkError> {
+        self.execute_node_owned(shell, attempt, settings, Some(schema))
+            .await
+    }
+
+    async fn execute_node_owned(
+        &self,
+        shell: &CallbackHandle,
+        attempt: WorkNodeAttempt,
+        settings: WorkBrowserAdapterSettings,
+        collection: Option<WorkBrowseCollectionSchema>,
+    ) -> Result<WorkNodeSettlement, WorkError> {
         let intervention_origin = match &attempt.specification().capability {
             WorkCapability::AccountRead { scope } | WorkCapability::AccountUpdate { scope, .. } => {
                 Some(scope.origin.clone())
@@ -103,7 +126,7 @@ impl MacosWorkComposition {
             _ => None,
         };
         let diagnostics = Diagnostics::from(&settings);
-        let invocation = compile(&attempt, settings)?;
+        let invocation = compile(&attempt, settings, collection.as_ref())?;
         let outputs: Vec<String> = attempt
             .node()
             .outputs
@@ -118,7 +141,7 @@ impl MacosWorkComposition {
                 intervention_origin,
                 attempt.specification().limits,
                 &outputs,
-                None,
+                collection.as_ref(),
                 diagnostics,
             )
             .await?;
@@ -247,7 +270,15 @@ impl MacosWorkComposition {
             // Draining also releases the controller's bounded event backpressure.
             while let Some(event) = guard.0.take_event() {
                 #[cfg(feature = "public-qualification")]
-                if matches!(event.kind(), AgentWorkEventKind::ModelSettled { .. }) {
+                if matches!(
+                    event.kind(),
+                    AgentWorkEventKind::ModelSettled { .. }
+                        | AgentWorkEventKind::ToolProposed(_)
+                        | AgentWorkEventKind::InspectionRefused
+                        | AgentWorkEventKind::NavigationRefused
+                        | AgentWorkEventKind::ActionProposalRefused(_)
+                        | AgentWorkEventKind::ModelRequestedHuman(_)
+                ) {
                     if let Some(diagnostic) = diagnostics.model_diagnostic {
                         diagnostic(event.kind());
                     }
@@ -549,6 +580,7 @@ fn compile_step(
 fn compile(
     attempt: &WorkNodeAttempt,
     settings: WorkBrowserAdapterSettings,
+    collection: Option<&WorkBrowseCollectionSchema>,
 ) -> Result<crate::TrustedWorkRequest, WorkError> {
     attempt.specification().capability.validate()?;
     if settings.profile.profile() != attempt.profile()
@@ -560,16 +592,28 @@ fn compile(
     {
         return Err(WorkError::Invalid);
     }
-    let output_fields = attempt
-        .node()
-        .outputs
-        .iter()
-        .enumerate()
-        .map(|(index, _)| {
-            SemanticExtractionFieldSchema::try_text(format!("output_{index}"), true, 4096)
-                .map_err(|_| WorkError::Invalid)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let output_fields = if let Some(schema) = collection {
+        if attempt.node().outputs.len() != 1
+            || !matches!(
+                attempt.specification().capability,
+                WorkCapability::PublicBrowse { .. } | WorkCapability::PublicDiscovery { .. }
+            )
+        {
+            return Err(WorkError::Invalid);
+        }
+        vec![schema.extraction_field()?]
+    } else {
+        attempt
+            .node()
+            .outputs
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                SemanticExtractionFieldSchema::try_text(format!("output_{index}"), true, 4096)
+                    .map_err(|_| WorkError::Invalid)
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
     let limits = attempt.specification().limits;
     let budget = AgentRunBudget::try_new(
         limits.operations,

@@ -498,6 +498,16 @@ fn encode_field(
                     .ok_or(SemanticModelEncodingError::Invariant)?
             ),
         )?,
+        SemanticExtractionValueKind::Money => checked_write(
+            output,
+            format_args!(
+                " currencies={}",
+                field
+                    .currencies()
+                    .ok_or(SemanticModelEncodingError::Invariant)?
+                    .join(",")
+            ),
+        )?,
         SemanticExtractionValueKind::Boolean => {}
         SemanticExtractionValueKind::Unsigned => checked_write(
             output,
@@ -535,6 +545,7 @@ fn extraction_kind_label(kind: SemanticExtractionValueKind) -> &'static str {
         SemanticExtractionValueKind::Text => "text",
         SemanticExtractionValueKind::Url => "url",
         SemanticExtractionValueKind::ImageUrl => "image_url",
+        SemanticExtractionValueKind::Money => "money",
         SemanticExtractionValueKind::Boolean => "boolean",
         SemanticExtractionValueKind::Unsigned => "unsigned",
         SemanticExtractionValueKind::TextList => "text_list",
@@ -562,6 +573,7 @@ fn hash_field(hasher: &mut Sha256, field: &crate::SemanticExtractionFieldSchema)
         SemanticExtractionValueKind::Text => 1,
         SemanticExtractionValueKind::Url => 6,
         SemanticExtractionValueKind::ImageUrl => 7,
+        SemanticExtractionValueKind::Money => 8,
         SemanticExtractionValueKind::Boolean => 2,
         SemanticExtractionValueKind::Unsigned => 3,
         SemanticExtractionValueKind::TextList => 4,
@@ -583,6 +595,12 @@ fn hash_field(hasher: &mut Sha256, field: &crate::SemanticExtractionFieldSchema)
             .unwrap_or(u64::MAX)
             .to_be_bytes(),
     );
+    if let Some(currencies) = field.currencies() {
+        hasher.update((currencies.len() as u64).to_be_bytes());
+        for currency in currencies {
+            hasher.update(currency.as_bytes());
+        }
+    }
     if let Some(children) = field.row_fields() {
         hasher.update((children.len() as u64).to_be_bytes());
         for child in children {
@@ -620,6 +638,26 @@ mod tests {
     };
     use serde_json::json;
     use zephium_core::ids::ProfileId;
+
+    #[test]
+    fn money_currency_substitution_changes_the_schema_guard() {
+        let schema = |currency: &str| {
+            SemanticExtractionSchema::try_new(
+                SemanticExtractionSchemaId::new(1).unwrap(),
+                vec![SemanticExtractionFieldSchema::try_money(
+                    "price".into(),
+                    true,
+                    vec![currency.into()],
+                )
+                .unwrap()],
+            )
+            .unwrap()
+        };
+        assert_ne!(
+            extraction_schema_guard(&schema("USD")),
+            extraction_schema_guard(&schema("EUR"))
+        );
+    }
 
     struct FixedCounter {
         revision: SemanticTokenizerRevision,
@@ -790,7 +828,11 @@ mod tests {
             SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
         )
         .unwrap();
-        assert_eq!(encoded.stats().bytes(), 13316);
+        assert_eq!(
+            encoded.stats().bytes(),
+            13316 + " default_fields_complete=unproven".len() as u32
+        );
+        assert!(encoded.content.contains("default_fields_complete=unproven"));
         assert_eq!(encoded.stats().read().items(), 117);
         assert_eq!(
             encoded

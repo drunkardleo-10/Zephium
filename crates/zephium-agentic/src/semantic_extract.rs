@@ -81,6 +81,8 @@ pub enum SemanticExtractionValueKind {
     Url,
     /// One exact observed public image source.
     ImageUrl,
+    /// Decimal amount with explicit observed currency.
+    Money,
     /// One Boolean scalar.
     Boolean,
     /// One unsigned integer scalar.
@@ -105,6 +107,9 @@ enum SemanticExtractionFieldSpec {
     },
     ImageUrl {
         max_bytes: usize,
+    },
+    Money {
+        currencies: Vec<String>,
     },
     Boolean,
     Unsigned {
@@ -168,6 +173,37 @@ impl SemanticExtractionFieldSchema {
         let mut field = Self::try_url(name, required, max_bytes)?;
         field.spec = SemanticExtractionFieldSpec::ImageUrl { max_bytes };
         Ok(field)
+    }
+
+    /// Requires an explicitly observed currency from the host-approved list.
+    pub fn try_money(
+        name: String,
+        required: bool,
+        currencies: Vec<String>,
+    ) -> Result<Self, SemanticExtractionSchemaError> {
+        validate_field_name(&name)?;
+        let mut unique = BTreeSet::new();
+        if currencies.is_empty()
+            || currencies.len() > 16
+            || currencies
+                .iter()
+                .any(|code| !crate::semantic_money::valid_currency(code) || !unique.insert(code))
+        {
+            return Err(SemanticExtractionSchemaError::CurrencyLimit);
+        }
+        Ok(Self {
+            name,
+            required,
+            spec: SemanticExtractionFieldSpec::Money { currencies },
+        })
+    }
+
+    /// Host-approved currency codes, when this is a money field.
+    pub fn currencies(&self) -> Option<&[String]> {
+        match &self.spec {
+            SemanticExtractionFieldSpec::Money { currencies } => Some(currencies),
+            _ => None,
+        }
     }
 
     /// Constructs a Boolean field.
@@ -272,6 +308,7 @@ impl SemanticExtractionFieldSchema {
             SemanticExtractionFieldSpec::Text { .. } => SemanticExtractionValueKind::Text,
             SemanticExtractionFieldSpec::Url { .. } => SemanticExtractionValueKind::Url,
             SemanticExtractionFieldSpec::ImageUrl { .. } => SemanticExtractionValueKind::ImageUrl,
+            SemanticExtractionFieldSpec::Money { .. } => SemanticExtractionValueKind::Money,
             SemanticExtractionFieldSpec::Boolean => SemanticExtractionValueKind::Boolean,
             SemanticExtractionFieldSpec::Unsigned { .. } => SemanticExtractionValueKind::Unsigned,
             SemanticExtractionFieldSpec::TextList { .. } => SemanticExtractionValueKind::TextList,
@@ -453,6 +490,9 @@ pub enum SemanticExtractionSchemaError {
     /// A list ceiling was zero or exceeded its hard maximum.
     #[error("semantic extraction schema list ceiling is invalid")]
     ListLimit,
+    /// Currency list is empty, duplicated, malformed or too large.
+    #[error("semantic extraction currency list is invalid")]
+    CurrencyLimit,
 }
 
 fn validate_schema_fields(
@@ -621,6 +661,32 @@ impl fmt::Debug for SemanticExtractedBoolean {
     }
 }
 
+/// Decimal strings with source-backed currency; no floating-point conversion.
+#[derive(Eq, PartialEq)]
+pub struct SemanticExtractedMoney {
+    amount: SemanticExtractedText,
+    currency: String,
+}
+impl SemanticExtractedMoney {
+    /// Admitted decimal amount.
+    pub fn amount(&self) -> &str {
+        self.amount.as_str()
+    }
+    /// Explicit observed currency code.
+    pub fn currency(&self) -> &str {
+        &self.currency
+    }
+    /// Exact cited source span.
+    pub const fn source_span(&self) -> SemanticExtractionSourceSpan {
+        self.amount.source_span()
+    }
+}
+impl fmt::Debug for SemanticExtractedMoney {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SemanticExtractedMoney([redacted])")
+    }
+}
+
 /// Bounded model-mapped unsigned integer plus exact cited evidence.
 #[derive(Eq, PartialEq)]
 pub struct SemanticExtractedUnsigned {
@@ -728,6 +794,8 @@ pub enum SemanticExtractedValue {
     Url(SemanticExtractedText),
     /// Exact observed image URL, without fetch or navigation authority.
     ImageUrl(SemanticExtractedText),
+    /// Source-backed decimal amount and currency.
+    Money(SemanticExtractedMoney),
     /// Boolean scalar.
     Boolean(SemanticExtractedBoolean),
     /// Unsigned integer scalar.
@@ -743,6 +811,7 @@ impl SemanticExtractedValue {
             Self::Text(_) => SemanticExtractionValueKind::Text,
             Self::Url(_) => SemanticExtractionValueKind::Url,
             Self::ImageUrl(_) => SemanticExtractionValueKind::ImageUrl,
+            Self::Money(_) => SemanticExtractionValueKind::Money,
             Self::Boolean(_) => SemanticExtractionValueKind::Boolean,
             Self::Unsigned(_) => SemanticExtractionValueKind::Unsigned,
             Self::TextList(_) => SemanticExtractionValueKind::TextList,
@@ -757,6 +826,7 @@ impl fmt::Debug for SemanticExtractedValue {
             Self::Text(value) | Self::Url(value) | Self::ImageUrl(value) => value.fmt(formatter),
             Self::Boolean(value) => value.fmt(formatter),
             Self::Unsigned(value) => value.fmt(formatter),
+            Self::Money(value) => value.fmt(formatter),
             Self::TextList(value) => value.fmt(formatter),
             Self::Rows(value) => value.fmt(formatter),
         }
@@ -889,6 +959,7 @@ impl<'a> SemanticExtractionResult<'a> {
                         .try_reserve(1)
                         .map_err(|_| SemanticExtractionError::Invariant)?;
                     sources.push(SemanticOwnedExtractionSource {
+                        fields_complete: provenance.fields_complete(),
                         id: fragment.id(),
                         field: fragment.field(),
                         role: fragment.role(),
@@ -991,6 +1062,8 @@ pub enum SemanticOwnedReadContent {
 
 /// Owned provenance and one deduplicated safe source quote. No live ref authority.
 pub struct SemanticOwnedExtractionSource {
+    /// Native evidence that the source node fields were not clipped.
+    pub fields_complete: bool,
     /// Historical source observation, independent of the terminal baseline.
     pub observation: SemanticObservationId,
     /// Historical source observation generation.
@@ -1477,6 +1550,62 @@ fn admit_value<'a>(
             )?))
         }
         (
+            SemanticExtractionFieldSpec::Money { currencies },
+            RawValue::Money {
+                amount,
+                currency,
+                sources: raw_sources,
+            },
+        ) => {
+            if !currencies.contains(&currency)
+                || !raw_sources.iter().any(|token| {
+                    SemanticReadFragmentId::parse_model_token(token)
+                        .and_then(|id| read.fragment(id))
+                        .is_some_and(|source| {
+                            if !source.provenance().fields_complete()
+                                || !matches!(
+                                    source.field(),
+                                    crate::SemanticReadField::AccessibleName
+                                        | crate::SemanticReadField::VisibleText
+                                        | crate::SemanticReadField::TextValue
+                                )
+                            {
+                                return false;
+                            }
+                            let content = source.content();
+                            let text = content.text().map(|text| text.as_str()).or_else(|| {
+                                content
+                                    .value_preview()
+                                    .filter(|preview| !preview.truncated())
+                                    .map(|preview| preview.text())
+                            });
+                            text.is_some_and(|text| {
+                                crate::semantic_money::supports_money(text, &amount, &currency)
+                            })
+                        })
+                })
+            {
+                return Err(SemanticExtractionError::SourceInvalid);
+            }
+            let amount = admit_text(
+                amount,
+                24,
+                raw_sources,
+                read,
+                sensitivity_limit,
+                sources,
+                counters,
+            )?;
+            counters.text_bytes += currency.len();
+            if counters.text_bytes > MAX_SEMANTIC_EXTRACTION_TOTAL_TEXT_BYTES {
+                return Err(SemanticExtractionError::TextLimit);
+            }
+            Ok(SemanticExtractedValue::Money(SemanticExtractedMoney {
+                amount,
+                currency,
+            }))
+        }
+        (
             SemanticExtractionFieldSpec::Boolean,
             RawValue::Boolean {
                 value,
@@ -1701,6 +1830,12 @@ struct RawField {
 #[derive(Deserialize)]
 #[serde(tag = "k", deny_unknown_fields)]
 enum RawValue {
+    #[serde(rename = "money")]
+    Money {
+        amount: String,
+        currency: String,
+        sources: Vec<String>,
+    },
     #[serde(rename = "rows")]
     Rows { items: Vec<RawRow> },
     #[serde(rename = "text")]
@@ -1766,6 +1901,10 @@ mod tests {
     }
 
     fn observation_with_nodes(nodes: Value) -> SemanticObservation {
+        observation_with_completeness(nodes, "complete")
+    }
+
+    fn observation_with_completeness(nodes: Value, completeness: &str) -> SemanticObservation {
         let identity = ContextIdentity::new(
             ContextId::from_raw(731),
             ContextRunId::from_raw(732),
@@ -1801,7 +1940,7 @@ mod tests {
             "v": SEMANTIC_WIRE_VERSION,
             "i": 17,
             "g": 19,
-            "c": "complete",
+            "c": completeness,
             "n": nodes
         }))
         .expect("wire");
@@ -1930,6 +2069,112 @@ mod tests {
             &serde_json::to_vec(output).expect("output"),
         )
         .expect_err("output must fail")
+    }
+
+    #[test]
+    fn money_refuses_a_clipped_amount_even_when_its_prefix_matches() {
+        let observation = observation_with_completeness(
+            json!([
+                {"k":1,"r":"document","o":16,"fc":true},
+                {"k":2,"p":0,"r":"paragraph","t":"USD 123","fc":false}
+            ]),
+            "field_limit",
+        );
+        let read = read(&observation, 31);
+        let delivery = delivered(&read);
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(29).unwrap(),
+            vec![SemanticExtractionFieldSchema::try_money(
+                "price".into(),
+                true,
+                vec!["USD".into()],
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let output = serde_json::to_vec(&json!({"v":1,"schema":29,"fields":[{"name":"price","value":{"k":"money","amount":"123","currency":"USD","sources":["@r1"]}}]})).unwrap();
+        assert_eq!(
+            extract_semantic_read(
+                &schema,
+                &read,
+                &delivery,
+                SemanticReadSensitivityLimit::PublicOnly,
+                &output
+            )
+            .unwrap_err(),
+            SemanticExtractionError::SourceInvalid
+        );
+    }
+
+    #[test]
+    fn money_requires_matching_text_evidence_and_host_currency() {
+        let observation = observation_with_nodes(json!([
+            {"k":1,"r":"document","o":16},
+            {"k":2,"p":0,"r":"paragraph","t":"Price 1.299,50 EUR"},
+            {"k":3,"p":0,"r":"paragraph","t":"$1299.50"}
+        ]));
+        let read = read(&observation, 31);
+        let delivery = delivered(&read);
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(29).unwrap(),
+            vec![SemanticExtractionFieldSchema::try_money(
+                "price".into(),
+                true,
+                vec!["EUR".into()],
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let output = |amount: &str, currency: &str, source: &str| {
+            serde_json::to_vec(&json!({"v":1,"schema":29,"fields":[{"name":"price","value":{"k":"money","amount":amount,"currency":currency,"sources":[source]}}]})).unwrap()
+        };
+        let token = read
+            .fragments()
+            .iter()
+            .find(|source| {
+                source
+                    .content()
+                    .text()
+                    .is_some_and(|text| text.as_str().contains("EUR"))
+            })
+            .unwrap()
+            .id()
+            .model_token();
+        let accepted = extract_semantic_read(
+            &schema,
+            &read,
+            &delivery,
+            SemanticReadSensitivityLimit::PublicOnly,
+            &output("1299.50", "EUR", &token),
+        )
+        .unwrap();
+        assert!(
+            matches!(accepted.fields()[0].value(), SemanticExtractedValue::Money(value) if value.amount() == "1299.50" && value.currency() == "EUR")
+        );
+        for (amount, currency, source) in [
+            ("1299.50", "USD", token.as_str()),
+            ("1299.51", "EUR", token.as_str()),
+            ("1299.50", "EUR", "@r999"),
+        ] {
+            assert!(extract_semantic_read(
+                &schema,
+                &read,
+                &delivery,
+                SemanticReadSensitivityLimit::PublicOnly,
+                &output(amount, currency, source)
+            )
+            .is_err());
+        }
+        for currencies in [
+            vec![],
+            vec!["EUR".into(), "EUR".into()],
+            vec!["$".into()],
+            vec!["usd".into()],
+        ] {
+            assert!(
+                SemanticExtractionFieldSchema::try_money("price".into(), true, currencies).is_err()
+            );
+        }
     }
 
     #[test]

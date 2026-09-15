@@ -2467,3 +2467,51 @@ tampering and focused/current evidence retention are covered. This is a fixed
 main assignment with a real browser model, not autonomous Work routing, image
 rendering qualification or a whole-system production claim. CPU/RSS and total
 workflow wall time were not measured.
+
+## 2026-09-15: Typed money and durable collection tasks
+
+Money extraction now preserves a nonnegative decimal string and a host-approved
+currency code. Admission and version 6 reload require matching adjacent
+amount/currency text and native proof that the source fields were complete.
+The completeness bit is bound to read guards and retained evidence; a clipped
+numeric prefix cannot become a complete amount. A shared default encodes wholly
+unproven field cohorts without repeating the marker on every row. Prior archive
+versions remain readable. No UTC observed time is inferred from monotonic ticks.
+
+`execute_collection_node_owned` exposes schema-driven output for a single-output
+durable public browse/discovery task, retaining the original attempt, approved
+scope, limits, cancellation and publication receipt. Normal Work routing still
+has to select the schema; this is not the complete streaming worker/page port.
+
+Public macOS/Luna evidence on the official Vercel Commerce product page:
+
+| Route | Outcome | Browser model calls | Input / output tokens | Catalog ceiling micro-USD | Sum model elapsed |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Fixed main assignment, before completeness guard | Typed price and cited image reopened | 2 | 7,621 / 313 | 1,569 | 10,683 ms |
+| Model-planned durable task, final completeness guard | Same product, typed price and image reopened | 2 | 7,456 / 350 | 1,573 | 14,080 ms |
+
+The final mapper used 2,194 input / 280 output tokens, a 9,472-byte request and
+3,690 bytes of semantic evidence. Native failure and persistence failure were
+absent, closure was acknowledged, and the stored output remained NeedsReview.
+These are browser-call metrics, not total planning/search overhead or workflow
+wall time. Work aggregate accounting remains conservative. Image candidates
+were not downloaded or rendered.
+
+Earlier qualification setup used the wrong demo hostname: provider search
+returned no results, and browser discovery later failed with Browser(Authority).
+That failure's precise native cause is not established. The target was corrected
+from the official repository. A durable preview also refused a non-directory
+path prefix; the qualifier now uses the existing /product/ contract and one
+hop. One model plan added an extra responsibility and was rejected before native
+execution. No capability, shape check or ceiling was relaxed; none of those runs
+is positive money evidence. The fixed main probe can attempt browser discovery
+after search provides no matching source; autonomous fallback is not qualified.
+
+Final affected checks: 1,830 tests passed, two pre-existing ignored; workspace
+Clippy, durable composition Clippy, native build, formatting and diff checks
+passed. Cases cover wrong amounts/currencies, decimal ambiguity, clipped source
+prefixes, archive downgrade and missing completeness proof, schema substitution
+and identity/price citations in Work cells. Remaining Work integration includes
+collection routing and artifact-local evidence-index mapping to disclosed source
+keys with relevant previews (the application still takes only eight). Signed-in
+actions, full worker/page streaming and remaining release blockers stay open.

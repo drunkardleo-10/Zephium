@@ -61,6 +61,7 @@ impl Content {
 }
 
 struct Fragment {
+    fields_complete: bool,
     node_key: crate::semantic::SemanticNodeKey,
     field: SemanticReadField,
     role: SemanticRole,
@@ -96,6 +97,7 @@ impl Capture {
         self.fragments.retain(|fragment| {
             let duplicate = preferred.fragments.iter().any(|other| {
                 fragment.node_key == other.node_key
+                    && fragment.fields_complete == other.fields_complete
                     && fragment.field == other.field
                     && fragment.role == other.role
                     && fragment.frame == other.frame
@@ -239,6 +241,7 @@ impl SemanticRetainedReadEvidence {
                         }
                     };
                     Fragment {
+                        fields_complete: source.fields_complete(),
                         node_key: source.node_key,
                         field: fragment.field(),
                         role: fragment.role(),
@@ -410,6 +413,7 @@ impl SemanticRetainedReadEvidence {
                     role: source.role,
                     content,
                     provenance: SemanticReadProvenance {
+                        fields_complete: source.fields_complete,
                         node_key: source.node_key,
                         observation: capture.acknowledgement.observation(),
                         observation_generation: capture.acknowledgement.generation(),

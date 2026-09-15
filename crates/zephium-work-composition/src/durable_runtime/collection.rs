@@ -224,6 +224,22 @@ impl WorkBrowseCollectionSchema {
                             text: value.clone(),
                         }
                     }
+                    Some(ArchivedValue::Money {
+                        amount,
+                        currency,
+                        sources,
+                    }) if field.kind() == SemanticExtractionValueKind::Money
+                        && field
+                            .currencies()
+                            .is_some_and(|currencies| currencies.contains(currency)) =>
+                    {
+                        cell_evidence.extend(cite(sources)?);
+                        WorkCellValue::Money {
+                            amount: amount.clone(),
+                            currency: currency.clone(),
+                            observed_at: None,
+                        }
+                    }
                     Some(ArchivedValue::Boolean { value, sources })
                         if field.kind() == SemanticExtractionValueKind::Boolean =>
                     {
@@ -280,6 +296,36 @@ impl WorkBrowseCollectionSchema {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn money_cells_keep_decimal_precision_currency_and_identity_citations() {
+        let schema = WorkBrowseCollectionSchema::try_new(
+            "Prices".into(),
+            vec![
+                SemanticExtractionFieldSchema::try_text("name".into(), true, 256).unwrap(),
+                SemanticExtractionFieldSchema::try_money("price".into(), false, vec!["EUR".into()])
+                    .unwrap(),
+            ],
+            3,
+        )
+        .unwrap();
+        let rows: Vec<Vec<ArchivedField>> = serde_json::from_value(serde_json::json!([
+            [{"name":"name","value":{"kind":"text","value":"Item A","sources":[1]}}, {"name":"price","value":{"kind":"money","amount":"1299.50","currency":"EUR","sources":[2]}}],
+            [{"name":"name","value":{"kind":"text","value":"Item B","sources":[3]}}]
+        ])).unwrap();
+        let data = schema
+            .comparison(&rows, &mut |ids| Ok(ids.iter().map(|id| id - 1).collect()))
+            .unwrap();
+        data.validate(3).unwrap();
+        let WorkArtifactDataV1::ComparisonMatrix { cells, .. } = data else {
+            panic!()
+        };
+        assert!(
+            matches!(&cells[0][0].value, WorkCellValue::Money { amount, currency, observed_at: None } if amount == "1299.50" && currency == "EUR")
+        );
+        assert_eq!(cells[0][0].evidence, [0, 1]);
+        assert!(matches!(cells[1][0].value, WorkCellValue::Unknown));
+    }
 
     #[test]
     fn subject_url_is_host_selected_and_keeps_identity_and_destination_citations() {

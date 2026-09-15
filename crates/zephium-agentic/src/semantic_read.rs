@@ -425,6 +425,7 @@ impl fmt::Debug for SemanticReadContent<'_> {
 /// Exact source coordinates attached to every readable primitive.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct SemanticReadProvenance<'a> {
+    fields_complete: bool,
     node_key: crate::semantic::SemanticNodeKey,
     observation: SemanticObservationId,
     observation_generation: SemanticObservationGeneration,
@@ -438,6 +439,10 @@ pub struct SemanticReadProvenance<'a> {
 }
 
 impl<'a> SemanticReadProvenance<'a> {
+    /// Whether native evidence proves the source node's fields were not clipped.
+    pub const fn fields_complete(self) -> bool {
+        self.fields_complete
+    }
     /// Exact observation request identity.
     pub const fn observation(self) -> SemanticObservationId {
         self.observation
@@ -1151,6 +1156,9 @@ impl<'a> SemanticReadBuilder<'a> {
             return;
         }
         let provenance = SemanticReadProvenance {
+            fields_complete: node
+                .fields_complete()
+                .unwrap_or(snapshot.completeness() == SemanticCompleteness::Complete),
             node_key: node.key(),
             observation: self.observation.request().id(),
             observation_generation: self.observation.request().generation(),
@@ -1277,6 +1285,9 @@ fn read_guard(
         hasher.update(fragment.id.get().to_be_bytes());
         hasher.update([read_field_code(fragment.field), role_code(fragment.role)]);
         let provenance = fragment.provenance;
+        if !provenance.fields_complete {
+            hasher.update(b"FIELDS-UNPROVEN-1\0");
+        }
         hasher.update(provenance.observation.get().to_be_bytes());
         hasher.update(provenance.observation_generation.get().to_be_bytes());
         hasher.update(provenance.captured_at.millis().to_be_bytes());

@@ -440,6 +440,11 @@ pub fn encode_semantic_read(
         ),
     )?;
     write_omissions(&mut output, read)?;
+    let all_fields_unproven = !read.fragments().is_empty()
+        && read
+            .fragments()
+            .iter()
+            .all(|fragment| !fragment.provenance().fields_complete());
     if read.has_retained_evidence() {
         checked_write(
             &mut output,
@@ -484,6 +489,12 @@ pub fn encode_semantic_read(
                 " default_f={}",
                 if frames.is_empty() { "none" } else { "f1" }
             ),
+        )?;
+    }
+    if all_fields_unproven {
+        checked_write(
+            &mut output,
+            format_args!(" default_fields_complete=unproven"),
         )?;
     }
     checked_write(
@@ -567,6 +578,9 @@ pub fn encode_semantic_read(
             SemanticReadContent::Ordinal(value) => {
                 checked_write(&mut output, format_args!("{value}"))?;
             }
+        }
+        if !all_fields_unproven && !fragment.provenance().fields_complete() {
+            checked_write(&mut output, format_args!(" fields_complete=unproven"))?;
         }
         if frame != 1 && !read.has_retained_evidence() {
             checked_write(&mut output, format_args!(" f=f{frame}"))?;

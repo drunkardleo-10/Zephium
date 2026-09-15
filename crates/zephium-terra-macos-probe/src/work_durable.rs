@@ -30,6 +30,7 @@ const OBJECTIVE: &str = "Find SQLite's official explanation of why WAL mode does
 const COORDINATED_OBJECTIVE: &str = "Explain SQLite's official reason that WAL mode does not work when clients on different machines share a database over a network filesystem. Use exactly two plan responsibilities: a delegated public-documentation research worker with one source-backed findings output, then a primary agent that depends on those findings and produces one concise source-backed explanation. Both outputs require source_mapped_needs_review. Use only sqlite.org or www.sqlite.org. No accounts, writes, installations or external communication are needed.";
 
 const AGENT_COLLECTION_OBJECTIVE: &str = "Read https://www.lego.com/en-us/themes/architecture in the browser and collect three distinct Architecture sets with their displayed prices and useful distinguishing details. Return a cited comparison of the observed products. Do not buy, sign in, change locale, or use search snippets as a substitute for inspecting the actual catalog. Omit details that the page does not establish.";
+const AGENT_MONEY_OBJECTIVE: &str = "Read https://demo.vercel.store/product/acme-geometric-circles-t-shirt in the browser and collect the Acme Circles T-Shirt with its explicitly displayed price, currency code and product image. Return only the target product with its observed amount and currency. Use one responsibility with one source-mapped output. Do not buy, sign in or change the cart. Do not substitute search snippets for the page.";
 const AGENT_READ_OBJECTIVE: &str = "From SQLite's official WAL documentation page, list every situation in which WAL mode does not work or has drawbacks, as cited findings with the page itself as the source. Read the actual page rather than relying on search snippets; use only sqlite.org.";
 const AGENT_OBJECTIVE: &str = "Compare Svelte Flow and React Flow as the canvas library for a desktop app: bundle size, license, and how actively each is maintained in 2026. Place the two libraries as subjects with cited findings, and finish with a short comparison.";
 
@@ -49,6 +50,8 @@ enum Mode {
     /// The same loop on an objective that needs a native page read.
     AgentRead,
     AgentCollection,
+    AgentMoney,
+    MoneyNode,
 }
 
 pub(super) fn run() -> Result<(), super::ProbeFailure> {
@@ -71,6 +74,14 @@ pub(super) fn run_agent() -> Result<(), super::ProbeFailure> {
     run_mode(Mode::Agent)
 }
 
+pub(super) fn run_money_node() -> Result<(), super::ProbeFailure> {
+    run_mode(Mode::MoneyNode)
+}
+
+pub(super) fn run_agent_money() -> Result<(), super::ProbeFailure> {
+    run_mode(Mode::AgentMoney)
+}
+
 pub(super) fn run_agent_collection() -> Result<(), super::ProbeFailure> {
     run_mode(Mode::AgentCollection)
 }
@@ -81,7 +92,7 @@ pub(super) fn run_agent_read() -> Result<(), super::ProbeFailure> {
 
 fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     use super::ProbeFailure as Error;
-    let coordinated = mode != Mode::Public;
+    let coordinated = !matches!(mode, Mode::Public | Mode::MoneyNode);
     let data = tempfile::Builder::new()
         .prefix("zephium-durable-work-")
         .tempdir()
@@ -127,12 +138,14 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     };
     // Credentials never enter Work, model context, diagnostics or serialized reports.
     let planning_key = load_macos_development_openai_credential().map_err(|_| Error::Keychain)?;
-    let browser_keys = (0
-        ..if matches!(mode, Mode::Agent | Mode::AgentRead | Mode::AgentCollection) {
-            6
-        } else {
-            4
-        })
+    let browser_keys = (0..if matches!(
+        mode,
+        Mode::Agent | Mode::AgentRead | Mode::AgentCollection | Mode::AgentMoney
+    ) {
+        6
+    } else {
+        4
+    })
         .map(|_| load_macos_development_openai_credential())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| Error::Keychain)?;
@@ -182,9 +195,10 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
                             runtime.block_on(async {
                                 tokio::time::timeout(
                                     Duration::from_secs(match mode {
-                                        Mode::Agent | Mode::AgentRead | Mode::AgentCollection => {
-                                            720
-                                        }
+                                        Mode::Agent
+                                        | Mode::AgentRead
+                                        | Mode::AgentCollection
+                                        | Mode::AgentMoney => 720,
                                         Mode::Public => 160,
                                         _ => 240,
                                     }),
@@ -352,7 +366,10 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     } else {
         WorkExecutionStatus::NeedsReview
     };
-    if matches!(mode, Mode::Agent | Mode::AgentRead | Mode::AgentCollection) {
+    if matches!(
+        mode,
+        Mode::Agent | Mode::AgentRead | Mode::AgentCollection | Mode::AgentMoney
+    ) {
         let execution = &state.executions[0];
         let counts = |kind: &str| {
             execution
@@ -393,6 +410,9 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
                     matches!(&cell.value, zephium_core::work::artifact::WorkCellValue::Text { text } if !text.is_empty()) && !cell.evidence.is_empty())))
             && !artifact.evidence.is_empty()
     });
+    let money_accepted = !matches!(mode, Mode::AgentMoney | Mode::MoneyNode) || state.executions[0].artifacts.iter().any(|artifact| {
+        artifact.title == "Observed product prices" && matches!(&artifact.data, zephium_core::work::artifact::WorkArtifactDataV1::ComparisonMatrix { subjects, cells, .. } if subjects.len() == 1 && subjects[0].name == "Acme Circles T-Shirt" && !subjects[0].image_candidates.is_empty() && subjects.len() == cells.len() && cells.iter().all(|row| row.first().is_some_and(|cell| matches!(&cell.value, zephium_core::work::artifact::WorkCellValue::Money { currency, observed_at: None, .. } if currency == "USD") && !cell.evidence.is_empty())))
+    });
     let mut evidence = Vec::new();
     for link in state.executions[0]
         .artifacts
@@ -421,10 +441,23 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         };
         evidence.push(preview);
     }
+    let money_accepted = money_accepted && (!matches!(mode, Mode::AgentMoney | Mode::MoneyNode) || state.executions[0].artifacts.iter().filter(|artifact| artifact.title == "Observed product prices").all(|artifact| artifact.evidence.iter().all(|link| evidence.iter().any(|preview| preview.link == *link && preview.origin == "https://demo.vercel.store/" && !preview.truncated && matches!(preview.source, zephium_core::work::artifact::WorkEvidenceSourceV1::NativeExtraction)))));
     let output = std::path::Path::new("target/work-runtime-proof");
     std::fs::create_dir_all(output).map_err(|_| Error::Output)?;
     std::fs::write(
-        output.join(if !collection_accepted {
+        output.join(if mode == Mode::MoneyNode {
+            if money_accepted {
+                "money-node-run.json"
+            } else {
+                "money-node-incomplete.json"
+            }
+        } else if mode == Mode::AgentMoney {
+            if money_accepted {
+                "agent-money-run.json"
+            } else {
+                "agent-money-incomplete.json"
+            }
+        } else if !collection_accepted {
             "agent-collection-incomplete.json"
         } else if mode == Mode::AgentCollection {
             "agent-collection-run.json"
@@ -440,7 +473,8 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             "public-research.json"
         }),
         serde_json::to_vec_pretty(&serde_json::json!({
-            "fixed_collection_assignment": mode == Mode::AgentCollection,
+            "fixed_collection_assignment": matches!(mode, Mode::AgentCollection | Mode::AgentMoney),
+            "money_accepted": money_accepted,
             "collection_accepted": collection_accepted,
             "projection": state,
             "historical_evidence": evidence,
@@ -453,10 +487,10 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     {
         return Err(Error::Runtime);
     }
-    if !collection_accepted {
+    if !collection_accepted || !money_accepted {
         return Err(Error::Runtime);
     }
-    writeln!(std::io::stdout().lock(), "durable-work: fixed_collection_assignment={}; native_browser=true; artifacts={}; resource_closed=true; reopened=true; semantic_status={:?}; content=redacted", mode == Mode::AgentCollection, state.executions[0].artifacts.len(), state.executions[0].status).map_err(|_| Error::Output)?;
+    writeln!(std::io::stdout().lock(), "durable-work: fixed_collection_assignment={}; native_browser=true; artifacts={}; resource_closed=true; reopened=true; semantic_status={:?}; content=redacted", matches!(mode, Mode::AgentCollection | Mode::AgentMoney), state.executions[0].artifacts.len(), state.executions[0].status).map_err(|_| Error::Output)?;
     Ok(())
 }
 
@@ -468,7 +502,7 @@ async fn workflow(
     mut browser_keys: Vec<zephium_agentic::AgentProviderCredential>,
     mode: Mode,
 ) -> Result<WorkflowResult, &'static str> {
-    let coordinated = mode != Mode::Public;
+    let coordinated = !matches!(mode, Mode::Public | Mode::MoneyNode);
     let binding = loop {
         let selected = handle.work_profile_binding();
         let answer = loop {
@@ -496,7 +530,10 @@ async fn workflow(
             _ => return Err("profile_not_ready"),
         }
     };
-    if matches!(mode, Mode::Agent | Mode::AgentRead | Mode::AgentCollection) {
+    if matches!(
+        mode,
+        Mode::Agent | Mode::AgentRead | Mode::AgentCollection | Mode::AgentMoney
+    ) {
         return agent_workflow(
             handle,
             composition,
@@ -515,7 +552,9 @@ async fn workflow(
                 version: 1,
                 command: WorkCommandId::generate(),
                 intent: WorkAuthoringIntent::Create {
-                    objective: if coordinated {
+                    objective: if mode == Mode::MoneyNode {
+                        AGENT_MONEY_OBJECTIVE
+                    } else if coordinated {
                         COORDINATED_OBJECTIVE
                     } else {
                         OBJECTIVE
@@ -595,6 +634,11 @@ async fn workflow(
     if plan.draft.nodes.len() > browser_keys.len() {
         return Err("qualification_node_limit");
     }
+    if mode == Mode::MoneyNode
+        && (plan.draft.nodes.len() != 1 || plan.draft.nodes[0].outputs.len() != 1)
+    {
+        return Err("money_node_shape");
+    }
     let primary = if coordinated {
         if plan.draft.nodes.len() != 2
             || plan.draft.nodes.iter().any(|n| {
@@ -643,21 +687,40 @@ async fn workflow(
                 expected_revision: planned.revision,
                 limits,
                 primary,
-                scope: WorkBrowseScope {
-                    start_url: "https://sqlite.org/docs.html".into(),
-                    routes: ["https://sqlite.org", "https://www.sqlite.org"]
-                        .into_iter()
-                        .map(|origin| WorkBrowseRoute {
-                            origin: origin.into(),
-                            path_prefix: "/".into(),
-                        })
-                        .collect(),
-                    max_hops: 8,
+                scope: if mode == Mode::MoneyNode {
+                    WorkBrowseScope {
+                        start_url:
+                            "https://demo.vercel.store/product/acme-geometric-circles-t-shirt"
+                                .into(),
+                        routes: vec![WorkBrowseRoute {
+                            origin: "https://demo.vercel.store".into(),
+                            path_prefix: "/product/".into(),
+                        }],
+                        max_hops: 1,
+                    }
+                } else {
+                    WorkBrowseScope {
+                        start_url: "https://sqlite.org/docs.html".into(),
+                        routes: ["https://sqlite.org", "https://www.sqlite.org"]
+                            .into_iter()
+                            .map(|origin| WorkBrowseRoute {
+                                origin: origin.into(),
+                                path_prefix: "/".into(),
+                            })
+                            .collect(),
+                        max_hops: 8,
+                    }
                 },
             },
         )
         .await
-        .map_err(|_| "approval_preview")?;
+        .map_err(|error| {
+            let _ = writeln!(
+                std::io::stdout().lock(),
+                "durable-work: approval_preview={error:?}; content=redacted"
+            );
+            "approval_preview"
+        })?;
     let WorkReplyV1::ApprovalDraft { spec, .. } = preview.reply else {
         return Err("approval_preview_reply");
     };
@@ -863,23 +926,32 @@ async fn workflow(
             .await
             .map_err(|_| "attempt_admission")?;
         writeln!(std::io::stdout().lock(), "durable-work: model_plan=true; exact_approval=true; starting_native=true; content=redacted").map_err(|_| "progress_output")?;
-        state = composition
-            .execute_public_node(
-                &handle.callback_handle(),
-                attempt,
-                browser_settings(
-                    binding,
-                    browser_keys.next().ok_or("qualification_key_limit")?,
-                ),
-            )
-            .await
-            .map_err(|error| {
-                let _ = writeln!(
-                    std::io::stdout().lock(),
-                    "durable-work: execution_error={error:?}; content=redacted"
-                );
-                "native_execution"
-            })?;
+        let settings = browser_settings(
+            binding,
+            browser_keys.next().ok_or("qualification_key_limit")?,
+        );
+        state = if mode == Mode::MoneyNode {
+            composition
+                .execute_collection_node_owned(
+                    &handle.callback_handle(),
+                    attempt,
+                    settings,
+                    money_schema().map_err(|_| "money_schema")?,
+                )
+                .await
+                .map(|settlement| settlement.into_projection())
+        } else {
+            composition
+                .execute_public_node(&handle.callback_handle(), attempt, settings)
+                .await
+        }
+        .map_err(|error| {
+            let _ = writeln!(
+                std::io::stdout().lock(),
+                "durable-work: execution_error={error:?}; content=redacted"
+            );
+            "native_execution"
+        })?;
         if !state.executions[0]
             .attempts
             .iter()
@@ -1015,9 +1087,10 @@ async fn agent_workflow(
     mut browser_keys: Vec<zephium_agentic::AgentProviderCredential>,
     mode: Mode,
 ) -> Result<WorkflowResult, &'static str> {
-    let collection = mode == Mode::AgentCollection;
+    let collection = matches!(mode, Mode::AgentCollection | Mode::AgentMoney);
     let objective = match mode {
         Mode::AgentCollection => AGENT_COLLECTION_OBJECTIVE,
+        Mode::AgentMoney => AGENT_MONEY_OBJECTIVE,
         Mode::AgentRead => AGENT_READ_OBJECTIVE,
         _ => AGENT_OBJECTIVE,
     };
@@ -1090,7 +1163,9 @@ async fn agent_workflow(
     };
     let keys = Arc::new(Mutex::new(browser_keys));
     let callback = handle.callback_handle();
-    let collection_assignment = CollectionAssignment;
+    let collection_assignment = CollectionAssignment {
+        money: mode == Mode::AgentMoney,
+    };
     let state = WorkAgentService::new(handle.clone())
         .with_diagnostic(|event| {
             let _ = writeln!(std::io::stdout().lock(), "agent-work: loop={event:?}");
@@ -1124,7 +1199,9 @@ async fn agent_workflow(
                     );
                     if collection {
                         use zephium_agentic::SemanticExtractionFieldSchema as Field;
-                        let schema = zephium_work_composition::durable_runtime::WorkBrowseCollectionSchema::try_new(
+                        let schema = if mode == Mode::AgentMoney {
+                            money_schema()?
+                        } else { zephium_work_composition::durable_runtime::WorkBrowseCollectionSchema::try_new(
                             "Observed Architecture sets".into(),
                             vec![
                                 Field::try_text("name".into(), true, 256).map_err(|_| WorkError::Invalid)?,
@@ -1133,7 +1210,7 @@ async fn agent_workflow(
                                 Field::try_url("product_url".into(), true, 2048).map_err(|_| WorkError::Invalid)?,
                                 Field::try_image_url("image_url".into(), true, 2048).map_err(|_| WorkError::Invalid)?,
                             ], 3,
-                        )?.with_subject_url_field("product_url")?.with_subject_image_field("image_url")?;
+                        )?.with_subject_url_field("product_url")?.with_subject_image_field("image_url")? };
                         composition.run_collection_step(callback, &probe, request, browser_settings(binding, key), schema).await
                     } else {
                         composition.run_agent_step(callback, &probe, request, browser_settings(binding, key)).await
@@ -1172,7 +1249,9 @@ async fn agent_workflow(
 }
 
 // Qualify the live browser worker independently of main-agent planning quality.
-struct CollectionAssignment;
+struct CollectionAssignment {
+    money: bool,
+}
 impl zephium_core::work::agent::WorkAgentTurnProvider for CollectionAssignment {
     fn turn<'a>(
         &'a self,
@@ -1182,7 +1261,11 @@ impl zephium_core::work::agent::WorkAgentTurnProvider for CollectionAssignment {
         use zephium_core::work::agent::*;
         Box::pin(async move {
             let context = input.context();
-            let fetch = if context.steps.iter().any(|step| step.kind == "read") {
+            let fetch = if context
+                .steps
+                .iter()
+                .any(|step| matches!(step.kind, "read" | "discover"))
+            {
                 if !context
                     .artifacts
                     .iter()
@@ -1197,12 +1280,21 @@ impl zephium_core::work::agent::WorkAgentTurnProvider for CollectionAssignment {
                 vec![]
             } else if let Some(source) = context.sources.iter().find(|source| {
                 zephium_agentic::ContextNavigationTarget::parse(&source.url).is_ok_and(|target| {
-                    target.as_url().host_str() == Some("www.lego.com")
-                        && target.as_url().path() == "/en-us/themes/architecture"
+                    if self.money {
+                        target.as_url().host_str() == Some("demo.vercel.store")
+                            && target.as_url().path() == "/product/acme-geometric-circles-t-shirt"
+                    } else {
+                        target.as_url().host_str() == Some("www.lego.com")
+                            && target.as_url().path() == "/en-us/themes/architecture"
+                    }
                 })
             }) {
                 vec![WorkAgentFetch::Read {
                     url: source.url.clone(),
+                }]
+            } else if self.money && context.steps.iter().any(|step| step.kind == "search") {
+                vec![WorkAgentFetch::Discover {
+                    query: "site:demo.vercel.store/product/acme-geometric-circles-t-shirt Acme Circles T-Shirt".into(),
                 }]
             } else if context.steps.iter().any(|step| step.kind == "search") {
                 return Err(
@@ -1211,7 +1303,13 @@ impl zephium_core::work::agent::WorkAgentTurnProvider for CollectionAssignment {
                     ),
                 );
             } else {
-                vec![WorkAgentFetch::Search { query: "site:lego.com/en-us/themes/architecture LEGO Architecture sets official catalog".into() }]
+                vec![WorkAgentFetch::Search {
+                    query: if self.money {
+                        "site:demo.vercel.store/product/acme-geometric-circles-t-shirt Acme Circles T-Shirt".into()
+                    } else {
+                        "site:lego.com/en-us/themes/architecture LEGO Architecture sets official catalog".into()
+                    },
+                }]
             };
             Ok(WorkAgentTurnResult {
                 output: WorkAgentTurnOutput {
@@ -1225,6 +1323,22 @@ impl zephium_core::work::agent::WorkAgentTurnProvider for CollectionAssignment {
             })
         })
     }
+}
+
+fn money_schema(
+) -> Result<zephium_work_composition::durable_runtime::WorkBrowseCollectionSchema, WorkError> {
+    use zephium_agentic::SemanticExtractionFieldSchema as Field;
+    zephium_work_composition::durable_runtime::WorkBrowseCollectionSchema::try_new(
+        "Observed product prices".into(),
+        vec![
+            Field::try_text("name".into(), true, 256).map_err(|_| WorkError::Invalid)?,
+            Field::try_money("price".into(), true, vec!["USD".into()])
+                .map_err(|_| WorkError::Invalid)?,
+            Field::try_image_url("image_url".into(), true, 2048).map_err(|_| WorkError::Invalid)?,
+        ],
+        1,
+    )?
+    .with_subject_image_field("image_url")
 }
 
 fn browser_settings(

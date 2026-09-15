@@ -93,6 +93,7 @@ impl AgentWorkArtifactPublication {
         {
             return Err(AgentWorkJournalError::Transition);
         }
+        let money = result.fields().iter().any(extracted_money);
         let mut sources = BTreeMap::new();
         let mut cite = |span| -> Result<Vec<u16>, AgentWorkJournalError> {
             result
@@ -109,6 +110,7 @@ impl AgentWorkArtifactPublication {
                     sources
                         .entry(source.id.get())
                         .or_insert_with(|| ArchivedSource {
+                            fields_complete: money.then_some(source.fields_complete),
                             id: source.id.get(),
                             origin: source.frame.origin().as_url().as_str().to_owned(),
                             role: crate::semantic_model::role_label(source.role).to_owned(),
@@ -162,7 +164,9 @@ impl AgentWorkArtifactPublication {
         };
         let fields = archive_fields(result.fields(), &mut cite)?;
         let document = ArchivedDocument {
-            version: if sources.values().any(|source| source.field == 7) {
+            version: if fields.iter().any(contains_money) {
+                6
+            } else if sources.values().any(|source| source.field == 7) {
                 5
             } else if sources.values().any(|source| source.field == 6) {
                 4
@@ -244,6 +248,11 @@ fn archive_fields(
                 value: value.as_str().to_owned(),
                 sources: cite(value.source_span())?,
             },
+            SemanticExtractedValue::Money(value) => ArchivedValue::Money {
+                amount: value.amount().to_owned(),
+                currency: value.currency().to_owned(),
+                sources: cite(value.source_span())?,
+            },
             SemanticExtractedValue::ImageUrl(value) => ArchivedValue::ImageUrl {
                 value: value.as_str().to_owned(),
                 sources: cite(value.source_span())?,
@@ -299,6 +308,15 @@ impl ArchivedField {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ArchivedValue {
+    /// Decimal amount with explicit source currency.
+    Money {
+        /// Plain decimal string.
+        amount: String,
+        /// Explicit observed currency code.
+        currency: String,
+        /// Historical read-local citations.
+        sources: Vec<u16>,
+    },
     /// Historical image source without fetch authority.
     ImageUrl {
         /// Exact observed, screened source URL.
@@ -397,6 +415,8 @@ pub enum ArchivedSourceContent {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArchivedSource {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fields_complete: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     observation: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -526,7 +546,7 @@ impl fmt::Debug for AgentWorkArchivedExtraction {
 impl ArchivedDocument {
     fn validate(&self) -> Result<(), AgentWorkJournalError> {
         let invalid = AgentWorkJournalError::Uncertain;
-        if !matches!(self.version, 1..=5)
+        if !matches!(self.version, 1..=6)
             || self.id == [0; 16]
             || self.schema == 0
             || self.observation == 0
@@ -704,6 +724,45 @@ impl ArchivedDocument {
                         values += 1;
                         cite(sources)?;
                     }
+                    ArchivedValue::Money {
+                        amount,
+                        currency,
+                        sources,
+                    } => {
+                        if self.version < 6
+                            || !sources.iter().any(|id| {
+                                self.sources.iter().any(|source| {
+                                    if source.id != *id
+                                        || source.fields_complete != Some(true)
+                                        || !matches!(source.field, 1..=3)
+                                    {
+                                        return false;
+                                    }
+                                    let text = match &source.content {
+                                        ArchivedSourceContent::Text { value } => {
+                                            Some(value.as_str())
+                                        }
+                                        ArchivedSourceContent::Preview {
+                                            value,
+                                            truncated: false,
+                                            ..
+                                        } => Some(value.as_str()),
+                                        _ => None,
+                                    };
+                                    text.is_some_and(|text| {
+                                        crate::semantic_money::supports_money(
+                                            text, amount, currency,
+                                        )
+                                    })
+                                })
+                            })
+                        {
+                            return Err(invalid);
+                        }
+                        text_bytes += amount.len() + currency.len();
+                        values += 1;
+                        cite(sources)?;
+                    }
                     ArchivedValue::Boolean { sources, .. }
                     | ArchivedValue::Unsigned { sources, .. } => {
                         values += 1;
@@ -733,6 +792,25 @@ impl ArchivedDocument {
         Ok(())
     }
 }
+fn extracted_money(field: &SemanticExtractedField) -> bool {
+    match field.value() {
+        SemanticExtractedValue::Money(_) => true,
+        SemanticExtractedValue::Rows(rows) => rows
+            .items()
+            .iter()
+            .any(|row| row.fields().iter().any(extracted_money)),
+        _ => false,
+    }
+}
+
+fn contains_money(field: &ArchivedField) -> bool {
+    match &field.value {
+        ArchivedValue::Money { .. } => true,
+        ArchivedValue::Rows { items } => items.iter().flatten().any(contains_money),
+        _ => false,
+    }
+}
+
 fn valid_text(value: &str, limit: usize) -> Result<(), AgentWorkJournalError> {
     if value.len() > limit {
         return Err(AgentWorkJournalError::Capacity);

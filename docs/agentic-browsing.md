@@ -577,12 +577,13 @@ adds only this initial-scope tool to the restricted capability profiles; no
 other profile capability or continuation budget changes.
 
 Host-selected extraction schemas also admit one bounded `Rows` level with
-text, boolean, unsigned and source-backed link/image URL cells. Child declarations share the schema guard;
+text, boolean, unsigned, money and source-backed link/image URL cells. Child
+declarations share the schema guard;
 each cell retains its own source edges under the existing aggregate limits.
-Row archives use version 3; scalar archives remain version 2 when no URL evidence is present. The Work adapter
+Row archives use version 3; scalar archives remain version 2 without URL or
+money evidence. The Work adapter
 can map these rows directly to comparison cells, preserving missing optional
-values as unknown. This does not yet provide typed money or collection
-completeness. Ordinary Work read/discovery steps now return up to 16 individually
+values as unknown. This does not establish collection completeness. Ordinary Work read/discovery steps now return up to 16 individually
 cited findings (1,024 bytes each), mapped directly to finding artifacts. Scalar
 node outputs remain compatible. A collection-level citation never substitutes
 for a finding's own sources; empty findings return unavailable.
@@ -602,6 +603,22 @@ screened and bounded like link destinations. Only image-selected schemas expose
 `image_source` fragments. Exact image citations survive version 5 archives and
 can populate host-selected Work subject image candidates; readers retain versions
 1–5. Candidates are not downloaded or decoded images and grant no fetch authority.
+
+Money fields carry a bounded nonnegative decimal string and one of up to 16
+host-approved three-letter currency codes. A cited, complete text/name/value
+fragment must show the matching amount beside an explicit currency code. Bare
+symbols, ambiguous separators and clipped prefixes do not establish a price. Field completeness survives read guards and retained
+evidence; version 6 archives recheck it with amount, currency and citations.
+Readers retain versions 1–6. Work money cells preserve the decimal string and
+identity/price citations. `observed_at` remains absent: capture ticks are
+process-local monotonic time, not a wall-clock timestamp.
+
+`execute_collection_node_owned` also accepts these schemas for one output of an
+original durable public browse/discovery attempt. The original scope, limits,
+cancellation, closure and publication receipt remain authoritative; account
+tasks cannot enter this collection route. Existing scalar node outputs and
+ordinary agent reads keep their previous mapping. Work still needs to select
+and supply collection schemas in its normal product routing.
 
 Public-web discovery may finalize an initial query rewrite on the same exact
 HTTPS origin/path and native committed load, then freezes that URL; it grants

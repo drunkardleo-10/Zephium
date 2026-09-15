@@ -151,7 +151,7 @@ const AGENT_EXTRACTION_INSTRUCTIONS_V1: &str = concat!(
     "Preserve schema field order, omit only fields marked ",
     "required=false when evidence is insufficient, and cite one through four exact @rN evidence ",
     "tokens in each value's sources array, in strictly increasing numeric order, for every ",
-    "scalar, text_list collection, and text_list item. URL values must exactly copy a cited link_destination fragment; image_url values must copy a cited image_source fragment. Never construct or normalize either URL. For rows, S parent lines define each record: ",
+    "scalar, text_list collection, and text_list item. URL values must exactly copy a cited link_destination fragment; image_url values must copy a cited image_source fragment. Never construct or normalize either URL. Money requires proven complete source fields, amount as a plain decimal string and an adjacent explicit currency code in the same cited text fragment; never infer currency from a symbol or locale, or an ambiguous separator. For rows, S parent lines define each record: ",
     "cite each field separately, omit unsupported optional fields, and use an empty items array when no records are supported. ",
     "Printed inline markers are not citations: put all ",
     "supporting refs in sources, and split claims into list items when they need different ",
@@ -5608,6 +5608,7 @@ fn bound_extraction_fields(fields: &[crate::SemanticExtractionFieldSchema]) -> V
                 crate::SemanticExtractionValueKind::Rows => 4,
                 crate::SemanticExtractionValueKind::Url => 5,
                 crate::SemanticExtractionValueKind::ImageUrl => 6,
+                crate::SemanticExtractionValueKind::Money => 7,
             };
             let mut value = variants[index].clone();
             match field.kind() {
@@ -5615,6 +5616,9 @@ fn bound_extraction_fields(fields: &[crate::SemanticExtractionFieldSchema]) -> V
                 | crate::SemanticExtractionValueKind::Url
                 | crate::SemanticExtractionValueKind::ImageUrl => {
                     value["properties"]["value"]["maxLength"] = json!(field.max_text_bytes());
+                }
+                crate::SemanticExtractionValueKind::Money => {
+                    value["properties"]["currency"]["enum"] = json!(field.currencies());
                 }
                 crate::SemanticExtractionValueKind::Boolean => {}
                 crate::SemanticExtractionValueKind::Unsigned => {
@@ -5700,6 +5704,17 @@ fn build_extraction_output_schema() -> Value {
             ("sources", sources()),
         ],
     );
+    let money = extraction_tagged_object(
+        "money",
+        vec![
+            (
+                "amount",
+                json!({"type":"string", "maxLength":24, "pattern":r"^(0|[1-9][0-9]{0,17})(\.[0-9]{1,6})?$"}),
+            ),
+            ("currency", json!({"type":"string", "pattern":"^[A-Z]{3}$"})),
+            ("sources", sources()),
+        ],
+    );
     let boolean = extraction_tagged_object(
         "boolean",
         vec![("value", json!({"type":"boolean"})), ("sources", sources())],
@@ -5748,7 +5763,9 @@ fn build_extraction_output_schema() -> Value {
         ),
         (
             "value",
-            any_of(vec![text, boolean, unsigned, text_list, url, image_url]),
+            any_of(vec![
+                text, boolean, unsigned, text_list, url, image_url, money,
+            ]),
         ),
     ]);
     let rows = extraction_tagged_object(
@@ -5771,6 +5788,7 @@ fn build_extraction_output_schema() -> Value {
         rows,
         scalar_variants[4].clone(),
         scalar_variants[5].clone(),
+        scalar_variants[6].clone(),
     ]);
     strict_object(vec![
         (
@@ -8218,6 +8236,8 @@ mod tests {
                     Field::try_text("name".into(), true, 100).unwrap(),
                     Field::try_unsigned("count".into(), false, 7).unwrap(),
                     Field::try_url("url".into(), false, 512).unwrap(),
+                    Field::try_money("price".into(), false, vec!["USD".into(), "EUR".into()])
+                        .unwrap(),
                 ],
                 3,
             )
@@ -8231,7 +8251,11 @@ mod tests {
         assert_eq!(rows["maxItems"], 3);
         let fields = &rows["items"]["properties"]["fields"];
         assert_eq!(fields["minItems"], 1);
-        assert_eq!(fields["maxItems"], 3);
+        assert_eq!(fields["maxItems"], 4);
+        let money = &fields["items"]["anyOf"][3]["properties"]["value"]["properties"];
+        assert_eq!(money["k"]["enum"], json!(["money"]));
+        assert_eq!(money["currency"]["enum"], json!(["USD", "EUR"]));
+        assert_eq!(money["amount"]["type"], "string");
         let url = &fields["items"]["anyOf"][2]["properties"]["value"]["properties"];
         assert_eq!(url["k"]["enum"], json!(["url"]));
         assert_eq!(url["value"]["maxLength"], 512);
