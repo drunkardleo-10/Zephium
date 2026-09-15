@@ -133,19 +133,22 @@ batches of the worker cap.
 
 **Where it stops (each is a blocker for §2.2).**
 
-1. Extraction is prose. No money, number, URL, image, enum, date, or
-   object-array fields. Prices and image URLs arrive, if at all, inside a
-   4 KB paragraph.
+1. Extraction reaching Work is prose. The schema layer has text, text list,
+   boolean, and unsigned fields; Work's step compiles only one 4 KB text
+   field, and there are no money, decimal with unit, URL, image, enum, date,
+   or object-array fields anywhere.
 2. One context, one page at a time, one action per model turn, at most eight
    actions per session. No parallel workers, no batched action turns.
 3. Navigation is link-following only: a requested URL must appear as a public
    link in the acknowledged observation and stay inside the approved path
    subtree. No click-to-navigate, no in-site search submission, no
    pagination, no cross-origin discovery. Discovery starts from bing.
-4. Actions are snapshot-verifiable Click, Fill, Select on trusted task
-   contracts. No `press`, no `scroll`, no typed navigation or dialog waits,
-   no model-proposed action sequences. Every workflow needs a hand-written
-   task adapter with exact field and value postconditions.
+4. Actions that execute are snapshot-verifiable Click, Fill, Select on
+   trusted task contracts. `Press`, `Scroll`, batch results, and wait kinds
+   exist as contracts in `zephium-agentic` but have no production path
+   through the controller, native recipes, or composition. Every workflow
+   needs a hand-written task adapter with exact field and value
+   postconditions.
 5. Model catalog is closed to GPT-5.6 Terra and Luna. Work's grant names a
    model (`WorkAgentGrantV1.model`); the worker must run on the eligible model
    the grant names, with a stated fallback when it cannot.
