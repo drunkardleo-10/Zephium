@@ -1,4 +1,5 @@
 use super::*;
+use zephium_core::work::collection::{WorkBrowseCollection, WorkBrowseValue};
 
 /// Host-selected record shape; contains no site code or new browser authority.
 #[derive(Clone)]
@@ -8,6 +9,57 @@ pub struct WorkBrowseCollectionSchema {
     max_items: usize,
     subject_url_field: Option<String>,
     subject_image_fields: Vec<String>,
+}
+
+impl TryFrom<&WorkBrowseCollection> for WorkBrowseCollectionSchema {
+    type Error = WorkError;
+
+    fn try_from(request: &WorkBrowseCollection) -> Result<Self, Self::Error> {
+        request.validate()?;
+        let mut fields = vec![
+            SemanticExtractionFieldSchema::try_text("name".into(), true, 512)
+                .map_err(|_| WorkError::Invalid)?,
+        ];
+        for column in &request.columns {
+            let name = column.name.clone();
+            let required = column.required;
+            fields.push(
+                match &column.value {
+                    WorkBrowseValue::Text => {
+                        SemanticExtractionFieldSchema::try_text(name, required, 1024)
+                    }
+                    WorkBrowseValue::Money { currencies } => {
+                        SemanticExtractionFieldSchema::try_money(name, required, currencies.clone())
+                    }
+                    WorkBrowseValue::Url => {
+                        SemanticExtractionFieldSchema::try_url(name, required, 2048)
+                    }
+                    WorkBrowseValue::ImageUrl => {
+                        SemanticExtractionFieldSchema::try_image_url(name, required, 2048)
+                    }
+                }
+                .map_err(|_| WorkError::Invalid)?,
+            );
+        }
+        let mut schema = Self::try_new(
+            request.title.clone(),
+            fields,
+            usize::from(request.max_items),
+        )?;
+        if let Some(column) = request
+            .columns
+            .iter()
+            .find(|column| column.value == WorkBrowseValue::Url)
+        {
+            schema = schema.with_subject_url_field(&column.name)?;
+        }
+        for column in &request.columns {
+            if column.value == WorkBrowseValue::ImageUrl {
+                schema = schema.with_subject_image_field(&column.name)?;
+            }
+        }
+        Ok(schema)
+    }
 }
 
 impl WorkBrowseCollectionSchema {
@@ -296,6 +348,34 @@ impl WorkBrowseCollectionSchema {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn work_collection_compiles_into_the_checked_native_record_shape() {
+        let request: WorkBrowseCollection = serde_json::from_value(serde_json::json!({
+            "title":"Products", "max_items":3, "columns":[
+                {"name":"price","required":false,"value":{"kind":"money","permitted_currencies":["USD"]}},
+                {"name":"product_url","required":true,"value":{"kind":"url"}},
+                {"name":"image","required":false,"value":{"kind":"image_url"}}
+            ]
+        }))
+        .unwrap();
+        let schema = WorkBrowseCollectionSchema::try_from(&request).unwrap();
+        assert_eq!(schema.fields[0].name(), "name");
+        assert!(schema.fields[0].required());
+        assert_eq!(schema.fields[1].currencies().unwrap(), ["USD"]);
+        assert_eq!(schema.subject_url_field.as_deref(), Some("product_url"));
+        assert_eq!(schema.subject_image_fields, ["image"]);
+        let mut invalid = request.clone();
+        invalid.columns[0].name = "name".into();
+        assert!(WorkBrowseCollectionSchema::try_from(&invalid).is_err());
+        invalid = request.clone();
+        invalid.max_items = 33;
+        assert!(WorkBrowseCollectionSchema::try_from(&invalid).is_err());
+        invalid = request;
+        invalid.columns[0].value = WorkBrowseValue::Money {
+            currencies: vec!["USD".into(), "USD".into()],
+        };
+        assert!(WorkBrowseCollectionSchema::try_from(&invalid).is_err());
+    }
 
     #[test]
     fn money_cells_keep_decimal_precision_currency_and_identity_citations() {

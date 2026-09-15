@@ -534,7 +534,7 @@ impl Driver {
             }
             if !turn.fetch.is_empty() {
                 let leaked = turn.fetch.iter().any(|kind| match kind {
-                    WorkStepKindV1::Search { query } | WorkStepKindV1::Discover { query } => {
+                    WorkStepKindV1::Search { query } | WorkStepKindV1::Discover { query, .. } => {
                         query_discloses(query, &self.private)
                     }
                     _ => false,
@@ -762,12 +762,6 @@ impl Driver {
                             .into_iter()
                             .filter_map(|draft| attempt.mint_artifact(draft).ok())
                             .collect();
-                        let mut previews = Vec::new();
-                        for link in artifacts.iter().flat_map(|a| &a.evidence).take(8) {
-                            if let Ok(preview) = self.probe.read_evidence(link.clone()).await {
-                                previews.push(preview);
-                            }
-                        }
                         let (status, artifacts) = if outcome.status == WorkStepStatus::Succeeded {
                             (WorkStepStatus::Succeeded, artifacts)
                         } else {
@@ -775,10 +769,23 @@ impl Driver {
                         };
                         let note =
                             (status == WorkStepStatus::Succeeded).then(|| read_note(&artifacts));
+                        let links = browser_preview_links(&artifacts);
+                        let published = artifacts.len();
                         self.settle(id, status, usage, artifacts, None, note)
                             .await?;
-                        for preview in previews {
-                            self.keep_preview(preview);
+                        self.published += published;
+                        for link in links {
+                            if self.cancelled().await {
+                                break;
+                            }
+                            let cached = self.previews.iter().find(|p| p.link == link).cloned();
+                            let preview = match cached {
+                                Some(preview) => Ok(preview),
+                                None => self.probe.read_evidence(link).await,
+                            };
+                            if let Ok(preview) = preview {
+                                self.keep_preview(preview);
+                            }
                         }
                         if outcome.status == WorkStepStatus::OutcomeUnknown {
                             terminal = Some(WorkAttemptStatus::OutcomeUnknown);
@@ -903,14 +910,31 @@ impl Driver {
         }
     }
     fn keep_preview(&mut self, preview: WorkEvidencePreviewV1) {
-        if self.previews.iter().any(|p| p.link == preview.link) {
-            return;
+        if let Some(index) = self.previews.iter().position(|p| p.link == preview.link) {
+            self.previews.remove(index);
         }
         if self.previews.len() >= MAX_PREVIEWS {
             self.previews.remove(0);
         }
         self.previews.push(preview);
     }
+}
+
+fn browser_preview_links(artifacts: &[WorkArtifactV1]) -> Vec<WorkEvidenceLink> {
+    let mut links = Vec::new();
+    for index in 0..MAX_ARTIFACT_EVIDENCE {
+        for artifact in artifacts {
+            if let Some(link) = artifact.evidence.get(index) {
+                if !links.contains(link) {
+                    links.push(link.clone());
+                    if links.len() == MAX_PREVIEWS {
+                        return links;
+                    }
+                }
+            }
+        }
+    }
+    links
 }
 
 fn step_kind_label(kind: &WorkStepKindV1) -> &'static str {
@@ -1013,6 +1037,17 @@ fn sources_note(count: usize) -> String {
     }
 }
 fn read_note(artifacts: &[WorkArtifactV1]) -> String {
+    if let [artifact] = artifacts {
+        match &artifact.data {
+            WorkArtifactDataV1::ComparisonMatrix { subjects, .. } => {
+                return format!("Placed {} cited records on the canvas", subjects.len());
+            }
+            WorkArtifactDataV1::Findings { items, .. } => {
+                return format!("Placed {} cited findings on the canvas", items.len());
+            }
+            _ => {}
+        }
+    }
     match artifacts.len() {
         0 => "Read the page".into(),
         _ => "Read the page and kept notes".into(),
@@ -1071,6 +1106,50 @@ async fn join_all<T>(mut futures: Vec<Pin<Box<dyn Future<Output = T> + Send + '_
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn browser_previews_cover_later_artifacts_and_deduplicate_within_the_budget() {
+        let artifact = |id: u128| WorkArtifactV1 {
+            version: 1,
+            id: id.into(),
+            execution: 1.into(),
+            node: 1.into(),
+            attempt: 1.into(),
+            output: "results".into(),
+            title: "Results".into(),
+            data: WorkArtifactDataV1::Findings {
+                subjects: vec![],
+                items: vec![],
+            },
+            evidence: (1..=64)
+                .map(|source_id| WorkEvidenceLink {
+                    extraction_id: id.into(),
+                    source_id,
+                })
+                .collect(),
+            review: WorkOutputReview::SourceMappedNeedsReview,
+            presentation: WorkArtifactPresentationV1::Automatic,
+        };
+        let first = artifact(10);
+        let second = artifact(20);
+        let links = browser_preview_links(&[first.clone(), first, second]);
+        assert_eq!(links.len(), MAX_PREVIEWS);
+        assert_eq!(
+            links
+                .iter()
+                .filter(|link| link.extraction_id == 10.into())
+                .count(),
+            48
+        );
+        assert_eq!(
+            links
+                .iter()
+                .filter(|link| link.extraction_id == 20.into())
+                .count(),
+            48
+        );
+        assert!(links.iter().any(|link| link.source_id == 48));
+    }
+
     #[test]
     fn private_context_never_rides_a_search_query() {
         let private = vec!["Our Q3 revenue target is 4.2M with a hiring freeze".to_owned()];

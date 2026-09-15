@@ -5,6 +5,7 @@
 pub mod agent;
 pub mod artifact;
 pub mod authoring;
+pub mod collection;
 pub mod context;
 pub mod document;
 pub mod environment;

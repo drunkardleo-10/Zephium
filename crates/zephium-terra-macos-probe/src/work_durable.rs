@@ -29,7 +29,7 @@ use zephium_work_composition::{durable_runtime::WorkBrowserAdapterSettings, Maco
 const OBJECTIVE: &str = "Find SQLite's official explanation of why WAL mode does not work when clients on different machines share a database over a network filesystem. Produce one concise source-backed note as a single plan responsibility. Use only public documentation at sqlite.org or www.sqlite.org. No account, writes, installations, or external communication are needed. Every factual output needs source-mapped human review.";
 const COORDINATED_OBJECTIVE: &str = "Explain SQLite's official reason that WAL mode does not work when clients on different machines share a database over a network filesystem. Use exactly two plan responsibilities: a delegated public-documentation research worker with one source-backed findings output, then a primary agent that depends on those findings and produces one concise source-backed explanation. Both outputs require source_mapped_needs_review. Use only sqlite.org or www.sqlite.org. No accounts, writes, installations or external communication are needed.";
 
-const AGENT_COLLECTION_OBJECTIVE: &str = "Read https://www.lego.com/en-us/themes/architecture in the browser and collect three distinct Architecture sets with their displayed prices and useful distinguishing details. Return a cited comparison of the observed products. Do not buy, sign in, change locale, or use search snippets as a substitute for inspecting the actual catalog. Omit details that the page does not establish.";
+const AGENT_COLLECTION_OBJECTIVE: &str = "Read https://www.lego.com/en-us/themes/architecture in the browser and collect three distinct Architecture sets with their displayed prices and useful distinguishing details. Return a cited comparison with displayed price text, distinguishing details, product links and images from the actual page, using structured collection. Do not buy, sign in, change locale, or use search snippets as a substitute for inspecting the actual catalog. Omit details that the page does not establish.";
 const AGENT_MONEY_OBJECTIVE: &str = "Read https://demo.vercel.store/product/acme-geometric-circles-t-shirt in the browser and collect the Acme Circles T-Shirt with its explicitly displayed price, currency code and product image. Return only the target product with its observed amount and currency. Use one responsibility with one source-mapped output. Do not buy, sign in or change the cart. Do not substitute search snippets for the page.";
 const AGENT_READ_OBJECTIVE: &str = "From SQLite's official WAL documentation page, list every situation in which WAL mode does not work or has drawbacks, as cited findings with the page itself as the source. Read the actual page rather than relying on search snippets; use only sqlite.org.";
 const AGENT_OBJECTIVE: &str = "Compare Svelte Flow and React Flow as the canvas library for a desktop app: bundle size, license, and how actively each is maintained in 2026. Place the two libraries as subjects with cited findings, and finish with a short comparison.";
@@ -404,10 +404,10 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         return Err(Error::Runtime);
     }
     let collection_accepted = mode != Mode::AgentCollection || state.executions[0].artifacts.iter().any(|artifact| {
-        artifact.title == "Observed Architecture sets"
+        state.executions[0].steps.iter().any(|step| step.artifacts.contains(&artifact.id) && matches!(&step.kind, WorkStepKindV1::Read { collection: Some(_), .. } | WorkStepKindV1::Discover { collection: Some(_), .. }))
             && matches!(&artifact.data, zephium_core::work::artifact::WorkArtifactDataV1::ComparisonMatrix { subjects, cells, .. }
-                if subjects.len() == 3 && subjects.iter().all(|subject| subject.homepage.is_some() && !subject.image_candidates.is_empty()) && cells.len() == 3 && cells.iter().all(|row| row.first().is_some_and(|cell|
-                    matches!(&cell.value, zephium_core::work::artifact::WorkCellValue::Text { text } if !text.is_empty()) && !cell.evidence.is_empty())))
+                if subjects.len() == 3 && subjects.iter().all(|subject| subject.homepage.is_some() && !subject.image_candidates.is_empty()) && cells.len() == 3 && cells.iter().all(|row| row.iter().any(|cell|
+                    matches!(&cell.value, zephium_core::work::artifact::WorkCellValue::Text { text } if text.contains('$')) && !cell.evidence.is_empty())))
             && !artifact.evidence.is_empty()
     });
     let money_accepted = !matches!(mode, Mode::AgentMoney | Mode::MoneyNode) || state.executions[0].artifacts.iter().any(|artifact| {
@@ -473,7 +473,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             "public-research.json"
         }),
         serde_json::to_vec_pretty(&serde_json::json!({
-            "fixed_collection_assignment": matches!(mode, Mode::AgentCollection | Mode::AgentMoney),
+            "fixed_collection_assignment": mode == Mode::AgentMoney,
             "money_accepted": money_accepted,
             "collection_accepted": collection_accepted,
             "projection": state,
@@ -490,7 +490,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     if !collection_accepted || !money_accepted {
         return Err(Error::Runtime);
     }
-    writeln!(std::io::stdout().lock(), "durable-work: fixed_collection_assignment={}; native_browser=true; artifacts={}; resource_closed=true; reopened=true; semantic_status={:?}; content=redacted", matches!(mode, Mode::AgentCollection | Mode::AgentMoney), state.executions[0].artifacts.len(), state.executions[0].status).map_err(|_| Error::Output)?;
+    writeln!(std::io::stdout().lock(), "durable-work: fixed_collection_assignment={}; native_browser=true; artifacts={}; resource_closed=true; reopened=true; semantic_status={:?}; content=redacted", mode == Mode::AgentMoney, state.executions[0].artifacts.len(), state.executions[0].status).map_err(|_| Error::Output)?;
     Ok(())
 }
 
@@ -1087,7 +1087,7 @@ async fn agent_workflow(
     mut browser_keys: Vec<zephium_agentic::AgentProviderCredential>,
     mode: Mode,
 ) -> Result<WorkflowResult, &'static str> {
-    let collection = matches!(mode, Mode::AgentCollection | Mode::AgentMoney);
+    let collection = mode == Mode::AgentMoney;
     let objective = match mode {
         Mode::AgentCollection => AGENT_COLLECTION_OBJECTIVE,
         Mode::AgentMoney => AGENT_MONEY_OBJECTIVE,
@@ -1181,7 +1181,11 @@ async fn agent_workflow(
             },
             None,
             WorkAgentProviders {
-                turn: if collection { &collection_assignment } else { &agent },
+                turn: if collection {
+                    &collection_assignment
+                } else {
+                    &agent
+                },
                 search: &search,
             },
             |probe, request| {
@@ -1198,22 +1202,25 @@ async fn agent_workflow(
                             .unwrap_or_default()
                     );
                     if collection {
-                        use zephium_agentic::SemanticExtractionFieldSchema as Field;
-                        let schema = if mode == Mode::AgentMoney {
-                            money_schema()?
-                        } else { zephium_work_composition::durable_runtime::WorkBrowseCollectionSchema::try_new(
-                            "Observed Architecture sets".into(),
-                            vec![
-                                Field::try_text("name".into(), true, 256).map_err(|_| WorkError::Invalid)?,
-                                Field::try_text("displayed_price".into(), false, 128).map_err(|_| WorkError::Invalid)?,
-                                Field::try_text("details".into(), false, 768).map_err(|_| WorkError::Invalid)?,
-                                Field::try_url("product_url".into(), true, 2048).map_err(|_| WorkError::Invalid)?,
-                                Field::try_image_url("image_url".into(), true, 2048).map_err(|_| WorkError::Invalid)?,
-                            ], 3,
-                        )?.with_subject_url_field("product_url")?.with_subject_image_field("image_url")? };
-                        composition.run_collection_step(callback, &probe, request, browser_settings(binding, key), schema).await
+                        let schema = money_schema()?;
+                        composition
+                            .run_collection_step(
+                                callback,
+                                &probe,
+                                request,
+                                browser_settings(binding, key),
+                                schema,
+                            )
+                            .await
                     } else {
-                        composition.run_agent_step(callback, &probe, request, browser_settings(binding, key)).await
+                        composition
+                            .run_agent_step(
+                                callback,
+                                &probe,
+                                request,
+                                browser_settings(binding, key),
+                            )
+                            .await
                     }
                 }
             },
@@ -1291,10 +1298,12 @@ impl zephium_core::work::agent::WorkAgentTurnProvider for CollectionAssignment {
             }) {
                 vec![WorkAgentFetch::Read {
                     url: source.url.clone(),
+                    collection: None,
                 }]
             } else if self.money && context.steps.iter().any(|step| step.kind == "search") {
                 vec![WorkAgentFetch::Discover {
                     query: "site:demo.vercel.store/product/acme-geometric-circles-t-shirt Acme Circles T-Shirt".into(),
+                    collection: None,
                 }]
             } else if context.steps.iter().any(|step| step.kind == "search") {
                 return Err(

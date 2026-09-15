@@ -749,7 +749,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
         vec![],
         vec![],
         &fact.steps,
-        &[preview],
+        std::slice::from_ref(&preview),
         &fact.artifacts,
         WorkAgentBudget {
             turns_left: 6,
@@ -763,6 +763,56 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
     assert_eq!(
         disclosure.context().sources[0].url,
         "https://svelteflow.dev/docs"
+    );
+    // Different artifacts can both cite local index zero after unrelated search results.
+    let mut native = preview.clone();
+    native.link.extraction_id = WorkArtifactId::from(90);
+    native.source = WorkEvidenceSourceV1::NativeExtraction;
+    let mut second_native = native.clone();
+    second_native.link.source_id = 2;
+    let mut findings = fact.artifacts[0].clone();
+    findings.evidence = vec![native.link.clone(), second_native.link.clone()];
+    let views = WorkAgentTurnDisclosure::try_new(
+        "Compare canvas libraries",
+        vec![],
+        vec![],
+        &[],
+        &[preview, second_native.clone(), native.clone()],
+        &[fact.artifacts[0].clone(), findings.clone()],
+        WorkAgentBudget {
+            turns_left: 6,
+            steps_left: 20,
+            browse_available: true,
+        },
+        limits,
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(views.context().artifacts[0].evidence, vec![Some(0)]);
+    assert_eq!(
+        views.context().artifacts[1].evidence,
+        vec![Some(2), Some(1)]
+    );
+    let missing = WorkAgentTurnDisclosure::try_new(
+        "Compare canvas libraries",
+        vec![],
+        vec![],
+        &[],
+        &[second_native],
+        &[findings],
+        WorkAgentBudget {
+            turns_left: 6,
+            steps_left: 20,
+            browse_available: true,
+        },
+        limits,
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(missing.context().artifacts[0].evidence, vec![None, Some(0)]);
+    assert_eq!(
+        serde_json::to_value(missing.context()).unwrap()["artifacts"][0]["evidence"],
+        serde_json::json!([null, 0])
     );
     let output = |fetch, ask, finish| WorkAgentTurnOutput {
         say: Some("Comparing.".into()),
@@ -790,6 +840,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
             vec![
                 WorkAgentFetch::Read {
                     url: "https://svelteflow.dev/docs".into(),
+                    collection: None,
                 },
                 WorkAgentFetch::Search {
                     query: "svelte flow bundle size".into(),
@@ -801,10 +852,76 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
         .unwrap();
     assert_eq!(turn.fetch.len(), 2);
     assert_eq!(turn.artifacts[0].evidence[0].source_id, 1);
+    let mut mapped = output(vec![], None, true);
+    mapped.artifacts[0].evidence = vec![views.context().artifacts[1].evidence[0].unwrap()];
+    assert_eq!(
+        views.resolve(mapped).unwrap().artifacts[0].evidence,
+        vec![native.link]
+    );
+    let collect: WorkAgentFetch = serde_json::from_value(serde_json::json!({
+        "kind":"read", "url":"https://svelteflow.dev/docs",
+        "records":{"title":"Libraries", "max_items":2, "columns":[
+            {"name":"license", "required":false, "value":{"kind":"text"}}
+        ]}
+    }))
+    .unwrap();
+    let direct = WorkAgentTurnDisclosure::try_new(
+        "Read [the documentation](https://svelteflow.dev/docs) in the browser",
+        vec![],
+        vec![],
+        &[],
+        &[],
+        &[],
+        WorkAgentBudget {
+            turns_left: 6,
+            steps_left: 20,
+            browse_available: true,
+        },
+        limits,
+        vec![],
+    )
+    .unwrap();
+    assert!(direct.context().sources.is_empty());
+    assert_eq!(
+        direct.context().requested_pages,
+        ["https://svelteflow.dev/docs"]
+    );
+    let direct_turn = direct
+        .resolve(WorkAgentTurnOutput {
+            say: None,
+            artifacts: vec![],
+            fetch: vec![collect.clone()],
+            ask: None,
+            finish: false,
+        })
+        .unwrap();
+    assert_eq!(direct_turn.fetch.len(), 1);
+    let admitted = disclosure
+        .resolve(output(vec![collect.clone()], None, false))
+        .unwrap();
+    assert!(
+        matches!(&admitted.fetch[0], WorkStepKindV1::Read { collection: Some(shape), .. } if shape.max_items == 2)
+    );
+    let encoded = serde_json::to_value(&admitted.fetch[0]).unwrap();
+    assert!(serde_json::from_value::<WorkStepKindV1>(encoded).unwrap() == admitted.fetch[0]);
+    let WorkAgentFetch::Read { collection, .. } = collect else {
+        panic!()
+    };
+    assert!(disclosure
+        .resolve(output(
+            vec![WorkAgentFetch::Read {
+                url: "https://unseen.example/".into(),
+                collection
+            }],
+            None,
+            false
+        ))
+        .is_err());
     assert!(disclosure
         .resolve(output(
             vec![WorkAgentFetch::Read {
                 url: "https://example.test/unseen".into(),
+                collection: None,
             }],
             None,
             false,

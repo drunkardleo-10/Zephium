@@ -32,6 +32,9 @@ pub struct WorkAgentArtifactView {
     pub kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<WorkArtifactDataV1>,
+    /// Artifact-local evidence index -> this turn's source key; null means unavailable.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<Option<u16>>,
 }
 #[derive(Clone, Copy, Serialize)]
 pub struct WorkAgentBudget {
@@ -42,6 +45,8 @@ pub struct WorkAgentBudget {
 #[derive(Serialize)]
 pub struct WorkAgentTurnContext {
     pub objective: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub requested_pages: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub decisions: Vec<planning::PlanningAnswer>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -122,8 +127,8 @@ impl WorkAgentTurnDisclosure {
                 let (kind, detail) = match &step.kind {
                     WorkStepKindV1::Turn => ("turn", String::new()),
                     WorkStepKindV1::Search { query } => ("search", query.clone()),
-                    WorkStepKindV1::Read { url } => ("read", url.clone()),
-                    WorkStepKindV1::Discover { query } => ("discover", query.clone()),
+                    WorkStepKindV1::Read { url, .. } => ("read", url.clone()),
+                    WorkStepKindV1::Discover { query, .. } => ("discover", query.clone()),
                     WorkStepKindV1::Publish => ("publish", String::new()),
                     WorkStepKindV1::Ask { prompt, answer, .. } => (
                         "ask",
@@ -156,6 +161,16 @@ impl WorkAgentTurnDisclosure {
                 title: artifact.title.clone(),
                 kind: artifact_kind(&artifact.data),
                 data: Some(artifact.data.clone()),
+                evidence: artifact
+                    .evidence
+                    .iter()
+                    .map(|link| {
+                        links
+                            .iter()
+                            .position(|shown| shown == link)
+                            .map(|i| i as u16)
+                    })
+                    .collect(),
             })
             .enumerate()
             .map(|(key, mut view)| {
@@ -165,6 +180,7 @@ impl WorkAgentTurnDisclosure {
             .collect();
         let mut context = WorkAgentTurnContext {
             objective: objective.to_owned(),
+            requested_pages: requested_pages(objective),
             decisions,
             context: bodies,
             steps,
@@ -187,6 +203,7 @@ impl WorkAgentTurnDisclosure {
                     break;
                 }
                 context.artifacts[index].data = None;
+                context.artifacts[index].evidence.clear();
             }
         }
         if !fits(&context)? {
@@ -232,7 +249,7 @@ impl WorkAgentTurnDisclosure {
         self.limits
     }
     /// Admit the whole turn or none of it. Evidence keys resolve to links the
-    /// model was shown; a read may only target a shown source.
+    /// model was shown; a read targets a shown source or an explicit requested page.
     pub fn resolve(&self, output: WorkAgentTurnOutput) -> Result<WorkAgentTurn, WorkError> {
         let bytes = serde_json::to_vec(&output)
             .map_err(|_| WorkError::Invalid)?
@@ -279,13 +296,15 @@ impl WorkAgentTurnDisclosure {
         for operation in output.fetch {
             let kind = match operation {
                 WorkAgentFetch::Search { query } => WorkStepKindV1::Search { query },
-                WorkAgentFetch::Read { url } => {
-                    if !self.urls.contains(&url) {
+                WorkAgentFetch::Read { url, collection } => {
+                    if !self.urls.contains(&url) && !self.context.requested_pages.contains(&url) {
                         return Err(WorkError::Invalid);
                     }
-                    WorkStepKindV1::Read { url }
+                    WorkStepKindV1::Read { url, collection }
                 }
-                WorkAgentFetch::Discover { query } => WorkStepKindV1::Discover { query },
+                WorkAgentFetch::Discover { query, collection } => {
+                    WorkStepKindV1::Discover { query, collection }
+                }
             };
             let probe = WorkStepFact {
                 id: WorkStepId::from(1),
@@ -334,6 +353,33 @@ impl WorkAgentTurnDisclosure {
             finish: output.finish,
         })
     }
+}
+
+fn requested_pages(objective: &str) -> Vec<String> {
+    let mut pages = Vec::new();
+    for token in objective.split(|c: char| c.is_whitespace() || matches!(c, '"' | '<' | '>' | '`'))
+    {
+        let token = token.rsplit_once("](").map_or(token, |(_, url)| url);
+        let mut candidate = token.trim_start_matches(['(', '[']);
+        for (open, close) in [('(', ')'), ('[', ']')] {
+            while candidate.ends_with(close)
+                && candidate.chars().filter(|c| *c == close).count()
+                    > candidate.chars().filter(|c| *c == open).count()
+            {
+                candidate = &candidate[..candidate.len() - 1];
+            }
+        }
+        if candidate.starts_with("https://")
+            && super::runtime::validate_public_url(candidate).is_ok()
+            && !pages.iter().any(|page| page == candidate)
+        {
+            pages.push(candidate.to_owned());
+            if pages.len() == 8 {
+                break;
+            }
+        }
+    }
+    pages
 }
 /// Why one proposed object was refused; wording for the model is closed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -441,9 +487,19 @@ pub struct WorkAgentArtifactOutput {
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkAgentFetch {
-    Search { query: String },
-    Read { url: String },
-    Discover { query: String },
+    Search {
+        query: String,
+    },
+    Read {
+        url: String,
+        #[serde(rename = "records", default, skip_serializing_if = "Option::is_none")]
+        collection: Option<super::collection::WorkBrowseCollection>,
+    },
+    Discover {
+        query: String,
+        #[serde(rename = "records", default, skip_serializing_if = "Option::is_none")]
+        collection: Option<super::collection::WorkBrowseCollection>,
+    },
 }
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]

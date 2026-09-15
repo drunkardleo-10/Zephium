@@ -1442,6 +1442,18 @@ export type WorkAuthoringReceipt = {
 
 export type WorkAuthoringStatus = "draft" | "needs_input" | "plan_ready";
 
+export type WorkBrowseCollection = {
+	title: string,
+	columns: WorkBrowseColumn[],
+	max_items: number,
+};
+
+export type WorkBrowseColumn = {
+	name: string,
+	value: WorkBrowseValue,
+	required: boolean,
+};
+
 export type WorkBrowseRoute = {
 	origin: string,
 	path_prefix: string,
@@ -1456,6 +1468,8 @@ export type WorkBrowseScope = {
 	routes: WorkBrowseRoute[],
 	max_hops: number,
 };
+
+export type WorkBrowseValue = { kind: "text" } | { kind: "money"; permitted_currencies: string[] } | { kind: "url" } | { kind: "image_url" };
 
 /**
  *  Durable document operations share a bounded, profile-checked transport.
@@ -2700,15 +2714,15 @@ export type WorkStepKindV1 = WorkStepKindV1_Serialize | WorkStepKindV1_Deseriali
 
 export type WorkStepKindV1_Deserialize = 
 /**  One model turn; `note` on the step is what the agent said. */
-({ kind: "turn" }) & { answer?: never; options?: never; prompt?: never; query?: never; url?: never } | ({ kind: "search"; query: string }) & { answer?: never; options?: never; prompt?: never; url?: never } | ({ kind: "read"; url: string }) & { answer?: never; options?: never; prompt?: never; query?: never } | ({ kind: "discover"; query: string }) & { answer?: never; options?: never; prompt?: never; url?: never } | 
+({ kind: "turn" }) & { answer?: never; collection?: never; options?: never; prompt?: never; query?: never; url?: never } | ({ kind: "search"; query: string }) & { answer?: never; collection?: never; options?: never; prompt?: never; url?: never } | ({ kind: "read"; url: string; collection?: WorkBrowseCollection | null }) & { answer?: never; options?: never; prompt?: never; query?: never } | ({ kind: "discover"; query: string; collection?: WorkBrowseCollection | null }) & { answer?: never; options?: never; prompt?: never; url?: never } | 
 /**  Objects the agent placed on the canvas from this turn. */
-({ kind: "publish" }) & { answer?: never; options?: never; prompt?: never; query?: never; url?: never } | ({ kind: "ask"; prompt: string; options: string[]; answer?: string | null }) & { query?: never; url?: never } | ({ kind: "finish" }) & { answer?: never; options?: never; prompt?: never; query?: never; url?: never };
+({ kind: "publish" }) & { answer?: never; collection?: never; options?: never; prompt?: never; query?: never; url?: never } | ({ kind: "ask"; prompt: string; options: string[]; answer?: string | null }) & { collection?: never; query?: never; url?: never } | ({ kind: "finish" }) & { answer?: never; collection?: never; options?: never; prompt?: never; query?: never; url?: never };
 
 export type WorkStepKindV1_Serialize = 
 /**  One model turn; `note` on the step is what the agent said. */
-({ kind: "turn" }) & { answer?: never; options?: never; prompt?: never; query?: never; url?: never } | ({ kind: "search"; query: string }) & { answer?: never; options?: never; prompt?: never; url?: never } | ({ kind: "read"; url: string }) & { answer?: never; options?: never; prompt?: never; query?: never } | ({ kind: "discover"; query: string }) & { answer?: never; options?: never; prompt?: never; url?: never } | 
+({ kind: "turn" }) & { answer?: never; collection?: never; options?: never; prompt?: never; query?: never; url?: never } | ({ kind: "search"; query: string }) & { answer?: never; collection?: never; options?: never; prompt?: never; url?: never } | ({ kind: "read"; url: string; collection?: WorkBrowseCollection | null }) & { answer?: never; options?: never; prompt?: never; query?: never } | ({ kind: "discover"; query: string; collection?: WorkBrowseCollection | null }) & { answer?: never; options?: never; prompt?: never; url?: never } | 
 /**  Objects the agent placed on the canvas from this turn. */
-({ kind: "publish" }) & { answer?: never; options?: never; prompt?: never; query?: never; url?: never } | ({ kind: "ask"; prompt: string; options: string[]; answer?: string | null }) & { query?: never; url?: never } | ({ kind: "finish" }) & { answer?: never; options?: never; prompt?: never; query?: never; url?: never };
+({ kind: "publish" }) & { answer?: never; collection?: never; options?: never; prompt?: never; query?: never; url?: never } | ({ kind: "ask"; prompt: string; options: string[]; answer?: string | null }) & { collection?: never; query?: never; url?: never } | ({ kind: "finish" }) & { answer?: never; collection?: never; options?: never; prompt?: never; query?: never; url?: never };
 
 export type WorkStepStatus = "running" | "succeeded" | "failed" | "cancelled" | "outcome_unknown";
 

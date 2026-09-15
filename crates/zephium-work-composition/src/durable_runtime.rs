@@ -166,7 +166,15 @@ impl MacosWorkComposition {
         request: WorkAgentBrowseRequest,
         settings: WorkBrowserAdapterSettings,
     ) -> Result<WorkBrowserOutcome, WorkError> {
-        self.run_agent_step_inner(shell, probe, request, settings, None)
+        let collection = match &request.step {
+            WorkStepKindV1::Read { collection, .. }
+            | WorkStepKindV1::Discover { collection, .. } => collection
+                .as_ref()
+                .map(WorkBrowseCollectionSchema::try_from)
+                .transpose()?,
+            _ => return Err(WorkError::Invalid),
+        };
+        self.run_agent_step_inner(shell, probe, request, settings, collection)
             .await
     }
 
@@ -179,6 +187,18 @@ impl MacosWorkComposition {
         settings: WorkBrowserAdapterSettings,
         schema: WorkBrowseCollectionSchema,
     ) -> Result<WorkBrowserOutcome, WorkError> {
+        if matches!(
+            &request.step,
+            WorkStepKindV1::Read {
+                collection: Some(_),
+                ..
+            } | WorkStepKindV1::Discover {
+                collection: Some(_),
+                ..
+            }
+        ) {
+            return Err(WorkError::Invalid);
+        }
         self.run_agent_step_inner(shell, probe, request, settings, Some(schema))
             .await
     }
@@ -195,7 +215,7 @@ impl MacosWorkComposition {
         let outputs = vec![request.output.clone()];
         let limits = request.limits;
         let host = match &request.step {
-            WorkStepKindV1::Read { url } => ContextNavigationTarget::parse(url)
+            WorkStepKindV1::Read { url, .. } => ContextNavigationTarget::parse(url)
                 .ok()
                 .and_then(|target| target.as_url().host_str().map(str::to_owned)),
             WorkStepKindV1::Discover { .. } => Some("the web".to_owned()),
@@ -506,7 +526,7 @@ fn compile_step(
     .map_err(|_| WorkError::Invalid)?;
     let hops = usize::from(request.hops.clamp(1, 8));
     let (navigation, task) = match &request.step {
-        WorkStepKindV1::Read { url } => (
+        WorkStepKindV1::Read { url, .. } => (
             AgentNavigationDiscovery::try_new_public_web(
                 ContextNavigationTarget::parse(url).map_err(|_| WorkError::Invalid)?,
                 1,
@@ -515,7 +535,7 @@ fn compile_step(
             .map_err(|_| WorkError::Invalid)?,
             format!("Read this page: {url}\nReport the facts on it that matter for the objective, with the exact figures, names and dates the page states. Do not follow links unless the page itself is only a listing."),
         ),
-        WorkStepKindV1::Discover { query } => (
+        WorkStepKindV1::Discover { query, .. } => (
             AgentNavigationDiscovery::try_new_public_web(
                 ContextNavigationTarget::parse(
                     WorkPublicDiscoveryScope {

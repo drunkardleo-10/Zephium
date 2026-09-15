@@ -728,9 +728,13 @@ pub enum WorkStepKindV1 {
     },
     Read {
         url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        collection: Option<super::collection::WorkBrowseCollection>,
     },
     Discover {
         query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        collection: Option<super::collection::WorkBrowseCollection>,
     },
     /// Objects the agent placed on the canvas from this turn.
     Publish,
@@ -776,12 +780,18 @@ impl WorkStepKindV1 {
     fn validate(&self) -> Result<(), WorkError> {
         match self {
             Self::Search { query } => super::search::validate_public_search_query(query),
-            Self::Read { url } => validate_public_url(url).map(|_| ()),
-            Self::Discover { query } => WorkPublicDiscoveryScope {
-                search_query: query.clone(),
-                max_hops: 1,
+            Self::Read { url, collection } => {
+                validate_public_url(url)?;
+                collection.as_ref().map_or(Ok(()), |shape| shape.validate())
             }
-            .validate(),
+            Self::Discover { query, collection } => {
+                WorkPublicDiscoveryScope {
+                    search_query: query.clone(),
+                    max_hops: 1,
+                }
+                .validate()?;
+                collection.as_ref().map_or(Ok(()), |shape| shape.validate())
+            }
             Self::Ask {
                 prompt,
                 options,
