@@ -34,6 +34,54 @@ and controller-source expectations. B1/B2 and production qualification remain
 open: typed money/URLs/images, the full worker port, action workflows and
 Windows qualification are not delivered by this slice.
 
+## 2026-09-15: Product text, evidence retention and terminal mapping
+
+The native runtime now preserves visible article prose across structural
+wrappers. Retention favors focused captures within the existing limits and
+removes only unchanged same-node duplicates. A later pressure regression also
+proves that a broad duplicate capture cannot erase the focused source before
+being evicted. Repeated subtree and exhausted inspection refusals are distinct;
+the eight-capture limit is checked before native dispatch. The extraction
+mapper is a fresh schema/evidence-only request, with ordinary tool continuation
+replay and Rust correlation/accounting checks unchanged.
+
+Authorized public macOS/Luna runs during this change:
+
+| Workflow / revision | Outcome | Browser model calls | Input / output tokens | Sum of model elapsed time |
+| --- | --- | ---: | ---: | ---: |
+| Catalog, initial text fix | Three names/prices, cited and reopened | Not separately recorded | Conservative Work accounting only | Not recorded |
+| Catalog, compact mapper | Same three-record acceptance passed | 3 | 18,533 / 875 | 15,096 ms |
+| Documentation, before inspection-limit precheck | Browser authority failure, then retry/deadline/resource failure | Not qualified | Mixed conservative accounting | Not qualified |
+| Documentation, recoverable inspection limit | Browser execution and persistence completed; incomplete prose and incorrect final-summary citation | 14 | 89,938 / 2,593 | 64,597 ms |
+| Catalog, same-source deduplication | Three-record acceptance passed, native citations reopened and resource closed | 2 | 9,976 / 696 | 11,388 ms |
+| Documentation, per-finding output | 16 browser findings with 17 native evidence fragments, reopened and resource closed | 16 | 79,154 / 2,691 | 63,310 ms |
+
+Recorded per-call `PricedCeiling` rows contain actual provider tokens and
+catalog-ceiling cost. Work aggregate usage remains conservative. The last
+catalog mapper used 2,510 input tokens, versus 9,934 in the supplied earlier
+failed trace; this is an individual workflow comparison, not a controlled
+latency/reliability distribution. Model elapsed sums exclude host, search and
+counting overhead; no end-to-end, CPU, RSS or wakeup target is claimed.
+The final native build additionally includes the deterministic duplicate-under-
+pressure fix; that last adjustment was not separately live-qualified.
+
+The documentation workflow is **not end-to-end qualified**. Its final Work
+summary still used one search citation. Inspection found that
+`WorkAgentTurnDisclosure` copies artifact data without mapping artifact-local
+evidence indexes to the disclosed source keys; the application also loads only
+the first eight browser evidence previews. The Work owner needs to preserve that
+mapping, disclose the relevant cited previews under its existing budget, and
+represent omitted previews explicitly. The browser's 16-call run also leaves
+long-page coverage and efficiency unresolved. The authority failure's specific
+cause was not proven by its collapsed diagnostic; no guard or ceiling was relaxed.
+
+Affected tests: 1,817 passed, two pre-existing ignored. Workspace and
+`durable-runtime` composition Clippy, runtime JavaScript smoke, native build,
+formatting and diff checks passed. A sandbox-only test attempt could not bind
+loopback sockets; the authorized rerun passed. No signed-in form, cart, purchase,
+parallel page, image/typed-money record or Windows workflow was qualified.
+B1/B2 and the remaining release blockers stay open.
+
 ## Earlier qualification evidence
 
 The physical-Windows procedure now has a checked-in, source-gated two-phase

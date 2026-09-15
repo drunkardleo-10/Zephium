@@ -1231,6 +1231,9 @@ fn browser_settings(
 ) -> WorkBrowserAdapterSettings {
     WorkBrowserAdapterSettings {
         retain_public_responses: true,
+        model_diagnostic: Some(|event| {
+            let _ = writeln!(std::io::stdout().lock(), "browser-model: {event:?}");
+        }),
         resource_diagnostic: Some(|cause| {
             let _ = writeln!(
                 std::io::stdout().lock(),

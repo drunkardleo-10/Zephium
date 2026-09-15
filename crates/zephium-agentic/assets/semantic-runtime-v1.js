@@ -1494,6 +1494,7 @@
     if (descriptor.contentEditable === true && textFillRole(descriptor.role)) return "value";
     if (
       descriptor.role === "paragraph" ||
+      (descriptor.role === "document" && descriptor.tag === "article") ||
       descriptor.role === "list_item" ||
       descriptor.role === "cell_header" ||
       descriptor.role === "cell" ||
@@ -1730,11 +1731,12 @@
             const index = addRecord(records, record, state);
             if (index === null) break;
             parent = index;
-            // An explicitly named inline link still has visible descendant
-            // words belonging to its prose parent. Keep that existing sink;
-            // never substitute its aria-label or overwrite its explicit name.
+            // Structural wrappers and named links retain their enclosing prose
+            // sink; their own labels never replace the visible descendant text.
+            const inheritsProse = descriptor.role === "link" || descriptor.role === "document" ||
+              descriptor.role === "group" || descriptor.role === "landmark" || descriptor.role === "list";
             sink = record.sink !== null ? index :
-              descriptor.role === "link" && record.sensitivity === "public" &&
+              inheritsProse && record.sensitivity === "public" &&
                 sink !== null && records[sink].sink === "text" ? sink : null;
             // A region is one structural level, not a full-DOM subtree. Keep
             // nested regions as current, independently expandable anchors so

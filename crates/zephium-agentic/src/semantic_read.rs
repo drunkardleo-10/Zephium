@@ -421,6 +421,7 @@ impl fmt::Debug for SemanticReadContent<'_> {
 /// Exact source coordinates attached to every readable primitive.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct SemanticReadProvenance<'a> {
+    node_key: crate::semantic::SemanticNodeKey,
     observation: SemanticObservationId,
     observation_generation: SemanticObservationGeneration,
     frame: &'a SemanticFrameJoin,
@@ -1059,6 +1060,7 @@ impl<'a> SemanticReadBuilder<'a> {
             return;
         }
         let provenance = SemanticReadProvenance {
+            node_key: node.key(),
             observation: self.observation.request().id(),
             observation_generation: self.observation.request().generation(),
             frame: snapshot.frame(),
@@ -1475,7 +1477,10 @@ mod tests {
             {"k":3,"p":0,"r":"paragraph","t":"Another quote"}
         ]);
         let older = retained_observation(1, nodes.clone());
-        let newer = retained_observation(2, nodes);
+        let mut newer_nodes = nodes;
+        newer_nodes[1]["k"] = json!(12);
+        newer_nodes[2]["k"] = json!(13);
+        let newer = retained_observation(2, newer_nodes);
         let empty = retained_observation(3, json!([{"k":1,"r":"document","o":16}]));
         let mut evidence = SemanticRetainedReadEvidence::default();
         for (observation, at) in [(&older, 100), (&newer, 200)] {
@@ -1625,6 +1630,156 @@ mod tests {
         assert!(merged.stats().omitted_items() > 0);
         assert_eq!(merged.fragments()[0].provenance().observation().get(), 12);
         assert!(merged.fragments().len() <= 8);
+    }
+
+    #[test]
+    fn retained_read_deduplicates_only_the_same_source_and_value() {
+        let mut evidence = SemanticRetainedReadEvidence::default();
+        for id in 1..=3 {
+            let observation = retained_observation(
+                id,
+                json!([
+                    {"k":1,"r":"document","o":16},
+                    {"k":2,"p":0,"r":"paragraph","t":"Price $49.99"},
+                    {"k":3,"p":0,"r":"paragraph","t":"Price $49.99"}
+                ]),
+            );
+            let ack = acknowledgement(&observation);
+            let read = read_semantic_observation(
+                &observation,
+                SemanticReadAuthority::Acknowledged(&ack),
+                SemanticCaptureInstant::from_millis(id),
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::STANDARD,
+            )
+            .unwrap();
+            evidence.retain(&read, &ack).unwrap();
+            assert_eq!(evidence.retained_items(), 2);
+        }
+        let empty = retained_observation(4, json!([{"k":1,"r":"document","o":16}]));
+        let ack = acknowledgement(&empty);
+        let current = read_semantic_observation(
+            &empty,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(4),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .unwrap();
+        let merged = evidence.merge_for_extraction(current).unwrap();
+        assert_eq!(merged.fragments().len(), 2);
+        assert!(merged.fragments().iter().all(|fragment| fragment
+            .provenance()
+            .observation()
+            .get()
+            == 3));
+        assert_eq!(merged.stats().omitted_items(), 0);
+        assert_ne!(
+            merged.fragments()[0].provenance().reference(),
+            merged.fragments()[1].provenance().reference()
+        );
+    }
+
+    #[test]
+    fn broad_duplicate_capture_cannot_erase_the_focused_source_it_replaces() {
+        let mut evidence = SemanticRetainedReadEvidence::default();
+        for (id, keys) in [
+            (1, vec![2, 3]),
+            (2, vec![129, 130]),
+            (3, (2..=128).collect()),
+        ] {
+            let mut nodes = vec![json!({"k":1,"r":"document","o":16})];
+            for key in keys {
+                nodes.push(json!({"k":key,"p":0,"r":"paragraph","t":format!("Fact {key}")}));
+            }
+            let observation = retained_observation(id, json!(nodes));
+            let ack = acknowledgement(&observation);
+            let read = read_semantic_observation(
+                &observation,
+                SemanticReadAuthority::Acknowledged(&ack),
+                SemanticCaptureInstant::from_millis(id),
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::STANDARD,
+            )
+            .unwrap();
+            evidence.retain(&read, &ack).unwrap();
+        }
+        assert_eq!(evidence.retained_items(), 4);
+        let empty = retained_observation(4, json!([{"k":1,"r":"document","o":16}]));
+        let ack = acknowledgement(&empty);
+        let read = read_semantic_observation(
+            &empty,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(4),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .unwrap();
+        let merged = evidence.merge_for_extraction(read).unwrap();
+        let source = merged
+            .fragments()
+            .iter()
+            .find(|fragment| {
+                fragment
+                    .content()
+                    .text()
+                    .is_some_and(|text| text.as_str() == "Fact 2")
+            })
+            .unwrap();
+        assert_eq!(source.provenance().observation().get(), 1);
+        assert!(merged.omissions().contains(SemanticReadOmission::ItemLimit));
+    }
+
+    #[test]
+    fn broad_capture_preserves_focused_evidence_with_original_provenance() {
+        let detail = retained_observation(
+            1,
+            json!([
+                {"k":1,"r":"document","o":16},
+                {"k":2,"p":0,"r":"paragraph","t":"Example set costs $159.99"},
+                {"k":3,"p":0,"r":"paragraph","t":"Width 29 cm"}
+            ]),
+        );
+        let mut nodes = vec![json!({"k":1,"r":"document","o":16})];
+        for key in 2..=128 {
+            nodes.push(json!({"k":key,"p":0,"r":"paragraph","t":format!("Catalog entry {key}")}));
+        }
+        let broad = retained_observation(2, json!(nodes));
+        let detail_ack = acknowledgement(&detail);
+        let broad_ack = acknowledgement(&broad);
+        let read = |observation, ack| {
+            read_semantic_observation(
+                observation,
+                SemanticReadAuthority::Acknowledged(ack),
+                SemanticCaptureInstant::from_millis(100),
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::STANDARD,
+            )
+            .unwrap()
+        };
+        let detail_read = read(&detail, &detail_ack);
+        let broad_read = read(&broad, &broad_ack);
+        let mut evidence = SemanticRetainedReadEvidence::default();
+        evidence.retain(&detail_read, &detail_ack).unwrap();
+        evidence.retain(&broad_read, &broad_ack).unwrap();
+        assert_eq!(evidence.retained_items(), 2);
+        let merged = evidence.merge_for_extraction(broad_read).unwrap();
+        assert!(merged.matches_acknowledgement(&broad_ack));
+        assert_eq!(merged.fragments().len(), 128);
+        assert!(merged.omissions().contains(SemanticReadOmission::ItemLimit));
+        let price = merged
+            .fragments()
+            .iter()
+            .find(|fragment| {
+                fragment
+                    .content()
+                    .text()
+                    .is_some_and(|text| text.as_str().contains("$159.99"))
+            })
+            .unwrap();
+        assert_eq!(price.provenance().observation().get(), 1);
+        assert_eq!(price.provenance().captured_at().millis(), 100);
+        assert!(merged.stats().content_bytes() <= SemanticReadBudget::STANDARD.max_bytes());
     }
 
     #[test]

@@ -582,7 +582,11 @@ each cell retains its own source edges under the existing aggregate limits.
 Row archives use version 3; scalar archives remain version 2. The Work adapter
 can map these rows directly to comparison cells, preserving missing optional
 values as unknown. This does not yet provide typed money, images or collection
-completeness. Symbol-only `locate` queries match literal retained substrings.
+completeness. Ordinary Work read/discovery steps now return up to 16 individually
+cited findings (1,024 bytes each), mapped directly to finding artifacts. Scalar
+node outputs remain compatible. A collection-level citation never substitutes
+for a finding's own sources; empty findings return unavailable.
+Symbol-only `locate` queries match literal retained substrings.
 Public-web discovery may finalize an initial query rewrite on the same exact
 HTTPS origin/path and native committed load, then freezes that URL; it grants
 no redirect or subsequent location-change authority.
@@ -593,7 +597,10 @@ trusted schema ID may bind a strictly newer same-plan call. Deterministic
 `ZEXTRACT1` input carries trusted, closed schema field declarations followed by
 the exact hostile `ZREAD3` evidence; one guard binds the full schema definition,
 read, observation fingerprint, context, generation, and capture time. The
-complete immutable replay must either receive an `ExactLocal` pinned
+fresh mapping request contains only the objective and exact bound `ZEXTRACT1`
+evidence. Browsing observations, checkpoints, old tool replay and reasoning
+are not resent to this mapper; ordinary browser continuation replay is unchanged.
+The complete mapping request must either receive an `ExactLocal` pinned
 provider/model/tokenizer count, or enter the OpenAI-only conservative-reserve
 then authenticated-exact-count path, before model generation. Policy rejoins
 the unchanged committed baseline taint without adding origins, references,
@@ -619,7 +626,21 @@ Retained reads explicitly declare `provenance=cohorts_v1`: `P` records hold
 exact capture coordinates once, `default_p=p1` selects the default, and `p=pN`
 selects another cohort per row. Historical frame invocation/snapshot come from
 that cohort. This additive extension leaves ordinary reads byte-compatible;
-retained quotes and per-source policy checks are unchanged.
+retained quotes and per-source policy checks are unchanged. Unchanged fragments
+from the same private node identity, field, frame, role and trust are deduplicated;
+equal values from different nodes and changed values remain distinct. Under the
+unchanged eight-capture/128-fragment/32-KiB limits, coarse capture cost favors
+focused evidence, with newest duplicate provenance preferred on ties. Broad
+captures cannot erase focused duplicate sources before being evicted. Terminal
+reads reserve at most half the existing budget for historical evidence and mark
+all budget omissions. Private node keys confer no current action authority.
+
+Visible article prose now includes ordinary descendant text across structural
+wrappers, while hidden, editable and secret boundaries still exclude content.
+Inspection checkpoints expose remaining capture capacity. Repeated subtree and
+exhausted-inspection refusals have distinct codes; the eight-capture limit is
+checked before native dispatch, preserving current evidence for extraction.
+
 Terminal extraction has its own 112-KiB conservative encoding envelope instead
 of reusing the 16-KiB initial-observation envelope: the existing STANDARD read
 can contain 32 KiB of values, which require up to 64 KiB after escaping, plus

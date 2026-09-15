@@ -48,6 +48,18 @@ impl AgentProviderContinuation {
         {
             return Err(AgentProviderContinuationError::Baseline);
         }
+        if self
+            .transcript
+            .inspection_checkpoint
+            .as_ref()
+            .is_some_and(|checkpoint| {
+                checkpoint.progress.captures.len() >= MAX_AGENT_INSPECTION_CAPTURES
+            })
+        {
+            return Ok(AgentProviderObservationResolution::Refused(Box::new(
+                AgentProviderObservationRefusal(self, InspectionRefusal::Limit),
+            )));
+        }
         let scope = self
             .correlation
             .snapshot_scope
@@ -60,7 +72,7 @@ impl AgentProviderContinuation {
             .is_some_and(|checkpoint| checkpoint.progress.repeats(observation, scope))
         {
             return Ok(AgentProviderObservationResolution::Refused(Box::new(
-                AgentProviderObservationRefusal(self),
+                AgentProviderObservationRefusal(self, InspectionRefusal::Repeated),
             )));
         }
         let expansion = match scope.clone() {
@@ -79,7 +91,7 @@ impl AgentProviderContinuation {
             }
             _ => {
                 return Ok(AgentProviderObservationResolution::Refused(Box::new(
-                    AgentProviderObservationRefusal(self),
+                    AgentProviderObservationRefusal(self, InspectionRefusal::Invalid),
                 )))
             }
         };
@@ -99,15 +111,19 @@ impl AgentProviderContinuation {
                 SemanticObservationBudget::INITIAL_FILTERED,
             ) {
                 Ok(_) => {}
+                Err(crate::SemanticObservationError::RepeatedScope) => {
+                    return Ok(AgentProviderObservationResolution::Refused(Box::new(
+                        AgentProviderObservationRefusal(self, InspectionRefusal::Repeated),
+                    )));
+                }
                 Err(
                     crate::SemanticObservationError::ScopeIncompatible
-                    | crate::SemanticObservationError::RepeatedScope
                     | crate::SemanticObservationError::Reference(
                         crate::SemanticReferenceError::Unknown,
                     ),
                 ) => {
                     return Ok(AgentProviderObservationResolution::Refused(Box::new(
-                        AgentProviderObservationRefusal(self),
+                        AgentProviderObservationRefusal(self, InspectionRefusal::Invalid),
                     )));
                 }
                 Err(_) => return Err(AgentProviderContinuationError::Scope),
@@ -163,7 +179,13 @@ pub enum AgentProviderObservationResolution {
 /// Move-only proof that one exact Snapshot proposal was refused before dispatch.
 /// The provider call, correlation, configuration and baseline cannot be replaced.
 #[must_use]
-pub struct AgentProviderObservationRefusal(AgentProviderContinuation);
+pub struct AgentProviderObservationRefusal(AgentProviderContinuation, InspectionRefusal);
+
+enum InspectionRefusal {
+    Invalid,
+    Repeated,
+    Limit,
+}
 
 impl AgentProviderObservationRefusal {
     pub(in crate::agent_provider) fn bind(
@@ -181,11 +203,17 @@ impl AgentProviderObservationRefusal {
         if !self.0.baseline.matches(observation) {
             return Err(AgentProviderContinuationError::Baseline);
         }
+        let (code, guidance) = match self.1 {
+            InspectionRefusal::Limit => ("inspection_budget_exhausted", "The inspection budget for this document is exhausted. No capture occurred; current refs and retained evidence remain available. Read or extract available evidence, or navigate through an admitted observed link when the remaining navigation budget allows. Do not request another snapshot of this document."),
+            InspectionRefusal::Repeated => ("repeated_snapshot_scope", "This subtree was already inspected. No capture occurred and current refs remain valid. Inspect a different region, use text_search within a current eligible boundary, or follow an observed detail link when allowed. Extract only the evidence actually available; repeating this subtree does not advance truncated content."),
+            InspectionRefusal::Invalid => ("invalid_snapshot_scope", "No capture occurred; this observation and its refs remain current. text_search and region require a current document/landmark/group/dialog ref. A heading is only eligible for surrounding_text or subtree; its subtree excludes following prose. If no eligible search boundary exists here, snapshot(initial) can restore current viewport anchors. You may extract retained evidence instead. Choose another operation within the remaining budget; do not repeat the rejected scope."),
+        };
         let result = serde_json::json!({
-            "status": "refused", "code": "invalid_snapshot_scope", "executed": false,
-            "guidance": "No capture occurred; this observation and its refs remain current. text_search and region require a current document/landmark/group/dialog ref. A heading is only eligible for surrounding_text or subtree; its subtree excludes following prose. If no eligible search boundary exists here, snapshot(initial) can restore current viewport anchors. You may extract retained evidence instead. Choose another operation within the remaining budget; do not repeat the rejected scope.",
+            "status": "refused", "code": code, "executed": false,
+            "guidance": guidance,
             "observation_unchanged": true,
-        }).to_string();
+        })
+        .to_string();
         let (call, _, _, correlation, mut transcript) = self.0.into_parts();
         let action_targets = transcript.take_action_targets();
         // Match progressive capture checkpointing: keep current refs exactly
@@ -212,7 +240,7 @@ impl AgentProviderObservationRefusal {
 
 impl fmt::Debug for AgentProviderObservationRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("AgentProviderObservationRefusal(invalid_snapshot_scope, [owned, redacted])")
+        f.write_str("AgentProviderObservationRefusal([owned, redacted])")
     }
 }
 
@@ -631,12 +659,12 @@ impl AgentInspectionProgress {
             "Choose a current narrower region or heading/window when needed. ",
             "snapshot(initial) restores the viewport; it does not scroll or advance a page cursor. ",
             "Region captures expose nested regions as anchors, not their descendants. ",
-            "Earlier action refs are retired. Terminal mapping may use bounded retained sources supplied in its own read inventory. Every inspection uses the same finite run budget.\n").to_owned();
+            "Earlier action refs are retired. Terminal mapping may use bounded retained sources supplied in its own read inventory. When remaining_inspections is zero, use retained evidence or an admitted navigation; no further snapshots of this document can execute.\n").to_owned();
         if self.captures.iter().any(|capture| capture.anchor_lost) {
             text.push_str("failed_anchor_missing means the requested scoped capture failed because its anchor disappeared before execution. Its result is unavailable; the following initial viewport is an independently captured refresh. Use only the fresh refs and do not treat the failed scope as captured evidence.\n");
         }
         text.push_str(
-            &serde_json::json!({"completed_inspections": captures.len(), "captures": captures})
+            &serde_json::json!({"completed_inspections": captures.len(), "remaining_inspections": MAX_AGENT_INSPECTION_CAPTURES - captures.len(), "captures": captures})
                 .to_string(),
         );
         Ok(text)

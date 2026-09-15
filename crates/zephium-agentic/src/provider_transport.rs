@@ -6478,16 +6478,22 @@ mod tests {
             AgentProviderKind::OpenAiResponses => {
                 assert_eq!(body["text"]["format"]["type"], "json_schema");
                 assert_eq!(body["text"]["format"]["strict"], true);
-                assert_eq!(body["input"][2]["type"], "function_call");
-                assert_eq!(body["input"][2]["name"], "extract");
-                assert_eq!(body["input"][3]["type"], "function_call_output");
+                assert_eq!(body["input"].as_array().unwrap().len(), 2);
+                assert_eq!(body["input"][1]["role"], "user");
+                assert!(body["input"][1]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("ZEXTRACT1"));
                 &body["text"]["format"]["schema"]
             }
             AgentProviderKind::AnthropicMessages => {
                 assert_eq!(body["output_config"]["format"]["type"], "json_schema");
-                assert_eq!(body["messages"][1]["content"][0]["type"], "tool_use");
-                assert_eq!(body["messages"][1]["content"][0]["name"], "extract");
-                assert_eq!(body["messages"][2]["content"][0]["type"], "tool_result");
+                assert_eq!(body["messages"].as_array().unwrap().len(), 1);
+                assert_eq!(body["messages"][0]["content"].as_array().unwrap().len(), 2);
+                assert!(body["messages"][0]["content"][1]["text"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("ZEXTRACT1"));
                 &body["output_config"]["format"]["schema"]
             }
         };

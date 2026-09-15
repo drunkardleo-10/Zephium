@@ -1470,6 +1470,15 @@ async function finish() {
     .append(new CharacterData("sk-prose-secret-fixture-value"));
   observable.append(new HTMLAnchorElement({ href: "https://example.test/private-label", "aria-label": "sk-private-label-fixture-value" }))
     .append(new CharacterData("private-link-body"));
+  const productItem = prose.append(new Element("li"));
+  const productArticle = productItem.append(new Element("article"));
+  productArticle.append(new Element("h3")).append(new CharacterData("Example set"));
+  productArticle.append(new Element("div")).append(new Element("span")).append(new CharacterData("$159.99"));
+  productArticle.append(new Element("span", { hidden: "" })).append(new CharacterData("hidden-price"));
+  productArticle.append(new Element("div", { contenteditable: "true" })).append(new CharacterData("private-edit"));
+  const standaloneProduct = prose.append(new Element("article"));
+  standaloneProduct.append(new Element("h2")).append(new CharacterData("Standalone set"));
+  standaloneProduct.append(new Element("span")).append(new CharacterData("€49.95"));
   const outer = prose.append(new Element("li"));
   outer.append(new CharacterData("Outer only"));
   const inner = outer.append(new Element("p"));
@@ -1487,6 +1496,9 @@ async function finish() {
     assert(link && link.r === "link" && link.p === proseSnapshot.n.indexOf(observableNode), "prose composition lost exact child link ancestry");
     assert(link.n === (feature === "profiling" ? "Profile tooling" : feature), "prose composition changed a child accessible name");
   }
+  assert(proseSnapshot.n.some((node) => node.r === "document" && node.t === "Example set $159.99"), "article boundary discarded a product's visible price");
+  assert(!proseWire.includes("hidden-price"), "hidden product text escaped");
+  assert(proseSnapshot.n.some((node) => node.r === "document" && node.t === "Standalone set €49.95"), "standalone article discarded visible text");
   assert(proseSnapshot.n.some((node) => node.r === "list_item" && node.t === "Outer only"), "nested block prose was flattened into its ancestor");
   assert(proseSnapshot.n.some((node) => node.r === "paragraph" && node.t === "Separate paragraph detail"), "nearest paragraph lost its inline label");
   assert(!proseWire.includes("hidden-prose-label") && !proseWire.includes("sk-prose-secret-fixture-value"), "hidden or secret inline text escaped");

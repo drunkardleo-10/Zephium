@@ -1,6 +1,7 @@
 //! Narrow browser executor for a live durable Work attempt. It compiles only
 //! explicit Public reading scope and uses the original retained native owner.
 mod collection;
+mod findings;
 pub use collection::WorkBrowseCollectionSchema;
 
 use crate::{
@@ -34,6 +35,8 @@ pub struct WorkBrowserAdapterSettings {
     #[cfg(feature = "public-qualification")]
     pub diagnostic:
         Option<fn(zephium_core::work::WorkAttemptId, zephium_app::RetainedWorkSnapshot)>,
+    #[cfg(feature = "public-qualification")]
+    pub model_diagnostic: Option<fn(AgentWorkEventKind)>,
     pub profile: AgentWorkProfileBinding,
     pub model: AgentBrowserModel,
     pub config: AgentWorkApplicationConfig,
@@ -53,6 +56,8 @@ impl WorkBrowserAdapterSettings {
             resource_diagnostic: None,
             #[cfg(feature = "public-qualification")]
             diagnostic: None,
+            #[cfg(feature = "public-qualification")]
+            model_diagnostic: None,
             profile,
             model,
             config,
@@ -241,6 +246,12 @@ impl MacosWorkComposition {
             // This loop exists only while an admitted worker/resource is owned.
             // Draining also releases the controller's bounded event backpressure.
             while let Some(event) = guard.0.take_event() {
+                #[cfg(feature = "public-qualification")]
+                if matches!(event.kind(), AgentWorkEventKind::ModelSettled { .. }) {
+                    if let Some(diagnostic) = diagnostics.model_diagnostic {
+                        diagnostic(event.kind());
+                    }
+                }
                 use zephium_ipc::work::WorkActivityV1;
                 let activity = match event.kind() {
                     AgentWorkEventKind::ModelActive => Some(WorkActivityV1::Planning),
@@ -418,6 +429,8 @@ struct BrowserRun {
 /// Closed diagnostic hooks copied out of the settings before they are consumed.
 #[derive(Clone, Copy)]
 struct Diagnostics {
+    #[cfg(feature = "public-qualification")]
+    model_diagnostic: Option<fn(AgentWorkEventKind)>,
     #[cfg(feature = "retained-lifetime-diagnostic")]
     resource_diagnostic: Option<fn(Option<zephium_engine::WorkResourceFailureCause>)>,
     #[cfg(feature = "public-qualification")]
@@ -435,6 +448,8 @@ impl From<&WorkBrowserAdapterSettings> for Diagnostics {
             resource_diagnostic: settings.resource_diagnostic,
             #[cfg(feature = "public-qualification")]
             diagnostic: settings.diagnostic,
+            #[cfg(feature = "public-qualification")]
+            model_diagnostic: settings.model_diagnostic,
         }
     }
 }
@@ -493,15 +508,14 @@ fn compile_step(
     objective.push_str(&task);
     objective.push_str(match collection {
         Some(_) => "\noutput_0: distinct records matching the requested collection schema. Preserve exact displayed values. Omit unsupported optional fields. Do not turn missing evidence into a negative or zero, mix different items into one record, or treat the visible subset as the complete catalog.",
-        None => "\noutput_0: findings from the visited pages, as plain text.",
+        None => "\noutput_0: a list of separately cited findings from the visited pages. Give each finding its own supporting sources. Preserve conditions, exceptions and historical qualifications. Cover the requested facts supported by the observed evidence; do not imply complete page coverage when observations are partial.",
     });
     if objective.len() > zephium_core::work::MAX_WORK_TEXT_BYTES {
         return Err(WorkError::Capacity);
     }
     let output_fields = vec![match collection {
         Some(schema) => schema.extraction_field()?,
-        None => SemanticExtractionFieldSchema::try_text("output_0".into(), true, 4096)
-            .map_err(|_| WorkError::Invalid)?,
+        None => findings::field_schema()?,
     }];
     let invocation = PublicReadWorkInvocation::new(
         PublicReadWorkObjective {
@@ -704,35 +718,55 @@ fn map_archive(
         zephium_core::work::WorkArtifactId::from(u128::from_be_bytes(archive.descriptor().id()));
     let mut result = Vec::new();
     for field in archive.fields() {
-        let ArchivedValue::Text { value, sources } = field.value() else {
-            return Err(WorkError::Invalid);
-        };
         let output = outputs
             .iter()
             .enumerate()
             .find(|(index, _)| format!("output_{index}") == field.name())
             .map(|(_, output)| output)
             .ok_or(WorkError::Invalid)?;
-        let mut unique = BTreeSet::new();
-        let evidence = sources
-            .iter()
-            .map(|source| {
-                if archive.source(*source).is_none() || !unique.insert(*source) {
-                    return Err(WorkError::Invalid);
-                }
-                Ok(WorkEvidenceLink {
-                    extraction_id,
-                    source_id: *source,
+        let mut evidence = Vec::<WorkEvidenceLink>::new();
+        let mut cite = |sources: &[u16]| -> Result<Vec<u16>, WorkError> {
+            let mut unique = BTreeSet::new();
+            sources
+                .iter()
+                .map(|source| {
+                    if archive.source(*source).is_none() || !unique.insert(*source) {
+                        return Err(WorkError::Invalid);
+                    }
+                    let link = WorkEvidenceLink {
+                        extraction_id,
+                        source_id: *source,
+                    };
+                    let index = if let Some(index) = evidence.iter().position(|item| *item == link)
+                    {
+                        index
+                    } else {
+                        if evidence.len() >= MAX_ARTIFACT_EVIDENCE {
+                            return Err(WorkError::Capacity);
+                        }
+                        evidence.push(link);
+                        evidence.len() - 1
+                    };
+                    u16::try_from(index).map_err(|_| WorkError::Capacity)
                 })
-            })
-            .collect::<Result<Vec<_>, WorkError>>()?;
+                .collect()
+        };
+        let data = match field.value() {
+            ArchivedValue::Text { value, sources } => {
+                cite(sources)?;
+                WorkArtifactDataV1::Document {
+                    paragraphs: vec![value.clone()],
+                    formatted: None,
+                }
+            }
+            ArchivedValue::TextList { items, .. } => findings::map_items(items, &mut cite)?,
+            _ => return Err(WorkError::Invalid),
+        };
+        data.validate(evidence.len())?;
         result.push(WorkArtifactDraft {
             output: output.clone(),
             title: output.clone(),
-            data: WorkArtifactDataV1::Document {
-                paragraphs: vec![value.clone()],
-                formatted: None,
-            },
+            data,
             evidence,
         });
     }

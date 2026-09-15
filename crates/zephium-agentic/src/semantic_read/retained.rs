@@ -61,6 +61,7 @@ impl Content {
 }
 
 struct Fragment {
+    node_key: crate::semantic::SemanticNodeKey,
     field: SemanticReadField,
     role: SemanticRole,
     content: Content,
@@ -79,13 +80,40 @@ struct Capture {
     stats: SemanticReadStats,
 }
 
+impl Capture {
+    fn cost_bucket(&self) -> u32 {
+        u32::from(self.stats.items)
+            .div_ceil(16)
+            .max(self.stats.content_bytes.div_ceil(4096))
+    }
+
+    fn remove_duplicates(&mut self, preferred: &Self) {
+        self.fragments.retain(|fragment| {
+            let duplicate = preferred.fragments.iter().any(|other| {
+                fragment.node_key == other.node_key
+                    && fragment.field == other.field
+                    && fragment.role == other.role
+                    && fragment.frame == other.frame
+                    && fragment.trust == other.trust
+                    && fragment.content.borrow() == other.content.borrow()
+            });
+            if duplicate {
+                self.stats.items -= 1;
+                self.stats.public_items -= 1;
+                self.stats.content_bytes -= fragment.content.borrow().retained_bytes();
+            }
+            !duplicate
+        });
+    }
+}
+
 /// Bounded safe evidence from acknowledged observations. Crossing documents
 /// requires an explicit committed navigation receipt; retained references
 /// remain historical and can only contribute to terminal extraction.
 ///
 /// Holds at most eight captures and STANDARD's 128 fragments / 32 KiB content.
-/// New captures displace oldest captures when necessary; omissions remain
-/// explicit. Empty reads never displace useful evidence. This object has no
+/// Under pressure, large captures yield to focused reads; age breaks ties.
+/// Omissions remain explicit. Empty reads never displace useful evidence. This object has no
 /// browser operation, codec, persistence, or provider-disclosure authority.
 #[derive(Default)]
 pub struct SemanticRetainedReadEvidence {
@@ -183,7 +211,7 @@ impl SemanticRetainedReadEvidence {
             return Ok(());
         }
         let mut frames: Vec<Arc<SemanticFrameJoin>> = Vec::new();
-        let capture = Capture {
+        let mut capture = Capture {
             acknowledgement: acknowledgement.clone(),
             captured_at: read.captured_at(),
             fragments: read
@@ -200,6 +228,7 @@ impl SemanticRetainedReadEvidence {
                         }
                     };
                     Fragment {
+                        node_key: source.node_key,
                         field: fragment.field(),
                         role: fragment.role(),
                         content: Content::copy(fragment.content()),
@@ -214,26 +243,58 @@ impl SemanticRetainedReadEvidence {
             omissions: read.omissions(),
             stats: read.stats(),
         };
-        while self.captures.len() >= MAX_CAPTURES
-            || self.retained_items() + capture.stats.items
-                > SemanticReadBudget::STANDARD.max_items()
-            || self.retained_bytes() + capture.stats.content_bytes
-                > SemanticReadBudget::STANDARD.max_bytes()
-        {
-            if self.retained_bytes() + capture.stats.content_bytes
-                > SemanticReadBudget::STANDARD.max_bytes()
-            {
-                self.dropped_omissions |= SemanticReadOmission::ByteLimit.bit();
+        for prior in &mut self.captures {
+            // Keep duplicates in the capture least likely to be evicted; newest wins ties.
+            if prior.cost_bucket() < capture.cost_bucket() {
+                capture.remove_duplicates(prior);
+            } else {
+                prior.remove_duplicates(&capture);
             }
-            let removed = self.captures.remove(0);
+        }
+        self.captures.retain(|prior| {
+            if prior.fragments.is_empty() {
+                merge_omitted_stats(&mut self.dropped_stats, prior.stats);
+                self.dropped_omissions |= prior.omissions.bits();
+                false
+            } else {
+                true
+            }
+        });
+        if capture.fragments.is_empty() {
+            merge_omitted_stats(&mut self.dropped_stats, capture.stats);
+            self.dropped_omissions |= capture.omissions.bits();
+        } else {
+            self.captures.push(capture);
+        }
+        while self.captures.len() > MAX_CAPTURES
+            || self.retained_items() > SemanticReadBudget::STANDARD.max_items()
+            || self.retained_bytes() > SemanticReadBudget::STANDARD.max_bytes()
+        {
+            let byte_pressure = self.retained_bytes() > SemanticReadBudget::STANDARD.max_bytes();
+            let item_pressure = self.retained_items() > SemanticReadBudget::STANDARD.max_items();
+            let index = if byte_pressure || item_pressure {
+                self.captures
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|(index, capture)| {
+                        (capture.cost_bucket(), std::cmp::Reverse(*index))
+                    })
+                    .map(|(index, _)| index)
+                    .expect("nonempty over-budget captures")
+            } else {
+                0
+            };
+            let removed = self.captures.remove(index);
             merge_omitted_stats(&mut self.dropped_stats, removed.stats);
             self.dropped_stats.omitted_items = self
                 .dropped_stats
                 .omitted_items
                 .saturating_add(removed.stats.items);
             self.dropped_omissions |= SemanticReadOmission::ItemLimit.bit();
+            if byte_pressure {
+                self.dropped_omissions |= SemanticReadOmission::ByteLimit.bit();
+            }
         }
-        self.captures.push(capture);
         Ok(())
     }
 
@@ -266,6 +327,40 @@ impl SemanticRetainedReadEvidence {
             if let Some(stats) = self.last_empty {
                 merge_omitted_stats(&mut current.stats, stats);
             }
+        }
+        // A broad current snapshot must not crowd every earlier detail out of
+        // terminal evidence. Reserve at most half for independently cited history.
+        let history = self
+            .captures
+            .iter()
+            .filter(|capture| !current.matches_acknowledgement(&capture.acknowledgement));
+        let (history_items, history_bytes) =
+            history.fold((0_u16, 0_u32), |(items, bytes), capture| {
+                (
+                    items + capture.stats.items,
+                    bytes + capture.stats.content_bytes,
+                )
+            });
+        let budget = SemanticReadBudget::STANDARD;
+        let item_limit = budget.max_items() - history_items.min(budget.max_items() / 2);
+        let byte_limit = budget.max_bytes() - history_bytes.min(budget.max_bytes() / 2);
+        while current.stats.items > item_limit || current.stats.content_bytes > byte_limit {
+            current
+                .omissions
+                .insert(if current.stats.items > item_limit {
+                    SemanticReadOmission::ItemLimit
+                } else {
+                    SemanticReadOmission::ByteLimit
+                });
+            let removed = current.fragments.pop().expect("nonempty over-budget read");
+            current.stats.items -= 1;
+            current.stats.content_bytes -= removed.content.retained_bytes();
+            match removed.provenance.sensitivity {
+                SemanticSensitivity::Public => current.stats.public_items -= 1,
+                SemanticSensitivity::Sensitive => current.stats.sensitive_items -= 1,
+                SemanticSensitivity::Secret => return Err(SemanticReadError::AuthorityMismatch),
+            }
+            current.stats.omitted_items = current.stats.omitted_items.saturating_add(1);
         }
         for capture in self.captures.iter().rev() {
             if current.matches_acknowledgement(&capture.acknowledgement) {
@@ -301,6 +396,7 @@ impl SemanticRetainedReadEvidence {
                     role: source.role,
                     content,
                     provenance: SemanticReadProvenance {
+                        node_key: source.node_key,
                         observation: capture.acknowledgement.observation(),
                         observation_generation: capture.acknowledgement.generation(),
                         captured_at: capture.captured_at,

@@ -3558,7 +3558,7 @@ mod tests {
                 .unwrap();
             let result: serde_json::Value =
                 serde_json::from_str(transcript.latest().tool_result()).unwrap();
-            assert_eq!(result["code"], "invalid_snapshot_scope");
+            assert_eq!(result["code"], "repeated_snapshot_scope");
             assert_eq!(result["executed"], false);
             assert_eq!(result["observation_unchanged"], true);
         }
@@ -4265,6 +4265,57 @@ mod tests {
         }
         let next = observation(context(), 10, 10, 10, "body");
         assert!(AgentInspectionProgress::record(history, &previous, &next).is_err());
+    }
+
+    #[test]
+    fn exhausted_inspection_budget_refuses_before_capture_and_keeps_current_evidence() {
+        let mut previous = observation(context(), 1, 1, 1, "body");
+        let mut history = None;
+        for index in 0..super::observation_checkpoint::MAX_AGENT_INSPECTION_CAPTURES {
+            let generation = index as u64 + 2;
+            let current = observation(context(), generation, generation, generation, "body");
+            history = Some(AgentInspectionProgress::record(history, &previous, &current).unwrap());
+            previous = current;
+        }
+        let history = history.unwrap();
+        let text = history.encode(&previous).unwrap();
+        assert!(text.contains("\"remaining_inspections\":0"));
+        let transcript = AgentProviderTranscript::try_initial_with_checkpoints(
+            Arc::from("inspect within budget"),
+            "current observation".into(),
+            None,
+            Some(super::super::request::AgentProviderInspectionContext {
+                text,
+                progress: history,
+            }),
+        )
+        .unwrap();
+        let config = config(AgentProviderKind::OpenAiResponses)
+            .restrict_to_navigation_and_extraction()
+            .with_baseline_read()
+            .with_progressive_observation();
+        let acknowledgement = SemanticObservationAcknowledgement::from_fingerprint(
+            SemanticObservationFingerprint::from_observation(&previous),
+        );
+        let turn = snapshot_scope_continuation_with_transcript(
+            AgentProviderKind::OpenAiResponses,
+            acknowledgement,
+            config.clone(),
+            json!({"kind":"initial"}),
+            transcript,
+        );
+        let AgentProviderObservationResolution::Refused(refusal) =
+            turn.resolve_observation(&previous, &config).unwrap()
+        else {
+            panic!("exhausted capture dispatched")
+        };
+        let (_, bound) = refusal
+            .bind(&previous, &config, "current observation".into())
+            .unwrap();
+        let result: serde_json::Value = serde_json::from_str(bound.latest().tool_result()).unwrap();
+        assert_eq!(result["code"], "inspection_budget_exhausted");
+        assert_eq!(result["executed"], false);
+        assert_eq!(result["observation_unchanged"], true);
     }
 
     #[test]
@@ -5202,6 +5253,8 @@ mod tests {
             assert!(wire.get("previous_response_id").is_none());
             let serialized = serde_json::to_string(&wire).expect("request JSON text");
             assert!(serialized.contains("private extraction evidence"));
+            assert!(!serialized.contains("private initial observation"));
+            assert!(!serialized.contains("extract_private_1"));
             assert!(serialized.contains("ZEXTRACT1"));
             assert!(serialized.contains(r#"S name=\"title\""#));
             let debug = format!("{draft:?}");
@@ -5229,9 +5282,12 @@ mod tests {
                         wire["text"]["format"]["schema"]["additionalProperties"],
                         false
                     );
-                    assert_eq!(wire["input"][2]["type"], "function_call");
-                    assert_eq!(wire["input"][2]["name"], "extract");
-                    assert_eq!(wire["input"][3]["type"], "function_call_output");
+                    assert_eq!(wire["input"].as_array().unwrap().len(), 2);
+                    assert_eq!(wire["input"][1]["role"], "user");
+                    assert!(wire["input"][1]["content"][0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("ZEXTRACT1"));
                 }
                 AgentProviderKind::AnthropicMessages => {
                     assert_eq!(wire["stream"], true);
@@ -5244,9 +5300,12 @@ mod tests {
                         wire["output_config"]["format"]["schema"]["additionalProperties"],
                         false
                     );
-                    assert_eq!(wire["messages"][1]["content"][0]["type"], "tool_use");
-                    assert_eq!(wire["messages"][1]["content"][0]["name"], "extract");
-                    assert_eq!(wire["messages"][2]["content"][0]["type"], "tool_result");
+                    assert_eq!(wire["messages"].as_array().unwrap().len(), 1);
+                    assert_eq!(wire["messages"][0]["content"].as_array().unwrap().len(), 2);
+                    assert!(wire["messages"][0]["content"][1]["text"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("ZEXTRACT1"));
                 }
             }
         }
