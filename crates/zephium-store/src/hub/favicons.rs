@@ -52,6 +52,12 @@ impl Hub {
                  ON CONFLICT(origin) DO UPDATE SET content_type = ?2, icon = ?3, fetched_at = ?4",
             )?
             .execute(params![origin, content_type, bytes, now])?;
+            // Rows from before the fixed-raster format can never be read back
+            // and would otherwise hold retention slots forever.
+            tx.execute(
+                "DELETE FROM favicons WHERE length(icon) <> ?1",
+                [RGBA32_BYTES as i64],
+            )?;
             tx.execute(
                 "DELETE FROM favicons WHERE origin IN (
                      SELECT origin FROM favicons
@@ -101,6 +107,24 @@ impl Hub {
         let bytes = bytes?;
         validated_rgba32(&bytes)?;
         Some((Some(RGBA32_MIME.to_owned()), bytes))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn favicon_rows(&mut self, profile: ProfileId) -> i64 {
+        self.profile_conn(profile)
+            .and_then(|conn| conn.query_row("SELECT count(*) FROM favicons", [], |r| r.get(0)))
+            .unwrap_or(-1)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_malformed_favicon(&mut self, profile: ProfileId, origin: &str, len: usize) {
+        let _ = self.profile_conn(profile).map(|conn| {
+            conn.execute(
+                "INSERT INTO favicons(origin, content_type, icon, fetched_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![origin, RGBA32_MIME, vec![7u8; len], now_secs()],
+            )
+        });
     }
 
     pub(crate) fn favicon_raster_with_age(

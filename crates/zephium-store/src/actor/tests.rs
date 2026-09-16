@@ -8841,3 +8841,25 @@ fn a_scoped_history_page_reaches_back_only_as_far_as_its_range() {
         1
     );
 }
+
+#[test]
+fn saving_an_icon_clears_rows_that_can_never_be_read_back() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    hub.save_favicon(profile, "https://keep.example", None, &rgba());
+    // A row from before the fixed-raster format: readable queries reject it,
+    // so it is invisible but still occupies a retention slot.
+    hub.seed_malformed_favicon(profile, "https://legacy.example", 5430);
+    assert_eq!(hub.favicon_rows(profile), 2);
+
+    hub.save_favicon(profile, "https://later.example", None, &rgba());
+
+    assert_eq!(hub.favicon_rows(profile), 2, "the unreadable row is gone");
+    assert!(hub
+        .favicon_raster_with_age(profile, "https://keep.example")
+        .is_some());
+    assert!(hub
+        .favicon_raster_with_age(profile, "https://legacy.example")
+        .is_none());
+}
