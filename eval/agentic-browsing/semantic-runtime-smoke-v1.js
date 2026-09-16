@@ -148,6 +148,25 @@ class Element extends Node {
     this._shadow = null;
     this.rect = { x: 10, y: 10, width: 160, height: 32 };
   }
+  get clientWidth() { return this._clientWidth || this.rect.width; }
+  get clientHeight() { return this._clientHeight || this.rect.height; }
+  get scrollWidth() { return this._scrollWidth || this.clientWidth; }
+  get scrollHeight() { return this._scrollHeight || this.clientHeight; }
+  get scrollLeft() { return this._scrollLeft || 0; }
+  get scrollTop() { return this._scrollTop || 0; }
+  scrollBy({left, top}) {
+    if (this._deferredScroll) {
+      this._deferredScroll = false;
+      setImmediate(() => {
+        this._scrollLeft = Math.max(0, Math.min(this.scrollWidth - this.clientWidth, this.scrollLeft + left));
+        this._scrollTop = Math.max(0, Math.min(this.scrollHeight - this.clientHeight, this.scrollTop + top));
+      });
+      return;
+    }
+    this._scrollLeft = Math.max(0, Math.min(this.scrollWidth - this.clientWidth, this.scrollLeft + left));
+    this._scrollTop = Math.max(0, Math.min(this.scrollHeight - this.clientHeight, this.scrollTop + top));
+  }
+  scrollIntoView() { if (this._reveal) this._reveal(); }
   get tagName() {
     // Web IDL getters reject non-implementing receivers. In particular a
     // retained Document ancestor is a Node, never an Element.
@@ -186,6 +205,20 @@ class Element extends Node {
 class ShadowRoot extends Node {
   constructor() { super(11); this._active = null; }
   get activeElement() { return this._active; }
+}
+
+class HTMLDetailsElement extends Element {
+  constructor(attributes = {}) { super("details", attributes); }
+  get open() {
+    if (!(this instanceof HTMLDetailsElement)) throw new TypeError("Details receiver");
+    return this.hasAttribute("open");
+  }
+}
+
+class HTMLButtonElement extends Element {
+  constructor(attributes = {}) { super("button", attributes); }
+  get type() { if (!(this instanceof HTMLButtonElement)) throw new TypeError("Button receiver"); return this.attributes.type || "submit"; }
+  get form() { if (!(this instanceof HTMLButtonElement)) throw new TypeError("Button receiver"); return this._form || null; }
 }
 
 class HTMLInputElement extends Element {
@@ -269,6 +302,7 @@ class Document extends Node {
     this._hit = null;
   }
   get documentElement() { return this._root; }
+  get scrollingElement() { return this._root; }
   get activeElement() { return this._active; }
   get readyState() { return this._ready; }
   getElementById(id) {
@@ -331,6 +365,8 @@ Object.assign(globalThis, {
   HTMLElement: Element,
   ShadowRoot,
   HTMLInputElement,
+  HTMLButtonElement,
+  HTMLDetailsElement,
   HTMLAnchorElement,
   HTMLImageElement,
   HTMLTextAreaElement,
@@ -342,10 +378,12 @@ Object.assign(globalThis, {
   Selection,
   MutationObserver,
   CustomEvent,
+  requestAnimationFrame(callback) { return globalThis.__holdScrollFrames ? 999999 : setImmediate(callback); },
+  cancelAnimationFrame(handle) { clearImmediate(handle); },
   innerWidth: 1280,
   innerHeight: 720,
   getComputedStyle() {
-    return { display: "block", visibility: "visible", contentVisibility: "visible" };
+    return { display: "block", visibility: "visible", contentVisibility: "visible", overflowX: "auto", overflowY: "auto" };
   }
 });
 Object.defineProperty(globalThis, "crypto", {
@@ -927,7 +965,7 @@ async function finishCommandSmoke() {
   }
   if(control){assert(JSON.parse(result).b==='fixed_semantic_recipe'&&target._value==='replacement','control setter changed');}
   else if(diagnostic)assert(result===diagnostic,'exact preflight reason '+result);
-  else if(preflight)assert(['E2:credential_boundary','E2:target_changed','E2:unsupported_interaction','E1:invalid_request'].includes(result),'preflight refusal '+result);
+  else if(preflight)assert(['E2:credential_boundary','E2:target_changed','E2:target_descriptor_changed','E2:target_descriptor_incomplete','E2:target_name_changed','E2:target_state_changed','E2:target_operations_changed','E2:target_geometry_changed','E2:unsupported_interaction','E1:invalid_request'].includes(result),'preflight refusal '+result);
   else if(preparationOnly && commandCase==='prepare-normal')assert(result==='E2:applied_unverified_preparation_only','negative control terminal '+result);
   else if(['normal','retarget','reentrant','nested-ancestors','inherited-ancestors','sibling-tag-div','prepare-normal'].includes(commandCase))assert(result==='E2:applied_unverified_logical_editor','fresh logical proof '+result);
   else if(preparationRefusal||['focus-repurpose','ancestor-focus-change'].includes(commandCase))assert(result==='E2:applied_unverified_beforeinput_revalidation','focus mutation escaped revalidation '+result);
@@ -965,7 +1003,7 @@ async function finishCommandSmoke() {
     if(next){document._hit=leaf._parent?leaf:root.childNodes.item(0);request.i=request.g=251;request.a=251;request.t=next.k;request.f.s=next.s||0;request.f.vt=next.v?.value||'';
       const retry=await runtime.invoke(JSON.stringify(request));
       const newlyIneligible=['post-root-writability','post-target-structure'].includes(commandCase);
-      if(preparationRefusal)assert(['E2:applied_unverified','E2:unsupported_interaction','E2:credential_boundary','E2:target_changed','E2:target_occluded'].includes(retry),'prepared retry admitted '+retry);
+      if(preparationRefusal)assert(['E2:applied_unverified','E2:unsupported_interaction','E2:credential_boundary','E2:target_changed','E2:target_descriptor_changed','E2:target_descriptor_incomplete','E2:target_name_changed','E2:target_state_changed','E2:target_operations_changed','E2:target_geometry_changed','E2:target_occluded'].includes(retry),'prepared retry admitted '+retry);
       else assert(retry===(newlyIneligible?'E2:unsupported_interaction':'E2:applied_unverified'),'command opportunity regranted '+retry);}
     assert((document._commands||0)===(focusRefusal?0:1),'retry entered command');
   }
@@ -1031,7 +1069,7 @@ async function finish() {
 
   button.attributes["aria-label"] = "Delete";
   assert(
-    runtime.invoke(actionRequest(3)) === "E2:target_changed",
+    runtime.invoke(actionRequest(3)) === "E2:target_name_changed",
     "same-node semantic repurposing was accepted"
   );
   button.attributes["aria-label"] = "Save";
@@ -1045,7 +1083,7 @@ async function finish() {
 
   button.rect = { x: 240, y: 10, width: 160, height: 32 };
   assert(
-    runtime.invoke(actionRequest(5)) === "E2:target_changed",
+    runtime.invoke(actionRequest(5)) === "E2:target_geometry_changed",
     "incompatible target geometry was accepted"
   );
   button.rect = { x: 10, y: 10, width: 160, height: 32 };
@@ -1053,14 +1091,14 @@ async function finish() {
   const escapedDescriptor = JSON.parse(actionRequest(6));
   escapedDescriptor.f = { ...saveDescriptor, n: 'Save"\\\u2028Ω' };
   assert(
-    runtime.invoke(JSON.stringify(escapedDescriptor)) === "E2:target_changed",
+    runtime.invoke(JSON.stringify(escapedDescriptor)) === "E2:target_name_changed",
     "escaped private descriptor bypassed exact comparison"
   );
   const savedButtonChildren = button._children;
   button._children = new NodeList();
   for (let index = 0; index < 2050; index += 1) button.append(new Element("span"));
   assert(
-    runtime.invoke(actionRequest(7)) === "E2:target_changed",
+    runtime.invoke(actionRequest(7)) === "E2:target_descriptor_incomplete",
     "oversized action target subtree escaped descriptor budget"
   );
   button._children = savedButtonChildren;
@@ -1247,7 +1285,7 @@ async function finish() {
 
   textInput._value = "descriptor drift";
   assert(
-    runtime.invoke(fillRequest(textNode, "drift refusal", 14)) === "E2:target_changed",
+    runtime.invoke(fillRequest(textNode, "drift refusal", 14)) === "E2:target_descriptor_changed",
     "pre-fill value drift escaped exact descriptor revalidation"
   );
   textInput._value = "fixture text";
@@ -1543,6 +1581,28 @@ async function finish() {
   const largeProseSnapshot = JSON.parse(invoke(109, 109, { k: "initial" }));
   assert(largeProseSnapshot.c === "field_limit" && largeProseSnapshot.n.some((node) => node.r === "paragraph" && Buffer.byteLength(node.t) <= 4096), "inline copies escaped the original per-prose-field ceiling");
 
+  const plainSpecs = new Element("main");
+  plainSpecs.append(new Element("div")).append(new CharacterData("3,456 pieces"));
+  plainSpecs.append(new Element("span")).append(new CharacterData("$129.99"));
+  const plainHeading = plainSpecs.append(new Element("h2"));
+  plainHeading.append(new Element("span")).append(new CharacterData("Dimensions"));
+  const plainParagraph = plainSpecs.append(new Element("p"));
+  plainParagraph.append(new Element("span")).append(new CharacterData("42 cm wide"));
+  plainSpecs.append(new Element("div", { hidden: "" })).append(new CharacterData("hidden-plain-spec"));
+  plainSpecs.append(new Element("div")).append(new CharacterData("sk-plain-secret-fixture-value"));
+  document._root = plainSpecs;
+  plainSpecs._parent = document;
+  setOwner(plainSpecs, document);
+  const plainWire = invoke(401, 401, { k: "initial" });
+  const plainSnapshot = JSON.parse(plainWire);
+  assert(plainSnapshot.n.some(node => node.t === "3,456 pieces") && plainSnapshot.n.some(node => node.t === "$129.99"), "generic standalone specifications or price omitted");
+  assert(plainSnapshot.n.some(node => node.r === "heading" && node.n === "Dimensions"), "generic inline text replaced heading name");
+  assert(plainSnapshot.n.filter(node => node.t === "42 cm wide").length === 1, "generic inline text duplicated paragraph");
+  assert(!plainWire.includes("hidden-plain-spec") && !plainWire.includes("sk-plain-secret-fixture-value"), "generic text escaped privacy filtering");
+  const plainDocument = plainSnapshot.n.find(node => node.r === "landmark");
+  const searchedPlain = JSON.parse(invoke(402, 402, { k: "text_search", a: plainDocument.k, q: "pieces $129.99" }));
+  assert(searchedPlain.n.some(node => node.t === "3,456 pieces") && searchedPlain.n.some(node => node.t === "$129.99"), "generic prices/specifications lost independent search sources");
+
   // Generic below-viewport evidence: TOC links are not section bodies. The
   // initial inventory may expose actual rendered headings at spare capacity;
   // exact surrounding-text capture reaches their following sibling prose.
@@ -1582,6 +1642,18 @@ async function finish() {
   assert(crowded.n.length <= 8 && crowded.c === "node_limit", "structural inventory escaped its bound or hid omission");
   const tight = JSON.parse(invoke(114, 114, { k: "initial" }, { t: 64 }));
   assert(tight.n.some((node) => node.n === "Visible final action"), "offscreen headings spent visible content's text budget");
+  crowd._parent = document; crowd._scrollHeight = 12000;
+  const hiddenDetails = crowd.append(new HTMLDetailsElement());
+  const hiddenSummary = hiddenDetails.append(new Element("summary")); hiddenSummary.rect.y = 9000;
+  hiddenSummary.append(new CharacterData("Collapsed technical details"));
+  const prioritized = JSON.parse(invoke(115, 115, { k: "initial" }, { n: 8, t: 1024 }));
+  assert(prioritized.n.some(node => node.n === "Collapsed technical details" && node.o === 16),
+    "earlier headings hid the actionable disclosure in the bounded inventory");
+  assert(prioritized.n.some(node => node.n === "Visible final action"), "deferred disclosure displaced viewport controls");
+  crowd._scrollHeight = crowd._clientHeight;
+  const unscrollable = JSON.parse(invoke(116, 116, { k: "initial" }, { n: 8, t: 1024 }));
+  const unavailable = unscrollable.n.find(node => node.n === "Collapsed technical details");
+  assert(unavailable && !unavailable.o, "offscreen disclosure advertised an action without a scrollable ancestor");
   const inventoryExtraBytes = Buffer.byteLength(inventoryWire) - Buffer.byteLength(JSON.stringify({ ...inventory, n: inventory.n.filter((node) => node !== sectionRef) }));
 
   // A broad parent region with a long earlier nested navigation must expose
@@ -1700,7 +1772,7 @@ async function finish() {
   clippedAction.i = 132; clippedAction.g = 132; clippedAction.t = clippedButton.k;
   clippedAction.f.n = clippedButton.n;
   const clippedActionResult = runtime.invoke(JSON.stringify(clippedAction));
-  assert(clippedActionResult === "E2:target_changed" && !oversizedButton._fixedClickCount,
+  assert(clippedActionResult === "E2:target_descriptor_incomplete" && !oversizedButton._fixedClickCount,
     `a field-clipped descriptor became actionable during live revalidation: ${clippedActionResult}`);
   const unicodePage = new Element("main");
   unicodePage.append(new Element("p")).append(new CharacterData("Earlier words then nearest"));
@@ -2040,7 +2112,7 @@ async function finish() {
       const result = runtime.invoke(JSON.stringify(request));
       if (change === "none") assert(JSON.parse(result).b === "fixed_semantic_recipe" && leaf.textContent === "replacement", `nested leaf fill failed: ${result}`);
       else {
-        const allowed = phase === "before-dispatch" ? ["E2:target_changed", "E2:unsupported_interaction"] :
+        const allowed = phase === "before-dispatch" ? ["E2:target_changed", "E2:target_descriptor_changed", "E2:target_descriptor_incomplete", "E2:target_name_changed", "E2:target_state_changed", "E2:target_operations_changed", "E2:unsupported_interaction"] :
           phase === "beforeinput" ? ["E2:applied_unverified_beforeinput_revalidation"] : ["E2:applied_unverified_postcondition"];
         assert(allowed.includes(result), `nested ${phase}/${change}: ${result}`);
         if (phase !== "input") assert(leaf.textContent === "original", "rejected nested fill mutated value");
@@ -2052,7 +2124,7 @@ async function finish() {
   // A page-dialog proof is independent of projection scope and opener state.
   // An ordinary click never pays the extra scan or publishes private evidence.
   const dialogModes = ["appears", "already-visible", "focus-only", "unrelated", "overflow", "stale-capture",
-    "deep-appears", "deep-already-visible", "deep-noop", "shadow-appears", "after-overflow", "deep-overflow"];
+    "deep-appears", "deep-already-visible", "deep-noop", "shadow-appears", "after-overflow", "deep-overflow", "delayed-close", "delayed-appears"];
   for (const [modeIndex, mode] of dialogModes.entries()) {
     const root = new Element("main");
     const opener = root.append(new Element("button", {"aria-label": "Open panel"}));
@@ -2066,7 +2138,7 @@ async function finish() {
       }
     }
     container.append(dialog);
-    const alreadyVisible = mode === "already-visible" || mode === "deep-already-visible";
+    const alreadyVisible = mode === "already-visible" || mode === "deep-already-visible" || mode === "delayed-close";
     dialog.rect = alreadyVisible ? {x: 10,y: 10,width: 160,height: 32} : {x: 0,y: 0,width: 0,height: 0};
     document._root = root; setOwner(root, document); document._hit = opener; document._active = null;
     // Multi-point fixture hit testing models the independent dialog sample.
@@ -2081,9 +2153,13 @@ async function finish() {
       f: {r:7,o:9,q:1,s:0,n:"Open panel",vk:0,vt:null,vo:0,vb:false}});
     opener._onClick = () => {
       document._active = opener;
-      if (mode.endsWith("appears") || alreadyVisible || mode === "stale-capture" || mode === "after-overflow") {
+      if ((mode.endsWith("appears") && mode !== "delayed-appears") || alreadyVisible || mode === "stale-capture" || mode === "after-overflow") {
         dialog.rect = {x:10,y:10,width:160,height:32}; document._hit = dialog;
       }
+      if (mode === "delayed-close" || mode === "delayed-appears") setTimeout(() => {
+        dialog.rect = mode === "delayed-close" ? {x:0,y:0,width:0,height:0} : {x:10,y:10,width:160,height:32};
+        document._hit = mode === "delayed-close" ? opener : dialog;
+      }, 60);
       if (mode === "after-overflow") for (let n = 0; n < 16400; n++) root.append(new Element("span"));
       if (mode === "unrelated") root.append(new Element("p")).append(new CharacterData("updated"));
     };
@@ -2092,7 +2168,7 @@ async function finish() {
       let tail = root;
       for (let n = 0; n < 16400; n++) tail = tail.append(new Element("span"));
     }
-    const result = runtime.invoke(JSON.stringify(click));
+    const result = await runtime.invoke(JSON.stringify(click));
     if (mode === "overflow" || mode === "deep-overflow") {
       assert(result === "E2:page_dialog_sample_limit" && !opener._fixedClickCount, "incomplete dialog baseline dispatched click");
       continue;
@@ -2104,6 +2180,7 @@ async function finish() {
     if (mode === "stale-capture" || mode === "after-overflow") assert(!after.u, "dialog proof survived skipped or incomplete capture");
     else {
       assert(after.u && after.u.a === generation && after.u.i === generation && after.u.g === generation, "dialog proof correlation lost");
+      if (mode === "delayed-close") assert(after.u.before.length === 1 && after.u.after.length === 0, "dialog was sampled before its delayed closure");
       const appeared = after.u.after.some(key => !after.u.before.includes(key));
       assert(appeared === mode.endsWith("appears"), `false dialog appearance: ${mode}`);
       assert(!JSON.parse(invoke(next+1,next+1,{k:"initial"})).u, "dialog witness replayed");
@@ -2160,6 +2237,78 @@ async function finish() {
     }
   }
 
+  for (const mode of ["document", "nested", "deferred", "frame-timeout", "edge", "stale-capture", "replaced-root"]) {
+    const root = new Element("main");
+    const scroller = mode === "nested" ? root.append(new Element("section", {role:"group"})) : root;
+    scroller._clientHeight = 100; scroller._scrollHeight = 800;
+    document._root = root; setOwner(root, document); document._active = null;
+    if (mode === "edge") scroller._scrollTop = 700;
+    if (mode === "deferred") scroller._deferredScroll = true;
+    globalThis.__holdScrollFrames = mode === "frame-timeout";
+    const before = JSON.parse(invoke(1000,1000,{k:"initial"}));
+    const target = before.n.find(n => mode === "nested" ? n.r === "group" && (n.o & 16) : n.r === "document");
+    assert(target?.o & 16, "scrollable target not advertised");
+    const request = JSON.parse(actionRequest(1000));
+    Object.assign(request, {i:1000,g:1000,t:target.k,r:target.r,k:"scroll",sc:["down","page"],
+      e: mode === "nested" ? {x:10,y:10,w:160,h:32} : {x:0,y:0,w:1280,h:720},
+      f:{r:mode === "nested" ? 1 : 2,o:16,q:1,s:0,n:null,vk:0,vt:null,vo:0,vb:false}});
+    const saved = Element.prototype.scrollBy;
+    Element.prototype.scrollBy = () => {throw Error("late page override");};
+    const pendingResult = runtime.invoke(JSON.stringify(request));
+    assert(pendingResult instanceof Promise, "scroll retired before rendering opportunity");
+    assert(runtime.invoke(JSON.stringify(request)) === "E1:busy", "pending scroll admitted another action");
+    const result = await pendingResult;
+    globalThis.__holdScrollFrames = false;
+    Element.prototype.scrollBy = saved;
+    assert(!result.startsWith("E2:"), `scroll ${mode} failed: ${result}`);
+    assert(!JSON.parse(result).j, "dispatch manufactured postcondition sample");
+    if (mode === "replaced-root") { document._root = new Element("main"); setOwner(document._root, document); }
+    const next = mode === "stale-capture" ? 1002 : 1001;
+    const after = JSON.parse(invoke(next,next,{k:"initial"}));
+    if (mode === "stale-capture" || mode === "replaced-root") assert(!after.j, "stale scroll proof admitted");
+    else {
+      assert(after.j?.t === target.k && after.j?.a === 1000, "scroll proof lost identity");
+      assert(after.j.after[1] - after.j.before[1] === (mode === "edge" ? 0 : 90), "scroll outcome sampled incorrectly");
+      assert(!JSON.parse(invoke(next+1,next+1,{k:"initial"})).j, "scroll proof replayed");
+    }
+  }
+
+  for (const mode of ["document", "nested", "blocked", "stationary", "reparented", "stale"]) {
+    const root=new Element("main"); root._clientHeight=720; root._scrollHeight=7000;
+    const container=["nested","reparented"].includes(mode) ? root.append(new Element("div",{role:"group"})) : root;
+    if(["nested","reparented"].includes(mode)) { container._clientHeight=200; container._scrollHeight=2000; }
+    const details=container.append(new HTMLDetailsElement());
+    const summary=details.append(new Element("summary")); summary.rect.y=5000;
+    const heading=summary.append(new Element("h2")); heading.rect.y=5000;
+    heading.append(new CharacterData("Reveal specifications"));
+    document._root=root; root._parent=document; setOwner(root,document); document._hit=summary; document._active=null;
+    summary._reveal=()=>{
+      if(mode!=="stationary") { container._scrollTop=500; summary.rect.y=100; heading.rect.y=100; }
+      if(mode==="blocked") document._hit=root;
+      if(mode==="reparented") root.append(details);
+    };
+    const before=JSON.parse(invoke(1010,1010,{k:"initial"}));
+    const target=before.n.find(n=>n.n==="Reveal specifications" && n.r==="button");
+    assert(target?.o === 16,"offscreen disclosure must offer reveal without premature activation");
+    const request=JSON.parse(actionRequest(1010));
+    Object.assign(request,{i:1010,g:1010,t:target.k,r:"button",k:"scroll",sc:["down","into_view"],
+      e:{x:10,y:5000,w:160,h:32},f:{a:6,r:7,o:16,q:1,s:0,n:target.n,vk:0,vt:null,vo:0,vb:false}});
+    const saved=Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView=()=>{throw Error("page override");};
+    const result=await runtime.invoke(JSON.stringify(request)); Element.prototype.scrollIntoView=saved;
+    assert(!result.startsWith("E"),`reveal refused: ${mode}: ${result}`);
+    assert(!details.open && !summary._fixedClickCount,"reveal activated the target");
+    const next=mode==="stale" ? 1012 : 1011;
+    const after=JSON.parse(invoke(next,next,{k:"initial"}));
+    if(mode==="stale" || mode==="reparented") assert(!after.j,"reveal witness crossed a capture gap or changed scroll ancestry");
+    else {
+      assert(after.j?.t===target.k,"reveal lost target identity");
+      assert(after.j.visible===!["blocked","stationary"].includes(mode),"reveal visibility was not independently sampled");
+      assert((after.j.before[1]!==after.j.after[1])===(mode!=="stationary"),"reveal movement was not independently sampled");
+      assert(!JSON.parse(invoke(next+1,next+1,{k:"initial"})).j,"reveal witness replayed");
+    }
+  }
+
   dormantNativeTransportPulls.shift()("K1");
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
@@ -2170,7 +2319,104 @@ async function finish() {
   assert(dormantNativeTransportPulls.length === 1, "reactivated transport lost dormant pull");
   dormantNativeTransportPulls.shift()("S1");
 
+  {
+    const root = new Element("main");
+    const gallery = root.append(new Element("ul", {"aria-label":"Gallery"}));
+    for(let n=0;n<160;n++) gallery.append(new Element("li")).append(new Element("button",{"aria-label":`Image ${n}`}));
+    root.append(new Element("p")).append(new CharacterData("Product specifications after the gallery"));
+    document._root=root; root._parent=document; setOwner(root,document); document._active=null;
+    const initial=JSON.parse(invoke(930,930,{k:"initial"}));
+    const mainKey=initial.n.find(node=>node.r==="landmark").k;
+    const region=JSON.parse(invoke(931,931,{k:"region",a:mainKey}));
+    assert(region.n.length<8 && region.n.some(node=>node.t==="Product specifications after the gallery"),"gallery exhausted region before later product prose");
+    const galleryKey=region.n.find(node=>node.r==="list").k;
+    const expanded=JSON.parse(invoke(932,932,{k:"subtree",a:galleryKey}));
+    assert(expanded.c==="node_limit" && expanded.n.some(node=>node.n==="Image 0"),"folded gallery lost explicit expansion");
+  }
+
+  for (const modal of [true, false]) {
+    const root = new Element("main");
+    root.append(new Element("p")).append(new CharacterData("Background catalog"));
+    const dialog = root.append(new Element("div",{role:"dialog","aria-modal":String(modal)}));
+    const next = dialog.append(new HTMLButtonElement({"aria-label":"Continue"}));
+    document._root=root; root._parent=document; setOwner(root,document); document._active=next;
+    const observed=JSON.parse(invoke(940,940,{k:"initial"}));
+    assert(observed.n.some(node=>node.n==="Continue"),"focused dialog control missing");
+    assert(observed.n.some(node=>node.t==="Background catalog") === !modal,"modal projection did not exclude covered content");
+    if (modal) assert(observed.n[0].r==="dialog" && observed.c==="complete","modal context was not complete");
+  }
+
+  for (const mode of ["ordinary", "submit", "reset", "form", "navigation", "disclosure", "rebound"]) {
+    const root = new Element("main");
+    const nativeButton = root.append(new HTMLButtonElement({"aria-label":"Continue"}));
+    if (["submit", "reset", "form"].includes(mode)) nativeButton._form = new Element("form");
+    if (mode === "reset") nativeButton.attributes.type = "reset";
+    if (mode === "form") nativeButton.attributes.type = "button";
+    if (mode === "disclosure") nativeButton.attributes["aria-expanded"] = "false";
+    if (mode === "navigation") root.append(new HTMLAnchorElement({href:"https://example.test/"})).append(nativeButton);
+    document._root = root; root._parent = document; setOwner(root, document); document._hit = nativeButton; document._active = null;
+    const captured = JSON.parse(invoke(950,950,{k:"initial"}));
+    const target = captured.n.find(node => node.n === "Continue");
+    const expected = {ordinary:1,submit:2,reset:3,form:5,navigation:4,disclosure:6,rebound:1}[mode];
+    assert(target.ak === expected, `native activation boundary ${mode}: ${target.ak}`);
+    if (mode !== "ordinary" && mode !== "rebound") continue;
+    const click = JSON.parse(actionRequest(950));
+    Object.assign(click,{i:950,g:950,a:950,t:target.k,
+      f:{a:target.ak,r:7,o:9,q:1,s:0,n:"Continue",vk:0,vt:null,vo:0,vb:false}});
+    if (mode === "rebound") nativeButton._form = new Element("form");
+    const result = runtime.invoke(JSON.stringify(click));
+    if (mode === "rebound") assert(result === "E2:target_descriptor_changed" && !nativeButton._fixedClickCount, "changed form association dispatched click");
+    else assert(!result.startsWith("E") && nativeButton._fixedClickCount === 1, `ordinary native click failed: ${result}`);
+  }
+
+  {
+    const root = new Element("main");
+    root.append(new Element("figure", {"aria-label":"Pieces:3745"})).append(new Element("p")).append(new CharacterData("3745"));
+    document._root=root; root._parent=document; setOwner(root,document);
+    const result=JSON.parse(invoke(959,959,{k:"initial"}));
+    const figure=result.n.find(node=>node.r==="group" && node.n==="Pieces:3745");
+    assert(figure && result.n.some(node=>node.t==="3745" && node.p===result.n.indexOf(figure)),"named figure lost the context of its displayed metric");
+  }
+
+  for (const mode of ["closed", "open", "orphan", "second", "form", "link", "offscreen", "rebound"]) {
+    const root = new Element("main");
+    const parent = mode === "form" ? root.append(new Element("form")) :
+      mode === "link" ? root.append(new HTMLAnchorElement({href:"https://example.test/"})) : root;
+    const details = parent.append(new HTMLDetailsElement(mode === "open" ? {open:""} : {}));
+    details.append(new CharacterData(" "));
+    details.append(new Element("div"));
+    if (mode === "second") details.append(new Element("summary"));
+    const summary = (mode === "orphan" ? parent : details).append(new Element("summary"));
+    summary.append(new Element("div")).append(new Element("h2")).append(new CharacterData("Specifications"));
+    if (mode === "offscreen") {
+      summary.rect.y = 6000;
+      summary._children.values[0]._children.values[0].rect.y = 6000;
+    }
+    document._root=root; root._parent=document; setOwner(root,document); document._active=null; document._hit=summary;
+    const before=JSON.parse(invoke(960,960,{k:"initial"}));
+    const target=before.n.find(node=>node.r==="button" && node.n==="Specifications");
+    assert(target, `summary discovery missing: ${mode}`);
+    const expected = {orphan:1,second:1,form:5,link:4}[mode] || 6;
+    assert(target.ak===expected, `summary activation ${mode}: ${target.ak}`);
+    assert(Boolean(target.s & 4)===(mode==="open"), `summary native expanded state ${mode}`);
+    if (mode !== "closed" && mode !== "open" && mode !== "rebound") continue;
+    summary._onClick=()=>{ if(details.open) details.removeAttribute("open"); else details.setAttribute("open",""); };
+    const click=JSON.parse(actionRequest(960));
+    Object.assign(click,{i:960,g:960,a:960,t:target.k,
+      f:{a:6,r:7,o:9,q:1,s:target.s || 0,n:"Specifications",vk:0,vt:null,vo:0,vb:false}});
+    if(mode==="rebound") { details._children.values.unshift(new Element("summary")); details._children.values[0]._parent=details; }
+    const result=runtime.invoke(JSON.stringify(click));
+    if(mode==="rebound") {
+      assert(result==="E2:target_descriptor_changed" && !summary._fixedClickCount,"reordered summary dispatched native click");
+    } else {
+      assert(!result.startsWith("E") && summary._fixedClickCount===1,`summary click failed: ${result}`);
+      const after=JSON.parse(invoke(961,960,{k:"initial"})).n.find(node=>node.k===target.k);
+      assert(Boolean(after.s & 4)===(mode==="closed"),"fresh observation did not verify native expansion/collapse");
+    }
+  }
+
   process.stdout.write(`${JSON.stringify({
+    independent_scroll_samples: true,
     empty_contenteditable_roundtrip: true,
     independent_page_dialog_samples: true,
     nested_leaf_context_authority: true,
