@@ -491,7 +491,7 @@ impl WorkAgentArtifactRefusal {
             Self::Uncited => "cites no evidence keys",
             Self::UnknownEvidenceKey => "cites an evidence key that is not in the sources list",
             Self::UnlistedLink => "links to a URL that is not a listed source",
-            Self::Malformed => "has invalid content (check cell evidence indexes, subject indexes, and text limits)",
+            Self::Malformed => "has invalid content: measurement cells hold a plain number only (the criterion carries the unit), cell and finding evidence must cite listed source keys, subject indexes must exist, and text must fit its limits",
         }
     }
 }
@@ -528,6 +528,7 @@ impl WorkAgentTurnDisclosure {
             artifact.evidence.push(key);
             Ok((artifact.evidence.len() - 1) as u16)
         })?;
+        normalize_measurements(&mut artifact.data);
         artifact
             .data
             .validate(artifact.evidence.len())
@@ -564,6 +565,37 @@ impl WorkAgentTurnDisclosure {
             data: artifact.data,
             evidence,
         })
+    }
+}
+/// Models write measurements the way pages show them ("4,383 pieces"). A
+/// measurement criterion already carries the unit, so keep the number only.
+fn normalize_measurements(data: &mut WorkArtifactDataV1) {
+    let WorkArtifactDataV1::ComparisonMatrix {
+        criteria, cells, ..
+    } = data
+    else {
+        return;
+    };
+    for row in cells {
+        for (cell, criterion) in row.iter_mut().zip(criteria.iter()) {
+            let (WorkCellValue::Measurement { value }, WorkCriterionKind::Measurement { .. }) =
+                (&mut cell.value, &criterion.kind)
+            else {
+                continue;
+            };
+            if value.parse::<f64>().is_ok() {
+                continue;
+            }
+            let number: String = value
+                .trim()
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | ','))
+                .filter(|c| *c != ',')
+                .collect();
+            if !number.is_empty() && number.parse::<f64>().is_ok_and(f64::is_finite) {
+                *value = number;
+            }
+        }
     }
 }
 fn remap_citations(
