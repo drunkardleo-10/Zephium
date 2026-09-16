@@ -260,6 +260,8 @@ export function reconcileNodes(
         node.data.media?.asset.digest === item.media?.asset.digest &&
         node.data.image?.digest === item.image?.digest &&
         JSON.stringify(node.data.agent) === JSON.stringify(item.agent) &&
+        JSON.stringify(node.data.page) === JSON.stringify(item.page) &&
+        JSON.stringify(node.data.facts) === JSON.stringify(item.facts) &&
         JSON.stringify(node.data.responsibility) === JSON.stringify(item.responsibility);
       // Agents follow their work: a fresh computed position moves the node.
       const moved = item.agent ? positions[item.id] : undefined;
