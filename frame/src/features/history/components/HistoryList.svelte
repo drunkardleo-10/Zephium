@@ -5,7 +5,7 @@
   import { favicons } from "$domain/favicons";
   import * as m from "$shared/i18n/messages";
   import { hostOf, matchRange, timeLabel, toRows, visitedAt } from "../lib/history-model";
-  import { offsetsOf, windowFor, WINDOW_THRESHOLD } from "../lib/history-window";
+  import { createVirtualWindow } from "$shared/lib/virtual-window.svelte";
   import type { HistorySession } from "../lib/history-session.svelte";
 
   let {
@@ -21,28 +21,16 @@
   const heights = $derived(density === "page" ? { day: 44, visit: 46 } : { day: 32, visit: 34 });
 
   let scroller: HTMLElement | undefined = $state();
-  let scrollTop = $state(0);
-  let viewport = $state(0);
   let selected = $state<string | null>(null);
 
   let today = $state(new Date());
   let rows = $derived(
     toRows(session.visits, today, { today: m.history_today(), yesterday: m.history_yesterday() }),
   );
-  let windowed = $derived(rows.length > WINDOW_THRESHOLD);
-  let offsets = $derived(
-    windowed
-      ? offsetsOf(
-          rows.map((row) => row.kind),
-          heights,
-        )
-      : [],
-  );
-  let slice = $derived(
-    windowed
-      ? windowFor(offsets, scrollTop, viewport)
-      : { first: 0, last: rows.length, before: 0, after: 0 },
-  );
+  const virtual = createVirtualWindow({
+    heights: () => rows.map((row) => (row.kind === "day" ? heights.day : heights.visit)),
+  });
+  let slice = $derived(virtual.window);
   let visible = $derived(rows.slice(slice.first, slice.last));
 
   // A day boundary while the page is open must not leave "Today" on yesterday.
@@ -54,41 +42,50 @@
     return () => clearInterval(timer);
   });
 
-  function measure(element: HTMLElement) {
-    viewport = element.clientHeight;
-    const observer = new ResizeObserver(() => {
-      viewport = element.clientHeight;
-    });
-    observer.observe(element);
-    return { destroy: () => observer.disconnect() };
+  function onscroll(event: Event & { currentTarget: HTMLElement }) {
+    const { scrollTop, scrollHeight, clientHeight } = event.currentTarget;
+    if (scrollTop + clientHeight >= scrollHeight - clientHeight) void session.reload(true);
   }
 
-  function onscroll(event: Event & { currentTarget: HTMLElement }) {
-    scrollTop = event.currentTarget.scrollTop;
-    const { scrollHeight, clientHeight } = event.currentTarget;
-    if (scrollTop + clientHeight >= scrollHeight - clientHeight) void session.reload(true);
+  /** Rows a page key covers, from the viewport rather than a fixed guess. */
+  function pageStep() {
+    const viewport = scroller?.clientHeight ?? 0;
+    return Math.max(1, Math.floor(viewport / heights.visit) - 1);
+  }
+
+  function select(position: number) {
+    const visits = rows.filter((row) => row.kind === "visit");
+    if (!visits.length) return;
+    const next = Math.min(visits.length - 1, Math.max(0, position));
+    const target = visits[next];
+    if (!target) return;
+    selected = target.id;
+    // A jump lands outside the drawn window, where the row has no element for
+    // scrollIntoView to find. Carry the day heading with the row it opens, so
+    // a jumped-to visit is never stranded under a heading left off-screen.
+    const index = rows.indexOf(target);
+    virtual.scrollToIndex(rows[index - 1]?.kind === "day" ? index - 1 : index);
   }
 
   function move(offset: number) {
     const visits = rows.filter((row) => row.kind === "visit");
-    if (!visits.length) return;
     const at = visits.findIndex((row) => row.id === selected);
-    const next = Math.min(visits.length - 1, Math.max(0, at < 0 ? 0 : at + offset));
-    selected = visits[next]?.id ?? null;
-    scroller?.querySelector<HTMLElement>(`[data-row="${selected}"]`)?.scrollIntoView({
-      block: "nearest",
-    });
+    select(at < 0 ? 0 : at + offset);
   }
 
   function keydown(event: KeyboardEvent) {
-    if (event.key === "ArrowDown") {
+    const jumps: Record<string, () => void> = {
+      ArrowDown: () => move(1),
+      ArrowUp: () => move(-1),
+      PageDown: () => move(pageStep()),
+      PageUp: () => move(-pageStep()),
+      Home: () => select(0),
+      End: () => select(Number.MAX_SAFE_INTEGER),
+    };
+    const jump = jumps[event.key];
+    if (jump) {
       event.preventDefault();
-      move(1);
-      return;
-    }
-    if (event.key === "ArrowUp") {
-      event.preventDefault();
-      move(-1);
+      jump();
       return;
     }
     const row = rows.find((candidate) => candidate.id === selected);
@@ -105,9 +102,9 @@
 
 <div
   class="scroller"
-  data-density={density}
   bind:this={scroller}
-  use:measure
+  data-density={density}
+  use:virtual.attach
   {onscroll}
   onkeydown={keydown}
   role="listbox"
@@ -116,9 +113,13 @@
   tabindex="0"
 >
   <div class="spacer" style:block-size={`${slice.before}px`}></div>
-  {#each visible as row (row.id)}
+  {#each visible as row, offset (row.id)}
     {#if row.kind === "day"}
-      <h2 class="day" style:block-size={`${heights.day}px`}>
+      <h2
+        class="day"
+        style:block-size={`${heights.day}px`}
+        data-virtual-index={slice.first + offset}
+      >
         {row.label}<span class="count">{row.count}</span>
       </h2>
     {:else}
@@ -128,6 +129,7 @@
         class="visit"
         class:selected={selected === row.id}
         data-row={row.id}
+        data-virtual-index={slice.first + offset}
         id={row.id}
         style:block-size={`${heights.visit}px`}
         role="option"

@@ -228,6 +228,31 @@ test("a long list renders a window rather than every row", async () => {
   expect(rendered()).toBeLessThan(80);
 });
 
+test("the keyboard reaches rows the window has not drawn", async () => {
+  await page.viewport(1100, 720);
+  const many = Array.from({ length: 900 }, (_, index) => visit(`Page ${index}`, index * 900));
+  native.history.mockImplementation(async (_profile: string, call: HistoryCall) => {
+    if (call.kind !== "page") return { kind: "removed", count: 0 } satisfies HistoryResponse;
+    return { kind: "page", visits: many, next: null } satisfies HistoryResponse;
+  });
+  render(HistoryPage);
+  await expect.element(page.getByText("Page 0")).toBeVisible();
+
+  const scroller = document.querySelector<HTMLElement>("[role='listbox']")!;
+  scroller.focus();
+
+  // End lands on a row hundreds of screens away, which the window has not
+  // drawn and scrollIntoView therefore cannot find.
+  await userEvent.keyboard("{End}");
+
+  await vi.waitFor(() => expect(scroller.scrollTop).toBeGreaterThan(30_000));
+  await expect.element(page.getByText("Page 899")).toBeVisible();
+
+  await userEvent.keyboard("{Home}");
+  await vi.waitFor(() => expect(scroller.scrollTop).toBe(0));
+  await expect.element(page.getByText("Page 0")).toBeVisible();
+});
+
 test("renders in both themes", async () => {
   // The library fills the browser stage, which is far wider than the default
   // test viewport.

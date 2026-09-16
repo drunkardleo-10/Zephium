@@ -1,27 +1,29 @@
 import { describe, expect, it } from "vitest";
-import { offsetsOf, rowAt, totalHeight, windowFor } from "../lib/history-window";
+import { offsetsOf, rowAt, totalHeight, windowFor } from "../virtual-window.svelte";
 
 const HEIGHTS = { day: 40, visit: 30 };
 
-function kinds(pattern: ("day" | "visit")[], repeat: number): ("day" | "visit")[] {
-  return Array.from({ length: repeat }, () => pattern).flat();
+function heights(pattern: ("day" | "visit")[], repeat: number): number[] {
+  return Array.from({ length: repeat }, () => pattern)
+    .flat()
+    .map((kind) => HEIGHTS[kind]);
 }
 
 describe("windowing offsets", () => {
   it("opens each row where the previous one ends", () => {
-    const offsets = offsetsOf(["day", "visit", "visit", "day"], HEIGHTS);
+    const offsets = offsetsOf(heights(["day", "visit", "visit", "day"], 1));
     expect(offsets).toEqual([0, 40, 70, 100, 140]);
     expect(totalHeight(offsets)).toBe(140);
   });
 
   it("handles an empty list without inventing a row", () => {
-    const offsets = offsetsOf([], HEIGHTS);
+    const offsets = offsetsOf([]);
     expect(totalHeight(offsets)).toBe(0);
     expect(windowFor(offsets, 0, 500)).toEqual({ first: 0, last: 0, before: 0, after: 0 });
   });
 
   it("finds the row covering an offset, including its exact top edge", () => {
-    const offsets = offsetsOf(["day", "visit", "visit", "visit"], HEIGHTS);
+    const offsets = offsetsOf(heights(["day", "visit", "visit", "visit"], 1));
     expect(rowAt(offsets, 0)).toBe(0);
     expect(rowAt(offsets, 39)).toBe(0);
     expect(rowAt(offsets, 40)).toBe(1);
@@ -32,8 +34,8 @@ describe("windowing offsets", () => {
 });
 
 describe("the rendered window", () => {
-  const rows = kinds(["day", "visit", "visit", "visit", "visit"], 200);
-  const offsets = offsetsOf(rows, HEIGHTS);
+  const rows = heights(["day", "visit", "visit", "visit", "visit"], 200);
+  const offsets = offsetsOf(rows);
 
   it("covers the viewport and leaves the rest as spacer height", () => {
     const slice = windowFor(offsets, 5000, 600);
@@ -56,5 +58,12 @@ describe("the rendered window", () => {
     const end = windowFor(offsets, totalHeight(offsets), 600);
     expect(end.last).toBe(rows.length);
     expect(end.after).toBe(0);
+  });
+
+  it("draws beyond each edge so a fast scroll finds rows already there", () => {
+    const tight = windowFor(offsets, 5000, 600, 0);
+    const padded = windowFor(offsets, 5000, 600, 8);
+    expect(padded.first).toBeLessThan(tight.first);
+    expect(padded.last).toBeGreaterThan(tight.last);
   });
 });
