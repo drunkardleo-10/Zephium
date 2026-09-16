@@ -447,6 +447,10 @@ New(empty) -navigate-> Active <-> Inactive -idle-> Hibernated -> Closed(restorab
   tab restores by URL.
 - Inactive non-discarded tabs keep their webview hidden (media, sockets,
   scroll survive a switch).
+- Site icons cross as a reference (origin plus content revision), never as a
+  raster. Pixels travel on their own projection, sent once per privileged
+  surface and only for references that surface does not already hold. See
+  `docs/design/history.md`.
 
 ---
 
