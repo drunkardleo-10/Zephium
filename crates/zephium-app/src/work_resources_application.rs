@@ -187,6 +187,10 @@ pub(super) struct RetainedWork {
     native_shutdown: Option<RetainedNativeShutdown>,
 }
 impl RetainedWork {
+    /// The newest canvas frame of this resource's page, if the engine hosts one.
+    pub(super) fn latest_frame(&self) -> Option<Arc<zephium_agentic::WorkBrowserFrame>> {
+        self.owner.shared.port.latest_work_frame(&self.resource)
+    }
     /// Consumes the original owner, not a replacement port or a decoded row.
     /// Store and audit must be the same original adapter allocation. Construction
     /// and selected-profile admission still belong to the trusted application.

@@ -16,6 +16,7 @@ use zephium_ipc::work::WorkActivityV1;
 /// A browser read or discovery the loop admitted for one step. The host
 /// compiles it into an anonymous, read-only public browsing task.
 pub struct WorkAgentBrowseRequest {
+    pub id: WorkStepId,
     pub step: WorkStepKindV1,
     pub hops: u8,
     pub objective: String,
@@ -700,6 +701,7 @@ impl Driver {
             } else {
                 self.probe.record_activity(WorkActivityV1::Reading);
                 let request = WorkAgentBrowseRequest {
+                    id,
                     step: kind,
                     hops: self.grant.browse_hops,
                     objective: self.objective.clone(),

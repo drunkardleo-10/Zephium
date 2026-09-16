@@ -505,6 +505,25 @@ pub struct WorkSignalV1 {
     pub attempt: WorkAttemptId,
     pub activity: WorkActivityV1,
 }
+/// A page one browser step opened, with its newest bounded frame for the
+/// canvas. Frames are transient and person-facing only.
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(deny_unknown_fields)]
+pub struct WorkPageV1 {
+    pub execution: WorkExecutionId,
+    pub attempt: WorkAttemptId,
+    pub step: WorkStepId,
+    pub url: String,
+    pub live: bool,
+    pub frame: Option<WorkPageFrameV1>,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(deny_unknown_fields)]
+pub struct WorkPageFrameV1 {
+    pub generation: u32,
+    pub width: u32,
+    pub height: u32,
+}
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
 #[serde(deny_unknown_fields)]
 pub struct WorkActivityResponseV1 {
@@ -512,6 +531,8 @@ pub struct WorkActivityResponseV1 {
     pub profile: String,
     pub work: WorkId,
     pub signals: Vec<WorkSignalV1>,
+    #[serde(default)]
+    pub pages: Vec<WorkPageV1>,
     pub error: Option<WorkFailureV1>,
 }
 

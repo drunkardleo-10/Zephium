@@ -21,7 +21,7 @@ use zephium_app::{
     AgentWorkApplicationConfig, AgentWorkProfileBinding, CallbackHandle, RetainedWorkHandle,
     RetainedWorkPhase,
 };
-use zephium_core::work::{artifact::*, runtime::*, WorkError};
+use zephium_core::work::{artifact::*, runtime::*, WorkError, WorkStepId};
 
 /// Trusted host operands. Model output cannot select credentials, a profile,
 /// a controller implementation or provider configuration.
@@ -142,6 +142,7 @@ impl MacosWorkComposition {
                 attempt.specification().limits,
                 &outputs,
                 collection.as_ref(),
+                None,
                 diagnostics,
             )
             .await?;
@@ -229,6 +230,20 @@ impl MacosWorkComposition {
             WorkStepKindV1::Discover { .. } => Some("the web".to_owned()),
             _ => None,
         };
+        let page = (
+            request.id,
+            match &request.step {
+                WorkStepKindV1::Read { url, .. } => url.clone(),
+                WorkStepKindV1::Discover { query, .. } => WorkPublicDiscoveryScope {
+                    search_query: query.clone(),
+                    max_hops: 1,
+                }
+                .start_url()
+                .map(|url| url.to_string())
+                .unwrap_or_default(),
+                _ => String::new(),
+            },
+        );
         let invocation = compile_step(probe, request, settings, collection.as_ref())?;
         let mut run = self
             .run_retained(
@@ -239,6 +254,7 @@ impl MacosWorkComposition {
                 limits,
                 &outputs,
                 collection.as_ref(),
+                Some(page),
                 diagnostics,
             )
             .await?;
@@ -271,6 +287,7 @@ impl MacosWorkComposition {
         limits: WorkExecutionLimits,
         outputs: &[String],
         collection: Option<&WorkBrowseCollectionSchema>,
+        page: Option<(WorkStepId, String)>,
         diagnostics: Diagnostics,
     ) -> Result<BrowserRun, WorkError> {
         #[cfg(feature = "public-qualification")]
@@ -296,7 +313,22 @@ impl MacosWorkComposition {
         let mut next_cancel_check = Instant::now();
         let mut cleanup_deadline = attempt.deadline() + Duration::from_secs(30);
         let mut disposition = None;
+        let mut shown_frame = 0;
+        if let Some((step, url)) = &page {
+            attempt.record_page_frame(*step, url, None);
+        }
+        let _page_guard = page
+            .as_ref()
+            .map(|(step, _)| PageSettle(attempt.clone(), *step));
         loop {
+            if let Some((step, url)) = &page {
+                if let Some(frame) = guard.0.frame() {
+                    if frame.generation != shown_frame {
+                        shown_frame = frame.generation;
+                        attempt.record_page_frame(*step, url, Some(frame));
+                    }
+                }
+            }
             // This loop exists only while an admitted worker/resource is owned.
             // Draining also releases the controller's bounded event backpressure.
             while let Some(event) = guard.0.take_event() {
@@ -516,6 +548,14 @@ struct BrowserRun {
     artifacts: Vec<WorkArtifactDraft>,
     intervention: Option<WorkInterventionV1>,
 }
+/// Drops the page's live mark on every exit from the retained loop.
+struct PageSettle(WorkAttemptProbe, WorkStepId);
+impl Drop for PageSettle {
+    fn drop(&mut self) {
+        self.0.settle_page(self.1);
+    }
+}
+
 impl BrowserRun {
     fn closed(
         result: Result<(WorkAttemptStatus, Vec<WorkArtifactDraft>), WorkError>,

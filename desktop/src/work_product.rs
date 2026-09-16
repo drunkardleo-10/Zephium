@@ -11,6 +11,16 @@ pub(crate) struct WorkProductState {
     providers: std::sync::Arc<super::work_provider::WorkProviders>,
 }
 #[cfg(feature = "work-product")]
+impl WorkProductState {
+    pub(crate) fn page_frame(
+        &self,
+        attempt: zephium_core::work::WorkAttemptId,
+        step: zephium_core::work::WorkStepId,
+    ) -> Option<std::sync::Arc<Vec<u8>>> {
+        self.providers.activity.frame(attempt, step)
+    }
+}
+#[cfg(feature = "work-product")]
 pub(crate) fn install(
     app: &tauri::AppHandle,
     engine: std::sync::Arc<zephium_engine::WebviewEngine>,
@@ -98,11 +108,8 @@ pub(crate) async fn work_activity(
         };
         #[cfg(feature = "work-product")]
         {
-            Ok(app
-                .state::<WorkProductState>()
-                .providers
-                .activity
-                .read(&state))
+            let activity = &app.state::<WorkProductState>().providers.activity;
+            Ok((activity.read(&state), activity.read_pages(&state)))
         }
         #[cfg(not(feature = "work-product"))]
         {
@@ -111,15 +118,16 @@ pub(crate) async fn work_activity(
         }
     }
     .await;
-    let (signals, error) = match result {
-        Ok(signals) => (signals, None),
-        Err(error) => (Vec::new(), Some(error.into())),
+    let (signals, pages, error) = match result {
+        Ok((signals, pages)) => (signals, pages, None),
+        Err(error) => (Vec::new(), Vec::new(), Some(error.into())),
     };
     zephium_ipc::work::WorkActivityResponseV1 {
         version: 1,
         profile: expected_profile,
         work,
         signals,
+        pages,
         error,
     }
 }

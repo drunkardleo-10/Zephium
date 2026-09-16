@@ -189,6 +189,7 @@ pub struct RetainedWorkSnapshot {
 struct Projection {
     #[cfg(feature = "work-execution-probe")]
     construction_resource: Option<WorkBrowserResourceJoin>,
+    frame: Option<Arc<zephium_agentic::WorkBrowserFrame>>,
     snapshot: RetainedWorkSnapshot,
     events: VecDeque<AgentWorkEvent>,
     extraction: Option<Box<SemanticOwnedExtractionResult>>,
@@ -236,6 +237,10 @@ impl RetainedWorkHandle {
                 snapshot
             }
         }
+    }
+    /// The newest canvas frame of the hosted page; replaced in place, never queued.
+    pub fn frame(&self) -> Option<Arc<zephium_agentic::WorkBrowserFrame>> {
+        self.signal.projection.lock().ok()?.frame.clone()
     }
     pub fn take_event(&self) -> Option<AgentWorkEvent> {
         let event = self.signal.projection.lock().ok()?.events.pop_front();
@@ -341,6 +346,7 @@ impl CallbackHandle {
             projection: Mutex::new(Projection {
                 #[cfg(feature = "work-execution-probe")]
                 construction_resource: None,
+                frame: None,
                 snapshot: RetainedWorkSnapshot {
                     phase: RetainedWorkPhase::Attaching,
                     run: prepared.spec.identity.owner(),
@@ -553,6 +559,7 @@ impl ProductWork {
             };
             projection.events.push_back(event);
         }
+        projection.frame = work.latest_frame();
         #[cfg(feature = "work-execution-probe")]
         if work.phase() == AdmissionPhase::Terminal
             && projection.snapshot.phase != RetainedWorkPhase::Terminal

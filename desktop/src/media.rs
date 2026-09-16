@@ -229,6 +229,9 @@ pub(crate) fn serve(
         return respond(403, Vec::new(), "text/plain");
     }
     let path = request.uri().path().trim_start_matches('/');
+    if let Some(rest) = path.strip_prefix("frame/") {
+        return serve_page_frame(&ctx, rest);
+    }
     let Some((profile, digest)) = path.split_once('/') else {
         return respond(404, Vec::new(), "text/plain");
     };
@@ -247,6 +250,41 @@ pub(crate) fn serve(
     match sniff_image(&bytes) {
         Some(mime) => respond(200, bytes, mime),
         None => respond(404, Vec::new(), "text/plain"),
+    }
+}
+
+/// `frame/<attempt>/<step>/<generation>`: the newest frame of one agent page.
+/// The generation only busts caches; the bytes are whatever is current.
+fn serve_page_frame(
+    ctx: &tauri::UriSchemeContext<'_, tauri::Wry>,
+    rest: &str,
+) -> tauri::http::Response<Cow<'static, [u8]>> {
+    let mut parts = rest.split('/');
+    let ids = (parts.next(), parts.next());
+    #[cfg(feature = "work-product")]
+    {
+        use zephium_core::work::{WorkAttemptId, WorkStepId};
+        let (Some(attempt), Some(step)) = (
+            ids.0.and_then(WorkAttemptId::parse),
+            ids.1.and_then(WorkStepId::parse),
+        ) else {
+            return respond(404, Vec::new(), "text/plain");
+        };
+        let Some(state) = ctx
+            .app_handle()
+            .try_state::<super::work_product::WorkProductState>()
+        else {
+            return respond(503, Vec::new(), "text/plain");
+        };
+        match state.page_frame(attempt, step) {
+            Some(png) => respond(200, png.as_ref().clone(), "image/png"),
+            None => respond(404, Vec::new(), "text/plain"),
+        }
+    }
+    #[cfg(not(feature = "work-product"))]
+    {
+        let _ = (ctx, ids);
+        respond(404, Vec::new(), "text/plain")
     }
 }
 

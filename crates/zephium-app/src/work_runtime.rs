@@ -1,6 +1,7 @@
 //! Product-owned dispatch and exact settlement over the ordinary Shell/Store.
 //! Construction is dormant. Deserialized facts can never construct an attempt.
 use std::{
+    collections::BTreeMap,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -38,6 +39,7 @@ pub struct WorkNodeAttempt {
     basis_revision: Arc<Mutex<WorkRevision>>,
     owner: WorkRuntimeSessionId,
     progress: Arc<Mutex<Option<zephium_ipc::work::WorkSignalV1>>>,
+    pages: Pages,
     handle: crate::Handle,
     profile: ProfileId,
     work: WorkId,
@@ -96,7 +98,9 @@ impl WorkNodeAttempt {
     pub fn observer(&self) -> WorkAttemptObserver {
         WorkAttemptObserver {
             attempt: self.attempt,
+            execution: self.execution,
             progress: Arc::downgrade(&self.progress),
+            pages: Arc::downgrade(&self.pages),
         }
     }
     pub fn record_activity(&self, activity: zephium_ipc::work::WorkActivityV1) {
@@ -111,6 +115,7 @@ impl WorkNodeAttempt {
             basis_revision: self.basis_revision.clone(),
             owner: self.owner,
             progress: self.progress.clone(),
+            pages: self.pages.clone(),
             handle: self.handle.clone(),
             profile: self.profile,
             work: self.work,
@@ -338,14 +343,29 @@ impl WorkNodeSettlement {
         self.projection
     }
 }
+/// The person-facing view of one browser step's page: its address and the
+/// newest bounded frame. Replaced in place, dropped with the attempt.
+#[derive(Clone)]
+pub struct WorkPageFrame {
+    pub step: WorkStepId,
+    pub url: String,
+    pub live: bool,
+    pub frame: Option<Arc<zephium_agentic::WorkBrowserFrame>>,
+}
+type Pages = Arc<Mutex<BTreeMap<WorkStepId, WorkPageFrame>>>;
 #[derive(Clone)]
 pub struct WorkAttemptObserver {
     attempt: WorkAttemptId,
+    execution: WorkExecutionId,
     progress: std::sync::Weak<Mutex<Option<zephium_ipc::work::WorkSignalV1>>>,
+    pages: std::sync::Weak<Mutex<BTreeMap<WorkStepId, WorkPageFrame>>>,
 }
 impl WorkAttemptObserver {
     pub fn attempt(&self) -> WorkAttemptId {
         self.attempt
+    }
+    pub fn execution(&self) -> WorkExecutionId {
+        self.execution
     }
     pub fn is_alive(&self) -> bool {
         self.progress.strong_count() > 0
@@ -354,6 +374,18 @@ impl WorkAttemptObserver {
     pub fn latest(&self) -> Option<zephium_ipc::work::WorkSignalV1> {
         self.progress.upgrade()?.lock().ok()?.clone()
     }
+    /// Pages this attempt has opened, newest frame each.
+    pub fn pages(&self) -> Vec<WorkPageFrame> {
+        self.pages
+            .upgrade()
+            .and_then(|pages| {
+                pages
+                    .lock()
+                    .ok()
+                    .map(|pages| pages.values().cloned().collect())
+            })
+            .unwrap_or_default()
+    }
 }
 #[derive(Clone)]
 pub struct WorkAttemptProbe {
@@ -361,6 +393,7 @@ pub struct WorkAttemptProbe {
     basis_revision: Arc<Mutex<WorkRevision>>,
     owner: WorkRuntimeSessionId,
     progress: Arc<Mutex<Option<zephium_ipc::work::WorkSignalV1>>>,
+    pages: Pages,
     handle: crate::Handle,
     profile: ProfileId,
     work: WorkId,
@@ -390,6 +423,36 @@ impl WorkAttemptProbe {
     }
     pub fn deadline(&self) -> Instant {
         self.deadline
+    }
+    /// Records the newest frame of one browser step's page, bounded per attempt.
+    pub fn record_page_frame(
+        &self,
+        step: WorkStepId,
+        url: &str,
+        frame: Option<Arc<zephium_agentic::WorkBrowserFrame>>,
+    ) {
+        if let Ok(mut pages) = self.pages.lock() {
+            if pages.len() >= 16 && !pages.contains_key(&step) {
+                return;
+            }
+            pages.insert(
+                step,
+                WorkPageFrame {
+                    step,
+                    url: url.chars().take(2048).collect(),
+                    live: true,
+                    frame,
+                },
+            );
+        }
+    }
+    /// The page's step settled: keep its last frame, drop its live mark.
+    pub fn settle_page(&self, step: WorkStepId) {
+        if let Ok(mut pages) = self.pages.lock() {
+            if let Some(page) = pages.get_mut(&step) {
+                page.live = false;
+            }
+        }
     }
     pub fn record_activity(&self, activity: zephium_ipc::work::WorkActivityV1) {
         if let Ok(mut signal) = self.progress.lock() {
@@ -703,6 +766,7 @@ impl WorkRuntimeService {
                 .ok_or(WorkError::Invalid)?
                 .owner,
             progress: Arc::new(Mutex::new(None)),
+            pages: Arc::new(Mutex::new(BTreeMap::new())),
             handle: self.handle.clone(),
             profile,
             work,
