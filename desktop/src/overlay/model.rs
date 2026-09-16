@@ -2,6 +2,7 @@ use zephium_ipc::{PanelRoute, PanelState, SearchContext, ToolKind};
 pub const RADIUS: u16 = 20;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Owner {
+    pub private: bool,
     pub window: String,
     pub profile: String,
     pub name: String,
@@ -210,6 +211,7 @@ mod tests {
     fn shortcut_and_context_revisions_do_not_replay() {
         let mut m = Model::default();
         m.set_owner(Some(Owner {
+            private: false,
             window: "window".into(),
             profile: "p".into(),
             name: "P".into(),
@@ -241,6 +243,7 @@ mod tests {
     fn owner_changes_invalidate_search_and_profile_changes_hide_tools() {
         let mut m = Model::default();
         let mut owner = Owner {
+            private: false,
             window: "one".into(),
             profile: "p".into(),
             name: "Personal".into(),

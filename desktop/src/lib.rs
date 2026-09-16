@@ -51,6 +51,7 @@ mod platform;
 #[cfg(target_os = "windows")]
 mod privileged_runtime_windows;
 mod resource_close;
+mod search_providers;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
@@ -1283,6 +1284,12 @@ fn request_unrecoverable_native_failure(app: &tauri::AppHandle, reason: &str) {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct NoteOpenRequested {
+    profile: String,
+    id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct ResourceChanged {
     profile: String,
     id: String,
@@ -1564,6 +1571,10 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tab_menu_popup,
             profile_menu_popup,
             sidebar_menu_popup,
+            newtab_search_context,
+            newtab_search,
+            newtab_run,
+            newtab_cancel,
             launcher_search,
             launcher_run,
             sidebar_set_width,
@@ -1578,6 +1589,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         .events(collect_events![
             ItemsChanged,
             ResourceChanged,
+            NoteOpenRequested,
             TabChanged,
             ExtensionActionsChanged,
             ExtensionActionFailed,
@@ -2113,6 +2125,7 @@ fn search_action_in_bounds(action: &zephium_ipc::SearchAction) -> bool {
     use zephium_ipc::SearchAction;
 
     match action {
+        SearchAction::OpenNote { id } => zephium_core::resources::valid_id(id),
         SearchAction::ActivateTab { id } => bounded(id, MAX_ITEM_ID_BYTES),
         SearchAction::OpenUrl { url } => bounded(url, MAX_NAVIGATION_INPUT_BYTES),
         // The launcher may only run registry commands. Context-menu actions
@@ -3360,6 +3373,121 @@ fn run_command(
     execute_command(&app, &id)
 }
 
+/// New Tab has its own main-only entry. The actor revalidates the bound blank
+/// tab and focused profile/space before searching or executing any result.
+#[tauri::command]
+#[specta::specta]
+fn newtab_search_context(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    tab_id: String,
+) -> Option<zephium_ipc::SearchContext> {
+    if !authorize(&caller, CallerPolicy::Main, "newtab_search_context")
+        || ItemId::parse(&tab_id).is_none()
+    {
+        return None;
+    }
+    let state = app.try_state::<overlay::Overlay>()?.snapshot();
+    static NEXT_SEARCH_SESSION: AtomicU64 = AtomicU64::new(1);
+    let session = NEXT_SEARCH_SESSION
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .ok()?;
+    Some(zephium_ipc::SearchContext {
+        window_id: state.window_id?,
+        profile_id: state.profile_id?,
+        space_id: state.space_id?,
+        session_id: format!("newtab:{tab_id}:{session}"),
+        request_id: String::new(),
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
+fn newtab_search(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    shell: State<'_, Handle>,
+    query: String,
+    context: zephium_ipc::SearchContext,
+) -> bool {
+    if !authorize(&caller, CallerPolicy::Main, "newtab_search")
+        || !bounded(&query, MAX_LAUNCHER_QUERY_BYTES)
+        || !newtab_context_valid(&context)
+    {
+        return false;
+    }
+    let accepted = shell.dispatch(Command::SearchScoped {
+        query: query.clone(),
+        context: Box::new(context.clone()),
+    });
+    if accepted {
+        search_providers::schedule(caller, app, shell.inner().clone(), query, context);
+    }
+    accepted
+}
+
+fn newtab_context_valid(context: &zephium_ipc::SearchContext) -> bool {
+    context
+        .session_id
+        .strip_prefix("newtab:")
+        .and_then(|value| value.split_once(':'))
+        .filter(|(_, nonce)| {
+            !nonce.is_empty()
+                && nonce.len() <= 20
+                && nonce.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        .and_then(|(id, _)| ItemId::parse(id))
+        .is_some()
+        && bounded(&context.request_id, 64)
+        && !context.request_id.is_empty()
+        && bounded(&context.window_id, 64)
+        && bounded(&context.profile_id, 64)
+        && bounded(&context.space_id, 64)
+}
+
+#[tauri::command]
+#[specta::specta]
+fn newtab_cancel(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    context: zephium_ipc::SearchContext,
+) -> bool {
+    if !authorize(&caller, CallerPolicy::Main, "newtab_cancel") || !newtab_context_valid(&context) {
+        return false;
+    }
+    search_providers::cancel(&context.session_id);
+    shell.dispatch(Command::CancelSearch {
+        session_id: context.session_id,
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
+fn newtab_run(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    shell: State<'_, Handle>,
+    action: zephium_ipc::SearchAction,
+    context: zephium_ipc::SearchContext,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "newtab_run")
+        || !newtab_context_valid(&context)
+        || !search_action_in_bounds(&action)
+    {
+        return rejected_operation();
+    }
+    dispatch_operation(
+        &app,
+        &shell,
+        Command::RunSearchAction {
+            context: Box::new(context),
+            action,
+        },
+    )
+}
+
 #[tauri::command]
 #[specta::specta]
 fn launcher_search(
@@ -3380,10 +3508,14 @@ fn launcher_search(
     else {
         return false;
     };
-    shell.dispatch(Command::SearchScoped {
-        query,
-        context: Box::new(context),
-    })
+    let accepted = shell.dispatch(Command::SearchScoped {
+        query: query.clone(),
+        context: Box::new(context.clone()),
+    });
+    if accepted {
+        search_providers::schedule(caller, app, shell.inner().clone(), query, context);
+    }
+    accepted
 }
 
 #[tauri::command]
@@ -4708,6 +4840,7 @@ pub fn run() {
                     &prompt,
                 ),
                 Projection::UiCommand(id) => {
+                    if id.starts_with("preference.search.") { search_providers::cancel_all(); }
                     if let Some(value)=id.strip_prefix("preference.tools.presentation=") {
                         if let Some(panel)=emit_handle.try_state::<overlay::Overlay>() {panel.preference(value=="floating");}
                     }
@@ -4718,8 +4851,9 @@ pub fn run() {
                     }
                     emit_ui_command(&emit_handle, &id);
                 }
+                Projection::OpenNote { profile, id } => emit_to_privileged(&emit_handle, MAIN_LABEL, "zephium:note-open-requested", &NoteOpenRequested { profile, id }),
                 Projection::Search(results) => {
-                    emit_to_privileged(&emit_handle, overlay::PANEL_LABEL, EVENT_SEARCH, &results)
+                    emit_to_privileged(&emit_handle, if results.context.as_ref().is_some_and(|context| context.session_id.starts_with("newtab:")) { MAIN_LABEL } else { overlay::PANEL_LABEL }, EVENT_SEARCH, &results)
                 }
                 Projection::Layout(layout) => {
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_LAYOUT, &layout)

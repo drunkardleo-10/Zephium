@@ -105,6 +105,20 @@ export const commands = {
 	tabMenuPopup: (id: string, x: number | null, y: number | null, canSplit: boolean) => __TAURI_INVOKE<boolean>("tab_menu_popup", { id, x, y, canSplit }),
 	profileMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("profile_menu_popup", { x, y }),
 	sidebarMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("sidebar_menu_popup", { x, y }),
+	/**
+	 *  New Tab has its own main-only entry. The actor revalidates the bound blank
+	 *  tab and focused profile/space before searching or executing any result.
+	 */
+	newtabSearchContext: (tabId: string) => __TAURI_INVOKE<{
+	window_id: string,
+	session_id: string,
+	request_id: string,
+	profile_id: string,
+	space_id: string,
+} | null>("newtab_search_context", { tabId }),
+	newtabSearch: (query: string, context: SearchContext) => __TAURI_INVOKE<boolean>("newtab_search", { query, context }),
+	newtabRun: (action: SearchAction, context: SearchContext) => __TAURI_INVOKE<OperationAdmission>("newtab_run", { action, context }),
+	newtabCancel: (context: SearchContext) => __TAURI_INVOKE<boolean>("newtab_cancel", { context }),
 	launcherSearch: (query: string, requestId: string) => __TAURI_INVOKE<boolean>("launcher_search", { query, requestId }),
 	launcherRun: (action: SearchAction, context: SearchContext) => __TAURI_INVOKE<OperationAdmission>("launcher_run", { action, context }),
 	sidebarSetWidth: (width: number | null) => __TAURI_INVOKE<void>("sidebar_set_width", { width }),
@@ -130,6 +144,7 @@ export const events = {
 	extensionRuntimeGrantPromptChanged: makeEvent<ExtensionRuntimeGrantPromptChanged>("extension-runtime-grant-prompt-changed"),
 	itemsChanged: makeEvent<ItemsChanged>("items-changed"),
 	layoutChanged: makeEvent<LayoutChanged>("layout-changed"),
+	noteOpenRequested: makeEvent<NoteOpenRequested>("note-open-requested"),
 	operationProcessed: makeEvent<OperationProcessed>("operation-processed"),
 	pagePermissionPromptChanged: makeEvent<PagePermissionPromptChanged>("page-permission-prompt-changed"),
 	resourceChanged: makeEvent<ResourceChanged>("resource-changed"),
@@ -703,6 +718,11 @@ export type NoteDocument_Serialize = {
 	document: DocumentNode_Serialize,
 };
 
+export type NoteOpenRequested = {
+	profile: string,
+	id: string,
+};
+
 /**
  *  Immediate result returned by a privileged IPC command. `accepted` with an
  *  `operation_id` means the mutation was successfully and non-evictably
@@ -823,9 +843,9 @@ export type ProfileView = {
 
 export type ResourceCall = ResourceCall_Serialize | ResourceCall_Deserialize;
 
-export type ResourceCall_Deserialize = ({ kind: "resolve_notes"; ids: string[] }) & { command?: never; id?: never; query?: never; request_id?: never } | ({ kind: "acknowledge"; request_id: string }) & { command?: never; id?: never; ids?: never; query?: never } | ({ kind: "list"; query: ResourceQuery }) & { command?: never; id?: never; ids?: never; request_id?: never } | ({ kind: "get"; id: string }) & { command?: never; ids?: never; query?: never; request_id?: never } | ({ kind: "mutate"; command: ResourceCommand_Deserialize }) & { id?: never; ids?: never; query?: never; request_id?: never };
+export type ResourceCall_Deserialize = ({ kind: "search_titles"; query: string }) & { command?: never; id?: never; ids?: never; request_id?: never } | ({ kind: "resolve_notes"; ids: string[] }) & { command?: never; id?: never; query?: never; request_id?: never } | ({ kind: "acknowledge"; request_id: string }) & { command?: never; id?: never; ids?: never; query?: never } | ({ kind: "list"; query: ResourceQuery }) & { command?: never; id?: never; ids?: never; request_id?: never } | ({ kind: "get"; id: string }) & { command?: never; ids?: never; query?: never; request_id?: never } | ({ kind: "mutate"; command: ResourceCommand_Deserialize }) & { id?: never; ids?: never; query?: never; request_id?: never };
 
-export type ResourceCall_Serialize = ({ kind: "resolve_notes"; ids: string[] }) & { command?: never; id?: never; query?: never; request_id?: never } | ({ kind: "acknowledge"; request_id: string }) & { command?: never; id?: never; ids?: never; query?: never } | ({ kind: "list"; query: ResourceQuery }) & { command?: never; id?: never; ids?: never; request_id?: never } | ({ kind: "get"; id: string }) & { command?: never; ids?: never; query?: never; request_id?: never } | ({ kind: "mutate"; command: ResourceCommand_Serialize }) & { id?: never; ids?: never; query?: never; request_id?: never };
+export type ResourceCall_Serialize = ({ kind: "search_titles"; query: string }) & { command?: never; id?: never; ids?: never; request_id?: never } | ({ kind: "resolve_notes"; ids: string[] }) & { command?: never; id?: never; query?: never; request_id?: never } | ({ kind: "acknowledge"; request_id: string }) & { command?: never; id?: never; ids?: never; query?: never } | ({ kind: "list"; query: ResourceQuery }) & { command?: never; id?: never; ids?: never; request_id?: never } | ({ kind: "get"; id: string }) & { command?: never; ids?: never; query?: never; request_id?: never } | ({ kind: "mutate"; command: ResourceCommand_Serialize }) & { id?: never; ids?: never; query?: never; request_id?: never };
 
 export type ResourceChanged = {
 	profile: string,
@@ -982,7 +1002,7 @@ export type RuntimeStatus = {
 
 export type RuntimeStatusChanged = RuntimeStatus;
 
-export type SearchAction = { type: "ActivateTab"; id: string } | { type: "OpenUrl"; url: string } | { type: "RunCommand"; id: string };
+export type SearchAction = { type: "OpenNote"; id: string } | { type: "ActivateTab"; id: string } | { type: "OpenUrl"; url: string } | { type: "RunCommand"; id: string };
 
 export type SearchChanged = SearchResults;
 
@@ -1003,8 +1023,15 @@ export type SearchResult = {
 };
 
 export type SearchResults = {
+	pending: boolean,
 	context: SearchContext | null,
 	query: string,
+	/**
+	 *  Host the field may complete the typed text to. Native decides what is
+	 *  confident enough to offer; the field still refuses to apply one that
+	 *  does not extend exactly what the user has typed.
+	 */
+	completion: string | null,
 	results: SearchResult[],
 };
 

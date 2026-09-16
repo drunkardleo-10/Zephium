@@ -112,6 +112,15 @@ impl Overlay {
     pub fn window_app(&self) -> &tauri::AppHandle {
         self.window.app_handle()
     }
+    pub fn private(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .model
+            .owner
+            .as_ref()
+            .is_none_or(|owner| owner.private)
+    }
     pub fn snapshot(&self) -> PanelState {
         let mut snapshot = self
             .state
@@ -195,6 +204,7 @@ impl Overlay {
     }
     fn cancel_search(&self, session_id: String) {
         if let Some(shell) = self.window.app_handle().try_state::<zephium_app::Handle>() {
+            crate::search_providers::cancel(&session_id);
             shell.dispatch(zephium_app::Command::CancelSearch { session_id });
         }
     }
@@ -586,6 +596,7 @@ impl Overlay {
 }
 pub fn update_context(app: &tauri::AppHandle, context: &PanelOwner) {
     let owner = Some(Owner {
+        private: context.private,
         window: context.window_id.clone(),
         profile: context.profile_id.clone(),
         name: context.profile_name.clone(),
