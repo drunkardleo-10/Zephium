@@ -67,6 +67,8 @@ test("a running agent shows its line, recent steps, and answers its question in 
   session.selected = "objective";
   session.projection = { ...structuredClone(projection), executions: [agentRun("running")] };
   const execute = vi.spyOn(session, "execute").mockResolvedValue(true);
+  // The run itself is one busy operation; its questions stay answerable.
+  vi.spyOn(session.operations, "busy").mockReturnValue(true);
   const screen = await render(WorkInteraction, { session, ondetails: vi.fn() });
   await expect
     .element(screen.getByText("Looking for quiet keyboards.", { exact: true }))

@@ -28,6 +28,10 @@
   const blocked = $derived(
     !!session.pending || operating || !["ready", "rejected"].includes(session.delivery),
   );
+  // A run is one long operation; its questions are answered while it is busy.
+  const answerBlocked = $derived(
+    !!session.pending || !["ready", "rejected"].includes(session.delivery),
+  );
   const live = $derived(
     !!execution &&
       !interrupted &&
@@ -161,7 +165,7 @@
   let answers = $state<Record<string, string>>({});
   async function answer(step: string) {
     const text = answers[step]?.trim();
-    if (!text || !execution || blocked) return;
+    if (!text || !execution || answerBlocked) return;
     if (await session.answerStep(execution.id, step, text)) delete answers[step];
   }
 </script>
@@ -199,7 +203,7 @@
         <div class="options">
           {#each question.options as option, index (index)}<Button
               size="compact"
-              disabled={blocked}
+              disabled={answerBlocked}
               onclick={() => (answers[question.id] = option)}>{option}</Button
             >{/each}
         </div>
@@ -208,9 +212,9 @@
           maxlength="8192"
           value={answers[question.id] ?? ""}
           oninput={(event) => (answers[question.id] = event.currentTarget.value)}
-          disabled={blocked}
+          disabled={answerBlocked}
         />
-        <Button type="submit" disabled={blocked || !answers[question.id]?.trim()}
+        <Button type="submit" disabled={answerBlocked || !answers[question.id]?.trim()}
           >{m.work_env_continue()}</Button
         >
       </form>{/each}
