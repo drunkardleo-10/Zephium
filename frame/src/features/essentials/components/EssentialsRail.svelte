@@ -3,6 +3,7 @@
   import { tabs } from "$domain/tabs";
   import type { TabView } from "$shared/ipc/bindings";
   import FavIcon from "$shared/ui/FavIcon";
+  import { favicons } from "$domain/favicons";
 
   let {
     entries,
@@ -39,7 +40,7 @@
           onclick={() => onSelect(tab.id)}
         >
           <FavIcon
-            favicon={tab.favicon}
+            image={favicons.image(tab.icon)}
             loading={tab.loading}
             size={20}
             lit={active}

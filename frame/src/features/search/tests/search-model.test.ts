@@ -23,7 +23,7 @@ const tab = (id: string, title = id): SearchResult => ({
   kind: "tab",
   title,
   detail: "example.com",
-  favicon: null,
+  icon: null,
   action: { type: "ActivateTab", id },
 });
 

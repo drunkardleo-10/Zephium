@@ -46,7 +46,7 @@ const search = (title: string): SearchResult => ({
   kind: "search",
   title,
   detail: "DuckDuckGo",
-  favicon: null,
+  icon: null,
   action: { type: "OpenUrl", url: `https://duckduckgo.com/?q=${title}` },
 });
 

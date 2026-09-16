@@ -10,6 +10,7 @@
   import { tabs } from "$domain/tabs";
   import type { TabView } from "$shared/ipc/bindings";
   import FavIcon from "$shared/ui/FavIcon";
+  import { favicons } from "$domain/favicons";
   import type { Snippet } from "svelte";
   import SearchField from "$shared/ui/SearchField";
 
@@ -122,7 +123,7 @@
             class="press flex h-11 w-11 cursor-default items-center justify-center rounded-lg bg-fill outline-none hover:bg-fill-hover"
             onclick={() => tabs.activate(tab.id)}
           >
-            <FavIcon favicon={tab.favicon} size={20} lit fallback={Globe02Icon} />
+            <FavIcon image={favicons.image(tab.icon)} size={20} lit fallback={Globe02Icon} />
           </button>
         </li>
       {/each}

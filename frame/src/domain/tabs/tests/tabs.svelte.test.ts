@@ -89,7 +89,7 @@ function tab(id: string, value: number, title = `Tab ${id}`): TabView {
     loading: false,
     can_go_back: false,
     can_go_forward: false,
-    favicon: null,
+    icon: null,
   };
 }
 

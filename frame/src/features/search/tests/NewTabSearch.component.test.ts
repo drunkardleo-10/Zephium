@@ -39,14 +39,14 @@ const search = (title: string): SearchResult => ({
   kind: "search",
   title,
   detail: "DuckDuckGo",
-  favicon: null,
+  icon: null,
   action: { type: "OpenUrl", url: `https://duckduckgo.com/?q=${title}` },
 });
 const tab = (title: string, id = title): SearchResult => ({
   kind: "tab",
   title,
   detail: "rust-lang.org",
-  favicon: null,
+  icon: null,
   action: { type: "ActivateTab", id },
 });
 

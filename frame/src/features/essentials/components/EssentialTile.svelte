@@ -2,6 +2,7 @@
   import { Globe02Icon } from "@hugeicons/core-free-icons";
   import type { TabView } from "$shared/ipc/bindings";
   import FavIcon from "$shared/ui/FavIcon";
+  import { favicons } from "$domain/favicons";
 
   let {
     tab,
@@ -52,7 +53,7 @@
     onclick={() => onSelect(tab.id)}
   >
     <FavIcon
-      favicon={tab.favicon}
+      image={favicons.image(tab.icon)}
       loading={tab.loading}
       size={22}
       lit={active}

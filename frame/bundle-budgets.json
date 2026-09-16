@@ -36,11 +36,11 @@
     "css": 6463
   },
   "lazy:features/settings/components/sections/FocusPage.svelte": {
-    "js": 417929,
+    "js": 419000,
     "css": 90293
   },
   "lazy:features/settings/components/sections/GeneralPage.svelte": {
-    "js": 429832,
+    "js": 431000,
     "css": 92134
   },
   "lazy:features/tools/components/previews/HistoryView.svelte": {
@@ -48,11 +48,11 @@
     "css": 6463
   },
   "lazy:features/settings/components/sections/KeyboardPage.svelte": {
-    "js": 419516,
+    "js": 420500,
     "css": 90293
   },
   "lazy:features/settings/components/sections/LanguagesPage.svelte": {
-    "js": 424842,
+    "js": 426000,
     "css": 90838
   },
   "lazy:features/tools/components/previews/NotesView.svelte": {
@@ -60,15 +60,15 @@
     "css": 12558
   },
   "lazy:features/settings/components/sections/PasswordsPage.svelte": {
-    "js": 352103,
+    "js": 353000,
     "css": 86098
   },
   "lazy:features/settings/components/sections/PerformancePage.svelte": {
-    "js": 418161,
+    "js": 419200,
     "css": 90293
   },
   "lazy:features/settings/components/sections/PrivacyPage.svelte": {
-    "js": 428128,
+    "js": 429500,
     "css": 92134
   },
   "lazy:features/settings/components/sections/ProfilesPage.svelte": {
@@ -120,7 +120,7 @@
     "css": 96000
   },
   "lazy:features/newtab/components/NewTab.svelte": {
-    "js": 295000,
+    "js": 295500,
     "css": 85000
   },
   "lazy:domain/resources/index.ts": {
@@ -128,11 +128,11 @@
     "css": 0
   },
   "lazy:features/search/components/LauncherPanel.svelte": {
-    "js": 119000,
+    "js": 123500,
     "css": 6000
   },
   "lazy:features/search/components/NewTabSearch.svelte": {
-    "js": 118500,
+    "js": 123000,
     "css": 6000
   }
 }

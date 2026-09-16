@@ -1,5 +1,6 @@
 import type {
   PanelState,
+  FaviconsView,
   NoteOpenRequested,
   ResourceChanged,
   BlockerStatusChanged,
@@ -40,6 +41,7 @@ function scopedEvent<T>(name: string) {
 // target, which would let the launcher panel subscribe to main-window state.
 export const nativeEventNames = {
   panelState: "zephium:panel-state",
+  favicons: "zephium:favicons",
   noteOpenRequested: "zephium:note-open-requested",
   resourceChanged: "zephium:resource-changed",
   resourceClose: "zephium:resource-close",
@@ -66,6 +68,7 @@ export const nativeEventNames = {
 } as const;
 
 export const events = {
+  favicons: scopedEvent<FaviconsView>(nativeEventNames.favicons),
   noteOpenRequested: scopedEvent<NoteOpenRequested>(nativeEventNames.noteOpenRequested),
   resourceClose: scopedEvent<string>(nativeEventNames.resourceClose),
   resourceCloseCancelled: scopedEvent<string>(nativeEventNames.resourceCloseCancelled),

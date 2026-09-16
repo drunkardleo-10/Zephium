@@ -10,6 +10,7 @@
   import { commands } from "$shared/ipc/bindings";
   import { events } from "$shared/ipc/native-events";
   import { theme } from "$domain/appearance";
+  import { favicons } from "$domain/favicons";
   import { acceptPanelState } from "$features/panel";
   import { tools as toolManifest, toolKinds } from "$features/tools";
   import { loadLauncherPanel } from "$features/search";
@@ -66,11 +67,14 @@
     const listener = events.panelState.listen((event) => {
       if (!disposed) apply(event.payload);
     });
+
+    // Result rasters arrive just ahead of the results that reference them.
+    const faviconsReady = favicons.init();
     void (async () => {
       try {
         stop = await listener;
         stopMotion = await motionListener;
-        await theme.init();
+        await Promise.all([theme.init(), faviconsReady]);
         if (disposed) return;
         const motion = await commands.settingGet("ui.reduce-motion").catch(() => null);
         if (disposed) return;
@@ -89,6 +93,7 @@
       disposed = true;
       stop?.();
       stopMotion?.();
+      favicons.dispose();
       theme.dispose();
     };
   });

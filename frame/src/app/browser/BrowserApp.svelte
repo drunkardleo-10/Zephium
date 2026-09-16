@@ -11,6 +11,7 @@
   import { IS_MAC } from "$shared/platform";
   import { blocker } from "$domain/blocker";
   import { extensions } from "$domain/extensions";
+  import { favicons } from "$domain/favicons";
   import { layout } from "$domain/layout";
   import { operations } from "$domain/operations";
   import { pagePermissions } from "$domain/permissions";
@@ -113,6 +114,10 @@
     const runtimeReady = runtime.init();
     const extensionsReady = extensions.init();
     const pagePermissionsReady = pagePermissions.init();
+
+    // Rasters are emitted immediately before the projection that references
+    // them, so this listener must exist before tabs asks native to bootstrap.
+    const faviconsReady = favicons.init();
     const tabsReady = tabs.init();
     const sidebarReady = sidebar.init();
     const uiEventsReady = ui.init();
@@ -131,6 +136,7 @@
           runtimeReady,
           extensionsReady,
           pagePermissionsReady,
+          faviconsReady,
           tabsReady,
           uiEventsReady,
           sidebarReady,
@@ -164,6 +170,7 @@
       runtime.dispose();
       extensions.dispose();
       pagePermissions.dispose();
+      favicons.dispose();
       tabs.dispose();
       ui.dispose();
       if (!IS_MAC) layout.dispose();

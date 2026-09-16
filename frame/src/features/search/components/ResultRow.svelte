@@ -10,6 +10,7 @@
   import type { SearchResult } from "$shared/ipc/bindings";
   import Icon from "$shared/ui/Icon";
   import FavIcon from "$shared/ui/FavIcon";
+  import { favicons } from "$domain/favicons";
   import { IS_MAC } from "$shared/platform";
   import { matchRange, resultDetail } from "../lib/search-model";
 
@@ -42,9 +43,9 @@
   let range = $derived(matchRange(title, query));
   // A site the user has reached is shown by its own mark. The clock belongs to
   // a recorded search, not to every visited page.
-  let favicon = $derived(
+  let image = $derived(
     result && (result.kind === "tab" || result.kind === "history" || result.kind === "url")
-      ? result.favicon
+      ? favicons.image(result.icon)
       : null,
   );
   let glyph = $derived.by(() => {
@@ -91,7 +92,7 @@
   onclick={onrun}
 >
   <span class="glyph">
-    {#if favicon}<FavIcon {favicon} size={16} lit fallback={Globe02Icon} />
+    {#if image}<FavIcon {image} size={16} lit fallback={Globe02Icon} />
     {:else}<Icon icon={glyph} size={16} />{/if}
   </span>
   <span class="title"

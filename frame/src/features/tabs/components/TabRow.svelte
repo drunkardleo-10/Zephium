@@ -3,6 +3,7 @@
   import { Cancel01Icon, Globe02Icon } from "@hugeicons/core-free-icons";
   import type { TabView } from "$shared/ipc/bindings";
   import FavIcon from "$shared/ui/FavIcon";
+  import { favicons } from "$domain/favicons";
   import Icon from "$shared/ui/Icon";
 
   let {
@@ -82,7 +83,7 @@
     onpointercancel={onPointerCancel}
     onclick={() => onSelect(tab.id)}
   >
-    <FavIcon favicon={tab.favicon} loading={tab.loading} lit={active} {fallback} />
+    <FavIcon image={favicons.image(tab.icon)} loading={tab.loading} lit={active} {fallback} />
     <span data-zephium-tab-label class="min-w-0 flex-1 truncate">{tab.title}</span>
   </button>
   {#if closable}
