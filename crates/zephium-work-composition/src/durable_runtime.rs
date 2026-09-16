@@ -744,7 +744,11 @@ fn compile_step(
         .map_err(|failure| {
             #[cfg(feature = "public-qualification")]
             if let Some(diagnostic) = diagnostic {
-                diagnostic(&format!("admission:{failure:?}"));
+                let remaining = probe
+                    .deadline()
+                    .saturating_duration_since(Instant::now())
+                    .as_millis();
+                diagnostic(&format!("admission:{failure:?} remaining_ms={remaining}"));
             }
             let _ = &failure;
             WorkError::Unavailable
