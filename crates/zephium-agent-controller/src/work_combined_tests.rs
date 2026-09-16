@@ -5,6 +5,7 @@ use super::*;
 pub(super) enum CombinedFault {
     None,
     BoundaryAfterAction,
+    OversizedDiffAfterAction,
     Premature,
     ExtraAction,
     WrongSchema,
@@ -26,6 +27,9 @@ pub(super) enum CombinedFault {
 fn verified_action_with_changed_boundary_continues_with_fresh_evidence() {
     let _serial = lock(&SERIAL);
     provider_fixture(ProviderFault::Combined(CombinedFault::BoundaryAfterAction));
+    provider_fixture(ProviderFault::Combined(
+        CombinedFault::OversizedDiffAfterAction,
+    ));
 }
 
 pub(super) struct CombinedTask {
@@ -35,6 +39,12 @@ pub(super) struct CombinedTask {
 }
 
 impl AgentWorkTask for CombinedTask {
+    fn allows_progressive_observation(&self) -> bool {
+        self.fault == CombinedFault::BoundaryAfterAction
+    }
+    fn allows_baseline_read(&self) -> bool {
+        self.fault == CombinedFault::BoundaryAfterAction
+    }
     fn allows_actions_before_extraction(&self) -> bool {
         self.fault != CombinedFault::ModeMutation || self.ready.is_none()
     }
@@ -158,7 +168,10 @@ pub(super) fn assert_outcome(
     );
     if matches!(
         fault,
-        CombinedFault::None | CombinedFault::Ceiling | CombinedFault::BoundaryAfterAction
+        CombinedFault::None
+            | CombinedFault::Ceiling
+            | CombinedFault::BoundaryAfterAction
+            | CombinedFault::OversizedDiffAfterAction
     ) {
         let AgentWorkOutcome::Succeeded(mut success) = outcome else {
             panic!("{outcome:?}");

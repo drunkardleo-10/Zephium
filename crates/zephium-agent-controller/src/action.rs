@@ -150,12 +150,10 @@ impl AgentBrowserActionProposal {
         let batch =
             SemanticActionBatchExecution::new(&batch).map_err(AgentBrowserActionError::Batch)?;
         // This vertical admits only independently snapshot-verifiable effects.
-        // Native navigation/dialog/scroll evidence needs its own host adapter.
+        // Native navigation/dialog evidence needs its own host adapter.
         if matches!(
             action.verification(),
-            SemanticVerification::NavigationCommitted
-                | SemanticVerification::Dialog(_)
-                | SemanticVerification::ScrollPositionChanged
+            SemanticVerification::NavigationCommitted | SemanticVerification::Dialog(_)
         ) {
             return Err(AgentBrowserActionError::EvidenceRequired);
         }
@@ -180,6 +178,10 @@ impl AgentBrowserActionProposal {
     /// The exact prepared action for a trusted effect classifier.
     pub const fn action(&self) -> &SemanticPreparedAction {
         &self.action
+    }
+
+    pub(crate) fn baseline(&self) -> &SemanticObservationAcknowledgement {
+        self.continuation.baseline()
     }
 
     /// Authorizes the separately assessed action and retains native authority.
@@ -406,7 +408,7 @@ impl AgentBrowserAction {
 
     /// Consumes only the exact fully-accounted synchronous refusal. The caller
     /// proves native non-admission; a native failure callback is insufficient.
-    pub(crate) fn into_rejected_batch(mut self) -> Result<SemanticActionBatchResult, Box<Self>> {
+    pub(crate) fn into_rejected_batch(self) -> Result<SemanticActionBatchResult, Box<Self>> {
         if !self.finished
             || self.native.is_some()
             || self.pending.is_some()
@@ -418,6 +420,34 @@ impl AgentBrowserAction {
         {
             return Err(Box::new(self));
         }
+        self.into_failed_batch()
+    }
+
+    pub(crate) fn into_failed_read_scroll_batch(
+        self,
+    ) -> Result<SemanticActionBatchResult, Box<Self>> {
+        if !self.finished
+            || self.native.is_some()
+            || self.pending.is_some()
+            || self.terminal.is_some()
+            || self.journal_failed
+            || self.proposal.action.kind() != SemanticActionKind::Scroll
+            || self.proposal.action.effect() != SemanticEffectClass::Read
+            || self.failed.as_ref().is_none_or(|failed| {
+                self.receipt != Some(failed.receipt())
+                    || failed.verification_error()
+                        != Some(SemanticVerificationError::OutcomeNotObserved)
+                    || failed.execution().is_none_or(|execution| {
+                        execution.backend() != SemanticActionExecutionBackend::FixedSemanticRecipe
+                    })
+            })
+        {
+            return Err(Box::new(self));
+        }
+        self.into_failed_batch()
+    }
+
+    fn into_failed_batch(mut self) -> Result<SemanticActionBatchResult, Box<Self>> {
         let failed = self.failed.take().expect("checked original failed owner");
         match self.proposal.batch.fail(&self.proposal.action, failed) {
             Ok(terminal) => Ok(terminal),

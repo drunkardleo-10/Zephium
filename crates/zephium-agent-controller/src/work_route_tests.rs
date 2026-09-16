@@ -160,10 +160,13 @@ impl RouteFault {
         assert_eq!(
             text.matches(r#"ZEPHIUM_HOST_NAVIGATION_CHECKPOINT_V1\n"#)
                 .count(),
-            1,
-            "one current navigation checkpoint, never replayed old progress"
+            usize::from(!text.contains("ZEXTRACT1 schema_content=trusted")),
+            "one current navigation checkpoint for decisions; none in terminal mapping"
         );
-        assert_eq!(text.matches(r#"\"completed_hops\":"#).count(), 1);
+        assert_eq!(
+            text.matches(r#"\"completed_hops\":"#).count(),
+            usize::from(!text.contains("ZEXTRACT1 schema_content=trusted"))
+        );
         let completed = if first {
             0
         } else if middle {
@@ -178,7 +181,9 @@ impl RouteFault {
         } else {
             "null".to_owned()
         };
-        assert!(text.contains(&format!(r#"{{\"completed_hops\":{completed},\"total_hops\":2,\"next_navigation_target\":{target}}}"#)));
+        if !text.contains("ZEXTRACT1 schema_content=trusted") {
+            assert!(text.contains(&format!(r#"{{\"completed_hops\":{completed},\"total_hops\":2,\"next_navigation_target\":{target}}}"#)));
+        }
         if self == Self::HostileCheckpoint && middle {
             assert!(
                 text.contains(HOSTILE_CHECKPOINT),

@@ -16,14 +16,12 @@ pub trait AgentWorkAccountSource: Send {
     fn sample(&self, context: ContextJoin) -> Result<AgentContextAccountBinding, AgentWorkFailure>;
 }
 
-/// Host-owned approval and independent effect classifier for local reversible
-/// actions, including read-only UI interactions, during an open objective. The
-/// host freezes the approved intent before admission and must establish that
-/// the exact target and operands are within that intent and have only local effects.
-/// Roles, names, page claims and the model-declared effect do not establish
-/// this: autosaving inputs, submits, remote writes and capability boundaries
-/// must refuse. Calls must be bounded and nonblocking. No native work belongs
-/// here; the controller separately admits, executes and verifies each action.
+/// Host-owned task scope and effect assessment for browser interactions.
+/// Page/model claims never grant authority. Implementations combine the trusted
+/// assignment with current control evidence and refuse consequential actions
+/// outside that scope. Native revalidation and outcome verification are separate;
+/// an assessment cannot prove that arbitrary page handlers have no side effects.
+/// Calls must be bounded and nonblocking.
 pub trait AgentWorkLocalActionPolicy: Send {
     /// Returns the independently approved operation subset for this exact
     /// observed node. This is model-affordance projection only; `assess`
@@ -34,8 +32,13 @@ pub trait AgentWorkLocalActionPolicy: Send {
         observation: &SemanticObservation,
     ) -> Result<SemanticOperations, AgentWorkFailure>;
 
+    /// Narrows the model effect vocabulary when the assignment has one effect.
+    fn model_action_effect(&self) -> Option<SemanticEffectClass> {
+        None
+    }
+
     /// Resolves the model-selected proposal against fresh semantic evidence and
-    /// independently returns its actual destination and effect, or refuses.
+    /// classifies its destination and expected effect within task scope, or refuses.
     fn assess(
         &self,
         action: &SemanticPreparedAction,
@@ -158,6 +161,11 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
             .as_ref()
             .ok_or(AgentWorkFailure::Contract)?
             .model_action_operations(node, observation)
+    }
+    fn model_action_effect(&self) -> Option<SemanticEffectClass> {
+        self.local_actions
+            .as_ref()
+            .and_then(|policy| policy.model_action_effect())
     }
     fn accept_verified_action(
         &mut self,

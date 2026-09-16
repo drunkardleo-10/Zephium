@@ -46,6 +46,9 @@ fn discovered_link_workflow_uses_original_controller_and_refuses_unobserved_urls
 
 pub(super) struct LocalActionPolicy;
 impl crate::AgentWorkLocalActionPolicy for LocalActionPolicy {
+    fn model_action_effect(&self) -> Option<SemanticEffectClass> {
+        Some(SemanticEffectClass::LocalWrite)
+    }
     fn model_action_operations(
         &self,
         node: &SemanticNode,
@@ -95,9 +98,11 @@ fn open_objective_interleaves_verified_local_actions_and_navigation_in_both_orde
 fn open_objective_corrects_unissued_action_and_bounds_repeated_invalid_proposals() {
     let _serial = lock(&SERIAL);
     for repeat in [false, true] {
-        provider_fixture(ProviderFault::Navigation(
-            NavigationFault::DiscoveryActionRefusal(repeat),
-        ));
+        for effect_mismatch in [false, true] {
+            provider_fixture(ProviderFault::Navigation(
+                NavigationFault::DiscoveryActionRefusal(repeat, effect_mismatch),
+            ));
+        }
     }
 }
 
@@ -294,7 +299,7 @@ impl TerraControllerClock for NavigationClock {
 pub(super) enum NavigationFault {
     Discovery,
     DiscoveryAction(bool),
-    DiscoveryActionRefusal(bool),
+    DiscoveryActionRefusal(bool, bool),
     DiscoveryBudget(u8, bool, u32),
     DiscoveryEvidence(bool),
     DiscoveryScopeRefusal(u8),
@@ -360,7 +365,7 @@ impl NavigationFault {
             }
             Self::DiscoveryMissingLink => 6,
             Self::DiscoveryAction(_) => 8,
-            Self::DiscoveryActionRefusal(repeat) => {
+            Self::DiscoveryActionRefusal(repeat, _) => {
                 if repeat {
                     4
                 } else {
@@ -439,9 +444,15 @@ impl NavigationFault {
                 .replace("Arrival certificate", "Departure certificate");
         }
 
-        if let Self::DiscoveryActionRefusal(repeat) = self {
+        if let Self::DiscoveryActionRefusal(repeat, effect_mismatch) = self {
             if turn == 1 || repeat {
-                return tool_stream(turn, true).replace("@a2", "@a1");
+                return if effect_mismatch {
+                    tool_stream(turn, true)
+                        .replace("@a2", "@a3")
+                        .replace("local_write", "read")
+                } else {
+                    tool_stream(turn, true).replace("@a2", "@a1")
+                };
             }
             let phase = turn - 1;
             return Self::DiscoveryAction(true)
@@ -668,7 +679,7 @@ impl NavigationFault {
             return;
         }
 
-        if let Self::DiscoveryActionRefusal(repeat) = self {
+        if let Self::DiscoveryActionRefusal(repeat, effect_mismatch) = self {
             if turns == 1 || (repeat && turns > 0) {
                 let body: serde_json::Value = serde_json::from_slice(bytes).unwrap();
                 let result = body["input"]
@@ -680,7 +691,18 @@ impl NavigationFault {
                 assert_eq!(result["call_id"], format!("call_{turns}"));
                 let error: serde_json::Value =
                     serde_json::from_str(result["output"].as_str().unwrap()).unwrap();
-                assert_eq!(error["code"], "operation_not_supported");
+                assert_eq!(
+                    error["code"],
+                    if effect_mismatch {
+                        "task_effect_mismatch"
+                    } else {
+                        "operation_not_supported"
+                    }
+                );
+                if effect_mismatch {
+                    assert_eq!(error["required_effect"], "local_write");
+                    assert_eq!(error["rejected"]["target"], "@a3");
+                }
                 assert_eq!(error["executed"], false);
                 assert_eq!(error["observation_unchanged"], true);
                 let text = std::str::from_utf8(bytes).unwrap();
@@ -694,7 +716,10 @@ impl NavigationFault {
         }
         if let Self::DiscoveryAction(action_first) = self {
             let text = std::str::from_utf8(bytes).unwrap();
-            assert!(text.contains("ZEPHIUM_HOST_LINK_DISCOVERY_V1"));
+            assert_eq!(
+                text.contains("ZEPHIUM_HOST_LINK_DISCOVERY_V1"),
+                !text.contains("ZEXTRACT1 schema_content=trusted")
+            );
             if turns < 3 {
                 assert!(text.contains(r#""name":"act""#));
                 assert!(text.contains(r#""name":"navigate""#));
@@ -783,7 +808,10 @@ impl NavigationFault {
         if let Self::DiscoveryBudget(configured_limit, _, operations) = self {
             let limit = configured_limit.min((operations - 1) as u8);
             let text = std::str::from_utf8(bytes).unwrap();
-            assert!(text.contains("ZEPHIUM_HOST_LINK_DISCOVERY_V1"));
+            assert_eq!(
+                text.contains("ZEPHIUM_HOST_LINK_DISCOVERY_V1"),
+                !text.contains("ZEXTRACT1 schema_content=trusted")
+            );
             assert_eq!(
                 text.matches("ZEPHIUM_HOST_DECISION_BUDGET_V1").count(),
                 usize::from(turns < limit - 1)
@@ -814,19 +842,27 @@ impl NavigationFault {
         if self.two_discovery_hops() {
             let text = std::str::from_utf8(bytes).unwrap();
             assert!(
-                text.contains("frames=1"),
-                "only the main frame is disclosed"
+                text.contains("frames=1") || text.contains("ZEXTRACT1 schema_content=trusted"),
+                "the main-frame observation or its terminal mapping inventory is disclosed"
             );
-            if self == Self::DiscoveryTwoHopsBlockedFrame && turns >= 2 {
+            if self == Self::DiscoveryTwoHopsBlockedFrame
+                && turns >= 2
+                && !text.contains("ZEXTRACT1 schema_content=trusted")
+            {
                 assert!(text.contains("unsupported:policy_blocked"));
                 assert!(text.contains("frame_boundary"));
             }
-            assert!(text.contains("ZEPHIUM_HOST_LINK_DISCOVERY_V1"));
+            assert_eq!(
+                text.contains("ZEPHIUM_HOST_LINK_DISCOVERY_V1"),
+                !text.contains("ZEXTRACT1 schema_content=trusted")
+            );
             assert!(!text.contains("ZEPHIUM_HOST_NAVIGATION_CHECKPOINT_V1"));
-            assert!(text.contains(&format!(
-                r#"\"completed_hops\":{},\"total_hops\":2,\"next_navigation_target\":null"#,
-                turns.min(2)
-            )));
+            if !text.contains("ZEXTRACT1 schema_content=trusted") {
+                assert!(text.contains(&format!(
+                    r#"\"completed_hops\":{},\"total_hops\":2,\"next_navigation_target\":null"#,
+                    turns.min(2)
+                )));
+            }
             for prior in 1..=turns.min(2) {
                 assert!(!text.contains(&format!("call_{prior}")));
                 assert!(!text.contains(&format!("resp_{prior}")));
@@ -838,9 +874,15 @@ impl NavigationFault {
         }
         let text = std::str::from_utf8(bytes).unwrap();
         if matches!(self, Self::Discovery | Self::DiscoveryMissingLink) {
-            assert!(text.contains("ZEPHIUM_HOST_LINK_DISCOVERY_V1"));
+            assert_eq!(
+                text.contains("ZEPHIUM_HOST_LINK_DISCOVERY_V1"),
+                !text.contains("ZEXTRACT1 schema_content=trusted")
+            );
             assert!(!text.contains("ZEPHIUM_HOST_NAVIGATION_CHECKPOINT_V1"));
-            assert!(text.contains(r#"\"next_navigation_target\":null"#));
+            assert_eq!(
+                text.contains(r#"\"next_navigation_target\":null"#),
+                !text.contains("ZEXTRACT1 schema_content=trusted")
+            );
         }
         assert!(
             text.contains("Verify a deterministic fixture."),
@@ -1085,7 +1127,7 @@ pub(super) fn capture(
         NavigationFault::DiscoveryEvidence(_)
             | NavigationFault::DiscoveryScopeRefusal(_)
             | NavigationFault::DiscoveryAction(_)
-            | NavigationFault::DiscoveryActionRefusal(_)
+            | NavigationFault::DiscoveryActionRefusal(_, _)
     ) {
         assert_eq!(
             correlation.snapshot_generation().get(),
@@ -1119,7 +1161,7 @@ pub(super) fn capture(
     );
     let wire = if matches!(
         fault,
-        NavigationFault::DiscoveryAction(_) | NavigationFault::DiscoveryActionRefusal(_)
+        NavigationFault::DiscoveryAction(_) | NavigationFault::DiscoveryActionRefusal(_, _)
     ) {
         let value = if lock(&port.calls).contains(&7) {
             "fixture value"
@@ -1140,7 +1182,7 @@ pub(super) fn capture(
             NavigationFault::Discovery
                 | NavigationFault::DiscoveryNavigationRefusal(_)
                 | NavigationFault::DiscoveryAction(_)
-                | NavigationFault::DiscoveryActionRefusal(_)
+                | NavigationFault::DiscoveryActionRefusal(_, _)
                 | NavigationFault::DiscoveryBudget(..)
                 | NavigationFault::DiscoveryEvidence(_)
                 | NavigationFault::DiscoveryScopeRefusal(_)
@@ -1324,7 +1366,7 @@ pub(super) fn assert_outcome(
         assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
         return;
     }
-    if let NavigationFault::DiscoveryActionRefusal(repeat) = fault {
+    if let NavigationFault::DiscoveryActionRefusal(repeat, _) = fault {
         if repeat {
             let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
                 panic!("{outcome:?}");

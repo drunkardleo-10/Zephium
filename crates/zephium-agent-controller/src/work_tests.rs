@@ -882,9 +882,13 @@ enum Fault {
     #[cfg(feature = "probe-harness")]
     ActionVerification,
     #[cfg(feature = "probe-harness")]
+    ScrollVerification,
+    #[cfg(feature = "probe-harness")]
     ActionApplied,
     #[cfg(feature = "probe-harness")]
     ActionAppliedBoundary,
+    #[cfg(feature = "probe-harness")]
+    ActionAppliedLargeDiff,
     #[cfg(feature = "probe-harness")]
     ActionBudget,
     #[cfg(feature = "probe-harness")]
@@ -1070,6 +1074,26 @@ impl AgentBrowserPort for Port {
             }
         );
         let wire = format!("{{\"v\":1,\"i\":{},\"g\":{},\"c\":\"complete\",\"n\":[{{\"k\":1,\"r\":\"document\",\"o\":16}},{{\"k\":2,\"p\":0,\"r\":\"textbox\",\"n\":\"Field\",\"s\":64,\"o\":2,\"v\":{{\"k\":\"text\",\"value\":\"\"}},\"b\":{{\"x\":10,\"y\":20,\"w\":120,\"h\":30}}}}]}}", correlation.invocation().get(), correlation.snapshot_generation().get());
+        #[cfg(feature = "probe-harness")]
+        let wire = if self.fault == Fault::ScrollVerification {
+            wire.replace(
+                r#""r":"document","o":16"#,
+                r#""r":"document","o":16,"b":{"x":0,"y":0,"w":800,"h":600}"#,
+            )
+        } else {
+            wire
+        };
+        #[cfg(feature = "probe-harness")]
+        let wire = if self.fault == Fault::ActionAppliedBoundary
+            && correlation.snapshot_generation().get() == 1
+        {
+            wire.replace(
+                "]}",
+                ",{\"k\":9,\"p\":0,\"r\":\"paragraph\",\"t\":\"Public detail before edit\"}]}",
+            )
+        } else {
+            wire
+        };
         let wire = if self.fault == Fault::EmbeddedFrame {
             wire.replace("]}", ",{\"k\":3,\"p\":0,\"r\":\"frame_boundary\"}]}")
         } else {
@@ -1093,7 +1117,7 @@ impl AgentBrowserPort for Port {
         #[cfg(feature = "probe-harness")]
         let wire = if matches!(
             self.fault,
-            Fault::ActionApplied | Fault::ActionAppliedBoundary
+            Fault::ActionApplied | Fault::ActionAppliedBoundary | Fault::ActionAppliedLargeDiff
         ) && lock(&self.calls).contains(&7)
         {
             wire.replace("\"value\":\"\"", "\"value\":\"fixture value\"")
@@ -1103,6 +1127,19 @@ impl AgentBrowserPort for Port {
         #[cfg(feature = "probe-harness")]
         let wire = if self.fault == Fault::ActionAppliedBoundary && lock(&self.calls).contains(&7) {
             wire.replace("]}", ",{\"k\":3,\"p\":0,\"r\":\"frame_boundary\"}]}")
+        } else {
+            wire
+        };
+        #[cfg(feature = "probe-harness")]
+        let wire = if self.fault == Fault::ActionAppliedLargeDiff && lock(&self.calls).contains(&7)
+        {
+            wire.replace(
+                "]}",
+                &format!(
+                    ",{{\"k\":3,\"p\":0,\"r\":\"paragraph\",\"t\":\"{}\"}}]}}",
+                    "New details ".repeat(180)
+                ),
+            )
         } else {
             wire
         };
@@ -1265,11 +1302,25 @@ impl AgentBrowserPort for Port {
         match self.fault {
             Fault::ActionDispatch => return ContextDispatch::Unsupported,
             Fault::ActionCallback => {}
+            Fault::ScrollVerification => {
+                let now = request.requested_at();
+                let geometry = request.expected_geometry();
+                completion(request.complete(
+                    SemanticActionExecutionBackend::FixedSemanticRecipe,
+                    SemanticActionNativeReadiness::ExactConnectedScrollTarget,
+                    SemanticActionNativeViewport::try_new(800, 600).unwrap(),
+                    geometry,
+                    now,
+                    now,
+                ));
+                return ContextDispatch::Scheduled;
+            }
             Fault::ActionVerification
             | Fault::ActionApplied
             | Fault::ActionAppliedBoundary
+            | Fault::ActionAppliedLargeDiff
             | Fault::Navigation(
-                NavigationFault::DiscoveryAction(_) | NavigationFault::DiscoveryActionRefusal(_),
+                NavigationFault::DiscoveryAction(_) | NavigationFault::DiscoveryActionRefusal(_, _),
             )
             | Fault::Scoped(ScopedFault::Combined) => {
                 let now = request.requested_at();
@@ -1992,7 +2043,10 @@ fn provider_fixture_with_discovery_account(
             // This fixture's native faults target one exact synthetic fill.
             // Without the advertised operation, the production driver correctly
             // rejects the proposal before the fault being tested can occur.
-            if node.name().is_some_and(|name| name.as_str() == "Field") {
+            if node.role() == SemanticRole::Document {
+                SemanticOperations::try_new(&[SemanticOperationClass::Scroll])
+                    .map_err(|_| AgentWorkFailure::Contract)
+            } else if node.name().is_some_and(|name| name.as_str() == "Field") {
                 SemanticOperations::try_new(&[SemanticOperationClass::Fill])
                     .map_err(|_| AgentWorkFailure::Contract)
             } else {
@@ -2015,7 +2069,11 @@ fn provider_fixture_with_discovery_account(
             Ok(AgentEffectAssessment::new(
                 action,
                 action.frame().origin().clone(),
-                SemanticEffectClass::LocalWrite,
+                if action.kind() == SemanticActionKind::Scroll {
+                    SemanticEffectClass::Read
+                } else {
+                    SemanticEffectClass::LocalWrite
+                },
             ))
         }
         fn attest_account(
@@ -2195,6 +2253,24 @@ fn provider_fixture_with_discovery_account(
             if let ProviderFault::Navigation(fault) = fault {
                 fault.check_request(&request[header + 4..], turns);
             }
+            if matches!(
+                fault,
+                ProviderFault::Combined(CombinedFault::None | CombinedFault::BoundaryAfterAction)
+            ) && turns == 1
+            {
+                let wire: serde_json::Value =
+                    serde_json::from_slice(&request[header + 4..]).unwrap();
+                let progress = wire["input"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .flat_map(|item| item["content"].as_array().into_iter().flatten())
+                    .filter_map(|part| part["text"].as_str())
+                    .find(|text| text.contains("ZEPHIUM_HOST_ACTION_PROGRESS_V1"))
+                    .expect("verified action history reaches count and generation requests");
+                assert!(progress.contains("ExactTargetValue"));
+                assert!(!progress.contains("fixture value") && !progress.contains("@a2"));
+            }
             if fault == ProviderFault::Combined(CombinedFault::BoundaryAfterAction) && turns == 1 {
                 let wire: serde_json::Value =
                     serde_json::from_slice(&request[header + 4..]).unwrap();
@@ -2215,6 +2291,37 @@ fn provider_fixture_with_discovery_account(
                         && observation.contains("snapshot=2")
                         && observation.contains("frame_boundary")
                 );
+            }
+            if fault == ProviderFault::Combined(CombinedFault::OversizedDiffAfterAction)
+                && turns == 1
+            {
+                let wire: serde_json::Value =
+                    serde_json::from_slice(&request[header + 4..]).unwrap();
+                let output = wire["input"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|item| item["type"] == "function_call_output")
+                    .unwrap();
+                let output: serde_json::Value =
+                    serde_json::from_str(output["output"].as_str().unwrap()).unwrap();
+                assert_eq!(output["status"], "verified");
+                assert_eq!(output["update"], "replace_observation");
+                assert!(output["observation"]
+                    .as_str()
+                    .unwrap()
+                    .contains("New details"));
+            }
+            if fault == ProviderFault::Combined(CombinedFault::BoundaryAfterAction) && turns == 2 {
+                let wire: serde_json::Value =
+                    serde_json::from_slice(&request[header + 4..]).unwrap();
+                let input = serde_json::to_string(&wire["input"]).unwrap();
+                assert!(
+                    input.contains("Public detail before edit"),
+                    "pre-action evidence reaches terminal mapping without an extra snapshot"
+                );
+                assert!(input.contains("snapshot=1"));
+                assert!(input.contains("refs=historical_read_only"));
             }
             let (kind, body) = if is_count {
                 (
@@ -2295,6 +2402,12 @@ fn provider_fixture_with_discovery_account(
                             | ProviderFault::HumanExtractionRequest
                     ) {
                         named_tool_stream(turns, "show_for_human", r#"{\"reason\":\"sign_in\"}"#)
+                    } else if fault == ProviderFault::Native(Fault::ScrollVerification) {
+                        named_tool_stream(
+                            turns,
+                            "act",
+                            r#"{\"actions\":[{\"kind\":\"scroll\",\"target\":\"@a1\",\"amount\":\"page\",\"direction\":\"down\",\"effect\":\"read\",\"wait\":{\"kind\":\"immediate\"},\"verification\":{\"kind\":\"scroll_position_changed\"},\"settle_millis\":2000}]}"#,
+                        )
                     } else {
                         let stream = tool_stream(turns, matches!(fault, ProviderFault::Native(_)));
                         if fault == ProviderFault::Native(Fault::ActionBudget) {
@@ -2331,7 +2444,7 @@ fn provider_fixture_with_discovery_account(
         ProviderFault::Navigation(
             NavigationFault::Discovery
                 | NavigationFault::DiscoveryAction(_)
-                | NavigationFault::DiscoveryActionRefusal(_)
+                | NavigationFault::DiscoveryActionRefusal(_, _)
                 | NavigationFault::DiscoveryEvidence(_)
                 | NavigationFault::DiscoveryScopeRefusal(_)
                 | NavigationFault::DiscoveryBudget(..)
@@ -2346,7 +2459,7 @@ fn provider_fixture_with_discovery_account(
                 fault,
                 ProviderFault::Navigation(
                     NavigationFault::DiscoveryAction(_)
-                        | NavigationFault::DiscoveryActionRefusal(_)
+                        | NavigationFault::DiscoveryActionRefusal(_, _)
                 )
             ) {
                 &[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite]
@@ -2408,7 +2521,7 @@ fn provider_fixture_with_discovery_account(
         if matches!(fault, NavigationFault::DiscoveryScopeRefusal(case) if case != 3)
             || matches!(
                 fault,
-                NavigationFault::DiscoveryActionRefusal(_)
+                NavigationFault::DiscoveryActionRefusal(_, _)
                     | NavigationFault::DiscoveryNavigationRefusal(_)
                     | NavigationFault::DiscoveryMissingLink
             )
@@ -2450,7 +2563,7 @@ fn provider_fixture_with_discovery_account(
             fault,
             NavigationFault::Discovery
                 | NavigationFault::DiscoveryAction(_)
-                | NavigationFault::DiscoveryActionRefusal(_)
+                | NavigationFault::DiscoveryActionRefusal(_, _)
                 | NavigationFault::DiscoveryEvidence(_)
                 | NavigationFault::DiscoveryScopeRefusal(_)
                 | NavigationFault::DiscoveryBudget(..)
@@ -2511,7 +2624,7 @@ fn provider_fixture_with_discovery_account(
                 if matches!(
                     fault,
                     NavigationFault::DiscoveryAction(_)
-                        | NavigationFault::DiscoveryActionRefusal(_)
+                        | NavigationFault::DiscoveryActionRefusal(_, _)
                 ) {
                     task.with_local_actions(Box::new(navigation_tests::LocalActionPolicy))
                 } else {
@@ -2630,6 +2743,8 @@ fn provider_fixture_with_discovery_account(
         Fault::Scoped(fault)
     } else if fault == ProviderFault::Combined(CombinedFault::ActionLost) {
         Fault::ActionLost
+    } else if fault == ProviderFault::Combined(CombinedFault::OversizedDiffAfterAction) {
+        Fault::ActionAppliedLargeDiff
     } else if fault == ProviderFault::Combined(CombinedFault::BoundaryAfterAction) {
         Fault::ActionAppliedBoundary
     } else if matches!(fault, ProviderFault::Combined(_)) {
@@ -2894,6 +3009,22 @@ fn provider_fixture_with_discovery_account(
             event.kind(),
             AgentWorkEventKind::Verified | AgentWorkEventKind::Terminal
         )));
+        assert_eq!(server.join().unwrap(), 1);
+        return;
+    }
+    if fault == ProviderFault::Native(Fault::ScrollVerification) {
+        let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+            panic!("completed failed scroll must close: {outcome:?}");
+        };
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        assert_eq!(calls, [1, 2, 3, 7, 3, 4, 5, 6]);
+        assert_eq!(closed.policy_settlement().closure().effects(), 1);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event.kind(), AgentWorkEventKind::ActionUnverified(_))));
+        assert!(!events
+            .iter()
+            .any(|event| event.kind() == AgentWorkEventKind::Verified));
         assert_eq!(server.join().unwrap(), 1);
         return;
     }
@@ -3341,4 +3472,11 @@ fn product_backpressure_is_bounded_sticky_and_content_free() {
         Err(AgentWorkFailure::Backpressure)
     );
     assert!(!format!("{:?}", events.queue).contains("work-fixture"));
+}
+
+#[cfg(feature = "probe-harness")]
+#[test]
+fn completed_unverified_read_scroll_closes_without_replay_or_native_debt() {
+    let _guard = lock(&SERIAL);
+    provider_fixture(ProviderFault::Native(Fault::ScrollVerification));
 }

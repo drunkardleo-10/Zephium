@@ -223,6 +223,10 @@ pub trait AgentWorkTask: Send {
     ) -> Result<SemanticOperations, AgentWorkFailure> {
         Ok(SemanticOperations::NONE)
     }
+    /// Optional effect vocabulary restriction; it never replaces assessment.
+    fn model_action_effect(&self) -> Option<SemanticEffectClass> {
+        None
+    }
     /// Advances trusted task state from one independently verified native
     /// action terminal. The default has no action-progress contract.
     fn accept_verified_action(
@@ -1412,8 +1416,12 @@ impl WorkState {
                 entries.push((node.reference(), operations));
             }
         }
-        AgentProviderActionAuthority::try_new(observation, &entries)
-            .ok_or(AgentWorkFailure::Contract)
+        let authority = AgentProviderActionAuthority::try_new(observation, &entries)
+            .ok_or(AgentWorkFailure::Contract)?;
+        Ok(match self.task.model_action_effect() {
+            Some(effect) => authority.with_required_effect(effect),
+            None => authority,
+        })
     }
 
     fn check_task_contract(&self) -> Result<(), AgentWorkFailure> {
@@ -2035,6 +2043,9 @@ impl AgentWorkController {
                 session.config.restrict_to_navigation_and_extraction()
             };
         }
+        session.config = session
+            .config
+            .with_navigation_available(!state.navigation_complete());
         if state.baseline_read {
             session.config = session.config.with_baseline_read();
         }
@@ -2730,6 +2741,28 @@ impl AgentWorkController {
                     ))
                 }
             };
+            if state.progressive_observation || state.navigation_discovery.is_some() {
+                if let Some(schema) = &state.extraction_schema {
+                    session.check_live().map_err(AgentWorkFailure::Browser)?;
+                    let read = read_semantic_observation_for_schema(
+                        &observation,
+                        SemanticReadAuthority::Acknowledged(proposal.baseline()),
+                        captured_at,
+                        SemanticReadSensitivityLimit::PublicOnly,
+                        SemanticReadBudget::STANDARD,
+                        schema,
+                    )
+                    .map_err(|error| {
+                        AgentWorkFailure::Browser(AgentBrowserProviderError::Read(error))
+                    })?;
+                    state
+                        .retained_read_evidence
+                        .retain(&read, proposal.baseline())
+                        .map_err(|error| {
+                            AgentWorkFailure::Browser(AgentBrowserProviderError::Read(error))
+                        })?;
+                }
+            }
             let assessment = state
                 .task
                 .assess_observed(proposal.action(), &observation)?;
@@ -2819,6 +2852,7 @@ impl AgentWorkController {
             if wake.is_some() {
                 return Err(AgentWorkFailure::Contract);
             }
+            state.journal_mut()?.emit(AgentWorkEventKind::Verifying)?;
             let current = Self::observe(state, worker, browser).await?;
             let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
             let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
@@ -4213,9 +4247,13 @@ pub enum AgentWorkEventKind {
     InspectionAnchorLost,
     /// An independently authorized native effect is active.
     ActionActive,
+    /// Native execution settled; a fresh observation is checking the outcome.
+    Verifying,
     /// Native synchronously refused admission; the failed effect and batch
     /// were accounted. No native execution or retry is implied.
     ActionRejected(SemanticActionFailure),
+    /// A completed read-only scroll did not prove movement; its failed receipt is closed.
+    ActionUnverified(SemanticActionFailure),
     /// A native effect was independently verified and accounted.
     Verified,
     /// An explicit policy/human boundary stopped execution.
@@ -4592,6 +4630,21 @@ impl WorkJournal {
         &mut self,
         batch: &SemanticActionBatchResult,
     ) -> Result<(), AgentWorkFailure> {
+        self.action_failure(batch, false)
+    }
+
+    pub(super) fn action_unverified(
+        &mut self,
+        batch: &SemanticActionBatchResult,
+    ) -> Result<(), AgentWorkFailure> {
+        self.action_failure(batch, true)
+    }
+
+    fn action_failure(
+        &mut self,
+        batch: &SemanticActionBatchResult,
+        issued: bool,
+    ) -> Result<(), AgentWorkFailure> {
         let failure = batch.failure().ok_or(AgentWorkFailure::Accounting)?;
         let receipt = failure.receipt();
         let AgentEffectSettlement::Failed(reason) = receipt.settlement() else {
@@ -4610,7 +4663,11 @@ impl WorkJournal {
             )
             .map_err(|_| AgentWorkFailure::Accounting)?;
         self.record()?;
-        self.emit(AgentWorkEventKind::ActionRejected(reason))
+        self.emit(if issued {
+            AgentWorkEventKind::ActionUnverified(reason)
+        } else {
+            AgentWorkEventKind::ActionRejected(reason)
+        })
     }
 }
 

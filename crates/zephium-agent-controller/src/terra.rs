@@ -2265,6 +2265,33 @@ impl AgentBrowserSession {
         let (continuation, result) = transition
             .into_parts()
             .ok_or(AgentBrowserProviderError::Continuation)?;
+        let (result, payload) = match result
+            .diff()
+            .map(|diff| {
+                encode_semantic_diff(
+                    diff,
+                    SemanticModelEncodingBudget::ACTION_DIFF_PROVIDER_EXACT_CONSERVATIVE,
+                )
+                .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
+            })
+            .transpose()
+        {
+            Ok(payload) => (result, payload),
+            Err(
+                _error @ (SemanticModelEncodingError::OutputLimit
+                | SemanticModelEncodingError::TokenLimit),
+            ) => match result {
+                crate::action::AgentBrowserVerifiedState::Accounted(result) => (
+                    crate::action::AgentBrowserVerifiedState::Accounted(Box::new(
+                        result.into_fresh_snapshot(),
+                    )),
+                    None,
+                ),
+                #[cfg(feature = "probe-harness")]
+                _ => return Err(AgentBrowserProviderError::DiffEncoding(_error)),
+            },
+            Err(error) => return Err(AgentBrowserProviderError::DiffEncoding(error)),
+        };
         let Some(diff) = result.diff() else {
             let result = result
                 .action_result()
@@ -2290,12 +2317,13 @@ impl AgentBrowserSession {
                 .map_err(AgentBrowserProviderError::from_request)?;
             return self.drive(prepared.into_transport_input()).await;
         };
-        let payload = encode_semantic_diff(
-            diff,
-            SemanticModelEncodingBudget::ACTION_DIFF_PROVIDER_EXACT_CONSERVATIVE,
-        )
-        .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
-        .map_err(AgentBrowserProviderError::DiffEncoding)?;
+        let payload = payload.ok_or(AgentBrowserProviderError::Continuation)?;
+        let continuation = match result.action_result() {
+            Some(result) => continuation
+                .with_verified_action_progress(result)
+                .map_err(|_| AgentBrowserProviderError::Continuation)?,
+            None => continuation,
+        };
         let bound = continuation
             .bind_diff_request_with_action_authority(
                 request,
@@ -2392,6 +2420,10 @@ impl AgentBrowserSession {
             self.account,
             browser_call_budget(self.model)?,
             now,
+        )
+        .with_remaining_native_actions(
+            self.max_actions
+                .saturating_sub(self.next_action.saturating_sub(1)),
         ))
     }
 
@@ -3295,6 +3327,13 @@ impl AgentBrowserSession {
         ) {
             Ok(accounted) => accounted,
             Err(error) => {
+                if error
+                    == crate::AgentBrowserActionError::Verification(
+                        zephium_agentic::SemanticVerificationError::OutcomeNotObserved,
+                    )
+                {
+                    self.close_failed_read_scroll()?;
+                }
                 let error = AgentBrowserProviderError::Action(error);
                 if error
                     != AgentBrowserProviderError::Action(
@@ -3361,6 +3400,13 @@ impl AgentBrowserSession {
         match result {
             Ok(accounted) => self.finish_action(accounted, baseline, current, observed_at),
             Err(error) => {
+                if error
+                    == crate::AgentBrowserActionError::Verification(
+                        zephium_agentic::SemanticVerificationError::OutcomeNotObserved,
+                    )
+                {
+                    self.close_failed_read_scroll()?;
+                }
                 let error = AgentBrowserProviderError::Action(error);
                 if error
                     != AgentBrowserProviderError::Action(
@@ -3372,6 +3418,36 @@ impl AgentBrowserSession {
                 Err(error)
             }
         }
+    }
+
+    fn close_failed_read_scroll(&mut self) -> Result<(), AgentBrowserProviderError> {
+        if self.action_executions.status().pending() != 0
+            || self.action_settlements.status().pending() != 0
+            || self.action_terminal.is_some()
+        {
+            return Ok(());
+        }
+        let Some(action) = self.action.take() else {
+            return Ok(());
+        };
+        let terminal = match action.into_failed_read_scroll_batch() {
+            Ok(terminal) => terminal,
+            Err(action) => {
+                self.action = Some(*action);
+                return Ok(());
+            }
+        };
+        self.action_terminal = Some(terminal);
+        if !self.journal.as_mut().is_some_and(|journal| {
+            journal
+                .action_unverified(self.action_terminal.as_ref().expect("retained terminal"))
+                .is_ok()
+        }) {
+            self.failure = Some(AgentBrowserProviderError::Journal);
+            return Err(AgentBrowserProviderError::Journal);
+        }
+        self.action_terminal.take();
+        Ok(())
     }
 
     fn finish_action(
@@ -4071,6 +4147,35 @@ mod tests {
     }
 
     #[test]
+    fn action_allowance_is_frozen_per_call_without_changing_continuation_config() {
+        for used in [0, 1, 2] {
+            let (mut session, observation) = browser_fixture_with_limits(
+                AgentRunBudget::try_new(16, 300_000, 1_000_000, 1).unwrap(),
+                MAX_BROWSER_MODEL_TURNS,
+                2,
+            );
+            let original = session.config.clone();
+            session.next_action = used + 1;
+            let input = reserved_browser_input(&mut session, &observation);
+            let body: serde_json::Value = serde_json::from_slice(input.request().body()).unwrap();
+            assert_eq!(
+                body["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|tool| tool["name"] == "act"),
+                used < 2
+            );
+            assert!(String::from_utf8(input.request().body().to_vec())
+                .unwrap()
+                .contains(&format!("native_actions_remaining={}", 2 - used)));
+            assert_eq!(session.config, original);
+            let _outcome = input.cancel(&mut session.policy).unwrap();
+            assert!(session.try_finish_unsuccessful().is_ok());
+        }
+    }
+
+    #[test]
     fn luna_initial_reservation_requires_sufficient_frozen_run_and_node_budget() {
         use zephium_agentic::{AgentPolicyError, AgentProviderRequestError};
         for cost in [
@@ -4409,12 +4514,21 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
+        let error = runtime
+            .block_on(session.start_initial(&observation))
+            .unwrap_err();
+        #[cfg(not(feature = "probe-harness"))]
         assert_eq!(
-            runtime
-                .block_on(session.start_initial(&observation))
-                .unwrap_err(),
+            error,
             AgentBrowserProviderError::RequestPolicy(zephium_agentic::AgentPolicyError::Budget)
         );
+        #[cfg(feature = "probe-harness")]
+        assert!(matches!(
+            error,
+            AgentBrowserProviderError::RequestPolicy(zephium_agentic::AgentPolicyError::ModelInputBudget {
+                cost, remaining_cost: 50_000, remaining_tokens: 100_000, remaining_operations: 8, ..
+            }) if cost > 50_000
+        ));
         assert_eq!(session.turns, 0);
         assert_eq!(session.policy.pending_model_calls(), 0);
         assert!(session.try_finish_unsuccessful().is_ok());
