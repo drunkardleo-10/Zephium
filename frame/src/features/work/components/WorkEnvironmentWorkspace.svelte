@@ -356,6 +356,26 @@
     ...agents.links,
   ]);
   const organizing = new SvelteSet<string>();
+  // Planned placements render new elements where organize intends them before
+  // their saved placement lands, so a canvas checkpoint never persists the
+  // fallback grid over them.
+  let planned = $state.raw<Record<string, { x: number; y: number; width: number; height: number }>>(
+    {},
+  );
+  const plannedGeometry = $derived.by(() => {
+    const positions: Record<string, { x: number; y: number }> = {};
+    const sizes: Record<string, { width: number; height: number }> = {};
+    if (!snapshot) return { positions, sizes };
+    const saved = new Set(snapshot.view.placements.map((place) => place.element));
+    for (const element of snapshot.elements) {
+      if (saved.has(element.id)) continue;
+      const place = planned[JSON.stringify(element.reference)];
+      if (!place) continue;
+      positions[element.id] = { x: place.x, y: place.y };
+      sizes[element.id] = { width: place.width, height: place.height };
+    }
+    return { positions, sizes };
+  });
   $effect(() => {
     const current = snapshot;
     const objectives = context.objectives;
@@ -382,6 +402,12 @@
     if (!session.snapshot) return;
     const plan = organizeExecution(projection, execution, anchor, session.snapshot);
     if (!plan.adds.length || !(await session.flushView())) return;
+    planned = {
+      ...planned,
+      ...Object.fromEntries(
+        plan.adds.map((add) => [JSON.stringify(add.reference), add.placement] as const),
+      ),
+    };
     for (const add of plan.adds) {
       if (session.snapshot && elementFor(session.snapshot, add.reference)) continue;
       if (!(await session.edit({ kind: "add", reference: add.reference, area: null }))) return;
@@ -527,11 +553,17 @@
             ...scene.positions,
             ...pages.positions,
             ...agents.positions,
+            ...plannedGeometry.positions,
             ...planGeometry.positions,
             ...savedResultPositions,
             ...environmentView(snapshot).positions,
           },
-          sizes: { ...planGeometry.sizes, ...savedResultSizes, ...environmentView(snapshot).sizes },
+          sizes: {
+            ...plannedGeometry.sizes,
+            ...planGeometry.sizes,
+            ...savedResultSizes,
+            ...environmentView(snapshot).sizes,
+          },
         }
       : undefined,
   );
