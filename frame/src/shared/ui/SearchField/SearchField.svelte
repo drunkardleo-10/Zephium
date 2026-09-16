@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { HTMLInputAttributes } from "svelte/elements";
   import { Search01Icon } from "@hugeicons/core-free-icons";
   import Icon from "../Icon/Icon.svelte";
   let {
@@ -8,7 +9,11 @@
     value = $bindable(""),
     ref = $bindable(),
     onsubmit,
+    oninput,
+    inputProps = {},
   }: {
+    inputProps?: Omit<HTMLInputAttributes, "value" | "oninput">;
+    oninput?: (value: string) => void;
     label: string;
     ref?: HTMLInputElement;
     size?: "chrome" | "page";
@@ -35,6 +40,8 @@
     bind:value
     {placeholder}
     autocomplete="off"
+    {...inputProps}
+    oninput={(event) => oninput?.(event.currentTarget.value)}
   />
 </form>
 

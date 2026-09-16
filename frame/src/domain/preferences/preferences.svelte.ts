@@ -5,6 +5,9 @@ import { settle } from "$domain/operations";
 
 const defaults = {
   appearance: "system",
+  "search.engine": "duckduckgo",
+  "search.custom-url": "",
+  "search.suggestions": "true",
   "sidebar.mode": "default",
   "tools.presentation": "follow_layout",
   "ui.accent": "graphite",

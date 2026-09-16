@@ -28,7 +28,8 @@
   import * as toolHost from "$session/tools.svelte";
   import { SettingsNavigation } from "$features/settings";
   import { LibraryPage } from "$features/library";
-  import { NewTab } from "$features/newtab";
+  import { loadNewTabSearch } from "$features/search";
+  import { loadNewTab } from "$features/newtab";
   import { Sidebar } from "$features/sidebar";
   import { IS_MAC } from "$shared/platform";
   import { tabs } from "$domain/tabs";
@@ -41,9 +42,19 @@
         if (disposed) unsubscribe();
         else stop = unsubscribe;
       });
+    const noteListener = events.noteOpenRequested.listen(({ payload: { profile, id } }) => {
+      if (profile !== tabs.profile()?.id) return;
+      toolHost.open("notes");
+      void import("$domain/resources").then(async ({ resourceSession }) => {
+        if (disposed || tabs.profile()?.id !== profile) return;
+        const session = resourceSession(profile, "note", "sidebar");
+        await session?.requestOpen(id);
+      });
+    });
     return () => {
       disposed = true;
       stop?.();
+      void noteListener.then((stop) => stop());
     };
   });
   $effect(() => {
@@ -154,12 +165,27 @@
     -->
     <main class="min-w-0 flex-1 ps-2" data-zephium-new-tab>
       <div class="content-pane h-full w-full overflow-hidden">
-        <NewTab
-          clockFormat={preview.get("ntp.clock-format", "System")}
-          showGreeting={preview.get("ntp.greeting", true)}
-          personalize={preview.get("ntp.personalize", false)}
-          showClock={preview.get("ntp.clock", true)}
-        />
+        <LazyView
+          loader={loadNewTab}
+          loadingLabel={m.surface_loading()}
+          failureLabel={m.surface_render_failed()}
+          retryLabel={m.surface_retry()}
+          >{#snippet children(NewTab)}<NewTab
+              clockFormat={preview.get("ntp.clock-format", "System")}
+              showGreeting={preview.get("ntp.greeting", true)}
+              personalize={preview.get("ntp.personalize", false)}
+              showClock={preview.get("ntp.clock", true)}
+              >{#snippet search()}{#key tabs.activeId()}<LazyView
+                    loader={loadNewTabSearch}
+                    loadingLabel={m.surface_loading()}
+                    failureLabel={m.surface_render_failed()}
+                    retryLabel={m.surface_retry()}
+                    >{#snippet children(Search)}<Search
+                        tabId={tabs.activeId()}
+                      />{/snippet}</LazyView
+                  >{/key}{/snippet}</NewTab
+            >{/snippet}</LazyView
+        >
       </div>
     </main>
   {/if}

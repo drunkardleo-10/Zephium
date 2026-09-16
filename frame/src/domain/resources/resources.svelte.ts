@@ -48,6 +48,11 @@ export class ResourceSession {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private writing: Promise<boolean> | null = null;
   private active = false;
+  private requestedId: string | null = null;
+  async requestOpen(id: string) {
+    if (this.active) await this.open(id);
+    else this.requestedId = id;
+  }
   readonly removeCloseTask: () => void;
   constructor(profile: string, kind: ResourceKind) {
     this.profile = profile;
@@ -92,6 +97,12 @@ export class ResourceSession {
     }
     this.stop = stop;
     await this.reload();
+    if (this.requestedId) {
+      const id = this.requestedId;
+      this.requestedId = null;
+      await this.open(id);
+      return;
+    }
     const selected = this.record?.id ?? this.resumeId;
     if (selected && this.saveState === "saved") await this.open(selected);
     if (this.saveState === "unsaved") void this.flush();

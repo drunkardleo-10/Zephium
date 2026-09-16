@@ -118,5 +118,21 @@
   "lazy:features/work/components/WorkCanvas.svelte": {
     "js": 470000,
     "css": 96000
+  },
+  "lazy:features/newtab/components/NewTab.svelte": {
+    "js": 295000,
+    "css": 85000
+  },
+  "lazy:domain/resources/index.ts": {
+    "js": 79000,
+    "css": 0
+  },
+  "lazy:features/search/components/LauncherPanel.svelte": {
+    "js": 119000,
+    "css": 6000
+  },
+  "lazy:features/search/components/NewTabSearch.svelte": {
+    "js": 118500,
+    "css": 6000
   }
 }

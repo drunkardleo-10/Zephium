@@ -62,6 +62,20 @@ export function resourceTestServer(profile: string) {
           .map(summary),
         next: null,
       });
+    if (call.kind === "search_titles")
+      return response({
+        kind: "page",
+        next: null,
+        items: [...records.values()]
+          .filter(
+            (record) =>
+              !record.trashed &&
+              record.draft.content.kind === "note" &&
+              record.draft.title.toLowerCase().includes(call.query.toLowerCase()),
+          )
+          .slice(0, 6)
+          .map(summary),
+      });
     const cached = receipts.get(call.command.request_id);
     if (cached) return structuredClone(cached);
     const intent = call.command.intent;

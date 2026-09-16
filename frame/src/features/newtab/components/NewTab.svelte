@@ -10,14 +10,17 @@
   import { tabs } from "$domain/tabs";
   import type { TabView } from "$shared/ipc/bindings";
   import FavIcon from "$shared/ui/FavIcon";
+  import type { Snippet } from "svelte";
   import SearchField from "$shared/ui/SearchField";
 
   let {
+    search,
     clockFormat = "System",
     showGreeting = true,
     personalize = false,
     showClock = true,
   }: {
+    search?: Snippet;
     clockFormat?: string;
     showGreeting?: boolean;
     personalize?: boolean;
@@ -99,13 +102,13 @@
       <time datetime={now.toISOString()}>{clock}</time><span>{date}</span>
     </div>{/if}
   <div class="newtab-search">
-    <SearchField
-      size="page"
-      label={m.search_web()}
-      placeholder={m.search_web()}
-      bind:ref={input}
-      onsubmit={go}
-    />
+    {#if search}{@render search()}{:else}<SearchField
+        size="page"
+        label={m.search_web()}
+        placeholder={m.search_web()}
+        bind:ref={input}
+        onsubmit={go}
+      />{/if}
   </div>
 
   {#if preferences.value("ui.newtab-shortcuts") === "true" && essentials.length > 0}
