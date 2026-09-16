@@ -33,6 +33,14 @@ impl Shell {
             });
             return;
         }
+        // A degraded profile answers every read with nothing and drops every
+        // write. Say so: an empty list here reads as "you have no history".
+        if self.degraded_storage_profiles.contains(&expected_profile) {
+            done.finish(HistoryResponse::Error {
+                error: HistoryError::Unavailable,
+            });
+            return;
+        }
         if self.history.pending.len() >= MAX_PENDING_HISTORY_CALLS {
             done.finish(HistoryResponse::Error {
                 error: HistoryError::Capacity,

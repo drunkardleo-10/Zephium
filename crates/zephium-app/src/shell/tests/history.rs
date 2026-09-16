@@ -304,3 +304,24 @@ fn reopening_with_nothing_closed_is_a_no_op_rather_than_a_failure() {
     assert_eq!(disposition.outcome, OperationOutcome::NoOp);
     assert_eq!(active_id(&screen), only);
 }
+
+#[test]
+fn degraded_storage_reports_itself_rather_than_looking_empty() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, screen, _queue) = browsed(store);
+    visit(&mut shell, &screen, "recorded.example");
+    let profile = shell.windows.focused().unwrap().profile;
+    shell.degraded_storage_profiles.insert(profile);
+
+    let answer = dispatch(&mut shell, profile, page("", 50));
+
+    assert!(
+        matches!(
+            taken(&answer),
+            HistoryResponse::Error {
+                error: HistoryError::Unavailable
+            }
+        ),
+        "an unusable store must not present itself as an empty history"
+    );
+}
