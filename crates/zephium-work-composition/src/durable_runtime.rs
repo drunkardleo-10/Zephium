@@ -37,6 +37,9 @@ pub struct WorkBrowserAdapterSettings {
         Option<fn(zephium_core::work::WorkAttemptId, zephium_app::RetainedWorkSnapshot)>,
     #[cfg(feature = "public-qualification")]
     pub model_diagnostic: Option<fn(AgentWorkEventKind)>,
+    /// Closed stage label of a refused step compilation; no operands.
+    #[cfg(feature = "public-qualification")]
+    pub compile_diagnostic: Option<fn(&str)>,
     pub profile: AgentWorkProfileBinding,
     pub model: AgentBrowserModel,
     pub config: AgentWorkApplicationConfig,
@@ -58,6 +61,8 @@ impl WorkBrowserAdapterSettings {
             diagnostic: None,
             #[cfg(feature = "public-qualification")]
             model_diagnostic: None,
+            #[cfg(feature = "public-qualification")]
+            compile_diagnostic: None,
             profile,
             model,
             config,
@@ -172,8 +177,9 @@ impl MacosWorkComposition {
             | WorkStepKindV1::Discover { collection, .. } => collection
                 .as_ref()
                 .map(WorkBrowseCollectionSchema::try_from)
-                .transpose()?,
-            _ => return Err(WorkError::Invalid),
+                .transpose()
+                .map_err(|error| refused(&settings, "collection", error))?,
+            _ => return Err(refused(&settings, "step", WorkError::Invalid)),
         };
         self.run_agent_step_inner(shell, probe, request, settings, collection)
             .await
@@ -639,7 +645,7 @@ fn compile_step(
     collection: Option<&WorkBrowseCollectionSchema>,
 ) -> Result<crate::TrustedWorkRequest, WorkError> {
     if settings.profile.profile() != probe.profile() {
-        return Err(WorkError::Invalid);
+        return Err(refused(&settings, "profile", WorkError::ProfileUnavailable));
     }
     let limits = request.limits;
     let budget = AgentRunBudget::try_new(
@@ -648,7 +654,7 @@ fn compile_step(
         u64::from(limits.cost_micro_usd),
         1,
     )
-    .map_err(|_| WorkError::Invalid)?;
+    .map_err(|_| refused(&settings, "budget", WorkError::Capacity))?;
     let hops = usize::from(request.hops.clamp(1, 8));
     let (navigation, task) = match &request.step {
         WorkStepKindV1::Read { url, .. } => (
@@ -680,7 +686,7 @@ fn compile_step(
     let navigation = if matches!(request.step, WorkStepKindV1::Read { .. }) {
         navigation
             .with_same_document_query_updates()
-            .map_err(|_| WorkError::Invalid)?
+            .map_err(|_| refused(&settings, "navigation", WorkError::Invalid))?
     } else {
         navigation
     };
@@ -694,14 +700,18 @@ fn compile_step(
         None => "\noutput_0: a list of separately cited findings from the visited pages. Give each finding its own supporting sources. Preserve conditions, exceptions and historical qualifications. Cover the requested facts supported by the observed evidence; do not imply complete page coverage when observations are partial.",
     });
     if let Some(schema) = collection {
-        schema.append_browsing_fields(&mut objective)?;
+        schema
+            .append_browsing_fields(&mut objective)
+            .map_err(|error| refused(&settings, "fields", error))?;
     }
     if objective.len() > zephium_core::work::MAX_WORK_TEXT_BYTES {
-        return Err(WorkError::Capacity);
+        return Err(refused(&settings, "capacity", WorkError::Capacity));
     }
     let output_fields = vec![match collection {
-        Some(schema) => schema.extraction_field()?,
-        None => findings::field_schema()?,
+        Some(schema) => schema
+            .extraction_field()
+            .map_err(|error| refused(&settings, "extraction", error))?,
+        None => findings::field_schema().map_err(|error| refused(&settings, "findings", error))?,
     }];
     let invocation = PublicReadWorkInvocation::new(
         PublicReadWorkObjective {
@@ -727,14 +737,32 @@ fn compile_step(
     } else {
         invocation
     };
-    invocation
+    #[cfg(feature = "public-qualification")]
+    let diagnostic = settings.compile_diagnostic;
+    let request = invocation
         .into_request(settings.profile)
-        .map(|request| {
-            request
-                .with_work_identity(probe.work())
-                .with_anonymous_session(probe.browser_session().clone())
-        })
-        .map_err(|_| WorkError::Invalid)
+        .map_err(|failure| {
+            #[cfg(feature = "public-qualification")]
+            if let Some(diagnostic) = diagnostic {
+                diagnostic(&format!("admission:{failure:?}"));
+            }
+            let _ = &failure;
+            WorkError::Unavailable
+        })?;
+    Ok(request
+        .with_work_identity(probe.work())
+        .with_anonymous_session(probe.browser_session().clone()))
+}
+
+/// Reports one closed compile stage under development traces; the error is unchanged.
+fn refused(settings: &WorkBrowserAdapterSettings, stage: &str, error: WorkError) -> WorkError {
+    #[cfg(feature = "public-qualification")]
+    if let Some(diagnostic) = settings.compile_diagnostic {
+        diagnostic(stage);
+    }
+    #[cfg(not(feature = "public-qualification"))]
+    let _ = (settings, stage);
+    error
 }
 
 fn compile(
