@@ -165,6 +165,7 @@
 
   /* Favicon plate. Inactive rows desaturate so mixed-brightness site icons
      stop competing with each other and with the surface. */
+  --favicon-plate: color-mix(in srgb, var(--color-text) 88%, transparent);
   --favicon-rest-opacity: 0.82;
   --favicon-rest-saturation: 0.85;
 }

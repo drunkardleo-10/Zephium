@@ -138,6 +138,22 @@ button {
   filter: none;
 }
 
+/* A near-neutral mark the colour of the surface behind it reads as an empty
+   square. Give it the opposite ground, the way a sticker carries its own.
+   Only neutral icons qualify: a coloured mark stays legible however dark it
+   is, and a plate behind it would misrepresent the brand. */
+.favicon-plate[data-tone="dark"] {
+  background: var(--favicon-plate);
+}
+
+:root[data-theme="light"] .favicon-plate[data-tone="dark"] {
+  background: none;
+}
+
+:root[data-theme="light"] .favicon-plate[data-tone="light"] {
+  background: var(--favicon-plate);
+}
+
 ::selection {
   background: color-mix(in srgb, var(--color-text) 22%, transparent);
 }

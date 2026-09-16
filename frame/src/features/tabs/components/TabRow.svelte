@@ -83,7 +83,13 @@
     onpointercancel={onPointerCancel}
     onclick={() => onSelect(tab.id)}
   >
-    <FavIcon image={favicons.image(tab.icon)} loading={tab.loading} lit={active} {fallback} />
+    <FavIcon
+      image={favicons.image(tab.icon)}
+      tone={favicons.tone(tab.icon)}
+      loading={tab.loading}
+      lit={active}
+      {fallback}
+    />
     <span data-zephium-tab-label class="min-w-0 flex-1 truncate">{tab.title}</span>
   </button>
   {#if closable}

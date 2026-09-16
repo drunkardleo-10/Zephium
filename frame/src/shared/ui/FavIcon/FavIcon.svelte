@@ -5,6 +5,9 @@
   type Props = {
     /** Decoded 32x32 RGBA pixels, or null until they arrive. */
     image: ImageData | null;
+    /** How the mark sits against a surface, so a near-neutral icon the colour
+     *  of the chrome behind it can be given its own ground. */
+    tone?: "dark" | "light" | "mid";
     loading?: boolean;
     size?: number;
     /** Resting rows dim and desaturate; the active row shows true color. */
@@ -13,7 +16,7 @@
     fallback?: IconSvgElement;
   };
 
-  let { image, loading = false, size = 17, lit = false, fallback }: Props = $props();
+  let { image, tone = "mid", loading = false, size = 17, lit = false, fallback }: Props = $props();
   let canvas: HTMLCanvasElement | undefined = $state();
 
   $effect(() => {
@@ -31,6 +34,7 @@
 {#if image}
   <canvas
     bind:this={canvas}
+    data-tone={tone}
     width={image.width}
     height={image.height}
     style:width={`${size}px`}

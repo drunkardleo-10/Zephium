@@ -43,11 +43,10 @@
   let range = $derived(matchRange(title, query));
   // A site the user has reached is shown by its own mark. The clock belongs to
   // a recorded search, not to every visited page.
-  let image = $derived(
-    result && (result.kind === "tab" || result.kind === "history" || result.kind === "url")
-      ? favicons.image(result.icon)
-      : null,
+  let sited = $derived(
+    !!result && (result.kind === "tab" || result.kind === "history" || result.kind === "url"),
   );
+  let image = $derived(sited ? favicons.image(result?.icon) : null);
   let glyph = $derived.by(() => {
     if (icon) return icon;
     switch (result?.kind) {
@@ -92,7 +91,13 @@
   onclick={onrun}
 >
   <span class="glyph">
-    {#if image}<FavIcon {image} size={16} lit fallback={Globe02Icon} />
+    {#if image}<FavIcon
+        {image}
+        tone={favicons.tone(result?.icon)}
+        size={16}
+        lit
+        fallback={Globe02Icon}
+      />
     {:else}<Icon icon={glyph} size={16} />{/if}
   </span>
   <span class="title"

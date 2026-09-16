@@ -12,7 +12,16 @@ const BASE64_LENGTH = Math.ceil(BYTE_LENGTH / 3) * 4;
 // pixels are never resent, so this capacity must not drop below it.
 const CAPACITY = 512;
 
-type Entry = { revision: string; image: ImageData };
+/** How a mark sits against a surface. A near-neutral icon the colour of the
+ *  chrome behind it reads as an empty square; a coloured one never does,
+ *  however dark it is, which is why chroma decides alongside luminance. */
+export type IconTone = "dark" | "light" | "mid";
+
+const DARK_LUMINANCE = 70;
+const LIGHT_LUMINANCE = 200;
+const NEUTRAL_CHROMA = 40;
+
+type Entry = { revision: string; image: ImageData; tone: IconTone };
 
 const rasters = new SvelteMap<string, Entry>();
 const lifecycle = createLifecycle();
@@ -34,12 +43,36 @@ function decode(encoded: string): ImageData | null {
   }
 }
 
+/** Measured over the opaque pixels only, so a small mark on a transparent
+ *  field is judged by the mark rather than by the empty space around it. */
+function toneOf(image: ImageData): IconTone {
+  const pixels = image.data;
+  let luminance = 0;
+  let chroma = 0;
+  let opaque = 0;
+  for (let index = 0; index < pixels.length; index += 4) {
+    if (pixels[index + 3]! < 32) continue;
+    const red = pixels[index]!;
+    const green = pixels[index + 1]!;
+    const blue = pixels[index + 2]!;
+    opaque += 1;
+    luminance += 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+    chroma += Math.max(red, green, blue) - Math.min(red, green, blue);
+  }
+  if (opaque === 0) return "mid";
+  const meanLuminance = luminance / opaque;
+  const meanChroma = chroma / opaque;
+  if (meanChroma >= NEUTRAL_CHROMA) return "mid";
+  if (meanLuminance < DARK_LUMINANCE) return "dark";
+  return meanLuminance > LIGHT_LUMINANCE ? "light" : "mid";
+}
+
 function accept(entries: readonly FaviconEntry[]) {
   for (const entry of entries) {
     const image = decode(entry.rgba);
     if (!image) continue;
     rasters.delete(entry.origin);
-    rasters.set(entry.origin, { revision: entry.revision, image });
+    rasters.set(entry.origin, { revision: entry.revision, image, tone: toneOf(image) });
   }
   while (rasters.size > CAPACITY) {
     const oldest = rasters.keys().next();
@@ -53,6 +86,12 @@ export function image(ref: IconRef | null | undefined): ImageData | null {
   if (!ref) return null;
   const entry = rasters.get(ref.origin);
   return entry?.revision === ref.revision ? entry.image : null;
+}
+
+export function tone(ref: IconRef | null | undefined): IconTone {
+  if (!ref) return "mid";
+  const entry = rasters.get(ref.origin);
+  return entry?.revision === ref.revision ? entry.tone : "mid";
 }
 
 export function init(): Promise<void> {

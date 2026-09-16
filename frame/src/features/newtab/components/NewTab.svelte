@@ -123,7 +123,13 @@
             class="press flex h-11 w-11 cursor-default items-center justify-center rounded-lg bg-fill outline-none hover:bg-fill-hover"
             onclick={() => tabs.activate(tab.id)}
           >
-            <FavIcon image={favicons.image(tab.icon)} size={20} lit fallback={Globe02Icon} />
+            <FavIcon
+              image={favicons.image(tab.icon)}
+              tone={favicons.tone(tab.icon)}
+              size={20}
+              lit
+              fallback={Globe02Icon}
+            />
           </button>
         </li>
       {/each}

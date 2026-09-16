@@ -54,6 +54,7 @@
   >
     <FavIcon
       image={favicons.image(tab.icon)}
+      tone={favicons.tone(tab.icon)}
       loading={tab.loading}
       size={22}
       lit={active}
