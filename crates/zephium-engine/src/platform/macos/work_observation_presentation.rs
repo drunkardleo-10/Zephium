@@ -1,14 +1,15 @@
 //! Shipping-private presentation mechanics for one retained-page observation.
+//! The page is hosted inside the human window beneath its chrome: WebKit keeps
+//! painting it, nothing appears on screen, and no input can reach it.
 //! No diagnostic capability, application activation, input or page script.
 #![deny(unsafe_op_in_unsafe_fn, clippy::undocumented_unsafe_blocks)]
 
 use objc2::rc::{Retained, Weak};
 use objc2::MainThreadOnly as _;
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSResponder, NSView, NSWindow, NSWindowOcclusionState,
-    NSWindowStyleMask,
+    NSApplication, NSResponder, NSView, NSWindow, NSWindowOcclusionState, NSWindowOrderingMode,
 };
-use objc2_foundation::{MainThreadMarker, NSAlignmentOptions, NSPoint, NSRect, NSSize};
+use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 use objc2_web_kit::WKWebView;
 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
 use std::rc::Rc;
@@ -36,29 +37,12 @@ const PREPARE_VIEW_FAILURES: [PresentationFailure; 3] = [
     PresentationFailure::PreparePageIsResponder,
 ];
 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
-const PRESENT_SURFACE_FAILURES: [PresentationFailure; 5] = [
-    PresentationFailure::PresentSurfaceAlreadyVisible,
-    PresentationFailure::PresentSurfaceFrameMismatch,
-    PresentationFailure::PresentSurfaceCanBecomeKey,
-    PresentationFailure::PresentSurfaceCanBecomeMain,
-    PresentationFailure::PresentSurfaceAlphaMismatch,
-];
-#[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
-const POLL_FAILURES: [PresentationFailure; 14] = [
-    PresentationFailure::PollFrameNotAdmitted,
-    PresentationFailure::PollSurfaceFrameMismatch,
+const POLL_FAILURES: [PresentationFailure; 5] = [
     PresentationFailure::PollPageFrameMismatch,
-    PresentationFailure::PollSurfaceNotVisible,
     PresentationFailure::PollPageHidden,
-    PresentationFailure::PollSurfaceIsKey,
-    PresentationFailure::PollSurfaceIsMain,
-    PresentationFailure::PollSurfaceCanBecomeKey,
-    PresentationFailure::PollSurfaceCanBecomeMain,
-    PresentationFailure::PollSurfaceReceivesMouse,
-    PresentationFailure::PollSurfaceNotOpaque,
-    PresentationFailure::PollSurfaceAlphaMismatch,
     PresentationFailure::PollPageAlphaMismatch,
     PresentationFailure::PollPageWindowMismatch,
+    PresentationFailure::PollPageIsResponder,
 ];
 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
 const RETIRE_FAILURES: [PresentationFailure; 4] = [
@@ -100,10 +84,6 @@ pub(crate) struct WorkObservationPresentation {
     page: Retained<WKWebView>,
     parent: Retained<NSView>,
     original_frame: NSRect,
-    surface: Option<Retained<NSWindow>>,
-    retired_surface: Option<Weak<NSWindow>>,
-    frame: NSRect,
-    screen: NSRect,
     deadline: Instant,
     state: PresentationState,
     cleanup_failed: bool,
@@ -112,11 +92,9 @@ pub(crate) struct WorkObservationPresentation {
 impl WorkObservationPresentation {
     #[cfg(feature = "native-agentic-work-resource-probe")]
     pub(crate) fn record_probe_weak(&self, resource: &zephium_agentic::WorkBrowserResourceJoin) {
-        if let Some(surface) = &self.surface {
-            super::agentic_foreground_probe::record_resource_observation_weak(
-                resource, &self.page, surface,
-            );
-        }
+        super::agentic_foreground_probe::record_resource_observation_weak(
+            resource, &self.page, &self.main,
+        );
     }
     pub(crate) fn prepare(
         view: &wry::WebView,
@@ -173,38 +151,9 @@ impl WorkObservationPresentation {
             }
             return Err(PresentationState::Failed);
         }
-        let native_screen = main.screen().ok_or(PresentationState::Unavailable)?;
-        let screen = native_screen.visibleFrame();
-        let frame = surface_frame(screen).ok_or(PresentationState::Unavailable)?;
-        let scale = native_screen.backingScaleFactor();
-        if !scale.is_finite()
-            || scale <= 0.0
-            || !(frame.size.width * scale).is_finite()
-            || !(frame.size.height * scale).is_finite()
-            || native_screen
-                .backingAlignedRect_options(frame, NSAlignmentOptions::AlignAllEdgesNearest)
-                != frame
-        {
-            return Err(PresentationState::Unavailable);
-        }
         if Instant::now() >= deadline {
             return Err(PresentationState::Expired);
         }
-        // SAFETY: all geometry is finite, main-thread-owned, and the retained
-        // owner below controls the borderless public AppKit window's lifetime.
-        let surface = unsafe {
-            NSWindow::initWithContentRect_styleMask_backing_defer(
-                NSWindow::alloc(mtm),
-                frame,
-                NSWindowStyleMask::Borderless,
-                NSBackingStoreType::Buffered,
-                false,
-            )
-        };
-        // SAFETY: Rust retains the surface; close must not consume that retain.
-        unsafe { surface.setReleasedWhenClosed(false) };
-        surface.setIgnoresMouseEvents(true);
-        surface.setOpaque(true);
         Ok(Self {
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             failure_diagnostic,
@@ -214,10 +163,6 @@ impl WorkObservationPresentation {
             page,
             parent,
             original_frame,
-            surface: Some(surface),
-            retired_surface: None,
-            frame,
-            screen,
             deadline,
             state: PresentationState::Prepared,
             cleanup_failed: false,
@@ -254,44 +199,19 @@ impl WorkObservationPresentation {
             self.state = PresentationState::Expired;
             return self.state;
         }
-        let Some(surface) = &self.surface else {
-            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
-            invoke_failure_diagnostic(
-                self.failure_diagnostic.as_ref(),
-                PresentationFailure::PresentMissingSurface,
-            );
-            self.state = PresentationState::Failed;
-            return self.state;
-        };
-        let surface_facts = [
-            !surface.isVisible(),
-            surface.frame() == self.frame,
-            !surface.canBecomeKeyWindow(),
-            !surface.canBecomeMainWindow(),
-            surface.alphaValue() == 1.0,
-        ];
-        if !surface_facts.into_iter().all(|fact| fact) {
-            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
-            if let Some(failure) = classify_predicates(surface_facts, PRESENT_SURFACE_FAILURES) {
-                invoke_failure_diagnostic(self.failure_diagnostic.as_ref(), failure);
-            }
-            self.state = PresentationState::Failed;
-            return self.state;
-        }
-        let Some(parent) = surface.contentView() else {
-            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
-            invoke_failure_diagnostic(
-                self.failure_diagnostic.as_ref(),
-                PresentationFailure::PresentMissingContentView,
-            );
-            self.state = PresentationState::Failed;
-            return self.state;
-        };
         self.state = PresentationState::Acquiring;
-        parent.addSubview(&self.page);
+        // Re-adding beneath every sibling keeps the page under the chrome and
+        // the vibrancy backdrop, so hit-testing never reaches it.
+        // SAFETY: page and parent are retained main-thread views of this window.
+        unsafe {
+            self.parent.addSubview_positioned_relativeTo(
+                &self.page,
+                NSWindowOrderingMode::Below,
+                None,
+            );
+        }
         self.page.setFrame(viewport());
         self.page.setHidden(false);
-        surface.orderFrontRegardless();
         self.poll()
     }
 
@@ -308,18 +228,11 @@ impl WorkObservationPresentation {
 
     pub(crate) fn poll(&mut self) -> PresentationState {
         if self.state == PresentationState::Retiring {
-            if self
-                .retired_surface
-                .as_ref()
-                .is_some_and(|surface| surface.load().is_none())
-            {
-                self.retired_surface = None;
-                self.state = if self.cleanup_failed {
-                    PresentationState::Failed
-                } else {
-                    PresentationState::Retired
-                };
-            }
+            self.state = if self.cleanup_failed {
+                PresentationState::Failed
+            } else {
+                PresentationState::Retired
+            };
             return self.state;
         }
         if !matches!(
@@ -330,76 +243,44 @@ impl WorkObservationPresentation {
         }
         if !self.human_current() {
             self.state = PresentationState::Unavailable;
-        } else if Instant::now() >= self.deadline {
-            self.state = PresentationState::Expired;
-        } else if let Some(surface) = &self.surface {
-            let exact = admitted_frame(self.frame, self.screen)
-                && surface.frame() == self.frame
-                && self.page.frame() == viewport()
-                && surface.isVisible()
-                && !self.page.isHiddenOrHasHiddenAncestor()
-                && !surface.isKeyWindow()
-                && !surface.isMainWindow()
-                && !surface.canBecomeKeyWindow()
-                && !surface.canBecomeMainWindow()
-                && surface.ignoresMouseEvents()
-                && surface.isOpaque()
-                && surface.alphaValue() == 1.0
-                && self.page.alphaValue() == 1.0
-                && self
-                    .page
-                    .window()
-                    .is_some_and(|window| std::ptr::eq(&*window, &**surface));
-            let visible = surface
-                .occlusionState()
-                .contains(NSWindowOcclusionState::Visible)
-                && self.page.visibleRect() == viewport();
-            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
-            if !exact {
-                let poll_facts = [
-                    admitted_frame(self.frame, self.screen),
-                    surface.frame() == self.frame,
-                    self.page.frame() == viewport(),
-                    surface.isVisible(),
-                    !self.page.isHiddenOrHasHiddenAncestor(),
-                    !surface.isKeyWindow(),
-                    !surface.isMainWindow(),
-                    !surface.canBecomeKeyWindow(),
-                    !surface.canBecomeMainWindow(),
-                    surface.ignoresMouseEvents(),
-                    surface.isOpaque(),
-                    surface.alphaValue() == 1.0,
-                    self.page.alphaValue() == 1.0,
-                    self.page
-                        .window()
-                        .is_some_and(|window| std::ptr::eq(&*window, &**surface)),
-                ];
-                if let Some(failure) = classify_predicates(poll_facts, POLL_FAILURES) {
-                    invoke_failure_diagnostic(self.failure_diagnostic.as_ref(), failure);
-                }
-            }
-            self.state = if !exact {
-                PresentationState::Failed
-            } else if visible {
-                PresentationState::Ready
-            } else if self.state == PresentationState::Acquiring {
-                PresentationState::Acquiring
-            } else {
-                PresentationState::Unavailable
-            };
-        } else {
-            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
-            invoke_failure_diagnostic(
-                self.failure_diagnostic.as_ref(),
-                PresentationFailure::PollMissingSurface,
-            );
-            self.state = PresentationState::Failed;
+            return self.state;
         }
+        if Instant::now() >= self.deadline {
+            self.state = PresentationState::Expired;
+            return self.state;
+        }
+        let poll_facts = [
+            self.page.frame() == viewport(),
+            !self.page.isHiddenOrHasHiddenAncestor(),
+            self.page.alphaValue() == 1.0,
+            self.page
+                .window()
+                .is_some_and(|window| std::ptr::eq(&*window, &*self.main)),
+            !responder_inside(&self.main, &self.page),
+        ];
+        let exact = poll_facts.into_iter().all(|fact| fact);
+        let visible = self
+            .main
+            .occlusionState()
+            .contains(NSWindowOcclusionState::Visible)
+            && !self.page.visibleRect().is_empty();
+        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+        if let Some(failure) = classify_predicates(poll_facts, POLL_FAILURES) {
+            invoke_failure_diagnostic(self.failure_diagnostic.as_ref(), failure);
+        }
+        self.state = if !exact {
+            PresentationState::Failed
+        } else if visible {
+            PresentationState::Ready
+        } else if self.state == PresentationState::Acquiring {
+            PresentationState::Acquiring
+        } else {
+            PresentationState::Unavailable
+        };
         self.state
     }
 
     /// Hide before restoring hierarchy. Never repair or reacquire human focus.
-    /// The weak window must actually drain before this returns Retired.
     pub(crate) fn retire(&mut self) -> PresentationState {
         if matches!(
             self.state,
@@ -410,13 +291,7 @@ impl WorkObservationPresentation {
         let before = human_owners(&self.app);
         self.state = PresentationState::Retiring;
         self.page.setHidden(true);
-        if let Some(surface) = self.surface.take() {
-            surface.orderOut(None);
-            self.parent.addSubview(&self.page);
-            self.page.setFrame(self.original_frame);
-            self.retired_surface = Some(Weak::from_retained(&surface));
-            surface.close();
-        }
+        self.page.setFrame(self.original_frame);
         // SAFETY: the retained native page and original parent remain alive on
         // the main thread. No pointer escapes this identity comparison.
         let original_parent = unsafe { self.page.superview() }
@@ -440,10 +315,7 @@ impl WorkObservationPresentation {
     }
 
     pub(crate) fn visible_for_audit(&self) -> bool {
-        self.surface
-            .as_ref()
-            .is_some_and(|surface| surface.isVisible())
-            || !self.page.isHidden()
+        !self.page.isHidden()
     }
     pub(crate) fn human_current(&self) -> bool {
         let foreground = foreground(
@@ -460,9 +332,7 @@ impl WorkObservationPresentation {
                 | PresentationState::Retiring
                 | PresentationState::Retired => true,
                 PresentationState::Acquiring | PresentationState::Ready => {
-                    self.surface.as_ref().is_some_and(|surface| {
-                        retained_surface_current(&self.page, surface, &self.main)
-                    })
+                    hosted_current(&self.page, &self.main)
                 }
                 PresentationState::Unavailable
                 | PresentationState::Expired
@@ -479,7 +349,6 @@ impl WorkObservationPresentation {
         // A fence observes these owners; it must not prolong their native
         // retirement while the semantic channel drains its original callback.
         let page = Weak::from_retained(&self.page);
-        let surface = self.surface.as_ref().map(Weak::from_retained);
         #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
         let failure_diagnostic = self.failure_diagnostic.clone();
         Box::new(move || {
@@ -490,11 +359,7 @@ impl WorkObservationPresentation {
                 false,
                 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
                 failure_diagnostic.as_ref(),
-            ) && surface
-                .as_ref()
-                .and_then(Weak::load)
-                .zip(page.load())
-                .is_some_and(|(surface, page)| retained_surface_current(&page, &surface, &main))
+            ) && page.load().is_some_and(|page| hosted_current(&page, &main))
         })
     }
 }
@@ -511,50 +376,7 @@ impl Drop for WorkObservationPresentation {
 fn viewport() -> NSRect {
     NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1280.0, 800.0))
 }
-fn surface_frame(screen: NSRect) -> Option<NSRect> {
-    let origin = |start: f64, available: f64, required: f64| {
-        let first = start.ceil();
-        let last = (start + available - required).floor();
-        let center = (start + (available - required) / 2.0).floor();
-        ([first, last, center].into_iter().all(f64::is_finite) && first <= last)
-            .then(|| center.clamp(first, last))
-    };
-    let frame = NSRect::new(
-        NSPoint::new(
-            origin(screen.origin.x, screen.size.width, 1280.0)?,
-            origin(screen.origin.y, screen.size.height, 800.0)?,
-        ),
-        viewport().size,
-    );
-    admitted_frame(frame, screen).then_some(frame)
-}
-fn admitted_frame(frame: NSRect, screen: NSRect) -> bool {
-    [
-        frame.origin.x,
-        frame.origin.y,
-        frame.size.width,
-        frame.size.height,
-        screen.origin.x,
-        screen.origin.y,
-        screen.size.width,
-        screen.size.height,
-        frame.origin.x + frame.size.width,
-        frame.origin.y + frame.size.height,
-        screen.origin.x + screen.size.width,
-        screen.origin.y + screen.size.height,
-    ]
-    .into_iter()
-    .all(f64::is_finite)
-        && frame.size == viewport().size
-        && screen.size.width >= 1280.0
-        && screen.size.height >= 800.0
-        && (frame.origin.x + frame.size.width) - frame.origin.x == frame.size.width
-        && (frame.origin.y + frame.size.height) - frame.origin.y == frame.size.height
-        && frame.origin.x >= screen.origin.x
-        && frame.origin.y >= screen.origin.y
-        && frame.origin.x + frame.size.width <= screen.origin.x + screen.size.width
-        && frame.origin.y + frame.size.height <= screen.origin.y + screen.size.height
-}
+
 fn foreground(
     app: &NSApplication,
     main: &NSWindow,
@@ -595,30 +417,24 @@ fn foreground_facts(facts: [bool; 6], require_original_responder: bool) -> bool 
     facts[..5].iter().all(|fact| *fact) && (!require_original_responder || facts[5])
 }
 
+/// Tolerate a changed human responder, never routing the human window's
+/// keyboard responder into the retained page or one of its native views.
+fn responder_inside(main: &NSWindow, page: &WKWebView) -> bool {
+    main.firstResponder().is_some_and(|responder| {
+        Retained::as_ptr(&responder).addr() == std::ptr::from_ref(page).addr()
+            || responder
+                .downcast::<NSView>()
+                .is_ok_and(|view| view.isDescendantOf(page))
+    })
+}
 // The page's exact native attachment and input exclusion remain independent
 // fences alongside controller lease/document revocation. No focus is acquired.
-fn retained_surface_current(page: &WKWebView, surface: &NSWindow, main: &NSWindow) -> bool {
-    retained_surface_facts([
-        surface.isVisible(),
-        !surface.isKeyWindow(),
-        !surface.isMainWindow(),
-        !surface.canBecomeKeyWindow(),
-        !surface.canBecomeMainWindow(),
-        surface.ignoresMouseEvents(),
-        page.window()
-            .is_some_and(|window| std::ptr::eq(&*window, surface)),
-        // Tolerate a changed human responder, never routing the human window's
-        // keyboard responder into the retained page or one of its native views.
-        main.firstResponder().is_none_or(|responder| {
-            Retained::as_ptr(&responder).addr() != std::ptr::from_ref(page).addr()
-                && !responder
-                    .downcast::<NSView>()
-                    .is_ok_and(|view| view.isDescendantOf(page))
-        }),
-    ])
-}
-fn retained_surface_facts(facts: [bool; 8]) -> bool {
-    facts.into_iter().all(|fact| fact)
+fn hosted_current(page: &WKWebView, main: &NSWindow) -> bool {
+    !page.isHiddenOrHasHiddenAncestor()
+        && page
+            .window()
+            .is_some_and(|window| std::ptr::eq(&*window, main))
+        && !responder_inside(main, page)
 }
 #[derive(Eq, PartialEq)]
 struct HumanOwners {
@@ -659,7 +475,6 @@ mod tests {
             }
         }
         assert_matrix(PREPARE_VIEW_FAILURES);
-        assert_matrix(PRESENT_SURFACE_FAILURES);
         assert_matrix(POLL_FAILURES);
         assert_matrix(RETIRE_FAILURES);
 
@@ -678,42 +493,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fixed_viewport_never_scales_clips_or_admits_nonfinite_screen_geometry() {
-        for screen in [
-            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1920.0, 1080.0)),
-            NSRect::new(NSPoint::new(-2000.25, 13.5), NSSize::new(1600.5, 999.5)),
-            viewport(),
-        ] {
-            let frame = surface_frame(screen).unwrap();
-            assert!(admitted_frame(frame, screen));
-            assert_eq!(frame.size, viewport().size);
-            assert_eq!(frame.origin.x.fract(), 0.0);
-            assert_eq!(frame.origin.y.fract(), 0.0);
-        }
-        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            assert!(surface_frame(NSRect::new(
-                NSPoint::new(bad, 0.0),
-                NSSize::new(1920.0, 1080.0)
-            ))
-            .is_none());
-            assert!(surface_frame(NSRect::new(
-                NSPoint::new(0.0, 0.0),
-                NSSize::new(bad, 1080.0)
-            ))
-            .is_none());
-        }
-        assert!(surface_frame(NSRect::new(
-            NSPoint::new(0.0, 0.0),
-            NSSize::new(1279.0, 800.0)
-        ))
-        .is_none());
-        assert!(surface_frame(NSRect::new(
-            NSPoint::new(0.25, 0.0),
-            NSSize::new(1280.0, 800.0)
-        ))
-        .is_none());
-    }
     #[test]
     fn initial_admission_requires_exact_responder_without_repairing_focus() {
         assert!(foreground_facts([true; 6], true));
@@ -735,14 +514,12 @@ mod tests {
             "setScheduling",
             "requestAnimationFrame",
             "evaluateJavaScript",
+            "NSWindow::alloc",
+            "orderFront",
         ] {
             assert!(!source.contains(forbidden));
         }
-        assert!(source.contains("surface.canBecomeKeyWindow()"));
-        assert!(source.contains("surface.canBecomeMainWindow()"));
-        assert!(source.contains("surface.setIgnoresMouseEvents(true)"));
-        assert!(source.contains("self.retired_surface = Some(Weak::from_retained(&surface))"));
-        assert!(source.contains("surface.load().is_none()"));
+        assert!(source.contains("NSWindowOrderingMode::Below"));
         assert!(source.contains("self.cleanup_failed |="));
         assert!(source.contains("human_owners(&self.app) != before"));
     }
@@ -758,14 +535,6 @@ mod tests {
             let mut facts = churn;
             facts[lost_owner] = false;
             assert!(!foreground_facts(facts, false));
-        }
-        // Promotion, reparenting, or an input-capable surface independently
-        // closes native presentation authority even when the app stays active.
-        assert!(retained_surface_facts([true; 8]));
-        for promoted_or_changed in 0..8 {
-            let mut surface = [true; 8];
-            surface[promoted_or_changed] = false;
-            assert!(!retained_surface_facts(surface));
         }
     }
 }

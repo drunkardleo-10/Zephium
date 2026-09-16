@@ -205,6 +205,7 @@ pub enum WorkObservationPresentationFailure {
     PollSurfaceAlphaMismatch,
     PollPageAlphaMismatch,
     PollPageWindowMismatch,
+    PollPageIsResponder,
     PollMissingSurface,
     RetirePageStillVisible,
     RetireHumanOwnershipChanged,
