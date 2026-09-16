@@ -73,6 +73,18 @@ pub struct PublicReadWorkInvocation {
 }
 
 impl PublicReadWorkInvocation {
+    #[cfg(feature = "durable-runtime")]
+    pub(crate) fn with_read_interactions(self) -> PublicLocalActionWorkInvocation {
+        PublicLocalActionWorkInvocation {
+            read: self,
+            actions: LocalActions {
+                policy: Box::new(read_interactions::ReadingInteractionPolicy),
+                max_actions: 8,
+                read_only: true,
+            },
+        }
+    }
+
     pub fn new(
         objective: PublicReadWorkObjective,
         settings: PublicReadWorkSettings,
@@ -138,7 +150,7 @@ impl std::fmt::Debug for PublicReadWorkInvocation {
 
 /// One ordinary public objective with explicitly approved reversible local
 /// effects. The host policy is independent of objective/page/model text and
-/// must prove the intent and actual effect of each model-selected proposal.
+/// classifies each proposal against task intent and native control evidence.
 /// It grants no remote write, submit, communication or capability authority.
 #[must_use]
 pub struct PublicLocalActionWorkInvocation {
@@ -149,6 +161,7 @@ pub struct PublicLocalActionWorkInvocation {
 struct LocalActions {
     policy: Box<dyn AgentWorkLocalActionPolicy>,
     max_actions: u64,
+    read_only: bool,
 }
 
 impl PublicLocalActionWorkInvocation {
@@ -171,6 +184,7 @@ impl PublicLocalActionWorkInvocation {
             actions: LocalActions {
                 policy,
                 max_actions,
+                read_only: false,
             },
         })
     }
@@ -275,11 +289,13 @@ fn assemble_with_actions(
     {
         return Err(AgentWorkFailure::Contract);
     }
-    let effects = AgentEffectScope::try_new(if actions.is_some() {
-        &[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite]
-    } else {
-        &[SemanticEffectClass::Read]
-    })
+    let effects = AgentEffectScope::try_new(
+        if actions.as_ref().is_some_and(|actions| !actions.read_only) {
+            &[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite]
+        } else {
+            &[SemanticEffectClass::Read]
+        },
+    )
     .map_err(fail)?;
     let mut origins = objective.navigation.origins().cloned().collect::<Vec<_>>();
     origins.sort();
@@ -405,3 +421,6 @@ fn assemble_with_actions(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(feature = "durable-runtime")]
+mod read_interactions;

@@ -80,10 +80,19 @@ fn main() {
         #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-read-work" => work_durable::run_agent_read(),
         #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-disclosure-work" => {
+            work_durable::run_agent_disclosure()
+        }
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-scroll-work" => work_durable::run_agent_scroll(),
+        #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-money-node-work" => work_durable::run_money_node(),
         #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-money-work" => work_durable::run_agent_money(),
         #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-product-details-work" => {
+            work_durable::run_agent_details()
+        }
         [argument] if argument == "--live-agent-collection-work" => {
             work_durable::run_agent_collection()
         }

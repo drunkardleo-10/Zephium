@@ -134,6 +134,46 @@ impl WorkBrowseCollectionSchema {
         .map_err(|_| WorkError::Invalid)
     }
 
+    pub(super) fn append_browsing_fields(&self, objective: &mut String) -> Result<(), WorkError> {
+        use std::fmt::Write as _;
+        writeln!(
+            objective,
+            "\nCollection output_0: up to {} distinct records. Fields:",
+            self.max_items
+        )
+        .map_err(|_| WorkError::Invalid)?;
+        for field in &self.fields {
+            let kind = match field.kind() {
+                SemanticExtractionValueKind::Text => "text",
+                SemanticExtractionValueKind::Url => "url",
+                SemanticExtractionValueKind::ImageUrl => "image_url",
+                SemanticExtractionValueKind::Money => "money",
+                SemanticExtractionValueKind::Boolean => "boolean",
+                SemanticExtractionValueKind::Unsigned => "unsigned",
+                SemanticExtractionValueKind::TextList | SemanticExtractionValueKind::Rows => {
+                    return Err(WorkError::Invalid)
+                }
+            };
+            write!(
+                objective,
+                "{}: {kind} {}",
+                field.name(),
+                if field.required() {
+                    "required"
+                } else {
+                    "optional"
+                }
+            )
+            .map_err(|_| WorkError::Invalid)?;
+            if let Some(currencies) = field.currencies() {
+                write!(objective, " permitted_currencies={}", currencies.join(","))
+                    .map_err(|_| WorkError::Invalid)?;
+            }
+            objective.push('\n');
+        }
+        Ok(())
+    }
+
     pub(super) fn artifact(
         &self,
         profile: zephium_core::ids::ProfileId,
@@ -375,6 +415,64 @@ mod tests {
             currencies: vec!["USD".into(), "USD".into()],
         };
         assert!(WorkBrowseCollectionSchema::try_from(&invalid).is_err());
+    }
+
+    #[test]
+    fn partial_product_record_preserves_anchored_link_and_unknown_fields() {
+        let request = serde_json::from_value::<WorkBrowseCollection>(serde_json::json!({
+            "title":"Product details", "max_items":1, "columns":[
+                {"name":"price","required":false,"value":{"kind":"text"}},
+                {"name":"pieces","required":false,"value":{"kind":"text"}},
+                {"name":"dimensions","required":false,"value":{"kind":"text"}},
+                {"name":"image","required":false,"value":{"kind":"image_url"}},
+                {"name":"url","required":false,"value":{"kind":"url"}}
+            ]
+        }))
+        .unwrap();
+        let schema = WorkBrowseCollectionSchema::try_from(&request).unwrap();
+        let mut rows: Vec<Vec<ArchivedField>> = serde_json::from_value(serde_json::json!([[
+            {"name":"name","value":{"kind":"text","value":"Paris – City of Love","sources":[64]}},
+            {"name":"pieces","value":{"kind":"text","value":"958","sources":[33]}},
+            {"name":"image","value":{"kind":"image_url","value":"https://www.lego.com/product.png?width=800&height=800","sources":[26]}},
+            {"name":"url","value":{"kind":"url","value":"https://www.lego.com/en-us/product/architecture-21064-21064#main-content","sources":[2]}}
+        ]])).unwrap();
+        let data = schema
+            .comparison(&rows, &mut |ids| {
+                Ok(ids
+                    .iter()
+                    .map(|id| match id {
+                        64 => 0,
+                        33 => 1,
+                        26 => 2,
+                        2 => 3,
+                        _ => panic!(),
+                    })
+                    .collect())
+            })
+            .unwrap();
+        data.validate(4).unwrap();
+        let WorkArtifactDataV1::ComparisonMatrix {
+            subjects, cells, ..
+        } = data
+        else {
+            panic!()
+        };
+        assert_eq!(
+            subjects[0].homepage.as_deref(),
+            Some("https://www.lego.com/en-us/product/architecture-21064-21064#main-content")
+        );
+        assert!(matches!(cells[0][0].value, WorkCellValue::Unknown));
+        assert!(matches!(cells[0][2].value, WorkCellValue::Unknown));
+        assert_eq!(cells[0][1].evidence, [0, 1]);
+        for invalid in [
+            "javascript:alert(1)",
+            "https://user:password@example.test/product#details",
+            "http://example.test/product#details",
+        ] {
+            rows[0][3] = serde_json::from_value(serde_json::json!({"name":"url","value":{"kind":"url","value":invalid,"sources":[2]}})).unwrap();
+            let data = schema.comparison(&rows, &mut |_| Ok(vec![0])).unwrap();
+            assert!(data.validate(1).is_err());
+        }
     }
 
     #[test]

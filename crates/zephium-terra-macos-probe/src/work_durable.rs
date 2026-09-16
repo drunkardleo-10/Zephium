@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 use zephium_agentic::{
-    load_macos_development_openai_credential, AgentProviderTransport, AgentProviderTransportConfig,
+    load_macos_probe_openai_credential, AgentProviderTransport, AgentProviderTransportConfig,
     OpenAiPublicSearch, OpenAiPublicSearchConfig, OpenAiWorkAgent, OpenAiWorkPlanner,
     OpenAiWorkSynthesizer, WorkPlanningConfig,
 };
@@ -30,6 +30,7 @@ const OBJECTIVE: &str = "Find SQLite's official explanation of why WAL mode does
 const COORDINATED_OBJECTIVE: &str = "Explain SQLite's official reason that WAL mode does not work when clients on different machines share a database over a network filesystem. Use exactly two plan responsibilities: a delegated public-documentation research worker with one source-backed findings output, then a primary agent that depends on those findings and produces one concise source-backed explanation. Both outputs require source_mapped_needs_review. Use only sqlite.org or www.sqlite.org. No accounts, writes, installations or external communication are needed.";
 
 const AGENT_COLLECTION_OBJECTIVE: &str = "Read https://www.lego.com/en-us/themes/architecture in the browser and collect three distinct Architecture sets with their displayed prices and useful distinguishing details. Return a cited comparison with displayed price text, distinguishing details, product links and images from the actual page, using structured collection. Do not buy, sign in, change locale, or use search snippets as a substitute for inspecting the actual catalog. Omit details that the page does not establish.";
+const AGENT_DETAILS_OBJECTIVE: &str = "Open https://www.lego.com/en-us/themes/architecture, choose three distinct Architecture sets, and visit each of their observed product links. On each product page inspect the displayed price and product specifications, especially piece count and dimensions when shown. Return a cited structured comparison with product links, images and distinguishing details. The catalog alone is insufficient: inspect all three product pages. Do not buy, sign in, change locale, or use search snippets as a substitute. Leave unsupported details unknown.";
 const AGENT_MONEY_OBJECTIVE: &str = "Read https://demo.vercel.store/product/acme-geometric-circles-t-shirt in the browser and collect the Acme Circles T-Shirt with its explicitly displayed price, currency code and product image. Return only the target product with its observed amount and currency. Use one responsibility with one source-mapped output. Do not buy, sign in or change the cart. Do not substitute search snippets for the page.";
 const AGENT_READ_OBJECTIVE: &str = "From SQLite's official WAL documentation page, list every situation in which WAL mode does not work or has drawbacks, as cited findings with the page itself as the source. Read the actual page rather than relying on search snippets; use only sqlite.org.";
 const AGENT_OBJECTIVE: &str = "Compare Svelte Flow and React Flow as the canvas library for a desktop app: bundle size, license, and how actively each is maintained in 2026. Place the two libraries as subjects with cited findings, and finish with a short comparison.";
@@ -49,7 +50,10 @@ enum Mode {
     Agent,
     /// The same loop on an objective that needs a native page read.
     AgentRead,
+    AgentScroll,
+    AgentDisclosure,
     AgentCollection,
+    AgentDetails,
     AgentMoney,
     MoneyNode,
 }
@@ -84,6 +88,18 @@ pub(super) fn run_agent_money() -> Result<(), super::ProbeFailure> {
 
 pub(super) fn run_agent_collection() -> Result<(), super::ProbeFailure> {
     run_mode(Mode::AgentCollection)
+}
+
+pub(super) fn run_agent_details() -> Result<(), super::ProbeFailure> {
+    run_mode(Mode::AgentDetails)
+}
+
+pub(super) fn run_agent_disclosure() -> Result<(), super::ProbeFailure> {
+    run_mode(Mode::AgentDisclosure)
+}
+
+pub(super) fn run_agent_scroll() -> Result<(), super::ProbeFailure> {
+    run_mode(Mode::AgentScroll)
 }
 
 pub(super) fn run_agent_read() -> Result<(), super::ProbeFailure> {
@@ -137,24 +153,42 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         return Err(Error::Authority);
     };
     // Credentials never enter Work, model context, diagnostics or serialized reports.
-    let planning_key = load_macos_development_openai_credential().map_err(|_| Error::Keychain)?;
+    let planning_key = load_macos_probe_openai_credential().map_err(|_| Error::Keychain)?;
     let browser_keys = (0..if matches!(
         mode,
-        Mode::Agent | Mode::AgentRead | Mode::AgentCollection | Mode::AgentMoney
+        Mode::Agent
+            | Mode::AgentRead
+            | Mode::AgentScroll
+            | Mode::AgentDisclosure
+            | Mode::AgentCollection
+            | Mode::AgentDetails
+            | Mode::AgentMoney
     ) {
         6
     } else {
         4
     })
-        .map(|_| load_macos_development_openai_credential())
+        .map(|_| load_macos_probe_openai_credential())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| Error::Keychain)?;
     let owner_store = store.clone();
     let (result_tx, result_rx) = mpsc::sync_channel(1);
     let relay = Arc::new(Mutex::new(None::<zephium_app::CallbackHandle>));
     let events = relay.clone();
+    let execution_timeout = Duration::from_secs(match mode {
+        Mode::Agent
+        | Mode::AgentRead
+        | Mode::AgentScroll
+        | Mode::AgentDisclosure
+        | Mode::AgentCollection
+        | Mode::AgentDetails
+        | Mode::AgentMoney => 720,
+        Mode::Public => 160,
+        _ => 240,
+    });
     let run = zephium_engine::run_macos_work_application_with_events_probe(
         profile,
+        execution_timeout + Duration::from_secs(30),
         move |event| {
             if let Ok(relay) = events.lock() {
                 if let Some(handle) = relay.as_ref() {
@@ -194,14 +228,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
                         .and_then(|runtime| {
                             runtime.block_on(async {
                                 tokio::time::timeout(
-                                    Duration::from_secs(match mode {
-                                        Mode::Agent
-                                        | Mode::AgentRead
-                                        | Mode::AgentCollection
-                                        | Mode::AgentMoney => 720,
-                                        Mode::Public => 160,
-                                        _ => 240,
-                                    }),
+                                    execution_timeout,
                                     workflow(
                                         &worker_handle,
                                         &composition,
@@ -368,7 +395,13 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     };
     if matches!(
         mode,
-        Mode::Agent | Mode::AgentRead | Mode::AgentCollection | Mode::AgentMoney
+        Mode::Agent
+            | Mode::AgentRead
+            | Mode::AgentScroll
+            | Mode::AgentDisclosure
+            | Mode::AgentCollection
+            | Mode::AgentDetails
+            | Mode::AgentMoney
     ) {
         let execution = &state.executions[0];
         let counts = |kind: &str| {
@@ -403,13 +436,31 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     if state.executions[0].status != expected_status || state.executions[0].artifacts.is_empty() {
         return Err(Error::Runtime);
     }
-    let collection_accepted = mode != Mode::AgentCollection || state.executions[0].artifacts.iter().any(|artifact| {
-        state.executions[0].steps.iter().any(|step| step.artifacts.contains(&artifact.id) && matches!(&step.kind, WorkStepKindV1::Read { collection: Some(_), .. } | WorkStepKindV1::Discover { collection: Some(_), .. }))
+    let collection_accepted = !matches!(mode, Mode::AgentCollection | Mode::AgentDetails) || state.executions[0].artifacts.iter().any(|artifact| {
+        (mode == Mode::AgentDetails || state.executions[0].steps.iter().any(|step| step.artifacts.contains(&artifact.id) && matches!(&step.kind, WorkStepKindV1::Read { collection: Some(_), .. } | WorkStepKindV1::Discover { collection: Some(_), .. })))
             && matches!(&artifact.data, zephium_core::work::artifact::WorkArtifactDataV1::ComparisonMatrix { subjects, cells, .. }
                 if subjects.len() == 3 && subjects.iter().all(|subject| subject.homepage.is_some() && !subject.image_candidates.is_empty()) && cells.len() == 3 && cells.iter().all(|row| row.iter().any(|cell|
                     matches!(&cell.value, zephium_core::work::artifact::WorkCellValue::Text { text } if text.contains('$')) && !cell.evidence.is_empty())))
             && !artifact.evidence.is_empty()
     });
+    let collection_accepted = collection_accepted
+        && (mode != Mode::AgentDetails || {
+            let mut pages = std::collections::BTreeSet::new();
+            for step in &state.executions[0].steps {
+                if let WorkStepKindV1::Read { url, .. } = &step.kind {
+                    if step.status == WorkStepStatus::Succeeded
+                        && state.executions[0].artifacts.iter().any(|artifact| {
+                            step.artifacts.contains(&artifact.id)
+                                && has_product_specification(&artifact.data)
+                        })
+                        && url.starts_with("https://www.lego.com/en-us/product/")
+                    {
+                        pages.insert(url.as_str());
+                    }
+                }
+            }
+            pages.len() >= 3
+        });
     let money_accepted = !matches!(mode, Mode::AgentMoney | Mode::MoneyNode) || state.executions[0].artifacts.iter().any(|artifact| {
         artifact.title == "Observed product prices" && matches!(&artifact.data, zephium_core::work::artifact::WorkArtifactDataV1::ComparisonMatrix { subjects, cells, .. } if subjects.len() == 1 && subjects[0].name == "Acme Circles T-Shirt" && !subjects[0].image_candidates.is_empty() && subjects.len() == cells.len() && cells.iter().all(|row| row.first().is_some_and(|cell| matches!(&cell.value, zephium_core::work::artifact::WorkCellValue::Money { currency, observed_at: None, .. } if currency == "USD") && !cell.evidence.is_empty())))
     });
@@ -457,10 +508,20 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             } else {
                 "agent-money-incomplete.json"
             }
+        } else if mode == Mode::AgentDetails {
+            if collection_accepted {
+                "agent-details-run.json"
+            } else {
+                "agent-details-incomplete.json"
+            }
         } else if !collection_accepted {
             "agent-collection-incomplete.json"
         } else if mode == Mode::AgentCollection {
             "agent-collection-run.json"
+        } else if mode == Mode::AgentDisclosure {
+            "agent-disclosure-run.json"
+        } else if mode == Mode::AgentScroll {
+            "agent-scroll-run.json"
         } else if mode == Mode::AgentRead {
             "agent-read-run.json"
         } else if mode == Mode::Agent {
@@ -532,7 +593,13 @@ async fn workflow(
     };
     if matches!(
         mode,
-        Mode::Agent | Mode::AgentRead | Mode::AgentCollection | Mode::AgentMoney
+        Mode::Agent
+            | Mode::AgentRead
+            | Mode::AgentScroll
+            | Mode::AgentDisclosure
+            | Mode::AgentCollection
+            | Mode::AgentDetails
+            | Mode::AgentMoney
     ) {
         return agent_workflow(
             handle,
@@ -1090,8 +1157,11 @@ async fn agent_workflow(
     let collection = mode == Mode::AgentMoney;
     let objective = match mode {
         Mode::AgentCollection => AGENT_COLLECTION_OBJECTIVE,
+        Mode::AgentDetails => AGENT_DETAILS_OBJECTIVE,
         Mode::AgentMoney => AGENT_MONEY_OBJECTIVE,
         Mode::AgentRead => AGENT_READ_OBJECTIVE,
+        Mode::AgentDisclosure => "Read https://www.lego.com/en-us/product/tower-bridge-21067 in one browser assignment. Find the Specifications disclosure, bring it into view if needed, expand it, and inspect its revealed content. Return the product name, displayed price, piece count and exact dimensions with citations from this page. Do not follow links, buy, sign in, change locale, or substitute public search. Leave unsupported details unknown. Use one browser read assignment and a source-backed note.",
+        Mode::AgentScroll => "Read https://www.lego.com/en-us/product/tower-bridge-21067 in one browser assignment. Dismiss entry and privacy notices if needed. Before extracting, scroll the document down by one page, inspect the new viewport, then scroll the document down by another page and inspect again. Report the product name and any details visible after scrolling, with cited evidence. The two actual scrolls are required: snapshots alone do not satisfy this task. Do not buy, sign in, change locale, or follow links. Use one read responsibility and a source-backed note.",
         _ => AGENT_OBJECTIVE,
     };
     let created = handle
@@ -1382,4 +1452,22 @@ fn browser_settings(
         ),
         credential,
     }
+}
+
+fn has_product_specification(data: &zephium_core::work::artifact::WorkArtifactDataV1) -> bool {
+    use zephium_core::work::artifact::{WorkArtifactDataV1, WorkCellValue};
+    let WorkArtifactDataV1::ComparisonMatrix {
+        criteria, cells, ..
+    } = data
+    else {
+        return false;
+    };
+    criteria.iter().enumerate().any(|(index, criterion)| {
+        let name = criterion.name.to_ascii_lowercase();
+        (name.contains("piece") || name.contains("dimension"))
+            && cells.iter().any(|row| row.get(index).is_some_and(|cell| {
+                !cell.evidence.is_empty()
+                    && matches!(&cell.value, WorkCellValue::Text { text } if !text.trim().is_empty())
+            }))
+    })
 }

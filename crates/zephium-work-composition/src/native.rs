@@ -14,6 +14,7 @@ use zephium_store::SqliteStore;
 /// effect assessment, account attestation, manifest or profile assignment.
 /// This layer intentionally has no default task or implicit effect permission.
 pub struct TrustedWorkRequest {
+    anonymous_session: Option<zephium_agentic::WorkBrowserSession>,
     work: Option<zephium_agentic::WorkId>,
     pub(crate) input: AgentWorkRunInput,
     pub(crate) config: AgentWorkApplicationConfig,
@@ -33,6 +34,7 @@ impl TrustedWorkRequest {
         task: Box<dyn AgentWorkTask>,
     ) -> Self {
         Self {
+            anonymous_session: None,
             work: None,
             input,
             config,
@@ -42,6 +44,13 @@ impl TrustedWorkRequest {
             #[cfg(feature = "public-qualification")]
             public_qualification: false,
         }
+    }
+    pub(crate) fn with_anonymous_session(
+        mut self,
+        session: zephium_agentic::WorkBrowserSession,
+    ) -> Self {
+        self.anonymous_session = Some(session);
+        self
     }
     /// Bind the aggregate owning this fresh dispatch; no authority is added.
     pub fn with_work_identity(mut self, work: zephium_agentic::WorkId) -> Self {
@@ -127,6 +136,10 @@ impl MacosWorkComposition {
             Some(work) => prepared.with_work_identity(work),
             None => prepared,
         };
+        let prepared = match request.anonymous_session {
+            Some(session) => prepared.with_anonymous_session(session)?,
+            None => prepared,
+        };
         Ok(shell.attach_retained_work(prepared))
     }
     /// Uses the same owners passed to the normal application shell.
@@ -161,6 +174,9 @@ impl MacosWorkComposition {
         &self,
         request: TrustedWorkRequest,
     ) -> Result<PreparedAgentWork, AgentWorkFailure> {
+        if request.anonymous_session.is_some() {
+            return Err(AgentWorkFailure::Contract);
+        }
         let binding = request.browser_profile.ok_or(AgentWorkFailure::Contract)?;
         #[cfg(feature = "public-qualification")]
         if request.public_qualification {

@@ -295,6 +295,7 @@ fn ordinary_local_action_objective_keeps_discovery_account_and_result_contract()
         Some(LocalActions {
             policy: Box::new(RefuseLocalActions),
             max_actions: 3,
+            read_only: false,
         }),
     )
     .unwrap();
@@ -323,9 +324,302 @@ fn ordinary_local_action_objective_keeps_discovery_account_and_result_contract()
             settings(PublicReadWorkAccount::Anonymous),
             Some(LocalActions {
                 policy: Box::new(RefuseLocalActions),
-                max_actions
+                max_actions,
+                read_only: false,
             })
         )
         .is_err());
+    }
+}
+
+#[cfg(feature = "durable-runtime")]
+#[test]
+fn public_interactions_preserve_anonymous_read_only_scope() {
+    let mut definition = objective();
+    definition.navigation = AgentNavigationDiscovery::try_new_public_page(
+        ContextNavigationTarget::parse("https://example.com/catalog").unwrap(),
+    )
+    .unwrap();
+    let (input, task) = assemble_with_actions(
+        identity(),
+        ContextProfileStorageClass::Durable,
+        definition,
+        settings(PublicReadWorkAccount::Anonymous),
+        Some(LocalActions {
+            policy: Box::new(read_interactions::ReadingInteractionPolicy),
+            max_actions: 8,
+            read_only: true,
+        }),
+    )
+    .unwrap();
+    assert!(task.allows_actions_before_extraction());
+    assert_eq!(task.navigation_discovery().unwrap().max_hops(), 0);
+    assert!(
+        input
+            .persist_extraction_result()
+            .unwrap()
+            .retained_resource_spec()
+            .unwrap()
+            .isolated_public
+    );
+}
+
+#[cfg(feature = "durable-runtime")]
+fn reading_observation(nodes: serde_json::Value, completeness: &str) -> SemanticObservation {
+    let context = join(identity());
+    let frame = SemanticFrameJoin::try_new(
+        context,
+        FrameId::MAIN,
+        context.frame_generation(),
+        SemanticOrigin::parse("https://example.test/").unwrap(),
+        SemanticFrameTrust::SameOrigin,
+    )
+    .unwrap();
+    let wire = serde_json::json!({"v":1,"i":1,"g":1,"c":completeness,"n":nodes});
+    let snapshot = decode_semantic_snapshot(
+        SemanticDecodeContext::new(
+            SemanticInvocationId::new(1).unwrap(),
+            frame,
+            SemanticSnapshotGeneration::new(1).unwrap(),
+        ),
+        &serde_json::to_vec(&wire).unwrap(),
+    )
+    .unwrap();
+    SemanticObservationAssembler::new(
+        SemanticObservationRequest::initial(
+            SemanticObservationId::new(1).unwrap(),
+            context,
+            SemanticObservationBudget::INITIAL_FILTERED,
+        ),
+        snapshot,
+    )
+    .unwrap()
+    .finish()
+    .unwrap()
+}
+
+#[cfg(feature = "durable-runtime")]
+#[test]
+fn reading_interactions_require_native_boundaries_and_intended_outcomes() {
+    use serde_json::json;
+    let policy = read_interactions::ReadingInteractionPolicy;
+    assert_eq!(
+        policy.model_action_effect(),
+        Some(SemanticEffectClass::Read)
+    );
+    for (role, name, activation, dialog, allowed, proof) in [
+        (
+            "button",
+            "Continue",
+            1,
+            true,
+            true,
+            SemanticVerification::PageDialogClosed,
+        ),
+        (
+            "button",
+            "Continue",
+            2,
+            true,
+            false,
+            SemanticVerification::PageDialogClosed,
+        ),
+        (
+            "button",
+            "Continue",
+            3,
+            true,
+            false,
+            SemanticVerification::PageDialogClosed,
+        ),
+        (
+            "button",
+            "Continue",
+            4,
+            true,
+            false,
+            SemanticVerification::PageDialogClosed,
+        ),
+        (
+            "button",
+            "Continue",
+            5,
+            true,
+            false,
+            SemanticVerification::PageDialogClosed,
+        ),
+        (
+            "button",
+            "Continue",
+            1,
+            false,
+            false,
+            SemanticVerification::PageDialogClosed,
+        ),
+        (
+            "button",
+            "Accept",
+            1,
+            true,
+            false,
+            SemanticVerification::PageDialogClosed,
+        ),
+        (
+            "button",
+            "Buy now",
+            6,
+            false,
+            false,
+            SemanticVerification::TargetState {
+                state: SemanticState::Expanded,
+                present: true,
+            },
+        ),
+        (
+            "button",
+            "Specifications",
+            6,
+            false,
+            true,
+            SemanticVerification::TargetState {
+                state: SemanticState::Expanded,
+                present: true,
+            },
+        ),
+        (
+            "button",
+            "Shop",
+            6,
+            false,
+            true,
+            SemanticVerification::TargetState {
+                state: SemanticState::Expanded,
+                present: false,
+            },
+        ),
+        (
+            "button",
+            "Specifications",
+            1,
+            false,
+            false,
+            SemanticVerification::TargetState {
+                state: SemanticState::Expanded,
+                present: true,
+            },
+        ),
+        (
+            "tab",
+            "Specifications",
+            1,
+            false,
+            true,
+            SemanticVerification::TargetState {
+                state: SemanticState::Selected,
+                present: true,
+            },
+        ),
+    ] {
+        let observation = reading_observation(
+            json!([
+                {"k":1,"r":if dialog {"dialog"} else {"document"},"fc":true},
+                {"k":2,"p":0,"r":role,"n":name,"ak":activation,"o":9,"fc":true,
+                 "s":if proof == (SemanticVerification::TargetState {state: SemanticState::Expanded, present: false}) {4} else {0},
+                 "b":{"x":1,"y":1,"w":100,"h":30}}
+            ]),
+            "complete",
+        );
+        let snapshot = &observation.frames()[0];
+        let node = &snapshot.nodes()[1];
+        assert_eq!(
+            policy
+                .model_action_operations(node, &observation)
+                .unwrap()
+                .contains(SemanticOperationClass::Click),
+            allowed,
+            "{role}/{name}/{activation}/{dialog}"
+        );
+        for verification in [
+            proof,
+            SemanticVerification::TargetState {
+                state: SemanticState::Focused,
+                present: true,
+            },
+        ] {
+            let proposal = SemanticActionProposal::try_new(
+                SemanticActionIntent::Click {
+                    target: node.reference(),
+                },
+                SemanticEffectClass::Read,
+                SemanticWaitCondition::Immediate,
+                verification,
+                SemanticSettleBudget::try_new(2000).unwrap(),
+            )
+            .unwrap();
+            let batch = SemanticActionBatch::bind(
+                SemanticActionBatchId::new(1).unwrap(),
+                &observation,
+                &[snapshot.frame().clone()],
+                vec![proposal],
+            );
+            let batch = match batch {
+                Ok(batch) => batch,
+                Err(_) if !allowed => continue,
+                Err(error) => panic!("allowed action failed binding: {error:?}"),
+            };
+            let action = batch.actions()[0].prepare(snapshot).unwrap();
+            assert_eq!(
+                policy.assess(&action, &observation).is_ok(),
+                allowed && verification == proof
+            );
+        }
+    }
+}
+
+#[cfg(feature = "durable-runtime")]
+#[test]
+fn reading_disclosure_preserves_both_reveal_and_click_admission() {
+    let policy = read_interactions::ReadingInteractionPolicy;
+    for completeness in ["complete", "node_limit"] {
+        let observed = reading_observation(
+            serde_json::json!([
+                {"k":1,"r":"document","o":16,"fc":true,"b":{"x":0,"y":0,"w":1280,"h":800}},
+                {"k":2,"p":0,"r":"button","n":"Specifications","ak":6,"o":25,"fc":true,
+                 "b":{"x":10,"y":5000,"w":160,"h":32}}
+            ]),
+            completeness,
+        );
+        let ops = policy
+            .model_action_operations(&observed.frames()[0].nodes()[1], &observed)
+            .unwrap();
+        assert!(ops.contains(SemanticOperationClass::Scroll));
+        assert!(ops.contains(SemanticOperationClass::Click));
+    }
+}
+
+#[test]
+fn reading_dismissal_requires_complete_nontransactional_dialog_context() {
+    use serde_json::json;
+    let policy = read_interactions::ReadingInteractionPolicy;
+    for (text, completeness, allowed) in [
+        ("You can shop, get support and more.", "complete", true),
+        ("Confirm your purchase", "complete", false),
+        ("You can shop, get support and more.", "node_limit", false),
+    ] {
+        let observation = reading_observation(
+            json!([
+                {"k":1,"r":"dialog","fc":true},
+                {"k":2,"p":0,"r":"paragraph","t":text,"fc":true},
+                {"k":3,"p":0,"r":"button","n":"Continue","ak":1,"o":9,"fc":true,"b":{"x":1,"y":1,"w":100,"h":30}}
+            ]),
+            completeness,
+        );
+        assert_eq!(
+            policy
+                .model_action_operations(&observation.frames()[0].nodes()[2], &observation)
+                .unwrap()
+                .contains(SemanticOperationClass::Click),
+            allowed
+        );
     }
 }
