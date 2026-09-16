@@ -756,6 +756,7 @@ enum Cmd {
     ),
     GetSetting(String, Sender<Option<String>>),
     SearchHistory(ProfileId, String, u32, Sender<Vec<HistoryHit>>),
+    RecordSearch(ProfileId, String, String),
     RecentHistory(ProfileId, u32, Sender<Vec<HistoryHit>>),
     FaviconAge(ProfileId, String, Sender<Option<i64>>),
     FreshFaviconRaster(ProfileId, String, i64, Sender<Option<Vec<u8>>>),
@@ -2919,6 +2920,18 @@ impl Store for SqliteStore {
         rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap_or_default()
     }
 
+    fn record_search(&self, profile: ProfileId, query: String, url: String) -> bool {
+        if query.trim().is_empty()
+            || query.len() > 512
+            || !zephium_core::navigation::is_allowed_str(&url)
+        {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::RecordSearch(profile, query, url))
+            .is_ok()
+    }
+
     fn search_history(&self, profile: ProfileId, query: &str, limit: u32) -> Vec<HistoryHit> {
         if query.len() > MAX_HISTORY_QUERY_BYTES || limit == 0 {
             return Vec::new();
@@ -3564,8 +3577,16 @@ fn actor(
                 drop(admission);
                 done(response);
             }
+            Some(Cmd::RecordSearch(profile, query, url)) => {
+                hub.record_search(profile, &query, &url);
+            }
             Some(Cmd::SearchHistory(profile, query, limit, reply)) => {
-                let _ = reply.send(hub.search_history(profile, &query, limit));
+                let mut hits = hub.search_queries(profile, &query);
+                hits.extend(hub.search_history(profile, &query, limit));
+                let mut seen = std::collections::HashSet::new();
+                hits.retain(|hit| seen.insert(hit.url.clone()));
+                hits.truncate(limit as usize);
+                let _ = reply.send(hits);
             }
             Some(Cmd::RecentHistory(profile, limit, reply)) => {
                 let _ = reply.send(hub.recent_history(profile, limit));

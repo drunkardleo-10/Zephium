@@ -70,6 +70,9 @@ impl Hub {
             return error(ResourceError::Unavailable);
         };
         match call {
+            ResourceCall::SearchTitles { query } => {
+                search_titles(conn, &query).unwrap_or_else(|_| error(ResourceError::Unavailable))
+            }
             ResourceCall::ResolveNotes { ids } => {
                 let mut items = Vec::new();
                 for id in ids {
@@ -302,3 +305,28 @@ fn mutate(conn: &mut Connection, command: ResourceCommand) -> rusqlite::Result<R
 #[cfg(test)]
 #[path = "resources/tests.rs"]
 mod tests;
+
+// The title-only index deliberately excludes document bodies and descriptions.
+fn search_titles(conn: &Connection, query: &str) -> rusqlite::Result<ResourceResponse> {
+    let terms = query
+        .split_whitespace()
+        .take(8)
+        .map(|word| format!("\"{}\"*", word.replace('"', "")))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut statement = conn.prepare_cached("SELECT r.id,r.revision,r.title,r.pinned,r.updated_at FROM resource_titles_fts f JOIN user_resources r ON r.rowid=f.rowid WHERE resource_titles_fts MATCH ?1 AND r.kind='note' AND r.trashed=0 ORDER BY rank LIMIT 6")?;
+    let items = statement
+        .query_map([terms], |row| {
+            Ok(ResourceSummary {
+                id: row.get(0)?,
+                revision: row.get::<_, i64>(1)?.to_string(),
+                title: row.get(2)?,
+                pinned: row.get(3)?,
+                updated_at: row.get::<_, i64>(4)?.to_string(),
+                completed: None,
+                due_date: None,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(ResourceResponse::Page { items, next: None })
+}

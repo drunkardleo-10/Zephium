@@ -8664,3 +8664,28 @@ fn agent_audit_completion_panic_is_contained_by_the_actor() {
         StoreShutdownOutcome::Clean
     );
 }
+
+#[test]
+fn history_search_ranks_by_frecency_and_never_starves_on_one_busy_address() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    // One address visited far more often than the scan cap used to allow.
+    // Capping candidates before the group-by let this address consume every
+    // slot, hiding every other match for the same term.
+    for _ in 0..600 {
+        hub.record_visit(profile, "https://example.com/busy", "Example Busy");
+    }
+    hub.record_visit(profile, "https://example.com/quiet", "Example Quiet");
+    hub.record_visit(profile, "https://example.org/other", "Example Other");
+
+    let hits = hub.search_history(profile, "example", 10);
+    let urls: Vec<&str> = hits.iter().map(|hit| hit.url.as_str()).collect();
+    assert!(
+        urls.contains(&"https://example.com/quiet") && urls.contains(&"https://example.org/other"),
+        "a busy address must not hide the rest: {urls:?}"
+    );
+    // Frecency, not recency: the daily destination outranks the page opened
+    // once, even though that page was visited more recently.
+    assert_eq!(hits[0].url, "https://example.com/busy");
+}

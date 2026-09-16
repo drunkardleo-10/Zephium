@@ -210,3 +210,28 @@ fn acknowledged_updates_still_cannot_reapply_an_old_revision() {
         }
     ));
 }
+
+#[test]
+fn title_index_excludes_bodies_tasks_and_trash_and_tracks_updates() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = connection(&dir.path().join("titles.sqlite"));
+    conn.execute("INSERT INTO user_resources(id,kind,revision,title,pinned,trashed,created_at,updated_at,body,search_text) VALUES('00000000000000000000000001','note',1,'Rust handbook',0,0,1,1,'{}','private body text')", []).unwrap();
+    let titles = |query| match search_titles(&conn, query).unwrap() {
+        ResourceResponse::Page { items, .. } => items,
+        other => panic!("unexpected {other:?}"),
+    };
+    assert_eq!(titles("rust")[0].title, "Rust handbook");
+    assert!(titles("private").is_empty());
+    conn.execute("UPDATE user_resources SET title='Svelte handbook'", [])
+        .unwrap();
+    assert!(titles("rust").is_empty());
+    assert_eq!(titles("svel").len(), 1);
+    conn.execute("UPDATE user_resources SET trashed=1", [])
+        .unwrap();
+    assert!(titles("svelte").is_empty());
+    conn.execute("UPDATE user_resources SET trashed=0,kind='task'", [])
+        .unwrap();
+    assert!(titles("svelte").is_empty());
+    conn.execute("DELETE FROM user_resources", []).unwrap();
+    assert!(titles("svelte").is_empty());
+}

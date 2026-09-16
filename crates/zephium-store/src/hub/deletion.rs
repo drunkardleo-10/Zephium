@@ -648,6 +648,7 @@ fn scrub_profile_database(path: &Path) -> rusqlite::Result<()> {
          DELETE FROM user_resource_usage;
          DELETE FROM userscripts;
          DELETE FROM userscript_catalog;
+         DELETE FROM search_queries;
          DELETE FROM history;
          DELETE FROM history_usage;
          DELETE FROM favicons;
@@ -918,6 +919,12 @@ mod tests {
             "items",
             "page_permission_catalog",
             "page_permission_grants",
+            "resource_titles_fts",
+            "resource_titles_fts_config",
+            "resource_titles_fts_data",
+            "resource_titles_fts_docsize",
+            "resource_titles_fts_idx",
+            "search_queries",
             "settings",
             "spaces",
             "sqlite_sequence",
@@ -934,6 +941,7 @@ mod tests {
         );
 
         for table in [
+            "search_queries",
             "user_resource_receipts",
             "user_resources",
             "user_resource_usage",

@@ -1963,6 +1963,48 @@ pub static PROFILE: &[Migration] = &[
         )
         },
     },
+    Migration {
+        version: 15,
+        up: |tx| {
+            // Titles only. Note and task bodies are deliberately outside the
+            // index so search never reaches document contents.
+            tx.execute_batch(
+                "CREATE VIRTUAL TABLE resource_titles_fts USING fts5(
+                     title,
+                     content='user_resources',
+                     content_rowid='rowid',
+                     prefix='2 3'
+                 );
+                 INSERT INTO resource_titles_fts(resource_titles_fts) VALUES ('rebuild');
+                 INSERT INTO resource_titles_fts(resource_titles_fts, rank)
+                     VALUES ('secure-delete', 1);
+
+                 CREATE TRIGGER resource_titles_insert AFTER INSERT ON user_resources BEGIN
+                     INSERT INTO resource_titles_fts(rowid, title)
+                     VALUES (NEW.rowid, NEW.title);
+                 END;
+                 CREATE TRIGGER resource_titles_delete AFTER DELETE ON user_resources BEGIN
+                     INSERT INTO resource_titles_fts(resource_titles_fts, rowid, title)
+                     VALUES ('delete', OLD.rowid, OLD.title);
+                 END;
+                 CREATE TRIGGER resource_titles_update AFTER UPDATE OF title ON user_resources
+                 WHEN OLD.title IS NOT NEW.title BEGIN
+                     INSERT INTO resource_titles_fts(resource_titles_fts, rowid, title)
+                     VALUES ('delete', OLD.rowid, OLD.title);
+                     INSERT INTO resource_titles_fts(rowid, title)
+                     VALUES (NEW.rowid, NEW.title);
+                 END;
+
+                 CREATE TABLE search_queries (
+                     query_key TEXT PRIMARY KEY NOT NULL,
+                     query TEXT NOT NULL CHECK (length(CAST(query AS BLOB)) <= 512),
+                     url TEXT NOT NULL CHECK (length(CAST(url AS BLOB)) <= 8192),
+                     last_used INTEGER NOT NULL,
+                     use_count INTEGER NOT NULL CHECK (use_count > 0)
+                 ) STRICT;",
+            )
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -3089,7 +3131,7 @@ mod tests {
                 .unwrap(),
             14
         );
-        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(14));
+        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(15));
     }
 
     #[test]
