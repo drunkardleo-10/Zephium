@@ -1411,12 +1411,9 @@ mod tests {
         let rgba: Vec<u8> = (0..zephium_core::icon::RGBA32_BYTES)
             .map(|index| (index % 251) as u8)
             .collect();
-        let chrome = zephium_core::icon::chrome_value(&rgba).unwrap();
-        let encoded = chrome
-            .strip_prefix(zephium_core::icon::RGBA32_PREFIX)
-            .unwrap();
+        let encoded = zephium_core::icon::encode_rgba32(&rgba).unwrap();
         assert!(encoded.contains('/'));
-        let serialized = serde_json::to_string(encoded).unwrap();
+        let serialized = serde_json::to_string(&encoded).unwrap();
         let foundation_serialized = serialized.replace('/', "\\/");
         assert_eq!(decode_favicon_eval_result(&serialized), Some(rgba.clone()));
         assert_eq!(
@@ -1424,7 +1421,7 @@ mod tests {
             Some(rgba)
         );
         assert!(decode_favicon_eval_result("null").is_none());
-        assert!(decode_favicon_eval_result(encoded).is_none());
+        assert!(decode_favicon_eval_result(&encoded).is_none());
         assert!(decode_favicon_eval_result(&format!("\"{encoded}x\"")).is_none());
         assert!(decode_favicon_eval_result(&format!(
             "\"{}\"",
