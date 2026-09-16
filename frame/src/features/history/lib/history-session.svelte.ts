@@ -21,6 +21,8 @@ export class HistorySession {
 
   visits = $state.raw<HistoryVisitView[]>([]);
   query = $state("");
+  /** How far back the list reaches, and what Clear removes. */
+  range = $state<HistoryRange>("everything");
   loading = $state(false);
   busy = $state(false);
   error = $state<HistoryError | null>(null);
@@ -68,6 +70,7 @@ export class HistorySession {
     this.visits = [];
     this.cursor = null;
     this.query = "";
+    this.range = "everything";
     this.error = null;
     this.loading = false;
   }
@@ -78,6 +81,13 @@ export class HistorySession {
     this.searchTimer = setTimeout(() => void this.reload(), SEARCH_DEBOUNCE_MS);
   }
 
+  scope(range: HistoryRange) {
+    if (range === this.range) return;
+    this.range = range;
+    this.cursor = null;
+    void this.reload();
+  }
+
   /** Loads the first page, or appends the next one. */
   async reload(more = false) {
     if (more && (this.exhausted || this.capped || this.loading)) return;
@@ -86,6 +96,7 @@ export class HistorySession {
     const response = await this.call({
       kind: "page",
       query: this.query.trim(),
+      range: this.range,
       before: more ? this.cursor : null,
       limit: PAGE_SIZE,
     });
@@ -118,10 +129,11 @@ export class HistorySession {
     this.error = response?.kind === "error" ? response.error : "unavailable";
   }
 
-  async clear(range: HistoryRange) {
+  /** Removes exactly what the list is showing. */
+  async clear() {
     if (this.busy) return;
     this.busy = true;
-    const response = await this.call({ kind: "clear", range });
+    const response = await this.call({ kind: "clear", range: this.range });
     this.busy = false;
     if (response?.kind === "removed") {
       this.cursor = null;

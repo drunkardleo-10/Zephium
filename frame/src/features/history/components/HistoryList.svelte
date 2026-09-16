@@ -142,7 +142,13 @@
           }
         }}
       >
-        <FavIcon image={favicons.image(row.visit.icon)} size={16} lit fallback={Globe02Icon} />
+        <FavIcon
+          image={favicons.image(row.visit.icon)}
+          tone={favicons.tone(row.visit.icon)}
+          size={16}
+          lit
+          fallback={Globe02Icon}
+        />
         <span class="title"
           >{#if range}{row.visit.title.slice(0, range[0])}<mark
               >{row.visit.title.slice(range[0], range[1])}</mark

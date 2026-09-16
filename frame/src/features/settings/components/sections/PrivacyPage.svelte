@@ -49,10 +49,10 @@
       label={m.preview_time_range()}
       value={preview.get("clear.range", "hour")}
       options={[
-        { value: "hour", label: m.history_clear_hour() },
-        { value: "day", label: m.history_clear_day() },
-        { value: "week", label: m.history_clear_week() },
-        { value: "everything", label: m.history_clear_all() },
+        { value: "hour", label: m.history_range_hour() },
+        { value: "day", label: m.history_range_day() },
+        { value: "week", label: m.history_range_week() },
+        { value: "everything", label: m.history_range_all() },
       ]}
       onchange={(value) => preview.set("clear.range", value)}
     />{#each [{ key: "history", label: m.preview_history }, { key: "cookies", label: m.preview_cookies }, { key: "cache", label: m.preview_cache }] as item (item.key)}<Checkbox
