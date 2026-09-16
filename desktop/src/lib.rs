@@ -4203,6 +4203,13 @@ fn build_menu(
     let history = SubmenuBuilder::new(handle, "History")
         .item(&item("nav.back")?)
         .item(&item("nav.forward")?)
+        .separator()
+        .item(&item("tab.reopen")?)
+        .item(
+            &MenuItemBuilder::with_id("browser.history", "Show All History")
+                .accelerator("CmdOrCtrl+Y")
+                .build(handle)?,
+        )
         .build()?;
     let window = SubmenuBuilder::new(handle, "Window")
         .minimize()

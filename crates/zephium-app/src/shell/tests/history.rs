@@ -266,3 +266,41 @@ fn opening_a_history_row_in_a_new_tab_leaves_the_current_one_alone() {
         Some("https://kept.example/".to_owned())
     );
 }
+
+#[test]
+fn reopening_restores_the_tab_that_was_closed_last() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, screen, _queue) = browsed(store);
+    let first = visit(&mut shell, &screen, "first.example");
+    let second = visit(&mut shell, &screen, "second.example");
+
+    shell.handle(Command::Close(second));
+    shell.handle(Command::Run("tab.reopen".into()));
+
+    let restored = active_id(&screen);
+    assert_ne!(restored, first);
+    assert_ne!(
+        restored, second,
+        "a restored tab is a new item, not a revival"
+    );
+    assert_eq!(
+        shell
+            .items
+            .tab(restored)
+            .and_then(|tab| tab.url.as_ref())
+            .map(ToString::to_string),
+        Some("https://second.example/".to_owned())
+    );
+}
+
+#[test]
+fn reopening_with_nothing_closed_is_a_no_op_rather_than_a_failure() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, screen, _queue) = browsed(store);
+    let only = visit(&mut shell, &screen, "only.example");
+
+    let disposition = shell.operation_run_command("tab.reopen");
+
+    assert_eq!(disposition.outcome, OperationOutcome::NoOp);
+    assert_eq!(active_id(&screen), only);
+}

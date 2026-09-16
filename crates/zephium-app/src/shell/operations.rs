@@ -494,6 +494,7 @@ impl Shell {
                 || operation_result(OperationOutcome::NoOp, OperationReason::NoFocusedWindow),
                 |id| self.operation_close(id),
             ),
+            "tab.reopen" => self.operation_reopen_closed_tab(),
             "tab.next" => self.operation_cycle_tab(1),
             "tab.previous" => self.operation_cycle_tab(-1),
             "nav.back" => active.map_or_else(
@@ -527,6 +528,22 @@ impl Shell {
                 OperationOutcome::Rejected,
                 OperationReason::UnsupportedCommand,
             ),
+        }
+    }
+
+    /// Restores the newest tab closed in the focused window's space. Nothing
+    /// to restore is a no-op, not a failure.
+    fn operation_reopen_closed_tab(&mut self) -> OperationDisposition {
+        if self.active_browser_page().is_some() {
+            self.browser_after_return = Some(Box::new(Command::Run("tab.reopen".into())));
+            return self.operation_show_browser_page(None);
+        }
+        let Some(profile) = self.windows.focused().map(|window| window.profile) else {
+            return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
+        };
+        match self.restore_recently_closed_tab(profile) {
+            Some((_, native)) => mutation_result(native),
+            None => operation_result(OperationOutcome::NoOp, OperationReason::MutationApplied),
         }
     }
 
