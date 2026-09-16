@@ -969,7 +969,7 @@ fn tracked_operation_command(command: &Command) -> bool {
             | Command::UninstallFocusedExtension { .. }
             | Command::RespondToExtensionRuntimeGrantPrompt { .. }
             | Command::RespondToPagePermissionPrompt { .. }
-            | Command::OpenUrl(_)
+            | Command::OpenUrl { .. }
             | Command::SetAppSetting { .. }
             | Command::DeleteProfile(_)
             | Command::RetryContentPolicy { .. }

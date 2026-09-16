@@ -225,3 +225,44 @@ fn a_shutting_down_shell_answers_history_calls_it_can_no_longer_serve() {
         }
     ));
 }
+
+#[test]
+fn opening_a_history_row_navigates_in_place_and_leaves_the_library() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, screen, _queue) = browsed(store);
+    let id = active_id(&screen);
+    shell.handle(Command::ShowBrowserPage(Some(crate::BrowserPage::History)));
+    assert!(shell.active_browser_page().is_some());
+
+    shell.handle(Command::OpenUrl {
+        input: "https://example.com/article".into(),
+        new_tab: false,
+    });
+
+    // Navigation from a browser page returns from it first and replays itself,
+    // so the row lands in the tab the reader was already looking at.
+    assert!(shell.browser_return.is_some() || shell.active_browser_page().is_none());
+    assert_eq!(active_id(&screen), id);
+}
+
+#[test]
+fn opening_a_history_row_in_a_new_tab_leaves_the_current_one_alone() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, screen, _queue) = browsed(store);
+    let first = visit(&mut shell, &screen, "kept.example");
+
+    shell.handle(Command::OpenUrl {
+        input: "https://example.com/article".into(),
+        new_tab: true,
+    });
+
+    assert_ne!(active_id(&screen), first);
+    assert_eq!(
+        shell
+            .items
+            .tab(first)
+            .and_then(|tab| tab.url.as_ref())
+            .map(ToString::to_string),
+        Some("https://kept.example/".to_owned())
+    );
+}

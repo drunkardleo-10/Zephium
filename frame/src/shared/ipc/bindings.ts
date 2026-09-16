@@ -125,6 +125,11 @@ export const commands = {
 	tabDragOver: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("tab_drag_over", { x, y }),
 	resourceCall: (expectedProfile: string, call: ResourceCall_Deserialize) => __TAURI_INVOKE<ResourceReply_Serialize>("resource_call", { expectedProfile, call }),
 	historyCall: (expectedProfile: string, call: HistoryCall) => __TAURI_INVOKE<HistoryResponse>("history_call", { expectedProfile, call }),
+	/**
+	 *  Opens an address in the focused window. The launcher panel and the history
+	 *  surfaces have no tab id to navigate, and must not be given one.
+	 */
+	browserOpenUrl: (url: string, newTab: boolean) => __TAURI_INVOKE<OperationAdmission>("browser_open_url", { url, newTab }),
 	resourceCloseReady: (token: string, success: boolean) => __TAURI_INVOKE<boolean>("resource_close_ready", { token, success }),
 	tabDrop: (id: string, x: number | null, y: number | null) => __TAURI_INVOKE<OperationAdmission>("tab_drop", { id, x, y }),
 	dividerGrab: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("divider_grab", { x, y }),

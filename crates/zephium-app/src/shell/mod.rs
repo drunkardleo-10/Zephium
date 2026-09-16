@@ -893,8 +893,8 @@ impl Shell {
             Command::RunSearchAction { context, action } => {
                 let _ = self.operation_run_search_action(*context, action);
             }
-            Command::OpenUrl(input) => {
-                let _ = self.operation_open_url(input);
+            Command::OpenUrl { input, new_tab } => {
+                let _ = self.operation_open_url(input, new_tab);
             }
             Command::SetAppSetting { key, value } => {
                 let _ = self.operation_set_app_setting(key, value);

@@ -286,7 +286,7 @@ impl Shell {
                 {
                     self.operation_navigate(id, url)
                 } else {
-                    self.operation_open_url(url)
+                    self.operation_open_url(url, true)
                 }
             }
             SearchAction::RunCommand { id } if id.starts_with("theme.") => {

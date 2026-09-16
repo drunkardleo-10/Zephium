@@ -227,7 +227,10 @@ fn open_url_lands_in_a_new_tab() {
     let (mut shell, engine, screen) = setup();
     shell.handle(Command::Bootstrap);
     let first = active_id(&screen);
-    shell.handle(Command::OpenUrl("github.com".into()));
+    shell.handle(Command::OpenUrl {
+        input: "github.com".into(),
+        new_tab: true,
+    });
     let second = active_id(&screen);
     assert_ne!(first, second);
     assert!(engine
@@ -254,7 +257,10 @@ fn open_url_at_item_limit_never_navigates_the_active_tab() {
     }
     let calls_before = engine.calls().len();
 
-    let completion = shell.handle_operation(Command::OpenUrl("must-not-replace.example".into()));
+    let completion = shell.handle_operation(Command::OpenUrl {
+        input: "must-not-replace.example".into(),
+        new_tab: true,
+    });
 
     assert_eq!(completion.outcome, OperationOutcome::Rejected);
     assert_eq!(completion.reason, OperationReason::ItemLimitReached);

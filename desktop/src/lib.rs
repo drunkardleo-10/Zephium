@@ -1585,6 +1585,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tab_drag_over,
             resource_call,
             history_call,
+            browser_open_url,
             resource_close_ready,
             tab_drop,
             divider_grab,
@@ -3748,6 +3749,32 @@ async fn resource_call(
         Ok(Ok(reply)) => reply,
         _ => failed(ResourceError::OutcomeUnknown),
     }
+}
+
+/// Opens an address in the focused window. The launcher panel and the history
+/// surfaces have no tab id to navigate, and must not be given one.
+#[tauri::command]
+#[specta::specta]
+fn browser_open_url(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    url: String,
+    new_tab: bool,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Both, "browser_open_url")
+        || !bounded(&url, MAX_NAVIGATION_INPUT_BYTES)
+        || !zephium_core::navigation::is_allowed_str(&url)
+    {
+        return rejected_operation();
+    }
+    dispatch_operation(
+        caller.app_handle(),
+        &shell,
+        Command::OpenUrl {
+            input: url,
+            new_tab,
+        },
+    )
 }
 
 #[tauri::command]

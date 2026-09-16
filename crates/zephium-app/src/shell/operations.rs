@@ -31,7 +31,7 @@ impl Shell {
                 revision,
                 anchor,
             } => self.operation_invoke_extension_action(runtime, revision, anchor),
-            Command::OpenUrl(input) => self.operation_open_url(input),
+            Command::OpenUrl { input, new_tab } => self.operation_open_url(input, new_tab),
             Command::SetAppSetting { key, value } => self.operation_set_app_setting(key, value),
             Command::RetryContentPolicy {
                 profile,
@@ -148,7 +148,13 @@ impl Shell {
         mutation_result(self.commit(effects))
     }
 
-    pub(super) fn operation_open_url(&mut self, input: String) -> OperationDisposition {
+    /// Opens an address in the focused window without naming a tab, which the
+    /// launcher panel and the history surfaces cannot do.
+    pub(super) fn operation_open_url(
+        &mut self,
+        input: String,
+        new_tab: bool,
+    ) -> OperationDisposition {
         let Some(input) = self
             .search
             .engine
@@ -157,8 +163,13 @@ impl Shell {
         else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
         };
-        if self.windows.focused().is_none() {
+        let Some(active) = self.windows.focused().map(|window| window.active) else {
             return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
+        };
+        if let Some(id) = active.filter(|_| !new_tab) {
+            // Navigating in place also returns from a browser page, which is
+            // what opening a row from the history library should do.
+            return self.operation_navigate(id, input);
         }
         let Some((id, mut effects)) = self.open_tab_with_id() else {
             // Reaching the bounded item limit must not repurpose and navigate

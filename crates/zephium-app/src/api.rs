@@ -609,7 +609,10 @@ pub enum Command {
         context: Box<zephium_ipc::SearchContext>,
         action: zephium_ipc::SearchAction,
     },
-    OpenUrl(String),
+    OpenUrl {
+        input: String,
+        new_tab: bool,
+    },
     SetAppSetting {
         key: String,
         value: String,
