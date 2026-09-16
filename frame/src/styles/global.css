@@ -128,11 +128,19 @@ button {
 .favicon-plate {
   display: block;
   box-sizing: border-box;
+  padding: 0;
   opacity: var(--favicon-rest-opacity);
   filter: saturate(var(--favicon-rest-saturation));
   transition:
     opacity var(--motion-fast) var(--ease-out-quiet),
     filter var(--motion-fast) var(--ease-out-quiet);
+}
+
+.favicon-plate > canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 3px;
 }
 
 .favicon-plate-lit {
@@ -145,14 +153,17 @@ button {
    Only neutral icons qualify: a coloured mark stays legible however dark it
    is, and a plate behind it would misrepresent the brand. */
 .favicon-plate[data-tone="dark"] {
+  padding: var(--favicon-inset);
   background: var(--favicon-plate);
 }
 
 :root[data-theme="light"] .favicon-plate[data-tone="dark"] {
+  padding: 0;
   background: none;
 }
 
 :root[data-theme="light"] .favicon-plate[data-tone="light"] {
+  padding: var(--favicon-inset);
   background: var(--favicon-plate);
 }
 

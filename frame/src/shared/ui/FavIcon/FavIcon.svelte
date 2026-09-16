@@ -19,11 +19,10 @@
   let { image, tone = "mid", loading = false, size = 17, lit = false, fallback }: Props = $props();
   let canvas: HTMLCanvasElement | undefined = $state();
 
-  // A plated mark is inset from its ground, the way a sticker leaves a margin.
-  // The outer box keeps its size so plating never shifts a row.
-  let plated = $derived(tone === "dark" || tone === "light");
-  let inset = $derived(plated ? Math.max(1, Math.round(size * 0.12)) : 0);
   let radius = $derived(Math.max(4, Math.round(size * 0.28)));
+  // Percentage padding resolves against the container's width, not the icon's,
+  // so the inset is measured here and applied only where CSS draws a plate.
+  let inset = $derived(Math.max(1, Math.round(size * 0.12)));
 
   $effect(() => {
     const pixels = image;
@@ -38,25 +37,19 @@
   this process never exposes an image decoder or a custom favicon protocol.
 -->
 {#if image}
+  <!-- The inset belongs to the plate, and only CSS knows whether this theme
+       draws one: insetting by tone alone shrank marks that were never plated. -->
   <span
     data-tone={tone}
     style:width={`${size}px`}
     style:height={`${size}px`}
-    style:padding={`${inset}px`}
     style:border-radius={`${radius}px`}
+    style:--favicon-inset={`${inset}px`}
     class:favicon-plate-lit={lit}
     class:animate-pulse={loading}
     class="favicon-plate shrink-0"
     aria-hidden="true"
-    ><canvas
-      bind:this={canvas}
-      width={image.width}
-      height={image.height}
-      style:width={`${size - inset * 2}px`}
-      style:height={`${size - inset * 2}px`}
-      style:border-radius={`${Math.max(3, radius - inset)}px`}
-      class="block"
-    ></canvas></span
+    ><canvas bind:this={canvas} width={image.width} height={image.height}></canvas></span
   >
 {:else if fallback}
   <span
