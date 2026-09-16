@@ -27,7 +27,8 @@
   import { loadToolSlot } from "$features/tools";
   import * as toolHost from "$session/tools.svelte";
   import { SettingsNavigation } from "$features/settings";
-  import { LibraryPage } from "$features/library";
+  import { loadLibraryPage } from "$features/library";
+  import { loadHistoryPage } from "$features/history";
   import { loadNewTabSearch } from "$features/search";
   import { loadNewTab } from "$features/newtab";
   import { Sidebar } from "$features/sidebar";
@@ -206,9 +207,21 @@
               failureLabel={m.surface_render_failed()}
               retryLabel={m.surface_retry()}>{#snippet children(View)}<View />{/snippet}</LazyView
             >{/key}
-        {:else}<LibraryPage
-            kind={browserPage.currentPage() === "history" ? "history" : "downloads"}
-          />{/if}
+        {:else if browserPage.currentPage() === "history"}
+          <LazyView
+            loader={loadHistoryPage}
+            loadingLabel={m.surface_loading()}
+            failureLabel={m.surface_render_failed()}
+            retryLabel={m.surface_retry()}>{#snippet children(View)}<View />{/snippet}</LazyView
+          >
+        {:else}
+          <LazyView
+            loader={loadLibraryPage}
+            loadingLabel={m.surface_loading()}
+            failureLabel={m.surface_render_failed()}
+            retryLabel={m.surface_retry()}
+            >{#snippet children(View)}<View kind="downloads" />{/snippet}</LazyView
+          >{/if}
       </RenderBoundary>
     </main>
   {/if}

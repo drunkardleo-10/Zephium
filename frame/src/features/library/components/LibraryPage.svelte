@@ -4,8 +4,8 @@
   import IconButton from "$shared/ui/IconButton";
   import Icon from "$shared/ui/Icon";
   import { ArrowLeft02Icon, Clock01Icon, Download01Icon } from "@hugeicons/core-free-icons";
-  let { kind }: { kind: "history" | "downloads" } = $props();
-  let history = $derived(kind === "history");
+  let { kind }: { kind: "downloads" } = $props();
+  let history = $derived<boolean>(kind !== "downloads");
 </script>
 
 <section class="library-shell">

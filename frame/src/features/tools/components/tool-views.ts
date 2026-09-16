@@ -31,7 +31,7 @@ export const tools = {
   },
   history: {
     title: m.browser_history_title,
-    description: m.browser_history_unavailable,
+    description: m.history_empty_help,
     empty: m.browser_history_empty,
     icon: Clock01Icon,
     load: () => import("./previews/HistoryView.svelte"),
