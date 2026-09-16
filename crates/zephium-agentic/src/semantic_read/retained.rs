@@ -4,6 +4,30 @@ use std::sync::Arc;
 
 const MAX_CAPTURES: usize = 8;
 
+fn extraction_priority(field: SemanticReadField, role: SemanticRole) -> u8 {
+    match field {
+        SemanticReadField::TextValue
+        | SemanticReadField::BooleanValue
+        | SemanticReadField::OrdinalValue => 0,
+        SemanticReadField::VisibleText | SemanticReadField::AccessibleName
+            if matches!(
+                role,
+                SemanticRole::Heading
+                    | SemanticRole::Paragraph
+                    | SemanticRole::Document
+                    | SemanticRole::Cell
+                    | SemanticRole::CellHeader
+                    | SemanticRole::Status
+                    | SemanticRole::ListItem
+            ) =>
+        {
+            0
+        }
+        SemanticReadField::LinkDestination | SemanticReadField::ImageSource => 1,
+        _ => 2,
+    }
+}
+
 fn merge_omitted_stats(target: &mut SemanticReadStats, source: SemanticReadStats) {
     target.omitted_items = target.omitted_items.saturating_add(source.omitted_items);
     target.withheld_sensitive_nodes = target
@@ -369,7 +393,17 @@ impl SemanticRetainedReadEvidence {
                 } else {
                     SemanticReadOmission::ByteLimit
                 });
-            let removed = current.fragments.pop().expect("nonempty over-budget read");
+            // Keep source order, but shed control labels before readable facts.
+            let index = current
+                .fragments
+                .iter()
+                .enumerate()
+                .max_by_key(|(index, fragment)| {
+                    (extraction_priority(fragment.field, fragment.role), *index)
+                })
+                .map(|(index, _)| index)
+                .expect("nonempty over-budget read");
+            let removed = current.fragments.remove(index);
             current.stats.items -= 1;
             current.stats.content_bytes -= removed.content.retained_bytes();
             match removed.provenance.sensitivity {
@@ -378,6 +412,10 @@ impl SemanticRetainedReadEvidence {
                 SemanticSensitivity::Secret => return Err(SemanticReadError::AuthorityMismatch),
             }
             current.stats.omitted_items = current.stats.omitted_items.saturating_add(1);
+        }
+        for (index, fragment) in current.fragments.iter_mut().enumerate() {
+            fragment.id =
+                SemanticReadFragmentId::new(index as u16 + 1).expect("bounded nonzero fragment");
         }
         for capture in self.captures.iter().rev() {
             if current.matches_acknowledgement(&capture.acknowledgement) {

@@ -17,10 +17,11 @@ use crate::semantic_diff::SemanticObservationFingerprint;
 use crate::semantic_model::{role_label, sensitivity_label, source_label};
 use crate::semantic_wire::looks_like_secret_value;
 use crate::{
-    ContextJoin, FrameId, SemanticFrameBoundaryStatus, SemanticFrameJoin, SemanticNode,
-    SemanticObservation, SemanticObservationAcknowledgement, SemanticObservationGeneration,
-    SemanticObservationId, SemanticReferenceId, SemanticRole, SemanticSensitivity, SemanticState,
-    SemanticTrust, SemanticValueSummary, MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_FRAMES,
+    ContextJoin, FrameId, SemanticActivation, SemanticFrameBoundaryStatus, SemanticFrameJoin,
+    SemanticNode, SemanticObservation, SemanticObservationAcknowledgement,
+    SemanticObservationGeneration, SemanticObservationId, SemanticOperations, SemanticReferenceId,
+    SemanticRole, SemanticSensitivity, SemanticState, SemanticTrust, SemanticValueSummary,
+    MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_FRAMES,
 };
 
 /// Maximum UTF-8 bytes accepted in one semantic lookup query.
@@ -392,6 +393,8 @@ pub struct SemanticLocateMatch {
     sensitivity: SemanticSensitivity,
     trust: SemanticTrust,
     actionable: bool,
+    operations: SemanticOperations,
+    disclosure_expanded: Option<bool>,
 }
 
 impl SemanticLocateMatch {
@@ -418,6 +421,16 @@ impl SemanticLocateMatch {
     /// Source node trust for downstream policy accounting.
     pub const fn trust(self) -> SemanticTrust {
         self.trust
+    }
+
+    /// Observed operations; task policy may narrow these further.
+    pub const fn operations(self) -> SemanticOperations {
+        self.operations
+    }
+
+    /// Present only for an observed disclosure control.
+    pub const fn disclosure_expanded(self) -> Option<bool> {
+        self.disclosure_expanded
     }
 
     /// Whether the source observation advertised at least one closed operation.
@@ -624,6 +637,10 @@ pub fn locate_semantic_observation(
                         sensitivity: node.sensitivity(),
                         trust: node.trust(),
                         actionable: !node.operations().is_empty(),
+                        operations: node.operations(),
+                        disclosure_expanded: (node.activation()
+                            == Some(SemanticActivation::Disclosure))
+                        .then_some(node.states().contains(SemanticState::Expanded)),
                     },
                 },
             );
@@ -940,6 +957,17 @@ fn match_node(
             across |= term_bits(scratch, &query.terms);
         }
     }
+    if node.activation() == Some(SemanticActivation::Disclosure) {
+        across |= term_bits("disclosure", &query.terms);
+        across |= term_bits(
+            if node.states().contains(SemanticState::Expanded) {
+                "expanded"
+            } else {
+                "collapsed"
+            },
+            &query.terms,
+        );
+    }
     across |= inherited;
 
     let matched_terms = (across & required).count_ones();
@@ -1181,7 +1209,13 @@ fn locate_result_guard(
         hasher.update([match_quality_guard_tag(matched.quality)]);
         hash_guard_label(&mut hasher, sensitivity_label(matched.sensitivity));
         hash_guard_label(&mut hasher, source_label(matched.trust));
-        hasher.update([u8::from(matched.actionable)]);
+        hasher.update([
+            u8::from(matched.actionable),
+            matched.operations.bits(),
+            matched
+                .disclosure_expanded
+                .map_or(0, |expanded| if expanded { 2 } else { 1 }),
+        ]);
     }
     hasher.finalize().into()
 }
@@ -1498,6 +1532,70 @@ mod tests {
         )
         .expect("bind");
         locate_semantic_observation(observation, request).expect("locate")
+    }
+
+    #[test]
+    fn lookup_distinguishes_same_named_disclosures_without_page_content() {
+        let context = context(150);
+        let main = snapshot(
+            context,
+            FrameId::MAIN,
+            context.frame_generation(),
+            "https://locate.example.test/details",
+            1,
+            1,
+            json!([
+                {"k":1,"r":"document"},
+                {"k":2,"p":0,"r":"button","n":"Specifications","ak":1,"o":9},
+                {"k":3,"p":0,"r":"button","n":"Specifications","ak":6,"o":16},
+                {"k":4,"p":0,"r":"button","n":"Specifications","ak":6,"o":9,"s":4}
+            ]),
+        );
+        let observed = SemanticObservationAssembler::new(
+            SemanticObservationRequest::initial(
+                SemanticObservationId::new(170).unwrap(),
+                context,
+                SemanticObservationBudget::INITIAL_FILTERED,
+            ),
+            main,
+        )
+        .unwrap()
+        .finish()
+        .unwrap();
+        let result = locate(
+            &observed,
+            1,
+            "Specifications",
+            SemanticLocateScope::Initial,
+            8,
+        );
+        assert_eq!(result.matches().len(), 3);
+        assert_eq!(result.matches()[0].disclosure_expanded(), None);
+        assert_eq!(result.matches()[1].disclosure_expanded(), Some(false));
+        assert!(result.matches()[1]
+            .operations()
+            .contains(crate::SemanticOperationClass::Scroll));
+        assert_eq!(result.matches()[2].disclosure_expanded(), Some(true));
+        let result = locate(
+            &observed,
+            2,
+            "Specifications collapsed disclosure",
+            SemanticLocateScope::Initial,
+            8,
+        );
+        assert_eq!(result.matches()[0].reference().get(), 3);
+        let encoded = crate::encode_semantic_locate_result(
+            &result,
+            crate::SemanticModelEncodingBudget::LOCATE_RESULT_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .unwrap();
+        let payload = encoded
+            .admit_conservative_utf8(
+                &crate::SemanticTokenizerRevision::try_new("lookup-test".into()).unwrap(),
+            )
+            .unwrap();
+        assert!(payload.as_str().contains("ops=scroll disclosure=collapsed"));
+        assert!(!payload.as_str().contains("Specifications"));
     }
 
     #[test]

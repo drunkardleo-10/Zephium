@@ -4,7 +4,7 @@
   const GLOBAL_NAME = "__zephiumSemanticRuntimeV1";
   const PROTOCOL_VERSION = 1;
   const WIRE_VERSION = 1;
-  const MAX_REQUEST_BYTES = 17701;
+  const MAX_REQUEST_BYTES = 17707;
   const MAX_SAFE_INTEGER = 9007199254740991;
   const MAX_NODES = 512;
   const MAX_TEXT_BYTES = 131072;
@@ -89,6 +89,15 @@
   const elementTagGetter = getter(Element.prototype, "tagName");
   const elementShadowGetter = getter(Element.prototype, "shadowRoot");
   const documentElementGetter = getter(Document.prototype, "documentElement");
+  const scrollingElementGetter = getter(Document.prototype, "scrollingElement");
+  const scrollLeftGetter = getter(Element.prototype, "scrollLeft");
+  const scrollTopGetter = getter(Element.prototype, "scrollTop");
+  const clientWidthGetter = getter(Element.prototype, "clientWidth");
+  const clientHeightGetter = getter(Element.prototype, "clientHeight");
+  const scrollWidthGetter = getter(Element.prototype, "scrollWidth");
+  const scrollHeightGetter = getter(Element.prototype, "scrollHeight");
+  const fixedScrollBy = Element.prototype.scrollBy;
+  const fixedScrollIntoView = Element.prototype.scrollIntoView;
   const documentActiveGetter = getter(Document.prototype, "activeElement");
   const documentReadyStateGetter = getter(Document.prototype, "readyState");
   const shadowActiveGetter =
@@ -106,6 +115,10 @@
   const htmlElementClick =
     typeof HTMLElement === "function" ? HTMLElement.prototype.click : null;
   const nativePromise = Promise;
+  const fixedAnimationFrame = globalThis.requestAnimationFrame;
+  const fixedCancelAnimationFrame = globalThis.cancelAnimationFrame;
+  const fixedTimeout = globalThis.setTimeout;
+  const fixedClearTimeout = globalThis.clearTimeout;
   const nativeInputEvent = globalThis.InputEvent;
   const fixedDispatchEvent = EventTarget.prototype.dispatchEvent;
   const inputValueSetter = setter(HTMLInputElement.prototype, "value");
@@ -123,6 +136,11 @@
     typeof HTMLAnchorElement === "function" ? getter(HTMLAnchorElement.prototype, "href") : null;
   const imageCurrentSrcGetter = typeof HTMLImageElement === "function" ? getter(HTMLImageElement.prototype, "currentSrc") : null;
   const imageSrcGetter = typeof HTMLImageElement === "function" ? getter(HTMLImageElement.prototype, "src") : null;
+  const detailsOpenGetter = typeof HTMLDetailsElement === "function" ? getter(HTMLDetailsElement.prototype, "open") : null;
+  const buttonTypeGetter = typeof HTMLButtonElement === "function" ? getter(HTMLButtonElement.prototype, "type") : null;
+  const buttonFormGetter = typeof HTMLButtonElement === "function" ? getter(HTMLButtonElement.prototype, "form") : null;
+  const inputTypeGetter = getter(HTMLInputElement.prototype, "type");
+  const inputFormGetter = getter(HTMLInputElement.prototype, "form");
   const inputCheckedGetter =
     typeof HTMLInputElement === "function" ? getter(HTMLInputElement.prototype, "checked") : null;
   const inputLabelsGetter =
@@ -167,6 +185,7 @@
   let dialogKeys = new WeakMap();
   let nextDialogKey = 1;
   let pendingDialogSample = null;
+  let pendingScrollSample = null;
   let transportActive = false;
 
   function clearDocumentState() {
@@ -179,6 +198,7 @@
     dialogKeys = new WeakMap();
     nextDialogKey = 1;
     pendingDialogSample = null;
+    pendingScrollSample = null;
   }
 
   const IDENTITY_EXHAUSTED = objectFreeze({});
@@ -289,6 +309,12 @@
 
   function parseActionRequest(request) {
     const actionKeys = ["v", "o", "a", "i", "g", "t", "r", "k", "e", "p", "z", "f", "of"];
+    if (objectHasOwn(request, "sc")) actionKeys.push("sc");
+    if (request.k === "scroll") {
+      if (!arrayIsArray(request.sc) || request.sc.length !== 2 ||
+          !["up", "down", "left", "right"].includes(request.sc[0]) ||
+          !["line", "half_page", "page", "into_view"].includes(request.sc[1])) return null;
+    } else if (objectHasOwn(request, "sc")) return null;
     if (objectHasOwn(request, "u")) actionKeys.push("u");
     if (!hasExactKeys(request, actionKeys) ||
         (objectHasOwn(request, "u") && (request.u !== true || request.k !== "click"))) {
@@ -374,7 +400,11 @@
   }
 
   function validRuntimeDescriptor(value) {
-    if (!hasExactKeys(value, ["r", "o", "q", "s", "n", "vk", "vt", "vo", "vb"])) return false;
+    if (!isPlainObject(value)) return false;
+    if (!hasExactKeys(value, objectHasOwn(value, "a")
+      ? ["a", "r", "o", "q", "s", "n", "vk", "vt", "vo", "vb"]
+      : ["r", "o", "q", "s", "n", "vk", "vt", "vo", "vb"])) return false;
+    if (objectHasOwn(value, "a") && (!numberIsSafeInteger(value.a) || value.a < 1 || value.a > 6)) return false;
     if (
       !numberIsSafeInteger(value.r) || value.r < 1 || value.r > 30 ||
       !numberIsSafeInteger(value.o) || value.o < 0 || value.o > 31 ||
@@ -698,6 +728,7 @@
 
   const ariaRoles = objectFreeze({
     group: "group",
+    figure: "group",
     document: "document",
     article: "document",
     region: "landmark",
@@ -764,6 +795,21 @@
     );
   }
 
+  function genericTextDescriptor(node, tag, inputType) {
+    if (tag !== "div" && tag !== "span") return null;
+    const children = read(nodeChildNodesGetter, node);
+    for (let index = 0; index < mathMin(listLength(children), 8); index += 1) {
+      const child = listItem(children, index);
+      if (child !== null && nodeType(child) === 3) {
+        const raw = read(characterDataGetter, child);
+        if (typeof raw === "string" && apply(stringTrim, apply(stringSlice, raw, [0, 128]), []) !== "") {
+          return { role: "paragraph", tag, inputType, genericText: true };
+        }
+      }
+    }
+    return null;
+  }
+
   function classify(node) {
     if (node === document) return { role: "document", tag: "#document", inputType: "" };
     if (nodeType(node) !== 1) return null;
@@ -795,8 +841,9 @@
     if (tag === "html" || tag === "body" || tag === "div" || tag === "fieldset" || tag === "details") {
       return tag === "fieldset" || tag === "details"
         ? { role: "group", tag, inputType }
-        : null;
+        : genericTextDescriptor(node, tag, inputType);
     }
+    if (tag === "figure") return { role: "group", tag, inputType };
     if (tag === "article") return { role: "document", tag, inputType };
     if (tag === "main" || tag === "nav" || tag === "header" || tag === "footer" || tag === "aside") {
       const landmark = { main: "main", nav: "navigation", header: "banner", footer: "contentinfo", aside: "complementary" }[tag];
@@ -846,7 +893,7 @@
     }
     if (tag === "progress" || tag === "meter") return { role: "progress", tag, inputType };
     if (tag === "output") return { role: "status", tag, inputType };
-    return null;
+    return genericTextDescriptor(node, tag, inputType);
   }
 
   function shouldSkipSubtree(element) {
@@ -939,6 +986,18 @@
     return inherited || has(element, "disabled") || lower(attribute(element, "aria-disabled", 16) || "") === "true";
   }
 
+  function summaryDetails(element) {
+    if (detailsOpenGetter === null || tagName(element) !== "summary") return null;
+    const parent = read(nodeParentGetter, element);
+    if (!parent || nodeType(parent) !== 1 || tagName(parent) !== "details") return null;
+    const children = read(nodeChildNodesGetter, parent);
+    for (let i = 0, n = mathMin(listLength(children), 128); i < n; i += 1) {
+      const child = listItem(children, i);
+      if (nodeType(child) === 1 && tagName(child) === "summary") return child === element ? parent : null;
+    }
+    return null;
+  }
+
   function stateBits(element, descriptor, disabled, focused) {
     let bits = 0;
     if (
@@ -953,7 +1012,8 @@
     ) {
       bits |= 2;
     }
-    if (lower(attribute(element, "aria-expanded", 16) || "") === "true") bits |= 4;
+    const details = summaryDetails(element);
+    if (details ? read(detailsOpenGetter, details) === true : lower(attribute(element, "aria-expanded", 16) || "") === "true") bits |= 4;
     if (disabled) bits |= 8;
     if (has(element, "required") || lower(attribute(element, "aria-required", 16) || "") === "true") {
       bits |= 16;
@@ -964,11 +1024,63 @@
     return bits;
   }
 
-  function operationBits(descriptor, disabled, readonly) {
+  function scrollElement(target) {
+    try {
+      const element = target === document ? read(scrollingElementGetter, document) : target;
+      if (!element || nodeType(element) !== 1) return null;
+      const width = read(clientWidthGetter, element), height = read(clientHeightGetter, element);
+      if (!(width > 0 && height > 0)) return null;
+      const style = apply(getComputedStyleFixed, globalThis, [element]);
+      const root = element === read(scrollingElementGetter, document);
+      const x = (root ? style.overflowX !== "hidden" && style.overflowX !== "clip" : ["auto", "scroll"].includes(style.overflowX)) && read(scrollWidthGetter, element) > width;
+      const y = (root ? style.overflowY !== "hidden" && style.overflowY !== "clip" : ["auto", "scroll"].includes(style.overflowY)) && read(scrollHeightGetter, element) > height;
+      return x || y ? element : null;
+    } catch (_) { return null; }
+  }
+
+  function scrollPosition(element) {
+    try {
+      const x = mathRound(read(scrollLeftGetter, element)), y = mathRound(read(scrollTopGetter, element));
+      return numberIsSafeInteger(x) && numberIsSafeInteger(y) && mathAbs(x) <= 1000000000 && mathAbs(y) <= 1000000000 ? [x, y] : null;
+    } catch (_) { return null; }
+  }
+
+  function scrollAncestors(target) {
+    const result = [];
+    let current = read(nodeParentGetter, target);
+    for (let depth = 0; current && depth < MAX_TREE_DEPTH; depth += 1) {
+      if (current === document || nodeType(current) === 1) {
+        const element = scrollElement(current);
+        if (element && !result.some(entry => entry.element === element)) {
+          const before = scrollPosition(element);
+          if (before === null) return null;
+          result.push({element, before});
+        }
+      }
+      if (current === document) return result;
+      current = nodeType(current) === 11 && shadowHostGetter !== null
+        ? read(shadowHostGetter, current) : read(nodeParentGetter, current);
+    }
+    return null;
+  }
+
+  function documentRect() {
+    const viewport = boundedViewport();
+    return viewport === null ? null : {x: 0, y: 0, width: viewport.width, height: viewport.height};
+  }
+
+  function operationBits(descriptor, disabled, readonly, element) {
     if (disabled || descriptor.noOperations === true) return 0;
     switch (descriptor.role) {
+      case "button": {
+        const rect = elementRect(element);
+        if (nativeActivation(element, descriptor) === 6 && rect !== null && !inViewport(rect)) {
+          const ancestors = scrollAncestors(element);
+          return ancestors !== null && ancestors.length > 0 ? 16 : 0;
+        }
+        return 1 | 8;
+      }
       case "link":
-      case "button":
       case "checkbox":
       case "radio":
       case "option":
@@ -987,13 +1099,13 @@
         return readonly ? 1 | 8 : descriptor.tag === "select" ? 1 | 4 | 8 :
           fillControlKind(descriptor, "") !== 0 ? 1 | 2 | 8 : 1 | 8;
       case "listbox":
-        return 4 | 8 | 16;
+        return 4 | 8 | (scrollElement(element) === null ? 0 : 16);
       case "group":
       case "document":
       case "landmark":
       case "list":
       case "table":
-        return 16;
+        return scrollElement(element) === null ? 0 : 16;
       default:
         return 0;
     }
@@ -1513,6 +1625,39 @@
     return mathMax(0, mathMin(65535, mathRound(number)));
   }
 
+  function nativeActivation(element, descriptor) {
+    if (descriptor.role !== "button" && descriptor.role !== "tab") return null;
+    let boundary = 1;
+    try {
+      if (descriptor.tag === "button" || descriptor.tag === "input") {
+        const button = descriptor.tag === "button";
+        const typeGetter = button ? buttonTypeGetter : inputTypeGetter;
+        const formGetter = button ? buttonFormGetter : inputFormGetter;
+        if (typeGetter === null || formGetter === null) return null;
+        const type = read(typeGetter, element);
+        if (read(formGetter, element) !== null) {
+          boundary = type === "submit" || type === "image" ? 2 : type === "reset" ? 3 : 5;
+        }
+      }
+      let current = element;
+      for (let depth = 0; depth < MAX_TREE_DEPTH; depth += 1) {
+        if (current === document) {
+          const expanded = attribute(element, "aria-expanded", 16);
+          return boundary === 1 && (expanded === "true" || expanded === "false" || summaryDetails(element) !== null) ? 6 : boundary;
+        }
+        if (current === null) return null;
+        if (nodeType(current) === 1) {
+          const tag = tagName(current);
+          if ((tag === "a" || tag === "area") && has(current, "href")) return 4;
+          if (tag === "form" && boundary === 1) boundary = 5;
+        }
+        current = nodeType(current) === 11 && shadowHostGetter !== null
+          ? read(shadowHostGetter, current) : read(nodeParentGetter, current);
+      }
+    } catch (_) {}
+    return null;
+  }
+
   function buildRecord(element, descriptor, parent, rect, disabled, focused, state) {
     const beforeFieldTruncations = state.fieldTruncations || 0;
     const wire = { k: keyFor(element, state.request.g), fc: true };
@@ -1535,7 +1680,7 @@
       !isDocument &&
       (has(element, "readonly") || lower(attribute(element, "aria-readonly", 16) || "") === "true");
     const states = isDocument ? 0 : stateBits(element, descriptor, disabled, focused);
-    const operations = operationBits(descriptor, disabled, readonly);
+    const operations = operationBits(descriptor, disabled, readonly, element);
     // Closed host diagnostics, omitted from model context.
     if (textFillRole(descriptor.role)) {
       wire.fs = disabled ? 11 : readonly ? 10 :
@@ -1545,6 +1690,8 @@
       if (descriptor.editableStructure !== null && descriptor.editableStructure !== undefined &&
           descriptor.editableStructure.length === 3) wire.es = descriptor.editableStructure;
     }
+    const activation = nativeActivation(element, descriptor);
+    if (activation !== null) wire.ak = activation;
     if (states !== 0) wire.s = states;
     if (operations !== 0) wire.o = operations;
     if (rect !== null && state.request.b.geo) wire.b = wireRect(rect);
@@ -1640,7 +1787,7 @@
     const stack = [];
 
     if (!anchored) {
-      const documentRecord = buildRecord(document, classify(document), null, null, false, false, state);
+      const documentRecord = buildRecord(document, classify(document), null, documentRect(), false, false, state);
       documentRecord.depth = 0;
       const index = addRecord(records, documentRecord, state);
       const rootElement = read(documentElementGetter, document);
@@ -1648,7 +1795,7 @@
         stack.push({ node: rootElement, parent: index, sink: null, depth: 1, disabled: false });
       }
     } else if (root === document) {
-      const documentRecord = buildRecord(document, classify(document), null, null, false, false, state);
+      const documentRecord = buildRecord(document, classify(document), null, documentRect(), false, false, state);
       documentRecord.depth = 0;
       const index = addRecord(records, documentRecord, state);
       const rootElement = read(documentElementGetter, document);
@@ -1673,7 +1820,9 @@
       if (type !== 1 && type !== 9 && type !== 11) continue;
       if (type === 1 && shouldSkipSubtree(item.node)) continue;
 
-      const descriptor = classify(item.node);
+      let descriptor = classify(item.node);
+      // Inline wrappers retain their existing prose/control source.
+      if (descriptor?.genericText && item.sink !== null) descriptor = null;
       let parent = item.parent;
       let sink = item.sink;
       let disabled = item.disabled;
@@ -1712,9 +1861,16 @@
               ? optionOfAdmittedSelect || (rect !== null && (initialPriority || inViewport(rect)))
               : true
           );
-          if (!anchored && !admitted && visible && descriptor.role === "heading") {
-            if (headings.length < 24) headings.push({ element: item.node, descriptor, parent, rect, disabled });
-            else mark(state, "node_limit", false);
+          if (!anchored && !admitted && visible &&
+              (descriptor.role === "heading" || summaryDetails(item.node) !== null) &&
+              !headings.some(anchor => apply(nodeContains, anchor.element, [item.node]))) {
+            const details = summaryDetails(item.node);
+            const priority = details === null ? 0 : read(detailsOpenGetter, details) ? 1 : 2;
+            const anchor = { element: item.node, descriptor, parent, rect, disabled, priority };
+            const before = headings.findIndex(existing => existing.priority < priority);
+            if (before >= 0) headings.splice(before, 0, anchor);
+            else headings.push(anchor);
+            if (headings.length > 24) { headings.pop(); mark(state, "node_limit", false); }
           }
           if (admitted) {
             const semanticDepth = parent === null ? 0 : records[parent].depth + 1;
@@ -1747,7 +1903,8 @@
             // an earlier navigation/sidebar cannot consume the parent's prose
             // budget. Subtree retains explicit recursive semantics.
             if (anchored && state.request.s?.k === "region" && item.node !== root &&
-                (descriptor.role === "landmark" || descriptor.role === "document")) {
+                (descriptor.role === "landmark" || descriptor.role === "document" ||
+                 descriptor.role === "list" || descriptor.role === "table")) {
               state.regionBoundary = true;
               continue;
             }
@@ -1927,7 +2084,7 @@
           const sink = recordSink(descriptor, false);
           // Visible inline names belong to their surrounding prose/name too.
           // Nested block prose remains an independent semantic source.
-          if (!textual || sink === "text") {
+          if (!textual || (sink === "text" && !descriptor.genericText)) {
             source = current;
             textual = sink === "name" || sink === "text";
           }
@@ -2092,7 +2249,7 @@
         const described = classify(current);
         if (described !== null && elementRect(current) !== null) {
           const sink = recordSink(described, false);
-          if (!textual || sink === "text") { source = current; textual = sink === "name" || sink === "text"; }
+          if (!textual || (sink === "text" && !described.genericText)) { source = current; textual = sink === "name" || sink === "text"; }
         }
       }
       if (type === 1 || type === 9 || type === 11) {
@@ -2140,11 +2297,34 @@
       const after = sampleVisiblePageDialogs();
       if (arrayIsArray(after)) dialogSample = `,"u":${apply(jsonStringify, JSON, [{...pending, after}])}`;
     }
+    let scrollSample = "";
+    const scroll = pendingScrollSample;
+    pendingScrollSample = null;
+    if (scroll !== null && request.i === scroll.i + 1 && request.g === scroll.g + 1) {
+      const target = resolveKey(scroll.t);
+      if (target !== null && scroll.chain) {
+        const chain = scrollAncestors(target), rect = elementRect(target), viewport = boundedViewport();
+        if (chain && chain.length === scroll.chain.length &&
+            chain.every((entry, index) => entry.element === scroll.chain[index].element)) {
+          const index = chain.findIndex((entry, i) => entry.before.some((value, axis) => value !== scroll.chain[i].before[axis]));
+          const entry = scroll.chain[mathMax(0, index)];
+          if (entry) scrollSample = `,"j":${apply(jsonStringify, JSON, [{a:scroll.a,i:scroll.i,g:scroll.g,t:scroll.t,
+            before:entry.before,after:chain[mathMax(0,index)].before,
+            visible:rect !== null && viewport !== null && actionPoint(target,rect,viewport) !== null}])}`;
+        }
+      } else if (target !== null && scrollElement(target) === scroll.element) {
+        const after = scrollPosition(scroll.element);
+        if (after !== null) {
+          const {element, ...sample} = scroll;
+          scrollSample = `,"j":${apply(jsonStringify, JSON, [{...sample, after}])}`;
+        }
+      }
+    }
     const encodedNodes = [];
     for (const record of records) encodedNodes.push(apply(jsonStringify, JSON, [record.wire]));
 
     const compose = (status) => {
-      const header = `{"v":${WIRE_VERSION},"i":${request.i},"g":${request.g},"c":"${status}"${dialogSample},"n":[`;
+      const header = `{"v":${WIRE_VERSION},"i":${request.i},"g":${request.g},"c":"${status}"${dialogSample}${scrollSample},"n":[`;
       const parts = [];
       let bytes = utf8Length(header, request.b.w + 1) + 2;
       let truncated = false;
@@ -2359,7 +2539,7 @@
     return null;
   }
 
-  function runtimeDescriptor(element, generation) {
+  function runtimeDescriptor(element, generation, shallow = false) {
     const state = {
       request: {
         g: generation,
@@ -2376,7 +2556,10 @@
       completeness: "complete",
       stopped: false
     };
-    const records = traverse(element, state, true);
+    const descriptor = classify(element);
+    const records = shallow && descriptor !== null
+      ? [buildRecord(element, descriptor, null, element === document ? documentRect() : elementRect(element), false, focusedElements().has(element), state)]
+      : traverse(element, state, true);
     if (records.length === 0 || records[0].element !== element || state.completeness !== "complete") {
       return null;
     }
@@ -2386,6 +2569,7 @@
     const sensitivity = descriptorSensitivityCode(wire.q);
     if (value === null || role === 0 || sensitivity === 0) return null;
     return {
+      ...(wire.ak === undefined ? {} : { a: wire.ak }),
       r: role,
       o: wire.o || 0,
       q: sensitivity,
@@ -2401,7 +2585,7 @@
   function descriptorMatches(expected, actual) {
     if (!validRuntimeDescriptor(expected) || !validRuntimeDescriptor(actual)) return false;
     return (
-      expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
+      expected.a === actual.a && expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
       expected.s === actual.s && expected.n === actual.n && expected.vk === actual.vk &&
       expected.vt === actual.vt && expected.vo === actual.vo && expected.vb === actual.vb
     );
@@ -2411,7 +2595,7 @@
     if (!validRuntimeDescriptor(expected) || !validRuntimeDescriptor(actual)) return false;
     const valueMatches = actual.vo === 0 && !actual.vb && actual.vk === 1 && actual.vt === value;
     return (
-      expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
+      expected.a === actual.a && expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
       expected.s === actual.s && expected.n === actual.n && valueMatches
     );
   }
@@ -2419,7 +2603,7 @@
   function descriptorMatchesSelectedValue(expected, actual, desired) {
     if (!validRuntimeDescriptor(expected) || !validRuntimeDescriptor(actual)) return false;
     return (
-      expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
+      expected.a === actual.a && expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
       expected.s === actual.s && expected.n === actual.n &&
       actual.vk === 4 && actual.vt === null && actual.vo === desired && !actual.vb
     );
@@ -2429,7 +2613,7 @@
     if (!validRuntimeDescriptor(expected) || !validRuntimeDescriptor(actual)) return false;
     const selectedBit = 2;
     return (
-      expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
+      expected.a === actual.a && expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
       (expected.s & ~selectedBit) === (actual.s & ~selectedBit) &&
       (actual.s & selectedBit) !== 0 && expected.n === actual.n &&
       expected.vk === actual.vk && expected.vt === actual.vt &&
@@ -2605,8 +2789,37 @@
     }]);
   }
 
+  function finishActionRendering(result, dialogs = null) {
+    // Keep presentation through queued rendering; the next capture proves the outcome.
+    return new nativePromise((resolve) => {
+      let frame = null, timer = null, poll = null, finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        if (frame !== null) apply(fixedCancelAnimationFrame, globalThis, [frame]);
+        if (timer !== null) apply(fixedClearTimeout, globalThis, [timer]);
+        if (poll !== null) apply(fixedClearTimeout, globalThis, [poll]);
+        resolve(result);
+      };
+      const check = () => {
+        if (finished) return;
+        if (dialogs === null) { finish(); return; }
+        const after = sampleVisiblePageDialogs();
+        if (!arrayIsArray(after) || dialogs.some(key => !after.includes(key)) || after.some(key => !dialogs.includes(key))) finish();
+        else poll = apply(fixedTimeout, globalThis, [check, 25]);
+      };
+      timer = apply(fixedTimeout, globalThis, [finish, 250]);
+      try {
+        frame = apply(fixedAnimationFrame, globalThis, [() => {
+          if (!finished) frame = apply(fixedAnimationFrame, globalThis, [check]);
+        }]);
+      } catch (_) { finish(); }
+    });
+  }
+
   function runAction(request) {
     pendingDialogSample = null;
+    pendingScrollSample = null;
     let readyState;
     try {
       readyState = read(documentReadyStateGetter, document);
@@ -2624,24 +2837,27 @@
     }
     sweepIdentities(request.g);
     const target = resolveKeyAtGeneration(request.t, request.g);
-    if (target === null || nodeType(target) !== 1) return actionFault("stale_reference");
+    if (target === null || (nodeType(target) !== 1 && !(request.k === "scroll" && target === document))) return actionFault("stale_reference");
     const descriptor = classify(target);
     if (descriptor === null) return actionFault("target_changed");
-    const credential = credentialField(target, descriptor, attribute(target, "aria-label", 512) || "");
+    const credential = target === document ? 0 : credentialField(target, descriptor, attribute(target, "aria-label", 512) || "");
     if (credential || descriptor.role === "password") return actionFault("credential_boundary");
     if (descriptor.role !== request.r) return actionFault("target_changed");
-    const disabled = disabledState(target, false);
-    const readonly = has(target, "readonly") || lower(attribute(target, "aria-readonly", 16) || "") === "true";
+    const disabled = target !== document && disabledState(target, false);
+    const readonly = target !== document && (has(target, "readonly") || lower(attribute(target, "aria-readonly", 16) || "") === "true");
     if (disabled || ((request.k === "fill" || request.k === "select") && readonly)) {
       return actionFault("target_disabled");
     }
     const required = actionOperationBit(request.k);
-    if (required === 0 || (operationBits(descriptor, disabled, readonly) & required) === 0) {
-      return actionFault("unsupported_interaction");
+    if (required === 0 || (operationBits(descriptor, disabled, readonly, target) & required) === 0) {
+      return actionFault(request.k === "scroll" ? "target_operations_changed" : "unsupported_interaction");
     }
-    const targetDescriptor = runtimeDescriptor(target, request.g);
+    const targetDescriptor = runtimeDescriptor(target, request.g, request.k === "scroll" && request.sc[1] !== "into_view");
     if (!descriptorMatches(request.f, targetDescriptor)) {
-      return actionFault("target_changed");
+      return actionFault(targetDescriptor === null ? "target_descriptor_incomplete" :
+        request.f.n !== targetDescriptor.n ? "target_name_changed" :
+        request.f.s !== targetDescriptor.s ? "target_state_changed" :
+        request.f.o !== targetDescriptor.o ? "target_operations_changed" : "target_descriptor_changed");
     }
     let delta = 0;
     let selectedOption = null;
@@ -2658,7 +2874,7 @@
       delta = computed;
     }
 
-    const finalTargetDescriptor = runtimeDescriptor(target, request.g);
+    const finalTargetDescriptor = runtimeDescriptor(target, request.g, request.k === "scroll" && request.sc[1] !== "into_view");
     const finalOptionDescriptor = selectedOption === null
       ? null
       : runtimeDescriptor(selectedOption, request.g);
@@ -2670,10 +2886,10 @@
     ) {
       return actionFault("target_changed");
     }
-    if (!styleIsVisible(target)) return actionFault("target_occluded");
-    const rect = elementRect(target);
+    if (target !== document && !styleIsVisible(target)) return actionFault("target_occluded");
+    const rect = target === document ? documentRect() : elementRect(target);
     if (rect === null) return actionFault("target_occluded");
-    if (!geometryCompatible(request.e, rect)) return actionFault("target_changed");
+    if (!geometryCompatible(request.e, rect)) return actionFault("target_geometry_changed");
     const viewport = boundedViewport();
     if (viewport === null) return actionFault("internal");
 
@@ -2688,9 +2904,36 @@
       readiness = "visible";
     }
     const geometry = wireRect(rect);
+    if (request.k === "scroll") {
+      if (request.sc[1] === "into_view") {
+        const chain = target === document ? null : scrollAncestors(target);
+        if (!chain || chain.length === 0 || [fixedScrollIntoView, fixedAnimationFrame, fixedCancelAnimationFrame, fixedTimeout, fixedClearTimeout].some(call => typeof call !== "function")) return actionFault("unsupported_interaction");
+        pendingScrollSample = {a:request.a,i:request.i,g:request.g,t:request.t,chain};
+        try { apply(fixedScrollIntoView,target,[{block:"center",inline:"nearest",behavior:"instant"}]); }
+        catch (_) { pendingScrollSample = null; return actionFault("applied_unverified_postcondition"); }
+        return finishActionRendering(encodeActionEvidence(request,"fixed_semantic_recipe",readiness,geometry,viewport,point,0));
+      }
+      const element = scrollElement(target);
+      const before = element === null ? null : scrollPosition(element);
+      if (before === null || [fixedScrollBy, fixedAnimationFrame, fixedCancelAnimationFrame,
+          fixedTimeout, fixedClearTimeout].some(call => typeof call !== "function")) return actionFault("unsupported_interaction");
+      const horizontal = request.sc[0] === "left" || request.sc[0] === "right";
+      const extent = read(horizontal ? clientWidthGetter : clientHeightGetter, element);
+      const distance = request.sc[1] === "line" ? 40 : mathMax(1, mathRound(extent * (request.sc[1] === "half_page" ? 0.5 : 0.9)));
+      const delta = distance * (["up", "left"].includes(request.sc[0]) ? -1 : 1);
+      pendingScrollSample = {a: request.a, i: request.i, g: request.g, t: request.t, before, element};
+      try {
+        apply(fixedScrollBy, element, [{left: horizontal ? delta : 0, top: horizontal ? 0 : delta, behavior: "instant"}]);
+      } catch (_) {
+        pendingScrollSample = null;
+        return actionFault("applied_unverified_postcondition");
+      }
+      return finishActionRendering(encodeActionEvidence(request, "fixed_semantic_recipe", readiness, geometry, viewport, point, 0));
+    }
     if (request.k === "click") {
       if (typeof htmlElementClick !== "function") return actionFault("unsupported_interaction");
       if (request.u === true) {
+        if ([fixedAnimationFrame, fixedCancelAnimationFrame, fixedTimeout, fixedClearTimeout].some(call => typeof call !== "function")) return actionFault("unsupported_interaction");
         const before = sampleVisiblePageDialogs();
         if (!arrayIsArray(before)) return actionFault(before);
         pendingDialogSample = {a: request.a, i: request.i, g: request.g, before};
@@ -2701,7 +2944,8 @@
         pendingDialogSample = null;
         return actionFault("unsupported_interaction");
       }
-      return encodeActionEvidence(request, "fixed_semantic_recipe", readiness, geometry, viewport, point, delta);
+      const result = encodeActionEvidence(request, "fixed_semantic_recipe", readiness, geometry, viewport, point, delta);
+      return pendingDialogSample === null ? result : finishActionRendering(result, pendingDialogSample.before);
     } else if (request.k === "fill") {
       const finishFill = (result) => {
         if (result !== "ok") {
@@ -2774,6 +3018,23 @@
     }
   }
 
+  function focusedModalRoot() {
+    for (const focused of focusedElements()) {
+      let current = focused;
+      for (let depth = 0; depth < MAX_TREE_DEPTH && current !== null && current !== document; depth += 1) {
+        if (nodeType(current) === 1) {
+          const descriptor = classify(current);
+          if (descriptor !== null && descriptor.role === "dialog" &&
+              attribute(current, "aria-modal", 16) === "true" &&
+              styleIsVisible(current) && elementRect(current) !== null) return current;
+        }
+        current = nodeType(current) === 11 && shadowHostGetter !== null
+          ? read(shadowHostGetter, current) : read(nodeParentGetter, current);
+      }
+    }
+    return null;
+  }
+
   function run(request) {
     let readyState;
     try {
@@ -2796,7 +3057,8 @@
 
     let records;
     if (request.s.k === "initial") {
-      records = traverse(document, state, false);
+      const modal = focusedModalRoot();
+      records = traverse(modal || document, state, modal !== null);
     } else {
       const anchor = resolveKey(request.s.a);
       if (anchor === null) return fault("anchor_missing");

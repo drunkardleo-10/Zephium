@@ -276,10 +276,14 @@ fn schema() -> Value {
 }
 /// The provider-facing artifact vocabulary shared by synthesis and agent turns.
 pub(super) fn artifact_data_schema() -> Value {
+    artifact_data_schema_with_evidence_limit(63)
+}
+
+pub(super) fn artifact_data_schema_with_evidence_limit(maximum: u16) -> Value {
     let text = json!({"type":"string"});
     let maybe_text = json!({"type":["string","null"]});
     let boolean = json!({"type":"boolean"});
-    let key = json!({"type":"integer","minimum":0,"maximum":63});
+    let key = json!({"type":"integer","minimum":0,"maximum":maximum});
     let keys = array(key.clone(), 0, 8);
     let subject = object(json!({
         "name":text,"descriptor":maybe_text,"homepage":maybe_text,

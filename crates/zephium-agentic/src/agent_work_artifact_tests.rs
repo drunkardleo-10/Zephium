@@ -332,6 +332,7 @@ fn url_archive_roundtrip_revalidates_version_destination_and_source_kind() {
     assert!(
         matches!(decoded.fields()[0].value(), ArchivedValue::Url { value, .. } if value == url)
     );
+    assert_eq!(decoded.source(1).unwrap().link_destination(), Some(url));
     d.version = 3;
     assert!(d.validate().is_err());
     d.version = 4;
@@ -372,6 +373,7 @@ fn image_archive_roundtrip_revalidates_version_destination_and_source_kind() {
     assert!(
         matches!(decoded.fields()[0].value(), ArchivedValue::ImageUrl { value, .. } if value == url)
     );
+    assert_eq!(decoded.source(1).unwrap().link_destination(), None);
     d.version = 4;
     assert!(d.validate().is_err());
     d.version = 5;

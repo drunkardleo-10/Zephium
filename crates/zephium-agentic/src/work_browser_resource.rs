@@ -213,6 +213,7 @@ struct OperationJoin {
 #[must_use]
 #[derive(Debug)]
 pub struct WorkBrowserResourceRequest {
+    anonymous_session: Option<crate::WorkBrowserSession>,
     operation: OperationJoin,
     storage: ContextProfileStorageClass,
     isolated_public: bool,
@@ -222,6 +223,27 @@ pub struct WorkBrowserResourceRequest {
     health: Option<Box<WorkBrowserResourceHealthReporter>>,
 }
 impl WorkBrowserResourceRequest {
+    /// Attaches attempt-owned storage only to exact anonymous construction.
+    pub fn with_anonymous_session(
+        mut self,
+        session: crate::WorkBrowserSession,
+    ) -> Result<Self, Box<Self>> {
+        let identity = self.resource().identity();
+        if self.operation() != WorkBrowserResourceOperation::Construct
+            || !self.isolated_public
+            || self.anonymous_session.is_some()
+            || !session.admits(identity.profile(), identity.work())
+        {
+            return Err(Box::new(self));
+        }
+        self.anonymous_session = Some(session);
+        Ok(self)
+    }
+    /// Optional anonymous storage scope; never profile authentication.
+    pub fn anonymous_session(&self) -> Option<&crate::WorkBrowserSession> {
+        self.anonymous_session.as_ref()
+    }
+
     /// Attaches one stable resource-health observer to original construction.
     /// Other operations and repeated attachment return the request losslessly.
     pub fn track_resource_health(mut self) -> Result<(Self, WorkBrowserResourceHealth), Box<Self>> {
@@ -253,7 +275,7 @@ impl WorkBrowserResourceRequest {
     pub const fn storage(&self) -> ContextProfileStorageClass {
         self.storage
     }
-    /// A fresh per-resource nonpersistent store, separate from profile cookies.
+    /// Anonymous nonpersistent storage, separate from profile cookies.
     pub const fn isolated_public(&self) -> bool {
         self.isolated_public
     }
@@ -654,6 +676,7 @@ impl WorkBrowserResources {
             },
         );
         Ok(WorkBrowserResourceRequest {
+            anonymous_session: None,
             operation,
             storage,
             isolated_public,
@@ -713,6 +736,7 @@ impl WorkBrowserResources {
         row.phase = WorkBrowserResourcePhase::Acquiring;
         row.pending = Some(operation.clone());
         Ok(WorkBrowserResourceRequest {
+            anonymous_session: None,
             operation,
             storage: row.storage,
             isolated_public: row.isolated_public,
@@ -774,6 +798,7 @@ impl WorkBrowserResources {
         row.phase = WorkBrowserResourcePhase::Revoking;
         row.pending = Some(operation.clone());
         Ok(WorkBrowserResourceRequest {
+            anonymous_session: None,
             operation,
             storage: row.storage,
             isolated_public: row.isolated_public,
@@ -839,6 +864,7 @@ impl WorkBrowserResources {
         row.destruction_attempted = true;
         row.destruction = Some(operation.clone());
         Ok(WorkBrowserResourceRequest {
+            anonymous_session: None,
             operation,
             storage: row.storage,
             isolated_public: row.isolated_public,

@@ -15,11 +15,12 @@ use thiserror::Error;
 use crate::semantic::SemanticNodeKey;
 use crate::semantic_wire::looks_like_secret_value;
 use crate::{
-    ContextJoin, FrameId, SemanticFrameJoin, SemanticInvocationId, SemanticObservation,
-    SemanticObservationGeneration, SemanticObservationId, SemanticOperationClass,
-    SemanticOperations, SemanticRect, SemanticReferenceError, SemanticReferenceId, SemanticRole,
-    SemanticSensitivity, SemanticSnapshot, SemanticSnapshotGeneration, SemanticState,
-    SemanticStates, SemanticTrust, SemanticValueSummary, MAX_SEMANTIC_FRAMES,
+    ContextJoin, FrameId, SemanticActivation, SemanticFrameJoin, SemanticInvocationId,
+    SemanticObservation, SemanticObservationGeneration, SemanticObservationId,
+    SemanticOperationClass, SemanticOperations, SemanticRect, SemanticReferenceError,
+    SemanticReferenceId, SemanticRole, SemanticSensitivity, SemanticSnapshot,
+    SemanticSnapshotGeneration, SemanticState, SemanticStates, SemanticTrust, SemanticValueSummary,
+    MAX_SEMANTIC_FRAMES,
 };
 
 /// Maximum sequential actions proposed in one model turn.
@@ -889,7 +890,19 @@ impl SemanticBoundAction {
         current: &SemanticSnapshot,
     ) -> Result<SemanticPreparedAction, SemanticActionPreparationError> {
         if !self.intent.target().fields_complete
-            || !current.has_complete_node_fields(self.target_key())
+            || !(current.has_complete_node_fields(self.target_key())
+                || (self.kind() == SemanticActionKind::Scroll
+                    && complete_scroll_target(current, self.target_key()))
+                || (self.kind() == SemanticActionKind::Click
+                    && self.effect() == SemanticEffectClass::Read
+                    && matches!(
+                        self.verification(),
+                        SemanticVerification::TargetState {
+                            state: SemanticState::Expanded,
+                            ..
+                        }
+                    )
+                    && complete_disclosure_target(current, self.target_key())))
             || matches!(&self.intent, BoundActionIntent::Select { option, .. }
                 if !option.fields_complete || !current.has_complete_node_fields(option.node_key))
         {
@@ -1649,16 +1662,22 @@ fn bind_intent(
             target,
             direction,
             amount,
-        } => Ok(BoundActionIntent::Scroll {
-            target: bind_target(
+        } => {
+            let target = bind_target(
                 observation,
                 current_frames,
                 target,
                 SemanticOperationClass::Scroll,
-            )?,
-            direction,
-            amount,
-        }),
+            )?;
+            if target.role == SemanticRole::Button && amount != SemanticScrollAmount::IntoView {
+                return Err(SemanticActionBindingError::OutcomeContract);
+            }
+            Ok(BoundActionIntent::Scroll {
+                target,
+                direction,
+                amount,
+            })
+        }
     }
 }
 
@@ -1673,7 +1692,14 @@ fn bind_target(
     observation
         .resolve(reference, current, operation)
         .map_err(SemanticActionBindingError::Reference)?;
-    Ok(bind_node(snapshot, node))
+    let mut bound = bind_node(snapshot, node);
+    if (operation == SemanticOperationClass::Scroll && complete_scroll_target(snapshot, node.key()))
+        || (operation == SemanticOperationClass::Click
+            && complete_disclosure_target(snapshot, node.key()))
+    {
+        bound.fields_complete = true;
+    }
+    Ok(bound)
 }
 
 fn current_frame<'a>(
@@ -1721,6 +1747,34 @@ fn is_descendant(snapshot: &SemanticSnapshot, mut child: usize, ancestor: usize)
         child = parent;
     }
     false
+}
+
+// Scrolling depends on the captured region, not omitted page descendants.
+fn complete_scroll_target(snapshot: &SemanticSnapshot, key: SemanticNodeKey) -> bool {
+    snapshot
+        .nodes()
+        .iter()
+        .find(|node| node.key() == key)
+        .is_some_and(|node| {
+            node.fields_complete() == Some(true)
+                && node.geometry().is_some()
+                && node.operations().contains(SemanticOperationClass::Scroll)
+        })
+}
+
+fn complete_disclosure_target(snapshot: &SemanticSnapshot, key: SemanticNodeKey) -> bool {
+    snapshot
+        .nodes()
+        .iter()
+        .find(|node| node.key() == key)
+        .is_some_and(|node| {
+            node.fields_complete() == Some(true)
+                && node.geometry().is_some()
+                && node.sensitivity() == SemanticSensitivity::Public
+                && node.role() == SemanticRole::Button
+                && node.activation() == Some(SemanticActivation::Disclosure)
+                && node.operations().contains(SemanticOperationClass::Click)
+        })
 }
 
 fn bind_node(snapshot: &SemanticSnapshot, node: &crate::SemanticNode) -> BoundNode {
@@ -1836,6 +1890,7 @@ fn structural_digest(node: &crate::SemanticNode, parent_key: Option<u64>) -> [u8
         hasher.update([0xfa, kind as u8]);
     }
     hasher.update([node.operations().bits()]);
+    hasher.update([node.activation().map_or(0, |kind| kind as u8)]);
     hasher.update([sensitivity_code(node.sensitivity())]);
     hasher.update([trust_code(node.trust())]);
     hasher.update(parent_key.unwrap_or(0).to_be_bytes());
@@ -1859,6 +1914,7 @@ fn runtime_descriptor(node: &crate::SemanticNode) -> SemanticActionRuntimeDescri
         Some(SemanticValueSummary::Ordinal(value)) => (4, None, *value, false),
     };
     SemanticActionRuntimeDescriptor {
+        activation: node.activation().map(|kind| kind as u8),
         role: role_code(node.role()),
         operations: node.operations().bits(),
         sensitivity: sensitivity_code(node.sensitivity()),
@@ -1873,6 +1929,8 @@ fn runtime_descriptor(node: &crate::SemanticNode) -> SemanticActionRuntimeDescri
 
 #[derive(Clone, Eq, PartialEq, Serialize)]
 pub(crate) struct SemanticActionRuntimeDescriptor {
+    #[serde(rename = "a", skip_serializing_if = "Option::is_none")]
+    activation: Option<u8>,
     #[serde(rename = "r")]
     role: u8,
     #[serde(rename = "o")]
@@ -1897,6 +1955,7 @@ pub(crate) struct SemanticActionRuntimeDescriptor {
 impl SemanticActionRuntimeDescriptor {
     pub(crate) fn maximum_text_wire_witness(name: String, value: String) -> Self {
         Self {
+            activation: Some(5),
             role: 16,
             operations: 11,
             sensitivity: 2,
@@ -2180,6 +2239,12 @@ pub enum SemanticActionBindingError {
     /// Bound target role or fixed key cannot establish the declared postcondition.
     #[error("semantic action bound outcome contract is incompatible")]
     OutcomeContract,
+    /// A model proposal conflicts with the host-projected task effect.
+    #[error("semantic action effect conflicts with task scope")]
+    TaskEffectMismatch(SemanticEffectClass),
+    /// The supplied target needs a focused observation before preparation.
+    #[error("semantic action target fields are incomplete")]
+    TargetIncomplete,
     /// Aggregate replacement text exceeded the fixed batch ceiling.
     #[error("semantic action batch exceeds its text ceiling")]
     TextLimit,
@@ -2368,8 +2433,150 @@ mod tests {
     }
 
     #[test]
+    fn scroll_uses_complete_local_fields_without_relaxing_click_completeness() {
+        let original = observation();
+        let frame = original.frames()[0].frame().clone();
+        for complete in [true, false] {
+            let bytes = serde_json::to_vec(&json!({"v":1,"i":7,"g":9,"c":"node_limit","n":[
+                {"k":1,"r":"document","o":16,"fc":complete,"b":{"x":0,"y":0,"w":1280,"h":800}},
+                {"k":2,"p":0,"r":"button","o":1,"fc":true,"b":{"x":10,"y":10,"w":100,"h":30}}
+            ]}))
+            .unwrap();
+            let snapshot = decode_semantic_snapshot(
+                SemanticDecodeContext::new(
+                    SemanticInvocationId::new(7).unwrap(),
+                    frame.clone(),
+                    SemanticSnapshotGeneration::new(9).unwrap(),
+                ),
+                &bytes,
+            )
+            .unwrap();
+            let observation = SemanticObservationAssembler::new(
+                crate::SemanticObservationRequest::initial(
+                    SemanticObservationId::new(1).unwrap(),
+                    frame.context(),
+                    SemanticObservationBudget::INITIAL_FILTERED,
+                ),
+                snapshot,
+            )
+            .unwrap()
+            .finish()
+            .unwrap();
+            for (intent, verification, accepted) in [
+                (
+                    SemanticActionIntent::Scroll {
+                        target: SemanticReferenceId::new(1).unwrap(),
+                        direction: SemanticScrollDirection::Down,
+                        amount: SemanticScrollAmount::Page,
+                    },
+                    SemanticVerification::ScrollPositionChanged,
+                    complete,
+                ),
+                (
+                    SemanticActionIntent::Click {
+                        target: SemanticReferenceId::new(2).unwrap(),
+                    },
+                    SemanticVerification::PageDialogOpened,
+                    false,
+                ),
+            ] {
+                let batch = SemanticActionBatch::bind(
+                    SemanticActionBatchId::new(1).unwrap(),
+                    &observation,
+                    std::slice::from_ref(&frame),
+                    vec![proposal(intent, SemanticEffectClass::Read, verification)],
+                )
+                .unwrap();
+                assert_eq!(
+                    batch.actions()[0].prepare(&observation.frames()[0]).is_ok(),
+                    accepted
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn partial_snapshot_disclosure_requires_complete_target_and_read_expansion() {
+        let original = observation();
+        let frame = original.frames()[0].frame().clone();
+        let expanded = SemanticVerification::TargetState {
+            state: SemanticState::Expanded,
+            present: true,
+        };
+        for (complete, activation, effect, verification, accepted) in [
+            (true, 6, SemanticEffectClass::Read, expanded, true),
+            (false, 6, SemanticEffectClass::Read, expanded, false),
+            (true, 1, SemanticEffectClass::Read, expanded, false),
+            (true, 6, SemanticEffectClass::LocalWrite, expanded, false),
+            (
+                true,
+                6,
+                SemanticEffectClass::Read,
+                SemanticVerification::PageDialogOpened,
+                false,
+            ),
+            (
+                true,
+                6,
+                SemanticEffectClass::Read,
+                SemanticVerification::TargetState {
+                    state: SemanticState::Expanded,
+                    present: false,
+                },
+                true,
+            ),
+        ] {
+            let bytes = serde_json::to_vec(&json!({"v":1,"i":7,"g":9,"c":"node_limit","n":[
+                {"k":1,"r":"document","o":16,"fc":true},
+                {"k":2,"p":0,"r":"button","n":"Specifications","ak":activation,"o":9,
+                 "s": if verification == (SemanticVerification::TargetState { state: SemanticState::Expanded, present: false }) { 4 } else { 0 },
+                 "fc":complete,"b":{"x":10,"y":10,"w":100,"h":30}}
+            ]}))
+            .unwrap();
+            let snapshot = decode_semantic_snapshot(
+                SemanticDecodeContext::new(
+                    SemanticInvocationId::new(7).unwrap(),
+                    frame.clone(),
+                    SemanticSnapshotGeneration::new(9).unwrap(),
+                ),
+                &bytes,
+            )
+            .unwrap();
+            let observed = SemanticObservationAssembler::new(
+                crate::SemanticObservationRequest::initial(
+                    SemanticObservationId::new(1).unwrap(),
+                    frame.context(),
+                    SemanticObservationBudget::INITIAL_FILTERED,
+                ),
+                snapshot,
+            )
+            .unwrap()
+            .finish()
+            .unwrap();
+            let batch = SemanticActionBatch::bind(
+                SemanticActionBatchId::new(1).unwrap(),
+                &observed,
+                std::slice::from_ref(&frame),
+                vec![proposal(
+                    SemanticActionIntent::Click {
+                        target: SemanticReferenceId::new(2).unwrap(),
+                    },
+                    effect,
+                    verification,
+                )],
+            )
+            .unwrap();
+            assert_eq!(
+                batch.actions()[0].prepare(&observed.frames()[0]).is_ok(),
+                accepted
+            );
+        }
+    }
+
+    #[test]
     fn runtime_descriptor_matches_the_cross_language_action_golden() {
         let wire = SemanticActionRuntimeDescriptor {
+            activation: None,
             role: role_code(SemanticRole::Button),
             operations: SemanticOperations::try_new(&[
                 SemanticOperationClass::Click,

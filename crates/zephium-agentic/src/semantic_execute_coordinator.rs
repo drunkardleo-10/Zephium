@@ -790,6 +790,10 @@ impl SemanticActionQualificationError {
                     "binding_outcome_already_satisfied"
                 }
                 crate::SemanticActionBindingError::OutcomeContract => "binding_outcome_contract",
+                crate::SemanticActionBindingError::TaskEffectMismatch(_) => {
+                    "binding_task_effect_mismatch"
+                }
+                crate::SemanticActionBindingError::TargetIncomplete => "binding_target_incomplete",
                 crate::SemanticActionBindingError::TextLimit => "binding_text_limit",
                 crate::SemanticActionBindingError::SettleLimit => "binding_settle_limit",
                 crate::SemanticActionBindingError::MixedEffectBoundary => {

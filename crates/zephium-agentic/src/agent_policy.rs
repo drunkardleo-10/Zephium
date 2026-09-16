@@ -177,6 +177,7 @@ pub struct AgentModelCallRequest {
     account: AgentContextAccountBinding,
     budget: AgentModelCallBudget,
     now: AgentPolicyInstant,
+    remaining_native_actions: Option<u64>,
 }
 
 impl AgentModelCallRequest {
@@ -194,7 +195,18 @@ impl AgentModelCallRequest {
             account,
             budget,
             now,
+            remaining_native_actions: None,
         }
+    }
+
+    /// Frozen host allowance for this call; it grants no native authority.
+    pub const fn with_remaining_native_actions(mut self, remaining: u64) -> Self {
+        self.remaining_native_actions = Some(remaining);
+        self
+    }
+
+    pub(crate) const fn remaining_native_actions(self) -> Option<u64> {
+        self.remaining_native_actions
     }
 
     /// Monotonic exact call identity.

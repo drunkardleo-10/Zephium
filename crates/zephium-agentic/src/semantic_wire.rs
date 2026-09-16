@@ -206,6 +206,12 @@ pub fn decode_semantic_snapshot(
         let operations = SemanticOperations::from_bits(raw_node.operations)
             .map_err(|_| SemanticDecodeError::NodeContract)?;
         validate_operations(role, states, operations)?;
+        if role == SemanticRole::Button
+            && operations.contains(SemanticOperationClass::Scroll)
+            && raw_node.activation != Some(6)
+        {
+            return Err(SemanticDecodeError::NodeContract);
+        }
         let fill_support = raw_node.fill_support.map(decode_fill_support).transpose()?;
         let editable_structure = raw_node
             .editable_structure
@@ -386,6 +392,18 @@ pub fn decode_semantic_snapshot(
             value,
             states,
             operations,
+            activation: raw_node
+                .activation
+                .map(|code| match code {
+                    1 => Ok(crate::SemanticActivation::Ordinary),
+                    2 => Ok(crate::SemanticActivation::Submit),
+                    3 => Ok(crate::SemanticActivation::Reset),
+                    4 => Ok(crate::SemanticActivation::Navigation),
+                    5 => Ok(crate::SemanticActivation::Form),
+                    6 => Ok(crate::SemanticActivation::Disclosure),
+                    _ => Err(SemanticDecodeError::NodeContract),
+                })
+                .transpose()?,
             fill_support,
             editable_structure,
             fields_complete: raw_node.fields_complete,
@@ -419,6 +437,10 @@ pub fn decode_semantic_snapshot(
         retained_text_bytes,
     )
     .map_err(|_| SemanticDecodeError::Contract)?;
+    if let Some(sample) = &raw.scroll_sample {
+        sample.validate()?;
+    }
+    snapshot.scroll_sample = raw.scroll_sample;
     snapshot.page_dialog_sample = page_dialog_sample;
     Ok(snapshot)
 }
@@ -517,8 +539,8 @@ fn validate_operations(
 fn allowed_operations(role: SemanticRole) -> Result<SemanticOperations, SemanticDecodeError> {
     use SemanticOperationClass::{Click, Fill, Press, Scroll, Select};
     let operations: &[SemanticOperationClass] = match role {
+        SemanticRole::Button => &[Click, Press, Scroll],
         SemanticRole::Link
-        | SemanticRole::Button
         | SemanticRole::Checkbox
         | SemanticRole::Radio
         | SemanticRole::Option
@@ -777,6 +799,8 @@ fn looks_like_secret_token(token: &str) -> bool {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSnapshot {
+    #[serde(rename = "j", default)]
+    scroll_sample: Option<ScrollSample>,
     #[serde(rename = "u", default)]
     page_dialog_sample: Option<PageDialogSample>,
     #[serde(rename = "v")]
@@ -917,6 +941,8 @@ struct RawNode {
     states: u8,
     #[serde(rename = "o", default)]
     operations: u8,
+    #[serde(rename = "ak", default)]
+    activation: Option<u8>,
     #[serde(rename = "fs", default)]
     fill_support: Option<u8>,
     #[serde(rename = "es", default)]
@@ -1676,6 +1702,8 @@ mod tests {
             json!([{"k": 1, "r": "heading", "l": 7}]),
             json!([{"k": 1, "r": "button", "l": 2}]),
             json!([{"k": 1, "r": "button", "o": 128}]),
+            json!([{"k": 1, "r": "button", "o": 16}]),
+            json!([{"k": 1, "r": "button", "o": 25, "ak": 2}]),
             json!([{"k": 1, "r": "button", "s": 128}]),
         ] {
             assert_eq!(
@@ -1765,5 +1793,31 @@ mod tests {
         assert!(!debug.contains("private-user-content"));
         assert!(!debug.contains("example.test"));
         assert!(!debug.contains("ProfileId"));
+    }
+}
+
+#[derive(Clone, Eq, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ScrollSample {
+    pub a: u64,
+    pub i: u64,
+    pub g: u64,
+    pub t: u64,
+    pub before: [i64; 2],
+    pub after: [i64; 2],
+    pub visible: Option<bool>,
+}
+impl ScrollSample {
+    fn validate(&self) -> Result<(), SemanticDecodeError> {
+        if [self.a, self.i, self.g, self.t].contains(&0)
+            || self
+                .before
+                .iter()
+                .chain(&self.after)
+                .any(|n| n.unsigned_abs() > crate::MAX_SEMANTIC_SCROLL_COORDINATE)
+        {
+            return Err(SemanticDecodeError::NodeIdentity);
+        }
+        Ok(())
     }
 }

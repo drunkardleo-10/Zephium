@@ -997,6 +997,24 @@ impl SemanticLandmarkKind {
     }
 }
 
+/// Native default activation, not a prediction of page JavaScript effects.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum SemanticActivation {
+    /// No native submission, reset, navigation or surrounding form.
+    Ordinary = 1,
+    /// Native form submission.
+    Submit = 2,
+    /// Native form reset.
+    Reset = 3,
+    /// Link activation, including an enclosing link.
+    Navigation = 4,
+    /// A control inside or associated with a form.
+    Form = 5,
+    /// Ordinary control exposing an explicit expanded state.
+    Disclosure = 6,
+}
+
 /// One bounded allowlisted semantic node.
 #[derive(Clone, Eq, PartialEq)]
 pub struct SemanticNode {
@@ -1014,6 +1032,7 @@ pub struct SemanticNode {
     states: SemanticStates,
     operations: SemanticOperations,
     fill_support: Option<SemanticFillSupport>,
+    activation: Option<SemanticActivation>,
     editable_structure: Option<SemanticEditableStructure>,
     fields_complete: Option<bool>,
     sensitivity: SemanticSensitivity,
@@ -1082,6 +1101,11 @@ impl SemanticNode {
     /// Complete operation set.
     pub const fn operations(&self) -> SemanticOperations {
         self.operations
+    }
+
+    /// Native activation boundary, revalidated immediately before dispatch.
+    pub const fn activation(&self) -> Option<SemanticActivation> {
+        self.activation
     }
 
     /// Optional host-only closed Fill diagnostic, not provider context or authority.
@@ -1165,6 +1189,7 @@ pub(crate) struct SemanticNodeInput {
     pub(crate) states: SemanticStates,
     pub(crate) operations: SemanticOperations,
     pub(crate) fill_support: Option<SemanticFillSupport>,
+    pub(crate) activation: Option<SemanticActivation>,
     pub(crate) editable_structure: Option<SemanticEditableStructure>,
     pub(crate) fields_complete: Option<bool>,
     pub(crate) sensitivity: SemanticSensitivity,
@@ -1175,6 +1200,7 @@ pub(crate) struct SemanticNodeInput {
 /// One exact bounded semantic frame snapshot.
 #[derive(Clone, Eq, PartialEq)]
 pub struct SemanticSnapshot {
+    pub(crate) scroll_sample: Option<crate::semantic_wire::ScrollSample>,
     pub(crate) page_dialog_sample: Option<crate::semantic_wire::PageDialogSample>,
     invocation: SemanticInvocationId,
     frame: SemanticFrameJoin,
@@ -1390,6 +1416,7 @@ impl SemanticSnapshot {
                 states: input.states,
                 operations: input.operations,
                 fill_support: input.fill_support,
+                activation: input.activation,
                 editable_structure: input.editable_structure,
                 fields_complete: input.fields_complete,
                 sensitivity: input.sensitivity,
@@ -1404,6 +1431,7 @@ impl SemanticSnapshot {
             generation,
             completeness,
             page_dialog_sample: None,
+            scroll_sample: None,
             nodes,
             references,
             total_text_bytes: u32::try_from(total_text_bytes)
@@ -1541,6 +1569,7 @@ mod tests {
             states: SemanticStates::NONE,
             operations,
             fill_support: None,
+            activation: None,
             editable_structure: None,
             fields_complete: None,
             sensitivity: SemanticSensitivity::Public,

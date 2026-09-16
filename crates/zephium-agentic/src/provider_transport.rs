@@ -4,7 +4,7 @@
 //! sees it. This crate adds only provider credentials, exact HTTPS endpoints,
 //! bounded concurrency, cancellation, response framing, and the existing
 //! provider-neutral stream decoder. It exposes no arbitrary URL, generic HTTP
-//! request, provider-native browser tool, raw response body, or automatic retry.
+//! request, provider-native browser tool, raw response body, or generation retry.
 
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
@@ -2062,7 +2062,7 @@ impl AgentProviderAttempt {
         )
     }
 
-    /// Calls OpenAI's authenticated exact input-token endpoint once.
+    /// Counts immutable input, with one bounded retry for explicit server overload.
     ///
     /// This borrows the operation. Dropping its future after it reaches the
     /// send point preserves the terminal authority for [`Self::abort`].
@@ -2142,31 +2142,69 @@ impl AgentProviderAttempt {
         self.mark_input_count_disclosed();
         let deadline = tokio::time::sleep_until(tokio::time::Instant::from_std(self.deadline));
         tokio::pin!(deadline);
-        let response = tokio::select! {
-            biased;
-            () = self.cancellation.cancelled() => return self.counted_failure(cancelled_failure()),
-            () = self.shutdown.cancelled() => return self.counted_failure(cancelled_failure()),
-            () = &mut deadline => return self.counted_failure(timeout_failure()),
-            response = request.send() => response,
-        };
-        let response = match response {
-            Ok(response) => response,
-            Err(error) => return self.counted_failure(network_failure(&error)),
-        };
-        if response.url() != &endpoint
-            || !response_headers_admitted(response.headers())
-            || !response_content_length_admitted(
-                response.headers(),
-                MAX_OPENAI_INPUT_TOKEN_RESPONSE_BYTES as u32,
-            )
-            || !response_encoding_admitted(response.headers())
-        {
-            return self.counted_failure(protocol_failure());
-        }
-        if response.status() != StatusCode::OK {
+        let mut retries = 0_u8;
+        let response = loop {
+            let Some(send) = request.try_clone() else {
+                return self.counted_failure(protocol_failure());
+            };
+            let response = tokio::select! {
+                biased;
+                () = self.cancellation.cancelled() => return self.counted_failure(cancelled_failure()),
+                () = self.shutdown.cancelled() => return self.counted_failure(cancelled_failure()),
+                () = &mut deadline => return self.counted_failure(timeout_failure()),
+                response = send.send() => response,
+            };
+            let response = match response {
+                Ok(response) => response,
+                Err(error) => return self.counted_failure(network_failure(&error)),
+            };
+            if response.url() != &endpoint
+                || !response_headers_admitted(response.headers())
+                || !response_content_length_admitted(
+                    response.headers(),
+                    MAX_OPENAI_INPUT_TOKEN_RESPONSE_BYTES as u32,
+                )
+                || !response_encoding_admitted(response.headers())
+            {
+                return self.counted_failure(protocol_failure());
+            }
+            if response.status() == StatusCode::OK {
+                break response;
+            }
             let failure = status_failure(response.status(), response.headers());
-            return self.counted_failure(AgentProviderTransportOutcomeOwned::Failed(failure));
-        }
+            let jitter =
+                openai_client_request_id(call, ProviderRequestPhase::InputTokens).map_or(0, |id| {
+                    id.as_bytes()
+                        .iter()
+                        .fold(0_u64, |sum, byte| (sum * 31 + u64::from(*byte)) % 251)
+                });
+            let delay = Duration::from_millis(
+                failure
+                    .retry_after()
+                    .map_or(500 + jitter, |hint| hint.millis()),
+            );
+            let retry = retries == 0
+                && failure.class() == AgentProviderFailureClass::Overloaded
+                && (!response.headers().contains_key(RETRY_AFTER)
+                    || failure.retry_after().is_some())
+                && Instant::now()
+                    .checked_add(delay)
+                    .is_some_and(|wake| wake < self.deadline);
+            if !retry {
+                return self.counted_failure(AgentProviderTransportOutcomeOwned::Failed(failure));
+            }
+            // Counting has dispatched no model or browser effect. Keep the same
+            // bytes, admission, disclosure owner and absolute deadline.
+            drop(response);
+            retries += 1;
+            tokio::select! {
+                biased;
+                () = self.cancellation.cancelled() => return self.counted_failure(cancelled_failure()),
+                () = self.shutdown.cancelled() => return self.counted_failure(cancelled_failure()),
+                () = &mut deadline => return self.counted_failure(timeout_failure()),
+                () = tokio::time::sleep(delay) => {},
+            }
+        };
         if !response_json_content_type_admitted(response.headers()) {
             return self.counted_failure(protocol_failure());
         }
@@ -2511,6 +2549,16 @@ fn provider_request(
     credential: HeaderValue,
     body: Vec<u8>,
 ) -> Option<reqwest::RequestBuilder> {
+    #[cfg(feature = "probe-harness")]
+    if serde_json::from_slice::<serde_json::Value>(&body)
+        .is_ok_and(|body| body.get("store") == Some(&serde_json::Value::Bool(true)))
+    {
+        static SEQUENCE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let index = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 128;
+        let directory = "target/work-runtime-proof/native-requests";
+        let _ = std::fs::create_dir_all(directory);
+        let _ = std::fs::write(format!("{directory}/{index:03}.json"), &body);
+    }
     let request = client
         .post(endpoint)
         .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
@@ -3707,6 +3755,15 @@ mod tests {
 
     impl SequenceServer {
         fn spawn(scripts: Vec<ScriptedResponse>) -> Self {
+            Self::spawn_with_statuses(
+                scripts
+                    .into_iter()
+                    .map(|script| ("200 OK", script))
+                    .collect(),
+            )
+        }
+
+        fn spawn_with_statuses(scripts: Vec<(&'static str, ScriptedResponse)>) -> Self {
             let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback");
             let address = listener.local_addr().expect("loopback address");
             let openai = Url::parse(&format!("http://{address}/v1/responses")).expect("openai URL");
@@ -3716,7 +3773,7 @@ mod tests {
             let thread = thread::spawn(move || {
                 let mut captured = Vec::with_capacity(scripts.len());
                 let result = (|| {
-                    for script in scripts {
+                    for (status, script) in scripts {
                         let (mut stream, _) = listener.accept().map_err(|_| "accept failed")?;
                         stream
                             .set_read_timeout(Some(Duration::from_secs(3)))
@@ -3724,7 +3781,7 @@ mod tests {
                         captured.push(read_request(&mut stream)?);
                         thread::sleep(script.delay);
                         let head = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: {}\r\nContent-Encoding: identity\r\nConnection: close\r\n\r\n",
+                            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: {}\r\nContent-Encoding: identity\r\nConnection: close\r\n\r\n",
                             script.body.len(),
                             script.content_type,
                         );
@@ -4501,6 +4558,146 @@ mod tests {
         }
         for required in ["model", "instructions", "input", "tools", "tool_choice"] {
             assert!(body.get(required).is_some(), "token-relevant field omitted");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn count_overload_retry_preserves_request_and_stops_after_one_retry() {
+        for recovered in [true, false] {
+            let server = SequenceServer::spawn_with_statuses(vec![
+                (
+                    "503 Service Unavailable",
+                    ScriptedResponse {
+                        delay: Duration::ZERO,
+                        content_type: "application/json",
+                        body: b"{}".to_vec(),
+                    },
+                ),
+                (
+                    if recovered {
+                        "200 OK"
+                    } else {
+                        "503 Service Unavailable"
+                    },
+                    ScriptedResponse {
+                        delay: Duration::ZERO,
+                        content_type: "application/json",
+                        body: br#"{"object":"response.input_tokens","input_tokens":17}"#.to_vec(),
+                    },
+                ),
+            ]);
+            let transport = AgentProviderTransport::try_new_loopback(
+                AgentProviderTransportConfig::STANDARD,
+                server.openai.as_str(),
+                server.anthropic.as_str(),
+            )
+            .unwrap();
+            let credential = AgentProviderCredential::try_new(
+                AgentProviderKind::OpenAiResponses,
+                "synthetic-openai-key".into(),
+            )
+            .unwrap();
+            let (mut policy, input) = provider_exact_fixture();
+            let mut attempt = transport
+                .try_admit(
+                    input,
+                    &mut policy,
+                    &credential,
+                    AgentProviderCancellation::new(),
+                )
+                .unwrap();
+            let result = match attempt.count_openai_input_tokens().await {
+                AgentProviderExactCountOutcome::Counted(counted) => {
+                    assert!(recovered);
+                    assert_eq!(counted.count().measurement().tokens(), 17);
+                    counted.cancel_without_model_dispatch().unwrap()
+                }
+                AgentProviderExactCountOutcome::Failed(result) => {
+                    assert!(!recovered);
+                    assert!(
+                        matches!(result.outcome(), AgentProviderTransportOutcome::Failed(failure) if failure.class() == AgentProviderFailureClass::Overloaded)
+                    );
+                    result
+                }
+                other => panic!("unexpected count: {other:?}"),
+            };
+            assert_eq!(
+                result.disclosure_stage(),
+                AgentProviderDisclosureStage::InputTokenCountDisclosed
+            );
+            assert_eq!(
+                result.usage_knowledge(),
+                AgentProviderUsageKnowledge::ExactZeroBeforeModelDispatch
+            );
+            let AgentProviderPolicySettlement::Immediate(settlement) =
+                result.into_policy_settlement()
+            else {
+                panic!("no generation");
+            };
+            let receipt = settlement.settle(&mut policy).unwrap();
+            assert_eq!((receipt.input_tokens(), receipt.output_tokens()), (0, 0));
+            assert!(transport.snapshot().unwrap().is_idle());
+            let requests = server.finish();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0].body, requests[1].body);
+            assert_eq!(requests[0].head, requests[1].head);
+            assert!(std::str::from_utf8(&requests[0].head)
+                .unwrap()
+                .starts_with("POST /v1/responses/input_tokens "));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn count_overload_backoff_honors_cancellation_and_original_deadline() {
+        for cancel in [true, false] {
+            let server = OneShotServer::spawn(
+                "503 Service Unavailable",
+                &[("Retry-After", "1")],
+                vec![b"{}".to_vec()],
+            );
+            let transport = test_transport(&server);
+            let credential = AgentProviderCredential::try_new(
+                AgentProviderKind::OpenAiResponses,
+                "synthetic-openai-key".into(),
+            )
+            .unwrap();
+            let (mut policy, input) = provider_exact_fixture();
+            let cancellation = AgentProviderCancellation::new();
+            let mut attempt = transport
+                .try_admit(input, &mut policy, &credential, cancellation.clone())
+                .unwrap();
+            if !cancel {
+                attempt.deadline = Instant::now() + Duration::from_millis(250);
+            }
+            let task = cancel.then(|| {
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    cancellation.cancel();
+                })
+            });
+            let AgentProviderExactCountOutcome::Failed(result) =
+                attempt.count_openai_input_tokens().await
+            else {
+                panic!("count should stop");
+            };
+            assert_eq!(
+                result.usage_knowledge(),
+                AgentProviderUsageKnowledge::ExactZeroBeforeModelDispatch
+            );
+            let AgentProviderPolicySettlement::Immediate(settlement) =
+                result.into_policy_settlement()
+            else {
+                panic!("no generation");
+            };
+            settlement.settle(&mut policy).unwrap();
+            if let Some(task) = task {
+                task.await.unwrap();
+            }
+            let request = server.finish();
+            assert!(std::str::from_utf8(&request.head)
+                .unwrap()
+                .starts_with("POST /v1/responses/input_tokens "));
+            assert!(transport.snapshot().unwrap().is_idle());
         }
     }
 

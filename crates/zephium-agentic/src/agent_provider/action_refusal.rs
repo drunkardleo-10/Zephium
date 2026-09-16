@@ -136,6 +136,14 @@ impl super::super::AgentProviderSettledToolTurn {
                                 SemanticReferenceError::OperationDenied,
                             ),
                         ))
+                    } else if let Some(expected) = targets
+                        .required_effect()
+                        .filter(|expected| *expected != action.effect())
+                    {
+                        Some((
+                            context,
+                            SemanticActionBindingError::TaskEffectMismatch(expected),
+                        ))
                     } else {
                         targets
                             .excluded_error(context.kind, context.target)
@@ -153,12 +161,36 @@ impl super::super::AgentProviderSettledToolTurn {
             ));
         }
         match SemanticActionBatch::bind(id, observation, frames, actions.into_actions()) {
-            Ok(batch) => Ok(AgentProviderActionResolution::Bound(batch, continuation)),
+            Ok(batch) => {
+                let incomplete = batch.actions().first().is_some_and(|action| {
+                    observation
+                        .frames()
+                        .iter()
+                        .find(|snapshot| snapshot.frame() == action.frame())
+                        .is_some_and(|snapshot| {
+                            matches!(
+                                action.prepare(snapshot),
+                                Err(crate::SemanticActionPreparationError::IncompleteSnapshot)
+                            )
+                        })
+                });
+                if incomplete {
+                    return Ok(AgentProviderActionResolution::Refused(
+                        AgentProviderActionRefusal {
+                            continuation,
+                            error: SemanticActionBindingError::TargetIncomplete,
+                            context: refusal_context,
+                        },
+                    ));
+                }
+                Ok(AgentProviderActionResolution::Bound(batch, continuation))
+            }
             Err(
                 error @ (SemanticActionBindingError::Reference(
                     SemanticReferenceError::OperationDenied,
                 )
-                | SemanticActionBindingError::OutcomeAlreadySatisfied),
+                | SemanticActionBindingError::OutcomeAlreadySatisfied
+                | SemanticActionBindingError::OutcomeContract),
             ) => Ok(AgentProviderActionResolution::Refused(
                 AgentProviderActionRefusal {
                     continuation,
@@ -212,9 +244,21 @@ impl AgentProviderActionRefusal {
                 "operation_not_supported",
                 "The requested operation is not in the target ref's advertised ops. The rejected metadata identifies the exact operation, target, role and observed capabilities without echoing action content. This operation/target pair is unavailable while the observation is unchanged; other eligible refs remain available. Choose an advertised operation on another supplied ref, inspect to reveal a suitable control, or request a genuinely fresh observation before reconsidering changed state. Do not repeat the rejected pair.",
             ),
+            SemanticActionBindingError::TaskEffectMismatch(_) => (
+                "task_effect_mismatch",
+                "Nothing executed. The proposed effect conflicts with this assignment. The required_effect field is a host constraint, not a claim about arbitrary page handlers. If the intended action fits the assignment, correct its effect using the current ref and supported verification. Otherwise inspect or extract within scope; do not relabel a consequential action to bypass the assignment. The target remains available for a corrected proposal.",
+            ),
+            SemanticActionBindingError::OutcomeContract => (
+                "outcome_incompatible",
+                "Nothing executed. The requested outcome does not match this control's observed structure. page_dialog_closed requires a control inside an observed dialog; a tab uses selected=true and a disclosure uses expanded=true. Inspect the relevant container if context is missing, then choose a supported outcome. Do not substitute another unrelated target.",
+            ),
             SemanticActionBindingError::OutcomeAlreadySatisfied => (
                 "outcome_already_satisfied",
                 "The proposed postcondition already holds in the supplied observation. Choose a meaningfully different operation or input with a verifiable change, request a genuinely fresh observation if state may have changed, or extract the result if the objective is complete. Do not repeat this exact proposal.",
+            ),
+            SemanticActionBindingError::TargetIncomplete => (
+                "target_incomplete",
+                "Nothing executed. The supplied observation omits fields needed to prepare this target. Capture snapshot(subtree) of the target or its containing dialog or section, then use the fresh refs and advertised operations. Repeating the action against this unchanged observation cannot succeed. You can also read or extract the available evidence without acting.",
             ),
             _ => return Err(AgentProviderContinuationError::ToolKind),
         };
@@ -222,6 +266,9 @@ impl AgentProviderActionRefusal {
             "status": "refused", "code": code, "executed": false,
             "guidance": guidance, "observation_unchanged": true,
         });
+        if let SemanticActionBindingError::TaskEffectMismatch(expected) = self.error {
+            result["required_effect"] = serde_json::json!(effect_label(expected));
+        }
         if let Some(context) = self.context {
             result["rejected"] = serde_json::json!({
                 "operation": action_kind_label(context.kind),
@@ -243,11 +290,12 @@ impl AgentProviderActionRefusal {
         .flatten();
         let (call, _, _, correlation, mut transcript) = self.continuation.into_parts();
         let action_targets = transcript.take_action_targets();
-        let mut transcript = AgentProviderTranscript::try_initial_with_checkpoints(
+        let mut transcript = AgentProviderTranscript::try_initial_with_progress(
             transcript.objective,
             payload,
             transcript.navigation_checkpoint,
             transcript.inspection_checkpoint,
+            transcript.action_progress,
         )
         .ok_or(AgentProviderContinuationError::TranscriptLimit)?;
         if let Some(mut targets) = action_targets {
@@ -260,6 +308,21 @@ impl AgentProviderActionRefusal {
             transcript.set_action_targets(targets);
         }
         Ok((call, transcript.try_bind(correlation, result)?))
+    }
+}
+
+pub(in crate::agent_provider) const fn effect_label(
+    effect: crate::SemanticEffectClass,
+) -> &'static str {
+    use crate::SemanticEffectClass::*;
+    match effect {
+        Read => "read",
+        LocalWrite => "local_write",
+        ExternalWrite => "external_write",
+        Communication => "communication",
+        Purchase => "purchase",
+        Destructive => "destructive",
+        CapabilityBoundary => "capability_boundary",
     }
 }
 

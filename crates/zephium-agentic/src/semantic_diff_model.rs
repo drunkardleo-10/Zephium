@@ -581,6 +581,10 @@ fn write_full_node(
         output.push(" destination=")?;
         write_quoted(output, target.as_url().as_str())?;
     }
+    if node.image_source().is_some() {
+        output.push(" image_source_available=true")?;
+    }
+    crate::semantic_model::write_disclosure(output, node)?;
     write_states(output, node.states())?;
     write_operations(output, node.operations())?;
     if let Some(name) = node.name() {
@@ -1139,6 +1143,49 @@ mod tests {
             fit_semantic_observation_for_model(raw, tiny),
             Err(SemanticModelEncodingError::OutputLimit)
         ));
+    }
+
+    #[test]
+    fn image_availability_survives_full_and_incremental_projection_without_url_replay() {
+        let context = context();
+        let make = |id, nodes| observation(context, id, id + 10, id + 20, nodes);
+        let empty = make(1, json!([{"k":9001,"r":"document"}]));
+        let image = make(
+            2,
+            json!([
+                {"k":9001,"r":"document"},
+                {"k":9002,"p":0,"r":"image","n":"Product","m":"https://images.example.test/product.png"}
+            ]),
+        );
+        let unloaded = make(
+            3,
+            json!([
+                {"k":9001,"r":"document"}, {"k":9002,"p":0,"r":"image","n":"Product"}
+            ]),
+        );
+        let budget = SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE;
+        let full = encode_semantic_observation(&image, budget)
+            .unwrap()
+            .admit_conservative_utf8(&revision())
+            .unwrap();
+        assert!(full.as_str().contains("image_source_available=true"));
+        assert!(!full.as_str().contains("images.example.test"));
+        for (previous, current, expected) in [
+            (&empty, &image, "image_source_available=true"),
+            (&image, &unloaded, "image_source_available=false"),
+        ] {
+            let SemanticDiffOutcome::Diff(diff) = compute_semantic_diff(
+                previous,
+                &acknowledge(previous),
+                current,
+                SemanticDiffBudget::ACTION,
+            ) else {
+                panic!("bounded image diff")
+            };
+            let encoded = encode_semantic_diff(&diff, budget).unwrap();
+            assert!(encoded.content.contains(expected));
+            assert!(!encoded.content.contains("images.example.test"));
+        }
     }
 
     #[test]

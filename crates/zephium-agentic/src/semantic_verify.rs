@@ -239,8 +239,9 @@ impl fmt::Debug for SemanticEffectEvidence<'_> {
 /// values, but those values must never become public runtime data. This helper
 /// selects and borrows them inside the agentic core, returning only the opaque
 /// evidence envelope. Page-dialog transitions consume independent bounded samples
-/// carried privately by the adjacent snapshot. Native navigation/dialog/scroll
-/// postconditions require other evidence and therefore fail closed here.
+/// carried privately by the adjacent snapshot. Scroll transitions use independent,
+/// action-bound position samples in the adjacent snapshot.
+/// Native navigation/dialog postconditions require other evidence.
 pub fn prepare_semantic_action_snapshot_evidence<'a>(
     action: &'a SemanticPreparedAction,
     attempt: SemanticActionAttemptId,
@@ -248,9 +249,13 @@ pub fn prepare_semantic_action_snapshot_evidence<'a>(
     snapshot: &'a SemanticSnapshot,
 ) -> Result<SemanticEffectEvidence<'a>, SemanticSnapshotEvidenceError> {
     match action.verification() {
-        SemanticVerification::PageDialogOpened | SemanticVerification::PageDialogClosed => Ok(
-            SemanticEffectEvidence::snapshot(attempt, observed_at, snapshot),
-        ),
+        SemanticVerification::PageDialogOpened
+        | SemanticVerification::PageDialogClosed
+        | SemanticVerification::ScrollPositionChanged => Ok(SemanticEffectEvidence::snapshot(
+            attempt,
+            observed_at,
+            snapshot,
+        )),
         SemanticVerification::TargetValueMatchesInput => {
             let (before, after) = action.verification_fill_values(snapshot)?;
             Ok(SemanticEffectEvidence::exact_target_value(
@@ -272,9 +277,7 @@ pub fn prepare_semantic_action_snapshot_evidence<'a>(
                 snapshot,
             ))
         }
-        SemanticVerification::NavigationCommitted
-        | SemanticVerification::Dialog(_)
-        | SemanticVerification::ScrollPositionChanged => {
+        SemanticVerification::NavigationCommitted | SemanticVerification::Dialog(_) => {
             Err(SemanticSnapshotEvidenceError::NonSnapshotEvidenceRequired)
         }
     }
@@ -320,6 +323,8 @@ pub struct SemanticVerifiedAction {
     current_invocation: Option<SemanticInvocationId>,
     current_snapshot: Option<SemanticSnapshotGeneration>,
     action_guard: [u8; 32],
+    pub(crate) kind: crate::SemanticActionKind,
+    pub(crate) scroll: Option<(SemanticScrollDirection, SemanticScrollAmount)>,
 }
 
 impl SemanticVerifiedAction {
@@ -675,7 +680,7 @@ pub(crate) fn verify_semantic_action(
                 // Requiring a sole visible dialog immediately before the click
                 // makes the sampled identity unambiguous: an unrelated dialog
                 // cannot close and satisfy this proof.
-                if sample.before.len() != 1 || !sample.after.is_empty() {
+                if sample.before.len() != 1 || sample.after.contains(&sample.before[0]) {
                     return Err(SemanticVerificationError::OutcomeNotObserved);
                 }
                 (
@@ -813,6 +818,48 @@ pub(crate) fn verify_semantic_action(
             }
             (
                 SemanticVerification::ScrollPositionChanged,
+                SemanticEffectEvidenceKind::Snapshot(snapshot),
+            ) => {
+                let sample = snapshot
+                    .scroll_sample
+                    .as_ref()
+                    .ok_or(SemanticVerificationError::OutcomeNotObserved)?;
+                if snapshot.frame() != action.frame()
+                    || action.checkpoint_snapshot().get().checked_add(1)
+                        != Some(snapshot.generation().get())
+                    || action.checkpoint_invocation().get().checked_add(1)
+                        != Some(snapshot.invocation().get())
+                    || sample.a != evidence.attempt.get()
+                    || sample.i != action.checkpoint_invocation().get()
+                    || sample.g != action.checkpoint_snapshot().get()
+                    || sample.t != action.target_key().get()
+                {
+                    return Err(SemanticVerificationError::StaleEvidence);
+                }
+                let (direction, amount) = action
+                    .scroll_recipe()
+                    .ok_or(SemanticVerificationError::ActionMismatch)?;
+                let before = SemanticScrollPosition::try_new(sample.before[0], sample.before[1])
+                    .map_err(|_| SemanticVerificationError::OutcomeNotObserved)?;
+                let after = SemanticScrollPosition::try_new(sample.after[0], sample.after[1])
+                    .map_err(|_| SemanticVerificationError::OutcomeNotObserved)?;
+                let observed = if amount == SemanticScrollAmount::IntoView {
+                    sample.visible == Some(true) && before != after
+                } else {
+                    sample.visible.is_none() && moved_in_direction(before, after, direction)
+                };
+                if !observed {
+                    return Err(SemanticVerificationError::OutcomeNotObserved);
+                }
+                (
+                    SemanticEffectProofKind::Scroll,
+                    snapshot.frame().context(),
+                    Some(snapshot.invocation()),
+                    Some(snapshot.generation()),
+                )
+            }
+            (
+                SemanticVerification::ScrollPositionChanged,
                 SemanticEffectEvidenceKind::Scroll {
                     snapshot,
                     before,
@@ -850,6 +897,8 @@ pub(crate) fn verify_semantic_action(
         current_invocation,
         current_snapshot,
         action_guard: action.verification_guard(),
+        kind: action.kind(),
+        scroll: action.scroll_recipe(),
     })
 }
 
@@ -857,7 +906,16 @@ fn verification_target<'a>(
     action: &SemanticPreparedAction,
     snapshot: &'a SemanticSnapshot,
 ) -> Result<(usize, &'a crate::SemanticNode), SemanticVerificationError> {
-    if !action.has_complete_snapshot_evidence(snapshot) {
+    let complete_state = matches!(
+        action.verification(),
+        SemanticVerification::TargetState { .. }
+    ) && action.checkpoint_invocation().get().checked_add(1)
+        == Some(snapshot.invocation().get())
+        && snapshot
+            .nodes()
+            .iter()
+            .any(|node| node.key() == action.target_key() && node.fields_complete() == Some(true));
+    if !action.has_complete_snapshot_evidence(snapshot) && !complete_state {
         return Err(SemanticVerificationError::IncompleteSnapshot);
     }
     action
@@ -1425,22 +1483,10 @@ mod tests {
                 SemanticWaitCondition::Dialog(SemanticDialogState::Present),
                 SemanticVerification::Dialog(SemanticDialogState::Present),
             ),
-            (
-                SemanticWaitCondition::ScrollPositionChanged,
-                SemanticVerification::ScrollPositionChanged,
-            ),
         ];
         for (wait, verification) in unsupported {
-            let intent = if verification == SemanticVerification::ScrollPositionChanged {
-                SemanticActionIntent::Scroll {
-                    target: SemanticReferenceId::new(1).expect("target"),
-                    direction: SemanticScrollDirection::Down,
-                    amount: SemanticScrollAmount::Page,
-                }
-            } else {
-                SemanticActionIntent::Click {
-                    target: SemanticReferenceId::new(2).expect("target"),
-                }
+            let intent = SemanticActionIntent::Click {
+                target: SemanticReferenceId::new(2).expect("target"),
             };
             let batch = bind(&observation, intent, wait, verification).expect("batch");
             let action = batch.actions()[0]
@@ -1989,6 +2035,34 @@ mod tests {
             SemanticEffectProofKind::PageDialogClosed
         );
 
+        // Closing one dialog may reveal a different dialog, e.g. cookie choices.
+        snapshot.page_dialog_sample.as_mut().unwrap().after = vec![10];
+        let evidence = prepare_semantic_action_snapshot_evidence(
+            &action,
+            SemanticActionAttemptId::new(2).unwrap(),
+            SemanticSettleInstant::from_millis(101),
+            &snapshot,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_semantic_action(&tracker, &action, evidence)
+                .unwrap()
+                .proof(),
+            SemanticEffectProofKind::PageDialogClosed
+        );
+        snapshot.page_dialog_sample.as_mut().unwrap().after = vec![9, 10];
+        let evidence = prepare_semantic_action_snapshot_evidence(
+            &action,
+            SemanticActionAttemptId::new(2).unwrap(),
+            SemanticSettleInstant::from_millis(101),
+            &snapshot,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_semantic_action(&tracker, &action, evidence),
+            Err(SemanticVerificationError::OutcomeNotObserved)
+        );
+
         snapshot.page_dialog_sample.as_mut().unwrap().before = vec![8, 9];
         snapshot.page_dialog_sample.as_mut().unwrap().after = vec![8];
         let evidence = prepare_semantic_action_snapshot_evidence(
@@ -2102,6 +2176,39 @@ mod tests {
             ),
             Err(SemanticVerificationError::IncompleteSnapshot)
         );
+        for (witness, invocation, state, accepted) in [
+            (Some(true), 2, 1, true),
+            (Some(false), 2, 1, false),
+            (None, 2, 1, false),
+            (Some(true), 3, 1, false),
+            (Some(true), 2, 0, false),
+        ] {
+            let mut node = json!({"k":4,"p":0,"r":"checkbox","n":"Private toggle","s":state,"o":1});
+            if let Some(witness) = witness {
+                node["fc"] = json!(witness);
+            }
+            let partial = snapshot_for_frame(
+                observation.frames()[0].frame().clone(),
+                invocation,
+                2,
+                "node_limit",
+                json!([{"k":1,"r":"document","o":16},node]),
+            );
+            let verified = verify_semantic_action(
+                &tracker,
+                action,
+                SemanticEffectEvidence::snapshot(
+                    SemanticActionAttemptId::new(2).unwrap(),
+                    SemanticSettleInstant::from_millis(102),
+                    &partial,
+                ),
+            );
+            assert_eq!(
+                verified.is_ok(),
+                accepted,
+                "local witness {witness:?}/{invocation}/{state}"
+            );
+        }
     }
 
     #[test]
@@ -2332,6 +2439,83 @@ mod tests {
             ),
         )
         .is_ok());
+    }
+
+    #[test]
+    fn scroll_snapshot_requires_exact_adjacent_sample_and_real_movement() {
+        for amount in [SemanticScrollAmount::Page, SemanticScrollAmount::IntoView] {
+            let (observation, _) = observation();
+            let batch = bind(
+                &observation,
+                SemanticActionIntent::Scroll {
+                    target: SemanticReferenceId::new(1).unwrap(),
+                    direction: SemanticScrollDirection::Down,
+                    amount,
+                },
+                SemanticWaitCondition::Immediate,
+                SemanticVerification::ScrollPositionChanged,
+            )
+            .unwrap();
+            let action = batch.actions()[0]
+                .prepare(&observation.frames()[0])
+                .unwrap();
+            let tracker = immediate(&action, 7);
+            let mut snapshot = current(&observation, json!([{ "k": 1, "r": "document", "o": 16 }]));
+            snapshot.scroll_sample = Some(crate::semantic_wire::ScrollSample {
+                a: 7,
+                i: action.checkpoint_invocation().get(),
+                g: action.checkpoint_snapshot().get(),
+                t: action.target_key().get(),
+                before: [0, 10],
+                after: [0, 300],
+                visible: (amount == SemanticScrollAmount::IntoView).then_some(true),
+            });
+            let verify = |snapshot: &SemanticSnapshot| {
+                verify_semantic_action(
+                    &tracker,
+                    &action,
+                    prepare_semantic_action_snapshot_evidence(
+                        &action,
+                        SemanticActionAttemptId::new(7).unwrap(),
+                        SemanticSettleInstant::from_millis(101),
+                        snapshot,
+                    )
+                    .unwrap(),
+                )
+            };
+            assert_eq!(
+                verify(&snapshot).unwrap().proof(),
+                SemanticEffectProofKind::Scroll
+            );
+            for corruption in [
+                "attempt",
+                "invocation",
+                "generation",
+                "target",
+                "stationary",
+                "wrong_direction",
+                "missing",
+                "visibility",
+            ] {
+                let mut invalid = snapshot.clone();
+                let sample = invalid.scroll_sample.as_mut().unwrap();
+                match corruption {
+                    "attempt" => sample.a += 1,
+                    "invocation" => sample.i += 1,
+                    "generation" => sample.g += 1,
+                    "target" => sample.t += 1,
+                    "stationary" => sample.after = sample.before,
+                    "wrong_direction" if amount == SemanticScrollAmount::IntoView => {
+                        sample.visible = None
+                    }
+                    "wrong_direction" => sample.after = [0, 0],
+                    "visibility" => sample.visible = Some(false),
+                    "missing" => invalid.scroll_sample = None,
+                    _ => unreachable!(),
+                }
+                assert!(verify(&invalid).is_err(), "{corruption}");
+            }
+        }
     }
 
     #[test]

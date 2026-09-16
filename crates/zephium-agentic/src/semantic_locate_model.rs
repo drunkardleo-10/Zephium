@@ -9,7 +9,7 @@ use std::fmt;
 
 use crate::semantic_model::{
     checked_write, conservative_utf8_measurement, role_label, sensitivity_label, source_label,
-    validate_semantic_token_measurement, BoundedModelBuffer,
+    validate_semantic_token_measurement, write_operations, BoundedModelBuffer,
 };
 use crate::{
     ContextJoin, SemanticLocateId, SemanticLocateMatchQuality, SemanticLocateResult,
@@ -467,7 +467,7 @@ pub fn encode_semantic_locate_result(
         checked_write(
             &mut output,
             format_args!(
-                "L ref={} role={} match={} sensitivity={} source={} actionable={}\n",
+                "L ref={} role={} match={} sensitivity={} source={} actionable={}",
                 matched.reference().model_token(),
                 role_label(matched.role()),
                 match_quality_label(matched.quality()),
@@ -476,6 +476,15 @@ pub fn encode_semantic_locate_result(
                 matched.actionable(),
             ),
         )?;
+        write_operations(&mut output, matched.operations())?;
+        if let Some(expanded) = matched.disclosure_expanded() {
+            output.push(if expanded {
+                " disclosure=expanded"
+            } else {
+                " disclosure=collapsed"
+            })?;
+        }
+        output.push("\n")?;
     }
     let content = output.finish();
     let lines = content.bytes().filter(|byte| *byte == b'\n').count();
@@ -752,7 +761,7 @@ mod tests {
             .expect("admit");
         assert_eq!(
             payload.as_str(),
-            "ZLOC1 content=untrusted observation_generation=1 matches=1 matched=1 scanned=4 withheld_secret=1 truncated=false\nL ref=@a2 role=button match=exact_name sensitivity=public source=page actionable=true\n"
+            "ZLOC1 content=untrusted observation_generation=1 matches=1 matched=1 scanned=4 withheld_secret=1 truncated=false\nL ref=@a2 role=button match=exact_name sensitivity=public source=page actionable=true ops=click\n"
         );
         assert!(payload.matches_result(&result));
         let debug = format!("{payload:?}");

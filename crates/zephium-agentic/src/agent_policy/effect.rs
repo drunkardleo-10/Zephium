@@ -49,11 +49,12 @@ impl fmt::Debug for AgentEffectId {
     }
 }
 
-/// Trusted fixed-classifier result for one exact prepared semantic action.
+/// Trusted host assessment for one exact prepared semantic action.
 ///
 /// Construction is deliberately separate from the model's declared effect.
-/// The selected native/service adapter must derive the actual effect and
-/// canonical destination independently before policy sees this value.
+/// The host classifies the effect and canonical destination from task authority
+/// and native evidence. This is admission, not proof about arbitrary page scripts;
+/// execution still requires independent outcome verification.
 #[derive(Clone, Eq, PartialEq)]
 pub struct AgentEffectAssessment {
     action_guard: [u8; 32],

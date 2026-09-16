@@ -1494,20 +1494,12 @@ fn admit_value<'a>(
                 sources: raw_sources,
             },
         ) => {
-            if !exact_public_url(&value)
-                || !raw_sources.iter().any(|token| {
-                    SemanticReadFragmentId::parse_model_token(token)
-                        .and_then(|id| read.fragment(id))
-                        .is_some_and(|source| {
-                            source.field() == crate::SemanticReadField::LinkDestination
-                                && source.content().value_preview().is_some_and(|preview| {
-                                    !preview.truncated() && preview.text() == value
-                                })
-                        })
-                })
-            {
-                return Err(SemanticExtractionError::SourceInvalid);
-            }
+            let value = resolve_source_url(
+                value,
+                &raw_sources,
+                read,
+                crate::SemanticReadField::LinkDestination,
+            )?;
             Ok(SemanticExtractedValue::Url(admit_text(
                 value,
                 *max_bytes,
@@ -1525,20 +1517,12 @@ fn admit_value<'a>(
                 sources: raw_sources,
             },
         ) => {
-            if !exact_public_url(&value)
-                || !raw_sources.iter().any(|token| {
-                    SemanticReadFragmentId::parse_model_token(token)
-                        .and_then(|id| read.fragment(id))
-                        .is_some_and(|source| {
-                            source.field() == crate::SemanticReadField::ImageSource
-                                && source.content().value_preview().is_some_and(|preview| {
-                                    !preview.truncated() && preview.text() == value
-                                })
-                        })
-                })
-            {
-                return Err(SemanticExtractionError::SourceInvalid);
-            }
+            let value = resolve_source_url(
+                value,
+                &raw_sources,
+                read,
+                crate::SemanticReadField::ImageSource,
+            )?;
             Ok(SemanticExtractedValue::ImageUrl(admit_text(
                 value,
                 *max_bytes,
@@ -1736,23 +1720,26 @@ fn admit_sources<'a>(
     if raw_sources.is_empty() || raw_sources.len() > MAX_SEMANTIC_EXTRACTION_SOURCES_PER_VALUE {
         return Err(SemanticExtractionError::SourceLimit);
     }
+    let mut ids = raw_sources
+        .iter()
+        .map(|token| {
+            SemanticReadFragmentId::parse_model_token(token)
+                .ok_or(SemanticExtractionError::SourceInvalid)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    // Citations are a set; normalize only IDs, never evidence or extracted values.
+    ids.sort_unstable();
+    ids.dedup();
     let next_source_len = sources
         .len()
-        .checked_add(raw_sources.len())
+        .checked_add(ids.len())
         .ok_or(SemanticExtractionError::SourceLimit)?;
     if next_source_len > MAX_SEMANTIC_EXTRACTION_SOURCE_EDGES {
         return Err(SemanticExtractionError::SourceLimit);
     }
     let start = u16::try_from(sources.len()).map_err(|_| SemanticExtractionError::Invariant)?;
-    let len = u8::try_from(raw_sources.len()).map_err(|_| SemanticExtractionError::Invariant)?;
-    let mut previous = None;
-    for token in raw_sources {
-        let id = SemanticReadFragmentId::parse_model_token(&token)
-            .ok_or(SemanticExtractionError::SourceInvalid)?;
-        if previous.is_some_and(|previous| id <= previous) {
-            return Err(SemanticExtractionError::SourceOrder);
-        }
-        previous = Some(id);
+    let len = u8::try_from(ids.len()).map_err(|_| SemanticExtractionError::Invariant)?;
+    for id in ids {
         let fragment = read
             .fragment(id)
             .ok_or(SemanticExtractionError::SourceMissing)?;
@@ -1803,6 +1790,33 @@ fn extraction_result_guard(
     hasher.finalize().into()
 }
 
+fn resolve_source_url(
+    proposed: Option<String>,
+    raw_sources: &[String],
+    read: &SemanticReadResult<'_>,
+    field: crate::SemanticReadField,
+) -> Result<String, SemanticExtractionError> {
+    // Source selection avoids model reserialization; legacy copied values stay exact.
+    if proposed.is_none() && raw_sources.len() != 1 {
+        return Err(SemanticExtractionError::SourceLimit);
+    }
+    let observed = raw_sources.iter().find_map(|token| {
+        let source =
+            SemanticReadFragmentId::parse_model_token(token).and_then(|id| read.fragment(id))?;
+        if source.field() != field {
+            return None;
+        }
+        let preview = source.content().value_preview()?;
+        (!preview.truncated()
+            && exact_public_url(preview.text())
+            && proposed
+                .as_ref()
+                .is_none_or(|value| value == preview.text()))
+        .then(|| preview.text().to_owned())
+    });
+    observed.ok_or(SemanticExtractionError::SourceInvalid)
+}
+
 pub(crate) fn exact_public_url(value: &str) -> bool {
     value.len() <= crate::semantic::MAX_SEMANTIC_LINK_DESTINATION_BYTES
         && crate::ContextNavigationTarget::parse(value).is_ok_and(|target| {
@@ -1841,9 +1855,15 @@ enum RawValue {
     #[serde(rename = "text")]
     Text { value: String, sources: Vec<String> },
     #[serde(rename = "url")]
-    Url { value: String, sources: Vec<String> },
+    Url {
+        value: Option<String>,
+        sources: Vec<String>,
+    },
     #[serde(rename = "image_url")]
-    ImageUrl { value: String, sources: Vec<String> },
+    ImageUrl {
+        value: Option<String>,
+        sources: Vec<String>,
+    },
     #[serde(rename = "boolean")]
     Boolean { value: bool, sources: Vec<String> },
     #[serde(rename = "unsigned")]
@@ -2179,7 +2199,7 @@ mod tests {
 
     #[test]
     fn url_extraction_requires_exact_screened_destination_evidence_and_schema_selection() {
-        let url = "https://shop.example.test/item/42?variant=blue";
+        let url = "https://shop.example.test/item/42?variant=blue#main-content";
         let observation = observation_with_nodes(json!([
             {"k":1,"r":"document","o":16},
             {"k":2,"p":0,"r":"paragraph","t":url},
@@ -2229,7 +2249,44 @@ mod tests {
         assert!(
             matches!(accepted.fields()[0].value(), SemanticExtractedValue::Url(value) if value.as_str() == url)
         );
+        let source_only = |sources: Vec<&str>| {
+            serde_json::to_vec(&json!({"v":1,"schema":29,"fields":[
+                {"name":"product_url","value":{"k":"url","sources":sources}}
+            ]}))
+            .unwrap()
+        };
+        let resolved = extract_semantic_read(
+            &schema,
+            &read,
+            &delivery,
+            SemanticReadSensitivityLimit::PublicOnly,
+            &source_only(vec![&token]),
+        )
+        .unwrap();
+        assert!(
+            matches!(resolved.fields()[0].value(), SemanticExtractedValue::Url(value) if value.as_str() == url)
+        );
+        for sources in [
+            vec![],
+            vec![token.as_str(), token.as_str()],
+            vec!["@r1"],
+            vec!["@r999"],
+            vec!["@r01"],
+        ] {
+            assert!(extract_semantic_read(
+                &schema,
+                &read,
+                &delivery,
+                SemanticReadSensitivityLimit::PublicOnly,
+                &source_only(sources)
+            )
+            .is_err());
+        }
         for (value, source) in [
+            (
+                "https://shop.example.test/item/42?variant=blue",
+                token.as_str(),
+            ),
             ("https://shop.example.test/item/43", token.as_str()),
             (url, "@r1"),
             ("https://shop.example.test/?token=secret", token.as_str()),
@@ -2308,6 +2365,21 @@ mod tests {
         .unwrap();
         assert!(
             matches!(accepted.fields()[0].value(), SemanticExtractedValue::ImageUrl(value) if value.as_str() == url)
+        );
+        let source_only = serde_json::to_vec(&json!({"v":1,"schema":29,"fields":[
+            {"name":"image","value":{"k":"image_url","sources":[token]}}
+        ]}))
+        .unwrap();
+        let resolved = extract_semantic_read(
+            &schema,
+            &read,
+            &delivery,
+            SemanticReadSensitivityLimit::PublicOnly,
+            &source_only,
+        )
+        .unwrap();
+        assert!(
+            matches!(resolved.fields()[0].value(), SemanticExtractedValue::ImageUrl(value) if value.as_str() == url)
         );
         for (kind, value, source) in [
             ("url", url, token.as_str()),
@@ -3118,6 +3190,50 @@ mod tests {
     }
 
     #[test]
+    fn citation_sets_normalize_order_and_duplicates_without_changing_evidence() {
+        let observation = observation();
+        let read = read(&observation, 31);
+        let delivery = delivered(&read);
+        let schema = schema();
+        for raw in [json!(["@r2", "@r1"]), json!(["@r2", "@r1", "@r2"])] {
+            let mut output = valid_output();
+            output["fields"][0]["value"]["sources"] = raw;
+            let bytes = serde_json::to_vec(&output).unwrap();
+            let result = extract_semantic_read(
+                &schema,
+                &read,
+                &delivery,
+                SemanticReadSensitivityLimit::Sensitive,
+                &bytes,
+            )
+            .unwrap();
+            let SemanticExtractedValue::Text(title) = result.fields()[0].value() else {
+                panic!("text");
+            };
+            assert_eq!(title.as_str(), "Quarterly summary");
+            let ids: Vec<_> = result
+                .sources(title.source_span())
+                .unwrap()
+                .iter()
+                .map(|source| source.fragment().id().get())
+                .collect();
+            assert_eq!(ids, [1, 2]);
+            assert_eq!(result.stats().source_edges(), 8);
+        }
+        let mut output = valid_output();
+        output["fields"][0]["value"]["sources"] = json!(["@r99", "@r1", "@r99"]);
+        assert_eq!(
+            extract_value_error(&output),
+            SemanticExtractionError::SourceMissing
+        );
+        output["fields"][0]["value"]["sources"] = json!(["@r1", "@r1", "@r1", "@r1", "@r1"]);
+        assert_eq!(
+            extract_value_error(&output),
+            SemanticExtractionError::SourceLimit
+        );
+    }
+
+    #[test]
     fn enforces_canonical_bounded_resolved_ordered_and_sensitive_sources() {
         for (sources, expected) in [
             (json!([]), SemanticExtractionError::SourceLimit),
@@ -3128,8 +3244,6 @@ mod tests {
             (json!(["@r01"]), SemanticExtractionError::SourceInvalid),
             (json!(["r1"]), SemanticExtractionError::SourceInvalid),
             (json!(["@r99"]), SemanticExtractionError::SourceMissing),
-            (json!(["@r1", "@r1"]), SemanticExtractionError::SourceOrder),
-            (json!(["@r2", "@r1"]), SemanticExtractionError::SourceOrder),
         ] {
             let mut output = valid_output();
             output["fields"][0]["value"]["sources"] = sources;

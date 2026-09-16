@@ -67,11 +67,12 @@ impl AgentProviderNavigationRefusal {
         }).to_string();
         let (call, _, _, correlation, mut transcript) = self.0.into_parts();
         let action_targets = transcript.take_action_targets();
-        let mut transcript = AgentProviderTranscript::try_initial_with_checkpoints(
+        let mut transcript = AgentProviderTranscript::try_initial_with_progress(
             transcript.objective,
             payload,
             transcript.navigation_checkpoint,
             transcript.inspection_checkpoint,
+            transcript.action_progress,
         )
         .ok_or(AgentProviderContinuationError::TranscriptLimit)?;
         if let Some(targets) = action_targets {

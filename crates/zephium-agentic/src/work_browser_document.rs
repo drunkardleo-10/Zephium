@@ -19,13 +19,21 @@ pub enum WorkBrowserDocumentPolicy {
     /// one safe native URL on the exact same origin/path and committed load;
     /// this grants neither a redirect nor any subsequent location change.
     PublicQueryFinalization,
+    /// Public interactions may update a safe query within the committed document.
+    /// The native gate still refuses every unapproved load, origin/path change,
+    /// fragment and credential-bearing location. The admitted URL remains the
+    /// resource's stable citation address; query state grants no new destination.
+    PublicSameDocumentQuery,
 }
 
 impl WorkBrowserDocumentPolicy {
     /// Checks trusted admission, before any request is sent to the native port.
     pub fn admits_request(self, requested: &ContextNavigationTarget) -> bool {
         let url = requested.as_url();
-        if self == Self::PublicQueryFinalization {
+        if matches!(
+            self,
+            Self::PublicQueryFinalization | Self::PublicSameDocumentQuery
+        ) {
             return url.scheme() == "https"
                 && url.fragment().is_none()
                 && crate::semantic_wire::model_safe_public_url(requested);
@@ -51,7 +59,10 @@ impl WorkBrowserDocumentPolicy {
         if requested == effective {
             return true;
         }
-        if self == Self::PublicQueryFinalization {
+        if matches!(
+            self,
+            Self::PublicQueryFinalization | Self::PublicSameDocumentQuery
+        ) {
             return self.admits_request(effective)
                 && requested.as_url().as_str().split('?').next()
                     == effective.as_url().as_str().split('?').next();

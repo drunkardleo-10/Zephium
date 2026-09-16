@@ -70,7 +70,10 @@ pub enum SemanticActionNextState {
 }
 
 enum SemanticActionStateUpdate {
-    Diff(Box<SemanticDiff>),
+    Diff {
+        diff: Box<SemanticDiff>,
+        observation: Box<SemanticObservation>,
+    },
     FreshSnapshot {
         reason: SemanticFreshSnapshotReason,
         observation: Box<SemanticObservation>,
@@ -99,7 +102,7 @@ impl SemanticActionResult {
     /// Whether the next model update is a bounded diff or full fresh snapshot.
     pub const fn next_state(&self) -> SemanticActionNextState {
         match &self.update {
-            SemanticActionStateUpdate::Diff(_) => SemanticActionNextState::Diff,
+            SemanticActionStateUpdate::Diff { .. } => SemanticActionNextState::Diff,
             SemanticActionStateUpdate::FreshSnapshot { reason, .. } => {
                 SemanticActionNextState::FreshSnapshot(*reason)
             }
@@ -109,7 +112,7 @@ impl SemanticActionResult {
     /// Complete bounded diff, when every conservative diff premise held.
     pub const fn diff(&self) -> Option<&SemanticDiff> {
         match &self.update {
-            SemanticActionStateUpdate::Diff(diff) => Some(diff),
+            SemanticActionStateUpdate::Diff { diff, .. } => Some(diff),
             SemanticActionStateUpdate::FreshSnapshot { .. } => None,
         }
     }
@@ -117,9 +120,23 @@ impl SemanticActionResult {
     /// Exact current observation that must be encoded in full after diff fallback.
     pub const fn fresh_snapshot(&self) -> Option<&SemanticObservation> {
         match &self.update {
-            SemanticActionStateUpdate::Diff(_) => None,
+            SemanticActionStateUpdate::Diff { .. } => None,
             SemanticActionStateUpdate::FreshSnapshot { observation, .. } => Some(observation),
         }
+    }
+
+    /// Replaces an oversized delta with its exact verified observation, without recapture.
+    pub fn into_fresh_snapshot(mut self) -> Self {
+        self.update = match self.update {
+            SemanticActionStateUpdate::Diff { observation, .. } => {
+                SemanticActionStateUpdate::FreshSnapshot {
+                    reason: SemanticFreshSnapshotReason::DiffLimit,
+                    observation,
+                }
+            }
+            update => update,
+        };
+        self
     }
 }
 
@@ -383,7 +400,10 @@ fn finish_semantic_action_result(
 ) -> SemanticActionResult {
     let current = current.observation;
     let update = match compute_semantic_diff(baseline, acknowledgement, &current, budget) {
-        SemanticDiffOutcome::Diff(diff) => SemanticActionStateUpdate::Diff(diff),
+        SemanticDiffOutcome::Diff(diff) => SemanticActionStateUpdate::Diff {
+            diff,
+            observation: Box::new(current),
+        },
         SemanticDiffOutcome::FreshSnapshot(reason) => {
             debug_assert_ne!(reason, SemanticFreshSnapshotReason::NotAcknowledged);
             SemanticActionStateUpdate::FreshSnapshot {
@@ -597,6 +617,76 @@ pub(crate) mod tests {
         .unwrap();
         assert!(result.fresh_snapshot().is_some());
         (baseline, result)
+    }
+
+    pub(crate) fn scroll_provider_fixture(id: u64, diff: bool) -> SemanticActionResult {
+        let context = context();
+        let baseline = observation(
+            context,
+            id,
+            id,
+            id,
+            id.is_multiple_of(2),
+            &format!("Private status {id}"),
+        );
+        let current = observation(
+            context,
+            id + 1,
+            id + 1,
+            id + 1,
+            !id.is_multiple_of(2),
+            &format!("Private status {}", id + 1),
+        );
+        let proposal = SemanticActionProposal::try_new(
+            SemanticActionIntent::Scroll {
+                target: SemanticReferenceId::new(1).unwrap(),
+                direction: crate::SemanticScrollDirection::Down,
+                amount: crate::SemanticScrollAmount::Page,
+            },
+            SemanticEffectClass::Read,
+            SemanticWaitCondition::Immediate,
+            SemanticVerification::ScrollPositionChanged,
+            SemanticSettleBudget::try_new(250).unwrap(),
+        )
+        .unwrap();
+        let batch = SemanticActionBatch::bind(
+            SemanticActionBatchId::new(id).unwrap(),
+            &baseline,
+            &[baseline.frames()[0].frame().clone()],
+            vec![proposal],
+        )
+        .unwrap();
+        let action = batch.actions()[0].prepare(&baseline.frames()[0]).unwrap();
+        let attempt = crate::SemanticActionAttemptId::new(id).unwrap();
+        let tracker =
+            SemanticSettleTracker::begin(attempt, &action, SemanticSettleInstant::from_millis(100))
+                .unwrap();
+        let verified = verify_semantic_action(
+            &tracker,
+            &action,
+            SemanticEffectEvidence::scroll(
+                attempt,
+                SemanticSettleInstant::from_millis(101),
+                &current.frames()[0],
+                crate::SemanticScrollPosition::try_new(0, 0).unwrap(),
+                crate::SemanticScrollPosition::try_new(0, 720).unwrap(),
+                true,
+            ),
+        )
+        .unwrap();
+        finalize_semantic_action_result(
+            &action,
+            verified,
+            &baseline,
+            &acknowledge(&baseline),
+            post(current, 101),
+            if diff {
+                SemanticDiffBudget::ACTION
+            } else {
+                SemanticDiffBudget::try_new(1).unwrap()
+            },
+        )
+        .unwrap()
     }
 
     #[test]

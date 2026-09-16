@@ -1214,6 +1214,7 @@ fn manifest_guard(
                     crate::WorkBrowserDocumentPolicy::InitialQueryFinalization => 1,
                     crate::WorkBrowserDocumentPolicy::DocumentQueryFinalization => 2,
                     crate::WorkBrowserDocumentPolicy::PublicQueryFinalization => 3,
+                    crate::WorkBrowserDocumentPolicy::PublicSameDocumentQuery => 4,
                 }]);
                 for value in [
                     discovery.departure().as_url().as_str(),

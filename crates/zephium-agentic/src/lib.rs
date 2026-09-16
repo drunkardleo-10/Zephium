@@ -53,6 +53,7 @@ mod context_port;
 mod context_registry;
 mod work_browser_document;
 mod work_browser_resource;
+mod work_browser_session;
 pub use work_browser_document::WorkBrowserDocumentPolicy;
 pub use work_browser_resource::{
     WorkBrowserActionCompletion, WorkBrowserActionCompletionCallback,
@@ -77,6 +78,7 @@ pub use work_browser_resource::{
     WorkBrowserResourceJoin, WorkBrowserResourceNativeOutcome, WorkBrowserResourceOperation,
     WorkBrowserResourcePhase, WorkBrowserResourceRequest, WorkBrowserResources, WorkId,
 };
+pub use work_browser_session::{WeakWorkBrowserSession, WorkBrowserSession};
 #[cfg(feature = "probe-harness")]
 mod contract;
 #[cfg(feature = "probe-harness")]
@@ -423,15 +425,16 @@ pub use protocol::{
     PROBE_PROTOCOL_VERSION,
 };
 pub use semantic::{
-    SemanticCompleteness, SemanticContractError, SemanticEditableStructure, SemanticFillSupport,
-    SemanticFrameJoin, SemanticFrameTrust, SemanticHeadingLevel, SemanticInvocationId,
-    SemanticLandmarkKind, SemanticNode, SemanticOperationClass, SemanticOperations, SemanticOrigin,
-    SemanticRect, SemanticReference, SemanticReferenceError, SemanticReferenceId, SemanticRole,
-    SemanticSensitivity, SemanticSnapshot, SemanticSnapshotGeneration, SemanticState,
-    SemanticStates, SemanticText, SemanticTruncation, SemanticTrust, SemanticValuePreview,
-    SemanticValueSummary, SemanticValueText, MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_FRAMES,
-    MAX_SEMANTIC_NAME_BYTES, MAX_SEMANTIC_NODES, MAX_SEMANTIC_TEXT_BYTES,
-    MAX_SEMANTIC_TOTAL_TEXT_BYTES, MAX_SEMANTIC_VALUE_BYTES, MAX_SEMANTIC_VALUE_PREVIEW_BYTES,
+    SemanticActivation, SemanticCompleteness, SemanticContractError, SemanticEditableStructure,
+    SemanticFillSupport, SemanticFrameJoin, SemanticFrameTrust, SemanticHeadingLevel,
+    SemanticInvocationId, SemanticLandmarkKind, SemanticNode, SemanticOperationClass,
+    SemanticOperations, SemanticOrigin, SemanticRect, SemanticReference, SemanticReferenceError,
+    SemanticReferenceId, SemanticRole, SemanticSensitivity, SemanticSnapshot,
+    SemanticSnapshotGeneration, SemanticState, SemanticStates, SemanticText, SemanticTruncation,
+    SemanticTrust, SemanticValuePreview, SemanticValueSummary, SemanticValueText,
+    MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_FRAMES, MAX_SEMANTIC_NAME_BYTES, MAX_SEMANTIC_NODES,
+    MAX_SEMANTIC_TEXT_BYTES, MAX_SEMANTIC_TOTAL_TEXT_BYTES, MAX_SEMANTIC_VALUE_BYTES,
+    MAX_SEMANTIC_VALUE_PREVIEW_BYTES,
 };
 pub(crate) use semantic_action::SemanticActionRuntimeDescriptor;
 pub use semantic_action::{

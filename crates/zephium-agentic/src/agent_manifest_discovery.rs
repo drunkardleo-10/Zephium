@@ -89,6 +89,15 @@ pub struct AgentNavigationDiscovery {
 }
 
 impl AgentNavigationDiscovery {
+    /// Anonymous reading of one page, with no successor navigation authority.
+    pub fn try_new_public_page(
+        departure: crate::ContextNavigationTarget,
+    ) -> Result<Self, AgentManifestContractError> {
+        let mut scope = Self::try_new_public_web(departure, 1, 1)?;
+        scope.max_hops = 0;
+        Ok(scope)
+    }
+
     /// A separately approved anonymous, read-only public-web capability.
     /// Every successor must still be a non-sensitive link in the acknowledged
     /// document. Native admission must use an isolated website data store.
@@ -117,6 +126,16 @@ impl AgentNavigationDiscovery {
         scope.document_policy = crate::WorkBrowserDocumentPolicy::PublicQueryFinalization;
         Ok(scope)
     }
+    /// Enables safe same-document query updates for a single-page public task.
+    /// No additional load, path, origin, hop or authenticated scope is granted.
+    pub fn with_same_document_query_updates(mut self) -> Result<Self, AgentManifestContractError> {
+        if !self.is_public_web() || self.max_hops != 0 {
+            return Err(AgentManifestContractError::NavigationRoute);
+        }
+        self.document_policy = crate::WorkBrowserDocumentPolicy::PublicSameDocumentQuery;
+        Ok(self)
+    }
+
     /// This capability never permits authenticated state or effects.
     pub const fn is_public_web(&self) -> bool {
         matches!(self.profile, DiscoveryProfile::PublicWeb)
@@ -539,5 +558,37 @@ mod tests {
                 "{sensitive}"
             );
         }
+    }
+    #[test]
+    fn query_interaction_scope_is_opt_in_and_cannot_add_navigation() {
+        let page =
+            AgentNavigationDiscovery::try_new_public_page(target("https://example.com/catalog"))
+                .unwrap();
+        assert_eq!(
+            page.document_policy(),
+            crate::WorkBrowserDocumentPolicy::PublicQueryFinalization
+        );
+        let page = page.with_same_document_query_updates().unwrap();
+        assert_eq!(page.max_hops(), 0);
+        assert_eq!(
+            page.document_policy(),
+            crate::WorkBrowserDocumentPolicy::PublicSameDocumentQuery
+        );
+        assert!(AgentNavigationDiscovery::try_new_public_web(
+            target("https://example.com/catalog"),
+            2,
+            1
+        )
+        .unwrap()
+        .with_same_document_query_updates()
+        .is_err());
+        assert!(AgentNavigationDiscovery::try_new(
+            target("https://example.com/catalog"),
+            "/".into(),
+            2
+        )
+        .unwrap()
+        .with_same_document_query_updates()
+        .is_err());
     }
 }

@@ -1122,7 +1122,7 @@ const SEMANTIC_RUNTIME_HTML: &str = r###"<!doctype html>
   <script>for (let i = 0; i < 129; i++) document.getElementById('fill-support-child-limit').appendChild(document.createTextNode('x'));</script>
   </aside>
   <p id="bridge-status">Page bridge unresolved</p>
-  <button id="primary-semantic-action" type="button" aria-label="Primary semantic action" aria-expanded="false">Run</button>
+  <details><summary id="primary-semantic-action"><span>Primary semantic action</span></summary><p>Native disclosure content</p></details>
   <p id="primary-action-activation" aria-label="Primary action activation pending"></p>
   <p id="primary-action-settled" aria-label="Primary action settle pending"></p>
   <input id="semantic-fill-text" type="text" aria-label="Semantic fill text" value="fixture text">
@@ -1159,7 +1159,6 @@ const SEMANTIC_RUNTIME_HTML: &str = r###"<!doctype html>
     const stickyDuring = !!userActivation?.hasBeenActive;
     const popup = window.open('/semantic-popup-denied-v1.html', '_blank');
     const popupDenied = popup === null;
-    primaryAction.setAttribute('aria-expanded', 'true');
     primaryAction.setAttribute(
       'aria-label',
       event.isTrusted ? 'Primary semantic action applied trusted' : 'Primary semantic action applied untrusted'

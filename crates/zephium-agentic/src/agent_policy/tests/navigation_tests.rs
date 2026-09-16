@@ -48,8 +48,20 @@ fn navigation_fixture_with_document_policy(
     registry
         .acknowledge_observation(context.identity().id(), context)
         .unwrap();
-    let source = origin("source");
-    let observation = if discovery {
+    let public_page = document_policy == crate::WorkBrowserDocumentPolicy::PublicQueryFinalization;
+    let source = if public_page {
+        SemanticOrigin::parse("https://example.com").unwrap()
+    } else {
+        origin("source")
+    };
+    let observation = if public_page {
+        observation(
+            context,
+            source.clone(),
+            1,
+            vec![json!({"k":1,"r":"link","n":"Next","u":"https://example.com/next"})],
+        )
+    } else if discovery {
         discovery_observation(context, 1)
     } else {
         actionable_observation(context, source.clone(), 1)
@@ -62,7 +74,12 @@ fn navigation_fixture_with_document_policy(
     let budget = run_budget(operations, tokens, 10_000);
     let effects = effects(&[SemanticEffectClass::Read]);
     let route = crate::AgentNavigationRoute::try_new(
-        ContextNavigationTarget::parse("https://source.example.test/start").unwrap(),
+        ContextNavigationTarget::parse(if public_page {
+            "https://example.com/start"
+        } else {
+            "https://source.example.test/start"
+        })
+        .unwrap(),
         destinations,
     )
     .unwrap();
@@ -77,12 +94,16 @@ fn navigation_fixture_with_document_policy(
     let authority = if discovery {
         authority
             .with_navigation_discovery(
-                crate::AgentNavigationDiscovery::try_new_with_document_policy(
-                    route.departure().clone(),
-                    "/".into(),
-                    2,
-                    document_policy,
-                )
+                if document_policy == crate::WorkBrowserDocumentPolicy::PublicQueryFinalization {
+                    crate::AgentNavigationDiscovery::try_new_public_page(route.departure().clone())
+                } else {
+                    crate::AgentNavigationDiscovery::try_new_with_document_policy(
+                        route.departure().clone(),
+                        "/".into(),
+                        2,
+                        document_policy,
+                    )
+                }
                 .unwrap(),
             )
             .unwrap()
@@ -250,6 +271,31 @@ fn production_navigation_fixture() -> (PolicyFixture, ContextRegistry, SemanticO
         &observation,
     );
     (PolicyFixture { policy, lease }, registry, observation)
+}
+
+#[test]
+fn public_page_read_has_no_navigation_authority_even_for_observed_links() {
+    let destination = ContextNavigationTarget::parse("https://example.com/next").unwrap();
+    let (mut fixture, registry, observed) = navigation_fixture_with_document_policy(
+        5,
+        100_000,
+        vec![destination.clone()],
+        true,
+        crate::WorkBrowserDocumentPolicy::PublicQueryFinalization,
+    );
+    let request = route_request(
+        &fixture,
+        &registry,
+        &observed,
+        account(observed.request().context(), NOW - 1),
+    );
+    assert_eq!(
+        fixture
+            .policy
+            .authorize_navigation(request, &observed, &baseline(&observed), &destination)
+            .err(),
+        Some(AgentPolicyError::Navigation)
+    );
 }
 
 #[test]

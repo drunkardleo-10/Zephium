@@ -1094,3 +1094,69 @@ fn exact_nonadmission_survives_quarantine_without_retaining_a_fictitious_native_
     registry.seal();
     assert!(registry.is_quiescent());
 }
+
+#[test]
+fn anonymous_session_attachment_requires_exact_owner_and_isolated_construction() {
+    use std::time::{Duration, Instant};
+    let profile = ProfileId::from(2_u128);
+    let work = WorkId::from(1_u128);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    for (isolated, session, expected) in [
+        (
+            true,
+            crate::WorkBrowserSession::new(profile, work, deadline),
+            true,
+        ),
+        (
+            false,
+            crate::WorkBrowserSession::new(profile, work, deadline),
+            false,
+        ),
+        (
+            true,
+            crate::WorkBrowserSession::new(3_u128.into(), work, deadline),
+            false,
+        ),
+        (
+            true,
+            crate::WorkBrowserSession::new(profile, WorkId::from(3_u128), deadline),
+            false,
+        ),
+    ] {
+        let mut rows = registry();
+        let request = rows
+            .construct_document_with_isolation(
+                WorkBrowserResourceId::generate(),
+                ContextId::generate(),
+                ContextProfileStorageClass::Durable,
+                ContextNavigationTarget::parse("https://example.test/").unwrap(),
+                crate::WorkBrowserDocumentPolicy::Exact,
+                isolated,
+                tick(1),
+            )
+            .unwrap();
+        let result = request.with_anonymous_session(session.clone());
+        assert_eq!(result.is_ok(), expected);
+        if let Ok(request) = result {
+            assert_eq!(request.anonymous_session().unwrap().id(), session.id());
+            let request = request.with_anonymous_session(session.clone()).unwrap_err();
+            session.close();
+            assert!(!request.anonymous_session().unwrap().is_current());
+        }
+    }
+    let mut rows = registry();
+    let session = crate::WorkBrowserSession::new(profile, work, deadline);
+    session.close();
+    let request = rows
+        .construct_document_with_isolation(
+            WorkBrowserResourceId::generate(),
+            ContextId::generate(),
+            ContextProfileStorageClass::Durable,
+            ContextNavigationTarget::parse("https://example.test/").unwrap(),
+            crate::WorkBrowserDocumentPolicy::Exact,
+            true,
+            tick(1),
+        )
+        .unwrap();
+    assert!(request.with_anonymous_session(session).is_err());
+}

@@ -467,6 +467,17 @@ impl ArchivedSource {
     pub fn content(&self) -> &ArchivedSourceContent {
         &self.content
     }
+    /// An observed link target, never a URL inferred from prose or an image.
+    pub fn link_destination(&self) -> Option<&str> {
+        match &self.content {
+            ArchivedSourceContent::Preview {
+                value,
+                truncated: false,
+                ..
+            } if self.field == 6 && self.role == "link" => Some(value),
+            _ => None,
+        }
+    }
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

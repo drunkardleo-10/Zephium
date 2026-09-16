@@ -32,7 +32,7 @@ pub const MAX_SEMANTIC_RUNTIME_REQUEST_BYTES: usize = 2 * 1024;
 // page-derived strings. A core-legal Spinbutton Fill with the maximum safe
 // numeric fields reaches this bound exactly; platform execution may still
 // refuse an unsupported concrete number control.
-const SEMANTIC_ACTION_RUNTIME_FIXED_WIRE_UPPER_BOUND_BYTES: usize = 293;
+const SEMANTIC_ACTION_RUNTIME_FIXED_WIRE_UPPER_BOUND_BYTES: usize = 299;
 // Every legal character either remains one UTF-8 byte or JSON-expands to at
 // most two bytes (`\"`, `\\`, `\t`, or `\n`). Control and bidi characters
 // with longer JSON escapes are rejected before encoding.
@@ -55,11 +55,11 @@ pub const MAX_SEMANTIC_RUNTIME_VISITED_NODES: u32 = 32 * 1024;
 pub const MAX_SEMANTIC_RUNTIME_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 /// Maximum immutable production runtime source bytes installed per document.
 ///
-/// The fixed 115 KiB ceiling covers the digest-pinned semantic runtime including
+/// The fixed 136 KiB ceiling covers the digest-pinned semantic runtime including
 /// production Fill, native-select, public links and bounded source-coalesced
 /// windows, keyword discovery, independent page-dialog samples and bounded fill diagnostics with an
 /// explicit installation bound per platform.
-pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 115 * 1024;
+pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 136 * 1024;
 /// Sole fixed isolated-world global installed by the production runtime.
 pub const SEMANTIC_RUNTIME_GLOBAL_NAME: &str = "__zephiumSemanticRuntimeV1";
 /// Sole fixed native message handler visible in the production isolated world.
@@ -87,8 +87,8 @@ pub const MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES: usize =
 
 const SEMANTIC_RUNTIME_SOURCE: &str = include_str!("../assets/semantic-runtime-v1.js");
 const SEMANTIC_RUNTIME_SOURCE_SHA256: [u8; 32] = [
-    0x15, 0x97, 0x75, 0x38, 0x98, 0xb5, 0x6d, 0x3a, 0x9e, 0xf1, 0xa5, 0x09, 0x57, 0x04, 0x1e, 0x64,
-    0x7d, 0x24, 0x42, 0xc7, 0x4c, 0xef, 0xe7, 0x9e, 0x53, 0x15, 0xb5, 0x59, 0x05, 0x53, 0xac, 0x97,
+    0x0a, 0x40, 0x8a, 0x30, 0x03, 0x34, 0x72, 0xc1, 0xb8, 0xe5, 0x58, 0x2f, 0xa2, 0xb1, 0xa8, 0xc6,
+    0x60, 0x5e, 0x48, 0x8a, 0xfd, 0x62, 0x60, 0x63, 0x6b, 0xaf, 0xcd, 0xd4, 0x86, 0x73, 0x1f, 0xea,
 ];
 
 /// Immutable production program passed only to a trusted isolated-world adapter.
@@ -316,10 +316,11 @@ impl SemanticActionRuntimeInvocation {
         let value = std::str::from_utf8(bytes)
             .map_err(|_| SemanticActionRuntimeResultError::InvalidEncoding)?;
         if let Some(code) = value.strip_prefix("E2:") {
-            return Err(SemanticActionRuntimeResultError::Runtime(
-                SemanticActionRuntimeFault::parse(code)
-                    .ok_or(SemanticActionRuntimeResultError::InvalidFault)?,
-            ));
+            let fault = SemanticActionRuntimeFault::parse(code)
+                .ok_or(SemanticActionRuntimeResultError::InvalidFault)?;
+            #[cfg(feature = "probe-harness")]
+            eprintln!("native-action-runtime: fault={fault:?}; code={code}; content=redacted");
+            return Err(SemanticActionRuntimeResultError::Runtime(fault));
         }
         let wire: SemanticActionRuntimeEvidenceWire = serde_json::from_str(value)
             .map_err(|_| SemanticActionRuntimeResultError::InvalidEncoding)?;
@@ -666,6 +667,12 @@ pub fn encode_semantic_action_runtime_invocation(
         (_, None) => None,
         (_, Some(_)) => return Err(SemanticActionRuntimeInvocationError::Recipe),
     };
+    #[cfg(feature = "probe-harness")]
+    eprintln!(
+        "native-action-runtime: dispatch={:?}; scroll={:?}; content=redacted",
+        request.kind(),
+        request.scroll_recipe()
+    );
     let wire = SemanticActionRuntimeInvocationWire {
         version: SEMANTIC_RUNTIME_PROTOCOL_VERSION,
         operation: "action_execute",
@@ -686,6 +693,25 @@ pub fn encode_semantic_action_runtime_invocation(
         target_descriptor: request.target_runtime_descriptor(),
         option_descriptor,
         page_dialog_opened: request.page_dialog_opened(),
+        scroll: request
+            .scroll_recipe()
+            .map(|(direction, amount)| {
+                use crate::{SemanticScrollAmount as A, SemanticScrollDirection as D};
+                let direction = match direction {
+                    D::Up => "up",
+                    D::Down => "down",
+                    D::Left => "left",
+                    D::Right => "right",
+                };
+                let amount = match amount {
+                    A::Line => "line",
+                    A::HalfPage => "half_page",
+                    A::Page => "page",
+                    A::IntoView => "into_view",
+                };
+                Ok([direction, amount])
+            })
+            .transpose()?,
     };
     let encoded =
         serde_json::to_string(&wire).map_err(|_| SemanticActionRuntimeInvocationError::Encoding)?;
@@ -778,6 +804,10 @@ pub enum SemanticActionRuntimeFault {
     StaleReference,
     /// Target role or supported operation changed.
     TargetChanged,
+    /// Captured semantic role, name, state or operation no longer matches.
+    TargetDescriptorChanged,
+    /// Target layout moved beyond the admitted geometry tolerance.
+    TargetGeometryChanged,
     /// Target became disabled or read-only for this operation.
     TargetDisabled,
     /// Target is or became a credential field.
@@ -845,6 +875,12 @@ impl SemanticActionRuntimeFault {
             "busy" => Some(Self::Busy),
             "stale_reference" => Some(Self::StaleReference),
             "target_changed" => Some(Self::TargetChanged),
+            "target_descriptor_changed"
+            | "target_descriptor_incomplete"
+            | "target_name_changed"
+            | "target_state_changed"
+            | "target_operations_changed" => Some(Self::TargetDescriptorChanged),
+            "target_geometry_changed" => Some(Self::TargetGeometryChanged),
             "target_disabled" => Some(Self::TargetDisabled),
             "credential_boundary" => Some(Self::CredentialBoundary),
             "target_occluded" => Some(Self::TargetOccluded),
@@ -1211,6 +1247,8 @@ struct RuntimeBudgetWire {
 
 #[derive(Serialize)]
 struct SemanticActionRuntimeInvocationWire<'a> {
+    #[serde(rename = "sc", skip_serializing_if = "Option::is_none")]
+    scroll: Option<[&'static str; 2]>,
     #[serde(rename = "u", skip_serializing_if = "std::ops::Not::not")]
     page_dialog_opened: bool,
     #[serde(rename = "v")]
@@ -1570,7 +1608,6 @@ mod tests {
             "WebSocket",
             "EventSource",
             "setInterval",
-            "requestAnimationFrame",
             ".dispatchEvent(",
             ".click(",
             ".focus(",
@@ -1597,13 +1634,8 @@ mod tests {
                 "forbidden runtime surface: {forbidden}"
             );
         }
-        // Fill has no page-originated transport or idle observer/timer.
-        for forbidden in [
-            "MutationObserver",
-            "CustomEvent",
-            "setTimeout",
-            "PAGE_RELAY",
-        ] {
+        // Fill has no page-originated transport or idle observer.
+        for forbidden in ["MutationObserver", "CustomEvent", "PAGE_RELAY"] {
             assert!(
                 !source.contains(forbidden),
                 "forbidden fill transport: {forbidden}"
@@ -2020,9 +2052,10 @@ mod tests {
             target_descriptor: &descriptor,
             option_descriptor: None,
             page_dialog_opened: false,
+            scroll: None,
         };
         let encoded = serde_json::to_string(&wire).expect("maximum legal fill wire");
-        assert_eq!(encoded.len(), 17_701);
+        assert_eq!(encoded.len(), 17_707);
         assert_eq!(encoded.len(), MAX_SEMANTIC_ACTION_RUNTIME_REQUEST_BYTES);
 
         for value in [
@@ -2067,6 +2100,7 @@ mod tests {
                         target_descriptor: &descriptor,
                         option_descriptor: None,
                         page_dialog_opened: false,
+                        scroll: None,
                     };
                     let encoded = serde_json::to_string(&wire).expect("legal fill variant");
                     assert!(encoded.len() <= MAX_SEMANTIC_ACTION_RUNTIME_REQUEST_BYTES);

@@ -772,6 +772,10 @@ pub fn encode_semantic_observation(
                 output.push(" destination=")?;
                 write_quoted(&mut output, target.as_url().as_str())?;
             }
+            if node.image_source().is_some() {
+                output.push(" image_source_available=true")?;
+            }
+            write_disclosure(&mut output, node)?;
             write_states(&mut output, node.states())?;
             write_operations(&mut output, node.operations())?;
             if let Some(name) = node.name() {
@@ -977,6 +981,20 @@ pub(crate) fn write_states(
             output.push(label)?;
             separator = ",";
         }
+    }
+    Ok(())
+}
+
+pub(crate) fn write_disclosure(
+    output: &mut BoundedModelBuffer,
+    node: &crate::SemanticNode,
+) -> Result<(), SemanticModelEncodingError> {
+    if node.activation() == Some(crate::SemanticActivation::Disclosure) {
+        output.push(if node.states().contains(SemanticState::Expanded) {
+            " disclosure=expanded"
+        } else {
+            " disclosure=collapsed"
+        })?;
     }
     Ok(())
 }
@@ -1303,6 +1321,7 @@ mod tests {
                     "p": 0,
                     "r": "button",
                     "n": "N @a99 p=- r=button",
+                    "ak": 6,
                     "s": 64,
                     "o": 1,
                     "b": {"x": 1, "y": 2, "w": 30, "h": 40}
@@ -1486,6 +1505,7 @@ mod tests {
             .content
             .contains("r=password q=secret src=page ops=fill name=\"Password\" value=[redacted]"));
         assert!(first.content.contains("name=\"N @a99 p=- r=button\""));
+        assert!(first.content.contains("disclosure=collapsed"));
         assert!(!first.content.contains(" rect="));
         assert_eq!(first.content.lines().count(), 6);
         assert_eq!(first.content.matches("\nN ").count(), 4);

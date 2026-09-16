@@ -1263,6 +1263,10 @@ fn hash_node(hasher: &mut FingerprintHasher, node: &SemanticNode) {
     }
     hasher.byte(node.states().bits());
     hasher.byte(node.operations().bits());
+    if let Some(activation) = node.activation() {
+        hasher.byte(0xf9);
+        hasher.byte(activation as u8);
+    }
     hasher.byte(match node.sensitivity() {
         SemanticSensitivity::Public => 1,
         SemanticSensitivity::Sensitive => 2,

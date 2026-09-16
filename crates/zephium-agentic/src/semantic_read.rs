@@ -1893,6 +1893,68 @@ mod tests {
     }
 
     #[test]
+    fn extraction_pressure_keeps_late_facts_ahead_of_gallery_controls() {
+        let mut history_nodes = vec![json!({"k":1,"r":"document","o":16})];
+        for key in 2..=65 {
+            history_nodes
+                .push(json!({"k":key,"p":0,"r":"paragraph","t":format!("Earlier detail {key}")}));
+        }
+        let history = retained_observation(1, json!(history_nodes));
+        let mut current_nodes = vec![json!({"k":1,"r":"document","o":16})];
+        for key in 2..=81 {
+            current_nodes.push(
+                json!({"k":key,"p":0,"r":"button","n":format!("Gallery thumbnail {key}"),"o":1}),
+            );
+        }
+        current_nodes.push(json!({"k":82,"p":0,"r":"heading","l":1,"n":"Example product"}));
+        current_nodes.push(json!({"k":83,"p":0,"r":"paragraph","t":"$349.99"}));
+        current_nodes.push(json!({"k":84,"p":0,"r":"paragraph","t":"Width 89 cm"}));
+        let current = retained_observation(2, json!(current_nodes));
+        let history_ack = acknowledgement(&history);
+        let current_ack = acknowledgement(&current);
+        let read = |observation, ack| {
+            read_semantic_observation(
+                observation,
+                SemanticReadAuthority::Acknowledged(ack),
+                SemanticCaptureInstant::from_millis(100),
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::STANDARD,
+            )
+            .unwrap()
+        };
+        let mut prior = read(&history, &history_ack);
+        prior.focused = true;
+        let mut evidence = SemanticRetainedReadEvidence::default();
+        evidence.retain(&prior, &history_ack).unwrap();
+        let merged = evidence
+            .merge_for_extraction(read(&current, &current_ack))
+            .unwrap();
+        for fact in ["Example product", "$349.99", "Width 89 cm"] {
+            let fragment = merged
+                .fragments()
+                .iter()
+                .find(|fragment| {
+                    fragment
+                        .content()
+                        .text()
+                        .is_some_and(|text| text.as_str() == fact)
+                })
+                .unwrap();
+            assert_eq!(fragment.provenance().observation(), current.request().id());
+        }
+        assert_eq!(merged.fragments().len(), 128);
+        assert!(merged.omissions().contains(SemanticReadOmission::ItemLimit));
+        for (index, fragment) in merged.fragments().iter().enumerate() {
+            assert_eq!(usize::from(fragment.id().get()), index + 1);
+        }
+        crate::encode_semantic_read(
+            &merged,
+            crate::SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn broad_capture_preserves_focused_evidence_with_original_provenance() {
         let detail = retained_observation(
             1,

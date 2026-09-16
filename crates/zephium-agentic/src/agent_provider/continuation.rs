@@ -31,6 +31,10 @@ use super::{
     AgentProviderCallIdentity, AgentProviderCompletion, AgentProviderKind, AgentProviderStopReason,
     AgentProviderToolCallCorrelation,
 };
+#[path = "action_progress.rs"]
+mod action_progress;
+pub(super) use action_progress::AgentActionProgress;
+pub(super) use action_refusal::effect_label;
 #[path = "action_refusal.rs"]
 mod action_refusal;
 #[path = "navigation_refusal.rs"]
@@ -74,6 +78,7 @@ pub struct AgentProviderActionAuthority {
     generation: SemanticObservationGeneration,
     guard: [u8; 32],
     entries: Vec<AgentProviderActionTarget>,
+    required_effect: Option<crate::SemanticEffectClass>,
 }
 
 impl AgentProviderActionAuthority {
@@ -112,6 +117,7 @@ impl AgentProviderActionAuthority {
             retained.push(AgentProviderActionTarget {
                 reference: *reference,
                 operations: *operations,
+                reveal_only: node.role() == crate::SemanticRole::Button,
             });
         }
         retained.sort_unstable_by_key(|entry| entry.reference);
@@ -123,7 +129,14 @@ impl AgentProviderActionAuthority {
             )
             .digest(),
             entries: retained,
+            required_effect: None,
         })
+    }
+
+    /// Narrows model proposals; independent native effect assessment still applies.
+    pub fn with_required_effect(mut self, effect: crate::SemanticEffectClass) -> Self {
+        self.required_effect = Some(effect);
+        self
     }
 
     fn matches(&self, observation: &SemanticObservation) -> bool {
@@ -161,10 +174,12 @@ pub(super) struct AgentProviderActionTargets {
     entries: Vec<AgentProviderActionTarget>,
     exclusions: Vec<AgentProviderActionExclusion>,
     host_projected: bool,
+    required_effect: Option<crate::SemanticEffectClass>,
 }
 
 #[derive(Clone, Copy)]
 struct AgentProviderActionTarget {
+    reveal_only: bool,
     reference: SemanticReferenceId,
     operations: SemanticOperations,
 }
@@ -191,6 +206,7 @@ impl AgentProviderActionTargets {
                     entries.push(AgentProviderActionTarget {
                         reference: node.reference(),
                         operations: node.operations(),
+                        reveal_only: node.role() == crate::SemanticRole::Button,
                     });
                 }
             }
@@ -202,6 +218,7 @@ impl AgentProviderActionTargets {
             entries,
             exclusions: Vec::new(),
             host_projected: false,
+            required_effect: None,
         })
     }
 
@@ -216,6 +233,7 @@ impl AgentProviderActionTargets {
             entries: authority.entries.clone(),
             exclusions: Vec::new(),
             host_projected: true,
+            required_effect: authority.required_effect,
         })
     }
 
@@ -273,6 +291,7 @@ impl AgentProviderActionTargets {
             entries.push(AgentProviderActionTarget {
                 reference,
                 operations: entry.operations,
+                reveal_only: entry.reveal_only,
             });
         }
         for entry in diff.entries() {
@@ -283,6 +302,7 @@ impl AgentProviderActionTargets {
                 entries.push(AgentProviderActionTarget {
                     reference: node.reference(),
                     operations: node.operations(),
+                    reveal_only: node.role() == crate::SemanticRole::Button,
                 });
             }
         }
@@ -300,6 +320,7 @@ impl AgentProviderActionTargets {
             entries,
             exclusions: Vec::new(),
             host_projected: false,
+            required_effect: None,
         })
     }
 
@@ -317,6 +338,18 @@ impl AgentProviderActionTargets {
         })
     }
 
+    pub(super) fn scroll_references(
+        &self,
+        reveal: bool,
+    ) -> impl Iterator<Item = SemanticReferenceId> + '_ {
+        self.permitted_references(SemanticActionKind::Scroll)
+            .filter(move |reference| {
+                self.entries
+                    .iter()
+                    .any(|entry| entry.reference == *reference && entry.reveal_only == reveal)
+            })
+    }
+
     pub(super) fn permitted_operations(
         &self,
         reference: SemanticReferenceId,
@@ -325,6 +358,10 @@ impl AgentProviderActionTargets {
             .iter()
             .find(|entry| entry.reference == reference)
             .map_or(SemanticOperations::NONE, |entry| entry.operations)
+    }
+
+    pub(super) const fn required_effect(&self) -> Option<crate::SemanticEffectClass> {
+        self.required_effect
     }
 
     pub(super) const fn is_host_projected(&self) -> bool {
@@ -371,6 +408,11 @@ impl AgentProviderActionTargets {
     }
 
     #[cfg(test)]
+    pub(super) fn set_required_effect_for_test(&mut self, effect: crate::SemanticEffectClass) {
+        self.required_effect = Some(effect);
+    }
+
+    #[cfg(test)]
     pub(super) fn exclusion_count(&self) -> usize {
         self.exclusions.len()
     }
@@ -390,10 +432,12 @@ impl AgentProviderActionTargets {
                 .map(|(reference, operations)| AgentProviderActionTarget {
                     reference: SemanticReferenceId::new(*reference).expect("reference"),
                     operations: SemanticOperations::try_new(operations).expect("operations"),
+                    reveal_only: operations.contains(&crate::SemanticOperationClass::Click),
                 })
                 .collect(),
             exclusions: Vec::new(),
             host_projected: false,
+            required_effect: None,
         }
     }
 
@@ -433,6 +477,7 @@ pub(super) struct AgentProviderTranscript {
     initial_observation: String,
     navigation_checkpoint: Option<super::request::AgentProviderNavigationContext>,
     inspection_checkpoint: Option<super::request::AgentProviderInspectionContext>,
+    action_progress: Option<AgentActionProgress>,
     action_targets: Option<AgentProviderActionTargets>,
     turns: Vec<AgentProviderTranscriptTurn>,
     retained_bytes: usize,
@@ -466,6 +511,22 @@ impl AgentProviderTranscript {
         navigation_checkpoint: Option<super::request::AgentProviderNavigationContext>,
         inspection_checkpoint: Option<super::request::AgentProviderInspectionContext>,
     ) -> Option<Self> {
+        Self::try_initial_with_progress(
+            objective,
+            initial_observation,
+            navigation_checkpoint,
+            inspection_checkpoint,
+            None,
+        )
+    }
+
+    pub(super) fn try_initial_with_progress(
+        objective: Arc<str>,
+        initial_observation: String,
+        navigation_checkpoint: Option<super::request::AgentProviderNavigationContext>,
+        inspection_checkpoint: Option<super::request::AgentProviderInspectionContext>,
+        action_progress: Option<AgentActionProgress>,
+    ) -> Option<Self> {
         if objective.len() > super::MAX_AGENT_PROVIDER_OBJECTIVE_BYTES
             || initial_observation.len() > MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES
             || navigation_checkpoint.as_ref().is_some_and(|checkpoint| {
@@ -487,10 +548,13 @@ impl AgentProviderTranscript {
                     .as_ref()
                     .map_or(0, |checkpoint| checkpoint.text.len()),
             )?
+            .checked_add(inspection_checkpoint.as_ref().map_or(0, |checkpoint| {
+                checkpoint.text.len() + checkpoint.progress.recall().map_or(0, str::len)
+            }))?
             .checked_add(
-                inspection_checkpoint
+                action_progress
                     .as_ref()
-                    .map_or(0, |checkpoint| checkpoint.text.len()),
+                    .map_or(0, |progress| progress.text().len()),
             )?;
         if retained_bytes > MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES {
             return None;
@@ -500,6 +564,7 @@ impl AgentProviderTranscript {
             initial_observation,
             navigation_checkpoint,
             inspection_checkpoint,
+            action_progress,
             action_targets: None,
             turns: Vec::new(),
             retained_bytes,
@@ -567,6 +632,10 @@ impl AgentProviderTranscript {
         &self.initial_observation
     }
 
+    pub(super) fn action_progress(&self) -> Option<&str> {
+        self.action_progress.as_ref().map(AgentActionProgress::text)
+    }
+
     pub(super) fn navigation_checkpoint(&self) -> Option<&str> {
         self.navigation_checkpoint
             .as_ref()
@@ -577,6 +646,12 @@ impl AgentProviderTranscript {
         self.inspection_checkpoint
             .as_ref()
             .map(|checkpoint| checkpoint.text.as_str())
+    }
+
+    pub(super) fn inspection_recall(&self) -> Option<&str> {
+        self.inspection_checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.progress.recall())
     }
 
     pub(super) fn validate_navigation_checkpoint(
@@ -622,12 +697,20 @@ impl AgentProviderBoundTranscript {
         self.prior.initial_observation()
     }
 
+    pub(super) fn action_progress(&self) -> Option<&str> {
+        self.prior.action_progress()
+    }
+
     pub(super) fn navigation_checkpoint(&self) -> Option<&str> {
         self.prior.navigation_checkpoint()
     }
 
     pub(super) fn inspection_checkpoint(&self) -> Option<&str> {
         self.prior.inspection_checkpoint()
+    }
+
+    pub(super) fn inspection_recall(&self) -> Option<&str> {
+        self.prior.inspection_recall()
     }
 
     pub(super) fn action_targets(&self) -> Option<&AgentProviderActionTargets> {
@@ -1032,6 +1115,40 @@ impl AgentProviderContinuation {
         self.transcript.retained_bytes()
     }
 
+    /// Carries only content-free independently verified outcomes across observation refreshes.
+    pub fn with_verified_action_progress(
+        mut self,
+        result: &crate::SemanticActionResult,
+    ) -> Result<Self, AgentProviderContinuationError> {
+        if self.correlation.kind() != AgentBrowserToolKind::Act || result.baseline != self.baseline
+        {
+            return Err(AgentProviderContinuationError::Baseline);
+        }
+        let previous_bytes = self
+            .transcript
+            .action_progress
+            .as_ref()
+            .map_or(0, |p| p.text().len());
+        let progress = AgentActionProgress::record(self.transcript.action_progress.take(), result)?;
+        let retired_inspection_bytes = self
+            .transcript
+            .inspection_checkpoint
+            .take()
+            .map_or(0, |checkpoint| {
+                checkpoint.text.len() + checkpoint.progress.recall().map_or(0, str::len)
+            });
+        self.transcript.retained_bytes = self
+            .transcript
+            .retained_bytes
+            .checked_sub(previous_bytes)
+            .and_then(|bytes| bytes.checked_sub(retired_inspection_bytes))
+            .and_then(|bytes| bytes.checked_add(progress.text().len()))
+            .filter(|bytes| *bytes <= MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES)
+            .ok_or(AgentProviderContinuationError::TranscriptLimit)?;
+        self.transcript.action_progress = Some(progress);
+        Ok(self)
+    }
+
     /// Bind an independently verified action whose next state cannot be safely
     /// expressed as a delta. This consumes the original tool call without
     /// recapture, replay, or acknowledgement of the replacement observation.
@@ -1095,21 +1212,23 @@ impl AgentProviderContinuation {
         if !payload.matches_observation(current) {
             return Err(AgentProviderContinuationError::Payload);
         }
+        let self_with_progress = self.with_verified_action_progress(result)?;
         let output = serde_json::json!({
             "status": "verified",
             "update": "replace_observation",
-            "guidance": "The prior action was independently verified. All prior semantic refs are retired. Use only the refs in this replacement observation for the next decision. Observation truncation does not mean omitted content is absent.",
+            "guidance": "The prior action was independently verified. This is the fresh post-action viewport: inspect it directly; another snapshot is only needed for missing details. All prior semantic refs are retired. Use only current refs. Truncation does not mean omitted content is absent.",
             "observation": payload.as_str(),
         }).to_string();
-        let (prior, _, _, correlation, transcript) = self.into_parts();
+        let (prior, _, _, correlation, transcript) = self_with_progress.into_parts();
         // Effects invalidate inspection anchors and old page replay. Keep the
         // objective and exact navigation policy binding; original run budgets
         // still bound all subsequent captures, actions, and model calls.
-        let mut transcript = AgentProviderTranscript::try_initial_with_checkpoints(
+        let mut transcript = AgentProviderTranscript::try_initial_with_progress(
             transcript.objective,
             "Prior page observations and their refs are retired. Current browser state follows in the verified action tool result.".into(),
             transcript.navigation_checkpoint,
             None,
+            transcript.action_progress,
         ).ok_or(AgentProviderContinuationError::TranscriptLimit)?;
         transcript.set_action_targets(
             action_authority
@@ -1187,11 +1306,12 @@ impl AgentProviderContinuation {
         })
         .to_string();
         let (prior, _, _, correlation, transcript) = self.into_parts();
-        let mut transcript = AgentProviderTranscript::try_initial_with_checkpoints(
+        let mut transcript = AgentProviderTranscript::try_initial_with_progress(
             transcript.objective,
             "Prior page observations and their refs are retired. Current browser state follows in the standalone wait tool result.".into(),
             transcript.navigation_checkpoint,
             None,
+            transcript.action_progress,
         )
         .ok_or(AgentProviderContinuationError::TranscriptLimit)?;
         transcript.set_action_targets(
@@ -1285,6 +1405,7 @@ impl AgentProviderContinuation {
                     entries: authority.entries.clone(),
                     exclusions: Vec::new(),
                     host_projected: true,
+                    required_effect: authority.required_effect,
                 })
             }
             None => self
@@ -1587,7 +1708,7 @@ impl AgentProviderContinuation {
             semantic_stats,
             delivery,
             schema: schema.id(),
-            output_schema: super::request::bound_extraction_output_schema(schema),
+            output_schema: super::request::bound_extraction_output_schema(schema, Some(read)),
             subtree_target,
             observation: read.observation(),
             observation_generation: read.observation_generation(),
@@ -2549,7 +2670,7 @@ mod tests {
         .expect("extract terminal join")
     }
 
-    fn call(value: u64) -> AgentProviderCallIdentity {
+    pub(super) fn call(value: u64) -> AgentProviderCallIdentity {
         AgentProviderCallIdentity {
             manifest: crate::AgentRunManifestId::from_raw(21),
             manifest_guard: [0; 32],
@@ -2559,7 +2680,7 @@ mod tests {
         }
     }
 
-    fn config(provider: AgentProviderKind) -> AgentProviderCallConfig {
+    pub(super) fn config(provider: AgentProviderKind) -> AgentProviderCallConfig {
         let model = match provider {
             AgentProviderKind::OpenAiResponses => "gpt-test-v1",
             AgentProviderKind::AnthropicMessages => "claude-test-v1",
@@ -2626,7 +2747,7 @@ mod tests {
         .expect("bounded transcript")
     }
 
-    fn model_request(context: crate::ContextJoin, value: u64) -> AgentModelCallRequest {
+    pub(super) fn model_request(context: crate::ContextJoin, value: u64) -> AgentModelCallRequest {
         AgentModelCallRequest::new(
             crate::AgentModelCallId::new(value).expect("model call"),
             crate::AgentPlanLeaseId::from_raw(22),
@@ -2700,6 +2821,16 @@ mod tests {
             .contains("private initial observation"));
         assert_eq!(bound.turn_count(), 1);
         assert!(bound.inspection_checkpoint().is_none());
+        let progress = bound
+            .action_progress()
+            .expect("verified history survives replacement");
+        assert!(progress.contains("TargetState"));
+        assert!(!progress.contains("Private") && !progress.contains("@a"));
+        let encoded =
+            super::super::request::encode_openai_continuation_body(&config, &bound).unwrap();
+        assert!(std::str::from_utf8(&encoded)
+            .unwrap()
+            .contains("ZEPHIUM_HOST_ACTION_PROGRESS_V1"));
         let targets = bound.action_targets().expect("fresh action targets");
         assert!(targets.matches(current));
         assert_eq!(targets.exclusion_count(), 0);
@@ -2960,13 +3091,26 @@ mod tests {
         target: &str,
         targets: AgentProviderActionTargets,
     ) -> super::super::AgentProviderSettledToolTurn {
+        action_turn_with_targets(
+            observation,
+            config,
+            targets,
+            json!({"actions":[{
+                "kind":"fill", "target":target, "value":"new value", "effect":"local_write",
+                "wait":{"kind":"immediate"}, "verification":{"kind":"target_value_matches_input"},
+                "settle_millis":2000
+            }]}),
+        )
+    }
+
+    fn action_turn_with_targets(
+        observation: &SemanticObservation,
+        config: AgentProviderCallConfig,
+        targets: AgentProviderActionTargets,
+        arguments: serde_json::Value,
+    ) -> super::super::AgentProviderSettledToolTurn {
         let prior = call(1);
-        let arguments = json!({"actions":[{
-            "kind":"fill", "target":target, "value":"new value", "effect":"local_write",
-            "wait":{"kind":"immediate"}, "verification":{"kind":"target_value_matches_input"},
-            "settle_millis":2000
-        }]})
-        .to_string();
+        let arguments = arguments.to_string();
         let tool = super::super::AgentBrowserToolCall::decode_openai(
             prior,
             "fc_action_private_1".into(),
@@ -2989,6 +3133,167 @@ mod tests {
         .join_terminal_tool(completion(prior, arguments.len() as u32), correlation)
         .unwrap();
         super::super::AgentProviderSettledToolTurn::for_test(proposal, continuation)
+    }
+
+    #[test]
+    fn reading_dialog_effect_mismatch_preserves_target_for_corrected_proposal() {
+        use crate::{SemanticEffectClass, SemanticOperationClass, SemanticOperations};
+        let observed = observation_with_nodes(
+            context(),
+            1,
+            1,
+            1,
+            json!([
+                {"k":1,"r":"dialog","n":"Privacy preferences"},
+                {"k":2,"p":0,"r":"button","n":"Reject All","o":1}
+            ]),
+        );
+        let authority = AgentProviderActionAuthority::try_new(
+            &observed,
+            &[(
+                SemanticReferenceId::new(2).unwrap(),
+                SemanticOperations::try_new(&[SemanticOperationClass::Click]).unwrap(),
+            )],
+        )
+        .unwrap()
+        .with_required_effect(SemanticEffectClass::Read);
+        let config = config(AgentProviderKind::OpenAiResponses);
+        let frames = [observed.frames()[0].frame().clone()];
+        let proposal = |effect| {
+            json!({"actions":[{
+                "kind":"click","target":"@a2","effect":effect,
+                "settle_millis":2000,"wait":{"kind":"immediate"},
+                "verification":{"kind":"page_dialog_closed"}
+            }]})
+        };
+        let targets =
+            AgentProviderActionTargets::try_from_authority(&observed, &authority).unwrap();
+        let resolution =
+            action_turn_with_targets(&observed, config.clone(), targets, proposal("local_write"))
+                .resolve_action(
+                    crate::SemanticActionBatchId::new(1).unwrap(),
+                    &observed,
+                    &frames,
+                    &config,
+                )
+                .unwrap();
+        let AgentProviderActionResolution::Refused(refusal) = resolution else {
+            panic!("incorrect effect bound")
+        };
+        assert_eq!(
+            refusal.reason(),
+            SemanticActionBindingError::TaskEffectMismatch(SemanticEffectClass::Read)
+        );
+        let (_, mut bound) = refusal
+            .bind(&observed, &config, "current observation".into())
+            .unwrap();
+        let result: serde_json::Value = serde_json::from_str(bound.latest().tool_result()).unwrap();
+        assert_eq!(result["executed"], false);
+        assert_eq!(result["required_effect"], "read");
+        assert_eq!(result["code"], "task_effect_mismatch");
+        let targets = bound.prior.take_action_targets().unwrap();
+        assert_eq!(targets.exclusion_count(), 0);
+        assert_eq!(targets.required_effect(), Some(SemanticEffectClass::Read));
+        assert_eq!(
+            targets
+                .permitted_references(crate::SemanticActionKind::Click)
+                .count(),
+            1
+        );
+        let corrected =
+            action_turn_with_targets(&observed, config.clone(), targets, proposal("read"))
+                .resolve_action(
+                    crate::SemanticActionBatchId::new(2).unwrap(),
+                    &observed,
+                    &frames,
+                    &config,
+                )
+                .unwrap();
+        assert!(matches!(
+            corrected,
+            AgentProviderActionResolution::Bound(..)
+        ));
+    }
+
+    #[test]
+    fn incompatible_click_outcome_returns_unissued_recovery_without_losing_target() {
+        let observed = observation_with_nodes(
+            context(),
+            1,
+            1,
+            1,
+            json!([
+                {"k":1,"r":"document"},
+                {"k":2,"p":0,"r":"button","n":"Details","o":1}
+            ]),
+        );
+        let config = config(AgentProviderKind::OpenAiResponses);
+        let prior = call(1);
+        let arguments = json!({"actions":[{
+            "kind":"click","target":"@a2","effect":"read",
+            "wait":{"kind":"immediate"},"verification":{"kind":"page_dialog_closed"},
+            "settle_millis":2000
+        }]})
+        .to_string();
+        let tool = super::super::AgentBrowserToolCall::decode_openai(
+            prior,
+            "fc_click_outcome".into(),
+            "call_click_outcome".into(),
+            "act",
+            arguments.clone(),
+        )
+        .unwrap();
+        let (correlation, proposal) = tool.into_continuation_parts();
+        let mut transcript = transcript();
+        transcript.set_action_targets(
+            AgentProviderActionTargets::try_from_observation(&observed).unwrap(),
+        );
+        let continuation = AgentProviderContinuationSeed {
+            call: prior,
+            config: config.clone(),
+            baseline: SemanticObservationAcknowledgement::from_fingerprint(
+                SemanticObservationFingerprint::from_observation(&observed),
+            ),
+            transcript,
+        }
+        .join_terminal_tool(completion(prior, arguments.len() as u32), correlation)
+        .unwrap();
+        let frames = observed
+            .frames()
+            .iter()
+            .map(|frame| frame.frame().clone())
+            .collect::<Vec<_>>();
+        let resolution =
+            super::super::AgentProviderSettledToolTurn::for_test(proposal, continuation)
+                .resolve_action(
+                    crate::SemanticActionBatchId::new(1).unwrap(),
+                    &observed,
+                    &frames,
+                    &config,
+                )
+                .unwrap();
+        let AgentProviderActionResolution::Refused(refusal) = resolution else {
+            panic!("incompatible outcome admitted")
+        };
+        assert_eq!(
+            refusal.reason(),
+            crate::SemanticActionBindingError::OutcomeContract
+        );
+        let (_, bound) = refusal
+            .bind(&observed, &config, "current observation".into())
+            .unwrap();
+        let result: serde_json::Value = serde_json::from_str(bound.latest().tool_result()).unwrap();
+        assert_eq!(result["executed"], false);
+        assert_eq!(result["code"], "outcome_incompatible");
+        assert_eq!(bound.action_targets().unwrap().exclusion_count(), 0);
+        assert_eq!(
+            bound
+                .action_targets()
+                .unwrap()
+                .permitted_references(crate::SemanticActionKind::Click)
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -3390,6 +3695,141 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2, 3, 4]
         );
+    }
+
+    #[test]
+    fn extraction_url_choices_use_only_matching_observed_source_fields() {
+        use crate::{
+            SemanticExtractionFieldSchema as Field, SemanticExtractionSchemaId, SemanticReadField,
+        };
+        let observed = observation_with_nodes(
+            context(),
+            1,
+            1,
+            1,
+            json!([
+                {"k":1,"r":"document","o":16},
+                {"k":2,"p":0,"r":"paragraph","t":"https://shop.example.test/unobserved"},
+                {"k":3,"p":0,"r":"link","n":"Product","u":"https://shop.example.test/product"},
+                {"k":4,"p":0,"r":"image","n":"Product image","m":"https://shop.example.test/image.png"}
+            ]),
+        );
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![Field::try_rows(
+                "products".into(),
+                true,
+                vec![
+                    Field::try_url("url".into(), false, 512).unwrap(),
+                    Field::try_image_url("image".into(), false, 512).unwrap(),
+                ],
+                1,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let read = crate::read_semantic_observation_for_schema(
+            &observed,
+            crate::SemanticReadAuthority::Initial,
+            crate::SemanticCaptureInstant::from_millis(1),
+            crate::SemanticReadSensitivityLimit::PublicOnly,
+            crate::SemanticReadBudget::STANDARD,
+            &schema,
+        )
+        .unwrap();
+        let output =
+            crate::agent_provider::request::bound_extraction_output_schema(&schema, Some(&read));
+        let fields = &output["properties"]["fields"]["items"]["anyOf"][0]["properties"]["value"]
+            ["properties"]["items"]["items"]["properties"]["fields"]["items"]["anyOf"];
+        for (index, kind) in [
+            SemanticReadField::LinkDestination,
+            SemanticReadField::ImageSource,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let expected: Vec<_> = read
+                .fragments()
+                .iter()
+                .filter(|fragment| fragment.field() == kind)
+                .map(|fragment| fragment.id().model_token())
+                .collect();
+            assert_eq!(expected.len(), 1);
+            assert_eq!(
+                fields[index]["properties"]["value"]["properties"]["sources"]["items"]["enum"],
+                json!(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn incomplete_action_returns_inspection_guidance_and_fresh_complete_target_binds() {
+        let config = config(AgentProviderKind::OpenAiResponses);
+        for complete in [false, true] {
+            let initial = observation(context(), 1, 1, 1, "current content");
+            let frames = [initial.frames()[0].frame().clone()];
+            let snapshot = decode_semantic_snapshot(
+                SemanticDecodeContext::new(
+                    SemanticInvocationId::new(1).unwrap(),
+                    frames[0].clone(),
+                    SemanticSnapshotGeneration::new(1).unwrap(),
+                ),
+                &serde_json::to_vec(
+                    &json!({"v":SEMANTIC_WIRE_VERSION,"i":1,"g":1,"c":if complete { "complete" } else { "field_limit" },"n":[
+                        {"k":1,"r":"document","o":16,"fc":true},
+                        {"k":2,"p":0,"r":"textbox","n":"Field","s":64,"o":3,"fc":complete,
+                         "v":{"k":"text","value":"old value"}}
+                    ]}),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let observed = SemanticObservationAssembler::new(
+                SemanticObservationRequest::initial(
+                    SemanticObservationId::new(1).unwrap(),
+                    initial.request().context(),
+                    SemanticObservationBudget::INITIAL_FILTERED,
+                ),
+                snapshot,
+            )
+            .unwrap()
+            .finish()
+            .unwrap();
+            let resolution = action_refusal_turn(&observed, config.clone(), "@a2")
+                .resolve_action(
+                    crate::SemanticActionBatchId::new(1).unwrap(),
+                    &observed,
+                    &frames,
+                    &config,
+                )
+                .unwrap();
+            if complete {
+                assert!(matches!(
+                    resolution,
+                    AgentProviderActionResolution::Bound(..)
+                ));
+            } else {
+                let AgentProviderActionResolution::Refused(refusal) = resolution else {
+                    panic!("incomplete target must be inspected before native preparation");
+                };
+                assert_eq!(
+                    refusal.reason(),
+                    crate::SemanticActionBindingError::TargetIncomplete
+                );
+                let (_, transcript) = refusal
+                    .bind(&observed, &config, "current observation".into())
+                    .unwrap();
+                let result: serde_json::Value =
+                    serde_json::from_str(transcript.latest().tool_result()).unwrap();
+                assert_eq!(result["code"], "target_incomplete");
+                assert_eq!(result["executed"], false);
+                assert!(result["guidance"]
+                    .as_str()
+                    .unwrap()
+                    .contains("snapshot(subtree)"));
+                assert!(!result.to_string().contains("new value"));
+            }
+        }
     }
 
     #[test]
@@ -3905,6 +4345,40 @@ mod tests {
                     &config,
                 )
                 .unwrap();
+            let searched = search_forest(search_request.clone(), search_nodes());
+            for (query, should_refuse) in [("width depth", true), ("pieces", false)] {
+                let history = AgentInspectionProgress::record(None, &previous, &searched).unwrap();
+                let text = history.encode(&searched).unwrap();
+                assert!(text.contains("\"query\":\"width depth\""));
+                assert!(text.contains("\"matched_sources\":1"));
+                assert!(!text.contains("Width 89 cm"));
+                let transcript = AgentProviderTranscript::try_initial_with_checkpoints(
+                    Arc::from("inspect dimensions"),
+                    "current observation".into(),
+                    None,
+                    Some(super::super::request::AgentProviderInspectionContext {
+                        text,
+                        progress: history,
+                    }),
+                )
+                .unwrap();
+                let turn = snapshot_scope_continuation_with_transcript(
+                    provider,
+                    SemanticObservationAcknowledgement::from_fingerprint(
+                        SemanticObservationFingerprint::from_observation(&searched),
+                    ),
+                    config.clone(),
+                    json!({"kind":"text_search","target":"@a1","query":query}),
+                    transcript,
+                );
+                assert_eq!(
+                    matches!(
+                        turn.resolve_observation(&searched, &config).unwrap(),
+                        AgentProviderObservationResolution::Refused(_)
+                    ),
+                    should_refuse
+                );
+            }
             let changed_query =
                 continuation(json!({"kind":"text_search","target":"@a1","query":"different"}))
                     .retire_for_observation(&previous, &config)
@@ -4225,7 +4699,7 @@ mod tests {
                 )
                 .unwrap(),
             4,
-            r#"[{"k":2,"r":"status","n":"current anchor"},{"k":1,"r":"document","t":"independent source body"}]"#,
+            r#"[{"k":2,"r":"status","n":"current anchor"},{"k":1,"r":"document","t":"independent source body"},{"k":3,"r":"paragraph","t":"private note","q":"sensitive"},{"k":4,"r":"textbox","v":{"k":"text","value":"private input"}}]"#,
         );
         let history = AgentInspectionProgress::record(Some(history), &restored, &window).unwrap();
         let text = history.encode(&window).unwrap();
@@ -4249,7 +4723,123 @@ mod tests {
         let text = history.encode(&absent).unwrap();
         assert!(!text.contains("@a") && text.contains(r#""current_target":null"#));
         assert!(text.len() < 2048);
+        let recall = history.recall().unwrap();
+        assert!(recall.contains("independent source body"));
+        assert!(!recall.contains("@a") && !recall.contains("private"));
+        assert!(!recall.contains("discarded region content"));
+        assert!(!recall.contains("hostile page instruction"));
+        assert!(recall.contains("historical=true") && recall.contains("content=untrusted"));
         assert!(AgentInspectionProgress::record(Some(history), &previous, &region).is_err());
+
+        let history = AgentInspectionProgress::record(None, &window, &absent).unwrap();
+        let text = history.encode(&absent).unwrap();
+        let expected_bytes = "inspect".len()
+            + "current observation".len()
+            + text.len()
+            + history.recall().unwrap().len();
+        let transcript = AgentProviderTranscript::try_initial_with_checkpoints(
+            Arc::from("inspect"),
+            "current observation".into(),
+            None,
+            Some(super::super::request::AgentProviderInspectionContext {
+                text,
+                progress: history,
+            }),
+        )
+        .unwrap();
+        assert_eq!(transcript.retained_bytes(), expected_bytes);
+        let config = config(AgentProviderKind::OpenAiResponses)
+            .restrict_to_navigation_and_extraction()
+            .with_baseline_read()
+            .with_progressive_observation();
+        let turn = snapshot_scope_continuation_with_transcript(
+            AgentProviderKind::OpenAiResponses,
+            SemanticObservationAcknowledgement::from_fingerprint(
+                SemanticObservationFingerprint::from_observation(&absent),
+            ),
+            config.clone(),
+            json!({"kind":"subtree","target":"@a99"}),
+            transcript,
+        );
+        let AgentProviderObservationResolution::Refused(refusal) =
+            turn.resolve_observation(&absent, &config).unwrap()
+        else {
+            panic!("retired refs must not authorize an inspection");
+        };
+        let (_, rebound) = refusal
+            .bind(&absent, &config, "current observation".into())
+            .unwrap();
+        let body =
+            super::super::request::encode_openai_continuation_body(&config, &rebound).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let messages = body["input"].as_array().unwrap();
+        let recalls: Vec<_> = messages
+            .iter()
+            .filter(|message| {
+                message["content"][0]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("independent source body"))
+            })
+            .collect();
+        assert_eq!(recalls.len(), 1);
+        assert_eq!(recalls[0]["role"], "user");
+    }
+
+    #[test]
+    fn focused_recall_is_bounded_escaped_and_does_not_retain_current_or_private_text() {
+        let mut previous = observation(context(), 1, 1, 1, "initial");
+        let mut history = None;
+        for generation in 2..=9 {
+            let request = previous
+                .begin_expansion(
+                    SemanticObservationId::new(generation).unwrap(),
+                    previous.frames()[0].nodes()[0].reference(),
+                    previous.frames()[0].frame(),
+                    crate::SemanticExpansionKind::TextSearch(
+                        crate::SemanticTextSearch::try_new(format!("measure{generation}")).unwrap(),
+                    ),
+                    SemanticObservationBudget::INITIAL_FILTERED,
+                )
+                .unwrap();
+            let mut nodes = vec![json!({"k":1,"r":"document"})];
+            for index in 0..4 {
+                nodes.push(json!({"k":index+2,"r":"paragraph","t":format!("capture{generation}-{index}: {}", "€\"\\".repeat(150))}));
+            }
+            nodes.push(json!({"k":9,"r":"paragraph","t":"private value","q":"sensitive"}));
+            let snapshot = decode_semantic_snapshot(
+                SemanticDecodeContext::new(
+                    SemanticInvocationId::new(generation).unwrap(),
+                    previous.frames()[0].frame().clone(),
+                    SemanticSnapshotGeneration::new(generation).unwrap(),
+                ),
+                &serde_json::to_vec(
+                    &json!({"v":1,"i":generation,"g":generation,"c":"complete","n":nodes}),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let current = SemanticObservationAssembler::new(request, snapshot)
+                .unwrap()
+                .finish()
+                .unwrap();
+            history = Some(AgentInspectionProgress::record(history, &previous, &current).unwrap());
+            if let Some(recall) = history.as_ref().unwrap().recall() {
+                assert!(recall.len() <= 4096);
+                assert!(!recall.contains("private value"));
+                assert!(!recall.contains(&format!("capture{generation}-")));
+                let body: serde_json::Value =
+                    serde_json::from_str(recall.lines().last().unwrap()).unwrap();
+                assert!(body["passages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|passage| passage["preview_truncated"] == true));
+            }
+            previous = current;
+        }
+        let recall = history.unwrap();
+        let recall = recall.recall().unwrap();
+        assert!(recall.contains("capture8-") && !recall.contains("capture2-"));
     }
 
     #[test]
@@ -4265,6 +4855,86 @@ mod tests {
         }
         let next = observation(context(), 10, 10, 10, "body");
         assert!(AgentInspectionProgress::record(history, &previous, &next).is_err());
+    }
+
+    #[test]
+    fn exhausted_scoped_inspection_can_restore_controls_once_without_renewal() {
+        let mut previous = observation(context(), 1, 1, 1, "body");
+        let mut history = None;
+        let mut restoration_history = None;
+        for index in 0..super::observation_checkpoint::MAX_AGENT_INSPECTION_CAPTURES {
+            let generation = index as u64 + 2;
+            let current = observation(context(), generation, generation, generation, "body");
+            let request = previous
+                .begin_expansion(
+                    SemanticObservationId::new(generation).unwrap(),
+                    previous.frames()[0].nodes()[0].reference(),
+                    previous.frames()[0].frame(),
+                    crate::SemanticExpansionKind::Region,
+                    crate::SemanticObservationBudget::INITIAL_FILTERED,
+                )
+                .unwrap();
+            let current = SemanticObservationAssembler::new(request, current.frames()[0].clone())
+                .unwrap()
+                .finish()
+                .unwrap();
+            history = Some(AgentInspectionProgress::record(history, &previous, &current).unwrap());
+            restoration_history = Some(
+                AgentInspectionProgress::record(restoration_history, &previous, &current).unwrap(),
+            );
+            previous = current;
+        }
+        let history = history.unwrap();
+        assert!(history
+            .encode(&previous)
+            .unwrap()
+            .contains("\"viewport_restore_available\":true"));
+        let config = config(AgentProviderKind::OpenAiResponses)
+            .restrict_to_navigation_and_extraction()
+            .with_baseline_read()
+            .with_progressive_observation();
+        let transcript = AgentProviderTranscript::try_initial_with_checkpoints(
+            Arc::from("Restore current controls"),
+            "current observation".into(),
+            None,
+            Some(super::super::request::AgentProviderInspectionContext {
+                text: history.encode(&previous).unwrap(),
+                progress: history,
+            }),
+        )
+        .unwrap();
+        let baseline = SemanticObservationAcknowledgement::from_fingerprint(
+            SemanticObservationFingerprint::from_observation(&previous),
+        );
+        let continuation = snapshot_scope_continuation_with_transcript(
+            AgentProviderKind::OpenAiResponses,
+            baseline,
+            config.clone(),
+            json!({"kind":"initial"}),
+            transcript,
+        );
+        let checkpoint = continuation
+            .retire_for_observation(&previous, &config)
+            .unwrap();
+        let request = checkpoint
+            .request(&previous, SemanticObservationId::new(10).unwrap())
+            .unwrap();
+        assert!(matches!(request.scope(), crate::SemanticScope::Initial));
+        let current = observation(context(), 10, 10, 10, "body");
+        let current = SemanticObservationAssembler::new(request, current.frames()[0].clone())
+            .unwrap()
+            .finish()
+            .unwrap();
+        let restored =
+            AgentInspectionProgress::record(restoration_history, &previous, &current).unwrap();
+        let text = restored.encode(&current).unwrap();
+        assert!(text.contains("\"viewport_restore_available\":false"));
+        assert!(text.contains("\"remaining_inspections\":0"));
+        let next = observation(context(), 11, 11, 11, "body");
+        assert!(AgentInspectionProgress::record(Some(restored), &current, &next).is_err());
+        checkpoint
+            .validate_successor(&previous, &current, model_request(context(), 10), &config)
+            .unwrap();
     }
 
     #[test]
