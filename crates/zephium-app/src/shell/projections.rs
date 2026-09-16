@@ -479,6 +479,7 @@ impl Shell {
         if let Some(window) = self.windows.focused() {
             if let Some(profile) = self.profiles.get(window.profile) {
                 (self.emit)(Projection::PanelOwner(zephium_ipc::PanelOwner {
+                    private: profile.kind == zephium_core::profiles::ProfileKind::Incognito,
                     window_id: window.id.to_string(),
                     profile_id: profile.id.to_string(),
                     profile_name: profile.name.clone(),

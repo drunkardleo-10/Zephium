@@ -149,9 +149,14 @@ impl Shell {
     }
 
     pub(super) fn operation_open_url(&mut self, input: String) -> OperationDisposition {
-        if navigation::classify(&input).is_none() {
+        let Some(input) = self
+            .search
+            .engine
+            .configured_classify(&input, &self.search.custom_url)
+            .map(|url| url.to_string())
+        else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
-        }
+        };
         if self.windows.focused().is_none() {
             return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
         }
@@ -226,8 +231,22 @@ impl Shell {
         if !self.item_in_focused_scope(id) {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
-        if navigation::classify(&input).is_none() {
+        let Some(input) = self
+            .search
+            .engine
+            .configured_classify(&input, &self.search.custom_url)
+            .map(|url| url.to_string())
+        else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
+        };
+        if let Some(context) = self
+            .search
+            .context
+            .as_ref()
+            .filter(|context| context.session_id.starts_with(&format!("newtab:{id}:")))
+        {
+            let session = context.session_id.clone();
+            self.cancel_scoped_search(&session);
         }
         if let Some(PendingDiscardProbe::Closing {
             recreate,
@@ -433,6 +452,13 @@ impl Shell {
                 OperationOutcome::Rejected,
                 OperationReason::StoreAdmissionRejected,
             );
+        }
+        if key == "search.custom-url" {
+            self.search.custom_url = value.clone();
+        }
+        if key == "search.engine" {
+            self.search.engine =
+                zephium_core::search::SearchEngine::from_id(&value).unwrap_or_default();
         }
         // This projection is downstream of truthful store-queue admission.
         // The desktop composition root applies native theme state from this

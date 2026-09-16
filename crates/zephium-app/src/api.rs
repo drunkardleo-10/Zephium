@@ -583,6 +583,15 @@ pub enum Command {
     /// Latest redacted state from the explicitly constructed product
     /// distribution worker. This is replaceable observation, not authority.
     ExtensionDistributionStatusChanged(ExtensionDistributionStatus),
+    SearchSupplementaryFinished {
+        context: Box<zephium_ipc::SearchContext>,
+        query: String,
+    },
+    SearchAdditional {
+        context: Box<zephium_ipc::SearchContext>,
+        query: String,
+        results: Vec<zephium_ipc::SearchResult>,
+    },
     Search(String),
     SearchScoped {
         query: String,

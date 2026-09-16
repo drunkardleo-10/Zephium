@@ -1930,6 +1930,7 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         Projection::RuntimeStatus(_) => {}
         Projection::BlockerStatus(_) => {}
         Projection::OperationProcessed(_) => {}
+        Projection::OpenNote { .. } => {}
     }
 }
 

@@ -451,7 +451,15 @@ impl Shell {
             windows: Windows::default(),
             pending_size: Size::default(),
             favicons: FaviconState::default(),
-            search: SearchState::default(),
+            search: SearchState {
+                custom_url: store.app_setting("search.custom-url").unwrap_or_default(),
+                engine: store
+                    .app_setting("search.engine")
+                    .as_deref()
+                    .and_then(zephium_core::search::SearchEngine::from_id)
+                    .unwrap_or_default(),
+                ..SearchState::default()
+            },
             presentation: PresentationState::default(),
             zoom: ZoomState::default(),
             divider: None,
@@ -864,6 +872,14 @@ impl Shell {
                 self.search.context = None;
                 self.search(&query);
             }
+            Command::SearchSupplementaryFinished { context, query } => {
+                self.search_supplementary_finished(*context, query)
+            }
+            Command::SearchAdditional {
+                context,
+                query,
+                results,
+            } => self.search_additional(*context, query, results),
             Command::SearchScoped { query, context } => self.search_scoped(&query, *context),
             Command::CancelSearch { session_id } => self.cancel_scoped_search(&session_id),
             Command::RunSearchAction { context, action } => {

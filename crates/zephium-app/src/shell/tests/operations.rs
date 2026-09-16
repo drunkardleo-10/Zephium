@@ -138,7 +138,7 @@ fn navigation_waits_for_exact_inflight_discard_instead_of_claiming_success() {
             recreate: true,
             deferred_navigation: Some(input),
             ..
-        }) if input == "after-discard.example"
+        }) if input == "https://after-discard.example/"
     ));
 }
 

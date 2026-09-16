@@ -455,7 +455,33 @@ impl Drop for StoreReaderStopGuard {
     }
 }
 
+/// The worker loop with its delivery injected, so a test can drive the real
+/// queue and the real request handling without an actor behind it.
+#[cfg(test)]
+pub(crate) fn run_for_test(
+    store: SharedStore,
+    queue: StoreReadQueue,
+    sink: std::sync::mpsc::Sender<StoreReadResult>,
+) {
+    run_with(store, queue, move |result| sink.send(result).is_ok());
+}
+
+/// Candidates handed to ranking. Larger than what is shown, so recorded
+/// searches and already-open tabs can be filtered out without leaving the
+/// history section short.
+const HISTORY_READ_LIMIT: u32 = 10;
+
 pub(crate) fn run(store: SharedStore, queue: StoreReadQueue, callback: CallbackHandle) {
+    run_with(store, queue, move |result| {
+        callback.dispatch(Command::StoreRead(result))
+    });
+}
+
+fn run_with(
+    store: SharedStore,
+    queue: StoreReadQueue,
+    mut deliver: impl FnMut(StoreReadResult) -> bool,
+) {
     while let Some(mut lease) = queue.recv() {
         let Some(request) = lease.take() else {
             continue;
@@ -469,9 +495,9 @@ pub(crate) fn run(store: SharedStore, queue: StoreReadQueue, callback: CallbackH
                 generation,
                 profile,
                 hits: store
-                    .search_history(profile, &query, 6)
+                    .search_history(profile, &query, HISTORY_READ_LIMIT)
                     .into_iter()
-                    .take(6)
+                    .take(HISTORY_READ_LIMIT as usize)
                     .filter(|hit| navigation::is_allowed_str(&hit.url))
                     .map(|mut hit| {
                         hit.title = sanitize_page_title(&hit.title);
@@ -541,7 +567,7 @@ pub(crate) fn run(store: SharedStore, queue: StoreReadQueue, callback: CallbackH
                 }
             }
         };
-        let _ = callback.dispatch(Command::StoreRead(result));
+        let _ = deliver(result);
     }
 }
 

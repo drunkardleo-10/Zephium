@@ -508,6 +508,7 @@ pub struct ItemsState {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 #[serde(tag = "type")]
 pub enum SearchAction {
+    OpenNote { id: String },
     ActivateTab { id: String },
     OpenUrl { url: String },
     RunCommand { id: String },
@@ -575,8 +576,13 @@ pub struct SearchResult {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 pub struct SearchResults {
+    pub pending: bool,
     pub context: Option<SearchContext>,
     pub query: String,
+    /// Host the field may complete the typed text to. Native decides what is
+    /// confident enough to offer; the field still refuses to apply one that
+    /// does not extend exactly what the user has typed.
+    pub completion: Option<String>,
     pub results: Vec<SearchResult>,
 }
 
@@ -973,6 +979,7 @@ impl BlockerStatusView {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct PanelOwner {
+    pub private: bool,
     pub window_id: String,
     pub profile_id: String,
     pub profile_name: String,
@@ -995,6 +1002,7 @@ pub enum Projection {
     PagePermissionPrompt(PagePermissionPromptView),
     UiCommand(String),
     Search(SearchResults),
+    OpenNote { profile: String, id: String },
     Layout(LayoutState),
     RuntimeStatus(RuntimeStatus),
     BlockerStatus(BlockerStatusView),
