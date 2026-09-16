@@ -1,6 +1,83 @@
 use super::*;
 
 #[test]
+fn native_link_handoff_admits_exact_observed_targets_without_promoting_prose() {
+    use super::{agent::*, artifact::*, runtime::*};
+    let target = "https://shop.example.test/products/42?variant=blue";
+    let mut preview = WorkEvidencePreviewV1 {
+        version: 1,
+        link: WorkEvidenceLink {
+            extraction_id: 40.into(),
+            source_id: 1,
+        },
+        origin: "https://shop.example.test/".into(),
+        role: "link".into(),
+        text: target.into(),
+        truncated: false,
+        source_bytes: target.len().to_string(),
+        link_destination: Some(target.into()),
+        source: WorkEvidenceSourceV1::NativeExtraction,
+    };
+    let disclose = |preview: &WorkEvidencePreviewV1| {
+        WorkAgentTurnDisclosure::try_new(
+            "Inspect the selected product",
+            vec![],
+            vec![],
+            &[],
+            std::slice::from_ref(preview),
+            &[],
+            WorkAgentBudget {
+                turns_left: 3,
+                steps_left: 8,
+                browse_available: true,
+            },
+            WorkExecutionLimits {
+                model_tokens: 8000,
+                cost_micro_usd: 10000,
+                operations: 8,
+                timeout_seconds: 60,
+                max_workers: 1,
+            },
+            vec![],
+        )
+    };
+    let read = |url: &str| WorkAgentTurnOutput {
+        say: None,
+        artifacts: vec![],
+        ask: None,
+        finish: false,
+        fetch: vec![WorkAgentFetch::Read {
+            url: url.into(),
+            collection: None,
+        }],
+    };
+    let disclosed = disclose(&preview).unwrap();
+    assert_eq!(disclosed.context().sources[0].url, preview.origin);
+    assert_eq!(
+        disclosed.context().sources[0].link_destination.as_deref(),
+        Some(target)
+    );
+    assert!(disclosed.resolve(read(target)).is_ok());
+    assert!(disclosed
+        .resolve(read("https://shop.example.test/products/42"))
+        .is_err());
+    preview.truncated = true;
+    assert!(disclose(&preview).is_err());
+    preview.truncated = false;
+    preview.role = "image".into();
+    assert!(disclose(&preview).is_err());
+    preview.link_destination = None;
+    preview.role = "paragraph".into();
+    assert!(disclose(&preview).unwrap().resolve(read(target)).is_err());
+    let legacy = serde_json::to_value(&preview).unwrap();
+    assert!(legacy.get("link_destination").is_none());
+    assert_eq!(
+        serde_json::from_value::<WorkEvidencePreviewV1>(legacy).unwrap(),
+        preview
+    );
+}
+
+#[test]
 fn coordination_rejects_combined_completion_deadlocks_and_scope_widening() {
     use super::runtime::*;
     let mut graph = draft();
@@ -725,6 +802,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
 
     // Turn resolution admits only shown sources and a complete vocabulary.
     let preview = WorkEvidencePreviewV1 {
+        link_destination: None,
         version: 1,
         link: WorkEvidenceLink {
             extraction_id: WorkArtifactId::from(40),
@@ -788,11 +866,10 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
         vec![],
     )
     .unwrap();
-    assert_eq!(views.context().artifacts[0].evidence, vec![Some(0)]);
-    assert_eq!(
-        views.context().artifacts[1].evidence,
-        vec![Some(2), Some(1)]
-    );
+    assert_eq!(views.context().sources[0].acquired_by, "provider_search");
+    assert_eq!(views.context().sources[1].acquired_by, "native_browser");
+    assert_eq!(views.context().artifacts[0].evidence, vec![0]);
+    assert_eq!(views.context().artifacts[1].evidence, vec![2, 1]);
     let missing = WorkAgentTurnDisclosure::try_new(
         "Compare canvas libraries",
         vec![],
@@ -809,11 +886,13 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
         vec![],
     )
     .unwrap();
-    assert_eq!(missing.context().artifacts[0].evidence, vec![None, Some(0)]);
+    assert_eq!(missing.context().artifacts[0].evidence, vec![0]);
     assert_eq!(
         serde_json::to_value(missing.context()).unwrap()["artifacts"][0]["evidence"],
-        serde_json::json!([null, 0])
+        serde_json::json!([0])
     );
+    assert!(missing.context().artifacts[0].data.is_none());
+    assert_eq!(views.context().citation_space, "source_keys");
     let output = |fetch, ask, finish| WorkAgentTurnOutput {
         say: Some("Comparing.".into()),
         artifacts: vec![WorkAgentArtifactOutput {
@@ -853,7 +932,10 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
     assert_eq!(turn.fetch.len(), 2);
     assert_eq!(turn.artifacts[0].evidence[0].source_id, 1);
     let mut mapped = output(vec![], None, true);
-    mapped.artifacts[0].evidence = vec![views.context().artifacts[1].evidence[0].unwrap()];
+    mapped.artifacts[0].evidence = vec![views.context().artifacts[1].evidence[0]];
+    if let artifact::WorkArtifactDataV1::Findings { items, .. } = &mut mapped.artifacts[0].data {
+        items[0].evidence = vec![2];
+    }
     assert_eq!(
         views.resolve(mapped).unwrap().artifacts[0].evidence,
         vec![native.link]
@@ -954,4 +1036,118 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
             finish: false,
         })
         .is_err());
+}
+
+#[test]
+fn agent_citations_round_trip_source_keys_without_model_renumbering() {
+    use super::{agent::*, artifact::*, runtime::*};
+    use serde_json::json;
+    let previews: Vec<_> = (0..80)
+        .map(|key| WorkEvidencePreviewV1 {
+            version: 1,
+            link: WorkEvidenceLink {
+                extraction_id: 40.into(),
+                source_id: key + 1,
+            },
+            origin: "https://shop.example.test/".into(),
+            role: "paragraph".into(),
+            text: format!("Observed detail {key}"),
+            source_bytes: format!("Observed detail {key}").len().to_string(),
+            truncated: false,
+            link_destination: None,
+            source: WorkEvidenceSourceV1::NativeExtraction,
+        })
+        .collect();
+    let disclose = |previews: &[WorkEvidencePreviewV1], artifacts: &[WorkArtifactV1]| {
+        WorkAgentTurnDisclosure::try_new(
+            "Compare the observed products",
+            vec![],
+            vec![],
+            &[],
+            previews,
+            artifacts,
+            WorkAgentBudget {
+                turns_left: 3,
+                steps_left: 8,
+                browse_available: true,
+            },
+            WorkExecutionLimits {
+                model_tokens: 8000,
+                cost_micro_usd: 10000,
+                operations: 8,
+                timeout_seconds: 60,
+                max_workers: 1,
+            },
+            vec![],
+        )
+        .unwrap()
+    };
+    let disclosure = disclose(&previews, &[]);
+    let subject = json!({"name":"Product"});
+    for data in [
+        json!({"kind":"comparison_matrix","subjects":[subject],"criteria":[{"name":"Details","kind":{"kind":"text"}},{"name":"Unavailable","kind":{"kind":"text"}}],"cells":[[{"value":{"kind":"text","text":"Observed"},"evidence":[70,20]},{"value":{"kind":"unknown"},"evidence":[]}]],"notes":[]}),
+        json!({"kind":"findings","items":[{"claim":"Observed","evidence":[70,20],"confidence":"supported"}]}),
+        json!({"kind":"chart","x_label":"Product","y_label":"Count","series":[{"name":"Count","points":[{"label":"Product","value":"12","evidence":[70,20]}]}]}),
+        json!({"kind":"evidence_collection","summary":"Sources","entries":[{"evidence":70,"title":"First","role":"source"},{"evidence":20,"title":"Second","role":"source"}]}),
+    ] {
+        let output = || WorkAgentTurnOutput {
+            say: None,
+            fetch: vec![],
+            ask: None,
+            finish: true,
+            artifacts: vec![WorkAgentArtifactOutput {
+                title: "Comparison".into(),
+                data: serde_json::from_value(data.clone()).unwrap(),
+                evidence: vec![1],
+            }],
+        };
+        let resolved = disclosure.resolve(output()).unwrap();
+        assert_eq!(resolved.dropped, 0);
+        let proposed = &resolved.artifacts[0];
+        assert!(proposed.data.validate(3).is_ok());
+        assert_eq!(
+            proposed.evidence,
+            vec![
+                previews[1].link.clone(),
+                previews[70].link.clone(),
+                previews[20].link.clone()
+            ]
+        );
+        let stored = WorkArtifactV1 {
+            version: 1,
+            id: 1.into(),
+            execution: 2.into(),
+            node: 3.into(),
+            attempt: 4.into(),
+            output: "Result".into(),
+            title: proposed.title.clone(),
+            data: proposed.data.clone(),
+            evidence: proposed.evidence.clone(),
+            review: WorkOutputReview::SourceMappedNeedsReview,
+            presentation: WorkArtifactPresentationV1::Automatic,
+        };
+        assert!(stored.validate().is_ok());
+        let shown = disclose(&previews, std::slice::from_ref(&stored));
+        assert_eq!(
+            serde_json::to_value(shown.context().artifacts[0].data.as_ref().unwrap()).unwrap(),
+            serde_json::to_value(
+                serde_json::from_value::<WorkArtifactDataV1>(data.clone()).unwrap()
+            )
+            .unwrap()
+        );
+        let reversed: Vec<_> = previews.iter().rev().cloned().collect();
+        let shown = disclose(&reversed, &[stored]);
+        let mut replay = output();
+        replay.artifacts[0].data = shown.context().artifacts[0].data.clone().unwrap();
+        replay.artifacts[0].evidence = shown.context().artifacts[0].evidence.clone();
+        let replayed = shown.resolve(replay).unwrap();
+        assert_eq!(replayed.artifacts[0].evidence, proposed.evidence);
+        assert!(replayed.artifacts[0].data == proposed.data);
+        let mut unknown = output();
+        unknown.artifacts[0].evidence = vec![80];
+        assert_eq!(
+            disclosure.resolve(unknown).unwrap().refusals,
+            vec![WorkAgentArtifactRefusal::UnknownEvidenceKey]
+        );
+    }
 }

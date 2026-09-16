@@ -45,6 +45,7 @@ impl RetainedWorkPorts {
 /// created until the original Shell accepts Engine/Store and selected profile.
 #[must_use]
 pub struct PreparedRetainedWork {
+    anonymous_session: Option<zephium_agentic::WorkBrowserSession>,
     work: Option<WorkId>,
     engine: crate::SharedEngine,
     journal: Arc<dyn AgentWorkJournalPort>,
@@ -55,6 +56,21 @@ pub struct PreparedRetainedWork {
     actor: ActorRequest,
 }
 impl PreparedRetainedWork {
+    pub fn with_anonymous_session(
+        mut self,
+        session: zephium_agentic::WorkBrowserSession,
+    ) -> Result<Self, AgentWorkFailure> {
+        if !self.spec.isolated_public
+            || !self
+                .work
+                .is_some_and(|work| session.admits(self.profile.profile(), work))
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
+        self.anonymous_session = Some(session);
+        Ok(self)
+    }
+
     /// Preserve the durable aggregate selected by the trusted runtime owner.
     /// This is an identity join and grants no additional native capability.
     pub fn with_work_identity(mut self, work: WorkId) -> Self {
@@ -107,6 +123,7 @@ impl PreparedRetainedWork {
             return Err(AgentWorkFailure::Contract);
         }
         Ok(Self {
+            anonymous_session: None,
             work: None,
             engine,
             journal,
@@ -443,6 +460,7 @@ impl ProductWork {
             prepared.spec.target,
             prepared.spec.document_policy,
             prepared.spec.isolated_public,
+            prepared.anonymous_session,
             now,
         ) {
             Ok(pending) => {
@@ -500,14 +518,13 @@ impl ProductWork {
         if self.signal.reconcile.swap(false, Ordering::AcqRel) {
             work.reconcile();
         }
-        if self.signal.close.load(Ordering::Acquire) {
+        let closed = if self.signal.close.load(Ordering::Acquire) {
             work.begin_shutdown();
-            if matches!(work.poll_shutdown(now), Ok(true)) {
-                self.signal.closed.store(true, Ordering::Release);
-            }
+            matches!(work.poll_shutdown(now), Ok(true))
         } else {
             work.poll(now);
-        }
+            false
+        };
         if let Ok(mut projection) = self.signal.projection.lock() {
             if let Some((record, decision)) = projection.review_requested.take() {
                 work.review(record, decision);
@@ -580,6 +597,11 @@ impl ProductWork {
         ) = work.failures();
         if projection.extraction.is_none() {
             projection.extraction = work.take_extraction();
+        }
+        drop(projection);
+        if closed {
+            // Publish closure only after the terminal usage and artifact projection.
+            self.signal.closed.store(true, Ordering::Release);
         }
     }
     pub(crate) fn next_deadline(&self) -> Option<Instant> {

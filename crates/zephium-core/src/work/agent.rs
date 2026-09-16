@@ -11,8 +11,11 @@ pub const MAX_AGENT_ARTIFACTS_PER_TURN: usize = 6;
 #[derive(Serialize)]
 pub struct WorkAgentSourceView {
     pub key: u16,
+    pub acquired_by: &'static str,
     pub title: String,
     pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link_destination: Option<String>,
     pub text: String,
     pub truncated: bool,
 }
@@ -32,9 +35,9 @@ pub struct WorkAgentArtifactView {
     pub kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<WorkArtifactDataV1>,
-    /// Artifact-local evidence index -> this turn's source key; null means unavailable.
+    /// Source keys in this turn, shared by every citation in the disclosed data.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub evidence: Vec<Option<u16>>,
+    pub evidence: Vec<u16>,
 }
 #[derive(Clone, Copy, Serialize)]
 pub struct WorkAgentBudget {
@@ -44,6 +47,7 @@ pub struct WorkAgentBudget {
 }
 #[derive(Serialize)]
 pub struct WorkAgentTurnContext {
+    pub citation_space: &'static str,
     pub objective: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub requested_pages: Vec<String>,
@@ -107,16 +111,33 @@ impl WorkAgentTurnDisclosure {
                 }
             };
             validate_text(&url, 4096)?;
+            if let Some(destination) = &preview.link_destination {
+                if !matches!(preview.source, WorkEvidenceSourceV1::NativeExtraction)
+                    || preview.role != "link"
+                    || preview.truncated
+                    || preview.text != *destination
+                    || preview.source_bytes != destination.len().to_string()
+                {
+                    return Err(WorkError::Invalid);
+                }
+                validate_text(destination, 2048)?;
+                urls.push(destination.clone());
+            }
             links.push(preview.link.clone());
             urls.push(url.clone());
             sources.push(WorkAgentSourceView {
                 key: sources.len() as u16,
+                acquired_by: match &preview.source {
+                    WorkEvidenceSourceV1::NativeExtraction => "native_browser",
+                    WorkEvidenceSourceV1::ProviderSearch { .. } => "provider_search",
+                },
                 title: if title.trim().is_empty() {
                     preview.origin.clone()
                 } else {
                     title
                 },
                 url,
+                link_destination: preview.link_destination.clone(),
                 text: preview.text.clone(),
                 truncated: preview.truncated,
             });
@@ -156,12 +177,9 @@ impl WorkAgentTurnDisclosure {
             .collect();
         let artifacts = artifacts
             .iter()
-            .map(|artifact| WorkAgentArtifactView {
-                key: 0,
-                title: artifact.title.clone(),
-                kind: artifact_kind(&artifact.data),
-                data: Some(artifact.data.clone()),
-                evidence: artifact
+            .enumerate()
+            .map(|(key, artifact)| {
+                let source_keys: Vec<_> = artifact
                     .evidence
                     .iter()
                     .map(|link| {
@@ -170,15 +188,28 @@ impl WorkAgentTurnDisclosure {
                             .position(|shown| shown == link)
                             .map(|i| i as u16)
                     })
-                    .collect(),
-            })
-            .enumerate()
-            .map(|(key, mut view)| {
-                view.key = key as u16;
-                view
+                    .collect();
+                let mut data = artifact.data.clone();
+                let complete = source_keys.iter().all(Option::is_some)
+                    && remap_citations(&mut data, |index| {
+                        source_keys
+                            .get(usize::from(index))
+                            .copied()
+                            .flatten()
+                            .ok_or(WorkAgentArtifactRefusal::UnknownEvidenceKey)
+                    })
+                    .is_ok();
+                WorkAgentArtifactView {
+                    key: key as u16,
+                    title: artifact.title.clone(),
+                    kind: artifact_kind(&artifact.data),
+                    data: complete.then_some(data),
+                    evidence: source_keys.into_iter().flatten().collect(),
+                }
             })
             .collect();
         let mut context = WorkAgentTurnContext {
+            citation_space: "source_keys",
             objective: objective.to_owned(),
             requested_pages: requested_pages(objective),
             decisions,
@@ -357,12 +388,33 @@ impl WorkAgentTurnDisclosure {
 
 fn requested_pages(objective: &str) -> Vec<String> {
     let mut pages = Vec::new();
-    for token in objective.split(|c: char| c.is_whitespace() || matches!(c, '"' | '<' | '>' | '`'))
-    {
-        let token = token.rsplit_once("](").map_or(token, |(_, url)| url);
-        let mut candidate = token.trim_start_matches(['(', '[']);
+    let mut consumed = 0;
+    for (start, _) in objective.match_indices("https://") {
+        if start < consumed {
+            continue;
+        }
+        let preceding = objective[..start].chars().next_back();
+        if preceding
+            .is_some_and(|c| !c.is_whitespace() && !matches!(c, '(' | '[' | '<' | '"' | '`'))
+        {
+            continue;
+        }
+        let tail = &objective[start..];
+        let end = tail
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '<' | '>' | '`'))
+            .unwrap_or(tail.len());
+        consumed = start + end;
+        let mut candidate = &tail[..end];
+        let delimited = matches!(preceding, Some('"' | '<' | '`'));
+        if !delimited {
+            // Prose punctuation outside brackets is not part of the enclosed URL.
+            if matches!(preceding, Some('(' | '[')) || !candidate.contains(['?', '#']) {
+                candidate = candidate.trim_end_matches(['.', ',', ';']);
+            }
+        }
         for (open, close) in [('(', ')'), ('[', ']')] {
-            while candidate.ends_with(close)
+            while !delimited
+                && candidate.ends_with(close)
                 && candidate.chars().filter(|c| *c == close).count()
                     > candidate.chars().filter(|c| *c == open).count()
             {
@@ -381,6 +433,50 @@ fn requested_pages(objective: &str) -> Vec<String> {
     }
     pages
 }
+
+#[cfg(test)]
+#[test]
+fn requested_page_punctuation_preserves_explicit_urls_and_query_bytes() {
+    for (objective, expected) in [
+        (
+            "Open https://example.test/catalog, then compare.",
+            "https://example.test/catalog",
+        ),
+        (
+            "Read https://example.test/catalog.",
+            "https://example.test/catalog",
+        ),
+        (
+            "Read [docs](https://example.test/a(b)).",
+            "https://example.test/a(b)",
+        ),
+        (
+            "Read `https://example.test/path,`",
+            "https://example.test/path,",
+        ),
+        (
+            "Read <https://example.test/path.)>",
+            "https://example.test/path.)",
+        ),
+        (
+            "Read https://example.test/?q=a,b,",
+            "https://example.test/?q=a,b,",
+        ),
+        (
+            "Read (https://example.test/?q=a,b,).",
+            "https://example.test/?q=a,b,",
+        ),
+        (
+            "Read https://example.test/?q=(https://other.test/a)",
+            "https://example.test/?q=(https://other.test/a)",
+        ),
+    ] {
+        assert_eq!(requested_pages(objective), [expected], "{objective}");
+    }
+    assert!(requested_pages("nothttps://example.test/a").is_empty());
+    assert!(requested_pages("Read https://example.test/#a.b.").is_empty());
+}
+
 /// Why one proposed object was refused; wording for the model is closed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkAgentArtifactRefusal {
@@ -402,7 +498,7 @@ impl WorkAgentArtifactRefusal {
 impl WorkAgentTurnDisclosure {
     fn resolve_artifact(
         &self,
-        artifact: WorkAgentArtifactOutput,
+        mut artifact: WorkAgentArtifactOutput,
     ) -> Result<WorkSynthesisArtifact, WorkAgentArtifactRefusal> {
         use WorkAgentArtifactRefusal as Refusal;
         validate_text(&artifact.title, 512).map_err(|_| Refusal::Malformed)?;
@@ -419,6 +515,19 @@ impl WorkAgentTurnDisclosure {
         {
             return Err(Refusal::UnknownEvidenceKey);
         }
+        remap_citations(&mut artifact.data, |key| {
+            if usize::from(key) >= self.links.len() {
+                return Err(Refusal::UnknownEvidenceKey);
+            }
+            if let Some(index) = artifact.evidence.iter().position(|source| *source == key) {
+                return Ok(index as u16);
+            }
+            if artifact.evidence.len() == 64 {
+                return Err(Refusal::Malformed);
+            }
+            artifact.evidence.push(key);
+            Ok((artifact.evidence.len() - 1) as u16)
+        })?;
         artifact
             .data
             .validate(artifact.evidence.len())
@@ -457,6 +566,46 @@ impl WorkAgentTurnDisclosure {
         })
     }
 }
+fn remap_citations(
+    data: &mut WorkArtifactDataV1,
+    mut map: impl FnMut(u16) -> Result<u16, WorkAgentArtifactRefusal>,
+) -> Result<(), WorkAgentArtifactRefusal> {
+    let mut remap = |keys: &mut Vec<u16>| -> Result<(), WorkAgentArtifactRefusal> {
+        for key in keys {
+            *key = map(*key)?;
+        }
+        Ok(())
+    };
+    match data {
+        WorkArtifactDataV1::ComparisonMatrix { cells, .. } => {
+            for cell in cells.iter_mut().flatten() {
+                remap(&mut cell.evidence)?;
+            }
+        }
+        WorkArtifactDataV1::Findings { items, .. } => {
+            for item in items {
+                remap(&mut item.evidence)?;
+            }
+        }
+        WorkArtifactDataV1::Chart { series, .. } => {
+            for point in series.iter_mut().flat_map(|series| &mut series.points) {
+                remap(&mut point.evidence)?;
+            }
+        }
+        WorkArtifactDataV1::EvidenceCollection { entries, .. } => {
+            for entry in entries {
+                entry.evidence = map(entry.evidence)?;
+            }
+        }
+        WorkArtifactDataV1::Document { .. }
+        | WorkArtifactDataV1::Table { .. }
+        | WorkArtifactDataV1::Comparison { .. }
+        | WorkArtifactDataV1::Checklist { .. }
+        | WorkArtifactDataV1::BrowserResourcePreview { .. } => {}
+    }
+    Ok(())
+}
+
 impl std::fmt::Debug for WorkAgentTurnDisclosure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("WorkAgentTurnDisclosure([redacted])")
@@ -480,6 +629,7 @@ pub fn artifact_kind(data: &WorkArtifactDataV1) -> &'static str {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkAgentArtifactOutput {
+    // All evidence values are source keys; only admitted artifacts use local indexes.
     pub title: String,
     pub data: WorkArtifactDataV1,
     pub evidence: Vec<u16>,

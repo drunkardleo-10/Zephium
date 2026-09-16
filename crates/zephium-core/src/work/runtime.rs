@@ -598,13 +598,20 @@ fn path_within(path: &str, prefix: &str) -> bool {
             && (prefix.ends_with('/') || path.as_bytes().get(prefix.len()) == Some(&b'/')))
 }
 pub(crate) fn validate_public_url(value: &str) -> Result<url::Url, WorkError> {
+    let url = validate_public_reference_url(value)?;
+    if url.fragment().is_some() {
+        return Err(WorkError::Invalid);
+    }
+    Ok(url)
+}
+
+pub(crate) fn validate_public_reference_url(value: &str) -> Result<url::Url, WorkError> {
     validate_text(value, 4096)?;
     let url = url::Url::parse(value).map_err(|_| WorkError::Invalid)?;
     if url.scheme() != "https"
         || url.host_str().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
-        || url.fragment().is_some()
     {
         return Err(WorkError::Invalid);
     }

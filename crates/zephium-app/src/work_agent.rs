@@ -52,6 +52,10 @@ pub enum WorkAgentDiagnostic {
     TurnRefused {
         turn: u8,
     },
+    ArtifactRefused {
+        turn: u8,
+        reason: zephium_core::work::agent::WorkAgentArtifactRefusal,
+    },
     CommitRefused {
         kind: &'static str,
         error: WorkError,
@@ -196,6 +200,7 @@ impl WorkAgentService {
             notices: Vec::new(),
             published: 0,
             finish_refusals: 0,
+            pending_output_repair: false,
         };
         let outcome = driver.drive(&attempt, &providers, &mut browser).await;
         let (status, usage) = match outcome {
@@ -245,6 +250,7 @@ struct Driver {
     notices: Vec<String>,
     published: usize,
     finish_refusals: u8,
+    pending_output_repair: bool,
 }
 
 enum Fetched {
@@ -475,7 +481,10 @@ impl Driver {
                 },
             );
             record.usage = Some(usage);
-            record.note = turn.as_ref().and_then(|turn| turn.say.clone());
+            record.note = turn
+                .as_ref()
+                .filter(|turn| !turn.finish)
+                .and_then(|turn| turn.say.clone());
             self.begin(record, vec![], None).await?;
             match &turn {
                 Some(turn) => self.report(WorkAgentDiagnostic::TurnAdmitted {
@@ -488,7 +497,7 @@ impl Driver {
                 }),
                 None => self.report(WorkAgentDiagnostic::TurnRefused { turn: self.turn }),
             }
-            let Some(turn) = turn else {
+            let Some(mut turn) = turn else {
                 self.failed_turns += 1;
                 if self.failed_turns >= 2 {
                     return Ok(WorkAttemptStatus::Failed);
@@ -496,7 +505,23 @@ impl Driver {
                 continue;
             };
             self.failed_turns = 0;
+            let proposed_artifacts = turn.artifacts.len() + turn.dropped;
+            let mut published_this_turn = 0;
+            turn.fetch.retain(|kind| {
+                if execution.steps.iter().any(|step| reuses_completed_read(kind, step)) {
+                    if self.notices.len() < 8 {
+                        self.notices.push("Repeated read skipped: this page and record schema already produced the cited canvas results shown in artifacts. Use those results, follow an observed source link_destination for missing details, or finish. No new browser work was dispatched.".into());
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
             for refusal in &turn.refusals {
+                self.report(WorkAgentDiagnostic::ArtifactRefused {
+                    turn: self.turn,
+                    reason: *refusal,
+                });
                 let notice = format!(
                     "A proposed object was refused last turn: it {}.",
                     refusal.notice()
@@ -529,6 +554,7 @@ impl Driver {
                     step.artifacts = artifacts.iter().map(|a| a.id).collect();
                     step.note = Some(publish_note(&artifacts));
                     self.published += artifacts.len();
+                    published_this_turn = artifacts.len();
                     self.begin(step, artifacts, None).await?;
                 }
             }
@@ -554,19 +580,25 @@ impl Driver {
                     return Ok(status);
                 }
             }
-            if turn.finish && self.published == 0 && self.finish_refusals < 2 {
-                // A research run is not finished until something is on the
-                // canvas; the model hears why and gets another turn.
+            if proposed_artifacts > 0 {
+                self.pending_output_repair = published_this_turn < proposed_artifacts;
+            }
+            if turn.finish && (self.published == 0 || self.pending_output_repair) {
+                if self.finish_refusals >= 2 {
+                    return Ok(WorkAttemptStatus::Failed);
+                }
                 self.finish_refusals += 1;
+                self.notices.truncate(7);
                 self.notices.push(
-                    "Finish was refused: nothing is on the canvas yet. Publish cited findings, subjects, or a comparison from the sources first, then finish."
+                    "Finish was refused: the requested result has not been published successfully. Repair the refused object using the existing sources and publish it before finishing. Earlier partial results do not replace that object."
                         .into(),
                 );
                 continue;
             }
             if turn.finish {
                 self.probe.record_activity(WorkActivityV1::Finishing);
-                let step = self.step(WorkStepKindV1::Finish, WorkStepStatus::Succeeded);
+                let mut step = self.step(WorkStepKindV1::Finish, WorkStepStatus::Succeeded);
+                step.note = turn.say;
                 self.begin(step, vec![], None).await?;
                 return Ok(WorkAttemptStatus::Succeeded);
             }
@@ -888,6 +920,7 @@ impl Driver {
             };
             let source_bytes = record.evidence.answer.len();
             self.keep_preview(WorkEvidencePreviewV1 {
+                link_destination: None,
                 version: 1,
                 link: WorkEvidenceLink {
                     extraction_id: record.id,
@@ -917,6 +950,36 @@ impl Driver {
             self.previews.remove(0);
         }
         self.previews.push(preview);
+    }
+}
+
+fn reuses_completed_read(request: &WorkStepKindV1, step: &WorkStepFact) -> bool {
+    if step.status != WorkStepStatus::Succeeded || step.artifacts.is_empty() {
+        return false;
+    }
+    match (request, &step.kind) {
+        (
+            WorkStepKindV1::Read { url, collection },
+            WorkStepKindV1::Read {
+                url: previous_url,
+                collection: previous,
+            },
+        ) if url == previous_url => match (collection, previous) {
+            (None, None) => true,
+            (Some(current), Some(previous)) => {
+                current.max_items == previous.max_items
+                    && current.columns.len() == previous.columns.len()
+                    && current.columns.iter().all(|column| {
+                        previous.columns.iter().any(|old| {
+                            old.name == column.name
+                                && old.value == column.value
+                                && old.required == column.required
+                        })
+                    })
+            }
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -1106,6 +1169,70 @@ async fn join_all<T>(mut futures: Vec<Pin<Box<dyn Future<Output = T> + Send + '_
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn repeated_read_reuses_results_but_failed_or_changed_requests_can_run() {
+        let collection = serde_json::from_value(serde_json::json!({
+            "title":"Products", "max_items":3, "columns":[
+                {"name":"price","required":false,"value":{"kind":"text"}}
+            ]
+        }))
+        .unwrap();
+        let request = WorkStepKindV1::Read {
+            url: "https://shop.example.test/catalog?q=sets".into(),
+            collection: Some(collection),
+        };
+        let mut step = WorkStepFact {
+            id: 1.into(),
+            turn: 1,
+            kind: request.clone(),
+            status: WorkStepStatus::Succeeded,
+            usage: Some(WorkUsage::default()),
+            artifacts: vec![1.into()],
+            evidence: None,
+            note: None,
+        };
+        assert!(reuses_completed_read(&request, &step));
+        let mut renamed = request.clone();
+        if let WorkStepKindV1::Read {
+            collection: Some(schema),
+            ..
+        } = &mut renamed
+        {
+            schema.title = "Compared products".into();
+        }
+        assert!(reuses_completed_read(&renamed, &step));
+        let mut changed_requirement = request.clone();
+        if let WorkStepKindV1::Read {
+            collection: Some(schema),
+            ..
+        } = &mut changed_requirement
+        {
+            schema.columns[0].required = true;
+        }
+        assert!(!reuses_completed_read(&changed_requirement, &step));
+        let mut stricter_previous = step.clone();
+        stricter_previous.kind = changed_requirement;
+        assert!(!reuses_completed_read(&request, &stricter_previous));
+        if let WorkStepKindV1::Read {
+            collection: Some(schema),
+            ..
+        } = &mut renamed
+        {
+            schema.max_items = 5;
+        }
+        assert!(!reuses_completed_read(&renamed, &step));
+        let mut changed_url = request.clone();
+        if let WorkStepKindV1::Read { url, .. } = &mut changed_url {
+            *url = "https://shop.example.test/catalog?q=other".into();
+        }
+        assert!(!reuses_completed_read(&changed_url, &step));
+        step.status = WorkStepStatus::Failed;
+        assert!(!reuses_completed_read(&request, &step));
+        step.status = WorkStepStatus::Succeeded;
+        step.artifacts.clear();
+        assert!(!reuses_completed_read(&request, &step));
+    }
+
     #[test]
     fn browser_previews_cover_later_artifacts_and_deduplicate_within_the_budget() {
         let artifact = |id: u128| WorkArtifactV1 {

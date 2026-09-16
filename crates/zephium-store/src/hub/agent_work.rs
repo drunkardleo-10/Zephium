@@ -501,6 +501,7 @@ pub(super) fn read_work_evidence(
         text,
         truncated,
         source_bytes: bytes.to_string(),
+        link_destination: source.link_destination().map(str::to_owned),
         source: zephium_core::work::artifact::WorkEvidenceSourceV1::NativeExtraction,
     })
 }

@@ -81,6 +81,7 @@ impl Hub {
                 let source_bytes = source.evidence.answer.len();
                 let text = source.evidence.citation_excerpt(usize::from(index))?;
                 return Ok(WorkReply::Evidence(WorkEvidencePreviewV1 {
+                    link_destination: None,
                     version: 1,
                     link: link.clone(),
                     origin: url::Url::parse(&citation.url)

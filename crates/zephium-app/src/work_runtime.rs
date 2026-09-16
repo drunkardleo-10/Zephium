@@ -34,6 +34,7 @@ impl Drop for Permit {
 /// selected textual fields through their own provider policy boundary.
 #[must_use]
 pub struct WorkNodeAttempt {
+    browser_session: zephium_agentic::WorkBrowserSession,
     basis_revision: Arc<Mutex<WorkRevision>>,
     owner: WorkRuntimeSessionId,
     progress: Arc<Mutex<Option<zephium_ipc::work::WorkSignalV1>>>,
@@ -106,6 +107,7 @@ impl WorkNodeAttempt {
     /// restart the attempt.
     pub fn probe(&self) -> WorkAttemptProbe {
         WorkAttemptProbe {
+            browser_session: self.browser_session.clone(),
             basis_revision: self.basis_revision.clone(),
             owner: self.owner,
             progress: self.progress.clone(),
@@ -355,6 +357,7 @@ impl WorkAttemptObserver {
 }
 #[derive(Clone)]
 pub struct WorkAttemptProbe {
+    browser_session: zephium_agentic::WorkBrowserSession,
     basis_revision: Arc<Mutex<WorkRevision>>,
     owner: WorkRuntimeSessionId,
     progress: Arc<Mutex<Option<zephium_ipc::work::WorkSignalV1>>>,
@@ -367,6 +370,9 @@ pub struct WorkAttemptProbe {
     deadline: Instant,
 }
 impl WorkAttemptProbe {
+    pub fn browser_session(&self) -> &zephium_agentic::WorkBrowserSession {
+        &self.browser_session
+    }
     pub fn profile(&self) -> ProfileId {
         self.profile
     }
@@ -434,7 +440,7 @@ impl WorkAttemptProbe {
                 }
             }
         }
-        Ok(!owned
+        let cancelled = !owned
             || state.interrupted.contains(&self.execution)
             || execution.status == WorkExecutionStatus::CancelRequested
             || execution.status.terminal()
@@ -443,7 +449,11 @@ impl WorkAttemptProbe {
                     attempt.status,
                     WorkAttemptStatus::Running | WorkAttemptStatus::Succeeded
                 )
-            }))
+            });
+        if cancelled {
+            self.browser_session.close();
+        }
+        Ok(cancelled)
     }
     pub(crate) async fn read_evidence(
         &self,
@@ -519,6 +529,7 @@ impl WorkAttemptProbe {
 }
 impl Drop for WorkNodeAttempt {
     fn drop(&mut self) {
+        self.browser_session.close();
         if let Ok(mut progress) = self.progress.lock() {
             progress.take();
         }
@@ -683,6 +694,7 @@ impl WorkRuntimeService {
             deadline.min(parent_deadline)
         });
         let owned = WorkNodeAttempt {
+            browser_session: zephium_agentic::WorkBrowserSession::new(profile, work, deadline),
             basis_revision: Arc::new(Mutex::new(projection.work.revision)),
             owner: projection
                 .owners

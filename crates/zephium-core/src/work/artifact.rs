@@ -34,6 +34,9 @@ pub struct WorkEvidencePreviewV1 {
     pub truncated: bool,
     /// Decimal byte count avoids JavaScript integer precision loss.
     pub source_bytes: String,
+    /// Exact archived link destination, distinct from the source page origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_destination: Option<String>,
     #[serde(default)]
     pub source: WorkEvidenceSourceV1,
 }
@@ -349,14 +352,14 @@ fn validate_subjects(
         }
         if let Some(homepage) = &subject.homepage {
             budget.text(homepage)?;
-            super::runtime::validate_public_url(homepage)?;
+            super::runtime::validate_public_reference_url(homepage)?;
         }
         if subject.image_candidates.len() > 3 {
             return Err(WorkError::Invalid);
         }
         for candidate in &subject.image_candidates {
             budget.text(candidate)?;
-            super::runtime::validate_public_url(candidate)?;
+            super::runtime::validate_public_reference_url(candidate)?;
         }
     }
     Ok(())

@@ -155,7 +155,7 @@ export type WorkActivityResponseV1 = {
 	error: WorkFailureV1 | null,
 };
 
-export type WorkActivityV1 = "planning" | "delegating" | "searching" | "reading" | "comparing" | "producing_artifact" | "waiting_for_approval" | "waiting_for_human" | "cancelling" | "finishing";
+export type WorkActivityV1 = "planning" | "delegating" | "searching" | "reading" | "interacting" | "verifying" | "recovering" | "comparing" | "producing_artifact" | "waiting_for_approval" | "waiting_for_human" | "cancelling" | "finishing";
 
 export type WorkAgentGrantV1 = {
 	provider: WorkSearchProvider,
@@ -309,6 +309,18 @@ export type WorkAuthoringReceipt = {
 
 export type WorkAuthoringStatus = "draft" | "needs_input" | "plan_ready";
 
+export type WorkBrowseCollection = {
+	title: string,
+	columns: WorkBrowseColumn[],
+	max_items: number,
+};
+
+export type WorkBrowseColumn = {
+	name: string,
+	value: WorkBrowseValue,
+	required: boolean,
+};
+
 export type WorkBrowseRoute = {
 	origin: string,
 	path_prefix: string,
@@ -323,6 +335,8 @@ export type WorkBrowseScope = {
 	routes: WorkBrowseRoute[],
 	max_hops: number,
 };
+
+export type WorkBrowseValue = { kind: "text" } | { kind: "money"; permitted_currencies: string[] } | { kind: "url" } | { kind: "image_url" };
 
 /**
  *  Durable document operations share a bounded, profile-checked transport.
@@ -795,7 +809,13 @@ export type WorkEvidenceLink = {
  *  Selected historical source content. This cannot restore a browser context,
  *  action reference, or execution authority. It remains untrusted source data.
  */
-export type WorkEvidencePreviewV1 = {
+export type WorkEvidencePreviewV1 = WorkEvidencePreviewV1_Serialize | WorkEvidencePreviewV1_Deserialize;
+
+/**
+ *  Selected historical source content. This cannot restore a browser context,
+ *  action reference, or execution authority. It remains untrusted source data.
+ */
+export type WorkEvidencePreviewV1_Deserialize = {
 	version: number,
 	link: WorkEvidenceLink,
 	origin: string,
@@ -804,7 +824,27 @@ export type WorkEvidencePreviewV1 = {
 	truncated: boolean,
 	/**  Decimal byte count avoids JavaScript integer precision loss. */
 	source_bytes: string,
+	/**  Exact archived link destination, distinct from the source page origin. */
+	link_destination?: string | null,
 	source?: WorkEvidenceSourceV1,
+};
+
+/**
+ *  Selected historical source content. This cannot restore a browser context,
+ *  action reference, or execution authority. It remains untrusted source data.
+ */
+export type WorkEvidencePreviewV1_Serialize = {
+	version: number,
+	link: WorkEvidenceLink,
+	origin: string,
+	role: string,
+	text: string,
+	truncated: boolean,
+	/**  Decimal byte count avoids JavaScript integer precision loss. */
+	source_bytes: string,
+	/**  Exact archived link destination, distinct from the source page origin. */
+	link_destination?: string | null,
+	source: WorkEvidenceSourceV1,
 };
 
 export type WorkEvidenceSourceV1 = { kind: "native_extraction" } | { kind: "provider_search"; provider: WorkSearchProvider; model: string; url: string; title: string; response_id: string; search_call_id: string };
@@ -1267,9 +1307,9 @@ export type WorkRelationOrigin = { kind: "user" } | { kind: "agent"; execution: 
 
 export type WorkReplyV1 = WorkReplyV1_Serialize | WorkReplyV1_Deserialize;
 
-export type WorkReplyV1_Deserialize = ({ kind: "public_read_admitted"; projection: WorkRuntimeProjection_Deserialize; receipt: WorkCommandReceipt; replayed: boolean }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "environment"; reply: WorkEnvironmentReply_Deserialize }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "approval_draft"; work: WorkId; expected_revision: WorkRevision; spec: WorkExecutionSpec_Deserialize }) & { error?: never; evidence?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; works?: never } | ({ kind: "projection"; projection: WorkRuntimeProjection_Deserialize }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "authoring_applied"; receipt: WorkAuthoringReceipt }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "execution_applied"; projection: WorkRuntimeProjection_Deserialize; receipt: WorkCommandReceipt }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "evidence"; evidence: WorkEvidencePreviewV1 }) & { error?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "snapshot"; snapshot: WorkSnapshot_Deserialize }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; spec?: never; work?: never; works?: never } | ({ kind: "plan"; plan: WorkPlanRevision_Deserialize }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "plan_history"; revisions: WorkRevision[] }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "page"; works: WorkSummary[]; next: WorkId | null }) & { error?: never; evidence?: never; expected_revision?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never } | ({ kind: "error"; error: WorkFailureV1 }) & { evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never };
+export type WorkReplyV1_Deserialize = ({ kind: "public_read_admitted"; projection: WorkRuntimeProjection_Deserialize; receipt: WorkCommandReceipt; replayed: boolean }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "environment"; reply: WorkEnvironmentReply_Deserialize }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "approval_draft"; work: WorkId; expected_revision: WorkRevision; spec: WorkExecutionSpec_Deserialize }) & { error?: never; evidence?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; works?: never } | ({ kind: "projection"; projection: WorkRuntimeProjection_Deserialize }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "authoring_applied"; receipt: WorkAuthoringReceipt }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "execution_applied"; projection: WorkRuntimeProjection_Deserialize; receipt: WorkCommandReceipt }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "evidence"; evidence: WorkEvidencePreviewV1_Deserialize }) & { error?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "snapshot"; snapshot: WorkSnapshot_Deserialize }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; spec?: never; work?: never; works?: never } | ({ kind: "plan"; plan: WorkPlanRevision_Deserialize }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "plan_history"; revisions: WorkRevision[] }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "page"; works: WorkSummary[]; next: WorkId | null }) & { error?: never; evidence?: never; expected_revision?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never } | ({ kind: "error"; error: WorkFailureV1 }) & { evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never };
 
-export type WorkReplyV1_Serialize = ({ kind: "public_read_admitted"; projection: WorkRuntimeProjection_Serialize; receipt: WorkCommandReceipt; replayed: boolean }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "environment"; reply: WorkEnvironmentReply_Serialize }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "approval_draft"; work: WorkId; expected_revision: WorkRevision; spec: WorkExecutionSpec_Serialize }) & { error?: never; evidence?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; works?: never } | ({ kind: "projection"; projection: WorkRuntimeProjection_Serialize }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "authoring_applied"; receipt: WorkAuthoringReceipt }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "execution_applied"; projection: WorkRuntimeProjection_Serialize; receipt: WorkCommandReceipt }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "evidence"; evidence: WorkEvidencePreviewV1 }) & { error?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "snapshot"; snapshot: WorkSnapshot_Serialize }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; spec?: never; work?: never; works?: never } | ({ kind: "plan"; plan: WorkPlanRevision_Serialize }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "plan_history"; revisions: WorkRevision[] }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "page"; works: WorkSummary[]; next: WorkId | null }) & { error?: never; evidence?: never; expected_revision?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never } | ({ kind: "error"; error: WorkFailureV1 }) & { evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never };
+export type WorkReplyV1_Serialize = ({ kind: "public_read_admitted"; projection: WorkRuntimeProjection_Serialize; receipt: WorkCommandReceipt; replayed: boolean }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "environment"; reply: WorkEnvironmentReply_Serialize }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "approval_draft"; work: WorkId; expected_revision: WorkRevision; spec: WorkExecutionSpec_Serialize }) & { error?: never; evidence?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; works?: never } | ({ kind: "projection"; projection: WorkRuntimeProjection_Serialize }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "authoring_applied"; receipt: WorkAuthoringReceipt }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "execution_applied"; projection: WorkRuntimeProjection_Serialize; receipt: WorkCommandReceipt }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "evidence"; evidence: WorkEvidencePreviewV1_Serialize }) & { error?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "snapshot"; snapshot: WorkSnapshot_Serialize }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; spec?: never; work?: never; works?: never } | ({ kind: "plan"; plan: WorkPlanRevision_Serialize }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "plan_history"; revisions: WorkRevision[] }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "page"; works: WorkSummary[]; next: WorkId | null }) & { error?: never; evidence?: never; expected_revision?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never } | ({ kind: "error"; error: WorkFailureV1 }) & { evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never };
 
 /**
  *  Closed product reply grammar: the host-only RuntimeStarted reply cannot
@@ -1493,15 +1533,15 @@ export type WorkStepKindV1 = WorkStepKindV1_Serialize | WorkStepKindV1_Deseriali
 
 export type WorkStepKindV1_Deserialize =
 /**  One model turn; `note` on the step is what the agent said. */
-({ kind: "turn" }) & { answer?: never; options?: never; prompt?: never; query?: never; url?: never } | ({ kind: "search"; query: string }) & { answer?: never; options?: never; prompt?: never; url?: never } | ({ kind: "read"; url: string }) & { answer?: never; options?: never; prompt?: never; query?: never } | ({ kind: "discover"; query: string }) & { answer?: never; options?: never; prompt?: never; url?: never } |
+({ kind: "turn" }) & { answer?: never; collection?: never; options?: never; prompt?: never; query?: never; url?: never } | ({ kind: "search"; query: string }) & { answer?: never; collection?: never; options?: never; prompt?: never; url?: never } | ({ kind: "read"; url: string; collection?: WorkBrowseCollection | null }) & { answer?: never; options?: never; prompt?: never; query?: never } | ({ kind: "discover"; query: string; collection?: WorkBrowseCollection | null }) & { answer?: never; options?: never; prompt?: never; url?: never } |
 /**  Objects the agent placed on the canvas from this turn. */
-({ kind: "publish" }) & { answer?: never; options?: never; prompt?: never; query?: never; url?: never } | ({ kind: "ask"; prompt: string; options: string[]; answer?: string | null }) & { query?: never; url?: never } | ({ kind: "finish" }) & { answer?: never; options?: never; prompt?: never; query?: never; url?: never };
+({ kind: "publish" }) & { answer?: never; collection?: never; options?: never; prompt?: never; query?: never; url?: never } | ({ kind: "ask"; prompt: string; options: string[]; answer?: string | null }) & { collection?: never; query?: never; url?: never } | ({ kind: "finish" }) & { answer?: never; collection?: never; options?: never; prompt?: never; query?: never; url?: never };
 
 export type WorkStepKindV1_Serialize =
 /**  One model turn; `note` on the step is what the agent said. */
-({ kind: "turn" }) & { answer?: never; options?: never; prompt?: never; query?: never; url?: never } | ({ kind: "search"; query: string }) & { answer?: never; options?: never; prompt?: never; url?: never } | ({ kind: "read"; url: string }) & { answer?: never; options?: never; prompt?: never; query?: never } | ({ kind: "discover"; query: string }) & { answer?: never; options?: never; prompt?: never; url?: never } |
+({ kind: "turn" }) & { answer?: never; collection?: never; options?: never; prompt?: never; query?: never; url?: never } | ({ kind: "search"; query: string }) & { answer?: never; collection?: never; options?: never; prompt?: never; url?: never } | ({ kind: "read"; url: string; collection?: WorkBrowseCollection | null }) & { answer?: never; options?: never; prompt?: never; query?: never } | ({ kind: "discover"; query: string; collection?: WorkBrowseCollection | null }) & { answer?: never; options?: never; prompt?: never; url?: never } |
 /**  Objects the agent placed on the canvas from this turn. */
-({ kind: "publish" }) & { answer?: never; options?: never; prompt?: never; query?: never; url?: never } | ({ kind: "ask"; prompt: string; options: string[]; answer?: string | null }) & { query?: never; url?: never } | ({ kind: "finish" }) & { answer?: never; options?: never; prompt?: never; query?: never; url?: never };
+({ kind: "publish" }) & { answer?: never; collection?: never; options?: never; prompt?: never; query?: never; url?: never } | ({ kind: "ask"; prompt: string; options: string[]; answer?: string | null }) & { collection?: never; query?: never; url?: never } | ({ kind: "finish" }) & { answer?: never; collection?: never; options?: never; prompt?: never; query?: never; url?: never };
 
 export type WorkStepStatus = "running" | "succeeded" | "failed" | "cancelled" | "outcome_unknown";
 

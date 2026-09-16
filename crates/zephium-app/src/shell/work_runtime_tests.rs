@@ -485,6 +485,9 @@ async fn runtime_application_approves_exact_plan_settles_artifact_and_recovers_d
     )
     .await
     .unwrap();
+    let browser_session = attempt.probe().browser_session().clone();
+    assert_eq!(browser_session.id(), attempt.probe().browser_session().id());
+    assert!(browser_session.admits(profile, work));
     assert_eq!(attempt.node().objective, plan.draft.nodes[0].objective);
     assert!(attempt.deadline() > Instant::now());
     assert!(attempt.dependency_artifacts().is_empty());
@@ -531,6 +534,10 @@ async fn runtime_application_approves_exact_plan_settles_artifact_and_recovers_d
     let completed = drive(&mut shell, &queue, attempt.settle(result))
         .await
         .unwrap();
+    assert!(
+        !browser_session.is_current(),
+        "settlement revokes retained probe clones"
+    );
     assert_eq!(completed.executions[0].status, WorkExecutionStatus::Running);
     assert_eq!(completed.executions[0].artifacts.len(), 1);
     let mut missing_output = completed.executions[0].clone();
@@ -619,8 +626,11 @@ async fn runtime_application_approves_exact_plan_settles_artifact_and_recovers_d
     )
     .await
     .unwrap();
+    let abandoned_session = attempt.probe().browser_session().clone();
+    assert_ne!(abandoned_session.id(), browser_session.id());
     let dropped = attempt.attempt();
     drop(attempt);
+    assert!(!abandoned_session.is_current());
     let state = drive(
         &mut shell,
         &queue,
@@ -671,3 +681,148 @@ async fn runtime_application_approves_exact_plan_settles_artifact_and_recovers_d
 
 #[path = "work_search_tests.rs"]
 mod search_tests;
+
+#[tokio::test]
+async fn rejected_final_output_cannot_finish_on_earlier_partial_artifacts() {
+    use crate::work_agent::*;
+    use zephium_core::work::{agent::*, search::*, synthesis::*};
+    struct Turns(std::sync::atomic::AtomicUsize);
+    impl WorkAgentTurnProvider for Turns {
+        fn turn<'a>(
+            &'a self,
+            input: &'a WorkAgentTurnDisclosure,
+            _: WorkSynthesisTrace,
+        ) -> WorkAgentTurnFuture<'a> {
+            Box::pin(async move {
+                let turn = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                assert!(turn < 4, "bounded repair attempts");
+                if turn > 1 {
+                    assert!(input
+                        .context()
+                        .notices
+                        .iter()
+                        .any(|notice| notice.starts_with("Finish was refused:")));
+                }
+                Ok(WorkAgentTurnResult {
+                    output: WorkAgentTurnOutput {
+                        say: Some("Completed the final comparison".into()),
+                        artifacts: if turn == 1 {
+                            vec![WorkAgentArtifactOutput {
+                                title: "Refused final output".into(),
+                                data: WorkArtifactDataV1::Document {
+                                    paragraphs: vec!["Unsupported result".into()],
+                                    formatted: None,
+                                },
+                                evidence: vec![],
+                            }]
+                        } else {
+                            vec![]
+                        },
+                        fetch: if turn == 0 {
+                            vec![WorkAgentFetch::Read {
+                                url: "https://example.test/catalog".into(),
+                                collection: None,
+                            }]
+                        } else {
+                            vec![]
+                        },
+                        ask: None,
+                        finish: turn > 0,
+                    },
+                    usage: WorkUsage::default(),
+                })
+            })
+        }
+    }
+    struct NoSearch;
+    impl WorkPublicSearchProvider for NoSearch {
+        fn search<'a>(
+            &'a self,
+            _: &'a WorkPublicSearchScope,
+            _: &'a [zephium_core::work::context::WorkContextBody],
+            _: WorkExecutionLimits,
+        ) -> WorkPublicSearchFuture<'a> {
+            panic!("repair must not dispatch a search");
+        }
+    }
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let create = handle
+        .work_document(WorkIntent::Create {
+            objective: "Read https://example.test/catalog and compare the results".into(),
+        })
+        .unwrap();
+    let work = create.work_id().unwrap();
+    drive(&mut shell, &queue, create).await.unwrap();
+    let provider = Turns(std::sync::atomic::AtomicUsize::new(0));
+    let service = WorkAgentService::new(handle);
+    let result = drive(
+        &mut shell,
+        &queue,
+        service.run(
+            profile,
+            WorkCommandV1 {
+                version: 1,
+                work,
+                expected_revision: WorkRevision::INITIAL,
+                command: WorkCommandId::generate(),
+                intent: WorkRuntimeIntent::BeginAgent {
+                    grant: WorkAgentGrantV1 {
+                        provider: WorkSearchProvider::OpenAi,
+                        model: PUBLIC_SEARCH_MODEL.into(),
+                        max_turns: 8,
+                        max_steps: 24,
+                        browse_hops: 1,
+                    },
+                    limits: WorkExecutionLimits {
+                        model_tokens: 100_000,
+                        cost_micro_usd: 100_000,
+                        operations: 32,
+                        timeout_seconds: 30,
+                        max_workers: 1,
+                    },
+                },
+            },
+            None,
+            WorkAgentProviders {
+                turn: &provider,
+                search: &NoSearch,
+            },
+            |_, request| async move {
+                Ok(WorkBrowserOutcome {
+                    status: WorkStepStatus::Succeeded,
+                    usage: Some(WorkUsage::default()),
+                    intervention: None,
+                    artifacts: vec![WorkArtifactDraft {
+                        output: request.output,
+                        title: "Earlier partial result".into(),
+                        evidence: vec![WorkEvidenceLink {
+                            extraction_id: WorkArtifactId::from(100),
+                            source_id: 1,
+                        }],
+                        data: WorkArtifactDataV1::Document {
+                            paragraphs: vec!["Partial page data".into()],
+                            formatted: None,
+                        },
+                    }],
+                })
+            },
+            |_| {},
+        ),
+    )
+    .await
+    .unwrap();
+    let execution = &result.executions[0];
+    assert_eq!(execution.artifacts.len(), 1);
+    assert_eq!(execution.status, WorkExecutionStatus::Failed);
+    assert!(!execution
+        .steps
+        .iter()
+        .any(|step| matches!(step.kind, WorkStepKindV1::Finish)));
+    assert!(execution
+        .steps
+        .iter()
+        .filter(|step| step.turn > 1)
+        .all(|step| step.note.as_deref() != Some("Completed the final comparison")));
+    assert_eq!(provider.0.load(std::sync::atomic::Ordering::SeqCst), 4);
+}

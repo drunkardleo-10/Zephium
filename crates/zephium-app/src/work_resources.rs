@@ -351,7 +351,7 @@ impl WorkResourceOwner {
         policy: zephium_agentic::WorkBrowserDocumentPolicy,
         now: AgentPolicyInstant,
     ) -> Result<PendingLifecycle, Refusal> {
-        self.construct_isolated(id, context, storage, target, policy, false, now)
+        self.construct_isolated(id, context, storage, target, policy, false, None, now)
     }
     #[allow(clippy::too_many_arguments)]
     fn construct_isolated(
@@ -362,6 +362,7 @@ impl WorkResourceOwner {
         target: ContextNavigationTarget,
         policy: zephium_agentic::WorkBrowserDocumentPolicy,
         isolated_public: bool,
+        anonymous_session: Option<zephium_agentic::WorkBrowserSession>,
         now: AgentPolicyInstant,
     ) -> Result<PendingLifecycle, Refusal> {
         if !self.shared.global_current() {
@@ -376,6 +377,12 @@ impl WorkResourceOwner {
             isolated_public,
             now,
         )?;
+        let request = match anonymous_session {
+            Some(session) => request
+                .with_anonymous_session(session)
+                .map_err(|_| Refusal::Uncertain)?,
+            None => request,
+        };
         let (request, mut health) = request
             .track_resource_health()
             .map_err(|_| Refusal::Uncertain)?;

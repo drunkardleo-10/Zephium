@@ -176,3 +176,45 @@ test.each(["unknown", "refused"] as const)(
     session.dispose();
   },
 );
+
+test("live browser phases render from the current attempt and disappear on completion", async () => {
+  const session = new WorkSession("profile");
+  session.selected = "objective";
+  const execution = agentRun("running");
+  execution.steps = execution.steps?.slice(0, 2);
+  session.projection = {
+    ...structuredClone(projection),
+    executions: [execution],
+    owners: [{ execution: execution.id, owner: "owner" }],
+  };
+  const screen = await render(WorkInteraction, { session, ondetails: vi.fn() });
+  for (const [activity, label] of [
+    ["interacting", "Interacting with the page"],
+    ["verifying", "Checking the result"],
+    ["recovering", "Recovering the browser"],
+  ] as const) {
+    session.activity = [
+      {
+        version: 1,
+        owner: "owner",
+        profile: session.projection.work.profile,
+        work: session.projection.work.id,
+        basis_revision: session.projection.work.revision,
+        execution: execution.id,
+        attempt: "attempt",
+        node: "node",
+        activity,
+      },
+    ];
+    await expect.element(screen.getByText(label, { exact: true })).toBeVisible();
+  }
+  session.projection = {
+    ...session.projection,
+    executions: [{ ...execution, status: "needs_review" }],
+  };
+  await expect
+    .element(screen.getByText("Recovering the browser", { exact: true }))
+    .not.toBeInTheDocument();
+  await screen.unmount();
+  session.dispose();
+});

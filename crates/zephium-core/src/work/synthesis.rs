@@ -389,6 +389,7 @@ mod tests {
             presentation: WorkArtifactPresentationV1::Automatic,
         };
         let preview = WorkEvidencePreviewV1 {
+            link_destination: None,
             source: super::super::artifact::WorkEvidenceSourceV1::NativeExtraction,
             version: 1,
             link,
