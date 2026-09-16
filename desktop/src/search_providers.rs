@@ -153,7 +153,7 @@ pub(super) fn schedule(
                                 kind: "note".into(),
                                 title: item.title,
                                 detail: "Note".into(),
-                                favicon: None,
+                                icon: None,
                                 action: SearchAction::OpenNote { id: item.id },
                             })
                             .collect();
@@ -277,7 +277,7 @@ fn parse_suggestions(bytes: &[u8], query: &str) -> Vec<SearchResult> {
                 kind: "suggestion".into(),
                 title: phrase.into(),
                 detail: "DuckDuckGo".into(),
-                favicon: None,
+                icon: None,
                 action: SearchAction::OpenUrl {
                     url: url.to_string(),
                 },

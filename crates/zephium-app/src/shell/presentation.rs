@@ -217,10 +217,18 @@ impl Shell {
             self.cancel_exact_pending_presentation(id, navigation);
             return;
         };
-        let projection =
-            self.presentation_tab_view(id, tab, self.favicon_key(tab, self.profile_of_item(id)));
+        let projection = self.presentation_tab_view(
+            id,
+            tab,
+            self.icon_ref(
+                zephium_ipc::IconSurface::Chrome,
+                tab,
+                self.profile_of_item(id),
+            ),
+        );
         let projection_revision = projection.projection_revision.clone();
         self.record_tab_projection_revision(id, &projection_revision);
+        self.publish_icons();
         let active = self.windows.focused().and_then(|window| window.active);
         let Some(queue) = self.self_queue.clone() else {
             let synchronous_projection = projection.clone();

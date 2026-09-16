@@ -58,6 +58,7 @@ impl Shell {
         results.completion = self.search_completion(&results.query, &results.results);
         results.pending = self.search.pending.is_some() || self.search.supplementary_pending;
         self.search.results = results.results.clone();
+        self.publish_icons();
         (self.emit)(Projection::Search(results));
     }
 
@@ -121,7 +122,7 @@ impl Shell {
             .filter(|result| {
                 result.title.len() <= 1024
                     && result.detail.len() <= 1024
-                    && result.favicon.is_none()
+                    && result.icon.is_none()
                     && match &result.action {
                         SearchAction::OpenNote { id } => {
                             result.kind == "note" && zephium_core::resources::valid_id(id)
@@ -151,10 +152,31 @@ impl Shell {
         if !self.search_context_current(&context) {
             return;
         }
+        // A launcher panel is created fresh each time it opens, so a new
+        // session id means its raster cache is empty again.
+        let reopened = !context.session_id.starts_with("newtab:")
+            && self
+                .search
+                .context
+                .as_ref()
+                .is_none_or(|current| current.session_id != context.session_id);
+        if reopened {
+            self.forget_delivered_icons(zephium_ipc::IconSurface::Panel);
+        }
         self.search.supplementary_pending = !query.trim().is_empty();
         self.search.query = query.to_owned();
         self.search.context = Some(context);
         self.search(query);
+    }
+
+    /// Search results reach New Tab through chrome and the launcher through
+    /// the panel, so their icons must be delivered to the same webview.
+    fn search_surface(&self) -> zephium_ipc::IconSurface {
+        if self.search_is_newtab() {
+            zephium_ipc::IconSurface::Chrome
+        } else {
+            zephium_ipc::IconSurface::Panel
+        }
     }
 
     /// The bound surface is New Tab rather than the floating launcher.
@@ -327,9 +349,13 @@ impl Shell {
             results.extend(
                 tabs.iter()
                     .filter_map(|id| {
-                        self.items
-                            .tab(*id)
-                            .map(|t| tab_result(*id, t, self.favicon_key(t, Some(profile))))
+                        self.items.tab(*id).map(|t| {
+                            tab_result(
+                                *id,
+                                t,
+                                self.icon_ref(self.search_surface(), t, Some(profile)),
+                            )
+                        })
                     })
                     .take(4),
             );
@@ -346,11 +372,13 @@ impl Shell {
                 .iter()
                 .filter_map(|(_, t)| t.url.as_ref().map(ToString::to_string))
                 .collect();
-            results.extend(
-                matched
-                    .iter()
-                    .map(|(id, t)| tab_result(*id, t, self.favicon_key(t, Some(profile)))),
-            );
+            results.extend(matched.iter().map(|(id, t)| {
+                tab_result(
+                    *id,
+                    t,
+                    self.icon_ref(self.search_surface(), t, Some(profile)),
+                )
+            }));
 
             if let Some(url) = (scope == SearchScope::All)
                 .then(|| {
@@ -370,7 +398,7 @@ impl Shell {
                             .map_or(self.search.engine, |(engine, _)| engine)
                             .name()
                             .into(),
-                        favicon: None,
+                        icon: None,
                         action: SearchAction::OpenUrl {
                             url: url.to_string(),
                         },
@@ -380,7 +408,7 @@ impl Shell {
                         kind: "url".into(),
                         title: format!("Open {url}"),
                         detail: "New Tab".into(),
-                        favicon: self.favicon_key_for_url(profile, url.as_str()),
+                        icon: self.icon_ref_for_url(self.search_surface(), profile, url.as_str()),
                         action: SearchAction::OpenUrl {
                             url: url.to_string(),
                         },
@@ -403,7 +431,7 @@ impl Shell {
                         kind: "command".into(),
                         title: c.title.into(),
                         detail: c.accelerator.unwrap_or_default().into(),
-                        favicon: None,
+                        icon: None,
                         action: SearchAction::RunCommand { id: c.id.into() },
                     }),
             );
@@ -526,7 +554,7 @@ impl Shell {
                     title
                 },
                 detail: hit.url.clone(),
-                favicon: self.favicon_key_for_url(profile, &hit.url),
+                icon: self.icon_ref_for_url(self.search_surface(), profile, &hit.url),
                 action: SearchAction::OpenUrl { url: hit.url },
             });
         }
@@ -540,7 +568,7 @@ impl Shell {
     }
 }
 
-fn tab_result(id: ItemId, tab: &TabState, favicon: Option<String>) -> SearchResult {
+fn tab_result(id: ItemId, tab: &TabState, icon: Option<zephium_ipc::IconRef>) -> SearchResult {
     let detail = tab
         .url
         .as_ref()
@@ -550,7 +578,7 @@ fn tab_result(id: ItemId, tab: &TabState, favicon: Option<String>) -> SearchResu
         kind: "tab".into(),
         title: tab.title.clone(),
         detail,
-        favicon,
+        icon,
         action: SearchAction::ActivateTab { id: id.to_string() },
     }
 }

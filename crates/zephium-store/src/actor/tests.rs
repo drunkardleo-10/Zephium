@@ -6650,7 +6650,7 @@ fn best_effort_actor_calls_remain_bounded_at_a_full_queue() {
         None
     );
     assert_eq!(
-        store.fresh_favicon_raster(ProfileId::from(1), "https://example.com", 7 * 24 * 3600),
+        store.favicon_raster_with_age(ProfileId::from(1), "https://example.com"),
         None
     );
     assert!(start.elapsed() < Duration::from_secs(1));
@@ -6762,11 +6762,9 @@ fn favicons_roundtrip_with_age() {
     let (ct, stored) = hub.favicon_bytes(profile, origin).unwrap();
     assert_eq!(ct.as_deref(), Some(zephium_core::icon::RGBA32_MIME));
     assert_eq!(stored, bytes);
-    assert_eq!(
-        hub.fresh_favicon_raster(profile, origin, 7 * 24 * 3600),
-        Some(bytes.clone())
-    );
-    assert_eq!(hub.fresh_favicon_raster(profile, origin, -1), None);
+    let (raster, age) = hub.favicon_raster_with_age(profile, origin).unwrap();
+    assert_eq!(raster, bytes);
+    assert!(age < 5);
 
     hub.save_favicon(profile, "https://example.com/path", None, &rgba());
     hub.save_favicon(profile, "https://invalid.example", None, &[1, 2, 3]);
@@ -6775,7 +6773,7 @@ fn favicons_roundtrip_with_age() {
 
     assert_eq!(hub.favicon_bytes(ProfileId::from(99), origin), None);
     assert_eq!(
-        hub.fresh_favicon_raster(ProfileId::from(99), origin, 3600),
+        hub.favicon_raster_with_age(ProfileId::from(99), origin),
         None
     );
 }

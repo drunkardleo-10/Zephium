@@ -56,7 +56,7 @@ impl Hub {
                 "DELETE FROM favicons WHERE origin IN (
                      SELECT origin FROM favicons
                      ORDER BY fetched_at DESC, origin
-                     LIMIT -1 OFFSET 512
+                     LIMIT -1 OFFSET 1024
                  )",
                 [],
             )?;
@@ -103,35 +103,34 @@ impl Hub {
         Some((Some(RGBA32_MIME.to_owned()), bytes))
     }
 
-    pub(crate) fn fresh_favicon_raster(
+    pub(crate) fn favicon_raster_with_age(
         &mut self,
         profile: ProfileId,
         origin: &str,
-        max_age_seconds: i64,
-    ) -> Option<Vec<u8>> {
+    ) -> Option<(Vec<u8>, i64)> {
         if !self.registry.contains(&profile)
             || self.degraded_profiles.contains(&profile)
             || !valid_favicon_origin(origin)
-            || max_age_seconds < 0
         {
             return None;
         }
-        let oldest = now_secs().saturating_sub(max_age_seconds);
-        let bytes = self
+        let now = now_secs();
+        let (bytes, fetched_at) = self
             .profile_conn(profile)
             .ok()?
             .query_row(
-                "SELECT CASE WHEN length(icon) <= ?3 THEN icon END
+                "SELECT CASE WHEN length(icon) <= ?2 THEN icon END, fetched_at
                  FROM favicons
-                 WHERE origin = ?1 AND fetched_at >= ?2",
-                params![origin, oldest, RGBA32_BYTES as i64],
-                |row| row.get::<_, Option<Vec<u8>>>(0),
+                 WHERE origin = ?1",
+                params![origin, RGBA32_BYTES as i64],
+                |row| Ok((row.get::<_, Option<Vec<u8>>>(0)?, row.get::<_, i64>(1)?)),
             )
             .optional()
             .ok()
-            .flatten()??;
+            .flatten()?;
+        let bytes = bytes?;
         validated_rgba32(&bytes)?;
-        Some(bytes)
+        Some((bytes, now.saturating_sub(fetched_at)))
     }
 }
 

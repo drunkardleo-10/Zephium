@@ -39,6 +39,8 @@ pub enum StoreReadResult {
         profile: ProfileId,
         origin: String,
         rgba: Option<Vec<u8>>,
+        /// The stored copy is older than the refresh window, or absent.
+        stale: bool,
     },
     FaviconBatch {
         generation: u64,
@@ -530,15 +532,19 @@ fn run_with(
                 profile,
                 origin,
             } => {
-                let rgba = store
-                    .fresh_favicon_raster(profile, &origin, FAVICON_CACHE_MAX_AGE_SECONDS)
-                    .filter(|bytes| icon::validated_rgba32(bytes).is_some());
+                let stored = store
+                    .favicon_raster_with_age(profile, &origin)
+                    .filter(|(bytes, _)| icon::validated_rgba32(bytes).is_some());
+                let stale = stored
+                    .as_ref()
+                    .is_none_or(|(_, age)| *age > FAVICON_CACHE_MAX_AGE_SECONDS);
                 StoreReadResult::Favicon {
                     generation,
                     id,
                     profile,
                     origin,
-                    rgba,
+                    rgba: stored.map(|(bytes, _)| bytes),
+                    stale,
                 }
             }
             Request::FaviconBatch {

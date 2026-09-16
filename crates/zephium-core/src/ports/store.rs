@@ -832,19 +832,13 @@ pub trait Store {
     );
     fn favicon_bytes(&self, profile: ProfileId, origin: &str) -> Option<(Option<String>, Vec<u8>)>;
 
-    /// Loads one already-decoded favicon only when it is no older than
-    /// `max_age_seconds`. Actor-backed adapters should implement this as one
-    /// bounded query rather than an age RPC followed by a bytes RPC.
-    fn fresh_favicon_raster(
-        &self,
-        profile: ProfileId,
-        origin: &str,
-        max_age_seconds: i64,
-    ) -> Option<Vec<u8>> {
-        if max_age_seconds < 0 || self.favicon_age(profile, origin)? > max_age_seconds {
-            return None;
-        }
-        self.favicon_bytes(profile, origin).map(|(_, bytes)| bytes)
+    /// Loads one already-decoded favicon with the age of the stored copy.
+    /// Age decides whether to refresh, never whether to display: an old
+    /// raster is still the right thing to draw while a newer one is fetched.
+    fn favicon_raster_with_age(&self, profile: ProfileId, origin: &str) -> Option<(Vec<u8>, i64)> {
+        let age = self.favicon_age(profile, origin)?;
+        self.favicon_bytes(profile, origin)
+            .map(|(_, bytes)| (bytes, age))
     }
 
     /// Loads already-decoded favicon rasters for a bounded authoritative set

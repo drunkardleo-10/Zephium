@@ -58,7 +58,7 @@ fn search_ranks_tabs_primary_action_commands_and_history() {
     ));
     // Page-derived image delivery stays absent until a sandboxed broker
     // exists; search projections must not recreate the old protocol URL.
-    assert!(last.results[1].favicon.is_none());
+    assert!(last.results[1].icon.is_none());
 
     shell.handle(Command::Search("reload".into()));
     let last = seen.lock().unwrap().last().unwrap().clone();
@@ -296,7 +296,7 @@ fn late_providers_extend_their_own_section_without_reordering_the_list() {
             kind: "note".into(),
             title: "Example note".into(),
             detail: "Note".into(),
-            favicon: None,
+            icon: None,
             action: SearchAction::OpenNote {
                 id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
             },
@@ -309,7 +309,7 @@ fn late_providers_extend_their_own_section_without_reordering_the_list() {
             kind: "suggestion".into(),
             title: "example domain".into(),
             detail: "DuckDuckGo".into(),
-            favicon: None,
+            icon: None,
             action: SearchAction::OpenUrl {
                 url: "https://duckduckgo.com/?q=example+domain".into(),
             },
@@ -366,7 +366,7 @@ fn one_talkative_provider_cannot_starve_the_other_sections() {
                 kind: "note".into(),
                 title: format!("Example note {index}"),
                 detail: "Note".into(),
-                favicon: None,
+                icon: None,
                 action: SearchAction::OpenNote {
                     id: format!("01ARZ3NDEKTSV4RRFFQ69G5FA{index}"),
                 },

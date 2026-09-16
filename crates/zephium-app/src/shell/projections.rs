@@ -489,6 +489,7 @@ impl Shell {
         }
         self.project_blocker_status();
         if let Some(snapshot) = self.items_snapshot() {
+            self.publish_icons();
             (self.emit)(Projection::Items(snapshot));
         }
     }
@@ -638,6 +639,7 @@ impl Shell {
         if let Some(tab) = self.items.tab(id) {
             let projection = self.generic_tab_view(id, tab, profile);
             self.record_tab_projection_revision(id, &projection.projection_revision);
+            self.publish_icons();
             (self.emit)(Projection::Tab(projection));
         }
     }
@@ -671,7 +673,11 @@ impl Shell {
     }
 
     fn generic_tab_view(&self, id: ItemId, tab: &TabState, profile: Option<ProfileId>) -> TabView {
-        let mut view = self.presentation_tab_view(id, tab, self.favicon_key(tab, profile));
+        let mut view = self.presentation_tab_view(
+            id,
+            tab,
+            self.icon_ref(zephium_ipc::IconSurface::Chrome, tab, profile),
+        );
         if self
             .presentation
             .deferred_first_content_layout
@@ -685,7 +691,7 @@ impl Shell {
             view.loading = false;
             view.can_go_back = false;
             view.can_go_forward = false;
-            view.favicon = None;
+            view.icon = None;
         }
         view
     }
@@ -694,9 +700,9 @@ impl Shell {
         &self,
         id: ItemId,
         tab: &TabState,
-        favicon: Option<String>,
+        icon: Option<zephium_ipc::IconRef>,
     ) -> TabView {
-        let mut view = tab_view(id, tab, favicon, self.next_projection_revision());
+        let mut view = tab_view(id, tab, icon, self.next_projection_revision());
         if self.crash.presentations.contains(&id) {
             view.title = "Page crashed".into();
         }
@@ -715,23 +721,24 @@ impl Shell {
         next
     }
 
-    // Chrome receives only a fixed-shape raster value; it never constructs a
-    // page-controlled image URL or invokes a privileged image decoder.
-    pub(super) fn favicon_key(&self, tab: &TabState, profile: Option<ProfileId>) -> Option<String> {
+    pub(super) fn icon_ref(
+        &self,
+        surface: zephium_ipc::IconSurface,
+        tab: &TabState,
+        profile: Option<ProfileId>,
+    ) -> Option<zephium_ipc::IconRef> {
         let origin = tab.url.as_ref().and_then(origin_of)?;
-        self.favicon_key_for(profile?, &origin)
+        self.icon_ref_for(surface, profile?, &origin)
     }
 
-    fn favicon_key_for(&self, profile: ProfileId, origin: &str) -> Option<String> {
-        self.favicons
-            .icon_values
-            .get(&(profile, origin.to_owned()))
-            .cloned()
-    }
-
-    pub(super) fn favicon_key_for_url(&self, profile: ProfileId, url: &str) -> Option<String> {
+    pub(super) fn icon_ref_for_url(
+        &self,
+        surface: zephium_ipc::IconSurface,
+        profile: ProfileId,
+        url: &str,
+    ) -> Option<zephium_ipc::IconRef> {
         let parsed = url::Url::parse(url).ok()?;
-        self.favicon_key_for(profile, &origin_of(&parsed)?)
+        self.icon_ref_for(surface, profile, &origin_of(&parsed)?)
     }
 }
 
@@ -874,7 +881,12 @@ fn runtime_security_advisory_view(
     }
 }
 
-fn tab_view(id: ItemId, tab: &TabState, favicon: Option<String>, revision: u128) -> TabView {
+fn tab_view(
+    id: ItemId,
+    tab: &TabState,
+    icon: Option<zephium_ipc::IconRef>,
+    revision: u128,
+) -> TabView {
     TabView {
         id: id.to_string(),
         projection_revision: format!("{revision:032x}"),
@@ -883,6 +895,6 @@ fn tab_view(id: ItemId, tab: &TabState, favicon: Option<String>, revision: u128)
         loading: tab.loading,
         can_go_back: tab.can_go_back,
         can_go_forward: tab.can_go_forward,
-        favicon,
+        icon,
     }
 }

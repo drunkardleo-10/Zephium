@@ -1724,17 +1724,10 @@ impl Store for FakeStore {
                 )
             })
     }
-    fn fresh_favicon_raster(
-        &self,
-        profile: ProfileId,
-        origin: &str,
-        max_age_seconds: i64,
-    ) -> Option<Vec<u8>> {
-        self.favicon_age(profile, origin)
-            .is_some_and(|age| age <= max_age_seconds)
-            .then(|| self.favicon_bytes(profile, origin))
-            .flatten()
-            .map(|(_, bytes)| bytes)
+    fn favicon_raster_with_age(&self, profile: ProfileId, origin: &str) -> Option<(Vec<u8>, i64)> {
+        let age = self.favicon_age(profile, origin)?;
+        self.favicon_bytes(profile, origin)
+            .map(|(_, bytes)| (bytes, age))
     }
     fn pending_profile_deletions(&self) -> ProfileDeletionLoad {
         self.pending_deletion_load_calls
@@ -1923,6 +1916,7 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         Projection::ExtensionDistribution(_) => {}
         Projection::ExtensionRuntimeGrantPrompt(_) => {}
         Projection::PagePermissionPrompt(_) => {}
+        Projection::Favicons(_) => {}
         Projection::PanelOwner(_) => {}
         Projection::UiCommand(_) => {}
         Projection::Search(_) => {}
@@ -1968,6 +1962,41 @@ fn setup_with_extension_lifecycle(
 
 fn setup() -> (Shell, Arc<FakeEngine>, Screen) {
     setup_with(Arc::new(FakeStore::default()))
+}
+
+type IconLog = Arc<Mutex<Vec<zephium_ipc::FaviconsView>>>;
+
+/// Records the raster deltas chrome would receive alongside the usual screen.
+fn setup_with_icon_log(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen, IconLog) {
+    let engine = Arc::new(FakeEngine::default());
+    let screen: Screen = Arc::new(Mutex::new(ItemsState {
+        projection_revision: String::new(),
+        profile: None,
+        spaces: Vec::new(),
+        active_space_id: None,
+        nodes: Vec::new(),
+        tabs: Vec::new(),
+        active: None,
+        split_group: None,
+    }));
+    let icons: IconLog = Arc::new(Mutex::new(Vec::new()));
+    let sink = screen.clone();
+    let icon_sink = icons.clone();
+    let mut shell = Shell::new_with_extension_lifecycle(
+        engine.clone(),
+        store,
+        Arc::new(ImmediateAllowAllCompiler),
+        clean_extension_lifecycle(),
+        Arc::new(FakeChrome),
+        Box::new(move |p| {
+            if let Projection::Favicons(view) = &p {
+                icon_sink.lock().unwrap().push(view.clone());
+            }
+            apply_projection(&mut sink.lock().unwrap(), p);
+        }),
+    );
+    shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+    (shell, engine, screen, icons)
 }
 
 fn setup_with_async_chrome() -> (Shell, Arc<FakeEngine>, Arc<AsyncChrome>, Screen) {

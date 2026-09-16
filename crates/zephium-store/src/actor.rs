@@ -759,7 +759,7 @@ enum Cmd {
     RecordSearch(ProfileId, String, String),
     RecentHistory(ProfileId, u32, Sender<Vec<HistoryHit>>),
     FaviconAge(ProfileId, String, Sender<Option<i64>>),
-    FreshFaviconRaster(ProfileId, String, i64, Sender<Option<Vec<u8>>>),
+    FaviconRasterWithAge(ProfileId, String, Sender<Option<(Vec<u8>, i64)>>),
     SaveFavicon(ProfileId, String, Option<String>, Vec<u8>),
     FaviconBytes(ProfileId, String, Sender<Option<(Option<String>, Vec<u8>)>>),
     FaviconRasters(ProfileId, Vec<String>, Sender<Vec<(String, Vec<u8>)>>),
@@ -2876,23 +2876,13 @@ impl Store for SqliteStore {
         rx.recv_timeout(STORE_RPC_TIMEOUT).ok().flatten()
     }
 
-    fn fresh_favicon_raster(
-        &self,
-        profile: ProfileId,
-        origin: &str,
-        max_age_seconds: i64,
-    ) -> Option<Vec<u8>> {
-        if !hub::valid_favicon_origin(origin) || max_age_seconds < 0 {
+    fn favicon_raster_with_age(&self, profile: ProfileId, origin: &str) -> Option<(Vec<u8>, i64)> {
+        if !hub::valid_favicon_origin(origin) {
             return None;
         }
         let (tx, rx) = mpsc::channel();
         self.tx
-            .try_send(Cmd::FreshFaviconRaster(
-                profile,
-                origin.into(),
-                max_age_seconds,
-                tx,
-            ))
+            .try_send(Cmd::FaviconRasterWithAge(profile, origin.into(), tx))
             .ok()?;
         rx.recv_timeout(STORE_RPC_TIMEOUT).ok().flatten()
     }
@@ -3594,8 +3584,8 @@ fn actor(
             Some(Cmd::FaviconAge(profile, origin, reply)) => {
                 let _ = reply.send(hub.favicon_age(profile, &origin));
             }
-            Some(Cmd::FreshFaviconRaster(profile, origin, max_age_seconds, reply)) => {
-                let _ = reply.send(hub.fresh_favicon_raster(profile, &origin, max_age_seconds));
+            Some(Cmd::FaviconRasterWithAge(profile, origin, reply)) => {
+                let _ = reply.send(hub.favicon_raster_with_age(profile, &origin));
             }
             Some(Cmd::SaveFavicon(profile, origin, content_type, bytes)) => {
                 hub.save_favicon(profile, &origin, content_type.as_deref(), &bytes);

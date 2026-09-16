@@ -18,7 +18,41 @@ pub struct TabView {
     pub loading: bool,
     pub can_go_back: bool,
     pub can_go_forward: bool,
-    pub favicon: Option<String>,
+    pub icon: Option<IconRef>,
+}
+
+/// Names a cached site icon without carrying its pixels. Chrome keeps rasters
+/// by origin and repaints only when `revision` changes, so a projection costs
+/// a short string per tab instead of a five-kilobyte raster.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct IconRef {
+    pub origin: String,
+    pub revision: String,
+}
+
+/// One site icon: canonical base64 of exactly 32x32 RGBA bytes. Chrome never
+/// decodes a page-controlled image format.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct FaviconEntry {
+    pub origin: String,
+    pub revision: String,
+    pub rgba: String,
+}
+
+/// Which privileged webview a raster is destined for. Each keeps its own
+/// cache, so delivery is tracked per surface rather than broadcast.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum IconSurface {
+    Chrome,
+    Panel,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct FaviconsView {
+    pub surface: IconSurface,
+    pub profile_id: String,
+    pub entries: Vec<FaviconEntry>,
 }
 
 /// Non-authorizing identity for one live extension runtime. Privileged chrome
@@ -570,7 +604,7 @@ pub struct SearchResult {
     pub kind: String,
     pub title: String,
     pub detail: String,
-    pub favicon: Option<String>,
+    pub icon: Option<IconRef>,
     pub action: SearchAction,
 }
 
@@ -992,6 +1026,7 @@ pub enum Projection {
     PanelOwner(PanelOwner),
     Items(ItemsState),
     Tab(TabView),
+    Favicons(FaviconsView),
     ExtensionActions(ExtensionActionsView),
     ExtensionActionFailed(ExtensionActionFailedView),
     ExtensionActionShortcut(ExtensionActionShortcutView),

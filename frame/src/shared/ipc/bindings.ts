@@ -142,6 +142,7 @@ export const events = {
 	extensionManagementAvailabilityChanged: makeEvent<ExtensionManagementAvailabilityChanged>("extension-management-availability-changed"),
 	extensionManagementChanged: makeEvent<ExtensionManagementChanged>("extension-management-changed"),
 	extensionRuntimeGrantPromptChanged: makeEvent<ExtensionRuntimeGrantPromptChanged>("extension-runtime-grant-prompt-changed"),
+	faviconsChanged: makeEvent<FaviconsChanged>("favicons-changed"),
 	itemsChanged: makeEvent<ItemsChanged>("items-changed"),
 	layoutChanged: makeEvent<LayoutChanged>("layout-changed"),
 	noteOpenRequested: makeEvent<NoteOpenRequested>("note-open-requested"),
@@ -680,6 +681,40 @@ export type ExtensionUpdateConsentView = {
 	limitations: ExtensionManagementLimitationView[],
 };
 
+/**
+ *  One site icon: canonical base64 of exactly 32x32 RGBA bytes. Chrome never
+ *  decodes a page-controlled image format.
+ */
+export type FaviconEntry = {
+	origin: string,
+	revision: string,
+	rgba: string,
+};
+
+export type FaviconsChanged = FaviconsView;
+
+export type FaviconsView = {
+	surface: IconSurface,
+	profile_id: string,
+	entries: FaviconEntry[],
+};
+
+/**
+ *  Names a cached site icon without carrying its pixels. Chrome keeps rasters
+ *  by origin and repaints only when `revision` changes, so a projection costs
+ *  a short string per tab instead of a five-kilobyte raster.
+ */
+export type IconRef = {
+	origin: string,
+	revision: string,
+};
+
+/**
+ *  Which privileged webview a raster is destined for. Each keeps its own
+ *  cache, so delivery is tracked per surface rather than broadcast.
+ */
+export type IconSurface = "chrome" | "panel";
+
 export type ItemsChanged = ItemsState;
 
 export type ItemsState = {
@@ -1018,7 +1053,7 @@ export type SearchResult = {
 	kind: string,
 	title: string,
 	detail: string,
-	favicon: string | null,
+	icon: IconRef | null,
 	action: SearchAction,
 };
 
@@ -1091,7 +1126,7 @@ export type TabView = {
 	loading: boolean,
 	can_go_back: boolean,
 	can_go_forward: boolean,
-	favicon: string | null,
+	icon: IconRef | null,
 };
 
 export type ToolKind = "notes" | "tasks" | "ai" | "history" | "downloads" | "time";

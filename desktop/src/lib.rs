@@ -131,6 +131,7 @@ const APPEARANCE_DARK: u8 = 2;
 
 const EVENT_ITEMS: &str = "zephium:items";
 const EVENT_TAB: &str = "zephium:tab";
+const EVENT_FAVICONS: &str = "zephium:favicons";
 const EVENT_EXTENSION_ACTIONS: &str = "zephium:extension-actions";
 const EVENT_EXTENSION_ACTION_FAILED: &str = "zephium:extension-action-failed";
 const EVENT_EXTENSION_ACTION_SHORTCUT: &str = "zephium:extension-action-shortcut";
@@ -1303,6 +1304,9 @@ struct ItemsChanged(zephium_ipc::ItemsState);
 struct TabChanged(zephium_ipc::TabView);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct FaviconsChanged(zephium_ipc::FaviconsView);
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct ExtensionActionsChanged(zephium_ipc::ExtensionActionsView);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
@@ -1588,6 +1592,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         ])
         .events(collect_events![
             ItemsChanged,
+            FaviconsChanged,
             ResourceChanged,
             NoteOpenRequested,
             TabChanged,
@@ -4791,6 +4796,15 @@ pub fn run() {
                 Projection::Tab(tab) => {
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_TAB, &tab)
                 }
+                Projection::Favicons(favicons) => emit_to_privileged(
+                    &emit_handle,
+                    match favicons.surface {
+                        zephium_ipc::IconSurface::Chrome => MAIN_LABEL,
+                        zephium_ipc::IconSurface::Panel => overlay::PANEL_LABEL,
+                    },
+                    EVENT_FAVICONS,
+                    &favicons,
+                ),
                 Projection::ExtensionActions(actions) => emit_to_privileged(
                     &emit_handle,
                     MAIN_LABEL,
