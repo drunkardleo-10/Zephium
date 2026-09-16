@@ -827,12 +827,13 @@ pub trait Store {
     /// Prefix search over the profile's history FTS index, deduped by url,
     /// most recent first.
     fn search_history(&self, profile: ProfileId, query: &str, limit: u32) -> Vec<HistoryHit>;
-    /// One page of visits, newest first, optionally narrowed by a query.
-    /// `before` is the id of the last visit already seen.
+    /// One page of visits, newest first, optionally narrowed by a query and by
+    /// `since`. `before` is the id of the last visit already seen.
     fn history_page(
         &self,
         profile: ProfileId,
         query: &str,
+        since: Option<i64>,
         before: Option<i64>,
         limit: u32,
     ) -> Vec<HistoryVisit>;

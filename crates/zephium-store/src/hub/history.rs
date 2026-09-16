@@ -191,6 +191,7 @@ impl Hub {
         &mut self,
         profile: ProfileId,
         query: &str,
+        since: Option<i64>,
         before: Option<i64>,
         limit: u32,
     ) -> Vec<HistoryVisit> {
@@ -213,6 +214,7 @@ impl Hub {
         };
         let limit = limit.min(MAX_HISTORY_PAGE);
         let before = before.unwrap_or(i64::MAX);
+        let since = since.unwrap_or(i64::MIN);
         let Ok(conn) = self.profile_conn(profile) else {
             return Vec::new();
         };
@@ -221,6 +223,7 @@ impl Hub {
              FROM history_fts f JOIN history h ON h.id = f.rowid
              WHERE history_fts MATCH ?4
                AND h.id < ?1
+               AND h.visited_at >= ?6
                AND length(CAST(h.url AS BLOB)) <= ?2
                AND length(CAST(h.title AS BLOB)) <= ?3
              ORDER BY h.id DESC
@@ -229,6 +232,7 @@ impl Hub {
             "SELECT id, url, title, visited_at
              FROM history
              WHERE id < ?1
+               AND visited_at >= ?6
                AND length(CAST(url AS BLOB)) <= ?2
                AND length(CAST(title AS BLOB)) <= ?3
              ORDER BY id DESC
@@ -242,7 +246,8 @@ impl Hub {
             MAX_URL_BYTES as i64,
             MAX_TITLE_BYTES as i64,
             fts.as_deref().unwrap_or_default(),
-            limit
+            limit,
+            since
         ];
         stmt.query_map(params, |row| {
             Ok(HistoryVisit {

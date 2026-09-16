@@ -758,13 +758,15 @@ enum Cmd {
     SearchHistory(ProfileId, String, u32, Sender<Vec<HistoryHit>>),
     RecordSearch(ProfileId, String, String),
     RecentHistory(ProfileId, u32, Sender<Vec<HistoryHit>>),
-    HistoryPage(
-        ProfileId,
-        String,
-        Option<i64>,
-        u32,
-        Sender<Vec<HistoryVisit>>,
-    ),
+    // Two adjacent Option<i64> bounds mean different things; name them.
+    HistoryPage {
+        profile: ProfileId,
+        query: String,
+        since: Option<i64>,
+        before: Option<i64>,
+        limit: u32,
+        reply: Sender<Vec<HistoryVisit>>,
+    },
     ForgetHistoryUrls(ProfileId, Vec<String>, Sender<u32>),
     ClearHistory(ProfileId, Option<i64>, Sender<u32>),
     AmendVisitTitle(ProfileId, String, String),
@@ -2956,6 +2958,7 @@ impl Store for SqliteStore {
         &self,
         profile: ProfileId,
         query: &str,
+        since: Option<i64>,
         before: Option<i64>,
         limit: u32,
     ) -> Vec<HistoryVisit> {
@@ -2965,13 +2968,14 @@ impl Store for SqliteStore {
         let (tx, rx) = mpsc::channel();
         if self
             .tx
-            .try_send(Cmd::HistoryPage(
+            .try_send(Cmd::HistoryPage {
                 profile,
-                query.to_owned(),
+                query: query.to_owned(),
+                since,
                 before,
-                limit.min(hub::MAX_HISTORY_PAGE),
-                tx,
-            ))
+                limit: limit.min(hub::MAX_HISTORY_PAGE),
+                reply: tx,
+            })
             .is_err()
         {
             return Vec::new();
@@ -3651,8 +3655,15 @@ fn actor(
                 hits.truncate(limit as usize);
                 let _ = reply.send(hits);
             }
-            Some(Cmd::HistoryPage(profile, query, before, limit, reply)) => {
-                let _ = reply.send(hub.history_page(profile, &query, before, limit));
+            Some(Cmd::HistoryPage {
+                profile,
+                query,
+                since,
+                before,
+                limit,
+                reply,
+            }) => {
+                let _ = reply.send(hub.history_page(profile, &query, since, before, limit));
             }
             Some(Cmd::ForgetHistoryUrls(profile, urls, reply)) => {
                 let _ = reply.send(hub.forget_history_urls(profile, &urls));

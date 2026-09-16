@@ -629,6 +629,9 @@ pub enum HistoryCall {
     /// seconds cross as decimal strings; JavaScript never parses a Rust i64.
     Page {
         query: String,
+        /// How far back the list reaches. The same scope Clear operates on,
+        /// so clearing removes exactly what the reader is looking at.
+        range: HistoryRange,
         before: Option<String>,
         limit: u16,
     },
@@ -672,6 +675,7 @@ impl HistoryCall {
                 query,
                 before,
                 limit,
+                ..
             } => {
                 query.len() <= MAX_HISTORY_QUERY_BYTES
                     && *limit > 0

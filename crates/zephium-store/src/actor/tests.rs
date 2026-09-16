@@ -8700,7 +8700,7 @@ fn history_pages_every_visit_newest_first_without_gaps_or_repeats() {
     let mut seen = Vec::new();
     let mut cursor = None;
     loop {
-        let page = hub.history_page(profile, "", cursor, 10);
+        let page = hub.history_page(profile, "", None, cursor, 10);
         if page.is_empty() {
             break;
         }
@@ -8724,7 +8724,7 @@ fn history_page_narrows_by_query_and_keeps_repeat_visits() {
     hub.record_visit(profile, "https://example.com/docs", "Documentation");
     hub.record_visit(profile, "https://other.example/news", "Headlines");
 
-    let page = hub.history_page(profile, "documentation", None, 10);
+    let page = hub.history_page(profile, "documentation", None, None, 10);
     assert_eq!(
         page.len(),
         2,
@@ -8734,7 +8734,7 @@ fn history_page_narrows_by_query_and_keeps_repeat_visits() {
         .iter()
         .all(|visit| visit.url == "https://example.com/docs"));
     assert!(hub
-        .history_page(profile, "documentation", None, 0)
+        .history_page(profile, "documentation", None, None, 0)
         .is_empty());
 }
 
@@ -8800,14 +8800,44 @@ fn a_title_published_after_the_url_commits_replaces_the_placeholder() {
 
     hub.amend_visit_title(profile, "https://example.com/article", "The Real Headline");
 
-    let page = hub.history_page(profile, "", None, 10);
+    let page = hub.history_page(profile, "", None, None, 10);
     assert_eq!(page[0].title, "The Real Headline");
     assert_eq!(hub.search_history(profile, "headline", 10).len(), 1);
 
     hub.backdate_history(profile, 300);
     hub.amend_visit_title(profile, "https://example.com/article", "Too Late");
     assert_eq!(
-        hub.history_page(profile, "", None, 10)[0].title,
+        hub.history_page(profile, "", None, None, 10)[0].title,
         "The Real Headline"
+    );
+}
+
+#[test]
+fn a_scoped_history_page_reaches_back_only_as_far_as_its_range() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    hub.record_visit(profile, "https://old.example/page", "Ancient");
+    hub.backdate_history(profile, 3 * 24 * 3600);
+    hub.record_visit(profile, "https://new.example/page", "Recent");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    let everything = hub.history_page(profile, "", None, None, 10);
+    let last_hour = hub.history_page(profile, "", Some(now - 3600), None, 10);
+
+    assert_eq!(everything.len(), 2);
+    assert_eq!(last_hour.len(), 1, "a scoped page must not reach past it");
+    assert_eq!(last_hour[0].url, "https://new.example/page");
+
+    // The scope applies to a narrowed list too, not just the unfiltered one.
+    assert!(hub
+        .history_page(profile, "ancient", Some(now - 3600), None, 10)
+        .is_empty());
+    assert_eq!(
+        hub.history_page(profile, "ancient", None, None, 10).len(),
+        1
     );
 }

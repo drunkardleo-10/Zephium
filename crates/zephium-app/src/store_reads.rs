@@ -21,6 +21,12 @@ const MAX_SEARCH_QUERY_BYTES: usize = 4 * 1024;
 const MAX_CONSECUTIVE_EXTENSION_HISTORY_READS: usize = 4;
 pub(crate) const FAVICON_CACHE_MAX_AGE_SECONDS: i64 = 7 * 24 * 3600;
 
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64)
+}
+
 #[derive(Clone, Debug)]
 pub enum StoreReadResult {
     History {
@@ -582,13 +588,16 @@ fn run_with(
             } => match call {
                 zephium_ipc::HistoryCall::Page {
                     query,
+                    range,
                     before,
                     limit,
                 } => {
                     let before = before
                         .as_deref()
                         .and_then(|cursor| cursor.parse::<i64>().ok());
-                    let visits = store.history_page(profile, &query, before, u32::from(limit));
+                    let since = range.window_seconds().map(|window| now_secs() - window);
+                    let visits =
+                        store.history_page(profile, &query, since, before, u32::from(limit));
                     // A full page implies there may be more; a short one is the end.
                     let next = (visits.len() == usize::from(limit))
                         .then(|| visits.last().map(|visit| visit.id))
@@ -609,13 +618,7 @@ fn run_with(
                     removed: Some(store.forget_history_urls(profile, &urls)),
                 },
                 zephium_ipc::HistoryCall::Clear { range } => {
-                    let since = range.window_seconds().map(|window| {
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|elapsed| elapsed.as_secs() as i64)
-                            .unwrap_or(0)
-                            .saturating_sub(window)
-                    });
+                    let since = range.window_seconds().map(|window| now_secs() - window);
                     StoreReadResult::HistorySurface {
                         token,
                         profile,

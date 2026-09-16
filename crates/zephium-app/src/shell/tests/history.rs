@@ -26,8 +26,13 @@ fn taken(answer: &Answer) -> HistoryResponse {
 }
 
 fn page(query: &str, limit: u16) -> HistoryCall {
+    scoped(query, limit, HistoryRange::Everything)
+}
+
+fn scoped(query: &str, limit: u16, range: HistoryRange) -> HistoryCall {
     HistoryCall::Page {
         query: query.into(),
+        range,
         before: None,
         limit,
     }
@@ -153,7 +158,7 @@ fn forgetting_an_address_reports_what_it_removed() {
         taken(&answer),
         HistoryResponse::Removed { count: 1 }
     ));
-    assert_eq!(store.history_page(profile, "", None, 50).len(), 1);
+    assert_eq!(store.history_page(profile, "", None, None, 50).len(), 1);
 }
 
 #[test]
@@ -177,7 +182,7 @@ fn clearing_everything_empties_the_list() {
         taken(&answer),
         HistoryResponse::Removed { count: 2 }
     ));
-    assert!(store.history_page(profile, "", None, 50).is_empty());
+    assert!(store.history_page(profile, "", None, None, 50).is_empty());
 }
 
 #[test]
@@ -189,7 +194,7 @@ fn a_title_published_after_the_url_commits_reaches_recorded_history() {
     // The visit was recorded when the URL committed, before the document had a
     // title of its own.
     assert_eq!(
-        store.history_page(profile, "", None, 1)[0].title,
+        store.history_page(profile, "", None, None, 1)[0].title,
         "article.example"
     );
 
@@ -199,7 +204,7 @@ fn a_title_published_after_the_url_commits_reaches_recorded_history() {
     }));
 
     assert_eq!(
-        store.history_page(profile, "", None, 1)[0].title,
+        store.history_page(profile, "", None, None, 1)[0].title,
         "The Real Headline"
     );
 }
@@ -323,5 +328,25 @@ fn degraded_storage_reports_itself_rather_than_looking_empty() {
             }
         ),
         "an unusable store must not present itself as an empty history"
+    );
+}
+
+#[test]
+fn the_range_the_reader_picks_narrows_the_list_it_is_looking_at() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, screen, queue) = browsed(store.clone());
+    visit(&mut shell, &screen, "recent.example");
+    let profile = shell.windows.focused().unwrap().profile;
+
+    // Every recorded visit is older than the window.
+    let answer = dispatch(&mut shell, profile, scoped("", 50, HistoryRange::Hour));
+    drain_reads(&mut shell, store, queue);
+
+    let HistoryResponse::Page { visits, .. } = taken(&answer) else {
+        panic!("the reader answers with a page")
+    };
+    assert!(
+        visits.is_empty(),
+        "a scoped request must reach the store's range bound: {visits:?}"
     );
 }

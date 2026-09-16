@@ -714,7 +714,12 @@ export type HistoryCall =
  *  `before` is the id of the last visit already seen. Row ids and unix
  *  seconds cross as decimal strings; JavaScript never parses a Rust i64.
  */
-{ kind: "page"; query: string; before: string | null; limit: number } | { kind: "forget"; urls: string[] } | { kind: "clear"; range: HistoryRange };
+{ kind: "page"; query: string; 
+/**
+ *  How far back the list reaches. The same scope Clear operates on,
+ *  so clearing removes exactly what the reader is looking at.
+ */
+range: HistoryRange; before: string | null; limit: number } | { kind: "forget"; urls: string[] } | { kind: "clear"; range: HistoryRange };
 
 export type HistoryError = "invalid" | "unavailable" | "capacity";
 

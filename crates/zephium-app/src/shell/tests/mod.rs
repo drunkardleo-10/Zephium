@@ -1696,6 +1696,7 @@ impl Store for FakeStore {
         &self,
         _profile: ProfileId,
         query: &str,
+        since: Option<i64>,
         before: Option<i64>,
         limit: u32,
     ) -> Vec<zephium_core::ports::store::HistoryVisit> {
@@ -1706,6 +1707,7 @@ impl Store for FakeStore {
             .iter()
             .rev()
             .filter(|visit| before.is_none_or(|cursor| visit.id < cursor))
+            .filter(|visit| since.is_none_or(|floor| visit.visited_at >= floor))
             .filter(|visit| {
                 needle.is_empty()
                     || visit.title.to_lowercase().contains(&needle)
