@@ -133,9 +133,9 @@
     "description": "Measured 328183 JS bytes with the agent run operation, step labels, and the agent line on the canvas card in the shared graph."
   },
   "lazy:features/work/components/WorkCanvas.svelte": {
-    "js": 536000,
-    "css": 112000,
-    "description": "Measured 532576 JS bytes with the source card and agent worker avatars in the node graph."
+    "js": 540000,
+    "css": 116000,
+    "description": "Measured 535681 JS and 113096 CSS bytes with page cards and subject facts in the node graph."
   },
   "lazy:shared/ui/data/Chart/Chart.svelte": {
     "js": 415000,
