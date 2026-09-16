@@ -16,6 +16,7 @@ use zephium_core::{icon, navigation};
 use crate::{CallbackHandle, Command, SharedStore};
 
 const MAX_PENDING_FAVICON_READS: usize = 64;
+const MAX_PENDING_HISTORY_CALLS: usize = 8;
 const MAX_SEARCH_QUERY_BYTES: usize = 4 * 1024;
 const MAX_CONSECUTIVE_EXTENSION_HISTORY_READS: usize = 4;
 pub(crate) const FAVICON_CACHE_MAX_AGE_SECONDS: i64 = 7 * 24 * 3600;
@@ -49,6 +50,13 @@ pub enum StoreReadResult {
         origins: Vec<String>,
         rasters: Vec<(String, Vec<u8>)>,
     },
+    HistorySurface {
+        token: u64,
+        profile: ProfileId,
+        visits: Vec<zephium_core::ports::store::HistoryVisit>,
+        next: Option<i64>,
+        removed: Option<u32>,
+    },
 }
 
 enum Request {
@@ -74,6 +82,11 @@ enum Request {
         space: SpaceId,
         origins: Vec<String>,
     },
+    HistorySurface {
+        token: u64,
+        profile: ProfileId,
+        call: zephium_ipc::HistoryCall,
+    },
 }
 
 struct State {
@@ -82,6 +95,7 @@ struct State {
     in_flight: bool,
     consecutive_extension_history_reads: usize,
     history: Option<Request>,
+    history_calls: VecDeque<Request>,
     extension_history: HashMap<
         (
             zephium_core::extensions::ExtensionRuntimeInstance,
@@ -106,6 +120,7 @@ impl Default for State {
             in_flight: false,
             consecutive_extension_history_reads: 0,
             history: None,
+            history_calls: VecDeque::new(),
             extension_history: HashMap::new(),
             extension_history_order: VecDeque::new(),
             favicon_batch: None,
@@ -156,6 +171,37 @@ impl StoreReadQueue {
             generation,
             profile,
             query,
+        });
+        self.inner.ready.notify_one();
+        true
+    }
+
+    /// Queues one history-surface request. Unlike launcher input these are not
+    /// latest-value: each carries a completion the caller is waiting on.
+    pub(crate) fn request_history_call(
+        &self,
+        token: u64,
+        profile: ProfileId,
+        call: zephium_ipc::HistoryCall,
+    ) -> bool {
+        if !call.validate() {
+            return false;
+        }
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.stopped
+            || !state.accepting
+            || state.history_calls.len() >= MAX_PENDING_HISTORY_CALLS
+        {
+            return false;
+        }
+        state.history_calls.push_back(Request::HistorySurface {
+            token,
+            profile,
+            call,
         });
         self.inner.ready.notify_one();
         true
@@ -347,6 +393,7 @@ impl StoreReadQueue {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.accepting = false;
         state.history = None;
+        state.history_calls.clear();
         state.consecutive_extension_history_reads = 0;
         state.extension_history.clear();
         state.extension_history_order.clear();
@@ -392,6 +439,7 @@ impl StoreReadQueue {
         state.stopped = true;
         state.accepting = false;
         state.history = None;
+        state.history_calls.clear();
         state.consecutive_extension_history_reads = 0;
         state.extension_history.clear();
         state.extension_history_order.clear();
@@ -415,6 +463,7 @@ fn pop_browser_read(state: &mut State) -> Option<Request> {
     state
         .history
         .take()
+        .or_else(|| state.history_calls.pop_front())
         .or_else(|| state.favicon_batch.take())
         .or_else(|| {
             while let Some(id) = state.favicon_order.pop_front() {
@@ -525,6 +574,56 @@ fn run_with(
                         hit
                     })
                     .collect(),
+            },
+            Request::HistorySurface {
+                token,
+                profile,
+                call,
+            } => match call {
+                zephium_ipc::HistoryCall::Page {
+                    query,
+                    before,
+                    limit,
+                } => {
+                    let before = before
+                        .as_deref()
+                        .and_then(|cursor| cursor.parse::<i64>().ok());
+                    let visits = store.history_page(profile, &query, before, u32::from(limit));
+                    // A full page implies there may be more; a short one is the end.
+                    let next = (visits.len() == usize::from(limit))
+                        .then(|| visits.last().map(|visit| visit.id))
+                        .flatten();
+                    StoreReadResult::HistorySurface {
+                        token,
+                        profile,
+                        visits,
+                        next,
+                        removed: None,
+                    }
+                }
+                zephium_ipc::HistoryCall::Forget { urls } => StoreReadResult::HistorySurface {
+                    token,
+                    profile,
+                    visits: Vec::new(),
+                    next: None,
+                    removed: Some(store.forget_history_urls(profile, &urls)),
+                },
+                zephium_ipc::HistoryCall::Clear { range } => {
+                    let since = range.window_seconds().map(|window| {
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|elapsed| elapsed.as_secs() as i64)
+                            .unwrap_or(0)
+                            .saturating_sub(window)
+                    });
+                    StoreReadResult::HistorySurface {
+                        token,
+                        profile,
+                        visits: Vec::new(),
+                        next: None,
+                        removed: Some(store.clear_history(profile, since)),
+                    }
+                }
             },
             Request::Favicon {
                 generation,

@@ -1584,6 +1584,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             sidebar_set_width,
             tab_drag_over,
             resource_call,
+            history_call,
             resource_close_ready,
             tab_drop,
             divider_grab,
@@ -3746,6 +3747,49 @@ async fn resource_call(
     match tokio::time::timeout(std::time::Duration::from_secs(8), receive).await {
         Ok(Ok(reply)) => reply,
         _ => failed(ResourceError::OutcomeUnknown),
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn history_call(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    expected_profile: String,
+    call: zephium_ipc::HistoryCall,
+) -> zephium_ipc::HistoryResponse {
+    use zephium_ipc::{HistoryError, HistoryResponse};
+    let failed = |error| HistoryResponse::Error { error };
+    if !authorize(&caller, CallerPolicy::Both, "history_call") || shutdown_started(&app) {
+        return failed(HistoryError::Unavailable);
+    }
+    if !call.validate() {
+        return failed(HistoryError::Invalid);
+    }
+    let Some(expected_profile) =
+        ProfileId::parse(&expected_profile).filter(|id| id.to_string() == expected_profile)
+    else {
+        return failed(HistoryError::Invalid);
+    };
+    let shell = app.state::<Handle>().inner().clone();
+    static HISTORY_ADMISSION: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+    let Ok(permit) = HISTORY_ADMISSION.try_acquire() else {
+        return failed(HistoryError::Capacity);
+    };
+    let (send, receive) = tokio::sync::oneshot::channel();
+    if !shell.dispatch(Command::HistoryCall {
+        expected_profile,
+        call: Box::new(call),
+        done: zephium_app::HistoryCompletion::new(move |response| {
+            let _permit = permit;
+            let _ = send.send(response);
+        }),
+    }) {
+        return failed(HistoryError::Unavailable);
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(8), receive).await {
+        Ok(Ok(response)) => response,
+        _ => failed(HistoryError::Unavailable),
     }
 }
 

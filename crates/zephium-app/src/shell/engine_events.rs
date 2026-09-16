@@ -404,7 +404,8 @@ impl Shell {
             EngineEvent::ShortcutPressed { .. } => {}
             EngineEvent::TitleChanged { id, title } => {
                 self.crash.presentations.remove(&id);
-                self.items.set_title(id, title);
+                self.items.set_title(id, title.clone());
+                self.amend_recorded_visit_title(id, &title);
                 self.project_tab(id);
                 self.sync_extension_browser_surface_metadata(id);
             }
@@ -563,6 +564,33 @@ impl Shell {
             EngineEvent::ShortcutPressed { item, .. } => self.profile_of_item(*item),
         };
         profile.is_some_and(|profile| self.profile_deletion_quarantines(profile))
+    }
+
+    /// A visit is recorded when its URL commits, which is before the document
+    /// publishes a title, so the row holds a URL-derived placeholder until the
+    /// real one arrives. Replace it while that visit is still the newest.
+    fn amend_recorded_visit_title(&mut self, id: ItemId, title: &str) {
+        let Some((recorded_url, _)) = self.last_visits.get(&id) else {
+            return;
+        };
+        let recorded_url = recorded_url.clone();
+        if self
+            .items
+            .tab(id)
+            .and_then(|tab| tab.url.as_ref())
+            .is_none_or(|url| url.as_str() != recorded_url)
+        {
+            return;
+        }
+        let Some(profile) = self.profile_of_item(id).filter(|profile| {
+            self.profiles
+                .get(*profile)
+                .is_some_and(|profile| profile.kind != ProfileKind::Incognito)
+        }) else {
+            return;
+        };
+        self.store
+            .amend_visit_title(profile, recorded_url, title.to_owned());
     }
 
     fn should_record_visit(&mut self, id: ItemId, url: &str) -> bool {

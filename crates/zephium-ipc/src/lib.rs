@@ -620,6 +620,113 @@ pub struct SearchResults {
     pub results: Vec<SearchResult>,
 }
 
+/// One request from a history surface. Reads and deletions share one bounded
+/// entry point, as resource calls do.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HistoryCall {
+    /// `before` is the id of the last visit already seen. Row ids and unix
+    /// seconds cross as decimal strings; JavaScript never parses a Rust i64.
+    Page {
+        query: String,
+        before: Option<String>,
+        limit: u16,
+    },
+    Forget {
+        urls: Vec<String>,
+    },
+    Clear {
+        range: HistoryRange,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryRange {
+    Hour,
+    Day,
+    Week,
+    Everything,
+}
+
+impl HistoryRange {
+    /// Seconds of history the range covers, or None for all of it.
+    pub fn window_seconds(self) -> Option<i64> {
+        match self {
+            Self::Hour => Some(3600),
+            Self::Day => Some(24 * 3600),
+            Self::Week => Some(7 * 24 * 3600),
+            Self::Everything => None,
+        }
+    }
+}
+
+pub const MAX_HISTORY_PAGE_LIMIT: u16 = 200;
+pub const MAX_HISTORY_QUERY_BYTES: usize = 512;
+pub const MAX_HISTORY_FORGET_URLS: usize = 100;
+
+impl HistoryCall {
+    pub fn validate(&self) -> bool {
+        match self {
+            Self::Page {
+                query,
+                before,
+                limit,
+            } => {
+                query.len() <= MAX_HISTORY_QUERY_BYTES
+                    && *limit > 0
+                    && *limit <= MAX_HISTORY_PAGE_LIMIT
+                    && before
+                        .as_ref()
+                        .is_none_or(|cursor| cursor.parse::<i64>().is_ok_and(|id| id > 0))
+            }
+            Self::Forget { urls } => {
+                !urls.is_empty()
+                    && urls.len() <= MAX_HISTORY_FORGET_URLS
+                    && urls
+                        .iter()
+                        .all(|url| zephium_core::navigation::is_allowed_str(url))
+            }
+            Self::Clear { .. } => true,
+        }
+    }
+}
+
+/// One recorded visit. Visits are not deduplicated by address: a history list
+/// shows every time a page was opened.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct HistoryVisitView {
+    pub id: String,
+    pub url: String,
+    pub title: String,
+    pub visited_at: String,
+    pub icon: Option<IconRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HistoryResponse {
+    Page {
+        visits: Vec<HistoryVisitView>,
+        /// Cursor for the following page, absent once the list is exhausted.
+        next: Option<String>,
+    },
+    Removed {
+        count: u32,
+    },
+    Error {
+        error: HistoryError,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryError {
+    Invalid,
+    Unavailable,
+    Capacity,
+}
+
 /// Split divider hit-strip in window logical coordinates; the chrome renders
 /// these as drag targets on platforms without native stage dividers.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
@@ -1044,6 +1151,9 @@ pub enum Projection {
     OperationProcessed(OperationDisposition),
 }
 
+/// Shared Rust-owned Notes/Tasks wire model.
+pub use zephium_core::resources::{ResourceCall, ResourceReply, ResourceResponse};
+
 #[cfg(test)]
 mod blocker_status_tests {
     use super::*;
@@ -1076,6 +1186,3 @@ mod blocker_status_tests {
         assert_eq!(status.retries_remaining, 0);
     }
 }
-
-/// Shared Rust-owned Notes/Tasks wire model.
-pub use zephium_core::resources::{ResourceCall, ResourceReply, ResourceResponse};

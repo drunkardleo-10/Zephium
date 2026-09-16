@@ -13,6 +13,7 @@ mod extension_management;
 mod extension_repository_maintenance;
 mod extension_runtime_grants;
 mod favicons;
+mod history;
 mod operations;
 mod page_permissions;
 mod persistence;
@@ -193,6 +194,7 @@ pub struct Shell {
     windows: Windows,
     pending_size: Size,
     favicons: FaviconState,
+    history: history::HistoryState,
     search: SearchState,
     presentation: PresentationState,
     zoom: ZoomState,
@@ -451,6 +453,7 @@ impl Shell {
             windows: Windows::default(),
             pending_size: Size::default(),
             favicons: FaviconState::default(),
+            history: history::HistoryState::default(),
             search: SearchState {
                 custom_url: store.app_setting("search.custom-url").unwrap_or_default(),
                 engine: store
@@ -756,6 +759,11 @@ impl Shell {
                 }
                 let _ = self.relayout();
             }
+            Command::HistoryCall {
+                expected_profile,
+                call,
+                done,
+            } => self.history_call(expected_profile, *call, done),
             Command::ResourceCall {
                 expected_profile,
                 call,
@@ -1107,6 +1115,7 @@ impl Shell {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 self.discard_blocker_inbox_for_shutdown();
                 self.finish_pending_blocker_operations_for_shutdown();
+                self.fail_pending_history_calls();
             }))
             .is_ok();
         if !post_store_coordination_clean {
@@ -1518,6 +1527,13 @@ impl Shell {
                 origins,
                 rasters,
             } => self.on_favicon_batch_read(generation, profile, space, origins, rasters),
+            StoreReadResult::HistorySurface {
+                token,
+                profile,
+                visits,
+                next,
+                removed,
+            } => self.on_history_surface_read(token, profile, visits, next, removed),
         }
     }
 }

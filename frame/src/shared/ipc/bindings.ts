@@ -124,6 +124,7 @@ export const commands = {
 	sidebarSetWidth: (width: number | null) => __TAURI_INVOKE<void>("sidebar_set_width", { width }),
 	tabDragOver: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("tab_drag_over", { x, y }),
 	resourceCall: (expectedProfile: string, call: ResourceCall_Deserialize) => __TAURI_INVOKE<ResourceReply_Serialize>("resource_call", { expectedProfile, call }),
+	historyCall: (expectedProfile: string, call: HistoryCall) => __TAURI_INVOKE<HistoryResponse>("history_call", { expectedProfile, call }),
 	resourceCloseReady: (token: string, success: boolean) => __TAURI_INVOKE<boolean>("resource_close_ready", { token, success }),
 	tabDrop: (id: string, x: number | null, y: number | null) => __TAURI_INVOKE<OperationAdmission>("tab_drop", { id, x, y }),
 	dividerGrab: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("divider_grab", { x, y }),
@@ -697,6 +698,37 @@ export type FaviconsView = {
 	surface: IconSurface,
 	profile_id: string,
 	entries: FaviconEntry[],
+};
+
+/**
+ *  One request from a history surface. Reads and deletions share one bounded
+ *  entry point, as resource calls do.
+ */
+export type HistoryCall = 
+/**
+ *  `before` is the id of the last visit already seen. Row ids and unix
+ *  seconds cross as decimal strings; JavaScript never parses a Rust i64.
+ */
+{ kind: "page"; query: string; before: string | null; limit: number } | { kind: "forget"; urls: string[] } | { kind: "clear"; range: HistoryRange };
+
+export type HistoryError = "invalid" | "unavailable" | "capacity";
+
+export type HistoryRange = "hour" | "day" | "week" | "everything";
+
+export type HistoryResponse = { kind: "page"; visits: HistoryVisitView[]; 
+/**  Cursor for the following page, absent once the list is exhausted. */
+next: string | null } | { kind: "removed"; count: number } | { kind: "error"; error: HistoryError };
+
+/**
+ *  One recorded visit. Visits are not deduplicated by address: a history list
+ *  shows every time a page was opened.
+ */
+export type HistoryVisitView = {
+	id: string,
+	url: string,
+	title: string,
+	visited_at: string,
+	icon: IconRef | null,
 };
 
 /**

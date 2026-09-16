@@ -372,6 +372,11 @@ pub enum Command {
         call: Arc<zephium_core::resources::ResourceCall>,
         done: ResourceCompletion,
     },
+    HistoryCall {
+        expected_profile: ProfileId,
+        call: Box<zephium_ipc::HistoryCall>,
+        done: HistoryCompletion,
+    },
     #[cfg(feature = "work-execution")]
     AttachWork(crate::work::WorkAttachment),
     #[cfg(feature = "work-execution")]
@@ -725,10 +730,10 @@ pub enum Command {
     },
 }
 
+type Completion<T> = Arc<Mutex<Option<Box<dyn FnOnce(T) + Send>>>>;
+
 #[derive(Clone)]
-pub struct ResourceCompletion(
-    Arc<Mutex<Option<Box<dyn FnOnce(zephium_core::resources::ResourceReply) + Send>>>>,
-);
+pub struct ResourceCompletion(Completion<zephium_core::resources::ResourceReply>);
 impl ResourceCompletion {
     pub fn new(done: impl FnOnce(zephium_core::resources::ResourceReply) + Send + 'static) -> Self {
         Self(Arc::new(Mutex::new(Some(Box::new(done)))))
@@ -747,5 +752,28 @@ impl ResourceCompletion {
 impl fmt::Debug for ResourceCompletion {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("ResourceCompletion")
+    }
+}
+
+#[derive(Clone)]
+pub struct HistoryCompletion(Completion<zephium_ipc::HistoryResponse>);
+impl HistoryCompletion {
+    pub fn new(done: impl FnOnce(zephium_ipc::HistoryResponse) + Send + 'static) -> Self {
+        Self(Arc::new(Mutex::new(Some(Box::new(done)))))
+    }
+    pub fn finish(self, response: zephium_ipc::HistoryResponse) {
+        let done = self
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(done) = done {
+            done(response);
+        }
+    }
+}
+impl fmt::Debug for HistoryCompletion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("HistoryCompletion")
     }
 }

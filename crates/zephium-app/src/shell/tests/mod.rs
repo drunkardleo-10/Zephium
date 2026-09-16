@@ -1390,6 +1390,7 @@ pub(crate) struct FakeStore {
     history_delay_ms: std::sync::atomic::AtomicU64,
     history_started: std::sync::atomic::AtomicBool,
     visits: Mutex<Vec<String>>,
+    recorded_visits: Mutex<Vec<zephium_core::ports::store::HistoryVisit>>,
     icon_ages: Mutex<std::collections::HashMap<String, i64>>,
     icons: Mutex<Vec<(String, Vec<u8>)>>,
     reject_settings: std::sync::atomic::AtomicBool,
@@ -1656,7 +1657,15 @@ impl Store for FakeStore {
         done(outcome);
         true
     }
-    fn record_visit(&self, _profile: ProfileId, url: String, _title: String) {
+    fn record_visit(&self, _profile: ProfileId, url: String, title: String) {
+        let mut visits = self.recorded_visits.lock().unwrap();
+        let id = i64::try_from(visits.len()).unwrap_or(i64::MAX) + 1;
+        visits.push(zephium_core::ports::store::HistoryVisit {
+            id,
+            url: url.clone(),
+            title,
+            visited_at: id,
+        });
         self.visits.lock().unwrap().push(url);
     }
     fn app_setting(&self, _key: &str) -> Option<String> {
@@ -1683,6 +1692,55 @@ impl Store for FakeStore {
         }
         self.history.clone()
     }
+    fn history_page(
+        &self,
+        _profile: ProfileId,
+        query: &str,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Vec<zephium_core::ports::store::HistoryVisit> {
+        let needle = query.trim().to_lowercase();
+        self.recorded_visits
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .filter(|visit| before.is_none_or(|cursor| visit.id < cursor))
+            .filter(|visit| {
+                needle.is_empty()
+                    || visit.title.to_lowercase().contains(&needle)
+                    || visit.url.to_lowercase().contains(&needle)
+            })
+            .take(limit as usize)
+            .cloned()
+            .collect()
+    }
+
+    fn forget_history_urls(&self, _profile: ProfileId, urls: &[String]) -> u32 {
+        let mut visits = self.recorded_visits.lock().unwrap();
+        let before = visits.len();
+        visits.retain(|visit| !urls.contains(&visit.url));
+        u32::try_from(before - visits.len()).unwrap_or(u32::MAX)
+    }
+
+    fn clear_history(&self, _profile: ProfileId, since: Option<i64>) -> u32 {
+        let mut visits = self.recorded_visits.lock().unwrap();
+        let before = visits.len();
+        match since {
+            Some(since) => visits.retain(|visit| visit.visited_at < since),
+            None => visits.clear(),
+        }
+        u32::try_from(before - visits.len()).unwrap_or(u32::MAX)
+    }
+
+    fn amend_visit_title(&self, _profile: ProfileId, url: String, title: String) -> bool {
+        let mut visits = self.recorded_visits.lock().unwrap();
+        if let Some(visit) = visits.iter_mut().rev().find(|visit| visit.url == url) {
+            visit.title = title;
+        }
+        true
+    }
+
     fn recent_history(
         &self,
         _profile: ProfileId,
@@ -2208,6 +2266,7 @@ mod extension_distribution;
 mod extension_repository_maintenance;
 mod extension_runtime_grants;
 mod favicons;
+mod history;
 #[path = "navigation.rs"]
 mod navigation_tests;
 mod operations;
