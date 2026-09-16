@@ -358,7 +358,7 @@ pub use context_port::{
     ContextOwnedViewport, ContextPortContractError, ContextPortFailure, ContextRendererLoss,
     ContextResourceAuditId, ContextResourceAuditSettlement, ContextShutdownAuditSettlement,
     ContextShutdownDispatch, ContextTransitionRequest, ContextTransitionSettlement,
-    SemanticActionNativeCompletion, SemanticScreenshotNativeCompletion,
+    SemanticActionNativeCompletion, SemanticScreenshotNativeCompletion, WorkBrowserFrame,
     MAX_CONTEXT_NAVIGATION_REDIRECTS, MAX_CONTEXT_NAVIGATION_REDIRECT_ORIGINS,
     MAX_PENDING_NATIVE_CONTEXT_TASKS,
 };

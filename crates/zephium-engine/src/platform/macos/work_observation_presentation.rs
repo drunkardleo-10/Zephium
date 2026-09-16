@@ -5,7 +5,6 @@
 #![deny(unsafe_op_in_unsafe_fn, clippy::undocumented_unsafe_blocks)]
 
 use objc2::rc::{Retained, Weak};
-use objc2::MainThreadOnly as _;
 use objc2_app_kit::{
     NSApplication, NSResponder, NSView, NSWindow, NSWindowOcclusionState, NSWindowOrderingMode,
 };
@@ -202,14 +201,8 @@ impl WorkObservationPresentation {
         self.state = PresentationState::Acquiring;
         // Re-adding beneath every sibling keeps the page under the chrome and
         // the vibrancy backdrop, so hit-testing never reaches it.
-        // SAFETY: page and parent are retained main-thread views of this window.
-        unsafe {
-            self.parent.addSubview_positioned_relativeTo(
-                &self.page,
-                NSWindowOrderingMode::Below,
-                None,
-            );
-        }
+        self.parent
+            .addSubview_positioned_relativeTo(&self.page, NSWindowOrderingMode::Below, None);
         self.page.setFrame(viewport());
         self.page.setHidden(false);
         self.poll()

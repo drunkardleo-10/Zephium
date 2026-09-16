@@ -484,6 +484,7 @@ impl EngineHost {
                 ended.wake = None;
                 if preserve {
                     resource.reading_presentation = ended.presentation.take();
+                    resource.capture_frame();
                 }
                 ended.presentation = None;
                 let outcome = ended.refusal.map_or_else(

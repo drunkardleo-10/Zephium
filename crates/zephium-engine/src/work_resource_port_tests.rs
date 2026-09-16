@@ -1785,7 +1785,8 @@ fn closed_anonymous_session_refuses_execution_but_preserves_native_drain() {
         let admission = admission();
         let guard = Arc::new(WorkResourceGuard::new(&request, &admission));
         guard.outcome(&request, Outcome::Constructed);
-        rows.settle_at(request.complete(Outcome::Constructed), tick(0))
+        let _settled = rows
+            .settle_at(request.complete(Outcome::Constructed), tick(0))
             .unwrap();
         if close_before_acquire {
             session.close();

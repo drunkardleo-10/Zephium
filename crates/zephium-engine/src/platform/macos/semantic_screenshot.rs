@@ -408,6 +408,98 @@ fn fitted_snapshot_width(
     (snapshot_width.is_finite() && snapshot_width > 0.0).then_some(snapshot_width)
 }
 
+type FrameCompletion = Box<dyn FnOnce(Option<(u32, u32, Vec<u8>)>)>;
+
+/// Fixed budget for the person-facing frame of a hosted Work page: 640 pixels
+/// wide, well under one megabyte, never model-visible.
+fn work_frame_budget() -> Option<SemanticScreenshotBudget> {
+    SemanticScreenshotBudget::try_new(640, 640, 409_600, 1024 * 1024).ok()
+}
+
+/// Captures one bounded PNG of the hosted page for the canvas. The completion
+/// runs once on the main thread with `None` on any refusal or failure.
+pub(crate) fn capture_work_frame(
+    view: &wry::WebView,
+    completion: impl FnOnce(Option<(u32, u32, Vec<u8>)>) + 'static,
+) -> bool {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return false;
+    };
+    let Some(budget) = work_frame_budget() else {
+        return false;
+    };
+    let webview = view.webview();
+    let bounds = webview.bounds();
+    let Some(window) = webview.window() else {
+        return false;
+    };
+    let scale = window.backingScaleFactor();
+    let Some(snapshot_width) =
+        fitted_snapshot_width(bounds.size.width, bounds.size.height, scale, budget)
+    else {
+        return false;
+    };
+    // SAFETY: `mtm` proves this WebKit object is created on the main thread;
+    // objc2 retains the returned configuration for the enclosing scope.
+    let configuration = unsafe { WKSnapshotConfiguration::new(mtm) };
+    let width = NSNumber::new_f64(snapshot_width);
+    // SAFETY: `configuration` and `width` are live retained Objective-C
+    // objects, `bounds` came from this live WKWebView, and all calls remain on
+    // the main thread proven above.
+    unsafe {
+        configuration.setRect(bounds);
+        configuration.setSnapshotWidth(Some(&width));
+        configuration.setAfterScreenUpdates(false);
+    }
+    let pending: Rc<RefCell<Option<FrameCompletion>>> =
+        Rc::new(RefCell::new(Some(Box::new(completion))));
+    let callback_pending = pending.clone();
+    let callback: RcBlock<dyn Fn(*mut objc2_app_kit::NSImage, *mut objc2_foundation::NSError)> =
+        RcBlock::new(
+            move |image: *mut objc2_app_kit::NSImage, error: *mut objc2_foundation::NSError| {
+                let Some(completion) = callback_pending.borrow_mut().take() else {
+                    return;
+                };
+                let encoded = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    objc2::exception::catch(AssertUnwindSafe(|| {
+                        if image.is_null() || !error.is_null() {
+                            return None;
+                        }
+                        // SAFETY: WebKit guarantees a non-null image pointer remains
+                        // valid for the duration of its completion callback.
+                        let image = unsafe { &*image };
+                        // SAFETY: `image` is live for this callback, AppKit accepts a
+                        // null proposed rectangle, and no context or hints are retained.
+                        let cg_image = unsafe {
+                            image.CGImageForProposedRect_context_hints(
+                                std::ptr::null_mut(),
+                                None,
+                                None,
+                            )
+                        }?;
+                        encode_bounded_png(&cg_image, budget).ok()
+                    }))
+                    .ok()
+                    .flatten()
+                }))
+                .ok()
+                .flatten();
+                let _ = std::panic::catch_unwind(AssertUnwindSafe(|| completion(encoded)));
+            },
+        );
+    // SAFETY: `webview`, `configuration`, and the copied block remain live for
+    // this dispatch. WebKit retains the completion block until its one reply;
+    // the call runs on the main thread and Objective-C exceptions are caught.
+    let dispatched = objc2::exception::catch(AssertUnwindSafe(|| unsafe {
+        webview.takeSnapshotWithConfiguration_completionHandler(Some(&configuration), &callback);
+    }));
+    if dispatched.is_err() {
+        pending.borrow_mut().take();
+        return false;
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

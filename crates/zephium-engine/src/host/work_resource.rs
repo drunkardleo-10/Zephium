@@ -130,6 +130,9 @@ pub(super) struct WorkNativeResource {
     action: Option<action::WorkAction>,
     reading_presentation: Option<crate::platform::imp::WorkObservationPresentation>,
     presentation_wake: Option<observation::ObservationWake>,
+    frame_generation: u64,
+    frame_in_flight: Arc<std::sync::atomic::AtomicBool>,
+    frame_captured_at: Option<Instant>,
     navigation: Option<navigation::WorkNavigation>,
     history_back: Option<navigation::WorkHistoryBack>,
     #[cfg(target_os = "macos")]
@@ -209,6 +212,9 @@ impl WorkNativeResource {
             action: None,
             reading_presentation: None,
             presentation_wake: None,
+            frame_generation: 0,
+            frame_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            frame_captured_at: None,
             navigation: None,
             history_back: None,
             #[cfg(target_os = "macos")]
@@ -427,8 +433,51 @@ impl WorkNativeResource {
         };
         ResourceFailureCause::LifecycleDeadline(stage)
     }
+    /// One bounded frame for the canvas after a settled observation or action.
+    /// Never more than one capture in flight, never faster than four a second.
+    pub(super) fn capture_frame(&mut self) {
+        use std::sync::atomic::Ordering;
+        let visible = self
+            .reading_presentation
+            .as_ref()
+            .is_some_and(crate::platform::imp::WorkObservationPresentation::visible_for_audit);
+        let recent = self
+            .frame_captured_at
+            .is_some_and(|at| at.elapsed() < Duration::from_millis(250));
+        if !visible || recent || self.frame_in_flight.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(view) = self.view.as_ref() else {
+            return;
+        };
+        let id = self.guard.resource().identity().context();
+        let generation = self.frame_generation.saturating_add(1);
+        let in_flight = self.frame_in_flight.clone();
+        in_flight.store(true, Ordering::Release);
+        let dispatched = crate::platform::imp::capture_work_frame(view.view(), move |encoded| {
+            if let Some((width, height, png)) = encoded {
+                super::work_frames::store(
+                    id,
+                    zephium_agentic::WorkBrowserFrame {
+                        generation,
+                        width,
+                        height,
+                        png: Arc::new(png),
+                    },
+                );
+            }
+            in_flight.store(false, Ordering::Release);
+        });
+        if dispatched {
+            self.frame_generation = generation;
+            self.frame_captured_at = Some(Instant::now());
+        } else {
+            self.frame_in_flight.store(false, Ordering::Release);
+        }
+    }
     fn retire_page(&mut self) -> bool {
         self.watchdog = None;
+        super::work_frames::clear(self.guard.resource().identity().context());
         if !self.retire_reading_presentation()
             || !self.retire_observation_presentation()
             || !self.retire_action_presentation()
@@ -836,6 +885,9 @@ impl EngineHost {
             action: None,
             reading_presentation: None,
             presentation_wake: None,
+            frame_generation: 0,
+            frame_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            frame_captured_at: None,
             navigation: None,
             history_back: None,
             #[cfg(target_os = "macos")]

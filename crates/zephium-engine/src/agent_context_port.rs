@@ -1457,6 +1457,13 @@ impl EngineAgentBrowserPort {
 }
 
 impl AgentBrowserPort for EngineAgentBrowserPort {
+    #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+    fn latest_work_frame(
+        &self,
+        resource: &zephium_agentic::WorkBrowserResourceJoin,
+    ) -> Option<Arc<zephium_agentic::WorkBrowserFrame>> {
+        crate::host::work_frames::latest(resource.identity().context())
+    }
     #[cfg(target_os = "macos")]
     fn supports_work_resource_history_back(&self) -> bool {
         let version = objc2_foundation::NSProcessInfo::processInfo().operatingSystemVersion();

@@ -975,6 +975,20 @@ pub enum ContextNativeEvent {
     SemanticRuntimeSettled(Box<SemanticRuntimeSettlement>),
 }
 
+/// One bounded PNG of a hosted Work page at a fixed reduced width. Frames are
+/// transient, per resource, and replaced in place; they carry no authority.
+#[derive(Clone, Debug)]
+pub struct WorkBrowserFrame {
+    /// Monotonic per resource; a newer frame replaces an older one.
+    pub generation: u64,
+    /// Encoded width in pixels.
+    pub width: u32,
+    /// Encoded height in pixels.
+    pub height: u32,
+    /// Metadata-free PNG bytes under the frame budget.
+    pub png: std::sync::Arc<Vec<u8>>,
+}
+
 /// Move-only terminal callback for one admitted native viewport capture.
 ///
 /// A port returning [`ContextDispatch::Scheduled`] must invoke this exactly
@@ -1115,6 +1129,15 @@ pub trait AgentBrowserPort: Send + Sync {
         request: SemanticActionNativeRequest,
         completion: SemanticActionNativeCompletion,
     ) -> ContextDispatch;
+
+    /// The newest bounded frame of one hosted Work page, for the person
+    /// watching the canvas. Never model-visible; `None` when nothing is hosted.
+    fn latest_work_frame(
+        &self,
+        _resource: &crate::WorkBrowserResourceJoin,
+    ) -> Option<std::sync::Arc<WorkBrowserFrame>> {
+        None
+    }
 
     /// Attempts one bounded viewport capture outside the cloneable event bus.
     fn capture_semantic_screenshot(
