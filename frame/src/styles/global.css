@@ -126,6 +126,8 @@ button {
 /* Site icons are arbitrary third-party artwork. Resting rows dim and
    desaturate them so the column reads as one surface. */
 .favicon-plate {
+  display: block;
+  box-sizing: border-box;
   opacity: var(--favicon-rest-opacity);
   filter: saturate(var(--favicon-rest-saturation));
   transition:

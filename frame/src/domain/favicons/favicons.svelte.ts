@@ -24,6 +24,10 @@ const NEUTRAL_CHROMA = 40;
 type Entry = { revision: string; image: ImageData; tone: IconTone };
 
 const rasters = new SvelteMap<string, Entry>();
+/** Native caches per profile and the reference carries only an origin, so two
+ *  profiles holding different icons for one site would collide here. A surface
+ *  shows one profile at a time; adopting a new one starts from empty. */
+let owner: string | null = null;
 const lifecycle = createLifecycle();
 let initializing: Promise<void> | null = null;
 let unlisten: Unlisten | null = null;
@@ -67,7 +71,11 @@ function toneOf(image: ImageData): IconTone {
   return meanLuminance > LIGHT_LUMINANCE ? "light" : "mid";
 }
 
-function accept(entries: readonly FaviconEntry[]) {
+function accept(profile: string, entries: readonly FaviconEntry[]) {
+  if (profile !== owner) {
+    owner = profile;
+    rasters.clear();
+  }
   for (const entry of entries) {
     const image = decode(entry.rgba);
     if (!image) continue;
@@ -99,7 +107,9 @@ export function init(): Promise<void> {
   const generation = lifecycle.begin();
   initializing = listenAll([
     events.favicons.listen((event) => {
-      if (lifecycle.isCurrent(generation)) accept(event.payload.entries);
+      if (lifecycle.isCurrent(generation)) {
+        accept(event.payload.profile_id, event.payload.entries);
+      }
     }),
   ])
     .then((listeners) => {
@@ -123,5 +133,6 @@ export function dispose() {
   initializing = null;
   unlisten?.();
   unlisten = null;
+  owner = null;
   rasters.clear();
 }

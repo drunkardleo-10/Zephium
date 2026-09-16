@@ -20,8 +20,8 @@ function solid(red: number, green: number, blue: number): string {
   return btoa(binary);
 }
 
-function deliver(entries: { origin: string; revision: string; rgba: string }[]) {
-  emitNativeEvent("favicons", { surface: "chrome", profile_id: "p", entries });
+function deliver(entries: { origin: string; revision: string; rgba: string }[], profile = "p") {
+  emitNativeEvent("favicons", { surface: "chrome", profile_id: profile, entries });
 }
 
 afterEach(() => favicons.dispose());
@@ -116,5 +116,20 @@ describe("icon tone", () => {
     await favicons.init();
     expect(favicons.tone({ origin: "https://unknown.example", revision: "a" })).toBe("mid");
     expect(favicons.tone(null)).toBe("mid");
+  });
+});
+
+describe("profile isolation", () => {
+  it("never shows one profile's icon for another's site", async () => {
+    await favicons.init();
+    const ref = { origin: "https://example.com", revision: "a" };
+    deliver([{ origin: ref.origin, revision: "a", rgba: raster(7) }], "personal");
+    expect(favicons.image(ref)?.data[0]).toBe(7);
+
+    // A private window is a different profile whose icons native caches apart.
+    deliver([{ origin: "https://other.example", revision: "a", rgba: raster(9) }], "private");
+
+    expect(favicons.image(ref)).toBeNull();
+    expect(favicons.image({ origin: "https://other.example", revision: "a" })?.data[0]).toBe(9);
   });
 });

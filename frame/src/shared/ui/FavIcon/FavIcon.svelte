@@ -19,6 +19,12 @@
   let { image, tone = "mid", loading = false, size = 17, lit = false, fallback }: Props = $props();
   let canvas: HTMLCanvasElement | undefined = $state();
 
+  // A plated mark is inset from its ground, the way a sticker leaves a margin.
+  // The outer box keeps its size so plating never shifts a row.
+  let plated = $derived(tone === "dark" || tone === "light");
+  let inset = $derived(plated ? Math.max(1, Math.round(size * 0.12)) : 0);
+  let radius = $derived(Math.max(4, Math.round(size * 0.28)));
+
   $effect(() => {
     const pixels = image;
     if (!pixels || !canvas) return;
@@ -32,18 +38,26 @@
   this process never exposes an image decoder or a custom favicon protocol.
 -->
 {#if image}
-  <canvas
-    bind:this={canvas}
+  <span
     data-tone={tone}
-    width={image.width}
-    height={image.height}
     style:width={`${size}px`}
     style:height={`${size}px`}
+    style:padding={`${inset}px`}
+    style:border-radius={`${radius}px`}
     class:favicon-plate-lit={lit}
     class:animate-pulse={loading}
-    class="favicon-plate shrink-0 rounded-[4px]"
+    class="favicon-plate shrink-0"
     aria-hidden="true"
-  ></canvas>
+    ><canvas
+      bind:this={canvas}
+      width={image.width}
+      height={image.height}
+      style:width={`${size - inset * 2}px`}
+      style:height={`${size - inset * 2}px`}
+      style:border-radius={`${Math.max(3, radius - inset)}px`}
+      class="block"
+    ></canvas></span
+  >
 {:else if fallback}
   <span
     style:width={`${size}px`}
