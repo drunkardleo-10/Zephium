@@ -7,7 +7,7 @@
   let props: ToolHostProps = $props();
 </script>
 
-<ToolFrame {...props} searchLabel={m.history_search()}>
+<ToolFrame {...props} searchLabel={m.history_search()} scrolls={false}>
   <LazyView
     loader={loadHistoryPanel}
     loadingLabel={m.panel_loading()}

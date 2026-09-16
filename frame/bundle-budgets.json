@@ -17,7 +17,7 @@
   },
   "lazy:features/tools/components/previews/ChatView.svelte": {
     "js": 98063,
-    "css": 6463
+    "css": 6600
   },
   "lazy:features/settings/components/sections/DeveloperPage.svelte": {
     "js": 299000,
@@ -33,7 +33,7 @@
   },
   "lazy:features/tools/components/previews/DownloadsView.svelte": {
     "js": 97028,
-    "css": 6463
+    "css": 6600
   },
   "lazy:features/settings/components/sections/FocusPage.svelte": {
     "js": 419700,
@@ -93,7 +93,7 @@
   },
   "lazy:features/tools/components/previews/TimeView.svelte": {
     "js": 97224,
-    "css": 6463
+    "css": 6600
   },
   "lazy:features/tools/components/ToolSlot.svelte": {
     "js": 93684,

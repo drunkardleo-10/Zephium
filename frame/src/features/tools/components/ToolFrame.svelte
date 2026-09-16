@@ -26,12 +26,16 @@
     searchLabel,
     filters,
     canCompose = false,
+    scrolls = true,
     children,
     footer,
   }: ToolHostProps & {
     searchLabel?: string;
     filters?: { value: string; label: string }[];
     canCompose?: boolean;
+    /** Set false when the view owns a scroller of its own, so the frame does
+     *  not nest one inside another and swallow the child's height. */
+    scrolls?: boolean;
     children?: Snippet;
     footer?: Snippet;
   } = $props();
@@ -93,6 +97,7 @@
     </div>{/if}
   <div
     class="shared-tool-content"
+    class:shared-tool-content-hosted={!scrolls}
     bind:this={content}
     onscroll={() => edit({ scrollTop: content.scrollTop })}
   >

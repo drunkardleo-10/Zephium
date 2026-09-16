@@ -69,6 +69,14 @@
   padding: 16px;
 }
 
+/* The view owns the scroller. Give it the height instead of a second one. */
+.shared-tool-content-hosted {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+}
+
 .shared-tool-empty {
   min-height: 200px;
   height: 100%;

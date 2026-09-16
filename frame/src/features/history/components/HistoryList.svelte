@@ -184,6 +184,10 @@
     scrollbar-width: thin;
   }
 
+  .scroller[data-density="panel"] {
+    padding: 8px 8px 12px;
+  }
+
   .day {
     display: flex;
     align-items: flex-end;
@@ -198,6 +202,13 @@
     top: 0;
     z-index: 1;
     background: var(--color-page);
+  }
+
+  /* The sidebar tool does not sit on the page ground, so a sticky heading
+     there would paint the wrong colour over the rows behind it. */
+  .scroller[data-density="panel"] .day {
+    position: static;
+    background: none;
   }
 
   .count {
