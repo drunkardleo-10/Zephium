@@ -45,7 +45,7 @@ use zephium_core::ports::store::{
     ExtensionNativeNamespaceLoadOutcome, ExtensionNativeOwnershipActivationOutcome,
     ExtensionNativeOwnershipJournalLoadOutcome, ExtensionNativeOwnershipJournalMutationOutcome,
     ExtensionProfilePolicyLoadOutcome, ExtensionProfilePolicyMutationOutcome, HistoryHit,
-    PagePermissionCatalogLoadOutcome, PagePermissionCatalogMutationOutcome,
+    HistoryVisit, PagePermissionCatalogLoadOutcome, PagePermissionCatalogMutationOutcome,
     ProfileDeletionAuthorizeOutcome, ProfileDeletionFinalizeOutcome, ProfileDeletionLoad,
     SessionLoad, Store, StoreShutdownOutcome, UserscriptCatalogLoadOutcome,
     UserscriptCatalogMutationOutcome, MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES,
@@ -758,6 +758,16 @@ enum Cmd {
     SearchHistory(ProfileId, String, u32, Sender<Vec<HistoryHit>>),
     RecordSearch(ProfileId, String, String),
     RecentHistory(ProfileId, u32, Sender<Vec<HistoryHit>>),
+    HistoryPage(
+        ProfileId,
+        String,
+        Option<i64>,
+        u32,
+        Sender<Vec<HistoryVisit>>,
+    ),
+    ForgetHistoryUrls(ProfileId, Vec<String>, Sender<u32>),
+    ClearHistory(ProfileId, Option<i64>, Sender<u32>),
+    AmendVisitTitle(ProfileId, String, String),
     FaviconAge(ProfileId, String, Sender<Option<i64>>),
     FaviconRasterWithAge(ProfileId, String, Sender<Option<(Vec<u8>, i64)>>),
     SaveFavicon(ProfileId, String, Option<String>, Vec<u8>),
@@ -2942,6 +2952,69 @@ impl Store for SqliteStore {
         rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap_or_default()
     }
 
+    fn history_page(
+        &self,
+        profile: ProfileId,
+        query: &str,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Vec<HistoryVisit> {
+        if limit == 0 || query.len() > MAX_HISTORY_QUERY_BYTES {
+            return Vec::new();
+        }
+        let (tx, rx) = mpsc::channel();
+        if self
+            .tx
+            .try_send(Cmd::HistoryPage(
+                profile,
+                query.to_owned(),
+                before,
+                limit.min(hub::MAX_HISTORY_PAGE),
+                tx,
+            ))
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap_or_default()
+    }
+
+    fn forget_history_urls(&self, profile: ProfileId, urls: &[String]) -> u32 {
+        if urls.is_empty() || urls.len() > hub::MAX_HISTORY_FORGET_URLS {
+            return 0;
+        }
+        let (tx, rx) = mpsc::channel();
+        if self
+            .tx
+            .try_send(Cmd::ForgetHistoryUrls(profile, urls.to_vec(), tx))
+            .is_err()
+        {
+            return 0;
+        }
+        rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap_or_default()
+    }
+
+    fn clear_history(&self, profile: ProfileId, since: Option<i64>) -> u32 {
+        let (tx, rx) = mpsc::channel();
+        if self
+            .tx
+            .try_send(Cmd::ClearHistory(profile, since, tx))
+            .is_err()
+        {
+            return 0;
+        }
+        rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap_or_default()
+    }
+
+    fn amend_visit_title(&self, profile: ProfileId, url: String, title: String) -> bool {
+        if !zephium_core::navigation::is_allowed_str(&url) || title.len() > hub::MAX_TITLE_BYTES {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::AmendVisitTitle(profile, url, title))
+            .is_ok()
+    }
+
     fn recent_history(&self, profile: ProfileId, limit: u32) -> Vec<HistoryHit> {
         if limit == 0 {
             return Vec::new();
@@ -3577,6 +3650,18 @@ fn actor(
                 hits.retain(|hit| seen.insert(hit.url.clone()));
                 hits.truncate(limit as usize);
                 let _ = reply.send(hits);
+            }
+            Some(Cmd::HistoryPage(profile, query, before, limit, reply)) => {
+                let _ = reply.send(hub.history_page(profile, &query, before, limit));
+            }
+            Some(Cmd::ForgetHistoryUrls(profile, urls, reply)) => {
+                let _ = reply.send(hub.forget_history_urls(profile, &urls));
+            }
+            Some(Cmd::ClearHistory(profile, since, reply)) => {
+                let _ = reply.send(hub.clear_history(profile, since));
+            }
+            Some(Cmd::AmendVisitTitle(profile, url, title)) => {
+                hub.amend_visit_title(profile, &url, &title);
             }
             Some(Cmd::RecentHistory(profile, limit, reply)) => {
                 let _ = reply.send(hub.recent_history(profile, limit));

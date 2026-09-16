@@ -8687,3 +8687,127 @@ fn history_search_ranks_by_frecency_and_never_starves_on_one_busy_address() {
     // once, even though that page was visited more recently.
     assert_eq!(hits[0].url, "https://example.com/busy");
 }
+
+#[test]
+fn history_pages_every_visit_newest_first_without_gaps_or_repeats() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    for index in 0..25 {
+        hub.record_visit(profile, &format!("https://example.com/{index}"), "Example");
+    }
+
+    let mut seen = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = hub.history_page(profile, "", cursor, 10);
+        if page.is_empty() {
+            break;
+        }
+        cursor = page.last().map(|visit| visit.id);
+        seen.extend(page);
+    }
+
+    assert_eq!(seen.len(), 25);
+    // Visits recorded in the same second still page exactly, because the cursor
+    // is the row id rather than the timestamp.
+    assert!(seen.windows(2).all(|pair| pair[0].id > pair[1].id));
+    assert_eq!(seen[0].url, "https://example.com/24");
+}
+
+#[test]
+fn history_page_narrows_by_query_and_keeps_repeat_visits() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    hub.record_visit(profile, "https://example.com/docs", "Documentation");
+    hub.record_visit(profile, "https://example.com/docs", "Documentation");
+    hub.record_visit(profile, "https://other.example/news", "Headlines");
+
+    let page = hub.history_page(profile, "documentation", None, 10);
+    assert_eq!(
+        page.len(),
+        2,
+        "a history list shows each visit, not each page"
+    );
+    assert!(page
+        .iter()
+        .all(|visit| visit.url == "https://example.com/docs"));
+    assert!(hub
+        .history_page(profile, "documentation", None, 0)
+        .is_empty());
+}
+
+#[test]
+fn forgetting_an_address_removes_it_from_search_and_the_byte_ledger() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    hub.record_visit(profile, "https://forget.example/page", "Forgettable");
+    hub.record_visit(profile, "https://forget.example/page", "Forgettable");
+    hub.record_visit(profile, "https://keep.example/page", "Keepsake");
+    let before = hub.history_bytes(profile);
+
+    assert_eq!(
+        hub.forget_history_urls(profile, &["https://forget.example/page".to_owned()]),
+        2
+    );
+
+    assert!(hub.search_history(profile, "forgettable", 10).is_empty());
+    assert_eq!(hub.search_history(profile, "keepsake", 10).len(), 1);
+    assert!(hub.history_bytes(profile) < before);
+}
+
+#[test]
+fn clearing_a_range_leaves_older_visits_and_drops_recorded_searches() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    hub.record_visit(profile, "https://old.example/page", "Ancient");
+    hub.backdate_history(profile, 7 * 24 * 3600);
+    hub.record_visit(profile, "https://new.example/page", "Recent");
+    hub.record_search(
+        profile,
+        "recent query",
+        "https://duckduckgo.com/?q=recent+query",
+    );
+
+    let cleared = hub.clear_history(
+        profile,
+        Some(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64
+                - 3600,
+        ),
+    );
+
+    assert_eq!(cleared, 1);
+    assert_eq!(hub.search_history(profile, "ancient", 10).len(), 1);
+    assert!(hub.search_history(profile, "recent", 10).is_empty());
+    assert!(hub.search_queries(profile, "recent").is_empty());
+}
+
+#[test]
+fn a_title_published_after_the_url_commits_replaces_the_placeholder() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    // The shell records a visit the moment a URL commits, which is before the
+    // document has a title of its own.
+    hub.record_visit(profile, "https://example.com/article", "example.com");
+
+    hub.amend_visit_title(profile, "https://example.com/article", "The Real Headline");
+
+    let page = hub.history_page(profile, "", None, 10);
+    assert_eq!(page[0].title, "The Real Headline");
+    assert_eq!(hub.search_history(profile, "headline", 10).len(), 1);
+
+    hub.backdate_history(profile, 300);
+    hub.amend_visit_title(profile, "https://example.com/article", "Too Late");
+    assert_eq!(
+        hub.history_page(profile, "", None, 10)[0].title,
+        "The Real Headline"
+    );
+}

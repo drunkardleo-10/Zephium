@@ -28,6 +28,16 @@ pub struct HistoryHit {
     pub last_visit: i64,
 }
 
+/// One recorded visit. Unlike `HistoryHit` these are not deduplicated by
+/// address: a history list shows every time a page was opened.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryVisit {
+    pub id: i64,
+    pub url: String,
+    pub title: String,
+    pub visited_at: i64,
+}
+
 /// Maximum number of exact origins that browser chrome may hydrate in one
 /// favicon-cache read. The returned raster for each origin is independently
 /// fixed at `icon::RGBA32_BYTES`, bounding a batch to two MiB before small
@@ -817,6 +827,21 @@ pub trait Store {
     /// Prefix search over the profile's history FTS index, deduped by url,
     /// most recent first.
     fn search_history(&self, profile: ProfileId, query: &str, limit: u32) -> Vec<HistoryHit>;
+    /// One page of visits, newest first, optionally narrowed by a query.
+    /// `before` is the id of the last visit already seen.
+    fn history_page(
+        &self,
+        profile: ProfileId,
+        query: &str,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Vec<HistoryVisit>;
+    /// Removes every visit to each address; returns how many rows went.
+    fn forget_history_urls(&self, profile: ProfileId, urls: &[String]) -> u32;
+    /// Removes visits at or after `since`, or all of them when it is absent.
+    fn clear_history(&self, profile: ProfileId, since: Option<i64>) -> u32;
+    /// Replaces the placeholder title on the newest recent visit to an address.
+    fn amend_visit_title(&self, profile: ProfileId, url: String, title: String) -> bool;
     /// Bounded, deduplicated recent history for browser-owned consumers such
     /// as a reviewed extension compatibility adapter. Implementations must
     /// keep profile isolation and the same URL/title validation as search.

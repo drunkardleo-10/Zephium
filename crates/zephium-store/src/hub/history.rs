@@ -3,7 +3,7 @@
 use super::*;
 
 use zephium_core::item::sanitize_page_title;
-use zephium_core::ports::store::HistoryHit;
+use zephium_core::ports::store::{HistoryHit, HistoryVisit};
 
 pub(crate) const MAX_HISTORY_QUERY_BYTES: usize = 4 * 1024;
 pub(crate) const MAX_HISTORY_RESULTS: u32 = 100;
@@ -17,6 +17,12 @@ const MAX_HISTORY_PRUNE_PASSES: usize = 26;
 const MAX_HISTORY_SEARCH_ROWS: i64 = 4096;
 /// Retained submitted searches per profile.
 const MAX_SUBMITTED_SEARCHES: i64 = 1024;
+/// Visits returned in one history page.
+pub(crate) const MAX_HISTORY_PAGE: u32 = 200;
+/// Addresses one forget request may name.
+pub(crate) const MAX_HISTORY_FORGET_URLS: usize = 100;
+/// A title arriving later than this belongs to a different visit.
+const TITLE_AMENDMENT_WINDOW_SECONDS: i64 = 60;
 
 impl Hub {
     #[cfg(test)]
@@ -178,6 +184,182 @@ impl Hub {
         .unwrap_or_default()
     }
 
+    /// One page of visits, newest first. `history.id` rises with insertion, so
+    /// paging on it is exact even when many visits share a second, and it is
+    /// the order the primary key already provides.
+    pub(crate) fn history_page(
+        &mut self,
+        profile: ProfileId,
+        query: &str,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Vec<HistoryVisit> {
+        if !self.registry.contains(&profile)
+            || self.degraded_profiles.contains(&profile)
+            || self.recovery_required.is_some()
+            || limit == 0
+            || query.len() > MAX_HISTORY_QUERY_BYTES
+        {
+            return Vec::new();
+        }
+        let trimmed = query.trim();
+        let fts = if trimmed.is_empty() {
+            None
+        } else {
+            match fts_query(trimmed) {
+                Some(fts) => Some(fts),
+                None => return Vec::new(),
+            }
+        };
+        let limit = limit.min(MAX_HISTORY_PAGE);
+        let before = before.unwrap_or(i64::MAX);
+        let Ok(conn) = self.profile_conn(profile) else {
+            return Vec::new();
+        };
+        let sql = if fts.is_some() {
+            "SELECT h.id, h.url, h.title, h.visited_at
+             FROM history_fts f JOIN history h ON h.id = f.rowid
+             WHERE history_fts MATCH ?4
+               AND h.id < ?1
+               AND length(CAST(h.url AS BLOB)) <= ?2
+               AND length(CAST(h.title AS BLOB)) <= ?3
+             ORDER BY h.id DESC
+             LIMIT ?5"
+        } else {
+            "SELECT id, url, title, visited_at
+             FROM history
+             WHERE id < ?1
+               AND length(CAST(url AS BLOB)) <= ?2
+               AND length(CAST(title AS BLOB)) <= ?3
+             ORDER BY id DESC
+             LIMIT ?5"
+        };
+        let Ok(mut stmt) = conn.prepare_cached(sql) else {
+            return Vec::new();
+        };
+        let params = params![
+            before,
+            MAX_URL_BYTES as i64,
+            MAX_TITLE_BYTES as i64,
+            fts.as_deref().unwrap_or_default(),
+            limit
+        ];
+        stmt.query_map(params, |row| {
+            Ok(HistoryVisit {
+                id: row.get(0)?,
+                url: row.get(1)?,
+                title: row.get(2)?,
+                visited_at: row.get(3)?,
+            })
+        })
+        .map(|rows| {
+            rows.filter_map(Result::ok)
+                .filter(|visit| navigation::is_allowed_str(&visit.url))
+                .map(|mut visit| {
+                    visit.title = sanitize_page_title(&visit.title);
+                    visit
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// Removes every visit to each address. Forgetting one entry in a history
+    /// list means forgetting the page, not one of the times it was opened.
+    pub(crate) fn forget_history_urls(&mut self, profile: ProfileId, urls: &[String]) -> u32 {
+        if !self.registry.contains(&profile)
+            || self.degraded_profiles.contains(&profile)
+            || self.recovery_required.is_some()
+            || urls.is_empty()
+            || urls.len() > MAX_HISTORY_FORGET_URLS
+        {
+            return 0;
+        }
+        let result = self.profile_conn(profile).and_then(|conn| {
+            let tx = conn.transaction()?;
+            let mut removed = 0usize;
+            {
+                let mut delete = tx.prepare_cached("DELETE FROM history WHERE url = ?1")?;
+                for url in urls {
+                    removed += delete.execute([url])?;
+                }
+            }
+            tx.commit()?;
+            Ok(removed)
+        });
+        match result {
+            Ok(removed) => u32::try_from(removed).unwrap_or(u32::MAX),
+            Err(e) => {
+                eprintln!("store: forget_history_urls failed for profile {profile}: {e}");
+                0
+            }
+        }
+    }
+
+    /// Clears visits at or after `since`, or all of them when it is absent.
+    pub(crate) fn clear_history(&mut self, profile: ProfileId, since: Option<i64>) -> u32 {
+        if !self.registry.contains(&profile)
+            || self.degraded_profiles.contains(&profile)
+            || self.recovery_required.is_some()
+        {
+            return 0;
+        }
+        let result = self.profile_conn(profile).and_then(|conn| {
+            let tx = conn.transaction()?;
+            let removed = match since {
+                Some(since) => tx.execute("DELETE FROM history WHERE visited_at >= ?1", [since])?,
+                None => tx.execute("DELETE FROM history", [])?,
+            };
+            match since {
+                Some(since) => {
+                    tx.execute("DELETE FROM search_queries WHERE last_used >= ?1", [since])?
+                }
+                None => tx.execute("DELETE FROM search_queries", [])?,
+            };
+            tx.commit()?;
+            Ok(removed)
+        });
+        match result {
+            Ok(removed) => u32::try_from(removed).unwrap_or(u32::MAX),
+            Err(e) => {
+                eprintln!("store: clear_history failed for profile {profile}: {e}");
+                0
+            }
+        }
+    }
+
+    /// A visit is recorded when its URL commits, which is before the document
+    /// publishes a title, so the row initially holds a URL-derived placeholder.
+    /// The real title replaces it while that visit is still the newest one.
+    pub(crate) fn amend_visit_title(&mut self, profile: ProfileId, url: &str, title: &str) {
+        if !self.registry.contains(&profile)
+            || self.degraded_profiles.contains(&profile)
+            || self.recovery_required.is_some()
+            || !navigation::is_allowed_str(url)
+        {
+            return;
+        }
+        let title = sanitize_page_title(title);
+        if title.is_empty() {
+            return;
+        }
+        let floor = now_secs().saturating_sub(TITLE_AMENDMENT_WINDOW_SECONDS);
+        let result = self.profile_conn(profile).and_then(|conn| {
+            conn.prepare_cached(
+                "UPDATE history SET title = ?3
+                 WHERE id = (
+                     SELECT id FROM history
+                     WHERE url = ?1 AND visited_at >= ?2
+                     ORDER BY id DESC LIMIT 1
+                 )",
+            )?
+            .execute(params![url, floor, title])
+        });
+        if let Err(e) = result {
+            eprintln!("store: amend_visit_title failed for profile {profile}: {e}");
+        }
+    }
+
     pub(crate) fn recent_history(&mut self, profile: ProfileId, limit: u32) -> Vec<HistoryHit> {
         if !self.registry.contains(&profile)
             || self.degraded_profiles.contains(&profile)
@@ -257,6 +439,24 @@ impl Hub {
                 )
             })
             .unwrap_or(-1)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn history_bytes(&mut self, profile: ProfileId) -> i64 {
+        self.profile_conn(profile)
+            .and_then(|conn| {
+                conn.query_row("SELECT bytes FROM history_usage WHERE id = 1", [], |r| {
+                    r.get(0)
+                })
+            })
+            .unwrap_or(-1)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn backdate_history(&mut self, profile: ProfileId, seconds: i64) {
+        let _ = self
+            .profile_conn(profile)
+            .map(|conn| conn.execute("UPDATE history SET visited_at = visited_at - ?1", [seconds]));
     }
 
     #[cfg(test)]
