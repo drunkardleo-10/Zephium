@@ -1968,40 +1968,22 @@ pub static PROFILE: &[Migration] = &[
         up: |tx| {
             // Titles only. Note and task bodies are deliberately outside the
             // index so search never reaches document contents.
+            //
+            // SQLite stores a CREATE statement verbatim in sqlite_schema, and
+            // the migration manifest compares that text. Reformatting any
+            // statement below would fail the manifest on every database that
+            // already applied this version, degrading it permanently. Treat
+            // this SQL as a released artifact, not as source to tidy.
             tx.execute_batch(
-                "CREATE VIRTUAL TABLE resource_titles_fts USING fts5(
-                     title,
-                     content='user_resources',
-                     content_rowid='rowid',
-                     prefix='2 3'
-                 );
+                "CREATE VIRTUAL TABLE resource_titles_fts USING fts5(title, content='user_resources', content_rowid='rowid', prefix='2 3');
                  INSERT INTO resource_titles_fts(resource_titles_fts) VALUES ('rebuild');
-                 INSERT INTO resource_titles_fts(resource_titles_fts, rank)
-                     VALUES ('secure-delete', 1);
-
-                 CREATE TRIGGER resource_titles_insert AFTER INSERT ON user_resources BEGIN
-                     INSERT INTO resource_titles_fts(rowid, title)
-                     VALUES (NEW.rowid, NEW.title);
-                 END;
-                 CREATE TRIGGER resource_titles_delete AFTER DELETE ON user_resources BEGIN
-                     INSERT INTO resource_titles_fts(resource_titles_fts, rowid, title)
-                     VALUES ('delete', OLD.rowid, OLD.title);
-                 END;
-                 CREATE TRIGGER resource_titles_update AFTER UPDATE OF title ON user_resources
-                 WHEN OLD.title IS NOT NEW.title BEGIN
-                     INSERT INTO resource_titles_fts(resource_titles_fts, rowid, title)
-                     VALUES ('delete', OLD.rowid, OLD.title);
-                     INSERT INTO resource_titles_fts(rowid, title)
-                     VALUES (NEW.rowid, NEW.title);
-                 END;
-
-                 CREATE TABLE search_queries (
-                     query_key TEXT PRIMARY KEY NOT NULL,
-                     query TEXT NOT NULL CHECK (length(CAST(query AS BLOB)) <= 512),
-                     url TEXT NOT NULL CHECK (length(CAST(url AS BLOB)) <= 8192),
-                     last_used INTEGER NOT NULL,
-                     use_count INTEGER NOT NULL CHECK (use_count > 0)
-                 ) STRICT;",
+                 INSERT INTO resource_titles_fts(resource_titles_fts, rank) VALUES ('secure-delete', 1);
+                 CREATE TRIGGER resource_titles_insert AFTER INSERT ON user_resources BEGIN INSERT INTO resource_titles_fts(rowid,title) VALUES(NEW.rowid,NEW.title); END;
+                 CREATE TRIGGER resource_titles_delete AFTER DELETE ON user_resources BEGIN INSERT INTO resource_titles_fts(resource_titles_fts,rowid,title) VALUES('delete',OLD.rowid,OLD.title); END;
+                 CREATE TRIGGER resource_titles_update AFTER UPDATE OF title ON user_resources WHEN OLD.title IS NOT NEW.title BEGIN
+        INSERT INTO resource_titles_fts(resource_titles_fts,rowid,title) VALUES('delete',OLD.rowid,OLD.title);
+        INSERT INTO resource_titles_fts(rowid,title) VALUES(NEW.rowid,NEW.title); END;
+                 CREATE TABLE search_queries (query_key TEXT PRIMARY KEY NOT NULL, query TEXT NOT NULL CHECK(length(CAST(query AS BLOB))<=512), url TEXT NOT NULL CHECK(length(CAST(url AS BLOB))<=8192), last_used INTEGER NOT NULL, use_count INTEGER NOT NULL CHECK(use_count>0)) STRICT;",
             )
         },
     },
@@ -2010,6 +1992,114 @@ pub static PROFILE: &[Migration] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fingerprint of the schema each shipped version produces.
+    ///
+    /// SQLite stores a CREATE statement verbatim, and `validate_current`
+    /// compares that text, so editing an already-released migration -- even
+    /// its whitespace -- fails the manifest on every database that applied the
+    /// old text and degrades it permanently. These constants exist so that
+    /// mistake breaks this test instead of a user's profile.
+    ///
+    /// A new migration appends one line. An existing line never changes.
+    const META_SCHEMA_FINGERPRINTS: &[(i64, u64)] = &[
+        (1, 0xa62c_2e08_66e8_0dd2),
+        (2, 0x4e66_f2fb_22b8_70d5),
+        (3, 0x2910_38e3_a32e_7be3),
+        (4, 0x2910_38e3_a32e_7be3),
+        (5, 0x0284_7c35_b4c0_e297),
+        (6, 0xac6c_b5d7_b66c_6da2),
+        (7, 0x0816_09d3_99f0_7c45),
+        (8, 0xea74_9bb2_69f4_5506),
+        (9, 0x000a_33fa_6b52_c5f2),
+        (10, 0xe187_684a_35da_7d8e),
+        (11, 0xfe6f_079b_1c21_7cde),
+        (12, 0x7367_0d0b_3f1f_9c96),
+        (13, 0xbf7c_627a_b150_22ae),
+        (14, 0x3a07_c3c5_e4cf_25fc),
+        (15, 0x8c12_efd7_c942_f404),
+        (16, 0x2dc6_d332_0299_d29b),
+        (17, 0xc06b_3cdd_2a6e_9fc6),
+        (18, 0xf8c3_1606_d301_f467),
+    ];
+    const PROFILE_SCHEMA_FINGERPRINTS: &[(i64, u64)] = &[
+        (1, 0x10b8_b7a3_094f_23d7),
+        (2, 0xd36a_6ccd_26cd_8ab3),
+        (3, 0xfa38_77ec_ded0_391e),
+        (4, 0xfa38_77ec_ded0_391e),
+        (5, 0xfa38_77ec_ded0_391e),
+        (6, 0x6133_6034_2097_64ef),
+        (7, 0xc545_b0e1_65b2_9c87),
+        (8, 0x441d_75af_3edb_d1fb),
+        (9, 0x52da_c9e7_ce8a_4d9b),
+        (10, 0x163b_4df0_050f_285e),
+        (11, 0x1831_eb77_6cbd_8ea1),
+        (12, 0x0d0b_cc00_2fd0_8fc9),
+        (13, 0x128f_f07d_8b37_6bc9),
+        (14, 0x0bb9_e89a_39c2_fb9f),
+        (15, 0x2f78_2c71_a646_acaf),
+    ];
+
+    fn schema_fingerprint(migrations: &[Migration], version: i64) -> u64 {
+        let manifest = expected_manifest(migrations, version).expect("shipped migrations apply");
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for object in &manifest {
+            for part in [
+                object.kind.as_str(),
+                object.name.as_str(),
+                object.table.as_str(),
+                object.sql.as_deref().unwrap_or("\u{0}"),
+            ] {
+                for byte in part.as_bytes().iter().chain(std::iter::once(&0x1f)) {
+                    hash ^= u64::from(*byte);
+                    hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+            }
+        }
+        hash
+    }
+
+    #[test]
+    #[ignore]
+    fn print_schema_fingerprints() {
+        for (migrations, family) in [(META, "META"), (PROFILE, "PROFILE")] {
+            println!("const {family}_SCHEMA_FINGERPRINTS: &[(i64, u64)] = &[");
+            for migration in migrations {
+                println!(
+                    "        ({}, {:#018x}),",
+                    migration.version,
+                    schema_fingerprint(migrations, migration.version)
+                );
+            }
+            println!("    ];");
+        }
+    }
+
+    #[test]
+    fn released_migrations_keep_the_exact_schema_text_they_shipped_with() {
+        for (migrations, expected, family) in [
+            (META, META_SCHEMA_FINGERPRINTS, "meta"),
+            (PROFILE, PROFILE_SCHEMA_FINGERPRINTS, "profile"),
+        ] {
+            let versions: Vec<i64> = migrations.iter().map(|m| m.version).collect();
+            assert_eq!(
+                expected
+                    .iter()
+                    .map(|(version, _)| *version)
+                    .collect::<Vec<_>>(),
+                versions,
+                "{family}: every shipped version needs a recorded fingerprint"
+            );
+            for (version, fingerprint) in expected {
+                assert_eq!(
+                    schema_fingerprint(migrations, *version),
+                    *fingerprint,
+                    "{family} migration {version} no longer produces the schema it shipped with; \
+                     a released migration's SQL text is an artifact, not source to reformat"
+                );
+            }
+        }
+    }
 
     fn insert_native_ownership_test_row(
         conn: &Connection,
