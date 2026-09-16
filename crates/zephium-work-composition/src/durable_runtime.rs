@@ -760,7 +760,7 @@ fn compile_step(
 
 /// One browser step never runs longer than this, whatever the run's own deadline:
 /// the controller refuses longer horizons, and a page read should not need them.
-const MAX_STEP_DURATION: Duration = Duration::from_secs(600);
+const MAX_STEP_DURATION: Duration = Duration::from_secs(540);
 
 /// Reports one closed compile stage under development traces; the error is unchanged.
 fn refused(settings: &WorkBrowserAdapterSettings, stage: &str, error: WorkError) -> WorkError {
