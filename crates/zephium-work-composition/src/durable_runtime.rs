@@ -724,7 +724,7 @@ fn compile_step(
             model: settings.model,
             budget,
             max_model_calls: 16,
-            deadline: probe.deadline(),
+            deadline: probe.deadline().min(Instant::now() + MAX_STEP_DURATION),
         },
         settings.config,
         settings.credential,
@@ -757,6 +757,10 @@ fn compile_step(
         .with_work_identity(probe.work())
         .with_anonymous_session(probe.browser_session().clone()))
 }
+
+/// One browser step never runs longer than this, whatever the run's own deadline:
+/// the controller refuses longer horizons, and a page read should not need them.
+const MAX_STEP_DURATION: Duration = Duration::from_secs(600);
 
 /// Reports one closed compile stage under development traces; the error is unchanged.
 fn refused(settings: &WorkBrowserAdapterSettings, stage: &str, error: WorkError) -> WorkError {
