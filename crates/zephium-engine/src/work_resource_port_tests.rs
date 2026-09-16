@@ -1757,3 +1757,55 @@ impl WorkResourceGuard {
         );
     }
 }
+
+#[test]
+fn closed_anonymous_session_refuses_execution_but_preserves_native_drain() {
+    for close_before_acquire in [true, false] {
+        let profile = zephium_core::ids::ProfileId::generate();
+        let work = WorkId::generate();
+        let session = zephium_agentic::WorkBrowserSession::new(
+            profile,
+            work,
+            Instant::now() + std::time::Duration::from_secs(60),
+        );
+        let mut rows = WorkBrowserResources::new(work, profile);
+        let request = rows
+            .construct_document_with_isolation(
+                WorkBrowserResourceId::generate(),
+                ContextId::generate(),
+                ContextProfileStorageClass::Durable,
+                ContextNavigationTarget::parse("https://example.test/").unwrap(),
+                zephium_agentic::WorkBrowserDocumentPolicy::Exact,
+                true,
+                tick(0),
+            )
+            .unwrap()
+            .with_anonymous_session(session.clone())
+            .unwrap();
+        let admission = admission();
+        let guard = Arc::new(WorkResourceGuard::new(&request, &admission));
+        guard.outcome(&request, Outcome::Constructed);
+        rows.settle_at(request.complete(Outcome::Constructed), tick(0))
+            .unwrap();
+        if close_before_acquire {
+            session.close();
+            let request = rows
+                .acquire(
+                    guard.resource(),
+                    ContextRunId::generate(),
+                    tick(1),
+                    tick(100),
+                )
+                .unwrap();
+            assert!(guard.admit_lifecycle(&request, tick(1)).is_err());
+        } else {
+            let lease = leased(&mut rows, &guard);
+            assert!(guard.admits(&lease, tick(2)));
+            session.close();
+            assert!(!guard.admits(&lease, tick(2)));
+            let request = rows.revoke(&lease).unwrap();
+            guard.admit_lifecycle(&request, tick(2)).unwrap();
+            assert!(guard.lease_drained(&lease));
+        }
+    }
+}

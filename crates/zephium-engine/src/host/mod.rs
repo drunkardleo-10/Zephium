@@ -739,6 +739,9 @@ pub(crate) struct EngineHost {
     // at this retained store; distinct profile ids can never share one.
     #[cfg(target_os = "macos")]
     macos_ephemeral_data_stores: HashMap<ProfileId, crate::platform::imp::WebsiteDataStore>,
+    #[cfg(all(target_os = "macos", feature = "agentic-browser"))]
+    anonymous_work_stores:
+        HashMap<zephium_agentic::ContextRunId, work_resource::AnonymousWorkStore>,
     // Native-extension controllers are independently bounded and
     // profile-scoped. Startup hydration is the only product path that may
     // populate this registry before Shell constructs profile views; retaining
@@ -827,3 +830,6 @@ pub(crate) struct EngineHost {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+pub(crate) mod anonymous_session_probe;

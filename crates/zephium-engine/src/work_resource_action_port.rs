@@ -18,7 +18,8 @@ impl WorkResourceGuard {
             .lock()
             .map_err(|_| ContextPortFailure::NativeRefused)?;
         let native = request.action();
-        if request.lease().resource() != &self.resource
+        if !self.session_current()
+            || request.lease().resource() != &self.resource
             || !self.health_current()
             || state.uncertain
             || state.phase != Phase::Leased
@@ -54,7 +55,8 @@ impl WorkResourceGuard {
         attempt: SemanticActionAttemptId,
         now: AgentPolicyInstant,
     ) -> bool {
-        self.port_open()
+        self.session_current()
+            && self.port_open()
             && self.health_current()
             && self.state.lock().is_ok_and(|state| {
                 !state.uncertain

@@ -225,6 +225,9 @@ impl WorkObservationPresentation {
     }
 
     pub(crate) fn present(&mut self) -> PresentationState {
+        if self.state == PresentationState::Ready {
+            return self.poll();
+        }
         if self.state != PresentationState::Prepared {
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             invoke_failure_diagnostic(
@@ -290,6 +293,17 @@ impl WorkObservationPresentation {
         self.page.setHidden(false);
         surface.orderFrontRegardless();
         self.poll()
+    }
+
+    pub(crate) fn renew(&mut self, deadline: Instant) -> bool {
+        if self.state != PresentationState::Ready
+            || !self.human_current()
+            || Instant::now() >= deadline
+        {
+            return false;
+        }
+        self.deadline = deadline;
+        self.poll() == PresentationState::Ready
     }
 
     pub(crate) fn poll(&mut self) -> PresentationState {

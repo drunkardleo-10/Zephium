@@ -298,10 +298,11 @@ pub fn run_macos_agentic_work_application_probe(
 #[doc(hidden)]
 pub fn run_macos_work_application_with_events_probe(
     profile: zephium_core::ids::ProfileId,
+    timeout: std::time::Duration,
     events: impl Fn(EngineEvent) + Send + Sync + 'static,
     start: impl FnOnce(std::sync::Arc<WebviewEngine>) -> Result<MacosAgentWorkProbePoll, &'static str>,
 ) -> Result<(), &'static str> {
-    platform::macos::run_work_application_with_events_probe(profile, events, start)
+    platform::macos::run_work_application_with_events_probe(profile, timeout, events, start)
 }
 
 /// Hosts one bounded variable-length public workflow through the production native adapter.
@@ -3970,4 +3971,11 @@ mod tests {
             zephium_core::session::MAX_SESSION_PROFILES
         );
     }
+}
+
+/// Native anonymous-session qualification; excluded from release builds.
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[doc(hidden)]
+pub fn run_macos_anonymous_work_session_probe() -> Result<(), &'static str> {
+    host::anonymous_session_probe::run()
 }

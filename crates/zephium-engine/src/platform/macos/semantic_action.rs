@@ -186,7 +186,11 @@ pub(super) const fn map_runtime_fault(
 ) -> SemanticActionNativeFailure {
     match fault {
         SemanticActionRuntimeFault::StaleReference => SemanticActionNativeFailure::StaleReference,
-        SemanticActionRuntimeFault::TargetChanged => SemanticActionNativeFailure::TargetChanged,
+        SemanticActionRuntimeFault::TargetChanged
+        | SemanticActionRuntimeFault::TargetDescriptorChanged
+        | SemanticActionRuntimeFault::TargetGeometryChanged => {
+            SemanticActionNativeFailure::TargetChanged
+        }
         SemanticActionRuntimeFault::TargetDisabled => SemanticActionNativeFailure::TargetDisabled,
         SemanticActionRuntimeFault::CredentialBoundary => {
             SemanticActionNativeFailure::CredentialBoundary

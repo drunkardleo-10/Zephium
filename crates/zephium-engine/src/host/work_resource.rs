@@ -59,6 +59,67 @@ mod navigation;
 #[path = "work_resource_observation.rs"]
 mod observation;
 
+#[cfg(target_os = "macos")]
+pub(super) struct AnonymousWorkStore {
+    session: zephium_agentic::WeakWorkBrowserSession,
+    pub(super) profile: zephium_core::ids::ProfileId,
+    pub(super) store: crate::platform::imp::WebsiteDataStore,
+}
+
+#[cfg(target_os = "macos")]
+impl EngineHost {
+    pub(super) fn anonymous_work_store(
+        &mut self,
+        session: &zephium_agentic::WorkBrowserSession,
+    ) -> Result<crate::platform::imp::WebsiteDataStore, ContextPortFailure> {
+        self.anonymous_work_stores.retain(|_, entry| {
+            entry.session.is_current() || self.erasure_tombstones.contains(&entry.profile)
+        });
+        if !session.is_current() {
+            return Err(ContextPortFailure::Stale);
+        }
+        if let Some(entry) = self.anonymous_work_stores.get(&session.id()) {
+            return Ok(entry.store.clone());
+        }
+        if self.anonymous_work_stores.len() >= MAX_LIVE_CONTEXTS {
+            return Err(ContextPortFailure::ResourceExhausted);
+        }
+        let store = crate::platform::imp::new_ephemeral_data_store()
+            .map_err(|_| ContextPortFailure::NativeRefused)?;
+        if self.anonymous_work_stores.values().any(|entry| {
+            objc2::rc::Retained::as_ptr(&entry.store) == objc2::rc::Retained::as_ptr(&store)
+        }) || self
+            .macos_ephemeral_data_stores
+            .values()
+            .any(|other| objc2::rc::Retained::as_ptr(other) == objc2::rc::Retained::as_ptr(&store))
+        {
+            return Err(ContextPortFailure::NativeRefused);
+        }
+        let id = session.id();
+        let profile = session.profile();
+        if !session.register_retirement(Box::new(move || {
+            dispatch2::DispatchQueue::main().exec_async(move || {
+                super::best_effort_with(move |host| {
+                    if !host.erasure_tombstones.contains(&profile) {
+                        host.anonymous_work_stores.remove(&id);
+                    }
+                });
+            });
+        })) {
+            return Err(ContextPortFailure::Stale);
+        }
+        self.anonymous_work_stores.insert(
+            id,
+            AnonymousWorkStore {
+                session: session.downgrade(),
+                profile: session.profile(),
+                store: store.clone(),
+            },
+        );
+        Ok(store)
+    }
+}
+
 pub(super) struct WorkNativeResource {
     pub(super) guard: Arc<WorkResourceGuard>,
     construction: Option<WorkLifecycleTask>,
@@ -67,6 +128,8 @@ pub(super) struct WorkNativeResource {
     watchdog: Option<crate::platform::imp::ContentPolicyTimeout>,
     observation: Option<observation::WorkObservation>,
     action: Option<action::WorkAction>,
+    reading_presentation: Option<crate::platform::imp::WorkObservationPresentation>,
+    presentation_wake: Option<observation::ObservationWake>,
     navigation: Option<navigation::WorkNavigation>,
     history_back: Option<navigation::WorkHistoryBack>,
     #[cfg(target_os = "macos")]
@@ -144,6 +207,8 @@ impl WorkNativeResource {
             watchdog: None,
             observation: None,
             action: None,
+            reading_presentation: None,
+            presentation_wake: None,
             navigation: None,
             history_back: None,
             #[cfg(target_os = "macos")]
@@ -364,7 +429,10 @@ impl WorkNativeResource {
     }
     fn retire_page(&mut self) -> bool {
         self.watchdog = None;
-        if !self.retire_observation_presentation() || !self.retire_action_presentation() {
+        if !self.retire_reading_presentation()
+            || !self.retire_observation_presentation()
+            || !self.retire_action_presentation()
+        {
             return false;
         }
         #[cfg(feature = "native-agentic-work-resource-probe")]
@@ -640,7 +708,6 @@ impl EngineHost {
                     cause: "build_refused",
                     port_failure: result.err(),
                     navigation: None,
-                    history_back: None,
                     document_started: false,
                     deadline_expired: false,
                     guard_healthy: guard.is_healthy(),
@@ -708,13 +775,16 @@ impl EngineHost {
             .native_resources
             .try_acquire(NativeResourceClass::TransientConstruction)
             .map_err(|_| ContextPortFailure::ResourceExhausted)?;
-        // Public discovery owns a fresh store for this one resource. It is
-        // never inserted into the profile cookie cache or reused by another run.
+        // Anonymous sessions never borrow the user's profile cookie store.
         let store = if guard.isolated_public() {
-            Some(
-                crate::platform::imp::new_ephemeral_data_store()
+            Some(match guard.anonymous_session() {
+                Some(session) if session.admits(profile, guard.resource().identity().work()) => {
+                    self.anonymous_work_store(session)?
+                }
+                Some(_) => return Err(ContextPortFailure::Stale),
+                None => crate::platform::imp::new_ephemeral_data_store()
                     .map_err(|_| ContextPortFailure::NativeRefused)?,
-            )
+            })
         } else {
             match guard.storage() {
                 ContextProfileStorageClass::Durable => None,
@@ -764,6 +834,8 @@ impl EngineHost {
             watchdog: None,
             observation: None,
             action: None,
+            reading_presentation: None,
+            presentation_wake: None,
             navigation: None,
             history_back: None,
             #[cfg(target_os = "macos")]
@@ -1062,11 +1134,17 @@ impl EngineHost {
             }
             return;
         }
+        let presentation_retired = if resource.revocation.is_some() {
+            resource.retire_reading_presentation()
+        } else {
+            true
+        };
         if let Some(task) = resource.revocation.as_ref() {
-            let drained = task
-                .request()
-                .and_then(|request| request.lease())
-                .is_some_and(|lease| guard.lease_drained(lease))
+            let drained = presentation_retired
+                && task
+                    .request()
+                    .and_then(|request| request.lease())
+                    .is_some_and(|lease| guard.lease_drained(lease))
                 && resource.observation.is_none()
                 && resource.action.is_none()
                 && resource.navigation.is_none()

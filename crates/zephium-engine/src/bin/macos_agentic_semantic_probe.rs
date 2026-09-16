@@ -9,6 +9,13 @@ fn main() {
 #[cfg(target_os = "macos")]
 fn main() {
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if arguments.as_slice() == ["--ci-anonymous-session"] {
+        match zephium_engine::run_macos_anonymous_work_session_probe() {
+            Ok(()) => eprintln!("macos-anonymous-session-probe: passed; native_cookie_continuity=true; cross_attempt_isolation=true; closed_session_refused=true; cache_released=true; provider=absent"),
+            Err(stage) => { eprintln!("macos-anonymous-session-probe: failed; stage={stage}"); std::process::exit(1); }
+        }
+        return;
+    }
     if arguments.as_slice() == ["--ci-history-runtime"] {
         match zephium_engine::run_macos_agentic_history_runtime_probe() {
             Ok(report) => eprintln!(

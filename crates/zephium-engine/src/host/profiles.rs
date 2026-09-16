@@ -264,6 +264,9 @@ pub(crate) fn release_macos_erasure_obligation(
             }) {
                 None | Some(crate::platform::imp::ControllerErasureSettlement::Settled) => {
                     host.macos_ephemeral_data_stores.remove(&profile);
+                    #[cfg(feature = "agentic-browser")]
+                    host.anonymous_work_stores
+                        .retain(|_, entry| entry.profile != profile);
                 }
                 Some(crate::platform::imp::ControllerErasureSettlement::Stale) => {
                     // A duplicate native terminal for an already-settled exact
@@ -663,6 +666,16 @@ impl EngineHost {
             .get(&profile)
             .cloned()
             .into_iter()
+            .collect::<Vec<_>>();
+        #[cfg(all(target_os = "macos", feature = "agentic-browser"))]
+        let ephemeral_stores = ephemeral_stores
+            .into_iter()
+            .chain(
+                self.anonymous_work_stores
+                    .values()
+                    .filter(|entry| entry.profile == profile)
+                    .map(|entry| entry.store.clone()),
+            )
             .collect();
 
         #[cfg(all(unix, not(target_os = "macos")))]

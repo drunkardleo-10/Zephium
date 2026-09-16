@@ -523,6 +523,8 @@ pub(crate) fn install(
             shutdown_completion: None,
             #[cfg(target_os = "macos")]
             macos_ephemeral_data_stores: HashMap::new(),
+            #[cfg(all(target_os = "macos", feature = "agentic-browser"))]
+            anonymous_work_stores: HashMap::new(),
             #[cfg(target_os = "macos")]
             macos_extension_controllers:
                 crate::platform::imp::PersistentControllerRegistry::with_browser_request_sink(

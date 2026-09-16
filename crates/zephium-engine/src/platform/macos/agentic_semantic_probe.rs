@@ -3301,12 +3301,18 @@ pub(crate) fn run_work_actor(
         Arc<dyn zephium_agentic::AgentBrowserPort>,
     ) -> Result<crate::MacosAgentWorkProbePoll, &'static str>,
 ) -> Result<(), &'static str> {
-    run_work_host(profile, WorkProbeTeardown::Host, None, move |engine| {
-        let port = engine
-            .take_agent_browser_port(sink)
-            .ok_or("actor_port_taken")?;
-        start(port)
-    })
+    run_work_host(
+        profile,
+        WorkProbeTeardown::Host,
+        None,
+        Duration::from_secs(180),
+        move |engine| {
+            let port = engine
+                .take_agent_browser_port(sink)
+                .ok_or("actor_port_taken")?;
+            start(port)
+        },
+    )
 }
 
 /// Excluded native host for the real application composition. It hands over
@@ -3317,11 +3323,18 @@ pub(crate) fn run_work_application(
         Arc<crate::WebviewEngine>,
     ) -> Result<crate::MacosAgentWorkProbePoll, &'static str>,
 ) -> Result<(), &'static str> {
-    run_work_host(profile, WorkProbeTeardown::Application, None, start)
+    run_work_host(
+        profile,
+        WorkProbeTeardown::Application,
+        None,
+        Duration::from_secs(180),
+        start,
+    )
 }
 
 pub(crate) fn run_work_application_with_events(
     profile: ProfileId,
+    timeout: Duration,
     events: impl Fn(crate::EngineEvent) + Send + Sync + 'static,
     start: impl FnOnce(
         Arc<crate::WebviewEngine>,
@@ -3331,6 +3344,7 @@ pub(crate) fn run_work_application_with_events(
         profile,
         WorkProbeTeardown::Application,
         Some(Arc::new(events)),
+        timeout,
         start,
     )
 }
@@ -3360,11 +3374,15 @@ fn run_work_host(
     profile: ProfileId,
     teardown: WorkProbeTeardown,
     events: Option<Arc<dyn Fn(crate::EngineEvent) + Send + Sync>>,
+    timeout: Duration,
     start: impl FnOnce(
         Arc<crate::WebviewEngine>,
     ) -> Result<crate::MacosAgentWorkProbePoll, &'static str>,
 ) -> Result<(), &'static str> {
     use zephium_core::ports::engine::Engine as _;
+    if timeout.is_zero() || timeout > Duration::from_secs(900) {
+        return Err("actor_host_timeout");
+    }
     let application_policy = events.is_some();
     let mtm = MainThreadMarker::new().ok_or("actor_main_thread")?;
     let app = NSApplication::sharedApplication(mtm);
@@ -3499,7 +3517,7 @@ fn run_work_host(
             }
         }
         let mut poll = start(engine.clone())?;
-        let deadline = Instant::now() + Duration::from_secs(180);
+        let deadline = Instant::now() + timeout;
         loop {
             if application_policy {
                 pump_work_application_event(&app, &mut application_events)?;

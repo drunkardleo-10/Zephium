@@ -16,7 +16,8 @@ impl WorkResourceGuard {
             .state
             .lock()
             .map_err(|_| ContextPortFailure::NativeRefused)?;
-        if request.lease().resource() != &self.resource
+        if !self.session_current()
+            || request.lease().resource() != &self.resource
             || !self.health_current()
             || state.uncertain
             || state.phase != Phase::Leased
@@ -50,7 +51,8 @@ impl WorkResourceGuard {
             .state
             .lock()
             .map_err(|_| ContextPortFailure::NativeRefused)?;
-        if request.lease().resource() != &self.resource
+        if !self.session_current()
+            || request.lease().resource() != &self.resource
             || !self.health_current()
             || state.uncertain
             || state.phase != Phase::Leased
@@ -82,7 +84,8 @@ impl WorkResourceGuard {
         now: AgentPolicyInstant,
         completing: bool,
     ) -> bool {
-        self.port_open()
+        (completing || self.session_current())
+            && self.port_open()
             && self.health_current()
             && self.state.lock().is_ok_and(|state| {
                 !state.uncertain

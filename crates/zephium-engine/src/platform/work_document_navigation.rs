@@ -1,6 +1,6 @@
 //! Resource-owned document gate. Construction and explicit policy-bound
 //! successor loads share one gate; unsolicited transitions, redirects and
-//! same-document continuation never acquire authority from native callbacks.
+//! query updates use an explicit public interaction policy within the same native document.
 
 use std::sync::{Arc, Mutex, Weak};
 use zephium_agentic::{
@@ -518,10 +518,9 @@ impl WorkDocumentNavigation {
     }
     /// Initial-load KVO does not establish readiness. Once exact native
     /// navigation and URL sampling have sealed the document, a delayed or
-    /// duplicate URL notification is idempotent only when its bounded native
-    /// value is raw-exactly the sealed effective URL. Missing, oversized or
-    /// unequal values invalidate this fixed-document slice. Canonical
-    /// equivalence is deliberately insufficient.
+    /// duplicate URL notification must match the sealed URL. An explicit public
+    /// interaction policy also admits safe query updates in that same document.
+    /// Missing, oversized or noncanonical values always revoke authority.
     pub(crate) fn location_changed(&self, current: Option<&str>) -> Result<bool, ()> {
         let mut state = self.0.lock().map_err(|_| ())?;
         #[cfg(feature = "native-agentic-work-resource-probe")]
@@ -539,6 +538,31 @@ impl WorkDocumentNavigation {
                     .is_some_and(|effective| effective.as_url().as_str() == current)
             }) {
                 return Ok(false);
+            }
+            // Ready retains the exact committed native ID. Every unarmed load
+            // is still refused by the navigation delegate and event state machine.
+            if state.policy == zephium_agentic::WorkBrowserDocumentPolicy::PublicSameDocumentQuery
+                && state.native_id.is_some()
+                && state.operation.is_none()
+            {
+                let observed = current.and_then(|raw| {
+                    ContextNavigationTarget::parse(raw)
+                        .ok()
+                        .filter(|target| target.as_url().as_str() == raw)
+                });
+                if let Some(observed) = observed.filter(|observed| {
+                    state.target.as_ref().is_some_and(|requested| {
+                        state.policy.admits_final_document(requested, observed)
+                    })
+                }) {
+                    let Some(revision) = state.location_revision.checked_add(1) else {
+                        state.phase = Phase::Refused;
+                        return Err(());
+                    };
+                    state.location_revision = revision;
+                    state.effective = Some(observed);
+                    return Ok(false);
+                }
             }
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             {
@@ -1283,6 +1307,60 @@ mod tests {
         assert!(!gate.allows(effective));
         assert_eq!(gate.location_changed(Some(requested)), Ok(true));
         assert!(gate.failed());
+    }
+
+    #[test]
+    fn public_interaction_queries_preserve_native_document_but_never_admit_loads() {
+        fn ready() -> WorkDocumentNavigation {
+            let gate = WorkDocumentNavigation::default();
+            assert!(gate.allows("about:blank"));
+            for phase in [E::Started, E::Committed, E::Finished] {
+                gate.observe(event(99, phase, "about:blank")).unwrap();
+            }
+            gate.arm_with_policy(
+                ContextNavigationTarget::parse(URL).unwrap(),
+                zephium_agentic::WorkBrowserDocumentPolicy::PublicSameDocumentQuery,
+            )
+            .unwrap();
+            assert!(gate.allows(URL));
+            for phase in [E::Started, E::Committed, E::Finished] {
+                gate.observe(event(1, phase, URL)).unwrap();
+            }
+            gate.finalize(|| Some(URL.into())).unwrap();
+            gate
+        }
+        let gate = ready();
+        for current in [
+            "https://example.test/frozen?entry=adult",
+            "https://example.test/frozen?sort=price",
+            URL,
+        ] {
+            assert_eq!(gate.location_changed(Some(current)), Ok(false));
+            assert!(gate.ready(Some(current)));
+            assert!(!gate.allows(current));
+            let state = gate.0.lock().unwrap();
+            assert_eq!(state.native_id, Some(wry::NavigationId::from_raw(1)));
+            assert_eq!(state.navigation_epoch, 1);
+            assert_eq!(state.target.as_ref().unwrap().as_url().as_str(), URL);
+        }
+        for current in [
+            None,
+            Some("https://example.test/other?sort=price"),
+            Some("https://other.test/frozen?sort=price"),
+            Some("http://example.test/frozen"),
+            Some("https://example.test/frozen#changed"),
+            Some("https://example.test/frozen?access_token=secret-value"),
+            Some("https://EXAMPLE.test/frozen?sort=price"),
+        ] {
+            let gate = ready();
+            assert_eq!(gate.location_changed(current), Ok(true));
+            assert!(gate.failed());
+        }
+        for phase in [E::Started, E::Committed, E::Finished] {
+            let gate = ready();
+            assert_eq!(gate.observe(event(2, phase, URL)), Ok((false, true)));
+            assert!(gate.failed());
+        }
     }
 
     #[test]

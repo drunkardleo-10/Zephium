@@ -88,6 +88,7 @@ pub(crate) struct WorkResourceGuard {
     resource: WorkBrowserResourceJoin,
     storage: ContextProfileStorageClass,
     isolated_public: bool,
+    anonymous_session: Option<zephium_agentic::WorkBrowserSession>,
     document: Option<ContextNavigationTarget>,
     document_policy: zephium_agentic::WorkBrowserDocumentPolicy,
     state: Mutex<State>,
@@ -126,6 +127,7 @@ impl WorkResourceGuard {
             resource: request.resource().clone(),
             storage: request.storage(),
             isolated_public: request.isolated_public(),
+            anonymous_session: request.anonymous_session().cloned(),
             document: request.document().cloned(),
             document_policy: request.document_policy(),
             health: None,
@@ -197,14 +199,23 @@ impl WorkResourceGuard {
             })
         })
     }
+    pub(crate) fn anonymous_session(&self) -> Option<&zephium_agentic::WorkBrowserSession> {
+        self.anonymous_session.as_ref()
+    }
     pub(crate) fn isolated_public(&self) -> bool {
         self.isolated_public
     }
     pub(crate) fn storage(&self) -> ContextProfileStorageClass {
         self.storage
     }
+    fn session_current(&self) -> bool {
+        self.anonymous_session
+            .as_ref()
+            .is_none_or(|session| session.is_current())
+    }
     pub(crate) fn construction_current(&self) -> bool {
-        self.port_open()
+        self.session_current()
+            && self.port_open()
             && self.health_current()
             && self.state.lock().is_ok_and(|state| {
                 state.phase == Phase::Constructing && state.construction_pending && !state.uncertain
@@ -288,7 +299,8 @@ impl WorkResourceGuard {
         }
         match request.operation() {
             Operation::Acquire
-                if self.health_current()
+                if self.session_current()
+                    && self.health_current()
                     && state.phase == Phase::Retained
                     && !state.uncertain
                     && state.lease.is_none()
@@ -326,7 +338,8 @@ impl WorkResourceGuard {
         lease: &WorkBrowserExecutionLease,
         now: AgentPolicyInstant,
     ) -> bool {
-        self.port_open()
+        self.session_current()
+            && self.port_open()
             && self.health_current()
             && self.state.lock().is_ok_and(|state| {
                 !state.uncertain
@@ -344,7 +357,8 @@ impl WorkResourceGuard {
         lease: &WorkBrowserExecutionLease,
         now: AgentPolicyInstant,
     ) -> bool {
-        self.port_open()
+        self.session_current()
+            && self.port_open()
             && self.health_current()
             && self.state.lock().is_ok_and(|state| {
                 !state.uncertain
@@ -433,7 +447,8 @@ impl WorkResourceGuard {
             .state
             .lock()
             .map_err(|_| ContextPortFailure::NativeRefused)?;
-        if state.uncertain
+        if !self.session_current()
+            || state.uncertain
             || !self.health_current()
             || state.phase != Phase::Leased
             || state.lease.as_ref() != Some(request.lease())

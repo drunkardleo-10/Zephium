@@ -1,4 +1,4 @@
-//! One admitted read owns presentation, semantic reply, retirement and delivery.
+//! Reads own their reply and delivery; the page retains presentation between calls.
 //! The native page stays resource-owned; no model-visible rendering capability.
 use super::*;
 use crate::platform::{
@@ -153,8 +153,39 @@ impl WorkObservation {
     }
 }
 impl WorkNativeResource {
+    pub(super) fn retire_reading_presentation(&mut self) -> bool {
+        if let Some(wake) = &mut self.presentation_wake {
+            wake.cancel();
+        }
+        let retired = self
+            .reading_presentation
+            .as_mut()
+            .is_none_or(|presentation| presentation.retire() == PresentationState::Retired);
+        let drained = self
+            .presentation_wake
+            .as_ref()
+            .is_none_or(ObservationWake::drained);
+        if drained {
+            self.presentation_wake = None;
+        }
+        if retired && drained {
+            self.reading_presentation = None;
+            return true;
+        }
+        if self.presentation_wake.is_none() {
+            self.presentation_wake = ObservationWake::schedule(&self.guard);
+            if self.presentation_wake.is_none() {
+                self.guard.fail();
+            }
+        }
+        false
+    }
+
     pub(in crate::host) fn observation_visible(&self) -> bool {
-        self.action_visible()
+        self.reading_presentation
+            .as_ref()
+            .is_some_and(WorkObservationPresentation::visible_for_audit)
+            || self.action_visible()
             || self
                 .observation
                 .as_ref()
@@ -195,7 +226,10 @@ impl EngineHost {
         // One presentation opportunity at a time. A second read never occludes
         // the first page or silently shares its captured foreground owner.
         if self.work_resources.values().any(|resource| {
-            resource.action.is_some()
+            (resource.guard.resource().identity().context()
+                != guard.resource().identity().context()
+                && resource.reading_presentation.is_some())
+                || resource.action.is_some()
                 || resource
                     .observation
                     .as_ref()
@@ -258,6 +292,13 @@ impl EngineHost {
         let external_witness = false;
         let presentation = if external_witness {
             None
+        } else if let Some(mut presentation) = resource.reading_presentation.take() {
+            if !presentation.renew(deadline) {
+                resource.reading_presentation = Some(presentation);
+                task.refuse(SemanticRuntimePortFailure::Cancelled);
+                return;
+            }
+            Some(presentation)
         } else {
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             let prepared = {
@@ -406,7 +447,16 @@ impl EngineHost {
                     }
                 }
             }
-            let retired = read.retirement_ready();
+            let preserve = read.refusal.is_none()
+                && read.outcome.as_ref().is_some_and(|outcome| outcome.is_ok())
+                && resource.revocation.is_none()
+                && resource.destruction.is_none();
+            if preserve {
+                if let Some(wake) = &mut read.wake {
+                    wake.cancel();
+                }
+            }
+            let retired = preserve || read.retirement_ready();
             if read
                 .presentation
                 .as_mut()
@@ -432,6 +482,9 @@ impl EngineHost {
                         resource.presentation_observations.saturating_add(1);
                 }
                 ended.wake = None;
+                if preserve {
+                    resource.reading_presentation = ended.presentation.take();
+                }
                 ended.presentation = None;
                 let outcome = ended.refusal.map_or_else(
                     || {
@@ -745,7 +798,7 @@ mod tests {
         assert_eq!(closure().1, Some(1));
     }
     #[test]
-    fn owner_publication_and_native_retirement_precede_effect_and_success_delivery() {
+    fn owner_publication_and_presentation_ownership_precede_effect_and_success_delivery() {
         let source = include_str!("work_resource_observation.rs")
             .split("\n#[cfg(test)]")
             .next()
@@ -762,7 +815,13 @@ mod tests {
         );
         assert!(
             source
-                .find("let retired = read.retirement_ready()")
+                .find("let retired = preserve || read.retirement_ready()")
+                .unwrap()
+                < source.find("task.complete(outcome)").unwrap()
+        );
+        assert!(
+            source
+                .find("resource.reading_presentation = ended.presentation.take()")
                 .unwrap()
                 < source.find("task.complete(outcome)").unwrap()
         );

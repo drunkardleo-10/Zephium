@@ -1,5 +1,5 @@
-//! Fixed semantic recipes on retained pages. Presentation, native completion,
-//! and callback return remain separate owners through cancellation and cleanup.
+//! Fixed semantic recipes on retained pages. Native completion and callback
+//! return drain before presentation returns to the page owner.
 use super::observation::ObservationWake;
 use super::*;
 use crate::platform::{
@@ -109,11 +109,13 @@ impl EngineHost {
         let native = request.action();
         let attempt = native.attempt();
         let context = native.frame().context();
-        if self
-            .work_resources
-            .values()
-            .any(|resource| resource.action.is_some() || resource.observation.is_some())
-        {
+        if self.work_resources.values().any(|resource| {
+            resource.action.is_some()
+                || resource.observation.is_some()
+                || (resource.guard.resource().identity().context()
+                    != guard.resource().identity().context()
+                    && resource.reading_presentation.is_some())
+        }) {
             task.refuse(SemanticActionNativeFailure::ResourceExhausted);
             return;
         }
@@ -166,21 +168,31 @@ impl EngineHost {
             task.refuse(SemanticActionNativeFailure::TimedOut);
             return;
         };
-        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
-        let prepared = {
-            let diagnostic = guard.clone();
-            WorkObservationPresentation::prepare(view.view(), deadline, move |failure| {
-                diagnostic
-                    .record_failure_cause(ResourceFailureCause::ObservationPresentation(failure));
-            })
-        };
-        #[cfg(not(feature = "native-agentic-work-lifetime-diagnostic"))]
-        let prepared = WorkObservationPresentation::prepare(view.view(), deadline);
-        let presentation = match prepared {
-            Ok(presentation) => presentation,
-            Err(_) => {
+        let presentation = if let Some(mut presentation) = resource.reading_presentation.take() {
+            if !presentation.renew(deadline) {
+                resource.reading_presentation = Some(presentation);
                 task.refuse(SemanticActionNativeFailure::TargetOccluded);
                 return;
+            }
+            presentation
+        } else {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            let prepared = {
+                let diagnostic = guard.clone();
+                WorkObservationPresentation::prepare(view.view(), deadline, move |failure| {
+                    diagnostic.record_failure_cause(ResourceFailureCause::ObservationPresentation(
+                        failure,
+                    ));
+                })
+            };
+            #[cfg(not(feature = "native-agentic-work-lifetime-diagnostic"))]
+            let prepared = WorkObservationPresentation::prepare(view.view(), deadline);
+            match prepared {
+                Ok(presentation) => presentation,
+                Err(_) => {
+                    task.refuse(SemanticActionNativeFailure::TargetOccluded);
+                    return;
+                }
             }
         };
         resource.action = Some(WorkAction {
@@ -464,7 +476,16 @@ impl EngineHost {
             }
         };
         if action.cancelled || terminal_ready {
-            let retired = action.retirement_ready();
+            let preserve = !action.cancelled
+                && terminal_ready
+                && resource.revocation.is_none()
+                && resource.destruction.is_none();
+            if preserve {
+                if let Some(wake) = &mut action.wake {
+                    wake.cancel();
+                }
+            }
+            let retired = preserve || action.retirement_ready();
             if action
                 .presentation
                 .as_mut()
@@ -479,6 +500,9 @@ impl EngineHost {
             if action.delivery_ready(retired, idle) {
                 let mut ended = resource.action.take().unwrap();
                 ended.wake = None;
+                if preserve {
+                    resource.reading_presentation = ended.presentation.take();
+                }
                 ended.presentation = None;
                 if let Some(task) = ended.task.take() {
                     if let Some(terminal) = ended.terminal.take() {
