@@ -1,6 +1,9 @@
 //! Validated UI preferences shared by desktop admission and the application actor.
 pub const KEYS: &[&str] = &[
     "appearance",
+    "search.engine",
+    "search.custom-url",
+    "search.suggestions",
     "sidebar.mode",
     "tools.presentation",
     "ui.accent",
@@ -11,6 +14,9 @@ pub const KEYS: &[&str] = &[
 
 pub fn value_allowed(key: &str, value: &str) -> bool {
     match key {
+        "search.custom-url" => value.is_empty() || crate::search::valid_template(value),
+        "search.engine" => crate::search::SearchEngine::from_id(value).is_some(),
+        "search.suggestions" => matches!(value, "true" | "false"),
         "appearance" => matches!(value, "system" | "light" | "dark"),
         "tools.presentation" => matches!(value, "follow_layout" | "floating"),
         "sidebar.mode" => matches!(value, "default" | "compact"),

@@ -376,6 +376,7 @@ mod tests;
 #[derive(Clone, Serialize, Deserialize, Type)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResourceCall {
+    SearchTitles { query: String },
     ResolveNotes { ids: Vec<String> },
     Acknowledge { request_id: String },
     List { query: ResourceQuery },
@@ -391,6 +392,7 @@ pub type ResourceDone = Box<dyn FnOnce(ResourceResponse) + Send>;
 impl ResourceCall {
     pub fn validate(&self) -> bool {
         match self {
+            Self::SearchTitles { query } => !query.trim().is_empty() && query.len() <= 512,
             Self::ResolveNotes { ids } => ids.len() <= 64 && ids.iter().all(|id| valid_id(id)),
             Self::Acknowledge { request_id } => valid_request(request_id),
             Self::Get { id } => valid_id(id),

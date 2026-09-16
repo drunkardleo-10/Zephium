@@ -809,6 +809,11 @@ pub trait Store {
     /// bounded adapter accepted the command; durability is established by a
     /// later `flush`/`flush_until` barrier. `false` is a definite rejection.
     fn set_app_setting(&self, key: String, value: String) -> bool;
+
+    /// Records an explicit submitted search, never a partial keystroke.
+    fn record_search(&self, _profile: ProfileId, _query: String, _url: String) -> bool {
+        false
+    }
     /// Prefix search over the profile's history FTS index, deduped by url,
     /// most recent first.
     fn search_history(&self, profile: ProfileId, query: &str, limit: u32) -> Vec<HistoryHit>;
