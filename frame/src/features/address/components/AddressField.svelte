@@ -1,6 +1,7 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
   import { Alert02Icon, LockIcon, Search01Icon } from "@hugeicons/core-free-icons";
+  import { settle } from "$domain/operations";
   import { tabs } from "$domain/tabs";
   import { uiCommands as ui } from "$domain/ui-commands";
   import { commands } from "$shared/ipc/bindings";
@@ -12,6 +13,9 @@
 
   let input: HTMLInputElement;
   let editing = $state(false);
+  let pending = $state(false);
+  let failed = $state(false);
+  let composing = false;
   let draft = $state("");
   let activeUrl = $derived(tabs.activeTab()?.url ?? "");
   let authoritativeValue = $derived(restingAddress(activeUrl));
@@ -32,16 +36,30 @@
     input.select();
   });
 
-  function submit(event: SubmitEvent) {
+  async function submit(event: SubmitEvent) {
     event.preventDefault();
+    if (composing || pending || !value.trim()) return;
     const id = tabs.activeId();
-    if (id !== null) tabs.navigate(id, value);
-    input.blur();
+    if (id === null) return;
+    const submitted = value;
+    pending = true;
+    failed = false;
+    try {
+      const result = await settle(commands.tabsNavigate(id, submitted));
+      if (tabs.activeId() !== id) return;
+      if (result.outcome === "failed" || result.outcome === "rejected") failed = true;
+      else if (value === submitted) input.blur();
+    } catch {
+      if (tabs.activeId() === id) failed = true;
+    } finally {
+      pending = false;
+    }
   }
 
   function handleInput(event: Event) {
     const target = event.currentTarget;
     if (!(target instanceof HTMLInputElement)) return;
+    failed = false;
     draft = target.value;
   }
 
@@ -83,9 +101,15 @@
     </div>
   {/if}
 
+  <!--
+    A refused navigation rings the field, following the shared Field
+    convention. The message is announced rather than drawn: a block of text
+    appearing under the address bar would push the whole chrome down.
+  -->
   <div
     class:sr-only={compact}
     class:flex={!compact}
+    class:shadow-[inset_0_0_0_1px_var(--color-danger)]={failed}
     class="focus-within:shadow-focus h-[34px] items-center gap-2 rounded-md bg-fill ps-2.5 pe-2 shadow-field transition-[background-color,box-shadow] duration-[var(--motion-fast)] ease-[var(--ease-out-quiet)] focus-within:bg-fill-hover hover:bg-fill-hover"
   >
     {#if !compact}
@@ -113,6 +137,17 @@
       spellcheck="false"
       {value}
       oninput={handleInput}
+      oncompositionstart={() => (composing = true)}
+      oncompositionend={() => (composing = false)}
+      onkeydown={(event) => {
+        if (event.key === "Escape" && !event.isComposing) {
+          event.preventDefault();
+          failed = false;
+          input.blur();
+        }
+      }}
+      aria-invalid={failed || undefined}
+      aria-describedby={failed ? "address-error" : undefined}
       onfocus={beginEditing}
       onblur={() => (editing = false)}
       class="min-w-0 flex-1 bg-transparent text-[13.5px] text-text outline-none placeholder:text-faint"
@@ -122,4 +157,5 @@
       {@render shield()}
     {/if}
   </div>
+  {#if failed}<p id="address-error" role="alert" class="sr-only">{m.browser_nav_failed()}</p>{/if}
 </form>
