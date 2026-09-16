@@ -31,11 +31,19 @@ const FINDINGS_PER_ARTIFACT = 8;
 const FINDINGS_PER_RUN = 32;
 const SUBJECTS_PER_RUN = 12;
 const SIZES = {
-  subject: { width: 240, height: 112 },
+  subject: { width: 240, height: 136 },
+  pictured: { width: 240, height: 256 },
   finding: { width: 300, height: 140 },
   source: { width: 260, height: 84 },
+  page: { width: 320, height: 236 },
 } as const;
 const GAP = 24;
+/** Column origins of the agent-run flow, shared with the transient page cards. */
+export const COLUMNS = {
+  pages: (x: number) => x + SIZES.source.width + GAP * 2,
+  subjects: (x: number) => COLUMNS.pages(x) + SIZES.page.width + GAP * 2,
+  objects: (x: number) => COLUMNS.subjects(x) + SIZES.pictured.width + GAP * 2,
+} as const;
 
 function roots(execution: WorkExecutionFact): WorkArtifactV1[] {
   return execution.artifacts.filter((artifact) =>
@@ -270,16 +278,19 @@ function organizeAgentRun(
     );
   const count = (kind: WorkEnvironmentReference["kind"]) =>
     existing.filter((element) => element.reference.kind === kind).length;
-  const subjectsY = anchor.y;
-  const columnsY = anchor.y + SIZES.subject.height + GAP * 2;
-  const findingsX = anchor.x;
-  const sourcesX = anchor.x + SIZES.finding.width + GAP * 2;
-  const objectsX = sourcesX + SIZES.source.width * 2 + GAP * 3;
+  // One flow, left to right: sources, the pages read from them, the subjects
+  // they establish, then findings and the published objects.
+  const sourcesX = anchor.x;
+  const subjectsX = COLUMNS.subjects(anchor.x);
+  const findingsX = COLUMNS.objects(anchor.x);
+  const objectsX = findingsX;
   let subjectCount = count("subject");
-  let findingY = bottom("finding", columnsY);
+  let subjectY = bottom("subject", anchor.y);
+  let findingY = bottom("finding", anchor.y);
   let sourceCount = count("source");
-  let sourceY = bottom("source", columnsY) - (sourceCount % 2 ? SIZES.source.height + GAP : 0);
-  let objectY = bottom("artifact", columnsY);
+  let sourceY = bottom("source", anchor.y);
+  let objectY = Math.max(bottom("artifact", anchor.y), bottom("finding", anchor.y));
+  const objectiveRef: WorkEnvironmentReference = { kind: "objective", objective };
 
   // Subjects are hubs: one per page or name across the run.
   const subjectByName = placedSubjects(snapshot, execution);
@@ -317,14 +328,9 @@ function organizeAgentRun(
       if (known) return known;
       const reference = subjectRef(artifact, index);
       if (subjectCount < SUBJECTS_PER_RUN) {
-        adds.push({
-          reference,
-          placement: {
-            x: anchor.x + subjectCount * (SIZES.subject.width + GAP),
-            y: subjectsY,
-            ...SIZES.subject,
-          },
-        });
+        const size = subject.image_candidates?.length ? SIZES.pictured : SIZES.subject;
+        adds.push({ reference, placement: { x: subjectsX, y: subjectY, ...size } });
+        subjectY += size.height + GAP;
         subjectCount += 1;
         subjectByName.set(name, reference);
       }
@@ -345,17 +351,11 @@ function organizeAgentRun(
           artifact: artifact.id,
           index,
         };
-        adds.push({
-          reference,
-          placement: {
-            x: sourcesX + (sourceCount % 2) * (SIZES.source.width + GAP),
-            y: sourceY,
-            ...SIZES.source,
-          },
-        });
+        adds.push({ reference, placement: { x: sourcesX, y: sourceY, ...SIZES.source } });
+        relations.push({ from: objectiveRef, to: reference, kind: "uses" });
         sourceByLink.set(linkKey(link), reference);
         sourceCount += 1;
-        if (sourceCount % 2 === 0) sourceY += SIZES.source.height + GAP;
+        sourceY += SIZES.source.height + GAP;
       }
       continue;
     }

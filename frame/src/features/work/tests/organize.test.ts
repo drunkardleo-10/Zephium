@@ -97,7 +97,15 @@ test("an agent run lands its sources while running and later findings connect to
   expect(pendingOrganize(snapshot, state)?.id).toBe("execution");
   const first = organizeExecution(state, execution, { x: 100, y: 300 }, snapshot);
   expect(first.adds.map((add) => add.reference.kind)).toEqual(["source", "source"]);
-  expect(first.adds[1]!.placement.x).toBeGreaterThan(first.adds[0]!.placement.x);
+  expect(first.adds[1]!.placement.y).toBeGreaterThan(first.adds[0]!.placement.y);
+  expect(first.adds[1]!.placement.x).toBe(first.adds[0]!.placement.x);
+  expect(first.relations).toEqual(
+    first.adds.map((add) => ({
+      from: { kind: "objective", objective: "objective" },
+      to: add.reference,
+      kind: "uses",
+    })),
+  );
   const placed: WorkEnvironmentSnapshot = {
     ...snapshot,
     elements: [

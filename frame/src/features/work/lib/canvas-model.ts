@@ -119,7 +119,7 @@ export function defaultSize(item: CanvasItem): { width: number; height: number }
     case "tab":
       return { width: 280, height: 96 };
     case "subject":
-      return { width: 240, height: 112 };
+      return { width: 240, height: 136 };
     case "finding":
       return { width: 300, height: 140 };
     case "source":

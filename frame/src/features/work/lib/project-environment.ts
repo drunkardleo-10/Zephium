@@ -9,6 +9,7 @@ import type {
 import { artifactView } from "./project-work";
 import { agentLine, isAgentExecution } from "./agent-steps";
 import { subjectFacts, subjectKey } from "./subjects";
+import { COLUMNS } from "./organize";
 import { pageFrameUrl } from "$domain/resources";
 
 function host(url: string | undefined): string {
@@ -481,15 +482,29 @@ export function environmentPages(
     const projection = objectives.get(element.reference.objective);
     const execution = projection?.executions.at(-1);
     if (!projection || !execution || !isAgentExecution(execution)) continue;
-    const steps = (execution.steps ?? []).filter(
-      (step) => step.kind.kind === "read" || step.kind.kind === "discover",
-    );
-    if (!steps.length) continue;
     const opened = pages(projection.work.id).filter((page) => page.execution === execution.id);
+    // One card per page: every step that opened the same URL folds into it.
+    const byUrl = new Map<
+      string,
+      { steps: typeof execution.steps & object; page?: WorkPageV1; running: boolean }
+    >();
+    for (const step of execution.steps ?? []) {
+      if (step.kind.kind !== "read" && step.kind.kind !== "discover") continue;
+      const page = opened.find((page) => page.step === step.id);
+      const url = page?.url || (step.kind.kind === "read" ? step.kind.url : "");
+      if (!url) continue;
+      const entry = byUrl.get(url) ?? { steps: [], running: false };
+      entry.steps.push(step);
+      if (page?.frame && (!entry.page?.frame || page.live)) entry.page = page;
+      else entry.page ??= page;
+      entry.running ||= step.status === "running";
+      byUrl.set(url, entry);
+    }
+    if (!byUrl.size) continue;
     const anchor = snapshot.view.placements.find((place) => place.element === element.id);
     const home = anchor
-      ? { x: anchor.x + anchor.width + 48, y: anchor.y + anchor.height + 64 }
-      : { x: 420, y: 320 };
+      ? { x: COLUMNS.pages(anchor.x), y: anchor.y + anchor.height + 48 }
+      : { x: COLUMNS.pages(80), y: 320 };
     const hubs = new Map<string, string>();
     for (const candidate of snapshot.elements) {
       const reference = candidate.reference;
@@ -505,15 +520,16 @@ export function environmentPages(
       if (subject) hubs.set(subjectKey(subject), candidate.id);
     }
     const agent = `agent:${element.id}`;
-    steps.forEach((step, index) => {
-      const page = opened.find((page) => page.step === step.id);
-      const url = page?.url || (step.kind.kind === "read" ? step.kind.url : "");
+    let index = 0;
+    for (const [url, entry] of byUrl) {
+      const first = entry.steps[0]!;
       const pageHost = host(url);
-      const live = step.status === "running";
-      const frame = page?.frame
-        ? pageFrameUrl(page.attempt, page.step, page.frame.generation)
+      const live = entry.running;
+      const succeeded = entry.steps.some((step) => step.status === "succeeded");
+      const frame = entry.page?.frame
+        ? pageFrameUrl(entry.page.attempt, entry.page.step, entry.page.frame.generation)
         : null;
-      const id = `page:${element.id}:${step.id}`;
+      const id = `page:${element.id}:${first.id}`;
       items.push({
         id,
         type: "page",
@@ -522,36 +538,38 @@ export function environmentPages(
         detail: url,
         status: live
           ? m.work_env_page_live()
-          : step.status === "failed"
-            ? m.work_env_status_failed()
-            : m.work_env_page_read(),
+          : succeeded
+            ? m.work_env_page_read()
+            : m.work_env_status_failed(),
         page: { url, host: pageHost, frame, live },
       });
-      positions[id] = { x: home.x + (index % 2) * 344, y: home.y + Math.floor(index / 2) * 260 };
+      positions[id] = { x: home.x, y: home.y + index * 260 };
+      index += 1;
       if (live) links.push({ id: `working:${id}`, source: agent, target: id, kind: "working" });
       const linked = new Set<string>();
-      for (const artifactId of step.artifacts ?? []) {
-        const artifact = execution.artifacts.find((artifact) => artifact.id === artifactId);
-        const subjects =
-          artifact &&
-          (artifact.data.kind === "comparison_matrix" ||
-            artifact.data.kind === "findings" ||
-            artifact.data.kind === "evidence_collection")
-            ? (artifact.data.subjects ?? [])
-            : [];
-        for (const subject of subjects) {
-          const hub = hubs.get(subjectKey(subject));
-          if (!hub || linked.has(hub)) continue;
-          linked.add(hub);
-          links.push({
-            id: `page-subject:${id}:${hub}`,
-            source: id,
-            target: hub,
-            kind: "supports",
-          });
+      for (const step of entry.steps)
+        for (const artifactId of step.artifacts ?? []) {
+          const artifact = execution.artifacts.find((artifact) => artifact.id === artifactId);
+          const subjects =
+            artifact &&
+            (artifact.data.kind === "comparison_matrix" ||
+              artifact.data.kind === "findings" ||
+              artifact.data.kind === "evidence_collection")
+              ? (artifact.data.subjects ?? [])
+              : [];
+          for (const subject of subjects) {
+            const hub = hubs.get(subjectKey(subject));
+            if (!hub || linked.has(hub)) continue;
+            linked.add(hub);
+            links.push({
+              id: `page-subject:${id}:${hub}`,
+              source: id,
+              target: hub,
+              kind: "supports",
+            });
+          }
         }
-      }
-    });
+    }
   }
   return { items, links, positions };
 }
