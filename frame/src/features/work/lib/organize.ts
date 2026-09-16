@@ -9,6 +9,7 @@ import type {
 } from "$shared/ipc/bindings";
 import { isAgentExecution } from "./agent-steps";
 import type { CanvasPosition, CanvasSize } from "./canvas-model";
+import { subjectKey } from "./subjects";
 
 type Placement = CanvasPosition & CanvasSize;
 export type OrganizePlan = {
@@ -52,6 +53,52 @@ function placeable(artifact: WorkArtifactV1): boolean {
       return true;
   }
 }
+/** Records a browser step collected: their subjects join the canvas, the table itself does not. */
+function recordArtifacts(execution: WorkExecutionFact): Set<string> {
+  const ids = new Set<string>();
+  for (const step of execution.steps ?? [])
+    if (step.kind.kind === "read" || step.kind.kind === "discover")
+      for (const artifact of step.artifacts ?? []) ids.add(artifact);
+  return ids;
+}
+function subjectsOf(artifact: WorkArtifactV1) {
+  return artifact.data.kind === "comparison_matrix" ||
+    artifact.data.kind === "findings" ||
+    artifact.data.kind === "evidence_collection"
+    ? (artifact.data.subjects ?? [])
+    : [];
+}
+/** Subject hubs already on the canvas for this run, by merge key. */
+function placedSubjects(
+  snapshot: WorkEnvironmentSnapshot,
+  execution: WorkExecutionFact,
+): Map<string, WorkEnvironmentReference> {
+  const keys = new Map<string, WorkEnvironmentReference>();
+  for (const element of snapshot.elements) {
+    const reference = element.reference;
+    if (reference.kind !== "subject" || reference.execution !== execution.id) continue;
+    const artifact = execution.artifacts.find((artifact) => artifact.id === reference.artifact);
+    const subject = artifact ? subjectsOf(artifact)[reference.index] : undefined;
+    if (subject) keys.set(subjectKey(subject), reference);
+  }
+  return keys;
+}
+function unplacedRoots(
+  snapshot: WorkEnvironmentSnapshot,
+  execution: WorkExecutionFact,
+): WorkArtifactV1[] {
+  const placed = referenced(snapshot, execution.id);
+  const records = recordArtifacts(execution);
+  const hubs = placedSubjects(snapshot, execution);
+  return roots(execution).filter((artifact) => {
+    if (placed.has(artifact.id) || !placeable(artifact)) return false;
+    if (!records.has(artifact.id)) return true;
+    return (
+      hubs.size < SUBJECTS_PER_RUN &&
+      subjectsOf(artifact).some((subject) => !hubs.has(subjectKey(subject)))
+    );
+  });
+}
 function referenced(snapshot: WorkEnvironmentSnapshot, execution: string): Set<string> {
   const ids = new Set<string>();
   for (const element of snapshot.elements) {
@@ -78,11 +125,9 @@ export function pendingOrganize(
   if (!execution || projection.interrupted.includes(execution.id)) return null;
   const agent = isAgentExecution(execution);
   if (!agent && !["completed", "needs_review"].includes(execution.status)) return null;
+  if (agent) return unplacedRoots(snapshot, execution).length ? execution : null;
   const placed = referenced(snapshot, execution.id);
-  const unplaced = roots(execution).filter(
-    (artifact) => !placed.has(artifact.id) && (!agent || placeable(artifact)),
-  );
-  return unplaced.length ? execution : null;
+  return roots(execution).some((artifact) => !placed.has(artifact.id)) ? execution : null;
 }
 
 /** Deterministic first placement around the objective; user arrangement is never rewritten. */
@@ -204,10 +249,8 @@ function organizeAgentRun(
   snapshot: WorkEnvironmentSnapshot,
 ): OrganizePlan {
   const objective = projection.work.id;
-  const placed = referenced(snapshot, execution.id);
-  const fresh = roots(execution).filter(
-    (artifact) => !placed.has(artifact.id) && placeable(artifact),
-  );
+  const fresh = unplacedRoots(snapshot, execution);
+  const records = recordArtifacts(execution);
   const adds: OrganizePlan["adds"] = [];
   const relations: OrganizePlan["relations"] = [];
   const existing = snapshot.elements.filter(
@@ -238,22 +281,8 @@ function organizeAgentRun(
   let sourceY = bottom("source", columnsY) - (sourceCount % 2 ? SIZES.source.height + GAP : 0);
   let objectY = bottom("artifact", columnsY);
 
-  // Subjects are hubs: one per name across the run.
-  const subjectByName = new Map<string, WorkEnvironmentReference>();
-  for (const element of existing) {
-    const reference = element.reference;
-    if (reference.kind !== "subject") continue;
-    const artifact = execution.artifacts.find((artifact) => artifact.id === reference.artifact);
-    const subjects =
-      artifact &&
-      (artifact.data.kind === "comparison_matrix" ||
-        artifact.data.kind === "findings" ||
-        artifact.data.kind === "evidence_collection")
-        ? artifact.data.subjects
-        : undefined;
-    const name = subjects?.[reference.index]?.name.trim().toLowerCase();
-    if (name) subjectByName.set(name, reference);
-  }
+  // Subjects are hubs: one per page or name across the run.
+  const subjectByName = placedSubjects(snapshot, execution);
   // Sources are matched to findings by the exact evidence link they cite.
   const sourceByLink = new Map<string, WorkEnvironmentReference>();
   const linkKey = (link: WorkEvidenceLink) => `${link.extraction_id}:${link.source_id}`;
@@ -282,14 +311,8 @@ function organizeAgentRun(
     artifact: artifact.id,
   });
   const admitSubjects = (artifact: WorkArtifactV1): WorkEnvironmentReference[] => {
-    const subjects =
-      artifact.data.kind === "comparison_matrix" ||
-      artifact.data.kind === "findings" ||
-      artifact.data.kind === "evidence_collection"
-        ? (artifact.data.subjects ?? [])
-        : [];
-    return subjects.map((subject, index) => {
-      const name = subject.name.trim().toLowerCase();
+    return subjectsOf(artifact).map((subject, index) => {
+      const name = subjectKey(subject);
       const known = subjectByName.get(name);
       if (known) return known;
       const reference = subjectRef(artifact, index);
@@ -337,6 +360,7 @@ function organizeAgentRun(
       continue;
     }
     const subjects = admitSubjects(artifact);
+    if (records.has(artifact.id)) continue;
     if (artifact.data.kind === "findings") {
       let findingCount = count("finding");
       for (const [index, item] of artifact.data.items.slice(0, FINDINGS_PER_ARTIFACT).entries()) {

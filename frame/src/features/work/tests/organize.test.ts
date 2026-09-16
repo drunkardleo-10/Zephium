@@ -164,3 +164,81 @@ test("reviewed plans still organize once, after they settle", () => {
   const plan = organizeExecution(projection, projection.executions[0]!, { x: 0, y: 0 }, snapshot);
   expect(plan.adds.map((add) => add.reference.kind)).toEqual(["artifact"]);
 });
+
+test("browser records merge into subject hubs and never place their tables", () => {
+  const execution = agentRun();
+  const record = (id: string, name: string, homepage: string, price: string | null) => ({
+    ...execution.artifacts[0]!,
+    id,
+    title: id,
+    data: {
+      kind: "comparison_matrix" as const,
+      subjects: [{ name, homepage, image_candidates: [`https://img.example/${id}.jpg`] }],
+      criteria: [{ name: "price", kind: { kind: "text" as const } }],
+      cells: [
+        [
+          {
+            value: price ? { kind: "text" as const, text: price } : { kind: "unknown" as const },
+            evidence: [0],
+            note: null,
+            general_knowledge: false,
+          },
+        ],
+      ],
+      notes: [],
+    },
+    evidence: [{ extraction_id: "record", source_id: 1 }],
+  });
+  execution.artifacts = [
+    record("catalog", "Tower Bridge", "https://shop.example/p/1?utm_source=x", "$119.99"),
+  ];
+  execution.steps = [
+    {
+      id: "read-1",
+      turn: 1,
+      kind: { kind: "read", url: "https://shop.example/catalog", collection: null },
+      status: "succeeded",
+      artifacts: ["catalog"],
+    },
+  ];
+  const state = { ...projection, executions: [execution] };
+  const first = organizeExecution(state, execution, { x: 100, y: 300 }, snapshot);
+  expect(first.adds.map((add) => add.reference.kind)).toEqual(["subject"]);
+  const placed: WorkEnvironmentSnapshot = {
+    ...snapshot,
+    elements: [
+      ...snapshot.elements,
+      { id: "hub", area: null, reference: first.adds[0]!.reference },
+    ],
+    view: { ...snapshot.view, placements: [{ element: "hub", ...first.adds[0]!.placement }] },
+  };
+  expect(pendingOrganize(placed, state)).toBeNull();
+  execution.artifacts.push(
+    record("detail", "LEGO Tower Bridge", "https://shop.example/p/1/", null),
+  );
+  execution.steps.push({
+    id: "read-2",
+    turn: 2,
+    kind: { kind: "read", url: "https://shop.example/p/1", collection: null },
+    status: "succeeded",
+    artifacts: ["detail"],
+  });
+  expect(pendingOrganize(placed, state)).toBeNull();
+  execution.artifacts.push({
+    ...record("final", "Tower Bridge", "https://shop.example/p/1", "$119.99"),
+    title: "Compared sets",
+  });
+  execution.steps.push({
+    id: "publish",
+    turn: 3,
+    kind: { kind: "publish" },
+    status: "succeeded",
+    artifacts: ["final"],
+  });
+  expect(pendingOrganize(placed, state)?.id).toBe("execution");
+  const second = organizeExecution(state, execution, { x: 100, y: 300 }, placed);
+  expect(second.adds.map((add) => add.reference.kind)).toEqual(["artifact"]);
+  expect(second.relations).toEqual([
+    { from: first.adds[0]!.reference, to: second.adds[0]!.reference, kind: "uses" },
+  ]);
+});

@@ -31,6 +31,8 @@ export type CanvasItem = {
   /** Planned output names only; these are not produced artifact resources. */
   responsibility?: { outputs: string[] };
   subject?: SubjectView;
+  /** What the run established about a subject, price first. */
+  facts?: { label: string; value: string }[];
   finding?: FindingView;
   /** Transient agent presence: avatar seed, status, and its latest line. */
   agent?: { seed: number; activity: string; objective: string; line?: string; worker?: boolean };

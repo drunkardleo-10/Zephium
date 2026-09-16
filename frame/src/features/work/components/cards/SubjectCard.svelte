@@ -17,7 +17,16 @@
         onerror={() => (failed = true)}
       />{:else}<span class="mark" aria-hidden="true">{item.title.slice(0, 1)}</span>{/if}{/snippet}
   {#if picture && !failed}<div class="hero"><img src={picture} alt={item.title} /></div>{/if}
-  {#if item.detail}<p class="descriptor">{item.detail}</p>{/if}
+  {#if item.facts?.length}
+    <dl class="facts">
+      {#each item.facts as fact, index (fact.label)}
+        <div class="fact" class:lead={index === 0}>
+          <dt>{fact.label}</dt>
+          <dd>{fact.value}</dd>
+        </div>
+      {/each}
+    </dl>
+  {:else if item.detail}<p class="descriptor">{item.detail}</p>{/if}
   {#snippet footer()}<span>{host || item.status}</span>{/snippet}
 </CardFrame>
 
@@ -53,6 +62,38 @@
     color: var(--color-text);
     font-weight: 700;
     text-transform: uppercase;
+  }
+
+  .facts {
+    display: grid;
+    gap: 2px;
+    margin: 0;
+  }
+
+  .fact {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: var(--text-label);
+    line-height: 16px;
+  }
+
+  .fact dt {
+    color: var(--color-muted);
+    text-transform: capitalize;
+    white-space: nowrap;
+  }
+
+  .fact dd {
+    margin: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .fact.lead dd {
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
   }
 
   .descriptor {

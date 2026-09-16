@@ -7,6 +7,7 @@ import type {
 } from "$shared/ipc/bindings";
 import { artifactView } from "./project-work";
 import { agentLine, isAgentExecution } from "./agent-steps";
+import { subjectFacts } from "./subjects";
 
 function host(url: string | undefined): string {
   if (!url) return "";
@@ -199,6 +200,7 @@ function elementItems(
             view.content.kind === "sources")
             ? view.content.subjects[reference.index]
             : undefined;
+        const facts = subject && execution ? subjectFacts(execution, subject) : [];
         return {
           id: element.id,
           type: "subject",
@@ -208,6 +210,7 @@ function elementItems(
           detail: subject?.descriptor ?? "",
           status: area,
           subject,
+          ...(facts.length ? { facts } : {}),
           unavailable: !subject,
         };
       }
