@@ -223,3 +223,101 @@ test("source elements read their citation and the running agent links to them", 
   ]);
   expect(agents.positions[`agent:${objectiveElement.id}`]).toEqual({ x: 700, y: -8 });
 });
+
+test("browser steps become page cards with frames, working links and subject links", async () => {
+  const { environmentPages } = await import("../lib/project-environment");
+  const state = structuredClone(projection);
+  const execution = state.executions[0]!;
+  execution.status = "running";
+  execution.authorization = "user_directed_agent";
+  execution.spec.nodes[0]!.capability = {
+    kind: "agent",
+    grant: {
+      provider: "open_ai",
+      model: "gpt-5.6-luna",
+      max_turns: 10,
+      max_steps: 32,
+      browse_hops: 4,
+    },
+  };
+  execution.artifacts = [
+    {
+      ...execution.artifacts[0]!,
+      id: "catalog",
+      data: {
+        kind: "comparison_matrix",
+        subjects: [{ name: "Tower Bridge", homepage: "https://shop.example/p/1" }],
+        criteria: [{ name: "price", kind: { kind: "text" } }],
+        cells: [
+          [{ value: { kind: "text", text: "$119" }, evidence: [], general_knowledge: false }],
+        ],
+        notes: [],
+      },
+    },
+  ];
+  execution.steps = [
+    {
+      id: "read-1",
+      turn: 1,
+      kind: { kind: "read", url: "https://shop.example/catalog", collection: null },
+      status: "succeeded",
+      artifacts: ["catalog"],
+    },
+    {
+      id: "read-2",
+      turn: 2,
+      kind: { kind: "read", url: "https://shop.example/p/1", collection: null },
+      status: "running",
+    },
+  ];
+  const objectiveElement = snapshot.elements.find(
+    (element) => element.reference.kind === "objective",
+  )!;
+  const withHub = {
+    ...snapshot,
+    elements: [
+      objectiveElement,
+      {
+        id: "hub",
+        area: null,
+        reference: {
+          kind: "subject" as const,
+          objective: "objective",
+          execution: "execution",
+          artifact: "catalog",
+          index: 0,
+        },
+      },
+    ],
+  };
+  const pages = environmentPages(withHub, new Map([["objective", state]]), () => [
+    {
+      execution: "execution",
+      attempt: "attempt",
+      step: "read-2",
+      url: "https://shop.example/p/1",
+      live: true,
+      frame: { generation: 3, width: 640, height: 400 },
+    },
+  ]);
+  expect(pages.items.map((item) => [item.id, item.page?.host, item.page?.live])).toEqual([
+    [`page:${objectiveElement.id}:read-1`, "shop.example", false],
+    [`page:${objectiveElement.id}:read-2`, "shop.example", true],
+  ]);
+  expect(pages.items[1]!.page?.frame).toMatch(/frame\/attempt\/read-2\/3$/);
+  expect(pages.items[0]!.page?.frame).toBeNull();
+  expect(pages.links).toEqual([
+    {
+      id: `page-subject:page:${objectiveElement.id}:read-1:hub`,
+      source: `page:${objectiveElement.id}:read-1`,
+      target: "hub",
+      kind: "supports",
+    },
+    {
+      id: `working:page:${objectiveElement.id}:read-2`,
+      source: `agent:${objectiveElement.id}`,
+      target: `page:${objectiveElement.id}:read-2`,
+      kind: "working",
+    },
+  ]);
+});

@@ -12,6 +12,7 @@ type CanvasKind =
   | "subject"
   | "finding"
   | "source"
+  | "page"
   | "agent";
 type RelationKind = "supports" | "uses" | "depends_on" | "same_as" | "contradicts";
 /** Display values only; deliberately independent from the generated Work wire contract. */
@@ -38,6 +39,8 @@ export type CanvasItem = {
   agent?: { seed: number; activity: string; objective: string; line?: string; worker?: boolean };
   /** A cited public source; opening it goes through the pane. */
   source?: { url: string; role: string };
+  /** A page a browser step opened: its newest frame while the agent works there. */
+  page?: { url: string; host: string; frame: string | null; live: boolean };
   unavailable?: boolean;
   /** The user's recorded choice about this element. */
   decision?: string;
@@ -129,6 +132,8 @@ export function defaultSize(item: CanvasItem): { width: number; height: number }
       return { width: 320, height: 150 };
     case "responsibility":
       return { width: 280, height: 150 };
+    case "page":
+      return { width: 320, height: 236 };
     case "agent":
       return item.agent?.worker
         ? { width: 200, height: 64 }

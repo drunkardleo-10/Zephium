@@ -1285,6 +1285,7 @@ export type WorkActivityResponseV1 = {
 	profile: string,
 	work: WorkId,
 	signals: WorkSignalV1[],
+	pages?: WorkPageV1[],
 	error: WorkFailureV1 | null,
 };
 
@@ -2295,6 +2296,25 @@ context?: WorkContextSelectionV1 | null }) & { request?: never } |
 
 /**  Requested output review level, never evidence that a requirement was met. */
 export type WorkOutputReview = "mechanical" | "source_mapped_needs_review" | "user_acceptance";
+
+export type WorkPageFrameV1 = {
+	generation: number,
+	width: number,
+	height: number,
+};
+
+/**
+ *  A page one browser step opened, with its newest bounded frame for the
+ *  canvas. Frames are transient and person-facing only.
+ */
+export type WorkPageV1 = {
+	execution: WorkExecutionId,
+	attempt: WorkAttemptId,
+	step: WorkStepId,
+	url: string,
+	live: boolean,
+	frame: WorkPageFrameV1 | null,
+};
 
 /**
  *  The Work browser pane's applied native hole in window logical coordinates.

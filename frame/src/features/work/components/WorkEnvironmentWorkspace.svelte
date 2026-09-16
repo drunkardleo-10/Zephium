@@ -47,6 +47,7 @@
     environmentAgents,
     environmentItems,
     environmentLinks,
+    environmentPages,
     environmentView,
   } from "../lib/project-environment";
   import { organizeExecution, pendingOrganize, elementFor } from "../lib/organize";
@@ -134,6 +135,10 @@
   function openLift(id: string) {
     const item = items.find((item) => item.id === id);
     if (!item) return;
+    if (item.type === "page" && item.page) {
+      openPane({ kind: "url", url: item.page.url }, id);
+      return;
+    }
     const reference = session.snapshot?.elements.find((element) => element.id === id)?.reference;
     if (reference?.kind === "browser") {
       if (tabs.some((tab) => tab.id === reference.tab))
@@ -336,10 +341,18 @@
         )
       : { items: [], links: [], positions: {} },
   );
-  const items = $derived([...results.items, ...agents.items]);
+  const pages = $derived(
+    snapshot
+      ? environmentPages(snapshot, context.objectives, (objective) =>
+          objectiveSession?.selected === objective ? objectiveSession.pages : [],
+        )
+      : { items: [], links: [], positions: {} },
+  );
+  const items = $derived([...results.items, ...pages.items, ...agents.items]);
   const links = $derived([
     ...scene.links,
     ...(snapshot ? environmentLinks(snapshot) : []),
+    ...pages.links,
     ...agents.links,
   ]);
   const organizing = new SvelteSet<string>();
@@ -512,6 +525,7 @@
           ...environmentView(snapshot),
           positions: {
             ...scene.positions,
+            ...pages.positions,
             ...agents.positions,
             ...planGeometry.positions,
             ...savedResultPositions,

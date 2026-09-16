@@ -11,6 +11,7 @@ import type {
   WorkEvidencePreviewV1,
   WorkPlanProposal,
   WorkSignalV1,
+  WorkPageV1,
   WorkArtifactDataV1,
   WorkContextSelectionV1,
 } from "$shared/ipc/bindings";
@@ -55,6 +56,8 @@ export class WorkSession {
   pending = $state.raw<Mutation | null>(null);
   composer = $state("");
   activity = $state.raw<WorkSignalV1[]>([]);
+  /** Pages the latest runs opened, with their newest frames; kept after a run ends. */
+  pages = $state.raw<WorkPageV1[]>([]);
   private activityRefresh: ReturnType<typeof setTimeout> | undefined;
   private readonly artifacts = new SvelteMap<string, ArtifactDraft>();
   private readonly drafts = new SvelteMap<string, TextDraft>();
@@ -217,14 +220,14 @@ export class WorkSession {
         this.lifetime.signal,
       );
       if (generation !== this.reads || !this.active) return;
-      this.activity =
+      const valid =
         result.state === "received" &&
         result.value.version === 1 &&
         result.value.profile === this.profile &&
         result.value.work === state.work.id &&
-        !result.value.error
-          ? currentActivity(state, result.value.signals)
-          : [];
+        !result.value.error;
+      this.activity = valid ? currentActivity(state, result.value.signals) : [];
+      if (valid) this.pages = result.value.pages ?? [];
     } catch {
       if (generation === this.reads) this.activity = [];
     }

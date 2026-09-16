@@ -3,11 +3,13 @@ import type {
   WorkEnvironmentSnapshot,
   TabView,
   ResourceSummary,
+  WorkPageV1,
   WorkRuntimeProjection,
 } from "$shared/ipc/bindings";
 import { artifactView } from "./project-work";
 import { agentLine, isAgentExecution } from "./agent-steps";
-import { subjectFacts } from "./subjects";
+import { subjectFacts, subjectKey } from "./subjects";
+import { pageFrameUrl } from "$domain/resources";
 
 function host(url: string | undefined): string {
   if (!url) return "";
@@ -460,6 +462,96 @@ export function environmentAgents(
       links.push({ id: `agent-worker:${worker}`, source: id, target: worker, kind: "working" });
       if (stand) positions[worker] = { x: stand.x, y: stand.y + 140 };
     }
+  }
+  return { items, links, positions };
+}
+
+/** Pages the agent opened: transient cards beside the goal that show the newest
+ * frame while a step works there and keep the last one after it settles. */
+export function environmentPages(
+  snapshot: WorkEnvironmentSnapshot,
+  objectives: ReadonlyMap<string, WorkRuntimeProjection>,
+  pages: (objective: string) => readonly WorkPageV1[],
+): { items: CanvasItem[]; links: CanvasLink[]; positions: Record<string, CanvasPosition> } {
+  const items: CanvasItem[] = [];
+  const links: CanvasLink[] = [];
+  const positions: Record<string, CanvasPosition> = {};
+  for (const element of snapshot.elements) {
+    if (element.reference.kind !== "objective") continue;
+    const projection = objectives.get(element.reference.objective);
+    const execution = projection?.executions.at(-1);
+    if (!projection || !execution || !isAgentExecution(execution)) continue;
+    const steps = (execution.steps ?? []).filter(
+      (step) => step.kind.kind === "read" || step.kind.kind === "discover",
+    );
+    if (!steps.length) continue;
+    const opened = pages(projection.work.id).filter((page) => page.execution === execution.id);
+    const anchor = snapshot.view.placements.find((place) => place.element === element.id);
+    const home = anchor
+      ? { x: anchor.x + anchor.width + 48, y: anchor.y + anchor.height + 64 }
+      : { x: 420, y: 320 };
+    const hubs = new Map<string, string>();
+    for (const candidate of snapshot.elements) {
+      const reference = candidate.reference;
+      if (reference.kind !== "subject" || reference.execution !== execution.id) continue;
+      const artifact = execution.artifacts.find((artifact) => artifact.id === reference.artifact);
+      const subject =
+        artifact &&
+        (artifact.data.kind === "comparison_matrix" ||
+          artifact.data.kind === "findings" ||
+          artifact.data.kind === "evidence_collection")
+          ? artifact.data.subjects?.[reference.index]
+          : undefined;
+      if (subject) hubs.set(subjectKey(subject), candidate.id);
+    }
+    const agent = `agent:${element.id}`;
+    steps.forEach((step, index) => {
+      const page = opened.find((page) => page.step === step.id);
+      const url = page?.url || (step.kind.kind === "read" ? step.kind.url : "");
+      const pageHost = host(url);
+      const live = step.status === "running";
+      const frame = page?.frame
+        ? pageFrameUrl(page.attempt, page.step, page.frame.generation)
+        : null;
+      const id = `page:${element.id}:${step.id}`;
+      items.push({
+        id,
+        type: "page",
+        kind: m.work_env_page(),
+        title: pageHost || m.work_env_page(),
+        detail: url,
+        status: live
+          ? m.work_env_page_live()
+          : step.status === "failed"
+            ? m.work_env_status_failed()
+            : m.work_env_page_read(),
+        page: { url, host: pageHost, frame, live },
+      });
+      positions[id] = { x: home.x + (index % 2) * 344, y: home.y + Math.floor(index / 2) * 260 };
+      if (live) links.push({ id: `working:${id}`, source: agent, target: id, kind: "working" });
+      const linked = new Set<string>();
+      for (const artifactId of step.artifacts ?? []) {
+        const artifact = execution.artifacts.find((artifact) => artifact.id === artifactId);
+        const subjects =
+          artifact &&
+          (artifact.data.kind === "comparison_matrix" ||
+            artifact.data.kind === "findings" ||
+            artifact.data.kind === "evidence_collection")
+            ? (artifact.data.subjects ?? [])
+            : [];
+        for (const subject of subjects) {
+          const hub = hubs.get(subjectKey(subject));
+          if (!hub || linked.has(hub)) continue;
+          linked.add(hub);
+          links.push({
+            id: `page-subject:${id}:${hub}`,
+            source: id,
+            target: hub,
+            kind: "supports",
+          });
+        }
+      }
+    });
   }
   return { items, links, positions };
 }

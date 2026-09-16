@@ -5,6 +5,14 @@ export type { MediaAssetV1 };
 
 const DIGEST = /^[0-9a-f]{64}$/;
 const PROFILE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
+const STEP_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const base = IS_MAC ? "zephium-media://localhost/" : "http://zephium-media.localhost/";
+
+/** The newest frame of one agent page; the generation only busts caches. */
+export function pageFrameUrl(attempt: string, step: string, generation: number): string | null {
+  if (!STEP_ID.test(attempt) || !STEP_ID.test(step) || !Number.isInteger(generation)) return null;
+  return `${base}frame/${attempt}/${step}/${generation}`;
+}
 
 /**
  * The privileged media route for one admitted blob. Rust serves only images
@@ -12,7 +20,6 @@ const PROFILE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
  */
 export function mediaUrl(profile: string, digest: string): string | null {
   if (!DIGEST.test(digest) || !PROFILE.test(profile)) return null;
-  const base = IS_MAC ? "zephium-media://localhost/" : "http://zephium-media.localhost/";
   return `${base}${profile}/${digest}`;
 }
 

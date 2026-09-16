@@ -21,6 +21,7 @@
   import FindingCard from "./cards/FindingCard.svelte";
   import SourceCard from "./cards/SourceCard.svelte";
   import AgentCard from "./cards/AgentCard.svelte";
+  import PageCard from "./cards/PageCard.svelte";
   import * as m from "$shared/i18n/messages";
   const open = getContext<(id: string) => void>(canvasOpen);
   const action = getContext<(id: string, action?: string) => void>(canvasAction);
@@ -103,6 +104,7 @@
   {:else if type === "subject"}<SubjectCard item={data} {selected} />
   {:else if type === "finding"}<FindingCard item={data} {selected} />
   {:else if type === "source"}<SourceCard item={data} {selected} />
+  {:else if type === "page"}<PageCard item={data} {selected} />
   {:else if type === "agent"}<AgentCard item={data} {selected} />
   {:else if type === "note"}<NoteCard item={data} {selected} />
   {:else if type === "media"}<MediaCard item={data} {selected} />
