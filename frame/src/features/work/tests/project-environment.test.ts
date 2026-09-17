@@ -49,8 +49,8 @@ test("objective status follows the latest durable execution and native interrupt
   expect(items({ ...projection, executions: [] })[0]?.detail).toBe("Status: Plan ready");
 });
 
-test("a subject takes its picture from a uses relation to an admitted image", async () => {
-  const { environmentItems } = await import("../lib/project-environment");
+test("a subject takes its picture from a uses relation and the image is not a card", async () => {
+  const { environmentItems, environmentLinks } = await import("../lib/project-environment");
   const snapshot = {
     version: 1,
     id: "env",
@@ -93,12 +93,22 @@ test("a subject takes its picture from a uses relation to an admitted image", as
   const items = environmentItems(snapshot, [], [], new Map(), media);
   const subject = items.find((item) => item.id === "e-subject")!;
   expect(subject.image).toEqual({ profile: "01ARZ3NDEKTSV4RRFFQ69G5FAV", digest: "d".repeat(64) });
-  const picture = items.find((item) => item.id === "e-media")!;
-  expect(picture.type).toBe("media");
-  expect(picture.media?.asset.name).toBe("kb.png");
+  // The admitted picture belongs to the subject; it is not a card of its own.
+  expect(items.map((item) => item.id)).toEqual(["e-subject", "e-note"]);
+  expect(environmentLinks(snapshot)).toEqual([]);
   const note = items.find((item) => item.id === "e-note")!;
   expect(note.type).toBe("note");
   expect(note.image).toBeUndefined();
+  // A media resource nothing admitted for a subject still stands on its own.
+  const loose = {
+    ...snapshot,
+    relations: [],
+  } as unknown as Parameters<typeof environmentItems>[0];
+  const picture = environmentItems(loose, [], [], new Map(), media).find(
+    (item) => item.id === "e-media",
+  )!;
+  expect(picture.type).toBe("media");
+  expect(picture.media?.asset.name).toBe("kb.png");
 });
 
 test("source elements read their citation and the running agent links to them", async () => {

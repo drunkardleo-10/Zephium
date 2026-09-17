@@ -75,6 +75,25 @@ function objectiveStatus(projection: WorkRuntimeProjection): string {
       : m.work_env_status_plan_ready();
 }
 
+/**
+ * Media elements a subject admitted its picture into: Rust records the origin
+ * as a `uses` relation from the subject to the media element. The picture
+ * belongs to that subject card and never becomes a card of its own.
+ */
+function subjectPictures(snapshot: WorkEnvironmentSnapshot): Set<string> {
+  const subjects = new Set<string>();
+  const resources = new Set<string>();
+  for (const element of snapshot.elements) {
+    if (element.reference.kind === "subject") subjects.add(element.id);
+    else if (element.reference.kind === "resource") resources.add(element.id);
+  }
+  const pictures = new Set<string>();
+  for (const relation of snapshot.relations ?? [])
+    if (relation.kind === "uses" && subjects.has(relation.from) && resources.has(relation.to))
+      pictures.add(relation.to);
+  return pictures;
+}
+
 export function environmentItems(
   snapshot: WorkEnvironmentSnapshot,
   tabs: readonly TabView[],
@@ -115,7 +134,9 @@ function elementItems(
   objectives: ReadonlyMap<string, WorkRuntimeProjection>,
   media: ReadonlyMap<string, MediaAssetV1>,
 ): CanvasItem[] {
-  return snapshot.elements.map((element) => {
+  const pictures = subjectPictures(snapshot);
+  return snapshot.elements.flatMap((element) => {
+    if (pictures.has(element.id)) return [];
     const area = snapshot.areas.find((area) => area.id === element.area)?.title ?? "";
     if (element.reference.kind === "browser") {
       const tabId = element.reference.tab;
@@ -296,7 +317,10 @@ const relationLabels: Record<CanvasLink["kind"], () => string> = {
   working: m.work_env_relation_working,
 };
 export function environmentLinks(snapshot: WorkEnvironmentSnapshot): CanvasLink[] {
-  const ids = new Set(snapshot.elements.map((element) => element.id));
+  const pictures = subjectPictures(snapshot);
+  const ids = new Set(
+    snapshot.elements.flatMap((element) => (pictures.has(element.id) ? [] : [element.id])),
+  );
   return (snapshot.relations ?? []).flatMap((relation) =>
     ids.has(relation.from) && ids.has(relation.to)
       ? [
