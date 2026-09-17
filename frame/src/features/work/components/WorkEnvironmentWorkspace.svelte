@@ -472,24 +472,30 @@
       return url;
     }
   }
-  /** Candidates this environment already holds an admitted copy of. */
-  function admittedImageUrls(): string[] {
-    return [...context.media.values()].flatMap((asset) =>
-      asset.origin.kind === "fetched" ? [canonicalImageUrl(asset.origin.url)] : [],
-    );
+  /** The media element on this canvas that already holds one candidate. */
+  function placedPicture(snapshot: WorkEnvironmentSnapshot, canonical: string): string | undefined {
+    for (const element of snapshot.elements) {
+      if (element.reference.kind !== "resource") continue;
+      const origin = context.media.get(element.reference.resource)?.origin;
+      if (origin?.kind === "fetched" && canonicalImageUrl(origin.url) === canonical)
+        return element.id;
+    }
+    return undefined;
   }
   async function admitSubjectImages(
     projection: WorkRuntimeProjection,
     execution: WorkExecutionFact,
     placed: WorkEnvironmentSnapshot,
   ) {
-    const admitted = admittedImageUrls();
     let budget = 6;
     for (const element of placed.elements) {
       if (budget <= 0) break;
       const reference = element.reference;
       if (reference.kind !== "subject" || reference.execution !== execution.id) continue;
-      const related = (placed.relations ?? []).some(
+      // A later run adds subjects beside pictures its predecessor admitted.
+      const current = session.snapshot ?? placed;
+      if (!current.elements.some((candidate) => candidate.id === element.id)) continue;
+      const related = (current.relations ?? []).some(
         (relation) => relation.from === element.id && relation.kind === "uses",
       );
       if (related) continue;
@@ -499,8 +505,14 @@
       const candidate = subject && run ? subjectImageCandidates(run, subject)[0] : undefined;
       if (!candidate) continue;
       const canonical = canonicalImageUrl(candidate);
+      const known = placedPicture(current, canonical);
+      if (known) {
+        // The picture is already here: point at it instead of fetching it twice.
+        await session.edit({ kind: "relate", from: element.id, to: known, relation: "uses" });
+        continue;
+      }
       const key = `${placed.id} ${canonical}`;
-      if (imageAdmissions.has(key) || admitted.includes(canonical)) continue;
+      if (imageAdmissions.has(key)) continue;
       imageAdmissions.add(key);
       budget -= 1;
       try {
