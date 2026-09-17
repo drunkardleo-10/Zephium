@@ -1590,6 +1590,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             media::media_open,
             media::media_admit_remote,
             media::work_admit_folder,
+            media::work_pick_folder,
+            media::work_reveal_path,
             work_product::work_activity,
             tabs_bootstrap,
             tabs_open,
@@ -5362,6 +5364,29 @@ pub fn run() {
                             );
                         }
                         window_shutdown.request(exit_handle.clone(), resize_shell.clone())
+                    }
+                    tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop {
+                        paths,
+                        position,
+                    }) => {
+                        // Finder drops reach the frame as a DOM event with the
+                        // dropped paths and the drop point in CSS pixels; the
+                        // frame admits each path through the folder policy.
+                        let scale = resize_window.scale_factor().unwrap_or(1.0);
+                        let logical = position.to_logical::<f64>(scale);
+                        let paths: Vec<String> = paths
+                            .iter()
+                            .map(|path| path.to_string_lossy().into_owned())
+                            .collect();
+                        if let Ok(detail) = serde_json::to_string(&serde_json::json!({
+                            "paths": paths,
+                            "x": logical.x,
+                            "y": logical.y,
+                        })) {
+                            let _ = resize_window.eval(format!(
+                                "window.dispatchEvent(new CustomEvent('zephium:work-paths-dropped',{{detail:{detail}}}))"
+                            ));
+                        }
                     }
                     tauri::WindowEvent::Focused(true) => {
                         // Some window managers restore without a distinct

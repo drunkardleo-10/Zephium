@@ -654,8 +654,9 @@ pub enum MediaAdmitV1 {
 pub enum WorkFolderAdmitV1 {
     /// The canonical path and display name to place as a Folder element.
     Admitted { path: String, name: String },
-    /// Outside the home folder, protected, missing, or not a folder.
-    Refused,
+    /// Outside the home folder, protected, or missing (`not_a_folder` false),
+    /// or an existing path that is not a folder.
+    Refused { not_a_folder: bool },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]

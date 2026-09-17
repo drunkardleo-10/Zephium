@@ -431,30 +431,118 @@ pub(crate) async fn work_admit_folder(
         || super::shutdown_started(&app)
         || profile_of(&expected_profile).is_none()
     {
-        return Ok(WorkFolderAdmitV1::Refused);
+        return Ok(WorkFolderAdmitV1::Refused {
+            not_a_folder: false,
+        });
     }
-    #[cfg(not(feature = "work-product"))]
+    Ok(admit_folder(path))
+}
+
+/// Opens the folder picker and admits the choice under the run's policy.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn work_pick_folder(
+    caller: WebviewWindow,
+    app: AppHandle,
+    expected_profile: String,
+) -> Result<Option<zephium_ipc::WorkFolderAdmitV1>, ()> {
+    if !super::authorize(&caller, super::CallerPolicy::Main, "work_pick_folder")
+        || super::shutdown_started(&app)
+        || profile_of(&expected_profile).is_none()
+    {
+        return Ok(None);
+    }
+    let picker = app.clone();
+    let picked = tokio::task::spawn_blocking(move || {
+        picker
+            .dialog()
+            .file()
+            .set_title("Add a folder to Work")
+            .blocking_pick_folder()
+    })
+    .await
+    .map_err(|_| ())?;
+    let Some(picked) = picked else {
+        return Ok(None);
+    };
+    let path = match picked {
+        tauri_plugin_dialog::FilePath::Path(path) => path,
+        tauri_plugin_dialog::FilePath::Url(url) => match url.to_file_path() {
+            Ok(path) => path,
+            Err(()) => return Ok(None),
+        },
+    };
+    Ok(Some(admit_folder(path.to_string_lossy().into_owned())))
+}
+
+/// Reveals an admitted folder, or a file inside one, in Finder.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn work_reveal_path(
+    caller: WebviewWindow,
+    app: AppHandle,
+    expected_profile: String,
+    path: String,
+) -> Result<bool, ()> {
+    if !super::authorize(&caller, super::CallerPolicy::Main, "work_reveal_path")
+        || super::shutdown_started(&app)
+        || profile_of(&expected_profile).is_none()
+    {
+        return Ok(false);
+    }
+    #[cfg(not(all(feature = "work-product", target_os = "macos")))]
     {
         let _ = path;
-        Ok(WorkFolderAdmitV1::Refused)
+        Ok(false)
+    }
+    #[cfg(all(feature = "work-product", target_os = "macos"))]
+    {
+        let target = std::path::PathBuf::from(&path);
+        let folder = if target.is_dir() {
+            target.clone()
+        } else {
+            match target.parent() {
+                Some(parent) => parent.to_path_buf(),
+                None => return Ok(false),
+            }
+        };
+        let (grant, _) =
+            zephium_app::work_files::WorkFileGrant::admit(&[folder.to_string_lossy().into_owned()]);
+        if grant.is_empty() {
+            return Ok(false);
+        }
+        Ok(std::process::Command::new("/usr/bin/open")
+            .arg("-R")
+            .arg(&target)
+            .spawn()
+            .is_ok())
+    }
+}
+
+fn admit_folder(path: String) -> zephium_ipc::WorkFolderAdmitV1 {
+    use zephium_ipc::WorkFolderAdmitV1;
+    let not_a_folder = std::path::Path::new(&path).is_file();
+    #[cfg(not(feature = "work-product"))]
+    {
+        WorkFolderAdmitV1::Refused { not_a_folder }
     }
     #[cfg(feature = "work-product")]
     {
         let (grant, _) = zephium_app::work_files::WorkFileGrant::admit(&[path]);
         let Some(root) = grant.roots().first() else {
-            return Ok(WorkFolderAdmitV1::Refused);
+            return WorkFolderAdmitV1::Refused { not_a_folder };
         };
         let name = root
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         if name.is_empty() {
-            return Ok(WorkFolderAdmitV1::Refused);
+            return WorkFolderAdmitV1::Refused { not_a_folder };
         }
-        Ok(WorkFolderAdmitV1::Admitted {
+        WorkFolderAdmitV1::Admitted {
             path: root.to_string_lossy().into_owned(),
             name,
-        })
+        }
     }
 }
 

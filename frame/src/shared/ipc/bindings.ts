@@ -25,6 +25,17 @@ export const commands = {
 	 *  and later runs can read inside it. The same policy governs the run.
 	 */
 	workAdmitFolder: (expectedProfile: string, path: string) => typedError<WorkFolderAdmitV1, null>(__TAURI_INVOKE("work_admit_folder", { expectedProfile, path })),
+	/**  Opens the folder picker and admits the choice under the run's policy. */
+	workPickFolder: (expectedProfile: string) => typedError<
+/**  The canonical path and display name to place as a Folder element. */
+{ kind: "admitted"; path: string; name: string } | 
+/**
+ *  Outside the home folder, protected, or missing (`not_a_folder` false),
+ *  or an existing path that is not a folder.
+ */
+{ kind: "refused"; not_a_folder: boolean } | null, null>(__TAURI_INVOKE("work_pick_folder", { expectedProfile })),
+	/**  Reveals an admitted folder, or a file inside one, in Finder. */
+	workRevealPath: (expectedProfile: string, path: string) => typedError<boolean, null>(__TAURI_INVOKE("work_reveal_path", { expectedProfile, path })),
 	workActivity: (expectedProfile: string, work: WorkId) => __TAURI_INVOKE<WorkActivityResponseV1>("work_activity", { expectedProfile, work }),
 	tabsBootstrap: () => __TAURI_INVOKE<void>("tabs_bootstrap"),
 	tabsOpen: () => __TAURI_INVOKE<OperationAdmission>("tabs_open"),
@@ -2204,8 +2215,11 @@ export type WorkFinding_Serialize = {
 export type WorkFolderAdmitV1 = 
 /**  The canonical path and display name to place as a Folder element. */
 { kind: "admitted"; path: string; name: string } | 
-/**  Outside the home folder, protected, missing, or not a folder. */
-{ kind: "refused" };
+/**
+ *  Outside the home folder, protected, or missing (`not_a_folder` false),
+ *  or an existing path that is not a folder.
+ */
+{ kind: "refused"; not_a_folder: boolean };
 
 /** Durable profile-owned Work identity; never an execution capability. */
 export type WorkId = string;
