@@ -34,6 +34,26 @@ function normalizeName(name: string): string {
     .trim();
 }
 
+/**
+ * A criterion column reduced to its bare label, so "Piece_Count" and
+ * "piece count" are one column and "Product URL" is recognisably a link.
+ */
+function factLabel(name: string): string {
+  return name.normalize("NFKC").toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+/** Columns that restate who the subject is, or link to it rather than describe it. */
+function identityColumn(label: string): boolean {
+  return (
+    label === "title" ||
+    label === "name" ||
+    label === "url" ||
+    label === "link" ||
+    label.endsWith(" url") ||
+    label.endsWith(" link")
+  );
+}
+
 /** The subjects one artifact names, whatever shape carries them. */
 export function subjectsOf(artifact: WorkArtifactV1): readonly Subject[] {
   return artifact.data.kind === "comparison_matrix" ||
@@ -72,11 +92,12 @@ export function subjectFacts(execution: WorkExecutionFact, subject: Subject): Su
   const money: SubjectFact[] = [];
   const other: SubjectFact[] = [];
   const seen = new Set<string>();
+  const identity = normalizeName(subject.name);
   for (const { matrix, index } of rows(execution, subjectKey(subject))) {
     matrix.criteria.forEach((criterion, column) => {
-      const label = criterion.name.trim().toLowerCase();
+      const label = factLabel(criterion.name);
       const cell = matrix.cells[index]?.[column];
-      if (!cell || seen.has(label)) return;
+      if (!cell || seen.has(label) || identityColumn(label)) return;
       const value = cell.value;
       let text: string | null = null;
       switch (value.kind) {
@@ -101,7 +122,7 @@ export function subjectFacts(execution: WorkExecutionFact, subject: Subject): Su
         default:
           break;
       }
-      if (!text) return;
+      if (!text || normalizeName(text) === identity) return;
       seen.add(label);
       (value.kind === "money" ? money : other).push({
         label: criterion.name,

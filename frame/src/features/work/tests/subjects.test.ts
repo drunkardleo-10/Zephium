@@ -72,6 +72,50 @@ test("a merged subject keeps the facts of every artifact that described it", () 
   expect(subjectFacts(execution, { name: "Paris" })).toEqual([]);
 });
 
+test("a fact never restates the subject's own identity", () => {
+  const execution = run();
+  const text = (value: string) => ({
+    value: { kind: "text", text: value },
+    evidence: [],
+    general_knowledge: false,
+  });
+  execution.artifacts = [
+    {
+      ...execution.artifacts[0]!,
+      id: "final",
+      data: {
+        kind: "comparison_matrix",
+        subjects: [{ name: "Tower Bridge" }],
+        criteria: [
+          { name: "Title", kind: { kind: "text" } },
+          { name: "Product URL", kind: { kind: "text" } },
+          { name: "image_url", kind: { kind: "text" } },
+          { name: "Set", kind: { kind: "text" } },
+          { name: "Price", kind: { kind: "text" } },
+          { name: "Piece Count", kind: { kind: "text" } },
+        ],
+        cells: [
+          [
+            text("Tower Bridge"),
+            text("shop.example/p/1"),
+            text("img.example/a.jpg"),
+            text("tower  bridge."),
+            text("$119.99"),
+            text("4295"),
+          ],
+        ],
+        notes: [],
+      },
+    },
+  ] as Artifacts;
+  // Title, the two link columns, and the column that merely repeats the name
+  // are identity, not facts.
+  expect(subjectFacts(execution, { name: "Tower Bridge" })).toEqual([
+    { label: "Price", value: "$119.99" },
+    { label: "Piece Count", value: "4295" },
+  ]);
+});
+
 test("pictures a browser step recorded outrank the ones a table claims", () => {
   const execution = run();
   const artifact = (id: string, subjects: object[], kind: string) => ({
