@@ -80,6 +80,8 @@ fn main() {
         #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-read-work" => work_durable::run_agent_read(),
         #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-files-work" => work_durable::run_agent_files(),
+        #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-disclosure-work" => {
             work_durable::run_agent_disclosure()
         }

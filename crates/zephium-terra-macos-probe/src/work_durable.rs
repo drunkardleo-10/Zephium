@@ -50,6 +50,9 @@ enum Mode {
     Agent,
     /// The same loop on an objective that needs a native page read.
     AgentRead,
+    /// The loop on a granted folder: a file read cited as a source and an
+    /// edit applied after the person's approval.
+    AgentFiles,
     AgentScroll,
     AgentDisclosure,
     AgentCollection,
@@ -104,6 +107,10 @@ pub(super) fn run_agent_scroll() -> Result<(), super::ProbeFailure> {
 
 pub(super) fn run_agent_read() -> Result<(), super::ProbeFailure> {
     run_mode(Mode::AgentRead)
+}
+
+pub(super) fn run_agent_files() -> Result<(), super::ProbeFailure> {
+    run_mode(Mode::AgentFiles)
 }
 
 fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
@@ -600,6 +607,7 @@ async fn workflow(
             | Mode::AgentCollection
             | Mode::AgentDetails
             | Mode::AgentMoney
+            | Mode::AgentFiles
     ) {
         return agent_workflow(
             handle,
@@ -1155,7 +1163,19 @@ async fn agent_workflow(
     mode: Mode,
 ) -> Result<WorkflowResult, &'static str> {
     let collection = mode == Mode::AgentMoney;
+    let folder = if mode == Mode::AgentFiles {
+        Some(probe_folder()?)
+    } else {
+        None
+    };
+    let files_objective = folder.as_ref().map(|folder| {
+        format!(
+            "In the granted folder {}: read README.md and place the three product names it mentions as cited findings from that file. Then edit NOTES.md, replacing the exact line Review pending with Reviewed by Zephium, and finish once the change is applied. Do not search the web or read web pages.",
+            folder.display()
+        )
+    });
     let objective = match mode {
+        Mode::AgentFiles => files_objective.as_deref().unwrap_or_default(),
         Mode::AgentCollection => AGENT_COLLECTION_OBJECTIVE,
         Mode::AgentDetails => AGENT_DETAILS_OBJECTIVE,
         Mode::AgentMoney => AGENT_MONEY_OBJECTIVE,
@@ -1209,7 +1229,10 @@ async fn agent_workflow(
         max_turns: 8,
         max_steps: 24,
         browse_hops: 3,
-        folders: vec![],
+        folders: folder
+            .iter()
+            .map(|folder| folder.to_string_lossy().into_owned())
+            .collect(),
     };
     let search = OpenAiPublicSearch::try_new(
         transport,
@@ -1237,6 +1260,61 @@ async fn agent_workflow(
     let collection_assignment = CollectionAssignment {
         money: mode == Mode::AgentMoney,
     };
+    // The person's stand-in: approves the first proposed change it sees.
+    let approver = folder.is_some().then(|| {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            let mut approved = 0u8;
+            for _ in 0..600 {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let Ok(request) = handle.work_projection(profile, work) else {
+                    continue;
+                };
+                let WorkReplyV1::Projection { projection } = request.response(profile).await.reply
+                else {
+                    continue;
+                };
+                let Some(execution) = projection.executions.first() else {
+                    continue;
+                };
+                if execution.status.terminal() {
+                    break;
+                }
+                let waiting = execution.steps.iter().find(|step| {
+                    step.status == WorkStepStatus::Running
+                        && step.kind.proposes_write()
+                        && step.kind.file_decision().is_none()
+                });
+                let Some(step) = waiting else {
+                    continue;
+                };
+                let Ok(request) = handle.work_command(
+                    profile,
+                    zephium_ipc::work::WorkCommandV1 {
+                        version: 1,
+                        work,
+                        expected_revision: projection.work.revision,
+                        command: WorkCommandId::generate(),
+                        intent: WorkRuntimeIntent::ApproveStep {
+                            execution: execution.id,
+                            step: step.id,
+                            approve: true,
+                        },
+                    },
+                ) else {
+                    continue;
+                };
+                if matches!(
+                    request.response(profile).await.reply,
+                    WorkReplyV1::ExecutionApplied { .. }
+                ) {
+                    approved += 1;
+                    let _ = writeln!(std::io::stdout().lock(), "agent-work: approved_step=true");
+                }
+            }
+            approved
+        })
+    });
     let state = WorkAgentService::new(handle.clone())
         .with_diagnostic(|event| {
             let _ = writeln!(std::io::stdout().lock(), "agent-work: loop={event:?}");
@@ -1320,10 +1398,61 @@ async fn agent_workflow(
             step.note.as_ref().map_or(0, String::len),
         );
     }
-    let failure = (execution.status != WorkExecutionStatus::NeedsReview
+    let mut failure = (execution.status != WorkExecutionStatus::NeedsReview
         || execution.artifacts.is_empty())
     .then_some("agent_outcome");
+    if let Some(folder) = folder {
+        let approved = match approver {
+            Some(task) => task.await.unwrap_or(0),
+            None => 0,
+        };
+        let read = execution.steps.iter().any(|step| {
+            matches!(step.kind, WorkStepKindV1::ReadFile { .. })
+                && step.status == WorkStepStatus::Succeeded
+                && step.evidence.is_some()
+        });
+        let edited = execution.steps.iter().any(|step| {
+            matches!(step.kind, WorkStepKindV1::EditFile { .. })
+                && step.status == WorkStepStatus::Succeeded
+                && step.kind.file_decision() == Some(true)
+        });
+        let notes = std::fs::read_to_string(folder.join("NOTES.md")).unwrap_or_default();
+        let applied = notes.contains("Reviewed by Zephium") && !notes.contains("Review pending");
+        let cited = execution.artifacts.iter().any(|artifact| {
+            artifact.evidence.iter().any(|link| {
+                execution
+                    .file_evidence
+                    .iter()
+                    .any(|record| record.id == link.extraction_id)
+            })
+        });
+        let _ = writeln!(
+            std::io::stdout().lock(),
+            "agent-work: files read={read}; edited={edited}; applied={applied}; cited={cited}; approved={approved}; records={}",
+            execution.file_evidence.len()
+        );
+        let _ = std::fs::remove_dir_all(&folder);
+        if !(read && edited && applied && cited) {
+            failure = failure.or(Some("agent_files_outcome"));
+        }
+    }
     Ok(WorkflowResult { state, failure })
+}
+
+/// A throwaway folder under the home folder, where the grant policy allows.
+fn probe_folder() -> Result<std::path::PathBuf, &'static str> {
+    let home = std::env::var_os("HOME").ok_or("home")?;
+    let folder = std::path::PathBuf::from(home)
+        .join("Library/Caches/app.zephium.probe")
+        .join(format!("files-{}", std::process::id()));
+    std::fs::create_dir_all(&folder).map_err(|_| "probe_folder")?;
+    std::fs::write(
+        folder.join("README.md"),
+        "# Atlas catalogue\n\nThe spring range has three products: Tower Bridge, Statue of Liberty and Taj Mahal.\nEach ships in a numbered box.\n",
+    )
+    .map_err(|_| "probe_folder")?;
+    std::fs::write(folder.join("NOTES.md"), "Review pending\n").map_err(|_| "probe_folder")?;
+    Ok(folder)
 }
 
 // Qualify the live browser worker independently of main-agent planning quality.
