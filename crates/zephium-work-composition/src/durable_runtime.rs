@@ -323,6 +323,14 @@ impl MacosWorkComposition {
         let mut disposition = None;
         let mut shown_frame = 0;
         let mut reviews = 0u8;
+        #[cfg(feature = "public-qualification")]
+        let trace = |label: &str| {
+            if let Some(diagnostic) = stage_diagnostic {
+                diagnostic(label);
+            }
+        };
+        #[cfg(not(feature = "public-qualification"))]
+        let trace = |_: &str| {};
         if let Some((step, url)) = &page {
             attempt.record_page_frame(*step, url, None);
         }
@@ -426,6 +434,7 @@ impl MacosWorkComposition {
                     attempt.record_activity(activity);
                 }
                 if matches!(event.kind(), AgentWorkEventKind::Recovery) {
+                    trace("close:recovery");
                     requested_close = true;
                 }
             }
@@ -435,13 +444,18 @@ impl MacosWorkComposition {
                 match attempt.cancellation_requested().await {
                     Ok(false) => {}
                     Ok(true) => {
+                        trace("close:cancel_requested");
                         user_cancelled = true;
                         requested_close = true;
                     }
-                    Err(_) => requested_close = true,
+                    Err(_) => {
+                        trace("close:cancel_read_failed");
+                        requested_close = true;
+                    }
                 }
             }
             if now >= attempt.deadline() {
+                trace("close:attempt_deadline");
                 requested_close = true;
             }
             if now >= cleanup_deadline {
@@ -475,7 +489,10 @@ impl MacosWorkComposition {
                         intervention: None,
                     });
                 }
-                RetainedWorkPhase::Uncertain => requested_close = true,
+                RetainedWorkPhase::Uncertain => {
+                    trace("close:uncertain");
+                    requested_close = true;
+                }
                 RetainedWorkPhase::NeedsReview => {
                     // A prior process ended mid-run; its native resources died
                     // with it. Accept fresh admission so this anonymous read can
@@ -510,12 +527,18 @@ impl MacosWorkComposition {
                             .record
                             .is_some_and(|record| guard.0.read_artifact(record));
                     } else if disposition != Some(AgentWorkDisposition::Succeeded) {
+                        trace(&format!("close:terminal:{disposition:?}"));
                         requested_close = true;
                     }
                     if archived.is_none() {
                         archived = guard.0.take_archived_extraction();
                     }
                     if archived.is_some() || snapshot.artifact_read.is_some_and(|r| r != Ok(true)) {
+                        trace(if archived.is_some() {
+                            "close:archived"
+                        } else {
+                            "close:artifact_read"
+                        });
                         requested_close = true;
                     }
                 }
