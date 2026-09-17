@@ -8,7 +8,7 @@ import type {
 } from "$shared/ipc/bindings";
 import { artifactView } from "./project-work";
 import { agentLine, isAgentExecution } from "./agent-steps";
-import { subjectFacts, subjectKey } from "./subjects";
+import { subjectFacts, subjectKey, subjectsOf } from "./subjects";
 import { COLUMNS } from "./organize";
 import { pageFrameUrl } from "$domain/resources";
 
@@ -510,13 +510,7 @@ export function environmentPages(
       const reference = candidate.reference;
       if (reference.kind !== "subject" || reference.execution !== execution.id) continue;
       const artifact = execution.artifacts.find((artifact) => artifact.id === reference.artifact);
-      const subject =
-        artifact &&
-        (artifact.data.kind === "comparison_matrix" ||
-          artifact.data.kind === "findings" ||
-          artifact.data.kind === "evidence_collection")
-          ? artifact.data.subjects?.[reference.index]
-          : undefined;
+      const subject = artifact ? subjectsOf(artifact)[reference.index] : undefined;
       if (subject) hubs.set(subjectKey(subject), candidate.id);
     }
     const agent = `agent:${element.id}`;
@@ -550,14 +544,7 @@ export function environmentPages(
       for (const step of entry.steps)
         for (const artifactId of step.artifacts ?? []) {
           const artifact = execution.artifacts.find((artifact) => artifact.id === artifactId);
-          const subjects =
-            artifact &&
-            (artifact.data.kind === "comparison_matrix" ||
-              artifact.data.kind === "findings" ||
-              artifact.data.kind === "evidence_collection")
-              ? (artifact.data.subjects ?? [])
-              : [];
-          for (const subject of subjects) {
+          for (const subject of artifact ? subjectsOf(artifact) : []) {
             const hub = hubs.get(subjectKey(subject));
             if (!hub || linked.has(hub)) continue;
             linked.add(hub);

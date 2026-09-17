@@ -9,7 +9,7 @@ import type {
 } from "$shared/ipc/bindings";
 import { isAgentExecution } from "./agent-steps";
 import type { CanvasPosition, CanvasSize } from "./canvas-model";
-import { subjectKey } from "./subjects";
+import { recordArtifacts, subjectKey, subjectsOf } from "./subjects";
 
 type Placement = CanvasPosition & CanvasSize;
 export type OrganizePlan = {
@@ -60,21 +60,6 @@ function placeable(artifact: WorkArtifactV1): boolean {
     default:
       return true;
   }
-}
-/** Records a browser step collected: their subjects join the canvas, the table itself does not. */
-function recordArtifacts(execution: WorkExecutionFact): Set<string> {
-  const ids = new Set<string>();
-  for (const step of execution.steps ?? [])
-    if (step.kind.kind === "read" || step.kind.kind === "discover")
-      for (const artifact of step.artifacts ?? []) ids.add(artifact);
-  return ids;
-}
-function subjectsOf(artifact: WorkArtifactV1) {
-  return artifact.data.kind === "comparison_matrix" ||
-    artifact.data.kind === "findings" ||
-    artifact.data.kind === "evidence_collection"
-    ? (artifact.data.subjects ?? [])
-    : [];
 }
 /** Subject hubs already on the canvas for this run, by merge key. */
 function placedSubjects(
@@ -292,7 +277,7 @@ function organizeAgentRun(
   let objectY = Math.max(bottom("artifact", anchor.y), bottom("finding", anchor.y));
   const objectiveRef: WorkEnvironmentReference = { kind: "objective", objective };
 
-  // Subjects are hubs: one per page or name across the run.
+  // Subjects are hubs: one per name across the run.
   const subjectByName = placedSubjects(snapshot, execution);
   // Sources are matched to findings by the exact evidence link they cite.
   const sourceByLink = new Map<string, WorkEnvironmentReference>();

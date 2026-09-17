@@ -173,32 +173,35 @@ test("reviewed plans still organize once, after they settle", () => {
   expect(plan.adds.map((add) => add.reference.kind)).toEqual(["artifact"]);
 });
 
-test("browser records merge into subject hubs and never place their tables", () => {
+test("browser records merge into subject hubs by name and never place their tables", () => {
   const execution = agentRun();
-  const record = (id: string, name: string, homepage: string, price: string | null) => ({
+  const theme = "https://shop.example/themes/architecture";
+  const record = (id: string, subjects: { name: string; homepage?: string }[]) => ({
     ...execution.artifacts[0]!,
     id,
     title: id,
     data: {
       kind: "comparison_matrix" as const,
-      subjects: [{ name, homepage, image_candidates: [`https://img.example/${id}.jpg`] }],
+      subjects,
       criteria: [{ name: "price", kind: { kind: "text" as const } }],
-      cells: [
-        [
-          {
-            value: price ? { kind: "text" as const, text: price } : { kind: "unknown" as const },
-            evidence: [0],
-            note: null,
-            general_knowledge: false,
-          },
-        ],
-      ],
+      cells: subjects.map(() => [
+        {
+          value: { kind: "text" as const, text: "$119.99" },
+          evidence: [0],
+          note: null,
+          general_knowledge: false,
+        },
+      ]),
       notes: [],
     },
     evidence: [{ extraction_id: "record", source_id: 1 }],
   });
+  // The catalogue read names each set with its own product page.
   execution.artifacts = [
-    record("catalog", "Tower Bridge", "https://shop.example/p/1?utm_source=x", "$119.99"),
+    record("catalog", [
+      { name: "Tower Bridge", homepage: "https://shop.example/p/1?utm_source=x" },
+      { name: "Paris", homepage: "https://shop.example/p/2" },
+    ]),
   ];
   execution.steps = [
     {
@@ -211,19 +214,25 @@ test("browser records merge into subject hubs and never place their tables", () 
   ];
   const state = { ...projection, executions: [execution] };
   const first = organizeExecution(state, execution, { x: 100, y: 300 }, snapshot);
-  expect(first.adds.map((add) => add.reference.kind)).toEqual(["subject"]);
+  expect(first.adds.map((add) => add.reference.kind)).toEqual(["subject", "subject"]);
   const placed: WorkEnvironmentSnapshot = {
     ...snapshot,
     elements: [
       ...snapshot.elements,
-      { id: "hub", area: null, reference: first.adds[0]!.reference },
+      ...first.adds.map((add, index) => ({
+        id: `hub-${index}`,
+        area: null,
+        reference: add.reference,
+      })),
     ],
-    view: { ...snapshot.view, placements: [{ element: "hub", ...first.adds[0]!.placement }] },
+    view: {
+      ...snapshot.view,
+      placements: first.adds.map((add, index) => ({ element: `hub-${index}`, ...add.placement })),
+    },
   };
   expect(pendingOrganize(placed, state)).toBeNull();
-  execution.artifacts.push(
-    record("detail", "LEGO Tower Bridge", "https://shop.example/p/1/", null),
-  );
+  // The product page read repeats one set by name alone: still one hub.
+  execution.artifacts.push(record("detail", [{ name: "Tower Bridge" }]));
   execution.steps.push({
     id: "read-2",
     turn: 2,
@@ -232,8 +241,12 @@ test("browser records merge into subject hubs and never place their tables", () 
     artifacts: ["detail"],
   });
   expect(pendingOrganize(placed, state)).toBeNull();
+  // The published table gives every set the theme page; the names still hold.
   execution.artifacts.push({
-    ...record("final", "Tower Bridge", "https://shop.example/p/1", "$119.99"),
+    ...record("final", [
+      { name: "Tower Bridge", homepage: theme },
+      { name: "Paris", homepage: theme },
+    ]),
     title: "Compared sets",
   });
   execution.steps.push({
@@ -248,5 +261,51 @@ test("browser records merge into subject hubs and never place their tables", () 
   expect(second.adds.map((add) => add.reference.kind)).toEqual(["artifact"]);
   expect(second.relations).toEqual([
     { from: first.adds[0]!.reference, to: second.adds[0]!.reference, kind: "uses" },
+    { from: first.adds[1]!.reference, to: second.adds[0]!.reference, kind: "uses" },
+  ]);
+});
+
+test("subjects that only share a homepage stay separate hubs", () => {
+  const execution = agentRun();
+  const theme = "https://shop.example/themes/architecture";
+  execution.artifacts = [
+    {
+      ...execution.artifacts[0]!,
+      id: "final",
+      title: "Compared sets",
+      data: {
+        kind: "comparison_matrix",
+        subjects: [
+          { name: "Tower Bridge", homepage: theme },
+          { name: "Paris", homepage: theme },
+          { name: "New York City", homepage: theme },
+        ],
+        criteria: [],
+        cells: [[], [], []],
+        notes: [],
+      },
+      evidence: [],
+    },
+  ];
+  execution.steps = [
+    {
+      id: "publish",
+      turn: 1,
+      kind: { kind: "publish" },
+      status: "succeeded",
+      artifacts: ["final"],
+    },
+  ];
+  const plan = organizeExecution(
+    { ...projection, executions: [execution] },
+    execution,
+    { x: 100, y: 300 },
+    snapshot,
+  );
+  expect(plan.adds.map((add) => add.reference.kind)).toEqual([
+    "subject",
+    "subject",
+    "subject",
+    "artifact",
   ]);
 });

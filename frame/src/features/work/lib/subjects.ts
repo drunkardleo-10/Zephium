@@ -1,4 +1,4 @@
-import type { WorkArtifactDataV1, WorkExecutionFact } from "$shared/ipc/bindings";
+import type { WorkArtifactDataV1, WorkArtifactV1, WorkExecutionFact } from "$shared/ipc/bindings";
 
 type Subject = {
   name: string;
@@ -8,22 +8,51 @@ type Subject = {
 type Matrix = Extract<WorkArtifactDataV1, { kind: "comparison_matrix" }>;
 export type SubjectFact = { label: string; value: string };
 
-/** Subjects merge across artifacts by page identity, then by name. */
+const DASHES = /[‐-―−­]/g;
+const APOSTROPHES = /[‘’‚‛′ʼ]/g;
+const QUOTES = /[“”„‟″]/g;
+
+/**
+ * Subjects merge across the artifacts of one run by name alone. One run
+ * describes the same thing with a product URL, no URL, and the catalogue page
+ * it came from; a homepage would split one name or merge two.
+ */
 export function subjectKey(subject: Subject): string {
-  const page = subject.homepage ? pageKey(subject.homepage) : null;
-  return page ?? `name:${subject.name.trim().toLowerCase()}`;
+  return `name:${normalizeName(subject.name)}`;
 }
 
-function pageKey(homepage: string): string | null {
-  try {
-    const url = new URL(homepage);
-    for (const key of [...url.searchParams.keys()])
-      if (key.startsWith("utm_") || key === "ref" || key === "tag") url.searchParams.delete(key);
-    url.hash = "";
-    return `page:${url.host.toLowerCase()}${url.pathname.replace(/\/+$/, "")}${url.search}`;
-  } catch {
-    return null;
-  }
+function normalizeName(name: string): string {
+  return name
+    .normalize("NFKC")
+    .replace(DASHES, "-")
+    .replace(APOSTROPHES, "'")
+    .replace(QUOTES, '"')
+    .toLowerCase()
+    .replace(/\s+/gu, " ")
+    .trim()
+    .replace(/\p{P}+$/u, "")
+    .trim();
+}
+
+/** The subjects one artifact names, whatever shape carries them. */
+export function subjectsOf(artifact: WorkArtifactV1): readonly Subject[] {
+  return artifact.data.kind === "comparison_matrix" ||
+    artifact.data.kind === "findings" ||
+    artifact.data.kind === "evidence_collection"
+    ? (artifact.data.subjects ?? [])
+    : [];
+}
+
+/**
+ * Artifacts a browser step recorded: their subjects were observed on the page
+ * itself, so their pictures are the ones worth admitting.
+ */
+export function recordArtifacts(execution: WorkExecutionFact): Set<string> {
+  const ids = new Set<string>();
+  for (const step of execution.steps ?? [])
+    if (step.kind.kind === "read" || step.kind.kind === "discover")
+      for (const artifact of step.artifacts ?? []) ids.add(artifact);
+  return ids;
 }
 
 function rows(execution: WorkExecutionFact, key: string): { matrix: Matrix; index: number }[] {
@@ -45,8 +74,9 @@ export function subjectFacts(execution: WorkExecutionFact, subject: Subject): Su
   const seen = new Set<string>();
   for (const { matrix, index } of rows(execution, subjectKey(subject))) {
     matrix.criteria.forEach((criterion, column) => {
+      const label = criterion.name.trim().toLowerCase();
       const cell = matrix.cells[index]?.[column];
-      if (!cell || seen.has(criterion.name)) return;
+      if (!cell || seen.has(label)) return;
       const value = cell.value;
       let text: string | null = null;
       switch (value.kind) {
@@ -72,7 +102,7 @@ export function subjectFacts(execution: WorkExecutionFact, subject: Subject): Su
           break;
       }
       if (!text) return;
-      seen.add(criterion.name);
+      seen.add(label);
       (value.kind === "money" ? money : other).push({
         label: criterion.name,
         value: text.slice(0, 80),
@@ -82,13 +112,25 @@ export function subjectFacts(execution: WorkExecutionFact, subject: Subject): Su
   return [...money, ...other].slice(0, 3);
 }
 
-/** Public image candidates the run has observed for one subject. */
+/**
+ * Public image candidates the run has observed for one subject. Candidates a
+ * browser step recorded come first: a comparison table names the run's pictures
+ * from memory and can cite another subject's.
+ */
 export function subjectImageCandidates(execution: WorkExecutionFact, subject: Subject): string[] {
-  const out: string[] = [];
-  for (const { matrix, index } of rows(execution, subjectKey(subject)))
-    for (const candidate of matrix.subjects[index]?.image_candidates ?? [])
-      if (!out.includes(candidate)) out.push(candidate);
-  return out;
+  const key = subjectKey(subject);
+  const records = recordArtifacts(execution);
+  const observed: string[] = [];
+  const claimed: string[] = [];
+  for (const artifact of execution.artifacts) {
+    const out =
+      records.has(artifact.id) || artifact.data.kind === "evidence_collection" ? observed : claimed;
+    for (const candidate of subjectsOf(artifact)) {
+      if (subjectKey(candidate) !== key) continue;
+      for (const url of candidate.image_candidates ?? []) if (!out.includes(url)) out.push(url);
+    }
+  }
+  return [...observed, ...claimed.filter((url) => !observed.includes(url))];
 }
 
 function formatMoney(amount: string, currency: string): string {
