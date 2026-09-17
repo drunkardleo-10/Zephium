@@ -295,6 +295,12 @@
   }
   function liftSize(item: CanvasItem | undefined) {
     if (!item) return { width: 720, height: 520 };
+    // A product compare wants every column at once, not a scrollbar.
+    if (item.artifact?.content.kind === "matrix")
+      return {
+        width: Math.min(1180, 320 + item.artifact.content.subjects.length * 200),
+        height: 640,
+      };
     switch (item.type) {
       case "note":
         return { width: 760, height: 620 };
@@ -306,6 +312,8 @@
         return { width: 480, height: 320 };
       case "sources":
         return { width: 560, height: 560 };
+      case "subject":
+        return { width: 860, height: 620 };
       default: {
         const base = defaultSize(item);
         return { width: Math.max(720, base.width + 200), height: Math.max(520, base.height + 160) };
