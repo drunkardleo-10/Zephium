@@ -18,8 +18,8 @@ use zephium_agentic::*;
 use zephium_app::{
     work_agent::{WorkAgentBrowseRequest, WorkBrowserOutcome},
     work_runtime::*,
-    AgentWorkApplicationConfig, AgentWorkProfileBinding, CallbackHandle, RetainedWorkHandle,
-    RetainedWorkPhase,
+    AgentWorkApplicationConfig, AgentWorkProfileBinding, AgentWorkReviewDecision, CallbackHandle,
+    RetainedWorkHandle, RetainedWorkPhase,
 };
 use zephium_core::work::{artifact::*, runtime::*, WorkError, WorkStepId};
 
@@ -37,9 +37,9 @@ pub struct WorkBrowserAdapterSettings {
         Option<fn(zephium_core::work::WorkAttemptId, zephium_app::RetainedWorkSnapshot)>,
     #[cfg(feature = "public-qualification")]
     pub model_diagnostic: Option<fn(AgentWorkEventKind)>,
-    /// Closed stage label of a refused step compilation; no operands.
+    /// Closed stage labels (refused compilation, historical review); no operands.
     #[cfg(feature = "public-qualification")]
-    pub compile_diagnostic: Option<fn(&str)>,
+    pub stage_diagnostic: Option<fn(&str)>,
     pub profile: AgentWorkProfileBinding,
     pub model: AgentBrowserModel,
     pub config: AgentWorkApplicationConfig,
@@ -62,7 +62,7 @@ impl WorkBrowserAdapterSettings {
             #[cfg(feature = "public-qualification")]
             model_diagnostic: None,
             #[cfg(feature = "public-qualification")]
-            compile_diagnostic: None,
+            stage_diagnostic: None,
             profile,
             model,
             config,
@@ -302,6 +302,8 @@ impl MacosWorkComposition {
         let mut diagnostic_sent = false;
         #[cfg(feature = "retained-lifetime-diagnostic")]
         let resource_diagnostic = diagnostics.resource_diagnostic;
+        #[cfg(feature = "public-qualification")]
+        let stage_diagnostic = diagnostics.stage;
         #[cfg(not(feature = "public-qualification"))]
         let _ = diagnostics;
         let view = self
@@ -320,6 +322,7 @@ impl MacosWorkComposition {
         let mut cleanup_deadline = attempt.deadline() + Duration::from_secs(30);
         let mut disposition = None;
         let mut shown_frame = 0;
+        let mut reviews = 0u8;
         if let Some((step, url)) = &page {
             attempt.record_page_frame(*step, url, None);
         }
@@ -472,8 +475,30 @@ impl MacosWorkComposition {
                         intervention: None,
                     });
                 }
-                RetainedWorkPhase::Uncertain | RetainedWorkPhase::NeedsReview => {
-                    requested_close = true
+                RetainedWorkPhase::Uncertain => requested_close = true,
+                RetainedWorkPhase::NeedsReview => {
+                    // A prior process ended mid-run; its native resources died
+                    // with it. Accept fresh admission so this anonymous read can
+                    // proceed. The recorded debt stays in the journal.
+                    let interrupted =
+                        guard.0.records().into_iter().find(|record| {
+                            record.disposition() == AgentWorkDisposition::Interrupted
+                        });
+                    match interrupted {
+                        Some(record) if reviews < MAX_HISTORICAL_REVIEWS => {
+                            if guard
+                                .0
+                                .review(record, AgentWorkReviewDecision::AcceptFreshAdmission)
+                            {
+                                reviews += 1;
+                                #[cfg(feature = "public-qualification")]
+                                if let Some(diagnostic) = stage_diagnostic {
+                                    diagnostic("review:interrupted");
+                                }
+                            }
+                        }
+                        _ => requested_close = true,
+                    }
                 }
                 RetainedWorkPhase::Terminal => {
                     disposition = snapshot.record.map(|r| r.disposition());
@@ -617,6 +642,8 @@ struct Diagnostics {
     resource_diagnostic: Option<fn(Option<zephium_engine::WorkResourceFailureCause>)>,
     #[cfg(feature = "public-qualification")]
     diagnostic: Option<fn(zephium_core::work::WorkAttemptId, zephium_app::RetainedWorkSnapshot)>,
+    #[cfg(feature = "public-qualification")]
+    stage: Option<fn(&str)>,
 }
 impl From<&WorkBrowserAdapterSettings> for Diagnostics {
     fn from(settings: &WorkBrowserAdapterSettings) -> Self {
@@ -632,6 +659,8 @@ impl From<&WorkBrowserAdapterSettings> for Diagnostics {
             diagnostic: settings.diagnostic,
             #[cfg(feature = "public-qualification")]
             model_diagnostic: settings.model_diagnostic,
+            #[cfg(feature = "public-qualification")]
+            stage: settings.stage_diagnostic,
         }
     }
 }
@@ -738,7 +767,7 @@ fn compile_step(
         invocation
     };
     #[cfg(feature = "public-qualification")]
-    let diagnostic = settings.compile_diagnostic;
+    let diagnostic = settings.stage_diagnostic;
     let request = invocation
         .into_request(settings.profile)
         .map_err(|failure| {
@@ -748,7 +777,9 @@ fn compile_step(
                     .deadline()
                     .saturating_duration_since(Instant::now())
                     .as_millis();
-                diagnostic(&format!("admission:{failure:?} remaining_ms={remaining}"));
+                diagnostic(&format!(
+                    "compile:admission:{failure:?} remaining_ms={remaining}"
+                ));
             }
             let _ = &failure;
             WorkError::Unavailable
@@ -758,6 +789,9 @@ fn compile_step(
         .with_anonymous_session(probe.browser_session().clone()))
 }
 
+/// Interrupted records of dead processes accepted per step before giving up.
+const MAX_HISTORICAL_REVIEWS: u8 = 8;
+
 /// One browser step never runs longer than this, whatever the run's own deadline:
 /// the controller refuses longer horizons, and a page read should not need them.
 const MAX_STEP_DURATION: Duration = Duration::from_secs(540);
@@ -765,8 +799,8 @@ const MAX_STEP_DURATION: Duration = Duration::from_secs(540);
 /// Reports one closed compile stage under development traces; the error is unchanged.
 fn refused(settings: &WorkBrowserAdapterSettings, stage: &str, error: WorkError) -> WorkError {
     #[cfg(feature = "public-qualification")]
-    if let Some(diagnostic) = settings.compile_diagnostic {
-        diagnostic(stage);
+    if let Some(diagnostic) = settings.stage_diagnostic {
+        diagnostic(&format!("compile:{stage}"));
     }
     #[cfg(not(feature = "public-qualification"))]
     let _ = (settings, stage);
