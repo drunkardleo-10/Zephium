@@ -254,8 +254,8 @@ impl WorkProviders {
                                         settings.diagnostic = Some(|attempt, snapshot| {
                                             record_diagnostic(format_args!("work: attempt={attempt} phase=agent_browser state={:?} failure={:?} persistence_failure={:?}", snapshot.phase, snapshot.failure, snapshot.persistence_failure));
                                         });
-                                        settings.compile_diagnostic = Some(|stage| {
-                                            record_diagnostic(format_args!("work: phase=agent_browser compile_refused={stage}"));
+                                        settings.stage_diagnostic = Some(|stage| {
+                                            record_diagnostic(format_args!("work: phase=agent_browser stage={stage}"));
                                         });
                                         settings.resource_diagnostic = Some(|cause| {
                                             record_diagnostic(format_args!("work: phase=agent_browser resource_failure={cause:?}"));
