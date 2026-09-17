@@ -7,7 +7,14 @@
   const rows = $derived(item.sources ?? []);
 </script>
 
-<CardFrame kind={item.kind} title={item.title} icon={Link04Icon} {selected} dense>
+<CardFrame
+  kind={item.kind}
+  title={item.title}
+  icon={Link04Icon}
+  {selected}
+  active={item.active}
+  dense
+>
   <div class="stage">
     {#if item.detail}<p class="request">{item.detail}</p>{/if}
     <ul class="rows">

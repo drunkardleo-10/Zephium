@@ -420,6 +420,39 @@
     stroke: var(--color-danger);
   }
 
+  /* A card that has just arrived settles in; it never bounces. */
+  .work-canvas :global(.work-node-enter) {
+    animation: work-node-in 260ms var(--ease-smooth);
+  }
+
+  @keyframes work-node-in {
+    from {
+      opacity: 0;
+      translate: 0 5px;
+    }
+
+    to {
+      opacity: 1;
+      translate: 0 0;
+    }
+  }
+
+  /* The path draws itself: each edge is stroked on from its stage. */
+  /* stylelint-disable-next-line selector-class-pattern */
+  .work-canvas :global(.work-edge .svelte-flow__edge-path) {
+    animation: work-edge-draw 520ms var(--ease-smooth);
+  }
+
+  @keyframes work-edge-draw {
+    from {
+      stroke-dasharray: 0 640;
+    }
+
+    to {
+      stroke-dasharray: 640 0;
+    }
+  }
+
   /* An agent moves to its work; the tie to it is transient and alive. */
   /* stylelint-disable-next-line selector-class-pattern */
   .work-canvas :global(.svelte-flow__node.agent-node) {

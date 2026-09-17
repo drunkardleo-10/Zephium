@@ -52,6 +52,8 @@ export type CanvasItem = {
   /** A page a browser step opened: its newest frame while the agent works there. */
   page?: { url: string; host: string; frame: string | null; live: boolean };
   unavailable?: boolean;
+  /** The stage a run is working in right now; it glows while that is true. */
+  active?: boolean;
   /** The user's recorded choice about this element. */
   decision?: string;
   /** An admitted media asset; the image URL is derived from profile and digest. */
@@ -271,6 +273,7 @@ export function reconcileNodes(
         node.data.subject === item.subject &&
         node.data.finding === item.finding &&
         node.data.decision === item.decision &&
+        node.data.active === item.active &&
         JSON.stringify(node.data.sources) === JSON.stringify(item.sources) &&
         node.data.media?.asset.digest === item.media?.asset.digest &&
         node.data.image?.digest === item.image?.digest &&
@@ -332,7 +335,7 @@ export function reconcileNodes(
       dragHandle: ".work-drag-handle",
       deletable: false,
       connectable: false,
-      ...(item.agent ? { class: "agent-node" } : {}),
+      class: item.agent ? "agent-node work-node-enter" : "work-node-enter",
       ariaLabel: `${item.title}. ${item.status}`,
     };
   });

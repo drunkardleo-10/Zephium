@@ -545,6 +545,9 @@ export function environmentSources(
     let index = 0;
     for (const execution of projection.executions) {
       if (!isAgentExecution(execution)) continue;
+      const running =
+        ["running", "cancel_requested", "approved"].includes(execution.status) &&
+        !projection.interrupted.includes(execution.id);
       const seen = new Set<string>();
       const files = new Set<string>();
       const rows: SourceRow[] = [];
@@ -582,6 +585,7 @@ export function environmentSources(
             : m.work_env_sources_count({ count: rows.length }),
         detail: served.slice(0, 240),
         status: "",
+        ...(running ? { active: true } : {}),
         sources: rows.slice(0, SOURCE_ROWS),
       });
       positions[id] = { x: home.x, y: home.y + index * (SOURCES_SIZE.height + 24) };

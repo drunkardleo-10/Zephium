@@ -8,6 +8,7 @@
     icon,
     leading,
     selected = false,
+    active = false,
     unavailable = false,
     dense = false,
     children,
@@ -18,6 +19,8 @@
     icon?: IconSvgElement;
     leading?: Snippet;
     selected?: boolean;
+    /** The stage a run is working in right now. */
+    active?: boolean;
     unavailable?: boolean;
     dense?: boolean;
     children?: Snippet;
@@ -25,7 +28,7 @@
   } = $props();
 </script>
 
-<article class="card" class:selected class:unavailable class:dense>
+<article class="card" class:selected class:active class:unavailable class:dense>
   <header class="work-drag-handle">
     <span class="glyph">
       {#if leading}{@render leading()}{:else if icon}<Icon {icon} size={16} />{/if}
@@ -63,6 +66,22 @@
       inset 0 0 0 1px var(--color-border-strong),
       0 0 0 2px var(--color-accent-soft),
       0 0 0 3px var(--color-accent);
+  }
+
+  /* The stage the run is working in breathes; it never flashes. */
+  .card.active {
+    animation: card-active 2.4s var(--ease-smooth) infinite;
+  }
+
+  @keyframes card-active {
+    0%,
+    100% {
+      box-shadow: inset 0 0 0 1px var(--color-border);
+    }
+
+    50% {
+      box-shadow: inset 0 0 0 1px var(--color-accent);
+    }
   }
 
   .card.unavailable {

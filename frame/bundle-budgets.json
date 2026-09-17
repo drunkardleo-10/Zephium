@@ -135,8 +135,8 @@
   },
   "lazy:features/work/components/WorkCanvas.svelte": {
     "js": 548000,
-    "css": 118500,
-    "description": "Measured 544966 JS and 117761 CSS bytes: the comparison card is a product compare with pictures, prices and check/cross rows."
+    "css": 119600,
+    "description": "Measured 545758 JS and 118421 CSS bytes: the product compare card, the settling of a new card, the drawn edge and the glow of the running stage."
   },
   "lazy:shared/ui/data/Chart/Chart.svelte": {
     "js": 70000,
@@ -144,9 +144,9 @@
     "description": "Measured 65242 JS and 2553 CSS bytes: a hand-written SVG plot with no chart library."
   },
   "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
-    "js": 587000,
-    "css": 120000,
-    "description": "Measured 585664 JS and 119007 CSS bytes with folder admission, Finder drops, link elements, and the file lift beside agent-run organization."
+    "js": 570000,
+    "css": 113000,
+    "description": "Measured 563831 JS and 110055 CSS bytes; lowered because project-work resolves its own host and no longer pulls the Artifact UI module into this graph."
   },
   "lazy:features/work/components/AgentLine.svelte": {
     "js": 110000,

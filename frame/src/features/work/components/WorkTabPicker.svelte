@@ -63,7 +63,11 @@
   <ul>
     {#each visible as tab (tab.id)}
       {@const attached = attachedTabIds.includes(tab.id)}
-      <li class:chosen={eligible.includes(tab.id)} class:attached>
+      <li
+        class:chosen={eligible.includes(tab.id)}
+        class:current={tab.id === currentTabId}
+        class:attached
+      >
         <label class="tab">
           <input
             type="checkbox"
@@ -75,7 +79,7 @@
           <span class="identity">
             <strong>{tab.title || m.work_env_untitled_tab()}</strong>
             <span class="where"
-              >{#if tab.id === currentTabId}<span class="current">{m.work_env_current_tab()}</span
+              >{#if tab.id === currentTabId}<span class="badge">{m.work_env_current_tab()}</span
                 >{/if}{host(tab.url)}</span
             >
           </span>
@@ -175,22 +179,32 @@
     max-block-size: min(360px, 45vh);
   }
 
-  /* A row reads like a tab: mark, title, where it is. */
+  /* A row is a tab: its mark, its title, and where it is. */
   li {
     display: flex;
     align-items: center;
     gap: 8px;
     padding: 4px 8px 4px 6px;
-    border-radius: var(--radius-control-compact);
-    transition: background-color var(--motion-fast) var(--ease-smooth);
+    border-radius: var(--radius-control);
+    background: var(--color-fill);
+    box-shadow: inset 0 0 0 1px transparent;
+    transition:
+      background-color var(--motion-fast) var(--ease-smooth),
+      box-shadow var(--motion-fast) var(--ease-smooth);
   }
 
   li:hover {
-    background: var(--color-fill);
+    background: var(--color-fill-hover);
+  }
+
+  li.current {
+    background: var(--color-surface);
+    box-shadow: inset 0 0 0 1px var(--color-border-strong);
   }
 
   li.chosen {
     background: var(--color-accent-soft);
+    box-shadow: inset 0 0 0 1px var(--color-accent);
   }
 
   li.attached {
@@ -252,7 +266,7 @@
     white-space: nowrap;
   }
 
-  .current {
+  .badge {
     margin-inline-end: 6px;
     padding: 0 6px;
     border-radius: var(--radius-capsule);
