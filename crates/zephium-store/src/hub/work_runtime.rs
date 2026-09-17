@@ -414,6 +414,44 @@ pub(super) fn command(
             write(tx, id, &row.fact)?;
             execution
         }
+        WorkRuntimeIntent::ApproveStep {
+            execution,
+            step,
+            approve,
+        } => {
+            let mut row = all
+                .into_iter()
+                .find(|r| r.fact.id == execution)
+                .ok_or(WorkError::NotFound)?;
+            if row.fact.status != WorkExecutionStatus::Running || !row.fact.is_agent() {
+                return Err(WorkError::Conflict);
+            }
+            let proposed = row
+                .fact
+                .steps
+                .iter_mut()
+                .find(|s| s.id == step)
+                .ok_or(WorkError::NotFound)?;
+            let (WorkStepKindV1::WriteFile {
+                decision: pending, ..
+            }
+            | WorkStepKindV1::EditFile {
+                decision: pending, ..
+            }) = &mut proposed.kind
+            else {
+                return Err(WorkError::Invalid);
+            };
+            if proposed.status != WorkStepStatus::Running || pending.is_some() {
+                return Err(WorkError::Conflict);
+            }
+            *pending = Some(approve);
+            row.fact.validate(
+                &read_plan(tx, id, row.fact.spec.plan_revision)?,
+                expected.next()?,
+            )?;
+            write(tx, id, &row.fact)?;
+            execution
+        }
         WorkRuntimeIntent::Steer { execution, text } => {
             let mut row = all
                 .into_iter()
@@ -550,6 +588,7 @@ pub(super) fn command(
                 artifacts: vec![],
                 user_artifacts: vec![],
                 provider_evidence: vec![],
+                file_evidence: vec![],
                 steps: vec![],
             };
             fact.validate(plan, expected.next()?)?;
@@ -880,6 +919,7 @@ pub(super) fn update(
             step,
             artifacts,
             evidence,
+            file,
             ..
         } => {
             let fact = row
@@ -905,6 +945,7 @@ pub(super) fn update(
                 step.evidence,
                 artifacts,
                 evidence,
+                file,
             )?;
             row.fact.steps.push(step);
         }
@@ -915,6 +956,7 @@ pub(super) fn update(
             usage,
             artifacts,
             evidence,
+            file,
             note,
             ..
         } => {
@@ -941,7 +983,10 @@ pub(super) fn update(
                 return Err(WorkError::Conflict);
             }
             let ids: Vec<_> = artifacts.iter().map(|a| a.id).collect();
-            let record = evidence.as_ref().map(|e| e.id);
+            let record = evidence
+                .as_ref()
+                .map(|e| e.id)
+                .or(file.as_ref().map(|f| f.id));
             attach_step_payload(
                 &mut row.fact,
                 attempt,
@@ -950,6 +995,7 @@ pub(super) fn update(
                 record,
                 artifacts,
                 evidence,
+                file,
             )?;
             let settled = &mut row.fact.steps[index];
             settled.status = status;
@@ -992,6 +1038,7 @@ pub(super) fn update(
 
 /// Artifacts and a provider record are attached once, by exactly the step
 /// that claims them, and only to the live attempt that produced them.
+#[allow(clippy::too_many_arguments)]
 fn attach_step_payload(
     fact: &mut WorkExecutionFact,
     attempt: WorkAttemptId,
@@ -1000,12 +1047,18 @@ fn attach_step_payload(
     claimed_evidence: Option<WorkArtifactId>,
     artifacts: Vec<WorkArtifactV1>,
     evidence: Option<Box<WorkProviderSearchRecordV1>>,
+    file: Option<Box<WorkFileRecordV1>>,
 ) -> Result<(), WorkError> {
     if artifacts.len() != claimed.len()
         || !claimed
             .iter()
             .all(|id| artifacts.iter().any(|a| a.id == *id))
-        || evidence.as_ref().map(|e| e.id) != claimed_evidence
+        || (evidence.is_some() && file.is_some())
+        || evidence
+            .as_ref()
+            .map(|e| e.id)
+            .or(file.as_ref().map(|f| f.id))
+            != claimed_evidence
         || artifacts
             .iter()
             .any(|a| a.attempt != attempt || a.node != node || a.execution != fact.id)
@@ -1026,6 +1079,16 @@ fn attach_step_payload(
             return Err(WorkError::Invalid);
         }
         fact.provider_evidence.push(*record);
+    }
+    if let Some(record) = file {
+        if record.attempt != attempt
+            || record.node != node
+            || fact.file_evidence.iter().any(|e| e.id == record.id)
+            || fact.file_evidence.len() >= MAX_WORK_STEPS
+        {
+            return Err(WorkError::Invalid);
+        }
+        fact.file_evidence.push(*record);
     }
     fact.artifacts.extend(artifacts);
     Ok(())

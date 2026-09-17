@@ -96,6 +96,8 @@ pub mod work_agent;
 pub mod work_coordination;
 #[cfg(feature = "work-runtime")]
 pub mod work_execution;
+#[cfg(feature = "work-runtime")]
+pub mod work_files;
 #[cfg(feature = "work-planning")]
 pub mod work_planning;
 #[cfg(feature = "work-runtime")]

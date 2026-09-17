@@ -1209,6 +1209,7 @@ async fn agent_workflow(
         max_turns: 8,
         max_steps: 24,
         browse_hops: 3,
+        folders: vec![],
     };
     let search = OpenAiPublicSearch::try_new(
         transport,

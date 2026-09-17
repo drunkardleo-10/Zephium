@@ -113,6 +113,9 @@ impl WorkAgentTurnDisclosure {
                 WorkEvidenceSourceV1::NativeExtraction => {
                     (preview.origin.clone(), preview.origin.clone())
                 }
+                WorkEvidenceSourceV1::File { path, name, .. } => {
+                    (name.clone(), format!("file://{path}"))
+                }
             };
             validate_text(&url, 4096)?;
             if let Some(destination) = &preview.link_destination {
@@ -134,6 +137,7 @@ impl WorkAgentTurnDisclosure {
                 acquired_by: match &preview.source {
                     WorkEvidenceSourceV1::NativeExtraction => "native_browser",
                     WorkEvidenceSourceV1::ProviderSearch { .. } => "provider_search",
+                    WorkEvidenceSourceV1::File { .. } => "file",
                 },
                 title: if title.trim().is_empty() {
                     preview.origin.clone()
@@ -163,6 +167,24 @@ impl WorkAgentTurnDisclosure {
                         },
                     ),
                     WorkStepKindV1::Steer { text } => ("person", text.clone()),
+                    WorkStepKindV1::List { path } => ("list", path.clone()),
+                    WorkStepKindV1::ReadFile { path } => ("read_file", path.clone()),
+                    WorkStepKindV1::SearchFiles { path, query } => {
+                        ("search_files", format!("{path}\n{query}"))
+                    }
+                    WorkStepKindV1::WriteFile { path, decision, .. }
+                    | WorkStepKindV1::EditFile { path, decision, .. } => (
+                        if matches!(step.kind, WorkStepKindV1::WriteFile { .. }) {
+                            "write_file"
+                        } else {
+                            "edit_file"
+                        },
+                        match decision {
+                            Some(true) => format!("{path}\nApproved by the person"),
+                            Some(false) => format!("{path}\nDeclined by the person"),
+                            None => path.clone(),
+                        },
+                    ),
                     WorkStepKindV1::Finish { .. } => ("finish", String::new()),
                 };
                 WorkAgentStepView {
@@ -359,6 +381,22 @@ impl WorkAgentTurnDisclosure {
                 WorkAgentFetch::Discover { query, collection } => {
                     WorkStepKindV1::Discover { query, collection }
                 }
+                WorkAgentFetch::List { path } => WorkStepKindV1::List { path },
+                WorkAgentFetch::ReadFile { path } => WorkStepKindV1::ReadFile { path },
+                WorkAgentFetch::SearchFiles { path, query } => {
+                    WorkStepKindV1::SearchFiles { path, query }
+                }
+                WorkAgentFetch::WriteFile { path, content } => WorkStepKindV1::WriteFile {
+                    path,
+                    content,
+                    decision: None,
+                },
+                WorkAgentFetch::EditFile { path, old, new } => WorkStepKindV1::EditFile {
+                    path,
+                    old,
+                    new,
+                    decision: None,
+                },
             };
             let probe = WorkStepFact {
                 id: WorkStepId::from(1),
@@ -720,6 +758,26 @@ pub enum WorkAgentFetch {
         query: String,
         #[serde(rename = "records", default, skip_serializing_if = "Option::is_none")]
         collection: Option<super::collection::WorkBrowseCollection>,
+    },
+    List {
+        path: String,
+    },
+    ReadFile {
+        path: String,
+    },
+    SearchFiles {
+        path: String,
+        query: String,
+    },
+    WriteFile {
+        path: String,
+        #[serde(rename = "text")]
+        content: String,
+    },
+    EditFile {
+        path: String,
+        old: String,
+        new: String,
     },
 }
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]

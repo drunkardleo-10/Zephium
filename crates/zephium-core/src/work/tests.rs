@@ -646,6 +646,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
         max_turns: 8,
         max_steps: 24,
         browse_hops: 4,
+        folders: vec![],
     };
     assert!(WorkAgentGrantV1 {
         max_turns: 0,
@@ -666,6 +667,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
         attempts: vec![],
         artifacts: vec![],
         provider_evidence: vec![],
+        file_evidence: vec![],
         user_artifacts: vec![],
         intervention: None,
         steps: vec![],
@@ -1234,6 +1236,63 @@ fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
             "Fourth".into(),
         ],
     };
+    let file = |kind, status| WorkStepFact {
+        id: 10.into(),
+        turn: 2,
+        kind,
+        status,
+        usage: None,
+        artifacts: vec![],
+        evidence: None,
+        note: None,
+    };
+    let proposal = |decision| WorkStepKindV1::WriteFile {
+        path: "/Users/me/Documents/project/notes.txt".into(),
+        content: "one\n".into(),
+        decision,
+    };
+    assert!(file(proposal(None), WorkStepStatus::Running)
+        .validate()
+        .is_ok());
+    assert!(file(proposal(Some(true)), WorkStepStatus::Running)
+        .validate()
+        .is_ok());
+    assert!(file(proposal(None), WorkStepStatus::Failed)
+        .validate()
+        .is_err());
+    assert!(file(proposal(Some(false)), WorkStepStatus::Failed)
+        .validate()
+        .is_ok());
+    assert!(file(
+        WorkStepKindV1::ReadFile {
+            path: "relative/notes.txt".into()
+        },
+        WorkStepStatus::Running
+    )
+    .validate()
+    .is_err());
+    let mut succeeded_read = file(
+        WorkStepKindV1::ReadFile {
+            path: "/Users/me/Documents/project/notes.txt".into(),
+        },
+        WorkStepStatus::Succeeded,
+    );
+    assert!(succeeded_read.validate().is_err());
+    succeeded_read.evidence = Some(11.into());
+    assert!(succeeded_read.validate().is_ok());
+    let grant = |folders: Vec<&str>| WorkAgentGrantV1 {
+        provider: super::search::WorkSearchProvider::OpenAi,
+        model: "gpt-5.6-luna".into(),
+        max_turns: 4,
+        max_steps: 12,
+        browse_hops: 2,
+        folders: folders.into_iter().map(String::from).collect(),
+    };
+    assert!(grant(vec!["/Users/me/Documents/project"])
+        .validate()
+        .is_ok());
+    assert!(grant(vec!["Documents/project"]).validate().is_err());
+    assert!(grant(vec!["/a"; 9]).validate().is_err());
     assert!(disclosure
         .resolve(output(false))
         .unwrap()

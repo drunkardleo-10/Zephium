@@ -563,16 +563,19 @@ impl WorkAttemptProbe {
                         status,
                         artifacts,
                         evidence,
+                        file,
                         ..
                     } if *status == WorkStepStatus::Succeeded => {
                         *status = WorkStepStatus::Failed;
                         artifacts.clear();
                         *evidence = None;
+                        *file = None;
                     }
                     WorkRuntimeUpdate::BeginStep {
                         step,
                         artifacts,
                         evidence,
+                        file,
                         ..
                     } if !artifacts.is_empty() => {
                         step.status = WorkStepStatus::Failed;
@@ -580,6 +583,7 @@ impl WorkAttemptProbe {
                         step.evidence = None;
                         artifacts.clear();
                         *evidence = None;
+                        *file = None;
                     }
                     _ => return Err(WorkError::Capacity),
                 },

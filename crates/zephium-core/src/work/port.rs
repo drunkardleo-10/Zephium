@@ -152,18 +152,20 @@ impl WorkRequest {
                         step,
                         artifacts,
                         evidence,
+                        file,
                         ..
                     },
                 ..
             } => {
                 step.validate()?;
-                validate_step_payload(artifacts, evidence.as_deref())
+                validate_step_payload(artifacts, evidence.as_deref(), file.as_deref())
             }
             Self::RuntimeUpdate {
                 update:
                     runtime::WorkRuntimeUpdate::SettleStep {
                         artifacts,
                         evidence,
+                        file,
                         note,
                         ..
                     },
@@ -172,7 +174,7 @@ impl WorkRequest {
                 if let Some(note) = note {
                     validate_text(note, runtime::MAX_WORK_STEP_NOTE_BYTES)?;
                 }
-                validate_step_payload(artifacts, evidence.as_deref())
+                validate_step_payload(artifacts, evidence.as_deref(), file.as_deref())
             }
             Self::RuntimeCommand {
                 intent: runtime::WorkRuntimeIntent::Approve { spec },
@@ -205,6 +207,7 @@ impl WorkRequest {
 fn validate_step_payload(
     artifacts: &[artifact::WorkArtifactV1],
     evidence: Option<&runtime::WorkProviderSearchRecordV1>,
+    file: Option<&runtime::WorkFileRecordV1>,
 ) -> Result<(), WorkError> {
     if artifacts.len() > artifact::MAX_WORK_ARTIFACTS {
         return Err(WorkError::Capacity);
@@ -212,8 +215,14 @@ fn validate_step_payload(
     for artifact in artifacts {
         artifact.validate()?;
     }
+    if evidence.is_some() && file.is_some() {
+        return Err(WorkError::Invalid);
+    }
     if let Some(record) = evidence {
         record.evidence.validate()?;
+    }
+    if let Some(record) = file {
+        record.file.validate()?;
     }
     Ok(())
 }

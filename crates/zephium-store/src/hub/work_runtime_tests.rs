@@ -782,6 +782,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
         max_turns: 8,
         max_steps: 24,
         browse_hops: 4,
+        folders: vec![],
     };
     let limits = WorkExecutionLimits {
         model_tokens: 600_000,
@@ -860,6 +861,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
             step: step(1, 1, WorkStepKindV1::Turn, WorkStepStatus::Succeeded),
             artifacts: vec![],
             evidence: None,
+            file: None,
         }
     )
     .is_err());
@@ -889,6 +891,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
             step: turn,
             artifacts: vec![],
             evidence: None,
+            file: None,
         },
     )
     .unwrap();
@@ -907,6 +910,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
             ),
             artifacts: vec![],
             evidence: None,
+            file: None,
         },
     )
     .unwrap();
@@ -963,6 +967,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
             usage: Some(usage),
             artifacts: vec![sources.clone()],
             evidence: None,
+            file: None,
             note: None,
         }
     )
@@ -977,6 +982,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
             usage: Some(usage),
             artifacts: vec![sources],
             evidence: Some(Box::new(record)),
+            file: None,
             note: Some("Found 1 source".into()),
         },
     )
@@ -1003,6 +1009,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
             ),
             artifacts: vec![],
             evidence: None,
+            file: None,
         },
     )
     .unwrap();
@@ -1052,6 +1059,82 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
         WorkStepFact { kind: WorkStepKindV1::Steer { text }, status: WorkStepStatus::Succeeded, usage: None, turn: 2, .. }
             if text == "Only official pricing pages"
     ));
+    // A proposed change waits undecided, takes exactly one decision, and
+    // settles with the file record it produced.
+    update(
+        &mut hub,
+        WorkRuntimeUpdate::BeginStep {
+            execution,
+            attempt,
+            step: step(
+                7,
+                2,
+                WorkStepKindV1::WriteFile {
+                    path: "/Users/me/Documents/project/notes.txt".into(),
+                    content: "one\n".into(),
+                    decision: None,
+                },
+                WorkStepStatus::Running,
+            ),
+            artifacts: vec![],
+            evidence: None,
+            file: None,
+        },
+    )
+    .unwrap();
+    let approve = |hub: &mut Hub, command: u128| {
+        let state = read_runtime(hub, &initial);
+        hub.work_document(
+            initial.profile,
+            WorkRequest::RuntimeCommand {
+                id: initial.id,
+                expected: state.work.revision,
+                command: command.into(),
+                intent: WorkRuntimeIntent::ApproveStep {
+                    execution,
+                    step: 7.into(),
+                    approve: true,
+                },
+            },
+        )
+    };
+    approve(&mut hub, 220).unwrap();
+    assert!(matches!(approve(&mut hub, 221), Err(WorkError::Conflict)));
+    let written = WorkFileRecordV1 {
+        id: 71.into(),
+        node,
+        attempt,
+        file: WorkFileEvidenceV1 {
+            path: "/Users/me/Documents/project/notes.txt".into(),
+            name: "notes.txt".into(),
+            kind: WorkFileKindV1::Written,
+            bytes: 4,
+            digest: "a".repeat(64),
+            text: "@@ -1,0 +1,1 @@\n+ one\n".into(),
+            truncated: false,
+        },
+    };
+    update(
+        &mut hub,
+        WorkRuntimeUpdate::SettleStep {
+            execution,
+            attempt,
+            step: 7.into(),
+            status: WorkStepStatus::Succeeded,
+            usage: None,
+            artifacts: vec![],
+            evidence: None,
+            file: Some(Box::new(written.clone())),
+            note: Some("Applied".into()),
+        },
+    )
+    .unwrap();
+    let state = read_runtime(&mut hub, &initial);
+    assert_eq!(state.executions[0].file_evidence, vec![written]);
+    assert!(matches!(
+        &state.executions[0].steps[4],
+        WorkStepFact { kind: WorkStepKindV1::WriteFile { decision: Some(true), .. }, status: WorkStepStatus::Succeeded, evidence: Some(id), .. } if *id == 71.into()
+    ));
     // Success needs the Finish step first.
     let settle = |hub: &mut Hub, status| {
         let state = read_runtime(hub, &initial);
@@ -1085,12 +1168,13 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
             ),
             artifacts: vec![],
             evidence: None,
+            file: None,
         },
     )
     .unwrap();
     settle(&mut hub, WorkAttemptStatus::Succeeded).unwrap();
     let state = read_runtime(&mut hub, &initial);
     assert_eq!(state.executions[0].status, WorkExecutionStatus::NeedsReview);
-    assert_eq!(state.executions[0].steps.len(), 5);
+    assert_eq!(state.executions[0].steps.len(), 6);
     assert!(matches!(steer(&mut hub, 211), Err(WorkError::Conflict)));
 }

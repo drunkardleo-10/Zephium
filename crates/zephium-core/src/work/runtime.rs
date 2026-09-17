@@ -10,6 +10,25 @@ pub const MAX_WORK_STEPS: usize = 48;
 pub const MAX_WORK_STEP_NOTE_BYTES: usize = 512;
 pub const MAX_WORK_FOLLOWUPS: usize = 3;
 pub const MAX_WORK_FOLLOWUP_BYTES: usize = 120;
+pub const MAX_WORK_FOLDERS: usize = 8;
+pub const MAX_WORK_FILE_PATH_BYTES: usize = 1024;
+/// Text disclosed from one file step: a file excerpt, a listing, hits or a diff.
+pub const MAX_WORK_FILE_TEXT_BYTES: usize = 16 * 1024;
+/// Content the agent may propose for one file write or edit.
+pub const MAX_WORK_FILE_CONTENT_BYTES: usize = 64 * 1024;
+pub const MAX_WORK_FILE_QUERY_BYTES: usize = 256;
+
+/// An absolute path without control bytes; the application resolves it.
+pub fn validate_file_path(path: &str) -> Result<(), WorkError> {
+    if path.is_empty()
+        || path.len() > MAX_WORK_FILE_PATH_BYTES
+        || !path.starts_with('/')
+        || path.chars().any(char::is_control)
+    {
+        return Err(WorkError::Invalid);
+    }
+    Ok(())
+}
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -150,9 +169,21 @@ pub struct WorkAgentGrantV1 {
     pub max_turns: u8,
     pub max_steps: u8,
     pub browse_hops: u8,
+    /// Folders the person granted for this run, as absolute paths. Every file
+    /// step must resolve inside one of them; the application enforces it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folders: Vec<String>,
 }
 impl WorkAgentGrantV1 {
     pub fn validate(&self) -> Result<(), WorkError> {
+        if self.folders.len() > MAX_WORK_FOLDERS
+            || self
+                .folders
+                .iter()
+                .any(|folder| validate_file_path(folder).is_err())
+        {
+            return Err(WorkError::Invalid);
+        }
         if !super::search::supported_public_search_model(&self.model)
             || self.max_turns == 0
             || self.max_turns > 16
@@ -722,6 +753,9 @@ pub struct WorkExecutionFact {
     pub artifacts: Vec<WorkArtifactV1>,
     #[serde(default)]
     pub provider_evidence: Vec<WorkProviderSearchRecordV1>,
+    /// What file steps disclosed: listings, excerpts, hits and applied diffs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_evidence: Vec<WorkFileRecordV1>,
     /// User edits and decisions never overwrite the original agent output.
     #[serde(default)]
     pub user_artifacts: Vec<WorkArtifactUserState>,
@@ -764,6 +798,32 @@ pub enum WorkStepKindV1 {
     /// its next turn.
     Steer {
         text: String,
+    },
+    /// Directory listing inside a granted folder.
+    List {
+        path: String,
+    },
+    ReadFile {
+        path: String,
+    },
+    SearchFiles {
+        path: String,
+        query: String,
+    },
+    /// A proposed whole-file write; `decision` is the person's answer.
+    WriteFile {
+        path: String,
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decision: Option<bool>,
+    },
+    /// A proposed replacement of one exact passage.
+    EditFile {
+        path: String,
+        old: String,
+        new: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decision: Option<bool>,
     },
     Finish {
         /// Up to three short next requests the person may choose.
@@ -839,6 +899,30 @@ impl WorkStepKindV1 {
                 Ok(())
             }
             Self::Steer { text } => validate_text(text, MAX_WORK_TEXT_BYTES),
+            Self::List { path } | Self::ReadFile { path } => validate_file_path(path),
+            Self::SearchFiles { path, query } => {
+                validate_file_path(path)?;
+                validate_text(query, MAX_WORK_FILE_QUERY_BYTES)
+            }
+            Self::WriteFile { path, content, .. } => {
+                validate_file_path(path)?;
+                if content.len() > MAX_WORK_FILE_CONTENT_BYTES || content.contains('\0') {
+                    return Err(WorkError::Invalid);
+                }
+                Ok(())
+            }
+            Self::EditFile { path, old, new, .. } => {
+                validate_file_path(path)?;
+                if old.is_empty()
+                    || old.len() > MAX_WORK_FILE_CONTENT_BYTES
+                    || new.len() > MAX_WORK_FILE_CONTENT_BYTES
+                    || old.contains('\0')
+                    || new.contains('\0')
+                {
+                    return Err(WorkError::Invalid);
+                }
+                Ok(())
+            }
             Self::Finish { followups } => {
                 if followups.len() > MAX_WORK_FOLLOWUPS {
                     return Err(WorkError::Invalid);
@@ -860,6 +944,30 @@ impl WorkStepKindV1 {
             self,
             Self::Search { .. } | Self::Read { .. } | Self::Discover { .. }
         )
+    }
+    /// A step on the person's files; it settles with a file record.
+    pub fn files(&self) -> bool {
+        matches!(
+            self,
+            Self::List { .. }
+                | Self::ReadFile { .. }
+                | Self::SearchFiles { .. }
+                | Self::WriteFile { .. }
+                | Self::EditFile { .. }
+        )
+    }
+    /// A proposed change that waits for the person's decision.
+    pub fn proposes_write(&self) -> bool {
+        matches!(self, Self::WriteFile { .. } | Self::EditFile { .. })
+    }
+    pub fn file_decision(&self) -> Option<bool> {
+        match self {
+            Self::WriteFile { decision, .. } | Self::EditFile { decision, .. } => *decision,
+            _ => None,
+        }
+    }
+    fn keeps_record(&self) -> bool {
+        matches!(self, Self::Search { .. }) || self.files()
     }
 }
 impl WorkStepFact {
@@ -887,13 +995,16 @@ impl WorkStepFact {
             || (!self.artifacts.is_empty()
                 && (!succeeded
                     || !(matches!(self.kind, WorkStepKindV1::Publish) || self.kind.fetches())))
-            || self.evidence.is_some()
-                != (succeeded && matches!(self.kind, WorkStepKindV1::Search { .. }))
+            || self.evidence.is_some() != (succeeded && self.kind.keeps_record())
         {
             return Err(WorkError::Invalid);
         }
         let consistent = match &self.kind {
             WorkStepKindV1::Ask { answer, .. } => answer.is_some() == succeeded,
+            // A proposal may run undecided or decided (being applied); once
+            // settled, the decision is on record.
+            WorkStepKindV1::WriteFile { decision, .. }
+            | WorkStepKindV1::EditFile { decision, .. } => running || decision.is_some(),
             WorkStepKindV1::Publish
             | WorkStepKindV1::Finish { .. }
             | WorkStepKindV1::Steer { .. } => succeeded,
@@ -954,6 +1065,60 @@ pub struct WorkProviderSearchRecordV1 {
     pub node: WorkPlanNodeId,
     pub attempt: WorkAttemptId,
     pub evidence: super::search::WorkProviderSearchEvidenceV1,
+}
+
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkFileRecordV1 {
+    pub id: WorkArtifactId,
+    pub node: WorkPlanNodeId,
+    pub attempt: WorkAttemptId,
+    pub file: WorkFileEvidenceV1,
+}
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkFileKindV1 {
+    Directory,
+    Text,
+    Binary,
+    Search,
+    Written,
+}
+/// What one file step disclosed, bounded and never the whole file system.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkFileEvidenceV1 {
+    pub path: String,
+    pub name: String,
+    pub kind: WorkFileKindV1,
+    pub bytes: u32,
+    /// Hex SHA-256 of the file bytes; empty for directories and searches.
+    pub digest: String,
+    /// The excerpt, listing, hits or applied diff shown to the agent.
+    pub text: String,
+    pub truncated: bool,
+}
+impl WorkFileEvidenceV1 {
+    pub fn validate(&self) -> Result<(), WorkError> {
+        validate_file_path(&self.path)?;
+        if self.name.is_empty()
+            || self.name.len() > 255
+            || self.name.chars().any(char::is_control)
+            || self.text.len() > MAX_WORK_FILE_TEXT_BYTES
+            || self
+                .text
+                .chars()
+                .any(|c| c.is_control() && c != '\n' && c != '\t')
+            || !(self.digest.is_empty()
+                || (self.digest.len() == 64 && self.digest.bytes().all(|b| b.is_ascii_hexdigit())))
+        {
+            return Err(WorkError::Invalid);
+        }
+        Ok(())
+    }
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -1344,20 +1509,32 @@ impl WorkExecutionFact {
                 }
             }
             if let Some(evidence) = step.evidence {
-                let record = self
-                    .provider_evidence
-                    .iter()
-                    .find(|record| record.id == evidence)
-                    .ok_or(WorkError::Invalid)?;
-                let usage = step.usage.ok_or(WorkError::Invalid)?;
-                if !claimed_evidence.insert(evidence)
-                    || Some(usage.model_tokens)
+                if !claimed_evidence.insert(evidence) {
+                    return Err(WorkError::Invalid);
+                }
+                if step.kind.files() {
+                    if !self
+                        .file_evidence
+                        .iter()
+                        .any(|record| record.id == evidence)
+                    {
+                        return Err(WorkError::Invalid);
+                    }
+                } else {
+                    let record = self
+                        .provider_evidence
+                        .iter()
+                        .find(|record| record.id == evidence)
+                        .ok_or(WorkError::Invalid)?;
+                    let usage = step.usage.ok_or(WorkError::Invalid)?;
+                    if Some(usage.model_tokens)
                         != record
                             .evidence
                             .actual_input_tokens
                             .checked_add(record.evidence.actual_output_tokens)
-                {
-                    return Err(WorkError::Invalid);
+                    {
+                        return Err(WorkError::Invalid);
+                    }
                 }
             }
             if matches!(step.kind, WorkStepKindV1::Finish { .. }) {
@@ -1368,7 +1545,7 @@ impl WorkExecutionFact {
             || (complete && (running_steps > 0 || !finished))
             || (finished && !(complete || running))
             || claimed_artifacts.len() != self.artifacts.len()
-            || claimed_evidence.len() != self.provider_evidence.len()
+            || claimed_evidence.len() != self.provider_evidence.len() + self.file_evidence.len()
         {
             return Err(WorkError::Invalid);
         }
@@ -1412,6 +1589,17 @@ impl WorkExecutionFact {
                 || source.evidence.model != grant.model
                 || !sources.insert(source.id)
                 || artifacts.contains(&source.id)
+            {
+                return Err(WorkError::Invalid);
+            }
+        }
+        for record in &self.file_evidence {
+            record.file.validate()?;
+            let fact = attempt.ok_or(WorkError::Invalid)?;
+            if record.attempt != fact.id
+                || record.node != node.node
+                || !sources.insert(record.id)
+                || artifacts.contains(&record.id)
             {
                 return Err(WorkError::Invalid);
             }
@@ -1472,6 +1660,12 @@ pub enum WorkRuntimeIntent {
         execution: WorkExecutionId,
         text: String,
     },
+    /// Decide a proposed file change the running agent is waiting on.
+    ApproveStep {
+        execution: WorkExecutionId,
+        step: WorkStepId,
+        approve: bool,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -1516,6 +1710,7 @@ pub enum WorkRuntimeUpdate {
         step: WorkStepFact,
         artifacts: Vec<WorkArtifactV1>,
         evidence: Option<Box<WorkProviderSearchRecordV1>>,
+        file: Option<Box<WorkFileRecordV1>>,
     },
     SettleStep {
         execution: WorkExecutionId,
@@ -1525,6 +1720,7 @@ pub enum WorkRuntimeUpdate {
         usage: Option<WorkUsage>,
         artifacts: Vec<WorkArtifactV1>,
         evidence: Option<Box<WorkProviderSearchRecordV1>>,
+        file: Option<Box<WorkFileRecordV1>>,
         note: Option<String>,
     },
 }

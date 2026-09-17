@@ -47,6 +47,12 @@ pub struct WorkEvidencePreviewV1 {
 pub enum WorkEvidenceSourceV1 {
     #[default]
     NativeExtraction,
+    /// A file step inside a granted folder.
+    File {
+        path: String,
+        name: String,
+        file_kind: super::runtime::WorkFileKindV1,
+    },
     ProviderSearch {
         provider: super::search::WorkSearchProvider,
         model: String,

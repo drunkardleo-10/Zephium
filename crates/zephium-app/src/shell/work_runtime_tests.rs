@@ -776,6 +776,7 @@ async fn rejected_final_output_cannot_finish_on_earlier_partial_artifacts() {
                         max_turns: 8,
                         max_steps: 24,
                         browse_hops: 1,
+                        folders: vec![],
                     },
                     limits: WorkExecutionLimits {
                         model_tokens: 100_000,

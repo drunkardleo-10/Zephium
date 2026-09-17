@@ -195,6 +195,7 @@ impl WorkAgentService {
             private,
             inherited: Vec::new(),
             thread: Vec::new(),
+            files: None,
             previews: Vec::new(),
             used: WorkUsage::default(),
             steps: 0,
@@ -207,6 +208,13 @@ impl WorkAgentService {
             finish_refusals: 0,
             pending_output_repair: false,
         };
+        let (files, refused) = crate::work_files::WorkFileGrant::admit(&driver.grant.folders);
+        for folder in refused {
+            driver.notice(&format!(
+                "Folder not granted: {folder}. It is outside the home folder, protected, or missing."
+            ));
+        }
+        driver.files = (!files.is_empty()).then_some(files);
         driver.inherit(&projection, receipt.execution).await;
         let outcome = driver.drive(&attempt, &providers, &mut browser).await;
         let (status, usage) = match outcome {
@@ -248,6 +256,8 @@ struct Driver {
     /// their sources stay citable.
     inherited: Vec<WorkArtifactV1>,
     thread: Vec<String>,
+    /// Folders the person granted, once admitted by policy.
+    files: Option<crate::work_files::WorkFileGrant>,
     private: Vec<String>,
     previews: Vec<WorkEvidencePreviewV1>,
     used: WorkUsage,
@@ -355,6 +365,7 @@ impl Driver {
                 step,
                 artifacts,
                 evidence: evidence.map(Box::new),
+                file: None,
             })
             .await
         {
@@ -363,6 +374,42 @@ impl Driver {
         }
         self.steps += 1;
         Ok(id)
+    }
+    fn notice(&mut self, text: &str) {
+        if !self.notices.iter().any(|n| n == text) && self.notices.len() < 8 {
+            self.notices.push(text.to_owned());
+        }
+    }
+    /// Settles a file step with what it disclosed, or with why it failed.
+    async fn settle_file(
+        &mut self,
+        step: WorkStepId,
+        status: WorkStepStatus,
+        file: Option<WorkFileRecordV1>,
+        note: Option<String>,
+    ) -> Result<(), WorkError> {
+        if let Err(error) = self
+            .probe
+            .commit_step(WorkRuntimeUpdate::SettleStep {
+                execution: self.probe.execution(),
+                attempt: self.probe.attempt(),
+                step,
+                status,
+                usage: None,
+                artifacts: vec![],
+                evidence: None,
+                file: file.map(Box::new),
+                note,
+            })
+            .await
+        {
+            self.report(WorkAgentDiagnostic::CommitRefused {
+                kind: "settle_file",
+                error,
+            });
+            return Err(error);
+        }
+        Ok(())
     }
     fn report(&self, event: WorkAgentDiagnostic) {
         if let Some(diagnostic) = self.diagnostic {
@@ -389,6 +436,7 @@ impl Driver {
                 usage,
                 artifacts,
                 evidence: evidence.map(Box::new),
+                file: None,
                 note,
             })
             .await
@@ -715,6 +763,13 @@ impl Driver {
                 return Ok(terminal);
             }
         }
+        let (file_steps, browses): (Vec<_>, Vec<_>) =
+            browses.into_iter().partition(WorkStepKindV1::files);
+        for kind in file_steps {
+            if let Some(terminal) = self.file_step(kind).await? {
+                return Ok(Some(terminal));
+            }
+        }
         for kind in browses {
             if matches!(kind, WorkStepKindV1::Discover { .. }) {
                 // Provider search covers the web here; a native search engine
@@ -760,6 +815,182 @@ impl Driver {
             }
         }
         Ok(None)
+    }
+
+    /// One step on the person's files. Reads settle at once with a record
+    /// the agent can cite; a proposed change waits for the person's decision.
+    async fn file_step(
+        &mut self,
+        kind: WorkStepKindV1,
+    ) -> Result<Option<WorkAttemptStatus>, WorkError> {
+        let Some(files) = self.files.clone() else {
+            self.notice("No folder is granted in this run. Ask the person to add a folder to the canvas before reading or changing files.");
+            return Ok(None);
+        };
+        if self.steps + 2 > u32::from(self.grant.max_steps) {
+            return Ok(None);
+        }
+        let step = self.step(kind.clone(), WorkStepStatus::Running);
+        let id = self.begin(step, vec![], None).await?;
+        let outcome = match &kind {
+            WorkStepKindV1::List { path } => {
+                self.probe.record_activity(WorkActivityV1::Reading);
+                files.list(path)
+            }
+            WorkStepKindV1::ReadFile { path } => {
+                self.probe.record_activity(WorkActivityV1::Reading);
+                files.read(path)
+            }
+            WorkStepKindV1::SearchFiles { path, query } => {
+                self.probe.record_activity(WorkActivityV1::Searching);
+                files.search(path, query)
+            }
+            WorkStepKindV1::WriteFile { path, content, .. } => {
+                match files.propose_write(path, content) {
+                    Ok(_) => return self.await_decision(id, &files, &kind).await,
+                    Err(error) => Err(error),
+                }
+            }
+            WorkStepKindV1::EditFile { path, old, new, .. } => {
+                match files.propose_edit(path, old, new) {
+                    Ok(_) => return self.await_decision(id, &files, &kind).await,
+                    Err(error) => Err(error),
+                }
+            }
+            _ => return Ok(None),
+        };
+        self.settle_file_outcome(id, outcome).await?;
+        Ok(None)
+    }
+    async fn settle_file_outcome(
+        &mut self,
+        id: WorkStepId,
+        outcome: Result<WorkFileEvidenceV1, crate::work_files::WorkFileError>,
+    ) -> Result<(), WorkError> {
+        match outcome {
+            Ok(file) => {
+                let record = WorkFileRecordV1 {
+                    id: WorkArtifactId::generate(),
+                    node: self.probe.node(),
+                    attempt: self.probe.attempt(),
+                    file,
+                };
+                self.keep_file_preview(&record);
+                let note = Some(match record.file.kind {
+                    WorkFileKindV1::Directory => format!("{} entries", record.file.bytes),
+                    WorkFileKindV1::Search => format!("{} hits", record.file.bytes),
+                    WorkFileKindV1::Written => "Applied".to_owned(),
+                    WorkFileKindV1::Text | WorkFileKindV1::Binary => {
+                        format!("{} bytes", record.file.bytes)
+                    }
+                });
+                self.settle_file(id, WorkStepStatus::Succeeded, Some(record), note)
+                    .await
+            }
+            Err(error) => {
+                self.settle_file(
+                    id,
+                    WorkStepStatus::Failed,
+                    None,
+                    Some(error.note().to_owned()),
+                )
+                .await
+            }
+        }
+    }
+    /// Waits for the person's decision on a proposed change, then applies it.
+    async fn await_decision(
+        &mut self,
+        id: WorkStepId,
+        files: &crate::work_files::WorkFileGrant,
+        kind: &WorkStepKindV1,
+    ) -> Result<Option<WorkAttemptStatus>, WorkError> {
+        self.probe.record_activity(WorkActivityV1::WaitingForHuman);
+        loop {
+            tokio::time::sleep(ASK_POLL).await;
+            let state = self.probe.runtime_projection().await?;
+            let execution = state
+                .executions
+                .iter()
+                .find(|e| e.id == self.probe.execution())
+                .ok_or(WorkError::NotFound)?;
+            let proposed = execution
+                .steps
+                .iter()
+                .find(|s| s.id == id)
+                .ok_or(WorkError::NotFound)?;
+            match proposed.kind.file_decision() {
+                Some(true) => {
+                    let outcome = match kind {
+                        WorkStepKindV1::WriteFile { path, content, .. } => {
+                            files.apply_write(path, content)
+                        }
+                        WorkStepKindV1::EditFile { path, old, new, .. } => {
+                            files.apply_edit(path, old, new)
+                        }
+                        _ => return Ok(None),
+                    };
+                    self.settle_file_outcome(id, outcome).await?;
+                    return Ok(None);
+                }
+                Some(false) => {
+                    self.settle_file(
+                        id,
+                        WorkStepStatus::Failed,
+                        None,
+                        Some("Declined by the person".into()),
+                    )
+                    .await?;
+                    return Ok(None);
+                }
+                None => {}
+            }
+            if self.cancelled().await {
+                let status = if Instant::now() >= self.probe.deadline() {
+                    WorkStepStatus::Failed
+                } else {
+                    WorkStepStatus::Cancelled
+                };
+                self.settle_file(id, status, None, None).await?;
+                return Ok(Some(if status == WorkStepStatus::Failed {
+                    WorkAttemptStatus::Failed
+                } else {
+                    WorkAttemptStatus::Cancelled
+                }));
+            }
+        }
+    }
+    /// The disclosed excerpt is capped below the record so the turn stays
+    /// within its preview bounds.
+    fn keep_file_preview(&mut self, record: &WorkFileRecordV1) {
+        const PREVIEW_BYTES: usize = 8192;
+        let file = &record.file;
+        let folder = std::path::Path::new(&file.path)
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut end = file.text.len().min(PREVIEW_BYTES);
+        while !file.text.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.keep_preview(WorkEvidencePreviewV1 {
+            link_destination: None,
+            version: 1,
+            link: WorkEvidenceLink {
+                extraction_id: record.id,
+                source_id: 1,
+            },
+            origin: format!("file://{folder}"),
+            role: "file".into(),
+            truncated: file.truncated || end < file.text.len(),
+            text: file.text[..end].to_owned(),
+            source_bytes: file.bytes.to_string(),
+            source: WorkEvidenceSourceV1::File {
+                path: file.path.clone(),
+                name: file.name.clone(),
+                file_kind: file.kind,
+            },
+        });
     }
 
     /// Commits one fetched outcome. Returns a terminal attempt status when the
@@ -1102,6 +1333,11 @@ fn step_kind_label(kind: &WorkStepKindV1) -> &'static str {
         WorkStepKindV1::Publish => "publish",
         WorkStepKindV1::Ask { .. } => "ask",
         WorkStepKindV1::Steer { .. } => "person",
+        WorkStepKindV1::List { .. } => "list",
+        WorkStepKindV1::ReadFile { .. } => "read_file",
+        WorkStepKindV1::SearchFiles { .. } => "search_files",
+        WorkStepKindV1::WriteFile { .. } => "write_file",
+        WorkStepKindV1::EditFile { .. } => "edit_file",
         WorkStepKindV1::Finish { .. } => "finish",
     }
 }

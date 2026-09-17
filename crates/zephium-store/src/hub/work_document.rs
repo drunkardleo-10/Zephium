@@ -102,6 +102,37 @@ impl Hub {
                     },
                 }));
             }
+            if let Some(record) = state.executions.iter().find_map(|execution| {
+                execution
+                    .file_evidence
+                    .iter()
+                    .find(|record| record.id == link.extraction_id)
+            }) {
+                use zephium_core::work::artifact::{WorkEvidencePreviewV1, WorkEvidenceSourceV1};
+                if link.source_id != 1 {
+                    return Err(WorkError::NotFound);
+                }
+                let file = &record.file;
+                let folder = std::path::Path::new(&file.path)
+                    .parent()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                return Ok(WorkReply::Evidence(WorkEvidencePreviewV1 {
+                    link_destination: None,
+                    version: 1,
+                    link: link.clone(),
+                    origin: format!("file://{folder}"),
+                    role: "file".into(),
+                    truncated: file.truncated,
+                    text: file.text.clone(),
+                    source_bytes: file.bytes.to_string(),
+                    source: WorkEvidenceSourceV1::File {
+                        path: file.path.clone(),
+                        name: file.name.clone(),
+                        file_kind: file.kind,
+                    },
+                }));
+            }
             #[cfg(feature = "work-execution")]
             return super::agent_work::read_work_evidence(&self.meta, profile, link.clone())
                 .map(WorkReply::Evidence);
