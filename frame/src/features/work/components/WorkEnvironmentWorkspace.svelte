@@ -2130,6 +2130,8 @@
     flex: 1;
     min-inline-size: 0;
     block-size: 28px;
+    overflow: hidden;
+    white-space: nowrap;
     border: 0;
     border-radius: var(--radius-sm);
     background: transparent;

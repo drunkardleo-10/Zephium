@@ -148,8 +148,8 @@
   },
   "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
     "js": 587000,
-    "css": 119000,
-    "description": "Measured 585517 JS bytes with folder admission, Finder drops, link elements, and the file lift beside agent-run organization."
+    "css": 120000,
+    "description": "Measured 585664 JS and 119007 CSS bytes with folder admission, Finder drops, link elements, and the file lift beside agent-run organization."
   },
   "lazy:features/work/components/AgentLine.svelte": {
     "js": 110000,
