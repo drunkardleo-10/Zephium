@@ -111,6 +111,86 @@ test("a subject takes its picture from a uses relation and the image is not a ca
   expect(picture.media?.asset.name).toBe("kb.png");
 });
 
+test("catalogue rows enrich the hub a detail read created without becoming cards", async () => {
+  const state = structuredClone(projection);
+  const execution = state.executions[0]!;
+  execution.authorization = "user_directed_agent";
+  execution.spec.nodes[0]!.capability = {
+    kind: "agent",
+    grant: {
+      provider: "open_ai",
+      model: "gpt-5.6-luna",
+      max_turns: 10,
+      max_steps: 32,
+      browse_hops: 4,
+    },
+  };
+  const matrix = (id: string, subjects: object[], price: string[]) => ({
+    ...execution.artifacts[0]!,
+    id,
+    title: id,
+    data: {
+      kind: "comparison_matrix" as const,
+      subjects,
+      criteria: [{ name: "price", kind: { kind: "text" as const } }],
+      cells: price.map((text) => [
+        { value: { kind: "text" as const, text }, evidence: [], general_knowledge: false },
+      ]),
+      notes: [],
+    },
+  });
+  execution.artifacts = [
+    // Twenty rows in, one price each; only three sets ever get a detail read.
+    matrix(
+      "catalog",
+      [{ name: "Tower Bridge" }, { name: "Paris" }, { name: "London" }],
+      ["$119.99", "$59.99", "$249.99"],
+    ),
+    matrix("detail", [{ name: "Tower Bridge" }], [""]),
+  ] as typeof execution.artifacts;
+  execution.steps = [
+    {
+      id: "read-1",
+      turn: 1,
+      kind: { kind: "read", url: "https://shop.example/catalog", collection: null },
+      status: "succeeded",
+      artifacts: ["catalog"],
+    },
+    {
+      id: "read-2",
+      turn: 2,
+      kind: { kind: "read", url: "https://shop.example/p/1", collection: null },
+      status: "succeeded",
+      artifacts: ["detail"],
+    },
+  ] as typeof execution.steps;
+  const withHub = {
+    ...snapshot,
+    elements: [
+      snapshot.elements[0]!,
+      {
+        id: "hub",
+        area: null,
+        reference: {
+          kind: "subject" as const,
+          objective: "objective",
+          execution: "execution",
+          artifact: "detail",
+          index: 0,
+        },
+      },
+    ],
+  };
+  const items = environmentItems(withHub, [], [], new Map([["objective", state]]));
+  // One hub, and its price comes from the catalogue row the read never repeated.
+  expect(items.filter((item) => item.type === "subject").map((item) => item.title)).toEqual([
+    "Tower Bridge",
+  ]);
+  expect(items.find((item) => item.id === "hub")?.facts).toEqual([
+    { label: "price", value: "$119.99" },
+  ]);
+});
+
 test("source elements read their citation and the running agent links to them", async () => {
   const { environmentAgents } = await import("../lib/project-environment");
   const state = structuredClone(projection);

@@ -9,7 +9,7 @@ import type {
 } from "$shared/ipc/bindings";
 import { isAgentExecution } from "./agent-steps";
 import type { CanvasPosition, CanvasSize } from "./canvas-model";
-import { recordArtifacts, subjectKey, subjectsOf } from "./subjects";
+import { listingArtifacts, recordArtifacts, subjectKey, subjectsOf } from "./subjects";
 
 type Placement = CanvasPosition & CanvasSize;
 export type OrganizePlan = {
@@ -82,9 +82,12 @@ function unplacedRoots(
 ): WorkArtifactV1[] {
   const placed = referenced(snapshot, execution.id);
   const records = recordArtifacts(execution);
+  const listings = listingArtifacts(execution);
   const hubs = placedSubjects(snapshot, execution);
   return roots(execution).filter((artifact) => {
     if (placed.has(artifact.id) || !placeable(artifact)) return false;
+    // A catalogue read establishes nothing on its own; its rows only enrich.
+    if (listings.has(artifact.id)) return false;
     if (!records.has(artifact.id)) return true;
     return (
       hubs.size < SUBJECTS_PER_RUN &&

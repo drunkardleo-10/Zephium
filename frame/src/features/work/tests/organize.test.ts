@@ -196,11 +196,13 @@ test("browser records merge into subject hubs by name and never place their tabl
     },
     evidence: [{ extraction_id: "record", source_id: 1 }],
   });
-  // The catalogue read names each set with its own product page.
+  // A catalogue read lists twenty sets with their product pages. Listing rows
+  // establish nothing: not one of them earns a card.
   execution.artifacts = [
     record("catalog", [
       { name: "Tower Bridge", homepage: "https://shop.example/p/1?utm_source=x" },
       { name: "Paris", homepage: "https://shop.example/p/2" },
+      { name: "London", homepage: "https://shop.example/p/3" },
     ]),
   ];
   execution.steps = [
@@ -213,25 +215,9 @@ test("browser records merge into subject hubs by name and never place their tabl
     },
   ];
   const state = { ...projection, executions: [execution] };
-  const first = organizeExecution(state, execution, { x: 100, y: 300 }, snapshot);
-  expect(first.adds.map((add) => add.reference.kind)).toEqual(["subject", "subject"]);
-  const placed: WorkEnvironmentSnapshot = {
-    ...snapshot,
-    elements: [
-      ...snapshot.elements,
-      ...first.adds.map((add, index) => ({
-        id: `hub-${index}`,
-        area: null,
-        reference: add.reference,
-      })),
-    ],
-    view: {
-      ...snapshot.view,
-      placements: first.adds.map((add, index) => ({ element: `hub-${index}`, ...add.placement })),
-    },
-  };
-  expect(pendingOrganize(placed, state)).toBeNull();
-  // The product page read repeats one set by name alone: still one hub.
+  expect(pendingOrganize(snapshot, state)).toBeNull();
+  expect(organizeExecution(state, execution, { x: 100, y: 300 }, snapshot).adds).toEqual([]);
+  // The product page read is one row: that set is what the run is about.
   execution.artifacts.push(record("detail", [{ name: "Tower Bridge" }]));
   execution.steps.push({
     id: "read-2",
@@ -240,8 +226,20 @@ test("browser records merge into subject hubs by name and never place their tabl
     status: "succeeded",
     artifacts: ["detail"],
   });
+  expect(pendingOrganize(snapshot, state)?.id).toBe("execution");
+  const first = organizeExecution(state, execution, { x: 100, y: 300 }, snapshot);
+  expect(first.adds.map((add) => add.reference.kind)).toEqual(["subject"]);
+  const placed: WorkEnvironmentSnapshot = {
+    ...snapshot,
+    elements: [
+      ...snapshot.elements,
+      { id: "hub-0", area: null, reference: first.adds[0]!.reference },
+    ],
+    view: { ...snapshot.view, placements: [{ element: "hub-0", ...first.adds[0]!.placement }] },
+  };
   expect(pendingOrganize(placed, state)).toBeNull();
-  // The published table gives every set the theme page; the names still hold.
+  // The published table gives every set the theme page; the names still hold,
+  // and the set it compares that no detail read covered earns its hub here.
   execution.artifacts.push({
     ...record("final", [
       { name: "Tower Bridge", homepage: theme },
@@ -258,10 +256,11 @@ test("browser records merge into subject hubs by name and never place their tabl
   });
   expect(pendingOrganize(placed, state)?.id).toBe("execution");
   const second = organizeExecution(state, execution, { x: 100, y: 300 }, placed);
-  expect(second.adds.map((add) => add.reference.kind)).toEqual(["artifact"]);
+  expect(second.adds.map((add) => add.reference.kind)).toEqual(["subject", "artifact"]);
+  // London was only ever a catalogue row, so it never reaches the canvas.
   expect(second.relations).toEqual([
-    { from: first.adds[0]!.reference, to: second.adds[0]!.reference, kind: "uses" },
-    { from: first.adds[1]!.reference, to: second.adds[0]!.reference, kind: "uses" },
+    { from: first.adds[0]!.reference, to: second.adds[1]!.reference, kind: "uses" },
+    { from: second.adds[0]!.reference, to: second.adds[1]!.reference, kind: "uses" },
   ]);
 });
 

@@ -75,6 +75,20 @@ export function recordArtifacts(execution: WorkExecutionFact): Set<string> {
   return ids;
 }
 
+/**
+ * Record artifacts that list rather than establish: a browser step that came
+ * back with more than one subject read a catalogue. Its rows enrich hubs the
+ * run has for another reason — a detail page read, a comparison, findings —
+ * and never become cards of their own, or one listing floods the canvas.
+ */
+export function listingArtifacts(execution: WorkExecutionFact): Set<string> {
+  const records = recordArtifacts(execution);
+  const ids = new Set<string>();
+  for (const artifact of execution.artifacts)
+    if (records.has(artifact.id) && subjectsOf(artifact).length > 1) ids.add(artifact.id);
+  return ids;
+}
+
 function rows(execution: WorkExecutionFact, key: string): { matrix: Matrix; index: number }[] {
   const out: { matrix: Matrix; index: number }[] = [];
   for (const artifact of execution.artifacts) {
