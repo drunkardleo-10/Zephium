@@ -1163,6 +1163,7 @@
   "work_env_reveal": "Reveal in Finder",
   "work_env_correct": "Correct",
   "work_env_accept_result": "Accept",
+  "work_env_open_page": "Open page",
   "work_line_reading_file": "Reading {name}",
   "work_line_paused": "Paused while the window is hidden",
   "work_line_searching_files": "Searching files",

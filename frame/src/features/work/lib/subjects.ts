@@ -2,6 +2,7 @@ import type { WorkArtifactDataV1, WorkArtifactV1, WorkExecutionFact } from "$sha
 
 type Subject = {
   name: string;
+  descriptor?: string | null;
   homepage?: string | null;
   image_candidates?: readonly string[] | null;
 };
@@ -98,7 +99,7 @@ export function listingArtifacts(execution: WorkExecutionFact): Set<string> {
   return ids;
 }
 
-type Row = { matrix: Matrix; index: number; rank: number };
+type Row = { artifact: WorkArtifactV1; matrix: Matrix; index: number; rank: number };
 /**
  * Rows about one subject, best evidence first: a detail page read, then what
  * the run published, then catalogue rows. A listing cell says "$349.99 New"
@@ -114,10 +115,29 @@ function rows(execution: WorkExecutionFact, key: string): Row[] {
     if (matrix.kind !== "comparison_matrix") continue;
     const rank = listings.has(artifact.id) ? 2 : records.has(artifact.id) ? 0 : 1;
     matrix.subjects.forEach((subject, index) => {
-      if (subjectKey(subject) === key && matrix.cells[index]) out.push({ matrix, index, rank });
+      if (subjectKey(subject) === key && matrix.cells[index])
+        out.push({ artifact, matrix, index, rank });
     });
   }
   return out.sort((a, b) => a.rank - b.rank);
+}
+
+/** Every matrix row about one subject, best evidence first, with the artifact
+ * that holds it so its cells can be read with their sources. */
+export function subjectMatrixRows(
+  execution: WorkExecutionFact,
+  subject: Subject,
+): { artifact: WorkArtifactV1; index: number }[] {
+  return rows(execution, subjectKey(subject)).map(({ artifact, index }) => ({ artifact, index }));
+}
+
+/** Whether a fact only restates who the subject is, or links to it. */
+export function restatesSubject(label: string, text: string, name: string): boolean {
+  return (
+    identityColumn(factLabel(label)) ||
+    identityText(text) === identityText(name) ||
+    /^https?:\/\//iu.test(text.trim())
+  );
 }
 
 /** Everything the run has established about one subject, price first. */

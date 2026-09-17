@@ -7,11 +7,22 @@ import type {
   WorkSignalV1,
   WorkEvidenceLink,
 } from "$domain/work";
-import { displayHost } from "$shared/ui/data/Artifact";
 import type { ArtifactView, ArtifactContent, EvidenceReference } from "$shared/ui/data/Artifact";
 import * as m from "$shared/i18n/messages";
 import type { CanvasItem, CanvasLink } from "./canvas-model";
 import { fileFolder } from "./work-files";
+
+/** Hostname for a source label. Resolved here so a small lazy chunk that needs
+ * one line of text does not pull the whole Artifact UI module with it. */
+function displayHost(value: string | undefined): string {
+  if (!value) return "";
+  try {
+    const url = new URL(value);
+    return ["https:", "http:"].includes(url.protocol) ? url.hostname.replace(/^www\./u, "") : "";
+  } catch {
+    return "";
+  }
+}
 
 /** Display derivation of one objective; neither WorkProjectionV1 nor a store. */
 export type ProjectedWork = {

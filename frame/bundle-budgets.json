@@ -172,5 +172,10 @@
     "js": 96000,
     "css": 7000,
     "description": "Single-note editor host for the Work lift; shares the Notes editor graph."
+  },
+  "lazy:features/work/components/WorkSubjectInspector.svelte": {
+    "js": 110000,
+    "css": 8500,
+    "description": "Measured 107031 JS and 7994 CSS bytes: the product view of one subject, its admitted pictures, facts with sources, and the pages behind them."
   }
 }

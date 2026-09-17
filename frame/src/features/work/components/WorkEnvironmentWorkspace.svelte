@@ -183,6 +183,8 @@
     chrome?.close();
     inspected = null;
     lifted = { id, origin: canvasRef?.screenRect(id) ?? null };
+    if (snapshot?.elements.find((element) => element.id === id)?.reference.kind === "subject")
+      void admitGallery(id);
   }
   // The floating browser pane: Rust owns the native hole, this owns the frame.
   let pane = $state.raw<{
@@ -722,10 +724,68 @@
   }
   const liftedItem = $derived(items.find((item) => item.id === lifted?.id));
   const liftedElement = $derived(snapshot?.elements.find((element) => element.id === lifted?.id));
+  /** Every admitted picture of one subject element, in the order it admitted them. */
+  function picturesOf(element: string) {
+    const current = snapshot;
+    if (!current) return [];
+    const resources = new Map(
+      current.elements.flatMap((entry) =>
+        entry.reference.kind === "resource" ? [[entry.id, entry.reference.resource]] : [],
+      ),
+    );
+    return (current.relations ?? []).flatMap((relation) => {
+      if (relation.kind !== "uses" || relation.from !== element) return [];
+      const resource = resources.get(relation.to);
+      const asset = resource ? context.media.get(resource) : undefined;
+      return asset?.kind === "image"
+        ? [{ profile: current.profile, digest: asset.digest, name: asset.name }]
+        : [];
+    });
+  }
+  const liftedPictures = $derived(
+    liftedElement?.reference.kind === "subject" ? picturesOf(liftedElement.id) : [],
+  );
+  // Opening a product view is an explicit act: it is worth admitting the other
+  // pictures the run observed for that subject, and only then.
+  const gallery = new SvelteSet<string>();
+  async function admitGallery(element: string) {
+    const current = snapshot;
+    const reference = current?.elements.find((entry) => entry.id === element)?.reference;
+    if (!current || reference?.kind !== "subject" || gallery.has(element)) return;
+    gallery.add(element);
+    const run = context.objectives
+      .get(reference.objective)
+      ?.executions.find((execution) => execution.id === reference.execution);
+    const artifact = run?.artifacts.find((artifact) => artifact.id === reference.artifact);
+    const subject = artifact ? subjectsOf(artifact)[reference.index] : undefined;
+    if (!run || !subject) return;
+    const known = picturesOf(element).flatMap((picture) => {
+      const origin = [...context.media.values()].find(
+        (asset) => asset.digest === picture.digest,
+      )?.origin;
+      return origin?.kind === "fetched" ? [canonicalImageUrl(origin.url)] : [];
+    });
+    for (const candidate of subjectImageCandidates(run, subject).slice(0, 3)) {
+      if (known.length >= 3) break;
+      const canonical = canonicalImageUrl(candidate);
+      if (known.includes(canonical)) continue;
+      known.push(canonical);
+      const key = `${current.id} ${canonical}`;
+      if (imageAdmissions.has(key)) continue;
+      imageAdmissions.add(key);
+      try {
+        await commands.mediaAdmitRemote(session.profile, current.id, element, candidate);
+      } catch {
+        /* The other pictures are a nicety; the first one already stands. */
+      }
+    }
+  }
+
   const authoritative = $derived(new Set(snapshot?.elements.map((element) => element.id) ?? []));
   let liftSource = $state.raw<EvidenceReference | null>(null);
   const loadResult = () => import("./WorkResultInspector.svelte");
   const loadFile = () => import("./WorkFileInspector.svelte");
+  const loadSubject = () => import("./WorkSubjectInspector.svelte");
   /** The file a source row opened, shown as the run recorded it. */
   let liftFile = $state.raw<WorkFileEvidenceV1 | null>(null);
   /** One surface: a result opens in the lift, on the run that produced it. */
@@ -1804,6 +1864,22 @@
           <p>{m.work_env_folder_grant_note()}</p>
           <Button size="compact" onclick={() => reveal(folder)}>{m.work_env_reveal()}</Button>
         </div>
+      {:else if liftedElement?.reference.kind === "subject"}
+        {@const subject = liftedElement.reference}
+        <LazyView
+          loader={loadSubject}
+          loadingLabel={m.surface_loading()}
+          failureLabel={m.surface_render_failed()}
+          retryLabel={m.surface_retry()}
+          >{#snippet children(Product)}<Product
+              reference={subject}
+              objectives={context.objectives}
+              pictures={liftedPictures}
+              onopen={openCitation}
+              onfile={(record: string) =>
+                (liftFile = fileEvidence(context.objectives, record) ?? null)}
+            />{/snippet}</LazyView
+        >
       {:else if liftedElement?.reference.kind === "objective" && objectiveSession}
         <LazyView
           loader={loadDetail}

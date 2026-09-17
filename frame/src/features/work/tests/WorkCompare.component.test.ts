@@ -5,6 +5,7 @@ import { page, userEvent } from "vitest/browser";
 import { WorkSession } from "$domain/work";
 import type { WorkCallV1, WorkRuntimeProjection } from "$shared/ipc/bindings";
 import WorkResultInspector from "../components/WorkResultInspector.svelte";
+import WorkSubjectInspector from "../components/WorkSubjectInspector.svelte";
 
 const native = vi.hoisted(() => ({ call: vi.fn() }));
 vi.mock("$shared/ipc/bindings", async () => {
@@ -73,7 +74,10 @@ function projection(): WorkRuntimeProjection {
             evidence: [{ extraction_id: "record", source_id: 1 }],
             data: {
               kind: "comparison_matrix",
-              subjects: [{ name: "Tower Bridge" }, { name: "Eiffel Tower" }],
+              subjects: [
+                { name: "Tower Bridge", homepage: "https://lego.com/tower-bridge" },
+                { name: "Eiffel Tower" },
+              ],
               criteria: [
                 { name: "Price", kind: { kind: "text" } },
                 { name: "Minifigures", kind: { kind: "text" } },
@@ -172,4 +176,31 @@ test("a comparison reads as a product compare, a cell is corrected in place, and
   });
   await screen.unmount();
   session.dispose();
+});
+
+test("a subject opens as a product view with its facts, their sources, and its page", async () => {
+  await page.viewport(1200, 800);
+  const onopen = vi.fn();
+  const screen = await render(WorkSubjectInspector, {
+    reference: {
+      kind: "subject",
+      objective: work,
+      execution: "execution",
+      artifact: "artifact",
+      index: 0,
+    },
+    objectives: new Map([[work, projection()]]),
+    pictures: [],
+    onopen,
+  });
+  await expect.element(screen.getByRole("heading", { name: "Tower Bridge" })).toBeVisible();
+  await expect.element(screen.getByText("$239.99", { exact: true })).toBeVisible();
+  await expect.element(screen.getByText("Minifigures", { exact: true })).toBeVisible();
+  await screen.getByRole("button", { name: "Open page", exact: true }).click();
+  expect(onopen).toHaveBeenCalledWith("https://lego.com/tower-bridge");
+  // The page behind the fact is listed once, and opens in the pane.
+  const sources = screen.getByRole("region", { name: "Sources" });
+  await sources.getByRole("button").first().click();
+  expect(onopen).toHaveBeenLastCalledWith("https://lego.com/tower-bridge");
+  await screen.unmount();
 });
