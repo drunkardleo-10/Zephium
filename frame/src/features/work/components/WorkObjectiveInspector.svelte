@@ -264,7 +264,7 @@
         ? m.work_env_archive_objective()
         : m.work_env_restore_objective()}</Button
     >
-    {#if session.failure}<p role="status">{m.work_request_failed({ reason: session.failure })}</p>
+    {#if session.failure}<p role="status">{m.work_request_failed()}</p>
       <Button onclick={() => void session.reconcile()}>{m.work_reconcile()}</Button>{/if}
   </div>{:else}<p>{m.surface_loading()}</p>{/if}
 

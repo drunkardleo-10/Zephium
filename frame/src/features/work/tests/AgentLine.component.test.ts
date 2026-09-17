@@ -196,3 +196,34 @@ test("a refused steer queues the draft and the queue rides on when the run close
   await screen.unmount();
   session.dispose();
 });
+
+test("a proposed file change waits on the person and its decision reaches the run", async () => {
+  const session = new WorkSession("profile");
+  session.selected = "objective";
+  const execution = agentRun("running");
+  execution.steps = [
+    ...execution.steps!,
+    {
+      id: "edit-1",
+      turn: 2,
+      kind: { kind: "edit_file", path: "/Users/reader/notes/plan.md", old: "a", new: "b" },
+      status: "running",
+    },
+  ];
+  session.projection = { ...structuredClone(projection), executions: [execution] };
+  const execute = vi.spyOn(session, "execute").mockResolvedValue(true);
+  const screen = await render(AgentLine, { session });
+  await expect
+    .element(screen.getByText("A change to plan.md needs you", { exact: true }))
+    .toBeVisible();
+  await screen.getByRole("button", { name: "Review", exact: true }).click();
+  await screen.getByRole("button", { name: "Approve", exact: true }).click();
+  expect(execute).toHaveBeenCalledExactlyOnceWith({
+    kind: "approve_step",
+    execution: "execution",
+    step: "edit-1",
+    approve: true,
+  });
+  await screen.unmount();
+  session.dispose();
+});

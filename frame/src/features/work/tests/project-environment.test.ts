@@ -306,7 +306,7 @@ test("a turn's searches become one Sources card the request and its pages join",
     {
       key: "record:1",
       url: "https://a.example/review",
-      host: "a.example",
+      where: "a.example",
       title: "Review A",
     },
   ]);

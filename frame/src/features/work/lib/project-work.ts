@@ -328,6 +328,7 @@ function activityLabel(activity: WorkSignalV1["activity"]): string {
     recovering: m.work_activity_recovering(),
     comparing: m.work_activity_comparing(),
     producing_artifact: m.work_activity_producing(),
+    paused: m.work_activity_paused(),
     waiting_for_approval: m.work_activity_approval(),
     waiting_for_human: m.work_activity_human(),
     cancelling: m.work_activity_cancelling(),

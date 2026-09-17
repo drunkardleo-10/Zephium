@@ -55,6 +55,39 @@
       return "";
     }
   });
+  const fileName = (path: string) => path.split(/[/\\]/u).filter(Boolean).at(-1) ?? path;
+  /** What the agent is doing in a granted folder, when it is doing that. */
+  const fileState = $derived.by(() => {
+    for (const step of execution?.steps ?? []) {
+      if (step.status !== "running") continue;
+      switch (step.kind.kind) {
+        case "list":
+          return m.work_line_listing_files();
+        case "read_file":
+          return m.work_line_reading_file({ name: fileName(step.kind.path) });
+        case "search_files":
+          return m.work_line_searching_files();
+        case "write_file":
+        case "edit_file":
+          return step.kind.decision === undefined || step.kind.decision === null
+            ? m.work_line_change_waiting({ name: fileName(step.kind.path) })
+            : m.work_line_writing_file({ name: fileName(step.kind.path) });
+      }
+    }
+    return "";
+  });
+  /** A proposed change to a file, waiting on the person's word. */
+  const proposal = $derived.by(() => {
+    if (!live) return undefined;
+    for (const step of execution?.steps ?? []) {
+      if (step.status !== "running") continue;
+      const kind = step.kind;
+      if (kind.kind !== "write_file" && kind.kind !== "edit_file") continue;
+      if (kind.decision === undefined || kind.decision === null)
+        return { id: step.id, path: kind.path, name: fileName(kind.path) };
+    }
+    return undefined;
+  });
   const activityStates: Record<string, () => string> = {
     planning: m.work_line_thinking,
     delegating: m.work_line_thinking,
@@ -65,6 +98,7 @@
     recovering: m.work_line_recovering,
     comparing: m.work_line_comparing,
     producing_artifact: m.work_line_writing,
+    paused: m.work_line_waiting_for_you,
     waiting_for_approval: m.work_line_waiting,
     waiting_for_human: m.work_line_waiting_for_you,
     cancelling: m.work_line_stopping,
@@ -108,14 +142,35 @@
     return null;
   });
   const intervention = $derived(execution?.intervention ?? null);
+  /** Why the agent stopped for a person, in the person's words. */
+  const interventionLabel = $derived.by(() => {
+    if (!intervention) return "";
+    const origin = intervention.origin ?? accountScope?.origin ?? "";
+    switch (intervention.kind) {
+      case "sign_in":
+        return m.work_intervention_sign_in({ origin });
+      case "challenge":
+        return m.work_intervention_challenge({ origin });
+      case "permission":
+        return m.work_intervention_permission();
+      case "unsupported_interaction":
+        return m.work_intervention_unsupported_interaction();
+      case "review":
+        return m.work_intervention_review();
+      case "human_takeover":
+        return m.work_intervention_human_takeover();
+    }
+  });
   /** A signed-in page the person may need: to finish a challenge, or to take over. */
   const pageHandoff = $derived(!!accountScope && !!onopenpage && (live || !!intervention));
   const closing = $derived(execution ? agentLine(execution) : null);
   /** Two or three words while it works; one quiet sentence once it stops. */
   const headline = $derived.by(() => {
+    if (intervention) return interventionLabel;
     if (failure || session.failure) return m.work_line_failed();
     if (interrupted) return m.work_line_stopped();
     if (live) {
+      if (fileState) return fileState;
       if (activity === "reading" && readingHost) return m.work_line_reading({ host: readingHost });
       if (activity) return activityStates[activity]?.() ?? m.work_line_thinking();
       return execution?.status === "cancel_requested"
@@ -135,7 +190,7 @@
         return run?.state.kind === "pending" ? m.work_line_thinking() : m.work_line_ready();
     }
   });
-  const settled = $derived(!live && !question);
+  const settled = $derived(!live && !question && !proposal);
   const followups = $derived(settled ? session.followups.slice(0, 3) : []);
   const preview = $derived(draft.trim().slice(0, 60));
 
@@ -144,7 +199,7 @@
   let answer = $state("");
   let host = $state<HTMLElement>();
   $effect(() => {
-    if (!question) expanded = false;
+    if (!question && !proposal) expanded = false;
   });
   $effect(() => {
     if (!live) open = false;
@@ -163,6 +218,11 @@
       answer = "";
       expanded = false;
     }
+  }
+  async function decide(approve: boolean) {
+    const waiting = proposal;
+    if (!waiting || blocked) return;
+    if (await session.approveStep(waiting.id, approve)) expanded = false;
   }
   async function steer() {
     const text = draft.trim();
@@ -223,9 +283,32 @@
         {:else}<li class="none">{m.work_line_no_agents()}</li>{/each}
       </ul>
     {/if}
-    <div class="expand" class:shown={expanded && !!question} aria-hidden={!expanded}>
+    <div
+      class="expand"
+      class:shown={expanded && (!!question || !!proposal)}
+      aria-hidden={!expanded}
+    >
       <div class="expand-inner">
-        {#if question}
+        {#if proposal}
+          <div class="change">
+            <span class="label">{proposal.name}</span>
+            <span class="path">{proposal.path}</span>
+            <div class="options">
+              <button
+                type="button"
+                class="chip"
+                disabled={blocked}
+                onclick={() => void decide(true)}>{m.work_line_approve_change()}</button
+              >
+              <button
+                type="button"
+                class="chip"
+                disabled={blocked}
+                onclick={() => void decide(false)}>{m.work_line_reject_change()}</button
+              >
+            </div>
+          </div>
+        {:else if question}
           <form
             onsubmit={(event) => {
               event.preventDefault();
@@ -285,6 +368,10 @@
             class="action"
             title={m.work_line_steer_hint()}
             onclick={() => void steer()}>{m.work_line_steer()}</button
+          >
+        {:else if proposal && !expanded}
+          <button type="button" class="action" onclick={() => (expanded = true)}
+            >{m.work_line_review()}</button
           >
         {:else if question && !expanded}
           <button type="button" class="action" onclick={() => (expanded = true)}
@@ -497,8 +584,28 @@
     box-shadow: var(--shadow-float);
   }
 
-  label {
+  label,
+  .label {
     font-size: var(--text-label);
+  }
+
+  .change {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 14px;
+    border-radius: var(--radius-control);
+    background: var(--color-menu);
+    backdrop-filter: blur(12px) saturate(1.2);
+    box-shadow: var(--shadow-float);
+  }
+
+  .path {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--color-faint);
+    font-size: var(--text-caption);
   }
 
   .options,

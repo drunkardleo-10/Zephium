@@ -1,6 +1,12 @@
 <script lang="ts">
+  import Icon from "$shared/ui/Icon";
+  import { File01Icon } from "../../lib/icons";
   /** A neutral stand-in for a site's mark; a real favicon fills this slot later. */
-  let { host = "", size = 16 }: { host?: string; size?: number } = $props();
+  let {
+    host = "",
+    file = false,
+    size = 16,
+  }: { host?: string; file?: boolean; size?: number } = $props();
   const letter = $derived(
     host
       .replace(/^www\./u, "")
@@ -9,7 +15,9 @@
   );
 </script>
 
-<span class="glyph" style:--glyph={`${size}px`} aria-hidden="true">{letter}</span>
+<span class="glyph" class:file style:--glyph={`${size}px`} aria-hidden="true">
+  {#if file}<Icon icon={File01Icon} size={Math.round(size * 0.62)} />{:else}{letter}{/if}
+</span>
 
 <style>
   .glyph {
@@ -24,5 +32,9 @@
     font-size: calc(var(--glyph) * 0.56);
     font-weight: 600;
     line-height: 1;
+  }
+
+  .glyph.file {
+    border-radius: var(--radius-xs);
   }
 </style>

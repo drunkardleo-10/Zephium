@@ -41,7 +41,7 @@
     background:
       linear-gradient(
         160deg,
-        color-mix(in srgb, var(--color-accent) 12%, transparent),
+        color-mix(in srgb, var(--color-accent) 10%, transparent),
         transparent 62%
       ),
       var(--color-raised);

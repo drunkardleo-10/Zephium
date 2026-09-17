@@ -12,6 +12,8 @@ export const AGENT_GRANT: WorkAgentGrantV1 = {
   max_turns: 10,
   max_steps: 32,
   browse_hops: 4,
+  // No folder is granted until a person grants one.
+  folders: [],
 };
 export const AGENT_LIMITS: WorkExecutionLimits = {
   model_tokens: 1_000_000,

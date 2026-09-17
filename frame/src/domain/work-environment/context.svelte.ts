@@ -65,9 +65,7 @@ export class WorkEnvironmentContext {
     const wanted = [
       ...new SvelteSet(
         ordered.flatMap((element) =>
-          element.reference.kind === "browser" || element.reference.kind === "resource"
-            ? []
-            : [element.reference.objective],
+          "objective" in element.reference ? [element.reference.objective] : [],
         ),
       ),
     ].slice(0, 32);

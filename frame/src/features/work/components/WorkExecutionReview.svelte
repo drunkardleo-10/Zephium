@@ -88,7 +88,7 @@
         {m.work_operation_unknown()}
       </p>{/if}
     {#if executionFailure}<p role="alert">
-        {m.work_request_failed({ reason: executionFailure })}
+        {m.work_request_failed()}
       </p>{/if}
     {#if work.status === "plan_ready" && !unsettled}
       <Button
@@ -107,7 +107,7 @@
         {m.work_preparing_execution()}
       </p>{/if}
     {#if operation?.state.kind === "unknown"}<p role="status">{m.work_operation_unknown()}</p>{/if}
-    {#if failure}<p role="alert">{m.work_request_failed({ reason: failure })}</p>{/if}
+    {#if failure}<p role="alert">{m.work_request_failed()}</p>{/if}
     {#if approval && !current && !unsettled && !executed}<p role="status">
         {m.work_approval_stale()}
       </p>{/if}

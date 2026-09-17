@@ -12,6 +12,7 @@ type CanvasKind =
   | "subject"
   | "finding"
   | "sources"
+  | "folder"
   | "page"
   | "agent";
 type RelationKind = "supports" | "uses" | "depends_on" | "same_as" | "contradicts";
@@ -38,7 +39,14 @@ export type CanvasItem = {
   /** Transient agent presence: avatar seed, status, and its latest line. */
   agent?: { seed: number; activity: string; objective: string; line?: string; worker?: boolean };
   /** The pages one fetch stage cited; opening a row goes through the pane. */
-  sources?: readonly { key: string; url: string; host: string; title: string }[];
+  sources?: readonly {
+    key: string;
+    /** Empty for a file: a granted folder is not a place the pane can open. */
+    url: string;
+    where: string;
+    title: string;
+    file?: boolean;
+  }[];
   /** A page a browser step opened: its newest frame while the agent works there. */
   page?: { url: string; host: string; frame: string | null; live: boolean };
   unavailable?: boolean;
@@ -124,6 +132,8 @@ export function defaultSize(item: CanvasItem): { width: number; height: number }
       return { width: 300, height: 140 };
     case "sources":
       return { width: 300, height: 208 };
+    case "folder":
+      return { width: 280, height: 96 };
     case "note":
       return { width: 300, height: 200 };
     case "media":

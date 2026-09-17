@@ -11,9 +11,9 @@
   <ul class="rows">
     {#each rows.slice(0, 6) as row (row.key)}
       <li>
-        <HostGlyph host={row.host} />
+        <HostGlyph host={row.where} file={row.file} />
         <span class="text">
-          <span class="host">{row.host}</span>
+          <span class="where">{row.where}</span>
           <span class="title">{row.title}</span>
         </span>
       </li>
@@ -47,8 +47,12 @@
     min-inline-size: 0;
   }
 
-  .host {
+  .where {
     flex: none;
+    max-inline-size: 45%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     color: var(--color-muted);
     font-size: var(--text-caption);
   }

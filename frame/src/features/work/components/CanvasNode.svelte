@@ -20,6 +20,7 @@
   import SubjectCard from "./cards/SubjectCard.svelte";
   import FindingCard from "./cards/FindingCard.svelte";
   import SourcesCard from "./cards/SourcesCard.svelte";
+  import FolderCard from "./cards/FolderCard.svelte";
   import AgentCard from "./cards/AgentCard.svelte";
   import PageCard from "./cards/PageCard.svelte";
   import * as m from "$shared/i18n/messages";
@@ -105,6 +106,7 @@
   {:else if type === "subject"}<SubjectCard item={data} {selected} />
   {:else if type === "finding"}<FindingCard item={data} {selected} />
   {:else if type === "sources"}<SourcesCard item={data} {selected} />
+  {:else if type === "folder"}<FolderCard item={data} {selected} />
   {:else if type === "page"}<PageCard item={data} {selected} />
   {:else if type === "agent"}<AgentCard item={data} {selected} />
   {:else if type === "note"}<NoteCard item={data} {selected} />

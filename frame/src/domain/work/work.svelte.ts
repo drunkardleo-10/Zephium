@@ -497,6 +497,12 @@ export class WorkSession {
     this.queue = rest;
     return this.continueWith(next);
   }
+  /** Accepts or refuses one proposed file change the running agent is waiting on. */
+  approveStep(step: string, approve: boolean): Promise<boolean> {
+    const execution = this.running;
+    if (!execution) return Promise.resolve(false);
+    return this.execute({ kind: "approve_step", execution: execution.id, step, approve });
+  }
   answerStep(execution: string, step: string, answer: string) {
     return this.execute({ kind: "answer_step", execution, step, answer });
   }

@@ -24,25 +24,29 @@ function host(url: string | undefined): string {
     return "";
   }
 }
-type SourceRow = { key: string; url: string; host: string; title: string };
-/** The cited pages behind one evidence collection, in the order it cites them. */
+type SourceRow = {
+  key: string;
+  url: string;
+  where: string;
+  title: string;
+  file?: boolean;
+};
+/** The pages and files behind one evidence collection, in the order it cites them. */
 function collectionRows(execution: WorkExecutionFact, artifact: WorkArtifactV1): SourceRow[] {
   if (artifact.data.kind !== "evidence_collection") return [];
   return (artifact.data.entries ?? []).flatMap((entry) => {
     const link = artifact.evidence[entry.evidence];
     if (!link) return [];
+    const key = `${link.extraction_id}:${link.source_id}`;
     const record = execution.provider_evidence?.find((record) => record.id === link.extraction_id);
     const citation = record?.evidence.citations[link.source_id - 1];
     const url = cleanUrl(citation?.url);
-    if (!url) return [];
-    return [
-      {
-        key: `${link.extraction_id}:${link.source_id}`,
-        url,
-        host: host(url),
-        title: entry.title || citation?.title || host(url),
-      },
-    ];
+    if (url)
+      return [{ key, url, where: host(url), title: entry.title || citation?.title || host(url) }];
+    // A granted folder is not a place the pane can open: the row names the file.
+    const file = execution.file_evidence?.find((record) => record.id === link.extraction_id)?.file;
+    if (!file) return [];
+    return [{ key, url: "", where: file.path, title: entry.title || file.name, file: true }];
   });
 }
 /** The provider's tracking parameter is not part of the page the card opens. */
@@ -177,6 +181,18 @@ function elementItems(
         detail: note?.updated_at ?? "",
         status: area,
         unavailable: !note,
+      };
+    }
+    if (element.reference.kind === "folder") {
+      const folder = element.reference;
+      return {
+        id: element.id,
+        type: "folder" as const,
+        area: element.area,
+        kind: m.work_env_folder(),
+        title: folder.name,
+        detail: folder.path,
+        status: area,
       };
     }
     const projection = objectives.get(element.reference.objective);
@@ -318,6 +334,7 @@ const agentLabels: Record<string, () => string> = {
   recovering: m.work_activity_recovering,
   comparing: m.work_activity_comparing,
   producing_artifact: m.work_activity_producing,
+  paused: m.work_activity_paused,
   waiting_for_approval: m.work_activity_approval,
   waiting_for_human: m.work_activity_human,
   cancelling: m.work_activity_cancelling,

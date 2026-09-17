@@ -25,7 +25,7 @@
     Archive01Icon,
     ArrowLeft02Icon,
     ChartColumnIcon,
-    Doc01Icon,
+    File01Icon,
     FolderAddIcon,
     Image01Icon,
     LayoutGridIcon,
@@ -1191,7 +1191,7 @@
 {#snippet mediaPanel()}
   <div class="palette-stack">
     <div class="segments" role="group" aria-label={m.work_env_media()}>
-      {@render segment("document", Doc01Icon, m.work_env_documents())}
+      {@render segment("document", File01Icon, m.work_env_documents())}
       {@render segment("image", Image01Icon, m.work_env_images())}
       {@render segment("link", Link04Icon, m.work_env_links())}
     </div>
@@ -1230,7 +1230,7 @@
     {/if}
   </div>
 {/snippet}
-{#snippet segment(key: "document" | "image" | "link", icon: typeof Doc01Icon, label: string)}
+{#snippet segment(key: "document" | "image" | "link", icon: typeof File01Icon, label: string)}
   <button
     type="button"
     class="segment"
@@ -1467,7 +1467,7 @@
     {#if session.failure || session.pending || session.viewDraft}<div class="status" role="status">
         <span
           >{session.failure
-            ? m.work_request_failed({ reason: session.failure })
+            ? m.work_request_failed()
             : session.pending
               ? m.work_env_pending()
               : m.work_env_unsaved_view()}</span
@@ -1522,10 +1522,10 @@
                   openPane({ kind: "url", url }, null);
                 }}
               >
-                <HostGlyph host={row.host} size={22} />
+                <HostGlyph host={row.where} file={row.file} size={22} />
                 <span class="source-text">
                   <strong>{row.title}</strong>
-                  <span>{row.host}</span>
+                  <span>{row.where}</span>
                 </span>
               </button>
             </li>
