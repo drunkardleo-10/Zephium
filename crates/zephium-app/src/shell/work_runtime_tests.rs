@@ -728,6 +728,7 @@ async fn rejected_final_output_cannot_finish_on_earlier_partial_artifacts() {
                         },
                         ask: None,
                         finish: turn > 0,
+                        followups: vec![],
                     },
                     usage: WorkUsage::default(),
                 })
@@ -818,7 +819,7 @@ async fn rejected_final_output_cannot_finish_on_earlier_partial_artifacts() {
     assert!(!execution
         .steps
         .iter()
-        .any(|step| matches!(step.kind, WorkStepKindV1::Finish)));
+        .any(|step| matches!(step.kind, WorkStepKindV1::Finish { .. })));
     assert!(execution
         .steps
         .iter()

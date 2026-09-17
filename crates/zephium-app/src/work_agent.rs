@@ -422,6 +422,10 @@ impl Driver {
                 .iter()
                 .find(|e| e.id == self.probe.execution())
                 .ok_or(WorkError::NotFound)?;
+            // Steps the person appended (steers) count against the grant too.
+            self.steps = self
+                .steps
+                .max(u32::try_from(execution.steps.len()).unwrap_or(u32::MAX));
             let disclosure = match WorkAgentTurnDisclosure::try_new(
                 &self.objective,
                 self.decisions.clone(),
@@ -600,7 +604,12 @@ impl Driver {
             }
             if turn.finish {
                 self.probe.record_activity(WorkActivityV1::Finishing);
-                let mut step = self.step(WorkStepKindV1::Finish, WorkStepStatus::Succeeded);
+                let mut step = self.step(
+                    WorkStepKindV1::Finish {
+                        followups: turn.followups,
+                    },
+                    WorkStepStatus::Succeeded,
+                );
                 step.note = turn.say;
                 self.begin(step, vec![], None).await?;
                 return Ok(WorkAttemptStatus::Succeeded);
@@ -1021,7 +1030,8 @@ fn step_kind_label(kind: &WorkStepKindV1) -> &'static str {
         WorkStepKindV1::Discover { .. } => "discover",
         WorkStepKindV1::Publish => "publish",
         WorkStepKindV1::Ask { .. } => "ask",
-        WorkStepKindV1::Finish => "finish",
+        WorkStepKindV1::Steer { .. } => "person",
+        WorkStepKindV1::Finish { .. } => "finish",
     }
 }
 

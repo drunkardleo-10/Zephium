@@ -158,7 +158,8 @@ impl WorkAgentTurnDisclosure {
                             None => prompt.clone(),
                         },
                     ),
-                    WorkStepKindV1::Finish => ("finish", String::new()),
+                    WorkStepKindV1::Steer { text } => ("person", text.clone()),
+                    WorkStepKindV1::Finish { .. } => ("finish", String::new()),
                 };
                 WorkAgentStepView {
                     turn: step.turn,
@@ -374,6 +375,21 @@ impl WorkAgentTurnDisclosure {
             }
             None => None,
         };
+        // Follow-ups ride only on a finishing turn; malformed ones are dropped.
+        let mut followups: Vec<String> = Vec::new();
+        if output.finish {
+            for followup in output.followups {
+                let followup = followup.trim().to_owned();
+                if followups.len() == MAX_WORK_FOLLOWUPS
+                    || followup.is_empty()
+                    || validate_text(&followup, MAX_WORK_FOLLOWUP_BYTES).is_err()
+                    || followups.contains(&followup)
+                {
+                    continue;
+                }
+                followups.push(followup);
+            }
+        }
         Ok(WorkAgentTurn {
             say,
             artifacts,
@@ -382,6 +398,7 @@ impl WorkAgentTurnDisclosure {
             fetch,
             ask,
             finish: output.finish,
+            followups,
         })
     }
 }
@@ -702,6 +719,9 @@ pub struct WorkAgentTurnOutput {
     pub ask: Option<WorkAgentQuestion>,
     #[serde(default)]
     pub finish: bool,
+    /// Next requests offered with a finishing turn; ignored otherwise.
+    #[serde(default)]
+    pub followups: Vec<String>,
 }
 /// An admitted turn. Fetches are step kinds ready to begin.
 pub struct WorkAgentTurn {
@@ -713,6 +733,7 @@ pub struct WorkAgentTurn {
     pub fetch: Vec<WorkStepKindV1>,
     pub ask: Option<WorkAgentQuestion>,
     pub finish: bool,
+    pub followups: Vec<String>,
 }
 pub struct WorkAgentTurnResult {
     pub output: WorkAgentTurnOutput,

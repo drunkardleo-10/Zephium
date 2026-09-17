@@ -1373,41 +1373,45 @@ export type WorkRuntimeIntent = WorkRuntimeIntent_Serialize | WorkRuntimeIntent_
  *  Internal Store grammar. User commands and host-only attempt facts have
  *  separate variants at the application edge; IPC never accepts settlements.
  */
-export type WorkRuntimeIntent_Deserialize = ({ kind: "read_public"; scope: WorkPublicSearchScope; limits: WorkExecutionLimits }) & { answer?: never; artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; grant?: never; intervention?: never; spec?: never; step?: never } | ({ kind: "review_artifact"; execution: WorkExecutionId; artifact: WorkArtifactId; decision: WorkArtifactDecision }) & { answer?: never; data?: never; evidence?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never; step?: never } | ({ kind: "edit_artifact"; execution: WorkExecutionId; artifact: WorkArtifactId; data: WorkArtifactDataV1_Deserialize; evidence: WorkEvidenceLink[] }) & { answer?: never; decision?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never; step?: never } | ({ kind: "approve"; spec: WorkExecutionSpec_Deserialize }) & { answer?: never; artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; grant?: never; intervention?: never; limits?: never; scope?: never; step?: never } | ({ kind: "cancel"; execution: WorkExecutionId;
+export type WorkRuntimeIntent_Deserialize = ({ kind: "read_public"; scope: WorkPublicSearchScope; limits: WorkExecutionLimits }) & { answer?: never; artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; grant?: never; intervention?: never; spec?: never; step?: never; text?: never } | ({ kind: "review_artifact"; execution: WorkExecutionId; artifact: WorkArtifactId; decision: WorkArtifactDecision }) & { answer?: never; data?: never; evidence?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never; step?: never; text?: never } | ({ kind: "edit_artifact"; execution: WorkExecutionId; artifact: WorkArtifactId; data: WorkArtifactDataV1_Deserialize; evidence: WorkEvidenceLink[] }) & { answer?: never; decision?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never; step?: never; text?: never } | ({ kind: "approve"; spec: WorkExecutionSpec_Deserialize }) & { answer?: never; artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; grant?: never; intervention?: never; limits?: never; scope?: never; step?: never; text?: never } | ({ kind: "cancel"; execution: WorkExecutionId;
 /**
  *  Present when a person takes the page over rather than abandoning
  *  the work; persisted with the execution.
  */
-intervention?: WorkInterventionV1_Deserialize | null }) & { answer?: never; artifact?: never; data?: never; decision?: never; evidence?: never; grant?: never; limits?: never; scope?: never; spec?: never; step?: never } |
+intervention?: WorkInterventionV1_Deserialize | null }) & { answer?: never; artifact?: never; data?: never; decision?: never; evidence?: never; grant?: never; limits?: never; scope?: never; spec?: never; step?: never; text?: never } |
 /**  Explicitly acknowledge that an old owner is gone. Cannot restart it. */
-({ kind: "acknowledge_interruption"; execution: WorkExecutionId }) & { answer?: never; artifact?: never; data?: never; decision?: never; evidence?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never; step?: never } |
+({ kind: "acknowledge_interruption"; execution: WorkExecutionId }) & { answer?: never; artifact?: never; data?: never; decision?: never; evidence?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never; step?: never; text?: never } |
 /**
  *  Start the routine agent loop on the objective. Mints the single-step
  *  plan and the execution in one transaction; the grant is the approval.
  */
-({ kind: "begin_agent"; grant: WorkAgentGrantV1; limits: WorkExecutionLimits }) & { answer?: never; artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; intervention?: never; scope?: never; spec?: never; step?: never } |
+({ kind: "begin_agent"; grant: WorkAgentGrantV1; limits: WorkExecutionLimits }) & { answer?: never; artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; intervention?: never; scope?: never; spec?: never; step?: never; text?: never } |
 /**  Answer a question the running agent asked; allowed while it runs. */
-({ kind: "answer_step"; execution: WorkExecutionId; step: WorkStepId; answer: string }) & { artifact?: never; data?: never; decision?: never; evidence?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never };
+({ kind: "answer_step"; execution: WorkExecutionId; step: WorkStepId; answer: string }) & { artifact?: never; data?: never; decision?: never; evidence?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never; text?: never } |
+/**  Hand the running agent a message; it reads it at its next turn. */
+({ kind: "steer"; execution: WorkExecutionId; text: string }) & { answer?: never; artifact?: never; data?: never; decision?: never; evidence?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never; step?: never };
 
 /**
  *  Internal Store grammar. User commands and host-only attempt facts have
  *  separate variants at the application edge; IPC never accepts settlements.
  */
-export type WorkRuntimeIntent_Serialize = ({ kind: "read_public"; scope: WorkPublicSearchScope; limits: WorkExecutionLimits }) & { answer?: never; artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; grant?: never; intervention?: never; spec?: never; step?: never } | ({ kind: "review_artifact"; execution: WorkExecutionId; artifact: WorkArtifactId; decision: WorkArtifactDecision }) & { answer?: never; data?: never; evidence?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never; step?: never } | ({ kind: "edit_artifact"; execution: WorkExecutionId; artifact: WorkArtifactId; data: WorkArtifactDataV1_Serialize; evidence: WorkEvidenceLink[] }) & { answer?: never; decision?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never; step?: never } | ({ kind: "approve"; spec: WorkExecutionSpec_Serialize }) & { answer?: never; artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; grant?: never; intervention?: never; limits?: never; scope?: never; step?: never } | ({ kind: "cancel"; execution: WorkExecutionId;
+export type WorkRuntimeIntent_Serialize = ({ kind: "read_public"; scope: WorkPublicSearchScope; limits: WorkExecutionLimits }) & { answer?: never; artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; grant?: never; intervention?: never; spec?: never; step?: never; text?: never } | ({ kind: "review_artifact"; execution: WorkExecutionId; artifact: WorkArtifactId; decision: WorkArtifactDecision }) & { answer?: never; data?: never; evidence?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never; step?: never; text?: never } | ({ kind: "edit_artifact"; execution: WorkExecutionId; artifact: WorkArtifactId; data: WorkArtifactDataV1_Serialize; evidence: WorkEvidenceLink[] }) & { answer?: never; decision?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never; step?: never; text?: never } | ({ kind: "approve"; spec: WorkExecutionSpec_Serialize }) & { answer?: never; artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; grant?: never; intervention?: never; limits?: never; scope?: never; step?: never; text?: never } | ({ kind: "cancel"; execution: WorkExecutionId;
 /**
  *  Present when a person takes the page over rather than abandoning
  *  the work; persisted with the execution.
  */
-intervention?: WorkInterventionV1_Serialize | null }) & { answer?: never; artifact?: never; data?: never; decision?: never; evidence?: never; grant?: never; limits?: never; scope?: never; spec?: never; step?: never } |
+intervention?: WorkInterventionV1_Serialize | null }) & { answer?: never; artifact?: never; data?: never; decision?: never; evidence?: never; grant?: never; limits?: never; scope?: never; spec?: never; step?: never; text?: never } |
 /**  Explicitly acknowledge that an old owner is gone. Cannot restart it. */
-({ kind: "acknowledge_interruption"; execution: WorkExecutionId }) & { answer?: never; artifact?: never; data?: never; decision?: never; evidence?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never; step?: never } |
+({ kind: "acknowledge_interruption"; execution: WorkExecutionId }) & { answer?: never; artifact?: never; data?: never; decision?: never; evidence?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never; step?: never; text?: never } |
 /**
  *  Start the routine agent loop on the objective. Mints the single-step
  *  plan and the execution in one transaction; the grant is the approval.
  */
-({ kind: "begin_agent"; grant: WorkAgentGrantV1; limits: WorkExecutionLimits }) & { answer?: never; artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; intervention?: never; scope?: never; spec?: never; step?: never } |
+({ kind: "begin_agent"; grant: WorkAgentGrantV1; limits: WorkExecutionLimits }) & { answer?: never; artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; intervention?: never; scope?: never; spec?: never; step?: never; text?: never } |
 /**  Answer a question the running agent asked; allowed while it runs. */
-({ kind: "answer_step"; execution: WorkExecutionId; step: WorkStepId; answer: string }) & { artifact?: never; data?: never; decision?: never; evidence?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never };
+({ kind: "answer_step"; execution: WorkExecutionId; step: WorkStepId; answer: string }) & { artifact?: never; data?: never; decision?: never; evidence?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never; text?: never } |
+/**  Hand the running agent a message; it reads it at its next turn. */
+({ kind: "steer"; execution: WorkExecutionId; text: string }) & { answer?: never; artifact?: never; data?: never; decision?: never; evidence?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never; step?: never };
 
 export type WorkRuntimeProjection = WorkRuntimeProjection_Serialize | WorkRuntimeProjection_Deserialize;
 
@@ -1553,15 +1557,29 @@ export type WorkStepKindV1 = WorkStepKindV1_Serialize | WorkStepKindV1_Deseriali
 
 export type WorkStepKindV1_Deserialize =
 /**  One model turn; `note` on the step is what the agent said. */
-({ kind: "turn" }) & { answer?: never; collection?: never; options?: never; prompt?: never; query?: never; url?: never } | ({ kind: "search"; query: string }) & { answer?: never; collection?: never; options?: never; prompt?: never; url?: never } | ({ kind: "read"; url: string; collection?: WorkBrowseCollection | null }) & { answer?: never; options?: never; prompt?: never; query?: never } | ({ kind: "discover"; query: string; collection?: WorkBrowseCollection | null }) & { answer?: never; options?: never; prompt?: never; url?: never } |
+({ kind: "turn" }) & { answer?: never; collection?: never; followups?: never; options?: never; prompt?: never; query?: never; text?: never; url?: never } | ({ kind: "search"; query: string }) & { answer?: never; collection?: never; followups?: never; options?: never; prompt?: never; text?: never; url?: never } | ({ kind: "read"; url: string; collection?: WorkBrowseCollection | null }) & { answer?: never; followups?: never; options?: never; prompt?: never; query?: never; text?: never } | ({ kind: "discover"; query: string; collection?: WorkBrowseCollection | null }) & { answer?: never; followups?: never; options?: never; prompt?: never; text?: never; url?: never } |
 /**  Objects the agent placed on the canvas from this turn. */
-({ kind: "publish" }) & { answer?: never; collection?: never; options?: never; prompt?: never; query?: never; url?: never } | ({ kind: "ask"; prompt: string; options: string[]; answer?: string | null }) & { collection?: never; query?: never; url?: never } | ({ kind: "finish" }) & { answer?: never; collection?: never; options?: never; prompt?: never; query?: never; url?: never };
+({ kind: "publish" }) & { answer?: never; collection?: never; followups?: never; options?: never; prompt?: never; query?: never; text?: never; url?: never } | ({ kind: "ask"; prompt: string; options: string[]; answer?: string | null }) & { collection?: never; followups?: never; query?: never; text?: never; url?: never } |
+/**
+ *  A message the person sent while the agent ran; the agent reads it at
+ *  its next turn.
+ */
+({ kind: "steer"; text: string }) & { answer?: never; collection?: never; followups?: never; options?: never; prompt?: never; query?: never; url?: never } | ({ kind: "finish";
+/**  Up to three short next requests the person may choose. */
+followups?: string[] }) & { answer?: never; collection?: never; options?: never; prompt?: never; query?: never; text?: never; url?: never };
 
 export type WorkStepKindV1_Serialize =
 /**  One model turn; `note` on the step is what the agent said. */
-({ kind: "turn" }) & { answer?: never; collection?: never; options?: never; prompt?: never; query?: never; url?: never } | ({ kind: "search"; query: string }) & { answer?: never; collection?: never; options?: never; prompt?: never; url?: never } | ({ kind: "read"; url: string; collection?: WorkBrowseCollection | null }) & { answer?: never; options?: never; prompt?: never; query?: never } | ({ kind: "discover"; query: string; collection?: WorkBrowseCollection | null }) & { answer?: never; options?: never; prompt?: never; url?: never } |
+({ kind: "turn" }) & { answer?: never; collection?: never; followups?: never; options?: never; prompt?: never; query?: never; text?: never; url?: never } | ({ kind: "search"; query: string }) & { answer?: never; collection?: never; followups?: never; options?: never; prompt?: never; text?: never; url?: never } | ({ kind: "read"; url: string; collection?: WorkBrowseCollection | null }) & { answer?: never; followups?: never; options?: never; prompt?: never; query?: never; text?: never } | ({ kind: "discover"; query: string; collection?: WorkBrowseCollection | null }) & { answer?: never; followups?: never; options?: never; prompt?: never; text?: never; url?: never } |
 /**  Objects the agent placed on the canvas from this turn. */
-({ kind: "publish" }) & { answer?: never; collection?: never; options?: never; prompt?: never; query?: never; url?: never } | ({ kind: "ask"; prompt: string; options: string[]; answer?: string | null }) & { collection?: never; query?: never; url?: never } | ({ kind: "finish" }) & { answer?: never; collection?: never; options?: never; prompt?: never; query?: never; url?: never };
+({ kind: "publish" }) & { answer?: never; collection?: never; followups?: never; options?: never; prompt?: never; query?: never; text?: never; url?: never } | ({ kind: "ask"; prompt: string; options: string[]; answer?: string | null }) & { collection?: never; followups?: never; query?: never; text?: never; url?: never } |
+/**
+ *  A message the person sent while the agent ran; the agent reads it at
+ *  its next turn.
+ */
+({ kind: "steer"; text: string }) & { answer?: never; collection?: never; followups?: never; options?: never; prompt?: never; query?: never; url?: never } | ({ kind: "finish";
+/**  Up to three short next requests the person may choose. */
+followups?: string[] }) & { answer?: never; collection?: never; options?: never; prompt?: never; query?: never; text?: never; url?: never };
 
 export type WorkStepStatus = "running" | "succeeded" | "failed" | "cancelled" | "outcome_unknown";
 

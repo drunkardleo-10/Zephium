@@ -413,6 +413,41 @@ pub(super) fn command(
             write(tx, id, &row.fact)?;
             execution
         }
+        WorkRuntimeIntent::Steer { execution, text } => {
+            let mut row = all
+                .into_iter()
+                .find(|r| r.fact.id == execution)
+                .ok_or(WorkError::NotFound)?;
+            if row.fact.status != WorkExecutionStatus::Running || !row.fact.is_agent() {
+                return Err(WorkError::Conflict);
+            }
+            let max_steps = row
+                .fact
+                .agent_grant()
+                .map(|grant| usize::from(grant.max_steps))
+                .ok_or(WorkError::Invalid)?;
+            // Leave room for the agent's own next turn and finish.
+            if row.fact.steps.len() + 2 >= max_steps {
+                return Err(WorkError::Capacity);
+            }
+            let turn = row.fact.steps.last().map_or(1, |step| step.turn);
+            row.fact.steps.push(WorkStepFact {
+                id: WorkStepId::generate(),
+                turn,
+                kind: WorkStepKindV1::Steer { text },
+                status: WorkStepStatus::Succeeded,
+                usage: None,
+                artifacts: vec![],
+                evidence: None,
+                note: None,
+            });
+            row.fact.validate(
+                &read_plan(tx, id, row.fact.spec.plan_revision)?,
+                expected.next()?,
+            )?;
+            write(tx, id, &row.fact)?;
+            execution
+        }
         intent @ (WorkRuntimeIntent::ReviewArtifact { .. }
         | WorkRuntimeIntent::EditArtifact { .. }) => {
             let (execution, artifact) = match &intent {

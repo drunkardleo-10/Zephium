@@ -8,6 +8,8 @@ pub const MAX_WORK_ATTEMPTS: usize = 128;
 pub const MAX_WORK_COMMANDS: usize = 256;
 pub const MAX_WORK_STEPS: usize = 48;
 pub const MAX_WORK_STEP_NOTE_BYTES: usize = 512;
+pub const MAX_WORK_FOLLOWUPS: usize = 3;
+pub const MAX_WORK_FOLLOWUP_BYTES: usize = 120;
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -751,7 +753,16 @@ pub enum WorkStepKindV1 {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         answer: Option<String>,
     },
-    Finish,
+    /// A message the person sent while the agent ran; the agent reads it at
+    /// its next turn.
+    Steer {
+        text: String,
+    },
+    Finish {
+        /// Up to three short next requests the person may choose.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        followups: Vec<String>,
+    },
 }
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -820,7 +831,21 @@ impl WorkStepKindV1 {
                 }
                 Ok(())
             }
-            Self::Turn | Self::Publish | Self::Finish => Ok(()),
+            Self::Steer { text } => validate_text(text, MAX_WORK_TEXT_BYTES),
+            Self::Finish { followups } => {
+                if followups.len() > MAX_WORK_FOLLOWUPS {
+                    return Err(WorkError::Invalid);
+                }
+                let mut unique = BTreeSet::new();
+                for followup in followups {
+                    validate_text(followup, MAX_WORK_FOLLOWUP_BYTES)?;
+                    if !unique.insert(followup) {
+                        return Err(WorkError::Invalid);
+                    }
+                }
+                Ok(())
+            }
+            Self::Turn | Self::Publish => Ok(()),
         }
     }
     fn fetches(&self) -> bool {
@@ -862,7 +887,9 @@ impl WorkStepFact {
         }
         let consistent = match &self.kind {
             WorkStepKindV1::Ask { answer, .. } => answer.is_some() == succeeded,
-            WorkStepKindV1::Publish | WorkStepKindV1::Finish => succeeded,
+            WorkStepKindV1::Publish
+            | WorkStepKindV1::Finish { .. }
+            | WorkStepKindV1::Steer { .. } => succeeded,
             WorkStepKindV1::Turn => !running,
             _ => true,
         };
@@ -1326,7 +1353,7 @@ impl WorkExecutionFact {
                     return Err(WorkError::Invalid);
                 }
             }
-            if matches!(step.kind, WorkStepKindV1::Finish) {
+            if matches!(step.kind, WorkStepKindV1::Finish { .. }) {
                 finished = true;
             }
         }
@@ -1432,6 +1459,11 @@ pub enum WorkRuntimeIntent {
         execution: WorkExecutionId,
         step: WorkStepId,
         answer: String,
+    },
+    /// Hand the running agent a message; it reads it at its next turn.
+    Steer {
+        execution: WorkExecutionId,
+        text: String,
     },
 }
 

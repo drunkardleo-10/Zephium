@@ -139,9 +139,13 @@ impl WorkRequest {
                 limits.validate()
             }
             Self::RuntimeCommand {
-                intent: runtime::WorkRuntimeIntent::AnswerStep { answer, .. },
+                intent: runtime::WorkRuntimeIntent::AnswerStep { answer: text, .. },
                 ..
-            } => validate_text(answer, MAX_WORK_TEXT_BYTES),
+            }
+            | Self::RuntimeCommand {
+                intent: runtime::WorkRuntimeIntent::Steer { text, .. },
+                ..
+            } => validate_text(text, MAX_WORK_TEXT_BYTES),
             Self::RuntimeUpdate {
                 update:
                     runtime::WorkRuntimeUpdate::BeginStep {

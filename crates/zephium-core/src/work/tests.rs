@@ -46,6 +46,7 @@ fn native_link_handoff_admits_exact_observed_targets_without_promoting_prose() {
         artifacts: vec![],
         ask: None,
         finish: false,
+        followups: vec![],
         fetch: vec![WorkAgentFetch::Read {
             url: url.into(),
             collection: None,
@@ -784,7 +785,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
     fact.steps.push(step(
         4,
         2,
-        WorkStepKindV1::Finish,
+        WorkStepKindV1::Finish { followups: vec![] },
         WorkStepStatus::Succeeded,
     ));
     fact.attempts[0].status = WorkAttemptStatus::Succeeded;
@@ -913,6 +914,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
         fetch,
         ask,
         finish,
+        followups: vec![],
     };
     let turn = disclosure
         .resolve(output(
@@ -975,6 +977,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
             fetch: vec![collect.clone()],
             ask: None,
             finish: false,
+            followups: vec![],
         })
         .unwrap();
     assert_eq!(direct_turn.fetch.len(), 1);
@@ -1034,6 +1037,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
             fetch: vec![],
             ask: None,
             finish: false,
+            followups: vec![],
         })
         .is_err());
 }
@@ -1095,6 +1099,7 @@ fn agent_citations_round_trip_source_keys_without_model_renumbering() {
             fetch: vec![],
             ask: None,
             finish: true,
+            followups: vec![],
             artifacts: vec![WorkAgentArtifactOutput {
                 title: "Comparison".into(),
                 data: serde_json::from_value(data.clone()).unwrap(),
@@ -1150,4 +1155,93 @@ fn agent_citations_round_trip_source_keys_without_model_renumbering() {
             vec![WorkAgentArtifactRefusal::UnknownEvidenceKey]
         );
     }
+}
+
+#[test]
+fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
+    use super::{agent::*, runtime::*};
+    let step = |kind, status| WorkStepFact {
+        id: 9.into(),
+        turn: 2,
+        kind,
+        status,
+        usage: None,
+        artifacts: vec![],
+        evidence: None,
+        note: None,
+    };
+    let steer = |status| {
+        step(
+            WorkStepKindV1::Steer {
+                text: "Only official pages".into(),
+            },
+            status,
+        )
+    };
+    assert!(steer(WorkStepStatus::Succeeded).validate().is_ok());
+    assert!(steer(WorkStepStatus::Running).validate().is_err());
+    let finish = |followups: Vec<&str>| {
+        step(
+            WorkStepKindV1::Finish {
+                followups: followups.into_iter().map(String::from).collect(),
+            },
+            WorkStepStatus::Succeeded,
+        )
+        .validate()
+    };
+    assert!(finish(vec!["Add Tower Bridge to cart", "Watch the price"]).is_ok());
+    assert!(finish(vec!["a", "b", "c", "d"]).is_err());
+    assert!(finish(vec!["a", "a"]).is_err());
+    assert!(finish(vec![&"x".repeat(121)]).is_err());
+    let disclosure = WorkAgentTurnDisclosure::try_new(
+        "Compare sets",
+        vec![],
+        vec![],
+        &[],
+        &[],
+        &[],
+        WorkAgentBudget {
+            turns_left: 3,
+            steps_left: 9,
+            browse_available: true,
+        },
+        WorkExecutionLimits {
+            model_tokens: 100_000,
+            cost_micro_usd: 100_000,
+            operations: 10,
+            timeout_seconds: 60,
+            max_workers: 1,
+        },
+        vec![],
+    )
+    .unwrap();
+    let output = |finish| WorkAgentTurnOutput {
+        say: None,
+        artifacts: vec![],
+        fetch: vec![WorkAgentFetch::Search {
+            query: "lego architecture sets".into(),
+        }],
+        ask: None,
+        finish,
+        followups: vec![
+            " Add to cart ".into(),
+            "".into(),
+            "Add to cart".into(),
+            "x".repeat(121),
+            "Watch the price".into(),
+            "Compare two".into(),
+            "Fourth".into(),
+        ],
+    };
+    assert!(disclosure
+        .resolve(output(false))
+        .unwrap()
+        .followups
+        .is_empty());
+    let mut finishing = output(true);
+    finishing.fetch.clear();
+    assert_eq!(
+        disclosure.resolve(finishing).unwrap().followups,
+        vec!["Add to cart", "Watch the price", "Compare two"]
+    );
 }

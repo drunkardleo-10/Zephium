@@ -1028,6 +1028,29 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
         &state.executions[0].steps[2].kind,
         WorkStepKindV1::Ask { answer: Some(answer), .. } if answer == "Low"
     ));
+    // A steer is a settled person step appended while the attempt runs.
+    let steer = |hub: &mut Hub, command: u128| {
+        let state = read_runtime(hub, &initial);
+        hub.work_document(
+            initial.profile,
+            WorkRequest::RuntimeCommand {
+                id: initial.id,
+                expected: state.work.revision,
+                command: command.into(),
+                intent: WorkRuntimeIntent::Steer {
+                    execution,
+                    text: "Only official pricing pages".into(),
+                },
+            },
+        )
+    };
+    steer(&mut hub, 210).unwrap();
+    let state = read_runtime(&mut hub, &initial);
+    assert!(matches!(
+        &state.executions[0].steps[3],
+        WorkStepFact { kind: WorkStepKindV1::Steer { text }, status: WorkStepStatus::Succeeded, usage: None, turn: 2, .. }
+            if text == "Only official pricing pages"
+    ));
     // Success needs the Finish step first.
     let settle = |hub: &mut Hub, status| {
         let state = read_runtime(hub, &initial);
@@ -1053,7 +1076,12 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
         WorkRuntimeUpdate::BeginStep {
             execution,
             attempt,
-            step: step(4, 3, WorkStepKindV1::Finish, WorkStepStatus::Succeeded),
+            step: step(
+                4,
+                3,
+                WorkStepKindV1::Finish { followups: vec![] },
+                WorkStepStatus::Succeeded,
+            ),
             artifacts: vec![],
             evidence: None,
         },
@@ -1062,5 +1090,6 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
     settle(&mut hub, WorkAttemptStatus::Succeeded).unwrap();
     let state = read_runtime(&mut hub, &initial);
     assert_eq!(state.executions[0].status, WorkExecutionStatus::NeedsReview);
-    assert_eq!(state.executions[0].steps.len(), 4);
+    assert_eq!(state.executions[0].steps.len(), 5);
+    assert!(matches!(steer(&mut hub, 211), Err(WorkError::Conflict)));
 }
