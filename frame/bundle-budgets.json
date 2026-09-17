@@ -150,15 +150,15 @@
     "css": 119000,
     "description": "Measured 575663 JS bytes with incremental agent-run organization, source elements, and worker links."
   },
+  "lazy:features/work/components/AgentLine.svelte": {
+    "js": 110000,
+    "css": 7000,
+    "description": "Measured 105901 JS and 6199 CSS bytes: one quiet line with the run's state, its question, the agent roster, and the steer/queue path."
+  },
   "lazy:features/work/components/WorkObjectiveInspector.svelte": {
     "js": 162000,
     "css": 19500,
     "description": "Account-scoped approvals, the signed-in composer chip, and intervention controls add to the Work graph and message catalog."
-  },
-  "lazy:features/work/components/WorkInteraction.svelte": {
-    "js": 131000,
-    "css": 7800,
-    "description": "Measured 127103 JS and 7627 CSS bytes: the agent line, recent step list, and run questions replaced the planning ceremony controls."
   },
   "lazy:features/work/components/WorkResultInspector.svelte": {
     "js": 74000,

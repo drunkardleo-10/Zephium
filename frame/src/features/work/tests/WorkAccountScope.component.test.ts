@@ -89,7 +89,7 @@ test("a tab card starts a signed-in request that Rust prepares for approval", as
   await expect
     .element(screen.getByText("https://app.notion.com", { exact: true }).first())
     .toBeVisible();
-  const composer = screen.getByRole("textbox", { name: "Start a new objective", exact: true });
+  const composer = screen.getByRole("textbox", { name: "What do you want to do?", exact: true });
   await expect.element(composer).toHaveFocus();
   await screen.getByRole("radio", { name: "Change a field and restore it", exact: true }).click();
   await composer.fill("Rename the sprint page briefly");

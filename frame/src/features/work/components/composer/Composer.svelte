@@ -1,31 +1,25 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
   import Icon from "$shared/ui/Icon";
-  import { ArrowUp02Icon, Mic01Icon, StopIcon } from "../../lib/icons";
+  import { ArrowUp02Icon } from "../../lib/icons";
   import * as m from "$shared/i18n/messages";
   let {
     value = $bindable(""),
     placeholder,
     disabled = false,
     busy = false,
-    canStop = false,
     context,
     above,
-    footer,
     onsubmit,
-    onstop,
     ref = $bindable(),
   }: {
     value?: string;
     placeholder: string;
     disabled?: boolean;
     busy?: boolean;
-    canStop?: boolean;
     context?: Snippet;
     above?: Snippet;
-    footer?: Snippet;
     onsubmit: () => void;
-    onstop?: () => void;
     ref?: HTMLElement;
   } = $props();
   const id = $props.id();
@@ -34,7 +28,7 @@
     const element = textarea;
     if (!element) return;
     element.style.blockSize = "auto";
-    element.style.blockSize = `${Math.min(element.scrollHeight, 160)}px`;
+    element.style.blockSize = `${Math.min(element.scrollHeight, 92)}px`;
   }
   $effect(() => {
     void value;
@@ -71,33 +65,15 @@
         {disabled}
         onkeydown={keydown}
         oninput={grow}></textarea>
-      <div class="actions">
-        <button
-          type="button"
-          class="icon voice"
-          aria-label={m.work_env_voice_input()}
-          title={m.work_env_voice_soon()}
-          disabled
-        >
-          <Icon icon={Mic01Icon} size={17} />
-        </button>
-        {#if canStop}
-          <button type="button" class="icon stop" aria-label={m.work_cancel()} onclick={onstop}>
-            <Icon icon={StopIcon} size={16} />
-          </button>
-        {:else}
-          <button
-            type="submit"
-            class="icon send"
-            aria-label={m.work_env_send()}
-            disabled={disabled || busy || !value.trim()}
-          >
-            <Icon icon={ArrowUp02Icon} size={17} strokeWidth={2} />
-          </button>
-        {/if}
-      </div>
+      <button
+        type="submit"
+        class="icon send"
+        aria-label={m.work_env_send()}
+        disabled={disabled || busy || !value.trim()}
+      >
+        <Icon icon={ArrowUp02Icon} size={17} strokeWidth={2} />
+      </button>
     </div>
-    {#if footer}<div class="footer">{@render footer()}</div>{/if}
   </form>
 </div>
 
@@ -160,7 +136,7 @@
     min-inline-size: 0;
     box-sizing: border-box;
     min-block-size: 32px;
-    max-block-size: 160px;
+    max-block-size: 92px;
     padding: 6px 0;
     border: 0;
     background: transparent;
@@ -176,15 +152,10 @@
     color: var(--color-faint);
   }
 
-  .actions {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-  }
-
   .icon {
     display: grid;
     place-items: center;
+    flex: none;
     inline-size: 32px;
     block-size: 32px;
     border: 0;
@@ -213,10 +184,6 @@
     scale: 0.94;
   }
 
-  .voice:disabled {
-    opacity: 0.55;
-  }
-
   .send {
     background: var(--color-accent);
     color: var(--color-on-accent);
@@ -232,21 +199,6 @@
   .send:hover:not(:disabled) {
     background: var(--color-accent-hover);
     color: var(--color-on-accent);
-  }
-
-  .stop {
-    background: var(--color-fill-active);
-    color: var(--color-text);
-  }
-
-  .footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    min-block-size: 16px;
-    color: var(--color-faint);
-    font-size: var(--text-caption);
   }
 
   .sr-only {

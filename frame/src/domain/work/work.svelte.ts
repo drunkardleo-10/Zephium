@@ -58,6 +58,8 @@ export class WorkSession {
   activity = $state.raw<WorkSignalV1[]>([]);
   /** Pages the latest runs opened, with their newest frames; kept after a run ends. */
   pages = $state.raw<WorkPageV1[]>([]);
+  /** Messages typed while a run was live; each is sent on as the run before it ends. */
+  queue = $state.raw<string[]>([]);
   private activityRefresh: ReturnType<typeof setTimeout> | undefined;
   private readonly artifacts = new SvelteMap<string, ArtifactDraft>();
   private readonly drafts = new SvelteMap<string, TextDraft>();
@@ -447,6 +449,53 @@ export class WorkSession {
         intent: { kind: "begin_agent", grant: AGENT_GRANT, limits: AGENT_LIMITS },
       },
     });
+  }
+  /**
+   * The person's next message on the same work: it becomes the live request and
+   * starts a fresh run over everything the work already established.
+   */
+  async continueWith(text: string): Promise<boolean> {
+    const message = text.trim();
+    if (!message || !this.projection?.work) return false;
+    if (!(await this.edit({ kind: "set_objective", objective: message }))) return false;
+    await this.run();
+    return true;
+  }
+  /** Up to three next requests the finished run offers; empty while it works. */
+  get followups(): readonly string[] {
+    const steps = this.projection?.executions.at(-1)?.steps ?? [];
+    for (let index = steps.length - 1; index >= 0; index--) {
+      const kind = steps[index]!.kind;
+      if (kind.kind === "finish") return kind.followups ?? [];
+    }
+    return [];
+  }
+  /** The live execution a person can still speak to. */
+  private get running() {
+    return this.projection?.executions.find(
+      (entry) =>
+        ["running", "approved"].includes(entry.status) &&
+        !this.projection?.interrupted.includes(entry.id),
+    );
+  }
+  /** Hands a message to the agent at its next move; refused when no run is live. */
+  async steer(text: string): Promise<boolean> {
+    const message = text.trim();
+    const execution = this.running;
+    if (!message || !execution) return false;
+    return this.execute({ kind: "steer", execution: execution.id, text: message });
+  }
+  /** Holds a message until the run in flight finishes. */
+  enqueue(text: string) {
+    const message = text.trim();
+    if (message && this.queue.length < 16) this.queue = [...this.queue, message];
+  }
+  /** Sends the oldest queued message on as a continuation; the rest wait their turn. */
+  async sendQueued(): Promise<boolean> {
+    const [next, ...rest] = this.queue;
+    if (!next) return false;
+    this.queue = rest;
+    return this.continueWith(next);
   }
   answerStep(execution: string, step: string, answer: string) {
     return this.execute({ kind: "answer_step", execution, step, answer });

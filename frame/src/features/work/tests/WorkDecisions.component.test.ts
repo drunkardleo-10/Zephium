@@ -164,7 +164,7 @@ test("a decision is recorded on the element, shown on the card, and disclosed as
   await expect.element(screen.getByText("Decision", { exact: true }).first()).toBeVisible();
   await screen.getByRole("button", { name: "Ask", exact: true }).click();
   await expect
-    .element(screen.getByRole("textbox", { name: "Start a new objective" }))
+    .element(screen.getByRole("textbox", { name: "What do you want to do?" }))
     .toHaveFocus();
   await screen.container.querySelector<HTMLElement>(".work-drag-handle")!.click();
   await screen.getByRole("button", { name: "Unchoose", exact: true }).click();

@@ -90,6 +90,7 @@
     </div>
     <p class="note">{m.work_account_update_note()}</p>
   {/if}
+  <p class="note">{m.work_account_disclosure()}</p>
 </div>
 
 <style>

@@ -94,7 +94,7 @@
   let canvasWidth = $state(0);
   let canvasHeight = $state(0);
   let host = $state<HTMLDivElement>();
-  setContext(canvasFocusResult, (id: string) => {
+  function center(id: string) {
     const node = nodes.find((node) => node.id === id);
     if (!node) return;
     const position = absolutePosition(node, nodes);
@@ -107,7 +107,8 @@
       zoom: 1,
     };
     publishView();
-  });
+  }
+  setContext(canvasFocusResult, center);
   const restoredViewport = untrack(() => validViewport(initialView?.viewport));
   let viewport = $state(restoredViewport ?? { x: 0, y: 0, zoom: 1 });
   let valid = $derived(validScene(items, links));
@@ -240,6 +241,7 @@
   type CanvasApi = {
     screenRect: (id: string) => DOMRect | null;
     selectionBounds: () => (CanvasPosition & CanvasSize & { ids: string[] }) | null;
+    center: (id: string) => void;
   };
   function selectionBounds() {
     const ids = selection.filter((id) => nodes.some((node) => node.id === id && !isAreaNode(node)));
@@ -260,7 +262,7 @@
     );
   }
   $effect(() => {
-    expose?.({ screenRect, selectionBounds });
+    expose?.({ screenRect, selectionBounds, center });
   });
   let lastClick = { id: "", at: 0 };
 </script>

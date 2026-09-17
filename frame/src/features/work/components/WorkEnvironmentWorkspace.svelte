@@ -111,6 +111,7 @@
       height: number;
       ids: string[];
     } | null;
+    center: (id: string) => void;
   }>();
   let selectionCount = $state(0);
   let selectedIds = $state.raw<string[]>([]);
@@ -654,7 +655,7 @@
     ) ?? [],
   );
   const loadCanvas = () => import("./WorkCanvas.svelte");
-  const loadInteraction = () => import("./WorkInteraction.svelte");
+  const loadAgentLine = () => import("./AgentLine.svelte");
   const loadDetail = () => import("./WorkObjectiveInspector.svelte");
   $effect(() => {
     const current = snapshot;
@@ -741,6 +742,28 @@
     await attachNote();
     chrome?.close();
     notesOpen = true;
+  }
+  /** The work this canvas is already talking to, if its request card is here. */
+  const runningObjective = $derived(
+    !!objectiveSession?.projection &&
+      !!snapshot?.elements.some(
+        (element) =>
+          element.reference.kind === "objective" &&
+          element.reference.objective === objectiveSession?.selected,
+      ),
+  );
+  /** One field, one meaning: the first message starts the work, the rest continue it. */
+  async function send() {
+    const text = session.composer.trim();
+    if (!text || busy) return;
+    const current = objectiveSession;
+    if (runningObjective && current) {
+      session.composer = "";
+      if (activeExecution) current.enqueue(text);
+      else await current.continueWith(text);
+      return;
+    }
+    await createObjective();
   }
   async function createObjective() {
     if (!session.composer.trim() || objectivePending || busy) return;
@@ -933,16 +956,6 @@
         !objectiveSession?.projection?.interrupted.includes(execution.id),
     ),
   );
-  async function stopObjective() {
-    const current = objectiveSession;
-    const execution = current?.projection?.executions.find(
-      (execution) =>
-        ["running", "approved"].includes(execution.status) &&
-        !current.projection?.interrupted.includes(execution.id),
-    );
-    if (!current || !execution || current.pending) return;
-    await current.execute({ kind: "cancel", execution: execution.id });
-  }
   const needsDecision = $derived(
     !!objectiveSession?.projection?.work.questions.some((question) => question.state === "active"),
   );
@@ -1245,20 +1258,19 @@
   </div>
 {/snippet}
 {#snippet composerAbove()}
-  {#if !objectiveOpen && objectiveSession?.projection && snapshot?.elements.some((element) => element.reference.kind === "objective" && element.reference.objective === objectiveSession?.selected)}
+  {#if runningObjective && objectiveSession}
     <LazyView
-      loader={loadInteraction}
+      loader={loadAgentLine}
       loadingLabel={m.surface_loading()}
       failureLabel={m.surface_render_failed()}
       retryLabel={m.surface_retry()}
-      >{#snippet children(Interaction)}
-        <Interaction
+      >{#snippet children(Line)}
+        <Line
           session={objectiveSession!}
-          ondetails={(execution) => {
-            inspectionExecution = execution ?? null;
-            inspectCurrentPlan = !execution;
-            objectiveOpen = true;
-          }}
+          agents={agents.items}
+          draft={session.composer}
+          onfocusagent={(id) => canvasRef?.center(id)}
+          onsteered={() => (session.composer = "")}
           onopenpage={(tab) => {
             if (!tabs.some((candidate) => candidate.id === tab)) return;
             const origin = snapshot?.elements.find(
@@ -1271,9 +1283,6 @@
   {/if}
   {#if composerFailure}<p class="composer-alert" role="alert">
       {m.work_account_update_invalid()}
-    </p>{/if}
-  {#if objectiveSession?.failure}<p class="composer-alert" role="status">
-      {m.work_request_failed({ reason: objectiveSession.failure })}
     </p>{/if}
 {/snippet}
 {#snippet composerContext()}
@@ -1293,10 +1302,6 @@
     <ContextManifest profile={session.profile} selection={contextSel} purpose="agent" />
   {/if}
 {/snippet}
-{#snippet composerFooter()}
-  <span class="disclosure">{m.work_account_disclosure()}</span>
-{/snippet}
-
 <div
   class="environment"
   style:--work-header-height="52px"
@@ -1626,15 +1631,12 @@
       <Composer
         bind:ref={composerElement}
         bind:value={session.composer}
-        placeholder={m.work_env_prompt()}
+        placeholder={runningObjective ? m.work_composer_continue() : m.work_composer_start()}
         disabled={objectivePending || !!session.objectiveSubmission}
         {busy}
         above={composerAbove}
         context={contextSel || session.accountScope ? composerContext : undefined}
-        footer={session.accountScope ? composerFooter : undefined}
-        canStop={activeExecution}
-        onsubmit={() => void createObjective()}
-        onstop={() => void stopObjective()}
+        onsubmit={() => void send()}
       />
     </div>
   {/if}
@@ -1933,12 +1935,5 @@
     box-shadow: var(--shadow-popover);
     color: var(--color-warning);
     font-size: var(--text-label);
-  }
-
-  .disclosure {
-    min-inline-size: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 </style>

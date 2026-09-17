@@ -153,7 +153,7 @@ test("the production manual environment attaches a real tab, opens it in the pan
     .element(screen.getByRole("region", { name: "Browser pane", exact: true }))
     .not.toBeInTheDocument();
   await expect
-    .element(screen.getByRole("textbox", { name: "Start a new objective" }))
+    .element(screen.getByRole("textbox", { name: "What do you want to do?" }))
     .not.toBeInTheDocument();
   await screen.unmount();
   session.dispose();
@@ -370,7 +370,7 @@ test("prompt submission keeps work on canvas and clarification choices above the
   root.style.height = "600px";
   root.style.width = "1100px";
   const composer = screen.getByRole("textbox", {
-    name: "Start a new objective",
+    name: "What do you want to do?",
     exact: true,
   });
   await expect.element(screen.getByRole("button", { name: "Fit view", exact: true })).toBeVisible();
@@ -420,14 +420,18 @@ test("prompt submission keeps work on canvas and clarification choices above the
     },
   ];
   objective.projection = { ...objective.projection!, executions: [asking] };
+  await screen.getByRole("button", { name: "Answer", exact: true }).click();
   await screen.getByRole("button", { name: "Under 150", exact: true }).click();
-  await expect.element(composer).toBeVisible();
-  const question = screen.container.querySelector(".interaction input")!;
+  // One field, two meanings: the same composer now continues the work it started.
+  await expect
+    .element(screen.getByRole("textbox", { name: "Message the agent…", exact: true }))
+    .toBeVisible();
+  const question = screen.container.querySelector(".agent-line input")!;
   const prompt = screen.container.querySelector(".panel textarea")!;
   expect(question.compareDocumentPosition(prompt) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(question.getBoundingClientRect().bottom).toBeLessThan(prompt.getBoundingClientRect().top);
   const answerStep = vi.spyOn(objective, "answerStep").mockResolvedValue(true);
-  await screen.getByRole("button", { name: "Continue", exact: true }).click();
+  await screen.getByRole("button", { name: "Send answer", exact: true }).click();
   expect(answerStep).toHaveBeenCalledExactlyOnceWith("execution", "ask-1", "Under 150");
   expect(planning).toHaveBeenCalledTimes(1);
   const link = { extraction_id: "provider-record", source_id: 1 };
@@ -477,12 +481,11 @@ test("prompt submission keeps work on canvas and clarification choices above the
   await screen.getByRole("button", { name: "Close", exact: true }).click();
   objective.discardDrafts();
   await expect
-    .poll(() => screen.container.querySelector(".interaction.settled") !== null)
+    .poll(() => screen.container.querySelector(".agent-line.settled") !== null)
     .toBe(true);
   await expect
     .poll(() => screen.container.querySelector(".above")!.getBoundingClientRect().height)
     .toBeLessThan(110);
-  expect(screen.container.querySelector(".interaction header button")).toBeNull();
   await expect.element(screen.getByRole("button", { name: "Source 1", exact: true })).toBeEnabled();
   await screen.getByRole("button", { name: "View 1 other results", exact: true }).click();
   await expect
