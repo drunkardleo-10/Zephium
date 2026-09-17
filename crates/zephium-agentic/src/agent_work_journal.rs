@@ -282,10 +282,9 @@ impl AgentWorkRecord {
             (Admitted, Running | RecoveryRequired | FailedClosed)
                 | (Running, NeedsApproval | RecoveryRequired | FailedClosed)
                 | (
-                    NeedsApproval | Interrupted,
+                    NeedsApproval | Interrupted | RecoveryRequired,
                     FreshAdmissionRequired | Rejected | FailedClosed
                 )
-                | (RecoveryRequired, FailedClosed)
         );
         if !allowed {
             return Err(AgentWorkJournalError::Transition);

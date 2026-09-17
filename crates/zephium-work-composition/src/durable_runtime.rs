@@ -323,6 +323,11 @@ impl MacosWorkComposition {
         let mut disposition = None;
         let mut shown_frame = 0;
         let mut reviews = 0u8;
+        // Anonymous reads have no side effects: an uncertain page settles as a
+        // failure charged with what the model actually used.
+        let anonymous = intervention_origin.is_none();
+        let mut settled = WorkUsage::default();
+        let mut model_in_flight = false;
         #[cfg(feature = "public-qualification")]
         let trace = |label: &str| {
             if let Some(diagnostic) = stage_diagnostic {
@@ -349,6 +354,23 @@ impl MacosWorkComposition {
             // This loop exists only while an admitted worker/resource is owned.
             // Draining also releases the controller's bounded event backpressure.
             while let Some(event) = guard.0.take_event() {
+                match event.kind() {
+                    AgentWorkEventKind::ModelActive => model_in_flight = true,
+                    AgentWorkEventKind::ModelSettled {
+                        input_tokens,
+                        output_tokens,
+                        cost_micro_usd,
+                        ..
+                    } => {
+                        model_in_flight = false;
+                        settled = settled_model_usage(
+                            settled,
+                            input_tokens.saturating_add(output_tokens),
+                            cost_micro_usd,
+                        );
+                    }
+                    _ => {}
+                }
                 #[cfg(feature = "public-qualification")]
                 if matches!(
                     event.kind(),
@@ -489,18 +511,31 @@ impl MacosWorkComposition {
                         intervention: None,
                     });
                 }
+                RetainedWorkPhase::Uncertain if anonymous => {
+                    trace("close:uncertain");
+                    return Ok(BrowserRun {
+                        status: WorkAttemptStatus::Failed,
+                        usage: Some(uncertain_usage(settled, model_in_flight, limits)),
+                        artifacts: vec![],
+                        intervention,
+                    });
+                }
                 RetainedWorkPhase::Uncertain => {
                     trace("close:uncertain");
                     requested_close = true;
                 }
                 RetainedWorkPhase::NeedsReview => {
-                    // A prior process ended mid-run; its native resources died
-                    // with it. Accept fresh admission so this anonymous read can
-                    // proceed. The recorded debt stays in the journal.
-                    let interrupted =
-                        guard.0.records().into_iter().find(|record| {
-                            record.disposition() == AgentWorkDisposition::Interrupted
-                        });
+                    // A prior process ended mid-run, or this process's own
+                    // scoped recovery already stopped its actor. Accept fresh
+                    // admission so this anonymous read can proceed. The
+                    // recorded debt stays in the journal.
+                    let interrupted = guard.0.records().into_iter().find(|record| {
+                        matches!(
+                            record.disposition(),
+                            AgentWorkDisposition::Interrupted
+                                | AgentWorkDisposition::RecoveryRequired
+                        )
+                    });
                     match interrupted {
                         Some(record) if reviews < MAX_HISTORICAL_REVIEWS => {
                             if guard
@@ -602,6 +637,39 @@ struct BrowserRun {
     artifacts: Vec<WorkArtifactDraft>,
     intervention: Option<WorkInterventionV1>,
 }
+fn settled_model_usage(settled: WorkUsage, tokens: u64, cost_micro_usd: u64) -> WorkUsage {
+    WorkUsage {
+        model_tokens: settled
+            .model_tokens
+            .saturating_add(u32::try_from(tokens).unwrap_or(u32::MAX)),
+        cost_micro_usd: settled
+            .cost_micro_usd
+            .saturating_add(u32::try_from(cost_micro_usd).unwrap_or(u32::MAX)),
+        operations: settled.operations.saturating_add(1),
+        accounting: WorkUsageAccounting::ConservativeReservation,
+    }
+}
+/// Model calls settle before their tool runs, so a page failing under a tool
+/// has an exact model bill. A call still in flight keeps the reservation.
+fn uncertain_usage(
+    settled: WorkUsage,
+    model_in_flight: bool,
+    limits: WorkExecutionLimits,
+) -> WorkUsage {
+    if model_in_flight || !settled.within(limits) {
+        WorkUsage {
+            model_tokens: limits.model_tokens,
+            cost_micro_usd: limits.cost_micro_usd,
+            operations: limits.operations,
+            accounting: WorkUsageAccounting::ConservativeReservation,
+        }
+    } else {
+        WorkUsage {
+            operations: settled.operations.max(1),
+            ..settled
+        }
+    }
+}
 /// Drops the page's live mark on every exit from the retained loop.
 struct PageSettle(WorkAttemptProbe, WorkStepId);
 impl Drop for PageSettle {
@@ -633,6 +701,40 @@ impl BrowserRun {
 #[cfg(test)]
 mod closed_result_tests {
     use super::*;
+
+    #[test]
+    fn an_uncertain_page_bills_settled_model_calls_unless_one_is_in_flight() {
+        let limits = WorkExecutionLimits {
+            model_tokens: 100_000,
+            cost_micro_usd: 100_000,
+            operations: 10,
+            timeout_seconds: 60,
+            max_workers: 1,
+        };
+        let settled = settled_model_usage(
+            settled_model_usage(WorkUsage::default(), 9000, 2500),
+            9500,
+            2600,
+        );
+        let usage = uncertain_usage(settled, false, limits);
+        assert_eq!(
+            (usage.model_tokens, usage.cost_micro_usd, usage.operations),
+            (18_500, 5_100, 2)
+        );
+        assert_eq!(
+            usage.accounting,
+            WorkUsageAccounting::ConservativeReservation
+        );
+        let reserved = uncertain_usage(settled, true, limits);
+        assert_eq!(
+            (reserved.model_tokens, reserved.cost_micro_usd),
+            (100_000, 100_000)
+        );
+        let empty = uncertain_usage(WorkUsage::default(), false, limits);
+        assert_eq!((empty.model_tokens, empty.operations), (0, 1));
+        let over = settled_model_usage(WorkUsage::default(), 200_000, 10);
+        assert_eq!(uncertain_usage(over, false, limits).model_tokens, 100_000);
+    }
 
     #[test]
     fn artifact_conversion_failure_preserves_native_usage_and_uncertainty() {

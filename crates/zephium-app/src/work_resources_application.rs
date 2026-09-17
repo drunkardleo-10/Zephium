@@ -449,8 +449,7 @@ impl RetainedWork {
                         .any(|pair| pair[0].key() >= pair[1].key())
                     || records.iter().any(|record| {
                         !(historical_record_admissible(*record)
-                            || (record.disposition() == AgentWorkDisposition::Interrupted
-                                && record.incarnation() == owner))
+                            || (reviewable(record.disposition()) && record.incarnation() == owner))
                     })
                 {
                     // Malformed or unreviewable recovery facts cannot admit work.
@@ -1043,7 +1042,7 @@ impl RetainedWork {
             Err(AgentWorkJournalError::Unavailable)
         } else if !self.inventory.contains(&record)
             || Some(record.incarnation()) != self.incarnation
-            || record.disposition() != AgentWorkDisposition::Interrupted
+            || !reviewable(record.disposition())
             || self.record.is_some()
             || self.active.is_some()
             || self.acquisition.is_some()
@@ -1356,6 +1355,14 @@ impl RetainedWork {
 
 /// A fresh native resource may coexist with explicitly reviewed historical
 /// uncertainty. This predicate never permits reuse of an active execution owner.
+/// A record whose actor is gone and whose debt stays historical: a prior
+/// process's interruption, or this process's own scoped recovery.
+fn reviewable(disposition: AgentWorkDisposition) -> bool {
+    matches!(
+        disposition,
+        AgentWorkDisposition::Interrupted | AgentWorkDisposition::RecoveryRequired
+    )
+}
 fn historical_record_admissible(record: AgentWorkRecord) -> bool {
     record.disposition().is_terminal()
         && (record.debt() == AgentWorkDebt::NONE

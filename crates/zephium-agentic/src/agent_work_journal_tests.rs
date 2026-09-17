@@ -48,10 +48,9 @@ fn every_disposition_pair_has_closed_transition_grammar() {
                 (Admitted, Running | RecoveryRequired | FailedClosed)
                     | (Running, NeedsApproval | RecoveryRequired | FailedClosed)
                     | (
-                        NeedsApproval | Interrupted,
+                        NeedsApproval | Interrupted | RecoveryRequired,
                         FreshAdmissionRequired | Rejected | FailedClosed
                     )
-                    | (RecoveryRequired, FailedClosed)
             );
             assert_eq!(record.transition(to).is_ok(), allowed, "{from:?} -> {to:?}");
         }

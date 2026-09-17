@@ -146,6 +146,31 @@ fn reviewed_history_allows_fresh_resources_but_unreviewed_or_foreign_history_doe
 }
 
 #[test]
+fn own_recovery_record_is_reviewable_like_an_interruption() {
+    let current = AgentWorkIncarnation::generate();
+    let mut bytes = *interrupted_record(current, 1).as_bytes();
+    bytes[1] = AgentWorkDisposition::RecoveryRequired as u8;
+    let record = AgentWorkRecord::decode(bytes).unwrap();
+    let (mut work, native, journal) = review_coordinator(vec![record], current);
+    assert_eq!(work.phase(), AdmissionPhase::NeedsReview);
+    work.review(record, crate::AgentWorkReviewDecision::AcceptFreshAdmission);
+    assert_eq!(work.phase(), AdmissionPhase::Reviewing);
+    let (request, completion) = journal.0.lock().unwrap().pop_front().unwrap();
+    let AgentWorkJournalRequest::CompareAndSet(mutation) = request else {
+        panic!("review CAS");
+    };
+    assert_eq!(
+        mutation.next().disposition(),
+        AgentWorkDisposition::FreshAdmissionRequired
+    );
+    assert_eq!(mutation.next().debt(), AgentWorkDebt::UNKNOWN);
+    completion(Ok(AgentWorkJournalReply::Record(Some(mutation.next()))));
+    work.poll(now());
+    assert!(work.ready());
+    assert_eq!(native.acquisitions.load(Ordering::Acquire), 0);
+}
+
+#[test]
 fn historical_review_bad_ack_and_stop_cannot_reopen_admission() {
     for stop in [false, true] {
         let incarnation = AgentWorkIncarnation::generate();
