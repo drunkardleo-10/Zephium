@@ -514,11 +514,13 @@ mod tests {
             .split("\n#[cfg(test)]")
             .next()
             .unwrap();
-        let gates = source
-            .split("fn window_present(")
-            .next()
-            .unwrap();
-        for forbidden in ["isActive()", "keyWindow()", "mainWindow()", "firstResponder()"] {
+        let gates = source.split("fn window_present(").next().unwrap();
+        for forbidden in [
+            "isActive()",
+            "keyWindow()",
+            "mainWindow()",
+            "firstResponder()",
+        ] {
             assert!(!gates.contains(forbidden), "{forbidden}");
         }
     }
