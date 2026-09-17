@@ -11,6 +11,7 @@ import { displayHost } from "$shared/ui/data/Artifact";
 import type { ArtifactView, ArtifactContent, EvidenceReference } from "$shared/ui/data/Artifact";
 import * as m from "$shared/i18n/messages";
 import type { CanvasItem, CanvasLink } from "./canvas-model";
+import { fileFolder } from "./work-files";
 
 /** Display derivation of one objective; neither WorkProjectionV1 nor a store. */
 export type ProjectedWork = {
@@ -165,11 +166,22 @@ function evidenceReferences(
   execution: WorkExecutionFact,
 ): EvidenceReference[] {
   return links.map((link, index) => {
+    const key = `${link.extraction_id}:${link.source_id}`;
     const record = execution.provider_evidence?.find((record) => record.id === link.extraction_id);
     const citation = record?.evidence.citations[link.source_id - 1];
     const origin = displayHost(citation?.url);
+    if (!citation?.url)
+      // A granted folder is not a web address: a file cites its own name.
+      for (const entry of execution.file_evidence ?? [])
+        if (entry.id === link.extraction_id)
+          return {
+            key,
+            label: entry.file.name,
+            origin: fileFolder(entry.file.path),
+            file: { record: entry.id, path: entry.file.path },
+          };
     return {
-      key: `${link.extraction_id}:${link.source_id}`,
+      key,
       label: citation?.title?.trim() || origin || m.work_source_number({ number: index + 1 }),
       ...(origin ? { origin } : {}),
       ...(citation?.url ? { url: citation.url } : {}),

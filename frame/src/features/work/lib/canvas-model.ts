@@ -111,6 +111,8 @@ export function defaultSize(item: CanvasItem): { width: number; height: number }
     switch (item.artifact.content.kind) {
       case "comparison":
         return { width: 640, height: 360 };
+      case "matrix":
+        return { width: 560, height: 300 };
       case "table":
         return { width: 560, height: 320 };
       case "chart":

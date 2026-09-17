@@ -101,6 +101,40 @@ function subjectPictures(snapshot: WorkEnvironmentSnapshot): Set<string> {
   return pictures;
 }
 
+/** The admitted picture of each subject on this canvas, by merge key, so a
+ * comparison column shows the same picture as the subject's own card. */
+export function environmentPictures(
+  snapshot: WorkEnvironmentSnapshot,
+  objectives: ReadonlyMap<string, WorkRuntimeProjection>,
+  media: ReadonlyMap<string, MediaAssetV1>,
+): Map<string, { profile: string; digest: string }> {
+  const resources = new Map(
+    snapshot.elements.flatMap((element) =>
+      element.reference.kind === "resource" ? [[element.id, element.reference.resource]] : [],
+    ),
+  );
+  const pictures = new Map<string, { profile: string; digest: string }>();
+  for (const element of snapshot.elements) {
+    const reference = element.reference;
+    if (reference.kind !== "subject") continue;
+    const execution = objectives
+      .get(reference.objective)
+      ?.executions.find((execution) => execution.id === reference.execution);
+    const artifact = execution?.artifacts.find((artifact) => artifact.id === reference.artifact);
+    const subject = artifact ? subjectsOf(artifact)[reference.index] : undefined;
+    if (!subject || pictures.has(subjectKey(subject))) continue;
+    for (const relation of snapshot.relations ?? []) {
+      if (relation.kind !== "uses" || relation.from !== element.id) continue;
+      const resource = resources.get(relation.to);
+      const asset = resource ? media.get(resource) : undefined;
+      if (asset?.kind !== "image") continue;
+      pictures.set(subjectKey(subject), { profile: snapshot.profile, digest: asset.digest });
+      break;
+    }
+  }
+  return pictures;
+}
+
 export function environmentItems(
   snapshot: WorkEnvironmentSnapshot,
   tabs: readonly TabView[],

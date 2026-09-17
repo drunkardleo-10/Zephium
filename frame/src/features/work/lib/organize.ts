@@ -227,7 +227,7 @@ function objectSize(artifact: WorkArtifactV1): CanvasSize {
     case "table":
       return { width: 560, height: 320 };
     case "comparison_matrix":
-      return { width: 760, height: 380 };
+      return { width: 560, height: 300 };
     default:
       return { width: 420, height: 300 };
   }

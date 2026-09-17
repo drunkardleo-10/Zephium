@@ -9,3 +9,5 @@ export const canvasOpenLink = Symbol("canvas-open-link");
 export const canvasAreas = Symbol("canvas-areas");
 /** The person whose words the request card carries. */
 export const canvasAuthor = Symbol("canvas-author");
+/** The admitted picture of each subject, by merge key, for compare columns. */
+export const canvasPictures = Symbol("canvas-pictures");

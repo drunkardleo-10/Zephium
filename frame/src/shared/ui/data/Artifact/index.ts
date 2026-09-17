@@ -6,6 +6,8 @@ export type {
   ArtifactContent,
   EvidenceReference,
   SubjectView,
+  CriterionView,
+  CellView,
   FindingView,
   SourceEntryView,
   NoteDocumentView,

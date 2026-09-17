@@ -20,6 +20,7 @@
   import SubjectCard from "./cards/SubjectCard.svelte";
   import FindingCard from "./cards/FindingCard.svelte";
   import SourcesCard from "./cards/SourcesCard.svelte";
+  import CompareCard from "./cards/CompareCard.svelte";
   import FolderCard from "./cards/FolderCard.svelte";
   import AgentCard from "./cards/AgentCard.svelte";
   import PageCard from "./cards/PageCard.svelte";
@@ -112,6 +113,7 @@
   {:else if type === "note"}<NoteCard item={data} {selected} />
   {:else if type === "media"}<MediaCard item={data} {selected} />
   {:else if type === "responsibility"}<ResponsibilityCard item={data} {selected} />
+  {:else if data.artifact?.content.kind === "matrix"}<CompareCard item={data} {selected} />
   {:else if type === "result" || data.artifact}<ResultCard
       {id}
       item={data}

@@ -187,7 +187,8 @@ export function subjectImageCandidates(execution: WorkExecutionFact, subject: Su
   return [...observed, ...claimed.filter((url) => !observed.includes(url))];
 }
 
-function formatMoney(amount: string, currency: string): string {
+/** Money as a person reads it here, with the currency the run recorded. */
+export function formatMoney(amount: string, currency: string): string {
   const value = Number(amount);
   if (!Number.isFinite(value)) return `${amount} ${currency}`;
   try {

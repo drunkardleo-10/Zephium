@@ -59,6 +59,7 @@
     environmentItems,
     environmentLinks,
     environmentPages,
+    environmentPictures,
     environmentSources,
     environmentView,
     fileEvidence,
@@ -520,6 +521,9 @@
     objectiveSession?.selected === objective
       ? objectiveSession.activity.at(-1)?.activity
       : undefined;
+  const pictures = $derived(
+    snapshot ? environmentPictures(snapshot, context.objectives, context.media) : new Map(),
+  );
   const agents = $derived(
     snapshot
       ? environmentAgents(snapshot, context.objectives, signalOf)
@@ -1578,6 +1582,7 @@
               {links}
               areas={snapshot.areas}
               author={profileLabel}
+              {pictures}
               initialView={canvasView}
               {remoteView}
               {authoritative}
@@ -1726,7 +1731,7 @@
           >{#snippet children(FileView)}<FileView
               file={liftFile!}
               onreveal={reveal}
-              onback={liftedItem?.sources ? () => (liftFile = null) : undefined}
+              onback={() => (liftFile = null)}
             />{/snippet}</LazyView
         >
       {:else if liftedItem?.sources}
@@ -1814,7 +1819,6 @@
         >
       {:else if liftedItem?.artifact}
         <div class="lift-result">
-          <h2>{liftedItem.title}</h2>
           {#if results.references.get(liftedItem.id) && objectiveSession}
             <LazyView
               loader={loadResult}
@@ -1825,10 +1829,13 @@
                   session={objectiveSession!}
                   reference={results.references.get(liftedItem!.id)!}
                   source={liftSource}
+                  {pictures}
                   onopen={openCitation}
+                  onfile={(record: string) =>
+                    (liftFile = fileEvidence(context.objectives, record) ?? null)}
                 />{/snippet}</LazyView
             >
-          {/if}
+          {:else}<h2>{liftedItem.title}</h2>{/if}
         </div>
       {:else if liftedItem}
         <div class="lift-plain">
