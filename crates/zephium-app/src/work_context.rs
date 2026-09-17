@@ -138,6 +138,15 @@ impl WorkContextAdmission {
             }
             // A folder reaches the agent as a grant, never as context text.
             WorkEnvironmentReference::Folder { .. } => Err(WorkError::Invalid),
+            // A placed link is public by construction; the agent may read it.
+            WorkEnvironmentReference::Link { url, title } => Ok(WorkContextSource {
+                element: id,
+                kind: WorkContextItemKind::Tab,
+                title: title.clone(),
+                revision: url.clone(),
+                visibility: WorkContextVisibility::Public,
+                text: format!("{title}\n{url}"),
+            }),
             WorkEnvironmentReference::Browser { tab } => {
                 let tab = *tab;
                 let handle = self.handle.clone();

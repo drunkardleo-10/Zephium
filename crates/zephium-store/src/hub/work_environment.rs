@@ -173,6 +173,8 @@ fn validate_reference(
         WorkEnvironmentReference::Browser { .. } => {}
         // Admitted by the application before placement; the run re-checks it.
         WorkEnvironmentReference::Folder { .. } => {}
+        // Validated as a public URL on the edit; nothing to look up.
+        WorkEnvironmentReference::Link { .. } => {}
     }
     Ok(())
 }

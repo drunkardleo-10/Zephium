@@ -757,7 +757,12 @@ export type WorkEnvironmentReference = { kind: "browser"; tab: ItemId } | { kind
  *  read and, with approval, change files inside it; the application
  *  admitted the path before it was placed.
  */
-{ kind: "folder"; path: string; name: string };
+{ kind: "folder"; path: string; name: string } |
+/**
+ *  A public link the person placed on this canvas: a card and a page
+ *  the agent may read, never a navigation grant by itself.
+ */
+{ kind: "link"; url: string; title: string };
 
 export type WorkEnvironmentReply = WorkEnvironmentReply_Serialize | WorkEnvironmentReply_Deserialize;
 

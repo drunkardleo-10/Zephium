@@ -60,6 +60,12 @@ pub enum WorkEnvironmentReference {
         path: String,
         name: String,
     },
+    /// A public link the person placed on this canvas: a card and a page
+    /// the agent may read, never a navigation grant by itself.
+    Link {
+        url: String,
+        title: String,
+    },
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -498,6 +504,13 @@ impl WorkEnvironmentEdit {
             } => {
                 super::runtime::validate_file_path(path)?;
                 validate_text(name, 255)
+            }
+            Self::Add {
+                reference: WorkEnvironmentReference::Link { url, title },
+                ..
+            } => {
+                super::runtime::validate_public_url(url)?;
+                validate_text(title, 512)
             }
             _ => Ok(()),
         }
