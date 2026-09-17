@@ -43,6 +43,26 @@ fn get(conn: &Connection, id: &str) -> rusqlite::Result<Option<ResourceRecord>> 
     )
     .optional()
 }
+/// A live media resource already holding this fetched asset: the same public
+/// URL, or the same bytes fetched from elsewhere. Imported files never merge.
+pub(super) fn existing_fetched_media(
+    conn: &Connection,
+    asset: &MediaAssetV1,
+) -> Option<ResourceRecord> {
+    let MediaOrigin::Fetched { url, .. } = &asset.origin else {
+        return None;
+    };
+    let id: String = conn
+        .query_row(
+            "SELECT id FROM user_resources WHERE kind='media' AND trashed=0 AND json_extract(body,'$.content.asset.origin.kind')='fetched' AND (json_extract(body,'$.content.asset.origin.url')=?1 OR json_extract(body,'$.content.asset.digest')=?2) ORDER BY id DESC LIMIT 1",
+            params![url, asset.digest],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten()?;
+    get(conn, &id).ok().flatten()
+}
 fn search_text(draft: &ResourceDraft) -> String {
     let mut text = draft.title.clone();
     match &draft.content {

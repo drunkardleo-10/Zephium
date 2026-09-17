@@ -197,6 +197,18 @@ impl Hub {
                 }
             }
         };
+        let Ok(conn) = self.profile_conn(profile) else {
+            return ResourceResponse::Error {
+                error: ResourceError::Unavailable,
+            };
+        };
+        if let Some(record) = super::resources::existing_fetched_media(conn, &asset) {
+            return ResourceResponse::Applied {
+                request_id: import.request_id,
+                applied_revision: record.revision.clone(),
+                record,
+            };
+        }
         if media.put(profile, &asset.digest, &import.bytes).is_err() {
             return ResourceResponse::Error {
                 error: ResourceError::Unavailable,
@@ -214,11 +226,6 @@ impl Hub {
                     related: vec![],
                 },
             },
-        };
-        let Ok(conn) = self.profile_conn(profile) else {
-            return ResourceResponse::Error {
-                error: ResourceError::Unavailable,
-            };
         };
         super::resources::mutate(conn, profile, command).unwrap_or(ResourceResponse::Error {
             error: ResourceError::OutcomeUnknown,
@@ -359,6 +366,65 @@ mod tests {
         );
         assert!(
             matches!(replay, ResourceResponse::Applied { record: again, .. } if again.id == record.id)
+        );
+        // A public URL fetched again, or its bytes seen under another URL,
+        // reuses the live resource; a second file import is a new resource.
+        let fetched = |hub: &mut Hub, request: &str, url: &str, bytes: Vec<u8>| {
+            let response = hub.import_media(
+                profile,
+                MediaImport {
+                    request_id: request.into(),
+                    name: "set.jpg".into(),
+                    origin: MediaOrigin::Fetched {
+                        url: url.into(),
+                        observed_at: "2026-09-17".into(),
+                    },
+                    bytes: std::sync::Arc::new(bytes),
+                },
+            );
+            let ResourceResponse::Applied { record, .. } = response else {
+                panic!("fetched import must apply");
+            };
+            record.id
+        };
+        let first = fetched(
+            &mut hub,
+            "media-fetch-request-0001",
+            "https://a.example/set.png",
+            png(5, 5),
+        );
+        let same_url = fetched(
+            &mut hub,
+            "media-fetch-request-0002",
+            "https://a.example/set.png",
+            png(6, 6),
+        );
+        let same_bytes = fetched(
+            &mut hub,
+            "media-fetch-request-0003",
+            "https://b.example/set.png",
+            png(5, 5),
+        );
+        let other = fetched(
+            &mut hub,
+            "media-fetch-request-0004",
+            "https://c.example/set.png",
+            png(7, 7),
+        );
+        assert_eq!(first, same_url);
+        assert_eq!(first, same_bytes);
+        assert_ne!(first, other);
+        let imported_again = hub.import_media(
+            profile,
+            MediaImport {
+                request_id: "media-import-request-0003".into(),
+                name: "Keyboard.png".into(),
+                origin: MediaOrigin::Imported,
+                bytes: std::sync::Arc::new(png(4, 4)),
+            },
+        );
+        assert!(
+            matches!(imported_again, ResourceResponse::Applied { record: again, .. } if again.id != record.id)
         );
     }
 }
