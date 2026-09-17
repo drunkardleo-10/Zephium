@@ -108,6 +108,7 @@ test("the media tool lists the profile's media, imports through the native dialo
   const screen = await render(WorkMediaPicker, {
     profile,
     host: "environment:space",
+    kind: "image",
     attachedIds: [],
     pending: false,
     onattach,

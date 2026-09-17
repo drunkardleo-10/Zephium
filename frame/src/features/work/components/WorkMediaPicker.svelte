@@ -9,22 +9,28 @@
   let {
     profile,
     host,
+    kind = "document",
     attachedIds = [],
     pending = false,
     onattach,
   }: {
     profile: string;
     host: string;
+    /** Which half of the library this palette shows. */
+    kind?: "document" | "image";
     attachedIds?: readonly string[];
     pending?: boolean;
     onattach: (ids: string[]) => void;
   } = $props();
+  const IMAGES = /\.(png|jpe?g|gif|webp|avif|heic|heif|svg|bmp|tiff?)$/iu;
   const session = untrack(() => resourceSession(profile, "media", host));
   onMount(() => {
     void session?.start();
     return () => session?.stopObserving();
   });
-  const items = $derived(session?.items ?? []);
+  const items = $derived(
+    (session?.items ?? []).filter((item) => IMAGES.test(item.title) === (kind === "image")),
+  );
   let selected = $state<string[]>([]);
   let importing = $state(false);
   let failure = $state<string | null>(null);
@@ -62,8 +68,11 @@
   }
 </script>
 
-<section class="picker" aria-label={m.work_env_media()} aria-busy={pending || importing}>
-  <header><strong>{m.work_env_media()}</strong></header>
+<section
+  class="picker"
+  aria-label={kind === "image" ? m.work_env_images() : m.work_env_documents()}
+  aria-busy={pending || importing}
+>
   <ul>
     {#each items as item (item.id)}
       <li>
@@ -112,11 +121,6 @@
     flex-direction: column;
     gap: 12px;
     min-inline-size: 0;
-  }
-
-  header strong {
-    font-size: var(--text-body);
-    font-weight: 600;
   }
 
   ul {

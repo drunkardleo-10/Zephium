@@ -48,13 +48,22 @@
   export function close() {
     if (panel) change(panel, false);
   }
+  // A palette opens on hover intent as well as on click; the rest wait for a click.
   const tools = [
     { key: "notes" as const, label: m.work_env_notes(), icon: Note01Icon },
-    { key: "create" as const, label: m.work_env_new(), icon: PlusSignIcon },
+    { key: "create" as const, label: m.work_env_components(), icon: PlusSignIcon, palette: true },
     { key: "tabs" as const, label: m.work_env_tabs(), icon: BrowserIcon, prominent: true },
-    { key: "media" as const, label: m.work_env_media(), icon: Attachment01Icon },
+    { key: "media" as const, label: m.work_env_media(), icon: Attachment01Icon, palette: true },
     { key: "area" as const, label: m.work_env_area(), icon: LayoutGridIcon },
   ];
+  let hover: ReturnType<typeof setTimeout> | undefined;
+  function hoverOpen(key: WorkEnvironmentPanel) {
+    clearTimeout(hover);
+    hover = setTimeout(() => change(key, true), 180);
+  }
+  function hoverCancel() {
+    clearTimeout(hover);
+  }
 </script>
 
 {#snippet tool(
@@ -62,6 +71,7 @@
   label: string,
   icon: (typeof tools)[number]["icon"],
   prominent = false,
+  palette = false,
 )}
   <Popover.Root open={panel === key} onOpenChange={(open) => change(key, open)}>
     <Popover.Trigger disabled={!panels[key]}>
@@ -74,6 +84,8 @@
           {prominent}
           active={panel === key}
           disabled={!panels[key]}
+          onpointerenter={palette && panels[key] ? () => hoverOpen(key) : undefined}
+          onpointerleave={palette ? hoverCancel : undefined}
         />
       {/snippet}
     </Popover.Trigger>
@@ -121,6 +133,7 @@
         entry.label,
         entry.icon,
         entry.prominent,
+        entry.palette,
       )}{/each}
   </nav>
   <div class="profile">

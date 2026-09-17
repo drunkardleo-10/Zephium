@@ -48,6 +48,7 @@
             tabs={tabs.tabs()}
             spaceName={tabs.spaces().find((space) => space.id === owner.space)?.name ?? ""}
             profileLabel={tabs.profile()?.name ?? ""}
+            currentTabId={tabs.activeId()}
             aiEnabled={preferences.value("ai.enabled") !== "false"}
             onreturn={() =>
               void owner.flushView().then((okay) => {

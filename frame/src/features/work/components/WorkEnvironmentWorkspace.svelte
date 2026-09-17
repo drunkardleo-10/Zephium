@@ -24,10 +24,17 @@
   import {
     Archive01Icon,
     ArrowLeft02Icon,
+    ChartColumnIcon,
+    Doc01Icon,
     FolderAddIcon,
+    Image01Icon,
+    LayoutGridIcon,
+    Link04Icon,
+    MapsIcon,
     NoteAddIcon,
     Search01Icon,
     Settings02Icon,
+    Table01Icon,
     Tick02Icon,
   } from "../lib/icons";
   import WorkChrome from "./chrome/WorkChrome.svelte";
@@ -64,6 +71,7 @@
     tabs,
     spaceName,
     profileLabel,
+    currentTabId = null,
     aiEnabled = true,
     onreturn,
     onopen,
@@ -74,6 +82,8 @@
     tabs: readonly TabView[];
     spaceName: string;
     profileLabel: string;
+    /** The Space's current tab, so the picker reads like its tab strip. */
+    currentTabId?: string | null;
     aiEnabled?: boolean;
     onreturn: () => void;
     /** Explicit Browse handoff for one Space tab; the pane is the default way to look at a page. */
@@ -308,6 +318,50 @@
     return () => observer.disconnect();
   });
   let archived = $state(false);
+  let mediaKind = $state<"document" | "image" | "link">("document");
+  let linkDraft = $state("");
+  let linkPending = $state(false);
+  let linkFailure = $state(false);
+  /** Only an explicit https or http address; anything else is not a link. */
+  function linkUrl(raw: string): string | null {
+    const text = raw.trim();
+    if (!text) return null;
+    try {
+      const url = new URL(/^[a-z][a-z0-9+.-]*:/iu.test(text) ? text : `https://${text}`);
+      return url.protocol === "https:" || url.protocol === "http:" ? url.toString() : null;
+    } catch {
+      return null;
+    }
+  }
+  /** A pasted link becomes a card: the page opens as a Space tab this Work holds. */
+  async function addLink() {
+    const url = linkUrl(linkDraft);
+    if (!url || linkPending || busy) return;
+    linkPending = true;
+    linkFailure = false;
+    try {
+      const known = new Set(tabs.map((tab) => tab.id));
+      const admitted = await commands.tabsOpenUrl(url).catch(() => null);
+      const opened = admitted?.accepted ? await freshTab(known) : null;
+      if (!opened) {
+        linkFailure = true;
+        return;
+      }
+      await attach([opened]);
+      linkDraft = "";
+      chrome?.close();
+    } finally {
+      linkPending = false;
+    }
+  }
+  async function freshTab(known: ReadonlySet<string>): Promise<string | null> {
+    for (let attempt = 0; attempt < 30; attempt++) {
+      const fresh = tabs.find((tab) => !known.has(tab.id));
+      if (fresh) return fresh.id;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return null;
+  }
   const snapshot = $derived(session.snapshot);
   const baseItems = $derived(
     snapshot
@@ -946,12 +1000,24 @@
         work.title.toLocaleLowerCase().includes(workQuery.trim().toLocaleLowerCase()),
     ),
   );
-  async function groupSelection() {
+  /** One click makes an Area: around the selection when there is one. */
+  async function createArea(title: string = m.work_env_area()) {
+    const name = title.trim() || m.work_env_area();
+    if (selectionCount > 0) {
+      await groupSelection(name);
+      return;
+    }
+    if (await session.edit({ kind: "create_area", title: name })) {
+      areaTitle = "";
+      chrome?.close();
+    }
+  }
+  async function groupSelection(title: string) {
     const bounds = canvasRef?.selectionBounds();
     const current = snapshot;
-    if (!bounds || !current || !areaTitle.trim()) return;
+    if (!bounds || !current || !title.trim()) return;
     if (!(await session.flushView())) return;
-    if (!(await session.edit({ kind: "create_area", title: areaTitle.trim() }))) return;
+    if (!(await session.edit({ kind: "create_area", title: title.trim() }))) return;
     const created = session.snapshot?.areas.find(
       (area) => !current.areas.some((known) => known.id === area.id),
     );
@@ -985,6 +1051,7 @@
 {#snippet tabPanel()}<WorkTabPicker
     {tabs}
     {spaceName}
+    {currentTabId}
     attachedTabIds={attachedTabs}
     pending={busy}
     onattach={(ids) => void attach(ids)}
@@ -1073,36 +1140,23 @@
   </div>
 {/snippet}
 {#snippet createPanel()}
-  <div class="menu">
-    <button type="button" class="menu-row" disabled={busy} onclick={() => void createNote()}>
-      <span class="menu-icon"><Icon icon={NoteAddIcon} /></span>{m.work_env_new_note()}
-    </button>
-    <div class="menu-separator"></div>
-    <div class="menu-heading">{m.work_env_new_area()}</div>
-    <form
-      class="menu-create"
-      onsubmit={(event) => {
-        event.preventDefault();
-        if (areaTitle.trim())
-          void session.edit({ kind: "create_area", title: areaTitle.trim() }).then((okay) => {
-            if (okay) {
-              areaTitle = "";
-              chrome?.close();
-            }
-          });
-      }}
-    >
-      <input
-        aria-label={m.work_env_new_area()}
-        bind:value={areaTitle}
-        maxlength="128"
-        placeholder={m.work_env_area()}
-        disabled={busy}
-      /><Button type="submit" size="compact" disabled={busy || !areaTitle.trim()}
-        >{m.work_env_create()}</Button
-      >
-    </form>
+  <div class="palette" role="group" aria-label={m.work_env_components()}>
+    {@render component(Table01Icon, m.work_env_component_table())}
+    {@render component(ChartColumnIcon, m.work_env_component_chart())}
+    {@render component(MapsIcon, m.work_env_component_map())}
+    {@render component(LayoutGridIcon, m.work_env_area(), () => void createArea())}
   </div>
+{/snippet}
+{#snippet component(
+  icon: typeof Table01Icon,
+  label: string,
+  onchoose: (() => void) | undefined = undefined,
+)}
+  <button type="button" class="menu-row" disabled={!onchoose || busy} onclick={onchoose}>
+    <span class="menu-icon"><Icon {icon} /></span>{label}{#if !onchoose}<span class="soon"
+        >{m.work_env_component_soon()}</span
+      >{/if}
+  </button>
 {/snippet}
 {#snippet areaPanel()}
   <div class="menu">
@@ -1112,16 +1166,7 @@
       onsubmit={(event) => {
         event.preventDefault();
         if (!areaTitle.trim()) return;
-        if (selectionCount > 0) {
-          void groupSelection();
-          return;
-        }
-        void session.edit({ kind: "create_area", title: areaTitle.trim() }).then((okay) => {
-          if (okay) {
-            areaTitle = "";
-            chrome?.close();
-          }
-        });
+        void createArea(areaTitle);
       }}
     >
       <span class="menu-icon"><Icon icon={FolderAddIcon} /></span>
@@ -1144,17 +1189,61 @@
   </div>
 {/snippet}
 {#snippet mediaPanel()}
-  <WorkMediaPicker
-    profile={session.profile}
-    host={notesHost}
-    attachedIds={snapshot?.elements.flatMap((element) =>
-      element.reference.kind === "resource" ? [element.reference.resource] : [],
-    ) ?? []}
-    pending={busy}
-    onattach={(ids) => void attachResources(ids)}
-  />
+  <div class="palette-stack">
+    <div class="segments" role="group" aria-label={m.work_env_media()}>
+      {@render segment("document", Doc01Icon, m.work_env_documents())}
+      {@render segment("image", Image01Icon, m.work_env_images())}
+      {@render segment("link", Link04Icon, m.work_env_links())}
+    </div>
+    {#if mediaKind === "link"}
+      <form
+        class="menu-create"
+        onsubmit={(event) => {
+          event.preventDefault();
+          void addLink();
+        }}
+      >
+        <span class="menu-icon"><Icon icon={Link04Icon} /></span>
+        <input
+          type="url"
+          aria-label={m.work_env_link_placeholder()}
+          placeholder={m.work_env_link_placeholder()}
+          bind:value={linkDraft}
+          maxlength="2048"
+          disabled={busy || linkPending}
+        /><Button type="submit" size="compact" disabled={busy || linkPending || !linkDraft.trim()}
+          >{m.work_env_link_add()}</Button
+        >
+      </form>
+      {#if linkFailure}<p class="menu-status" role="alert">{m.work_env_link_failed()}</p>{/if}
+    {:else}
+      <WorkMediaPicker
+        profile={session.profile}
+        host={notesHost}
+        kind={mediaKind}
+        attachedIds={snapshot?.elements.flatMap((element) =>
+          element.reference.kind === "resource" ? [element.reference.resource] : [],
+        ) ?? []}
+        pending={busy}
+        onattach={(ids) => void attachResources(ids)}
+      />
+    {/if}
+  </div>
+{/snippet}
+{#snippet segment(key: "document" | "image" | "link", icon: typeof Doc01Icon, label: string)}
+  <button
+    type="button"
+    class="segment"
+    aria-pressed={mediaKind === key}
+    onclick={() => (mediaKind = key)}
+  >
+    <Icon {icon} size={14} />{label}
+  </button>
 {/snippet}
 {#snippet notesPanel()}
+  <button type="button" class="menu-row" disabled={busy} onclick={() => void createNote()}>
+    <span class="menu-icon"><Icon icon={NoteAddIcon} /></span>{m.work_env_new_note()}
+  </button>
   <div class="notes-panel">
     <LazyView
       loader={loadNotes}
@@ -1779,6 +1868,64 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
+  }
+
+  .palette {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 2px;
+  }
+
+  .palette-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-inline-size: 0;
+  }
+
+  .soon {
+    margin-inline-start: auto;
+    padding: 1px 7px;
+    border-radius: var(--radius-capsule);
+    background: var(--color-fill-active);
+    color: var(--color-faint);
+    font-size: var(--text-caption);
+  }
+
+  .segments {
+    display: flex;
+    gap: 2px;
+    padding: 2px;
+    border-radius: var(--radius-control-compact);
+    background: var(--color-fill);
+  }
+
+  .segment {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    flex: 1;
+    min-inline-size: 0;
+    block-size: 28px;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--color-muted);
+    font: inherit;
+    font-size: var(--text-label);
+    cursor: default;
+  }
+
+  .segment:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+
+  .segment[aria-pressed="true"] {
+    background: var(--color-surface);
+    color: var(--color-text);
+    box-shadow: var(--shadow-control);
   }
 
   .menu-row {

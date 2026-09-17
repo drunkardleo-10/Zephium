@@ -1015,7 +1015,6 @@
   "work_provider_browser_child_limit": "Browser-child limit: {hops} transitions, only for separately approved browser children.",
   "work_env_focus_result": "Focus result",
   "work_env_other_results": "View {count} other results",
-  "work_env_new": "New",
   "work_env_send": "Send",
   "work_env_needs_you": "Needs you",
   "work_env_decision": "Decision",
@@ -1145,5 +1144,18 @@
   "work_env_sources": "Sources",
   "work_env_sources_count": "{count} sources",
   "work_env_source_one": "1 source",
-  "work_env_run_number": "Run {number}"
+  "work_env_run_number": "Run {number}",
+  "work_env_components": "Components",
+  "work_env_component_table": "Table",
+  "work_env_component_chart": "Chart",
+  "work_env_component_map": "Map",
+  "work_env_component_soon": "Soon",
+  "work_env_documents": "Documents",
+  "work_env_images": "Images",
+  "work_env_links": "Links",
+  "work_env_link_placeholder": "Paste a link",
+  "work_env_link_add": "Add",
+  "work_env_link_failed": "That link could not be added.",
+  "work_env_play_here": "Play here",
+  "work_env_current_tab": "Current"
 }
