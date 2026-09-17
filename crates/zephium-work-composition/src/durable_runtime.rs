@@ -328,6 +328,7 @@ impl MacosWorkComposition {
         let anonymous = intervention_origin.is_none();
         let mut settled = WorkUsage::default();
         let mut model_in_flight = false;
+        let mut paused = false;
         #[cfg(feature = "public-qualification")]
         let trace = |label: &str| {
             if let Some(diagnostic) = stage_diagnostic {
@@ -484,6 +485,15 @@ impl MacosWorkComposition {
                 return Err(WorkError::OutcomeUnknown);
             }
             let snapshot = guard.0.snapshot();
+            // A hidden window holds the page; say so, and resume quietly.
+            if (snapshot.phase == RetainedWorkPhase::Acquiring) != paused {
+                paused = !paused;
+                attempt.record_activity(if paused {
+                    zephium_ipc::work::WorkActivityV1::Paused
+                } else {
+                    zephium_ipc::work::WorkActivityV1::Reading
+                });
+            }
             #[cfg(feature = "public-qualification")]
             if !diagnostic_sent
                 && matches!(

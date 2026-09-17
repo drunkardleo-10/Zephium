@@ -1292,7 +1292,9 @@ export type WorkActivityResponseV1 = {
 	error: WorkFailureV1 | null,
 };
 
-export type WorkActivityV1 = "planning" | "delegating" | "searching" | "reading" | "interacting" | "verifying" | "recovering" | "comparing" | "producing_artifact" | "waiting_for_approval" | "waiting_for_human" | "cancelling" | "finishing";
+export type WorkActivityV1 = "planning" | "delegating" | "searching" | "reading" | "interacting" | "verifying" | "recovering" | 
+/**  The hosted page waits while its window is hidden or minimized. */
+"paused" | "comparing" | "producing_artifact" | "waiting_for_approval" | "waiting_for_human" | "cancelling" | "finishing";
 
 export type WorkAgentGrantV1 = WorkAgentGrantV1_Serialize | WorkAgentGrantV1_Deserialize;
 

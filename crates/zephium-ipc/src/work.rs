@@ -546,6 +546,8 @@ pub enum WorkActivityV1 {
     Interacting,
     Verifying,
     Recovering,
+    /// The hosted page waits while its window is hidden or minimized.
+    Paused,
     Comparing,
     ProducingArtifact,
     WaitingForApproval,
