@@ -1426,6 +1426,9 @@ fn browser_settings(
 ) -> WorkBrowserAdapterSettings {
     WorkBrowserAdapterSettings {
         retain_public_responses: true,
+        stage_diagnostic: Some(|stage| {
+            let _ = writeln!(std::io::stdout().lock(), "durable-work: stage={stage}");
+        }),
         model_diagnostic: Some(|event| {
             let _ = writeln!(std::io::stdout().lock(), "browser-model: {event:?}");
         }),
