@@ -107,7 +107,7 @@ test("exact stale-owner execution review exposes acknowledgment without claiming
     onattach: vi.fn(),
   });
   await expect
-    .element(screen.getByRole("button", { name: "Cancel execution", exact: true }))
+    .element(screen.getByRole("button", { name: "Stop", exact: true }))
     .not.toBeInTheDocument();
   expect(screen.container.textContent).not.toContain("running");
   await screen.getByText("Acknowledge interruption", { exact: true }).first().click();

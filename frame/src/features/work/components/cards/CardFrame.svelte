@@ -128,6 +128,10 @@
     padding: 0 14px;
   }
 
+  .dense .body {
+    padding: 0 12px;
+  }
+
   footer {
     display: flex;
     align-items: center;
