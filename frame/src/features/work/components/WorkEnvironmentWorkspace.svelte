@@ -666,6 +666,30 @@
     untrack(() => current.snapshot?.id);
     return () => objectiveSession?.stopObserving();
   });
+  // Leaving Work unmounts this workspace, so a return starts with no objective
+  // session and the canvas loses the agent's line and its page frames. Reattach
+  // the profile's session to the objective it was last on.
+  $effect(() => {
+    const current = snapshot;
+    if (!current || objectiveSession) return;
+    const objectives = current.elements.flatMap((element) =>
+      element.reference.kind === "objective" ? [element.reference.objective] : [],
+    );
+    if (!objectives.length) return;
+    untrack(() => {
+      let resumed;
+      try {
+        resumed = workSession(session.profile);
+      } catch {
+        return;
+      }
+      const wanted = objectives.includes(resumed.selected ?? "")
+        ? resumed.selected!
+        : objectives.at(-1)!;
+      objectiveSession = resumed;
+      void resumed.start().then(() => resumed.open(wanted));
+    });
+  });
   async function attach(ids: string[]) {
     for (const tab of ids) {
       if (!tabs.some((candidate) => candidate.id === tab)) continue;

@@ -1,9 +1,18 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import type { CanvasItem } from "../../lib/canvas-model";
   let { item, selected }: { item: CanvasItem; selected: boolean } = $props();
+  // A frame that missed once must not pin the placeholder: the store serves it
+  // again once the run settles, and every refresh mints a new generation.
   let failedFrame = $state<string | null>(null);
   const frame = $derived(item.page?.frame ?? null);
   const failed = $derived(frame !== null && failedFrame === frame);
+  $effect(() => {
+    const current = frame;
+    untrack(() => {
+      if (failedFrame !== null && failedFrame !== current) failedFrame = null;
+    });
+  });
 </script>
 
 <article class="page" class:selected class:live={item.page?.live}>

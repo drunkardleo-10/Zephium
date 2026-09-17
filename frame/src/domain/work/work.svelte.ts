@@ -124,6 +124,7 @@ export class WorkSession {
     this.stop = null;
     clearTimeout(this.refresh);
     clearTimeout(this.activityRefresh);
+    // Pages survive: the workspace remounts on every return to Work.
     this.activity = [];
     this.works = [];
     this.projection = null;
@@ -175,6 +176,7 @@ export class WorkSession {
     if (work !== this.selected) {
       this.selected = work;
       this.projection = null;
+      this.pages = [];
       if (!this.pending) {
         this.delivery = "ready";
         this.failure = null;
@@ -193,17 +195,21 @@ export class WorkSession {
     ) {
       this.projection = result.projection;
       this.activity = currentActivity(result.projection, this.activity);
-      if (
-        result.projection.executions.some(
-          (entry) =>
-            ["running", "cancel_requested"].includes(entry.status) &&
-            !result.projection.interrupted.includes(entry.id),
-        )
-      ) {
+      // Pages and their frames outlive the run that opened them, and the
+      // workspace remounts whenever Work is left: read them on every open,
+      // not only while an execution is live.
+      if (result.projection.executions.length) {
         void this.readActivity(result.projection, generation);
-        this.activityRefresh = setTimeout(() => {
-          if (this.active && this.selected === work) void this.open(work);
-        }, 1_000);
+        if (
+          result.projection.executions.some(
+            (entry) =>
+              ["running", "cancel_requested"].includes(entry.status) &&
+              !result.projection.interrupted.includes(entry.id),
+          )
+        )
+          this.activityRefresh = setTimeout(() => {
+            if (this.active && this.selected === work) void this.open(work);
+          }, 1_000);
       }
       if (this.delivery === "ready") this.failure = null;
       return true;
@@ -219,15 +225,18 @@ export class WorkSession {
         9_000,
         this.lifetime.signal,
       );
-      if (generation !== this.reads || !this.active) return;
+      if (!this.active || this.selected !== state.work.id) return;
       const valid =
         result.state === "received" &&
         result.value.version === 1 &&
         result.value.profile === this.profile &&
         result.value.work === state.work.id &&
         !result.value.error;
-      this.activity = valid ? currentActivity(state, result.value.signals) : [];
+      // Pages answer for the work, not for one read of it: an open that
+      // overtook this one must not throw away frames it did not ask for.
       if (valid) this.pages = result.value.pages ?? [];
+      if (generation !== this.reads) return;
+      this.activity = valid ? currentActivity(state, result.value.signals) : [];
     } catch {
       if (generation === this.reads) this.activity = [];
     }
