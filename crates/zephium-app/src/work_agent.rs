@@ -685,6 +685,15 @@ impl Driver {
             }
         }
         for kind in browses {
+            if matches!(kind, WorkStepKindV1::Discover { .. }) {
+                // Provider search covers the web here; a native search engine
+                // page is never dispatched from the agent loop.
+                let notice = "Native discovery is not available in this run: provider search covers the web. Use search for facts and read for exact URLs listed in sources.".to_owned();
+                if !self.notices.contains(&notice) && self.notices.len() < 8 {
+                    self.notices.push(notice);
+                }
+                continue;
+            }
             if self.steps + 2 > u32::from(self.grant.max_steps) {
                 break;
             }
