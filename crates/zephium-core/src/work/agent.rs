@@ -19,6 +19,7 @@ pub struct WorkAgentSourceView {
     pub text: String,
     pub truncated: bool,
 }
+const MAX_WORK_THREAD: usize = 16;
 #[derive(Serialize)]
 pub struct WorkAgentStepView {
     pub turn: u8,
@@ -49,6 +50,9 @@ pub struct WorkAgentBudget {
 pub struct WorkAgentTurnContext {
     pub citation_space: &'static str,
     pub objective: String,
+    /// The person's earlier requests in this work, oldest first.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub thread: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub requested_pages: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -212,6 +216,7 @@ impl WorkAgentTurnDisclosure {
         let mut context = WorkAgentTurnContext {
             citation_space: "source_keys",
             objective: objective.to_owned(),
+            thread: Vec::new(),
             requested_pages: requested_pages(objective),
             decisions,
             context: bodies,
@@ -282,6 +287,23 @@ impl WorkAgentTurnDisclosure {
     }
     /// Admit the whole turn or none of it. Evidence keys resolve to links the
     /// model was shown; a read targets a shown source or an explicit requested page.
+    /// Earlier requests of the same work, oldest first; the objective stays the latest.
+    pub fn with_thread(mut self, thread: Vec<String>) -> Result<Self, WorkError> {
+        if thread.len() > MAX_WORK_THREAD {
+            return Err(WorkError::Capacity);
+        }
+        for request in &thread {
+            validate_text(request, MAX_WORK_TEXT_BYTES)?;
+        }
+        self.context.thread = thread;
+        let bytes = serde_json::to_vec(&self.context)
+            .map_err(|_| WorkError::Invalid)?
+            .len();
+        if bytes > MAX_AGENT_CONTEXT_BYTES {
+            return Err(WorkError::Capacity);
+        }
+        Ok(self)
+    }
     pub fn resolve(&self, output: WorkAgentTurnOutput) -> Result<WorkAgentTurn, WorkError> {
         let bytes = serde_json::to_vec(&output)
             .map_err(|_| WorkError::Invalid)?

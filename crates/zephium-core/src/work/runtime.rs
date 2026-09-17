@@ -246,6 +246,10 @@ pub struct WorkExecutionSpec {
     /// Admitted canvas context disclosed to this execution's provider calls.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<super::context::WorkContextDisclosureV1>,
+    /// The person's request this execution serves: the work's objective when
+    /// it began. Earlier executions of a work keep theirs, forming the thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<String>,
 }
 impl WorkExecutionSpec {
     /// First product adapter: explicit public browsing scope, optionally with
@@ -273,6 +277,7 @@ impl WorkExecutionSpec {
         let count = plan.draft.nodes.len() as u32;
         let spec = Self {
             context: None,
+            request: None,
             plan_revision: plan.revision,
             limits,
             nodes: plan
@@ -333,6 +338,7 @@ impl WorkExecutionSpec {
         }
         let spec = Self {
             context: None,
+            request: None,
             plan_revision: plan.revision,
             limits,
             nodes: vec![WorkNodeExecutionSpec {
@@ -370,6 +376,7 @@ impl WorkExecutionSpec {
         }
         let spec = Self {
             context: None,
+            request: Some(node.objective.clone()),
             plan_revision: plan.revision,
             limits,
             nodes: vec![WorkNodeExecutionSpec {

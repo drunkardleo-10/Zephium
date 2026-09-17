@@ -209,6 +209,7 @@ fn spec(plan: &WorkPlanRevision) -> WorkExecutionSpec {
         max_workers: 1,
     };
     WorkExecutionSpec {
+        request: None,
         context: None,
         plan_revision: plan.revision,
         limits,

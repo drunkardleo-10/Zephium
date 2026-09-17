@@ -114,6 +114,7 @@ fn coordination_rejects_combined_completion_deadlocks_and_scope_widening() {
         max_hops: 1,
     };
     let mut spec = WorkExecutionSpec {
+        request: None,
         context: None,
         plan_revision: plan.revision,
         limits: WorkExecutionLimits {

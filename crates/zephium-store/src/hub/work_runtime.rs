@@ -318,6 +318,7 @@ pub(super) fn command(
         let plan = current.plan.as_ref().ok_or(WorkError::Invalid)?;
         WorkRuntimeIntent::Approve {
             spec: WorkExecutionSpec {
+                request: None,
                 plan_revision: plan.revision,
                 limits,
                 nodes: vec![WorkNodeExecutionSpec {

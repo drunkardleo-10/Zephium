@@ -111,6 +111,7 @@ async fn coordinator_joins_original_child_publication_and_fails_closed_on_loss()
             max_workers: 2,
         };
         let spec = WorkExecutionSpec {
+            request: None,
             context: None,
             plan_revision: plan.revision,
             limits: WorkExecutionLimits {

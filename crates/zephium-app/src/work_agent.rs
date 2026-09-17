@@ -38,6 +38,8 @@ pub struct WorkAgentProviders<'a> {
 const TURN_TOKEN_FLOOR: u32 = 12_000;
 const ASK_POLL: Duration = Duration::from_millis(500);
 const MAX_PREVIEWS: usize = 96;
+const INHERITED_PREVIEWS: usize = 64;
+const INHERITED_ARTIFACTS: usize = 32;
 
 /// Closed loop facts for development logs; never model, page or user text.
 #[derive(Clone, Copy, Debug)]
@@ -191,6 +193,8 @@ impl WorkAgentService {
             decisions: attempt.decisions().to_vec(),
             bodies,
             private,
+            inherited: Vec::new(),
+            thread: Vec::new(),
             previews: Vec::new(),
             used: WorkUsage::default(),
             steps: 0,
@@ -203,6 +207,7 @@ impl WorkAgentService {
             finish_refusals: 0,
             pending_output_repair: false,
         };
+        driver.inherit(&projection, receipt.execution).await;
         let outcome = driver.drive(&attempt, &providers, &mut browser).await;
         let (status, usage) = match outcome {
             Ok(status) => (status, driver.settled_usage(status)),
@@ -239,6 +244,10 @@ struct Driver {
     objective: String,
     decisions: Vec<planning::PlanningAnswer>,
     bodies: Vec<context::WorkContextBody>,
+    /// Earlier executions of this work: their cards stay on the canvas and
+    /// their sources stay citable.
+    inherited: Vec<WorkArtifactV1>,
+    thread: Vec<String>,
     private: Vec<String>,
     previews: Vec<WorkEvidencePreviewV1>,
     used: WorkUsage,
@@ -426,13 +435,24 @@ impl Driver {
             self.steps = self
                 .steps
                 .max(u32::try_from(execution.steps.len()).unwrap_or(u32::MAX));
+            let room = zephium_core::work::artifact::MAX_WORK_ARTIFACTS
+                .saturating_sub(execution.artifacts.len());
+            let artifacts: Vec<WorkArtifactV1> = self
+                .inherited
+                .iter()
+                .rev()
+                .take(room)
+                .rev()
+                .chain(execution.artifacts.iter())
+                .cloned()
+                .collect();
             let disclosure = match WorkAgentTurnDisclosure::try_new(
                 &self.objective,
                 self.decisions.clone(),
                 self.bodies.clone(),
                 &execution.steps,
                 &self.previews,
-                &execution.artifacts,
+                &artifacts,
                 WorkAgentBudget {
                     turns_left: self.grant.max_turns.saturating_sub(self.turn),
                     steps_left: u8::try_from(
@@ -443,7 +463,9 @@ impl Driver {
                 },
                 self.remaining(),
                 std::mem::take(&mut self.notices),
-            ) {
+            )
+            .and_then(|disclosure| disclosure.with_thread(self.thread.clone()))
+            {
                 Ok(disclosure) => disclosure,
                 Err(_) => return Ok(WorkAttemptStatus::Failed),
             };
@@ -928,6 +950,55 @@ impl Driver {
         }
     }
 
+    /// Seeds the thread from this work's earlier executions, newest first
+    /// within the caps, so a continuation builds on what is already there.
+    async fn inherit(&mut self, projection: &WorkRuntimeProjection, current: WorkExecutionId) {
+        let mut artifacts = Vec::new();
+        for execution in projection
+            .executions
+            .iter()
+            .rev()
+            .filter(|execution| execution.id != current)
+        {
+            for record in &execution.provider_evidence {
+                if self.previews.len() >= INHERITED_PREVIEWS {
+                    break;
+                }
+                self.remember(record);
+            }
+            for artifact in execution.artifacts.iter().rev() {
+                if artifacts.len() >= INHERITED_ARTIFACTS {
+                    break;
+                }
+                for link in &artifact.evidence {
+                    if self.previews.len() >= INHERITED_PREVIEWS {
+                        break;
+                    }
+                    if self.previews.iter().any(|preview| preview.link == *link) {
+                        continue;
+                    }
+                    if let Ok(preview) = self.probe.read_evidence(link.clone()).await {
+                        self.keep_preview(preview);
+                    }
+                }
+                artifacts.push(artifact.clone());
+            }
+        }
+        artifacts.reverse();
+        self.inherited = artifacts;
+        let mut thread: Vec<String> = Vec::new();
+        for execution in projection.executions.iter().filter(|e| e.id != current) {
+            if let Some(request) = &execution.spec.request {
+                if thread.last() != Some(request) {
+                    thread.push(request.clone());
+                }
+            }
+        }
+        if thread.last() == Some(&self.objective) {
+            thread.pop();
+        }
+        self.thread = thread.into_iter().rev().take(16).rev().collect();
+    }
     fn remember(&mut self, record: &WorkProviderSearchRecordV1) {
         let mut seen = std::collections::BTreeSet::new();
         for (index, citation) in record.evidence.citations.iter().enumerate() {

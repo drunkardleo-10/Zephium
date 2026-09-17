@@ -2070,6 +2070,11 @@ export type WorkExecutionSpec_Deserialize = {
 	nodes: WorkNodeExecutionSpec_Deserialize[],
 	/**  Admitted canvas context disclosed to this execution's provider calls. */
 	context?: WorkContextDisclosureV1_Deserialize | null,
+	/**
+	 *  The person's request this execution serves: the work's objective when
+	 *  it began. Earlier executions of a work keep theirs, forming the thread.
+	 */
+	request?: string | null,
 };
 
 export type WorkExecutionSpec_Serialize = {
@@ -2078,6 +2083,11 @@ export type WorkExecutionSpec_Serialize = {
 	nodes: WorkNodeExecutionSpec_Serialize[],
 	/**  Admitted canvas context disclosed to this execution's provider calls. */
 	context?: WorkContextDisclosureV1_Serialize | null,
+	/**
+	 *  The person's request this execution serves: the work's objective when
+	 *  it began. Earlier executions of a work keep theirs, forming the thread.
+	 */
+	request?: string | null,
 };
 
 export type WorkExecutionStatus = "approved" | "running" | "cancel_requested" | "completed" | "needs_review" | "cancelled" | "failed" | "interrupted";
