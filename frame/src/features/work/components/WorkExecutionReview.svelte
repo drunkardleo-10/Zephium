@@ -5,7 +5,7 @@
   import Button from "$shared/ui/Button";
   import ContextManifestList from "./composer/ContextManifestList.svelte";
   import * as m from "$shared/i18n/messages";
-  let { session, compact = false }: { session: WorkSession; compact?: boolean } = $props();
+  let { session }: { session: WorkSession } = $props();
   const work = $derived(session.projection?.work);
   const operation = $derived(
     work ? session.operations.latest(work.id, ["prepare_plan", "prepare_account"]) : undefined,
@@ -80,7 +80,7 @@
 </script>
 
 {#if work}
-  <section class="execution-review" class:compact aria-label={m.work_execution_review()}>
+  <section class="execution-review" aria-label={m.work_execution_review()}>
     {#if executionOperation?.state.kind === "pending"}<p role="status">
         {m.work_operation_pending()}
       </p>{/if}
@@ -112,7 +112,7 @@
         {m.work_approval_stale()}
       </p>{/if}
     {#if approval && current && !unsettled}
-      <details class="approval" open={!compact}>
+      <details class="approval" open>
         <summary>{m.work_env_review_scope()}</summary>
         <h2>{m.work_execution_review()}</h2>
         <p>{m.work_exact_approval_explanation()}</p>
@@ -281,12 +281,6 @@
     max-block-size: 50%;
     overflow: auto;
     flex-shrink: 0;
-  }
-
-  .execution-review.compact {
-    padding: 0;
-    max-block-size: none;
-    overflow: visible;
   }
 
   summary {

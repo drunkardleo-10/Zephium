@@ -138,6 +138,10 @@
   function openLift(id: string) {
     const item = items.find((item) => item.id === id);
     if (!item) return;
+    if (results.references.has(id)) {
+      void openResult(id);
+      return;
+    }
     if (item.type === "page" && item.page) {
       openPane({ kind: "url", url: item.page.url }, id);
       return;
@@ -148,6 +152,9 @@
         openPane({ kind: "tab", id: reference.tab }, id);
       return;
     }
+    lift(id);
+  }
+  function lift(id: string) {
     chrome?.close();
     inspected = null;
     lifted = { id, origin: canvasRef?.screenRect(id) ?? null };
@@ -278,14 +285,6 @@
       }
     }
   }
-  let objectiveOpen = $state(false);
-  let objectivePanel = $state<HTMLElement | undefined>();
-  $effect(() => {
-    if (objectiveOpen && objectivePanel) {
-      inspected = null;
-      objectivePanel.focus();
-    }
-  });
   let notesOpen = $state(false);
   let tasksOpen = $state(false);
   let title = $state("");
@@ -321,8 +320,6 @@
     sizes: {},
     viewport: { x: 0, y: 0, zoom: 1 },
   });
-  let inspectionExecution = $state<string | null>(null);
-  let inspectCurrentPlan = $state(false);
   const scene = $derived(
     snapshot
       ? environmentPlan(snapshot, baseItems, context.objectives, context.plans, expanded)
@@ -535,23 +532,20 @@
   const liftedItem = $derived(items.find((item) => item.id === lifted?.id));
   const liftedElement = $derived(snapshot?.elements.find((element) => element.id === lifted?.id));
   const authoritative = $derived(new Set(snapshot?.elements.map((element) => element.id) ?? []));
-  let resultSelection = $state<ResultReference | null>(null);
-  let resultSource = $state<EvidenceReference | null>(null);
+  let liftSource = $state.raw<EvidenceReference | null>(null);
   const loadResult = () => import("./WorkResultInspector.svelte");
-  async function inspectResult(id: string, source: EvidenceReference | null = null) {
+  /** One surface: a result opens in the lift, on the run that produced it. */
+  async function openResult(id: string, source: EvidenceReference | null = null) {
     const reference = results.references.get(id);
     if (!reference) return;
     const current = workSession(session.profile);
     if (!current) return;
     objectiveSession = current;
     await current.start();
-    if (await current.open(reference.objective)) {
-      inspected = null;
-      objectiveOpen = false;
-      notesOpen = false;
-      resultSelection = reference;
-      resultSource = source;
-    }
+    if (!(await current.open(reference.objective))) return;
+    notesOpen = false;
+    liftSource = source;
+    lift(id);
   }
   const savedResultPositions = $derived(
     Object.fromEntries(
@@ -636,27 +630,6 @@
           },
         ],
       });
-  }
-  async function inspectCanvas(id: string) {
-    if (results.references.has(id)) {
-      await inspectResult(id);
-      return;
-    }
-    resultSelection = null;
-    const target = scene.targets.get(id);
-    if (!target) {
-      inspected = id;
-      return;
-    }
-    const current = workSession(session.profile);
-    if (!current) return;
-    objectiveSession = current;
-    await current.start();
-    if (await current.open(target.objective)) {
-      inspectionExecution = target.execution;
-      inspectCurrentPlan = target.execution === null;
-      objectiveOpen = true;
-    }
   }
   const busy = $derived(!!session.pending || session.loading || objectivePending);
   const attachedTabs = $derived(
@@ -799,8 +772,6 @@
     };
     composerFailure = null;
     session.objectiveSubmission = submission;
-    inspectionExecution = null;
-    inspectCurrentPlan = false;
     objectivePending = true;
     objectiveSession = current;
     try {
@@ -864,7 +835,6 @@
       if (!(await current.open(objectiveId))) return;
       const basis = current.projection?.work;
       if (current.selected !== objectiveId || basis?.id !== objectiveId) return;
-      objectiveOpen = false;
       session.composer = "";
       session.objectiveToAttach = null;
       session.objectiveSubmission = null;
@@ -1334,9 +1304,7 @@
               {authoritative}
               expose={(api) => (canvasRef = api)}
               fitBottomInset={composerHeight}
-              oninspect={(id: string) => {
-                if (scene.targets.has(id) || results.references.has(id)) void inspectCanvas(id);
-              }}
+              oninspect={(id: string) => (inspected = id)}
               onopen={openLift}
               onopenlink={openCitation}
               onselectionchange={(ids: string[]) => {
@@ -1347,7 +1315,7 @@
               }}
               onareachange={(id: string, area: string | null) =>
                 void session.edit({ kind: "assign_area", element: id, area })}
-              onevidence={(id: string, source: EvidenceReference) => void inspectResult(id, source)}
+              onevidence={(id: string, source: EvidenceReference) => void openResult(id, source)}
               onaction={(id: string, action?: string) => {
                 if (action === "remove") {
                   const element = snapshot?.elements.find((element) => element.id === id);
@@ -1428,60 +1396,18 @@
         <Button
           size="compact"
           onclick={() => {
-            if (!results.remaining) return;
-            inspectionExecution = results.remaining.execution;
-            inspectCurrentPlan = false;
-            objectiveOpen = true;
+            const objective = results.remaining?.objective;
+            const request = snapshot?.elements.find(
+              (element) =>
+                element.reference.kind === "objective" && element.reference.objective === objective,
+            );
+            if (request) lift(request.id);
           }}>{m.work_env_other_results({ count: results.remaining.count })}</Button
         >
       </div>{/if}
-    {#if resultSelection && objectiveSession && !objectiveOpen && !notesOpen}<section
-        class="inspector"
-        aria-label={m.work_env_results()}
-      >
-        <Button size="compact" onclick={() => (resultSelection = null)}>{m.work_env_close()}</Button
-        >
-        <LazyView
-          loader={loadResult}
-          loadingLabel={m.surface_loading()}
-          failureLabel={m.surface_render_failed()}
-          retryLabel={m.surface_retry()}
-          >{#snippet children(
-            Result,
-          )}{#key `${resultSelection!.objective}:${resultSelection!.execution}:${resultSelection!.artifact}`}<Result
-                session={objectiveSession!}
-                reference={resultSelection!}
-                source={resultSource}
-                onopen={openCitation}
-              />{/key}{/snippet}</LazyView
-        >
-      </section>{/if}
     {#if notesOpen}<section class="detail" aria-label={m.work_env_notes()}>
         <Button onclick={() => void closeNotes()}>{m.work_env_close()}</Button
         >{@render notesPanel()}
-      </section>{/if}
-    {#if objectiveOpen && objectiveSession}<section
-        bind:this={objectivePanel}
-        tabindex="-1"
-        class="detail"
-        aria-label={m.work_env_objective()}
-      >
-        <Button onclick={() => (objectiveOpen = false)}>{m.work_env_back_canvas()}</Button><LazyView
-          loader={loadDetail}
-          loadingLabel={m.surface_loading()}
-          failureLabel={m.surface_render_failed()}
-          retryLabel={m.surface_retry()}
-          >{#snippet children(
-            Detail,
-          )}{#key `${objectiveSession?.selected}:${inspectionExecution}:${inspectCurrentPlan}`}<Detail
-                initialExecution={inspectionExecution}
-                showCurrentPlan={inspectCurrentPlan}
-                session={objectiveSession!}
-                attached={snapshot?.elements.map((element) => element.reference) ?? []}
-                onopencitation={openCitation}
-                onattach={(reference) => void session.edit({ kind: "add", reference, area: null })}
-              />{/key}{/snippet}</LazyView
-        >
       </section>{/if}
   </div>
   {#if lifted && cardBounds}
@@ -1490,7 +1416,10 @@
       bounds={cardBounds}
       preferred={liftSize(liftedItem)}
       title={liftedItem?.title ?? ""}
-      onclose={() => (lifted = null)}
+      onclose={() => {
+        lifted = null;
+        liftSource = null;
+      }}
     >
       {#if liftedItem?.sources}
         <ul class="lift-sources">
@@ -1555,8 +1484,6 @@
           failureLabel={m.surface_render_failed()}
           retryLabel={m.surface_retry()}
           >{#snippet children(Detail)}<Detail
-              initialExecution={null}
-              showCurrentPlan
               session={objectiveSession!}
               attached={snapshot?.elements.map((element) => element.reference) ?? []}
               onopencitation={openCitation}
@@ -1575,7 +1502,7 @@
               >{#snippet children(Result)}<Result
                   session={objectiveSession!}
                   reference={results.references.get(liftedItem!.id)!}
-                  source={null}
+                  source={liftSource}
                   onopen={openCitation}
                 />{/snippet}</LazyView
             >
@@ -1833,12 +1760,11 @@
     color: var(--color-muted);
   }
 
-  .inspector,
   .detail {
     position: absolute;
     inset-block: 16px;
     inset-inline-end: 16px;
-    inline-size: min(360px, calc(100% - 32px));
+    inline-size: min(520px, calc(100% - 32px));
     box-sizing: border-box;
     overflow: auto;
     padding: 16px;
@@ -1847,10 +1773,6 @@
     backdrop-filter: blur(14px) saturate(1.2);
     box-shadow: var(--shadow-popover);
     z-index: 20;
-  }
-
-  .detail {
-    inline-size: min(520px, calc(100% - 32px));
   }
 
   .menu {

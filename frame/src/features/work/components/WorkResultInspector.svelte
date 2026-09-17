@@ -3,7 +3,6 @@
   import type { ResultReference } from "../lib/project-environment-results";
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
   import Evidence, { type EvidenceView } from "$shared/ui/data/Evidence";
-  import WorkArtifactActions from "./WorkArtifactActions.svelte";
   import Button from "$shared/ui/Button";
   import { untrack } from "svelte";
   import * as m from "$shared/i18n/messages";
@@ -68,7 +67,6 @@
 </script>
 
 {#if artifact}<h2>{artifact.title}</h2>
-  <WorkArtifactActions {session} execution={reference.execution} artifact={reference.artifact} />
   {#each links as link, index (`${link.extraction_id}:${link.source_id}`)}<Button
       size="compact"
       onclick={() =>

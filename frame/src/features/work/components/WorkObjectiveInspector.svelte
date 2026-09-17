@@ -3,7 +3,6 @@
   import { untrack } from "svelte";
   import Artifact, { type EvidenceReference } from "$shared/ui/data/Artifact";
   import Evidence, { type EvidenceView } from "$shared/ui/data/Evidence";
-  import WorkArtifactActions from "./WorkArtifactActions.svelte";
   import { projectWork } from "../lib/project-work";
   import { preferences } from "$domain/preferences";
   import type { WorkEnvironmentReference } from "$shared/ipc/bindings";
@@ -14,15 +13,11 @@
   import * as m from "$shared/i18n/messages";
   let {
     session,
-    initialExecution = null,
-    showCurrentPlan = false,
     attached,
     onattach,
     onopencitation,
   }: {
     session: WorkSession;
-    initialExecution?: string | null;
-    showCurrentPlan?: boolean;
     attached: readonly WorkEnvironmentReference[];
     onattach: (reference: WorkEnvironmentReference) => void;
     onopencitation?: (url: string) => void;
@@ -30,16 +25,13 @@
   const id = $props.id();
   const projection = $derived(session.projection);
   const work = $derived(projection?.work);
-  let executionId = $state<string | null>(untrack(() => initialExecution));
+  let executionId = $state<string | null>(null);
   let artifactId = $state<string | null>(null);
   let historicalPlan = $state.raw<WorkPlanRevision | null>(null);
   let evidence = $state.raw<EvidenceView | null>(null);
   let evidenceRead = 0;
   const execution = $derived(
-    showCurrentPlan && executionId === null
-      ? undefined
-      : (projection?.executions.find((item) => item.id === executionId) ??
-          projection?.executions.at(-1)),
+    projection?.executions.find((item) => item.id === executionId) ?? projection?.executions.at(-1),
   );
   const revision = $derived(execution?.spec.plan_revision);
   const plan = $derived(
@@ -195,16 +187,15 @@
             evidence = null;
             evidenceRead++;
           }}
-          >{#each projection.executions as item (item.id)}<option value={item.id}
-              >{projection.interrupted.includes(item.id) ? m.work_interrupted() : item.status} · {item.id}</option
+          >{#each projection.executions as item, index (item.id)}<option value={item.id}
+              >{projection.interrupted.includes(item.id)
+                ? m.work_interrupted()
+                : m.work_env_run_number({ number: index + 1 })}</option
             >{/each}</select
         ></label
       >{/if}
     {#if execution}<section aria-label={m.work_env_results()}>
         <h3>{m.work_env_results()}</h3>
-        <p>
-          {projection?.interrupted.includes(execution.id) ? m.work_interrupted() : execution.status}
-        </p>
         {#if !projection?.interrupted.includes(execution.id) && ["approved", "running"].includes(execution.status)}<Button
             disabled={!!session.pending}
             onclick={() => void session.execute({ kind: "cancel", execution: execution.id })}
@@ -237,7 +228,7 @@
         {artifact}
         onevidence={(reference) => void inspectEvidence(reference)}
         onlink={onopencitation}
-      /><WorkArtifactActions {session} execution={execution.id} artifact={artifact.key} />{/if}
+      />{/if}
     {#if evidence}<aside>
         <Button
           size="compact"

@@ -81,50 +81,11 @@ test("compact objective inspection joins historical plans and keeps exact result
   expect(onopencitation).not.toHaveBeenCalled();
   await screen.getByRole("button", { name: "Open source in Browse", exact: true }).click();
   expect(onopencitation).toHaveBeenCalledExactlyOnceWith("https://example.com/original");
+  // A result reads as finished: no review strip, no "Review required".
   await expect
     .element(screen.getByRole("button", { name: "Edit result", exact: true }))
-    .toBeVisible();
-  await expect
-    .element(screen.getByRole("button", { name: "Accept result", exact: true }))
-    .toBeDisabled();
-  await screen.unmount();
-  session.dispose();
-});
-
-test("a current-plan canvas target opens the current draft without substituting old execution history", async () => {
-  const session = new WorkSession("profile");
-  session.projection = {
-    ...structuredClone(projection),
-    work: {
-      ...projection.work,
-      plan: {
-        author: "user",
-        revision: "4",
-        basis_revision: "3",
-        draft: {
-          id: "current",
-          nodes: [
-            { id: "new", objective: "New current responsibility", dependencies: [], outputs: [] },
-          ],
-        },
-      },
-    },
-  };
-  session.selected = "objective";
-  const historical = vi.spyOn(session, "plan");
-  const screen = await render(WorkObjectiveInspector, {
-    session,
-    attached: [],
-    onattach: vi.fn(),
-    showCurrentPlan: true,
-  });
-  await expect
-    .element(screen.getByText("New current responsibility", { exact: true }))
-    .toBeVisible();
-  expect(historical).not.toHaveBeenCalled();
-  await expect
-    .element(screen.getByRole("button", { name: "Dependency findings", exact: true }))
     .not.toBeInTheDocument();
+  expect(screen.container.textContent).not.toContain("Review required");
   await screen.unmount();
   session.dispose();
 });
@@ -143,8 +104,6 @@ test("exact stale-owner execution review exposes acknowledgment without claiming
   const screen = await render(WorkObjectiveInspector, {
     session,
     attached: [],
-    initialExecution: execution.id,
-    showCurrentPlan: false,
     onattach: vi.fn(),
   });
   await expect

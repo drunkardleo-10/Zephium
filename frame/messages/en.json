@@ -797,7 +797,6 @@
   "work_evidence_unavailable": "This content is unavailable. Refresh to try again.",
   "work_accepted": "Accepted by you",
   "work_rejected": "Rejected by you",
-  "work_mechanical_review": "Mechanical output requirement",
   "work_review_required": "Review required",
   "work_source_number": "Source {number}",
   "work_child_agent": "Child agent",
@@ -853,13 +852,6 @@
   "work_summary": "Summary",
   "work_title": "Title",
   "work_location": "Location",
-  "work_review_result": "Review result",
-  "work_edit_preserves_original": "Your changes are saved separately. The original result and source evidence remain available. Edited results need review again.",
-  "work_edit_result": "Edit result",
-  "work_save_result": "Save changes",
-  "work_review_explanation": "Accept when you have reviewed this result and find it useful. Source attribution alone does not verify its conclusions.",
-  "work_accept_result": "Accept result",
-  "work_reject_result": "Needs changes",
   "work_execution_review": "Review execution",
   "work_prepare_execution": "Prepare execution",
   "work_prepare_disclosure": "The configured model will propose capabilities and agent responsibilities for this plan. This does not start execution.",
@@ -1152,5 +1144,6 @@
   "work_env_you": "You",
   "work_env_sources": "Sources",
   "work_env_sources_count": "{count} sources",
-  "work_env_source_one": "1 source"
+  "work_env_source_one": "1 source",
+  "work_env_run_number": "Run {number}"
 }

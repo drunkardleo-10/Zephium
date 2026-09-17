@@ -10,13 +10,9 @@ vi.mock("$shared/ipc/bindings", async () => {
   return mockBindings({ workCall: native.call });
 });
 
-test.each([
-  [false, false],
-  [true, false],
-  [true, true],
-])(
-  "approves exact native scope and refuses changed basis (compact: %s, provider search: %s)",
-  async (compact, providerSearch) => {
+test.each([false, true])(
+  "approves exact native scope and refuses changed basis (provider search: %s)",
+  async (providerSearch) => {
     native.call.mockClear();
     const profile = "00000000000000000000000001";
     const work = "00000000000000000000000002";
@@ -128,13 +124,7 @@ test.each([
       });
       return { version: 1, profile, reply: { kind: "error", error: "conflict" } };
     });
-    const screen = await render(WorkExecutionReview, { session, compact });
-    if (compact) {
-      await expect
-        .element(screen.getByRole("button", { name: "Approve this plan and scope", exact: true }))
-        .not.toBeInTheDocument();
-      await screen.getByText("Review execution scope", { exact: true }).click();
-    }
+    const screen = await render(WorkExecutionReview, { session });
     await expect
       .element(screen.getByText("Svelte pending save unmount", { exact: true }))
       .toBeVisible();

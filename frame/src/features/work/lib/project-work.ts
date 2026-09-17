@@ -180,14 +180,13 @@ export function artifactView(artifact: WorkArtifactV1, execution: WorkExecutionF
     key: artifact.id,
     title: artifact.title,
     content: content(user?.edited_data ?? artifact.data, refs),
+    // A result reads as finished; only the person's own decision says more.
     reviewLabel:
       user?.decision === "accepted"
         ? m.work_accepted()
         : user?.decision === "rejected"
           ? m.work_rejected()
-          : artifact.review === "mechanical"
-            ? m.work_mechanical_review()
-            : m.work_review_required(),
+          : m.work_env_status_done(),
     evidence,
   };
 }

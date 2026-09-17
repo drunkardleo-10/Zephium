@@ -471,27 +471,26 @@ test("prompt submission keeps work on canvas and clarification choices above the
   await screen.getByRole("button", { name: "Fit view", exact: true }).click();
   await expect.element(screen.getByText("Reviewed findings", { exact: true })).toBeVisible();
   expect(screen.container.querySelector(".detail")).toBeNull();
-  await screen.getByRole("button", { name: "Source 1", exact: true }).click();
+  // A citation on the card opens the one surface: the lift, on that source.
+  await screen.getByRole("button", { name: "Source 1", exact: true }).first().click();
   await expect.element(screen.getByText("Exact cited source", { exact: true })).toBeVisible();
   expect(readEvidence).toHaveBeenCalledExactlyOnceWith(link);
+  // A result reads as finished: no review strip beside it, no second panel.
   await expect
     .element(screen.getByRole("button", { name: "Edit result", exact: true }))
-    .toBeVisible();
+    .not.toBeInTheDocument();
   expect(screen.container.querySelector(".detail")).toBeNull();
-  await screen.getByRole("button", { name: "Close", exact: true }).click();
-  objective.discardDrafts();
+  await screen.getByRole("button", { name: "Back to canvas", exact: true }).click();
   await expect
     .poll(() => screen.container.querySelector(".agent-line.settled") !== null)
     .toBe(true);
   await expect
     .poll(() => screen.container.querySelector(".above")!.getBoundingClientRect().height)
     .toBeLessThan(110);
-  await expect.element(screen.getByRole("button", { name: "Source 1", exact: true })).toBeEnabled();
   await screen.getByRole("button", { name: "View 1 other results", exact: true }).click();
   await expect
     .element(screen.getByRole("button", { name: "Supporting research", exact: true }))
     .toBeVisible();
-
   await expect
     .element(screen.getByRole("button", { name: "Back to canvas", exact: true }))
     .toBeVisible();
