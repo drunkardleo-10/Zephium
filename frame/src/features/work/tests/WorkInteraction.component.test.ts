@@ -93,7 +93,7 @@ test("a running agent shows its line, recent steps, and answers its question in 
   session.dispose();
 });
 
-test("a finished agent run settles to its last line and unknown delivery offers a refresh", async () => {
+test("a finished agent run settles to its closing line and unknown delivery offers a refresh", async () => {
   const session = new WorkSession("profile");
   session.selected = "objective";
   const done = agentRun("needs_review");
@@ -105,14 +105,32 @@ test("a finished agent run settles to its last line and unknown delivery offers 
       usage: { model_tokens: 20, cost_micro_usd: 2, operations: 2, accounting: "exact" },
     },
   ];
+  // The finishing turn says nothing on its turn step; the finish step carries
+  // the closing sentence, and that is the line a settled run ends on.
   done.steps = [
     ...done.steps!.slice(0, 2),
-    { id: "finish", turn: 2, kind: { kind: "finish" }, status: "succeeded" },
+    {
+      id: "turn-2",
+      turn: 2,
+      kind: { kind: "turn" },
+      status: "succeeded",
+      usage: { model_tokens: 10, cost_micro_usd: 1, operations: 1, accounting: "exact" },
+    },
+    {
+      id: "finish",
+      turn: 2,
+      kind: { kind: "finish" },
+      status: "succeeded",
+      note: "Compared three keyboards on price and switch noise.",
+    },
   ];
   session.projection = { ...structuredClone(projection), executions: [done] };
   const screen = await render(WorkInteraction, { session, ondetails: vi.fn() });
   await expect.poll(() => screen.container.querySelector(".settled")).not.toBeNull();
-  expect(screen.container.textContent).toContain("Looking for quiet keyboards.");
+  expect(screen.container.textContent).toContain(
+    "Compared three keyboards on price and switch noise.",
+  );
+  expect(screen.container.textContent).not.toContain("Looking for quiet keyboards.");
   expect(screen.container.textContent).not.toContain(projection.work.objective);
   session.delivery = "unknown";
   await expect

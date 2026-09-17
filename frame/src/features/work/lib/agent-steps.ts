@@ -3,12 +3,16 @@ import * as m from "$shared/i18n/messages";
 
 type Step = NonNullable<WorkExecutionFact["steps"]>[number];
 
-/** The agent's latest line for people, from the most recent turn that said something. */
+/**
+ * The agent's latest line for people, from the most recent turn that said
+ * something. The finishing turn says nothing on its turn step; its closing
+ * sentence rides the finish step, so a settled run ends on that line.
+ */
 export function agentLine(execution: WorkExecutionFact): string | null {
   const steps = execution.steps ?? [];
   for (let index = steps.length - 1; index >= 0; index--) {
     const step = steps[index]!;
-    if (step.kind.kind === "turn" && step.note) return step.note;
+    if ((step.kind.kind === "turn" || step.kind.kind === "finish") && step.note) return step.note;
   }
   return null;
 }
