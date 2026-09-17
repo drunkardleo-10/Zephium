@@ -1,16 +1,20 @@
 import type {
-  WorkEnvironmentReference,
+  WorkArtifactV1,
   WorkEnvironmentSnapshot,
   TabView,
   ResourceSummary,
+  WorkExecutionFact,
   WorkPageV1,
   WorkRuntimeProjection,
 } from "$shared/ipc/bindings";
 import { artifactView } from "./project-work";
 import { agentLine, isAgentExecution } from "./agent-steps";
 import { subjectFacts, subjectKey, subjectsOf } from "./subjects";
-import { COLUMNS } from "./organize";
+import { COLUMNS, SOURCES_SIZE } from "./organize";
 import { pageFrameUrl } from "$domain/resources";
+
+/** How many cited pages one Sources card lists; the lift shows the rest. */
+const SOURCE_ROWS = 24;
 
 function host(url: string | undefined): string {
   if (!url) return "";
@@ -20,21 +24,26 @@ function host(url: string | undefined): string {
     return "";
   }
 }
-/** The cited URL and title behind one source entry, from the provider record. */
-function sourceCitation(
-  projection: WorkRuntimeProjection | undefined,
-  reference: Extract<WorkEnvironmentReference, { kind: "source" }>,
-) {
-  const execution = projection?.executions.find((entry) => entry.id === reference.execution);
-  const artifact = execution?.artifacts.find((entry) => entry.id === reference.artifact);
-  if (!execution || artifact?.data.kind !== "evidence_collection") return undefined;
-  const entry = artifact.data.entries?.[reference.index];
-  const link = entry ? artifact.evidence[entry.evidence] : undefined;
-  const record = link
-    ? execution.provider_evidence?.find((record) => record.id === link.extraction_id)
-    : undefined;
-  const citation = link ? record?.evidence.citations[link.source_id - 1] : undefined;
-  return entry ? { entry, url: cleanUrl(citation?.url), title: citation?.title } : undefined;
+type SourceRow = { key: string; url: string; host: string; title: string };
+/** The cited pages behind one evidence collection, in the order it cites them. */
+function collectionRows(execution: WorkExecutionFact, artifact: WorkArtifactV1): SourceRow[] {
+  if (artifact.data.kind !== "evidence_collection") return [];
+  return (artifact.data.entries ?? []).flatMap((entry) => {
+    const link = artifact.evidence[entry.evidence];
+    if (!link) return [];
+    const record = execution.provider_evidence?.find((record) => record.id === link.extraction_id);
+    const citation = record?.evidence.citations[link.source_id - 1];
+    const url = cleanUrl(citation?.url);
+    if (!url) return [];
+    return [
+      {
+        key: `${link.extraction_id}:${link.source_id}`,
+        url,
+        host: host(url),
+        title: entry.title || citation?.title || host(url),
+      },
+    ];
+  });
 }
 /** The provider's tracking parameter is not part of the page the card opens. */
 function cleanUrl(url: string | undefined): string | undefined {
@@ -171,20 +180,8 @@ function elementItems(
       };
     }
     const projection = objectives.get(element.reference.objective);
-    if (element.reference.kind === "source") {
-      const citation = sourceCitation(projection, element.reference);
-      return {
-        id: element.id,
-        type: "source",
-        area: element.area,
-        kind: m.work_env_source(),
-        title: citation?.entry.title ?? m.work_artifact_unavailable(),
-        detail: host(citation?.url),
-        status: area,
-        ...(citation?.url ? { source: { url: citation.url, role: citation.entry.role } } : {}),
-        unavailable: !citation,
-      };
-    }
+    // A search stage cites many pages; they appear together on one Sources card.
+    if (element.reference.kind === "source") return [];
     if (element.reference.kind === "subject" || element.reference.kind === "finding") {
       const reference = element.reference;
       const execution = projection?.executions.find(
@@ -292,7 +289,9 @@ const relationLabels: Record<CanvasLink["kind"], () => string> = {
 export function environmentLinks(snapshot: WorkEnvironmentSnapshot): CanvasLink[] {
   const pictures = subjectPictures(snapshot);
   const ids = new Set(
-    snapshot.elements.flatMap((element) => (pictures.has(element.id) ? [] : [element.id])),
+    snapshot.elements.flatMap((element) =>
+      pictures.has(element.id) || element.reference.kind === "source" ? [] : [element.id],
+    ),
   );
   return (snapshot.relations ?? []).flatMap((relation) =>
     ids.has(relation.from) && ids.has(relation.to)
@@ -325,8 +324,8 @@ const agentLabels: Record<string, () => string> = {
   finishing: m.work_activity_finishing,
 };
 /** Transient agent presence for objectives with live executions; never persisted.
- * The primary avatar links to the sources of its latest turn; a worker avatar
- * appears beside the source a native step is reading. */
+ * The primary avatar stands beside what it just placed; a worker avatar appears
+ * beside it while a native step browses. */
 export function environmentAgents(
   snapshot: WorkEnvironmentSnapshot,
   objectives: ReadonlyMap<string, WorkRuntimeProjection>,
@@ -375,10 +374,6 @@ export function environmentAgents(
     const anchor = snapshot.view.placements.find((place) => place.element === element.id);
     const placement = (target: string) =>
       snapshot.view.placements.find((place) => place.element === target);
-    const beside = (target: string, dy = 0) => {
-      const place = placement(target);
-      return place ? { x: place.x + place.width + 40, y: place.y + dy } : undefined;
-    };
     const home = anchor ? { x: anchor.x + anchor.width + 48, y: anchor.y } : undefined;
     const steps = execution.steps ?? [];
     const elementsOf = (artifacts: readonly string[]) =>
@@ -389,14 +384,10 @@ export function environmentAgents(
           artifacts.includes(candidate.reference.artifact),
       );
     // The agent stands beside what it acts on now: the objects it just placed,
-    // the sources it is reading, or the goal while it thinks or searches.
+    // or the request while it thinks, searches and reads.
     const working = new Set<string>();
     const lastPublish = [...steps].reverse().find((step) => step.kind.kind === "publish");
     const latestTurn = Math.max(0, ...steps.map((step) => step.turn));
-    const reading = steps.find(
-      (step) =>
-        step.status === "running" && (step.kind.kind === "read" || step.kind.kind === "discover"),
-    );
     let stand = home;
     if (lastPublish && lastPublish.turn === latestTurn) {
       const placed = elementsOf(lastPublish.artifacts ?? []);
@@ -406,41 +397,6 @@ export function environmentAgents(
         .filter((place): place is NonNullable<typeof place> => !!place)
         .sort((a, b) => b.y - a.y)[0];
       if (newest) stand = { x: newest.x + newest.width + 40, y: newest.y };
-    }
-    const searches = steps.filter(
-      (step) => step.kind.kind === "search" && (step.artifacts?.length ?? 0) > 0,
-    );
-    const latestSearchTurn = Math.max(0, ...searches.map((step) => step.turn));
-    const recent = new Set(
-      searches
-        .filter((step) => step.turn === latestSearchTurn)
-        .flatMap((step) => step.artifacts ?? []),
-    );
-    const sources = snapshot.elements.filter(
-      (candidate) =>
-        candidate.reference.kind === "source" && candidate.reference.execution === execution.id,
-    );
-    let newestSource: { x: number; y: number; width: number } | undefined;
-    for (const source of sources) {
-      if (source.reference.kind !== "source" || !recent.has(source.reference.artifact)) continue;
-      if (latestTurn === latestSearchTurn) working.add(source.id);
-      const place = placement(source.id);
-      if (place && (!newestSource || place.y > newestSource.y)) newestSource = place;
-    }
-    if (newestSource && !(lastPublish && lastPublish.turn === latestTurn))
-      stand = { x: newestSource.x + newestSource.width + 40, y: newestSource.y };
-    if (reading?.kind.kind === "read") {
-      const target = sources.find((source) => {
-        const citation =
-          source.reference.kind === "source"
-            ? sourceCitation(projection, source.reference)
-            : undefined;
-        return citation?.url === reading.kind.url;
-      });
-      if (target) {
-        working.add(target.id);
-        stand = beside(target.id, -8) ?? stand;
-      }
     }
     if (stand) positions[id] = stand;
     for (const target of working)
@@ -464,12 +420,119 @@ export function environmentAgents(
   return { items, links, positions };
 }
 
+/**
+ * One Sources card per fetch stage: the pages a turn's searches cited, counted
+ * and listed together. Individual sources are rows, never cards, and later
+ * objects connect to the group that established them.
+ */
+export function environmentSources(
+  snapshot: WorkEnvironmentSnapshot,
+  objectives: ReadonlyMap<string, WorkRuntimeProjection>,
+): {
+  items: CanvasItem[];
+  links: CanvasLink[];
+  positions: Record<string, CanvasPosition>;
+  /** The group each cited page belongs to, so a page card joins the same stage. */
+  groups: Map<string, string>;
+} {
+  const items: CanvasItem[] = [];
+  const links: CanvasLink[] = [];
+  const positions: Record<string, CanvasPosition> = {};
+  const groups = new Map<string, string>();
+  for (const element of snapshot.elements) {
+    if (element.reference.kind !== "objective") continue;
+    const projection = objectives.get(element.reference.objective);
+    const execution = projection?.executions.at(-1);
+    if (!projection || !execution || !isAgentExecution(execution)) continue;
+    const stages = new Map<number, WorkArtifactV1[]>();
+    for (const step of execution.steps ?? []) {
+      if (step.kind.kind !== "search") continue;
+      for (const id of step.artifacts ?? []) {
+        const artifact = execution.artifacts.find((entry) => entry.id === id);
+        if (artifact?.data.kind !== "evidence_collection") continue;
+        const stage = stages.get(step.turn) ?? [];
+        if (!stage.includes(artifact)) stage.push(artifact);
+        stages.set(step.turn, stage);
+      }
+    }
+    if (!stages.size) continue;
+    const anchor = snapshot.view.placements.find((place) => place.element === element.id);
+    const home = anchor ? { x: anchor.x, y: anchor.y + anchor.height + 48 } : { x: 80, y: 320 };
+    let index = 0;
+    for (const [turn, artifacts] of [...stages].sort(([a], [b]) => a - b)) {
+      const seen = new Set<string>();
+      const rows: SourceRow[] = [];
+      for (const artifact of artifacts)
+        for (const row of collectionRows(execution, artifact)) {
+          if (seen.has(row.key)) continue;
+          seen.add(row.key);
+          rows.push(row);
+        }
+      if (!rows.length) continue;
+      const id = `sources:${element.id}:${turn}`;
+      items.push({
+        id,
+        type: "sources",
+        kind: m.work_env_sources(),
+        title:
+          rows.length === 1
+            ? m.work_env_source_one()
+            : m.work_env_sources_count({ count: rows.length }),
+        detail: "",
+        status: "",
+        sources: rows.slice(0, SOURCE_ROWS),
+      });
+      positions[id] = { x: home.x, y: home.y + index * (SOURCES_SIZE.height + 24) };
+      index += 1;
+      links.push({
+        id: `sources-of:${id}`,
+        source: element.id,
+        target: id,
+        kind: "uses",
+        label: m.work_env_relation_uses(),
+      });
+      for (const row of rows) groups.set(row.url, id);
+      // Findings and published objects hang off the stage whose pages they cite.
+      for (const candidate of snapshot.elements) {
+        const reference = candidate.reference;
+        if (
+          (reference.kind !== "finding" && reference.kind !== "artifact") ||
+          reference.execution !== execution.id
+        )
+          continue;
+        const artifact = execution.artifacts.find((entry) => entry.id === reference.artifact);
+        if (!artifact) continue;
+        const cited =
+          reference.kind === "artifact"
+            ? artifact.evidence
+            : (artifact.data.kind === "findings"
+                ? (artifact.data.items[reference.index]?.evidence ?? [])
+                : []
+              ).flatMap((position) =>
+                artifact.evidence[position] ? [artifact.evidence[position]!] : [],
+              );
+        if (!cited.some((link) => seen.has(`${link.extraction_id}:${link.source_id}`))) continue;
+        links.push({
+          id: `sources-support:${id}:${candidate.id}`,
+          source: id,
+          target: candidate.id,
+          kind: "supports",
+          label: m.work_env_relation_supports(),
+        });
+      }
+    }
+  }
+  return { items, links, positions, groups };
+}
+
 /** Pages the agent opened: transient cards beside the goal that show the newest
  * frame while a step works there and keep the last one after it settles. */
 export function environmentPages(
   snapshot: WorkEnvironmentSnapshot,
   objectives: ReadonlyMap<string, WorkRuntimeProjection>,
   pages: (objective: string) => readonly WorkPageV1[],
+  /** The Sources card each cited page came from, so a page joins its stage. */
+  groups: ReadonlyMap<string, string> = new Map(),
 ): { items: CanvasItem[]; links: CanvasLink[]; positions: Record<string, CanvasPosition> } {
   const items: CanvasItem[] = [];
   const links: CanvasLink[] = [];
@@ -536,6 +599,15 @@ export function environmentPages(
       });
       positions[id] = { x: home.x, y: home.y + index * 260 };
       index += 1;
+      const group = groups.get(url);
+      if (group)
+        links.push({
+          id: `sources-page:${group}:${id}`,
+          source: group,
+          target: id,
+          kind: "uses",
+          label: m.work_env_relation_uses(),
+        });
       if (live) links.push({ id: `working:${id}`, source: agent, target: id, kind: "working" });
       const linked = new Set<string>();
       for (const step of entry.steps)

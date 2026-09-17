@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import { projection, snapshot } from "./environment-fixtures";
-import { environmentItems } from "../lib/project-environment";
+import { environmentItems, environmentPages } from "../lib/project-environment";
 test("joins exact objective and historical artifact identities without replacing originals", () => {
   const items = environmentItems(snapshot, [], [], new Map([["objective", projection]]));
   expect(items[0]?.title).toBe("Investigate dependencies");
@@ -194,8 +194,8 @@ test("catalogue rows enrich the hub a detail read created without becoming cards
   ]);
 });
 
-test("source elements read their citation and the running agent links to them", async () => {
-  const { environmentAgents } = await import("../lib/project-environment");
+test("a turn's searches become one Sources card the request and its pages join", async () => {
+  const { environmentSources } = await import("../lib/project-environment");
   const state = structuredClone(projection);
   const execution = state.executions[0]!;
   execution.status = "running";
@@ -290,31 +290,34 @@ test("source elements read their citation and the running agent links to them", 
     ],
     view: {
       ...snapshot.view,
-      placements: [
-        { element: objectiveElement.id, x: 0, y: 0, width: 320, height: 150 },
-        { element: "source-1", x: 400, y: 0, width: 260, height: 84 },
-      ],
+      placements: [{ element: objectiveElement.id, x: 0, y: 0, width: 320, height: 150 }],
     },
   };
   const objectives = new Map([["objective", state]]);
-  const items = environmentItems(withSource, [], [], objectives);
-  const source = items.find((item) => item.type === "source")!;
-  expect(source.title).toBe("Review A");
-  expect(source.detail).toBe("a.example");
-  expect(source.source).toEqual({ url: "https://a.example/review", role: "source" });
-  // The agent stands beside the source it reads, tied to it by a working link.
-  const agents = environmentAgents(withSource, objectives, () => "reading");
-  expect(agents.items.map((item) => item.agent?.worker ?? false)).toEqual([false]);
-  expect(agents.items[0]?.agent?.line).toBe("Reading the review.");
-  expect(agents.links).toEqual([
+  // A source element left by an earlier run is no longer a card of its own.
+  expect(environmentItems(withSource, [], [], objectives).map((item) => item.id)).toEqual([
+    objectiveElement.id,
+  ]);
+  const sources = environmentSources(withSource, objectives);
+  expect(sources.items).toHaveLength(1);
+  const group = sources.items[0]!;
+  expect(group.title).toBe("1 source");
+  expect(group.sources).toEqual([
     {
-      id: "working:source-1",
-      source: `agent:${objectiveElement.id}`,
-      target: "source-1",
-      kind: "working",
+      key: "record:1",
+      url: "https://a.example/review",
+      host: "a.example",
+      title: "Review A",
     },
   ]);
-  expect(agents.positions[`agent:${objectiveElement.id}`]).toEqual({ x: 700, y: -8 });
+  expect(sources.links.map((link) => [link.source, link.target])).toEqual([
+    [objectiveElement.id, group.id],
+  ]);
+  expect(sources.positions[group.id]).toEqual({ x: 0, y: 198 });
+  expect(sources.groups.get("https://a.example/review")).toBe(group.id);
+  // The page the run read joins the stage that cited it, not a source card.
+  const pages = environmentPages(withSource, objectives, () => [], sources.groups);
+  expect(pages.links.some((link) => link.source === group.id)).toBe(true);
 });
 
 test("browser steps become page cards with frames, working links and subject links", async () => {

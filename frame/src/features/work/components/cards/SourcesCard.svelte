@@ -1,0 +1,63 @@
+<script lang="ts">
+  import CardFrame from "./CardFrame.svelte";
+  import HostGlyph from "./HostGlyph.svelte";
+  import { Link04Icon } from "../../lib/icons";
+  import type { CanvasItem } from "../../lib/canvas-model";
+  let { item, selected }: { item: CanvasItem; selected: boolean } = $props();
+  const rows = $derived(item.sources ?? []);
+</script>
+
+<CardFrame kind={item.kind} title={item.title} icon={Link04Icon} {selected} dense>
+  <ul class="rows">
+    {#each rows.slice(0, 6) as row (row.key)}
+      <li>
+        <HostGlyph host={row.host} />
+        <span class="text">
+          <span class="host">{row.host}</span>
+          <span class="title">{row.title}</span>
+        </span>
+      </li>
+    {/each}
+  </ul>
+</CardFrame>
+
+<style>
+  .rows {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 0;
+    padding: 0 0 4px;
+    block-size: 100%;
+    overflow: hidden;
+  }
+
+  li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-inline-size: 0;
+  }
+
+  .text {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    min-inline-size: 0;
+  }
+
+  .host {
+    flex: none;
+    color: var(--color-muted);
+    font-size: var(--text-caption);
+  }
+
+  .title {
+    min-inline-size: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--text-label);
+  }
+</style>

@@ -91,40 +91,12 @@ function agentRun(): WorkExecutionFact {
   };
 }
 
-test("an agent run lands its sources while running and later findings connect to them", () => {
+test("an agent run leaves its cited pages to the Sources card and places what they establish", () => {
   const execution = agentRun();
   const state = { ...projection, executions: [execution] };
-  expect(pendingOrganize(snapshot, state)?.id).toBe("execution");
-  const first = organizeExecution(state, execution, { x: 100, y: 300 }, snapshot);
-  expect(first.adds.map((add) => add.reference.kind)).toEqual(["source", "source"]);
-  expect(first.adds[1]!.placement.y).toBeGreaterThan(first.adds[0]!.placement.y);
-  expect(first.adds[1]!.placement.x).toBe(first.adds[0]!.placement.x);
-  expect(first.relations).toEqual(
-    first.adds.map((add) => ({
-      from: { kind: "objective", objective: "objective" },
-      to: add.reference,
-      kind: "uses",
-    })),
-  );
-  const placed: WorkEnvironmentSnapshot = {
-    ...snapshot,
-    elements: [
-      ...snapshot.elements,
-      ...first.adds.map((add, index) => ({
-        id: `source-${index}`,
-        area: null,
-        reference: add.reference,
-      })),
-    ],
-    view: {
-      ...snapshot.view,
-      placements: first.adds.map((add, index) => ({
-        element: `source-${index}`,
-        ...add.placement,
-      })),
-    },
-  };
-  expect(pendingOrganize(placed, state)).toBeNull();
+  // A search alone establishes nothing: its pages are rows on one Sources card.
+  expect(pendingOrganize(snapshot, state)).toBeNull();
+  expect(organizeExecution(state, execution, { x: 100, y: 300 }, snapshot).adds).toEqual([]);
   execution.artifacts.push({
     ...execution.artifacts[0]!,
     id: "findings",
@@ -149,16 +121,14 @@ test("an agent run lands its sources while running and later findings connect to
     status: "succeeded",
     artifacts: ["findings"],
   });
-  expect(pendingOrganize(placed, state)?.id).toBe("execution");
-  const second = organizeExecution(state, execution, { x: 100, y: 300 }, placed);
-  expect(second.adds.map((add) => add.reference.kind)).toEqual(["subject", "finding", "finding"]);
-  expect(second.relations).toEqual([
-    { from: second.adds[1]!.reference, to: second.adds[0]!.reference, kind: "supports" },
-    { from: first.adds[0]!.reference, to: second.adds[1]!.reference, kind: "supports" },
-    { from: second.adds[2]!.reference, to: second.adds[0]!.reference, kind: "supports" },
-    { from: first.adds[1]!.reference, to: second.adds[2]!.reference, kind: "supports" },
+  expect(pendingOrganize(snapshot, state)?.id).toBe("execution");
+  const plan = organizeExecution(state, execution, { x: 100, y: 300 }, snapshot);
+  expect(plan.adds.map((add) => add.reference.kind)).toEqual(["subject", "finding", "finding"]);
+  expect(plan.relations).toEqual([
+    { from: plan.adds[1]!.reference, to: plan.adds[0]!.reference, kind: "supports" },
+    { from: plan.adds[2]!.reference, to: plan.adds[0]!.reference, kind: "supports" },
   ]);
-  expect(second.adds[1]!.placement.y).toBeLessThan(second.adds[2]!.placement.y);
+  expect(plan.adds[1]!.placement.y).toBeLessThan(plan.adds[2]!.placement.y);
 });
 
 test("reviewed plans still organize once, after they settle", () => {

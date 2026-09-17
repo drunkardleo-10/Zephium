@@ -41,6 +41,7 @@
   import { mediaUrl } from "$domain/resources";
   import BrowserPane from "./pane/BrowserPane.svelte";
   import Lift from "./Lift.svelte";
+  import HostGlyph from "./cards/HostGlyph.svelte";
   import { defaultSize } from "../lib/canvas-model";
   import { environmentPlan } from "../lib/project-environment-plan";
   import {
@@ -48,6 +49,7 @@
     environmentItems,
     environmentLinks,
     environmentPages,
+    environmentSources,
     environmentView,
   } from "../lib/project-environment";
   import { organizeExecution, pendingOrganize, elementFor } from "../lib/organize";
@@ -144,10 +146,6 @@
     if (reference?.kind === "browser") {
       if (tabs.some((tab) => tab.id === reference.tab))
         openPane({ kind: "tab", id: reference.tab }, id);
-      return;
-    }
-    if (reference?.kind === "source") {
-      if (item.source) openPane({ kind: "url", url: item.source.url }, id);
       return;
     }
     chrome?.close();
@@ -272,6 +270,8 @@
         return { width: 640, height: 560 };
       case "responsibility":
         return { width: 480, height: 320 };
+      case "sources":
+        return { width: 560, height: 560 };
       default: {
         const base = defaultSize(item);
         return { width: Math.max(720, base.width + 200), height: Math.max(520, base.height + 160) };
@@ -342,17 +342,26 @@
         )
       : { items: [], links: [], positions: {} },
   );
+  const sources = $derived(
+    snapshot
+      ? environmentSources(snapshot, context.objectives)
+      : { items: [], links: [], positions: {}, groups: new Map<string, string>() },
+  );
   const pages = $derived(
     snapshot
-      ? environmentPages(snapshot, context.objectives, (objective) =>
-          objectiveSession?.selected === objective ? objectiveSession.pages : [],
+      ? environmentPages(
+          snapshot,
+          context.objectives,
+          (objective) => (objectiveSession?.selected === objective ? objectiveSession.pages : []),
+          sources.groups,
         )
       : { items: [], links: [], positions: {} },
   );
-  const items = $derived([...results.items, ...pages.items, ...agents.items]);
+  const items = $derived([...results.items, ...sources.items, ...pages.items, ...agents.items]);
   const links = $derived([
     ...scene.links,
     ...(snapshot ? environmentLinks(snapshot) : []),
+    ...sources.links,
     ...pages.links,
     ...agents.links,
   ]);
@@ -574,6 +583,7 @@
           ...environmentView(snapshot),
           positions: {
             ...scene.positions,
+            ...sources.positions,
             ...pages.positions,
             ...agents.positions,
             ...plannedGeometry.positions,
@@ -1482,7 +1492,28 @@
       title={liftedItem?.title ?? ""}
       onclose={() => (lifted = null)}
     >
-      {#if liftedElement?.reference.kind === "resource" && liftedItem?.media}
+      {#if liftedItem?.sources}
+        <ul class="lift-sources">
+          {#each liftedItem.sources as row (row.key)}
+            <li>
+              <button
+                type="button"
+                onclick={() => {
+                  const url = row.url;
+                  lifted = null;
+                  openPane({ kind: "url", url }, null);
+                }}
+              >
+                <HostGlyph host={row.host} size={22} />
+                <span class="source-text">
+                  <strong>{row.title}</strong>
+                  <span>{row.host}</span>
+                </span>
+              </button>
+            </li>
+          {/each}
+        </ul>
+      {:else if liftedElement?.reference.kind === "resource" && liftedItem?.media}
         {@const image =
           liftedItem.media.asset.kind === "image"
             ? mediaUrl(liftedItem.media.profile, liftedItem.media.asset.digest)
@@ -1721,6 +1752,60 @@
     font-size: var(--text-title);
     font-weight: 600;
     letter-spacing: -0.01em;
+  }
+
+  .lift-sources {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 0;
+    padding: 0;
+  }
+
+  .lift-sources button {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    inline-size: 100%;
+    box-sizing: border-box;
+    padding: 8px 10px;
+    border: 0;
+    border-radius: var(--radius-control-compact);
+    background: transparent;
+    color: var(--color-text);
+    font: inherit;
+    text-align: start;
+    cursor: default;
+    transition: background-color var(--motion-instant) ease;
+  }
+
+  .lift-sources button:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: -2px;
+  }
+
+  .lift-sources button:hover {
+    background: var(--color-fill-hover);
+  }
+
+  .source-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-inline-size: 0;
+  }
+
+  .source-text strong {
+    font-weight: 550;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .source-text span {
+    color: var(--color-muted);
+    font-size: var(--text-caption);
   }
 
   .lift-media {

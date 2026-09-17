@@ -19,7 +19,7 @@
   import ResultCard from "./cards/ResultCard.svelte";
   import SubjectCard from "./cards/SubjectCard.svelte";
   import FindingCard from "./cards/FindingCard.svelte";
-  import SourceCard from "./cards/SourceCard.svelte";
+  import SourcesCard from "./cards/SourcesCard.svelte";
   import AgentCard from "./cards/AgentCard.svelte";
   import PageCard from "./cards/PageCard.svelte";
   import * as m from "$shared/i18n/messages";
@@ -68,11 +68,11 @@
       >
         <Icon icon={Target01Icon} size={14} />{m.work_env_focus_result()}
       </button>{/if}
-    {#if type !== "responsibility" && type !== "agent" && type !== "page"}<button
+    {#if type !== "responsibility" && type !== "agent" && type !== "page" && type !== "sources"}<button
         type="button"
         onclick={() => action(id, "ask")}>{m.work_env_ask()}</button
       >{/if}
-    {#if type !== "responsibility" && type !== "agent" && type !== "page" && !data.actionLabel}<button
+    {#if type !== "responsibility" && type !== "agent" && type !== "page" && type !== "sources" && !data.actionLabel}<button
         type="button"
         class:on={!!data.decision}
         onclick={() => action(id, data.decision ? "unchoose" : "choose")}
@@ -90,7 +90,7 @@
         type="button"
         onclick={() => action(id, "account")}>{m.work_account_ask()}</button
       >{/if}
-    {#if type !== "responsibility" && type !== "agent" && type !== "page" && !data.actionLabel}<span
+    {#if type !== "responsibility" && type !== "agent" && type !== "page" && type !== "sources" && !data.actionLabel}<span
         class="separator"
       ></span><button type="button" class="danger" onclick={() => action(id, "remove")}>
         <Icon icon={MinusSignIcon} size={14} />{m.work_env_remove()}
@@ -104,7 +104,7 @@
   {#if type === "tab"}<TabCard item={data} {selected} />
   {:else if type === "subject"}<SubjectCard item={data} {selected} />
   {:else if type === "finding"}<FindingCard item={data} {selected} />
-  {:else if type === "source"}<SourceCard item={data} {selected} />
+  {:else if type === "sources"}<SourcesCard item={data} {selected} />
   {:else if type === "page"}<PageCard item={data} {selected} />
   {:else if type === "agent"}<AgentCard item={data} {selected} />
   {:else if type === "note"}<NoteCard item={data} {selected} />

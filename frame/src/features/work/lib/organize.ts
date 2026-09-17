@@ -3,7 +3,6 @@ import type {
   WorkEnvironmentElement,
   WorkEnvironmentReference,
   WorkEnvironmentSnapshot,
-  WorkEvidenceLink,
   WorkExecutionFact,
   WorkRuntimeProjection,
 } from "$shared/ipc/bindings";
@@ -25,8 +24,6 @@ export type OrganizePlan = {
 
 const same = (a: WorkEnvironmentReference, b: WorkEnvironmentReference) =>
   JSON.stringify(a) === JSON.stringify(b);
-const SOURCES_PER_ARTIFACT = 5;
-const SOURCES_PER_RUN = 24;
 const FINDINGS_PER_ARTIFACT = 8;
 const FINDINGS_PER_RUN = 32;
 const SUBJECTS_PER_RUN = 12;
@@ -34,13 +31,14 @@ const SIZES = {
   subject: { width: 240, height: 136 },
   pictured: { width: 240, height: 256 },
   finding: { width: 300, height: 140 },
-  source: { width: 260, height: 84 },
   page: { width: 320, height: 236 },
 } as const;
 const GAP = 24;
-/** Column origins of the agent-run flow, shared with the transient page cards. */
+/** One Sources card stands where a stage's cited pages were found. */
+export const SOURCES_SIZE = { width: 300, height: 208 } as const;
+/** Column origins of the agent-run flow, shared with the transient cards. */
 export const COLUMNS = {
-  pages: (x: number) => x + SIZES.source.width + GAP * 2,
+  pages: (x: number) => x + SOURCES_SIZE.width + GAP * 2,
   subjects: (x: number) => COLUMNS.pages(x) + SIZES.page.width + GAP * 2,
   objects: (x: number) => COLUMNS.subjects(x) + SIZES.pictured.width + GAP * 2,
 } as const;
@@ -53,8 +51,9 @@ function roots(execution: WorkExecutionFact): WorkArtifactV1[] {
 /** Whether an artifact yields at least one canvas object under the agent projection. */
 function placeable(artifact: WorkArtifactV1): boolean {
   switch (artifact.data.kind) {
+    // Cited pages are rows on the run's Sources card, not elements of their own.
     case "evidence_collection":
-      return (artifact.data.entries?.length ?? 0) > 0;
+      return (artifact.data.subjects?.length ?? 0) > 0;
     case "findings":
       return artifact.data.items.length > 0 || (artifact.data.subjects?.length ?? 0) > 0;
     default:
@@ -102,8 +101,7 @@ function referenced(snapshot: WorkEnvironmentSnapshot, execution: string): Set<s
     if (
       (reference.kind === "artifact" ||
         reference.kind === "subject" ||
-        reference.kind === "finding" ||
-        reference.kind === "source") &&
+        reference.kind === "finding") &&
       reference.execution === execution
     )
       ids.add(reference.artifact);
@@ -266,36 +264,18 @@ function organizeAgentRun(
     );
   const count = (kind: WorkEnvironmentReference["kind"]) =>
     existing.filter((element) => element.reference.kind === kind).length;
-  // One flow, left to right: sources, the pages read from them, the subjects
-  // they establish, then findings and the published objects.
-  const sourcesX = anchor.x;
+  // One flow, left to right: the Sources cards, the pages read from them, the
+  // subjects they establish, then findings and the published objects.
   const subjectsX = COLUMNS.subjects(anchor.x);
   const findingsX = COLUMNS.objects(anchor.x);
   const objectsX = findingsX;
   let subjectCount = count("subject");
   let subjectY = bottom("subject", anchor.y);
   let findingY = bottom("finding", anchor.y);
-  let sourceCount = count("source");
-  let sourceY = bottom("source", anchor.y);
   let objectY = Math.max(bottom("artifact", anchor.y), bottom("finding", anchor.y));
-  const objectiveRef: WorkEnvironmentReference = { kind: "objective", objective };
 
   // Subjects are hubs: one per name across the run.
   const subjectByName = placedSubjects(snapshot, execution);
-  // Sources are matched to findings by the exact evidence link they cite.
-  const sourceByLink = new Map<string, WorkEnvironmentReference>();
-  const linkKey = (link: WorkEvidenceLink) => `${link.extraction_id}:${link.source_id}`;
-  for (const element of existing) {
-    const reference = element.reference;
-    if (reference.kind !== "source") continue;
-    const artifact = execution.artifacts.find((artifact) => artifact.id === reference.artifact);
-    const entry =
-      artifact?.data.kind === "evidence_collection"
-        ? artifact.data.entries?.[reference.index]
-        : undefined;
-    const link = entry ? artifact!.evidence[entry.evidence] : undefined;
-    if (link) sourceByLink.set(linkKey(link), reference);
-  }
   const subjectRef = (artifact: WorkArtifactV1, index: number): WorkEnvironmentReference => ({
     kind: "subject",
     objective,
@@ -326,27 +306,6 @@ function organizeAgentRun(
     });
   };
   for (const artifact of fresh) {
-    if (artifact.data.kind === "evidence_collection") {
-      const entries = artifact.data.entries ?? [];
-      for (const [index, entry] of entries.slice(0, SOURCES_PER_ARTIFACT).entries()) {
-        if (sourceCount >= SOURCES_PER_RUN) break;
-        const link = artifact.evidence[entry.evidence];
-        if (!link) continue;
-        const reference: WorkEnvironmentReference = {
-          kind: "source",
-          objective,
-          execution: execution.id,
-          artifact: artifact.id,
-          index,
-        };
-        adds.push({ reference, placement: { x: sourcesX, y: sourceY, ...SIZES.source } });
-        relations.push({ from: objectiveRef, to: reference, kind: "uses" });
-        sourceByLink.set(linkKey(link), reference);
-        sourceCount += 1;
-        sourceY += SIZES.source.height + GAP;
-      }
-      continue;
-    }
     const subjects = admitSubjects(artifact);
     if (records.has(artifact.id)) continue;
     if (artifact.data.kind === "findings") {
@@ -369,11 +328,6 @@ function organizeAgentRun(
         const subject =
           item.subject === null || item.subject === undefined ? undefined : subjects[item.subject];
         if (subject) relations.push({ from: reference, to: subject, kind: "supports" });
-        for (const cited of item.evidence ?? []) {
-          const link = artifact.evidence[cited];
-          const source = link ? sourceByLink.get(linkKey(link)) : undefined;
-          if (source) relations.push({ from: source, to: reference, kind: "supports" });
-        }
       }
       continue;
     }
@@ -384,10 +338,6 @@ function organizeAgentRun(
     if (artifact.data.kind === "comparison_matrix")
       for (const subject of subjects)
         relations.push({ from: subject, to: reference, kind: "uses" });
-    for (const link of artifact.evidence) {
-      const source = sourceByLink.get(linkKey(link));
-      if (source) relations.push({ from: source, to: reference, kind: "supports" });
-    }
   }
   return {
     execution: execution.id,

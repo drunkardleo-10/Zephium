@@ -11,7 +11,7 @@ type CanvasKind =
   | "result"
   | "subject"
   | "finding"
-  | "source"
+  | "sources"
   | "page"
   | "agent";
 type RelationKind = "supports" | "uses" | "depends_on" | "same_as" | "contradicts";
@@ -37,8 +37,8 @@ export type CanvasItem = {
   finding?: FindingView;
   /** Transient agent presence: avatar seed, status, and its latest line. */
   agent?: { seed: number; activity: string; objective: string; line?: string; worker?: boolean };
-  /** A cited public source; opening it goes through the pane. */
-  source?: { url: string; role: string };
+  /** The pages one fetch stage cited; opening a row goes through the pane. */
+  sources?: readonly { key: string; url: string; host: string; title: string }[];
   /** A page a browser step opened: its newest frame while the agent works there. */
   page?: { url: string; host: string; frame: string | null; live: boolean };
   unavailable?: boolean;
@@ -122,8 +122,8 @@ export function defaultSize(item: CanvasItem): { width: number; height: number }
       return { width: 240, height: 136 };
     case "finding":
       return { width: 300, height: 140 };
-    case "source":
-      return { width: 260, height: 84 };
+    case "sources":
+      return { width: 300, height: 208 };
     case "note":
       return { width: 300, height: 200 };
     case "media":
@@ -256,7 +256,7 @@ export function reconcileNodes(
         node.data.subject === item.subject &&
         node.data.finding === item.finding &&
         node.data.decision === item.decision &&
-        JSON.stringify(node.data.source) === JSON.stringify(item.source) &&
+        JSON.stringify(node.data.sources) === JSON.stringify(item.sources) &&
         node.data.media?.asset.digest === item.media?.asset.digest &&
         node.data.image?.digest === item.image?.digest &&
         JSON.stringify(node.data.agent) === JSON.stringify(item.agent) &&

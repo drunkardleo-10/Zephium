@@ -1111,10 +1111,7 @@
   "work_account_update_invalid": "Enter the current value and a different temporary value before sending.",
   "work_activity_searching": "Searching the web",
   "work_env_status_done": "Done",
-  "work_env_source": "Source",
-  "work_env_from_run": "Placed by the agent from cited sources",
   "work_env_worker": "Worker",
-  "work_env_reading_host": "Reading {host}",
   "work_env_browsing": "Browsing the web",
   "work_context_kind_source": "Source",
   "work_env_choose": "Choose",
@@ -1152,5 +1149,8 @@
   "work_composer_continue": "Message the agent…",
   "work_line_send_answer": "Send answer",
   "work_env_request": "Request",
-  "work_env_you": "You"
+  "work_env_you": "You",
+  "work_env_sources": "Sources",
+  "work_env_sources_count": "{count} sources",
+  "work_env_source_one": "1 source"
 }
