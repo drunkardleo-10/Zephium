@@ -16,4 +16,6 @@ pub use actor::{
     ExtensionServiceStoreCallOutcome, ExtensionServiceStoreStartupRequirement, SqliteStore,
 };
 
+mod work_frames;
 mod work_migration_v2;
+pub use work_frames::{WorkFrameRecord, WorkFrameStore};
