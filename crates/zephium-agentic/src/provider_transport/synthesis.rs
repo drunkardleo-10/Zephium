@@ -132,6 +132,9 @@ pub(super) fn map_error(error: WorkPlanningError) -> WorkSynthesisError {
         WorkPlanningError::ProviderRefused(charged) => usage(charged)
             .map(WorkSynthesisError::Rejected)
             .unwrap_or(WorkSynthesisError::OutcomeUnknown),
+        WorkPlanningError::ProviderStalled(charged) => usage(charged)
+            .map(WorkSynthesisError::Stalled)
+            .unwrap_or(WorkSynthesisError::OutcomeUnknown),
         WorkPlanningError::ProviderOutcomeUnknown => WorkSynthesisError::OutcomeUnknown,
         WorkPlanningError::Capacity => WorkSynthesisError::NotDispatched(WorkError::Capacity),
         WorkPlanningError::Invalid | WorkPlanningError::Privacy => {

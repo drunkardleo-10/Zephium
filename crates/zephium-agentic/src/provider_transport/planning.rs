@@ -217,10 +217,26 @@ impl OpenAiWorkPlanner {
                     },
                 );
             }
-            let result = decoded
-                .ok_or(WorkPlanningError::ProviderOutcomeUnknown)?
-                .map_err(WorkPlanningError::ProviderRefused);
-            if result.is_ok() || matches!(result, Err(WorkPlanningError::ProviderRefused(_))) {
+            // A lost or unreadable terminal is charged at the call ceiling, which
+            // settles its spending; the slot completes instead of sealing.
+            let ceiling = self
+                .config
+                .call
+                .planning_cost_ceiling(tokens, self.config.call.max_output_tokens())
+                .map(|cost| WorkPlanningUsage {
+                    input_tokens: tokens,
+                    output_tokens: self.config.call.max_output_tokens(),
+                    cost_ceiling_micro_usd: cost,
+                });
+            let result = match decoded {
+                Some(Ok(value)) => Ok(value),
+                Some(Err(usage)) => Err(WorkPlanningError::ProviderRefused(usage)),
+                None => Err(ceiling.map_or(
+                    WorkPlanningError::ProviderOutcomeUnknown,
+                    WorkPlanningError::ProviderStalled,
+                )),
+            };
+            if !matches!(result, Err(WorkPlanningError::ProviderOutcomeUnknown)) {
                 slot.mark_completed();
             }
             result

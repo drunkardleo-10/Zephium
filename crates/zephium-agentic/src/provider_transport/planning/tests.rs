@@ -411,10 +411,11 @@ async fn planning_transport_refuses_budget_before_generation_and_seals_unknown_o
     let transport = server.transport();
     assert!(matches!(
         planner(transport.clone()).propose(disclosure()).await,
-        Err(WorkPlanningError::ProviderOutcomeUnknown)
+        Err(WorkPlanningError::ProviderStalled(usage))
+        if usage.input_tokens == 100 && usage.cost_ceiling_micro_usd > 0
     ));
     assert_eq!(server.thread.join().unwrap().len(), 2);
-    assert!(transport.snapshot().unwrap().is_sealed());
+    assert!(!transport.snapshot().unwrap().is_sealed());
     assert_eq!(transport.snapshot().unwrap().active_attempts(), 0);
 }
 #[tokio::test]
@@ -451,10 +452,11 @@ async fn rig_mapped_generation_retains_response_byte_ceiling_and_unknown_settlem
     let transport = server.transport();
     assert!(matches!(
         planner(transport.clone()).propose(disclosure()).await,
-        Err(WorkPlanningError::ProviderOutcomeUnknown)
+        Err(WorkPlanningError::ProviderStalled(usage))
+        if usage.input_tokens == 100 && usage.cost_ceiling_micro_usd > 0
     ));
     assert_eq!(server.thread.join().unwrap().len(), 2);
-    assert!(transport.snapshot().unwrap().is_sealed());
+    assert!(!transport.snapshot().unwrap().is_sealed());
     assert_eq!(transport.snapshot().unwrap().active_attempts(), 0);
 }
 
