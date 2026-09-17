@@ -195,6 +195,24 @@ function elementItems(
         status: area,
       };
     }
+    if (element.reference.kind === "link") {
+      const link = element.reference;
+      let origin = "";
+      try {
+        origin = new URL(link.url).origin;
+      } catch {
+        /* Rust admits the address; an unreadable one simply has no origin line. */
+      }
+      return {
+        id: element.id,
+        type: "link" as const,
+        area: element.area,
+        kind: m.work_env_link(),
+        title: link.title || host(link.url) || link.url,
+        detail: origin,
+        status: area,
+      };
+    }
     const projection = objectives.get(element.reference.objective);
     // A search stage cites many pages; they appear together on one Sources card.
     if (element.reference.kind === "source") return [];

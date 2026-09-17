@@ -102,7 +102,7 @@
   {#if data.decision}<span class="decision" title={data.decision}
       ><Icon icon={Tick02Icon} size={12} />{m.work_env_decided()}</span
     >{/if}
-  {#if type === "tab"}<TabCard item={data} {selected} />
+  {#if type === "tab" || type === "link"}<TabCard item={data} {selected} />
   {:else if type === "subject"}<SubjectCard item={data} {selected} />
   {:else if type === "finding"}<FindingCard item={data} {selected} />
   {:else if type === "sources"}<SourcesCard item={data} {selected} />

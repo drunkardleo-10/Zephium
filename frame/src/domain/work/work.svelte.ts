@@ -58,6 +58,8 @@ export class WorkSession {
   activity = $state.raw<WorkSignalV1[]>([]);
   /** Pages the latest runs opened, with their newest frames; kept after a run ends. */
   pages = $state.raw<WorkPageV1[]>([]);
+  /** Folders the canvas grants to the runs it starts; empty until a person grants one. */
+  folders = $state.raw<string[]>([]);
   /** Messages typed while a run was live; each is sent on as the run before it ends. */
   queue = $state.raw<string[]>([]);
   private activityRefresh: ReturnType<typeof setTimeout> | undefined;
@@ -446,7 +448,11 @@ export class WorkSession {
         work: work.id,
         expected_revision: work.revision,
         command: commandId(),
-        intent: { kind: "begin_agent", grant: AGENT_GRANT, limits: AGENT_LIMITS },
+        intent: {
+          kind: "begin_agent",
+          grant: this.folders.length ? { ...AGENT_GRANT, folders: this.folders } : AGENT_GRANT,
+          limits: AGENT_LIMITS,
+        },
       },
     });
   }

@@ -249,6 +249,7 @@
   }
   type CanvasApi = {
     screenRect: (id: string) => DOMRect | null;
+    flowPosition: (clientX: number, clientY: number) => CanvasPosition | null;
     selectionBounds: () => (CanvasPosition & CanvasSize & { ids: string[] }) | null;
     center: (id: string) => void;
   };
@@ -270,8 +271,17 @@
       (node.height ?? 160) * z,
     );
   }
+  /** Where a client point lands on the canvas, so a drop keeps its place. */
+  function flowPosition(clientX: number, clientY: number): CanvasPosition | null {
+    const origin = host?.getBoundingClientRect();
+    if (!origin) return null;
+    return {
+      x: (clientX - origin.left - viewport.x) / viewport.zoom,
+      y: (clientY - origin.top - viewport.y) / viewport.zoom,
+    };
+  }
   $effect(() => {
-    expose?.({ screenRect, selectionBounds, center });
+    expose?.({ screenRect, flowPosition, selectionBounds, center });
   });
   let lastClick = { id: "", at: 0 };
 </script>

@@ -5,8 +5,9 @@
     "description": "Note link marks and the typed document view add to the shared graph."
   },
   "panel": {
-    "js": 138000,
-    "css": 26345
+    "js": 139000,
+    "css": 26345,
+    "description": "Measured 138101 JS bytes: folder, link and file strings enter the shared message catalog."
   },
   "lazy:features/settings/components/sections/AboutPage.svelte": {
     "js": 432000,
@@ -133,9 +134,9 @@
     "description": "Measured 328183 JS bytes with the agent run operation, step labels, and the agent line on the canvas card in the shared graph."
   },
   "lazy:features/work/components/WorkCanvas.svelte": {
-    "js": 540000,
+    "js": 541000,
     "css": 116000,
-    "description": "Measured 535681 JS and 113096 CSS bytes with page cards and subject facts in the node graph."
+    "description": "Measured 540141 JS and 115667 CSS bytes with folder and link cards in the node graph."
   },
   "lazy:shared/ui/data/Chart/Chart.svelte": {
     "js": 415000,
@@ -146,9 +147,9 @@
     "css": 0
   },
   "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
-    "js": 580000,
+    "js": 585000,
     "css": 119000,
-    "description": "Measured 575663 JS bytes with incremental agent-run organization, source elements, and worker links."
+    "description": "Measured 583662 JS bytes with folder admission, Finder drops, and link elements beside agent-run organization."
   },
   "lazy:features/work/components/AgentLine.svelte": {
     "js": 110000,

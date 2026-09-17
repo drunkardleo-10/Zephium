@@ -50,6 +50,7 @@
   import Lift from "./Lift.svelte";
   import HostGlyph from "./cards/HostGlyph.svelte";
   import { defaultSize } from "../lib/canvas-model";
+  import { homePath } from "../lib/work-files";
   import { environmentPlan } from "../lib/project-environment-plan";
   import {
     environmentAgents,
@@ -63,7 +64,7 @@
   import { subjectImageCandidates, subjectsOf } from "../lib/subjects";
   import { environmentResults, type ResultReference } from "../lib/project-environment-results";
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
-  import type { CanvasView, CanvasItem } from "../lib/canvas-model";
+  import type { CanvasView, CanvasItem, CanvasPosition } from "../lib/canvas-model";
   import type { WorkEnvironmentPanel } from "../lib/work-environment";
   import * as m from "$shared/i18n/messages";
   let {
@@ -116,6 +117,7 @@
   let lifted = $state.raw<{ id: string; origin: DOMRect | null } | null>(null);
   let canvasRef = $state<{
     screenRect: (id: string) => DOMRect | null;
+    flowPosition: (clientX: number, clientY: number) => CanvasPosition | null;
     selectionBounds: () => {
       x: number;
       y: number;
@@ -157,6 +159,10 @@
       return;
     }
     const reference = session.snapshot?.elements.find((element) => element.id === id)?.reference;
+    if (reference?.kind === "link") {
+      openPane({ kind: "url", url: reference.url }, id);
+      return;
+    }
     if (reference?.kind === "browser") {
       if (tabs.some((tab) => tab.id === reference.tab))
         openPane({ kind: "tab", id: reference.tab }, id);
@@ -318,10 +324,115 @@
     return () => observer.disconnect();
   });
   let archived = $state(false);
-  let mediaKind = $state<"document" | "image" | "link">("document");
+  let mediaKind = $state<"document" | "image" | "link" | "folder">("document");
   let linkDraft = $state("");
   let linkPending = $state(false);
   let linkFailure = $state(false);
+  let folderDraft = $state("");
+  let folderPending = $state(false);
+  let folderRefused = $state(false);
+  let folderNotice: ReturnType<typeof setTimeout> | undefined;
+  /** One quiet line, and it goes away on its own. */
+  function refuseFolder() {
+    folderRefused = true;
+    clearTimeout(folderNotice);
+    folderNotice = setTimeout(() => (folderRefused = false), 6000);
+  }
+  /** A folder becomes a card only after the application admits its path. */
+  async function addFolder(path: string, at?: CanvasPosition | null) {
+    if (folderPending || busy) return false;
+    folderPending = true;
+    try {
+      const admitted = await commands.workAdmitFolder(session.profile, path).catch(() => null);
+      if (admitted?.status !== "ok" || admitted.data.kind !== "admitted") {
+        refuseFolder();
+        return false;
+      }
+      const reference = {
+        kind: "folder" as const,
+        path: admitted.data.path,
+        name: admitted.data.name,
+      };
+      if (session.snapshot && elementFor(session.snapshot, reference)) return true;
+      if (!(await session.flushView())) return false;
+      if (!(await session.edit({ kind: "add", reference, area: null }))) return false;
+      const current = session.snapshot;
+      const element = current ? elementFor(current, reference) : undefined;
+      const point = at ?? canvasCentre();
+      if (!current || !element || !point) return true;
+      const size = defaultSize({
+        id: element.id,
+        title: reference.name,
+        kind: "",
+        detail: reference.path,
+        status: "",
+        type: "folder",
+      });
+      session.checkpoint({
+        ...current.view,
+        placements: [
+          ...current.view.placements.filter((place) => place.element !== element.id),
+          {
+            element: element.id,
+            x: Math.round(point.x - size.width / 2),
+            y: Math.round(point.y - size.height / 2),
+            ...size,
+          },
+        ],
+      });
+      return true;
+    } finally {
+      folderPending = false;
+    }
+  }
+  function canvasCentre(): CanvasPosition | null {
+    const bounds = cardBounds;
+    return bounds
+      ? (canvasRef?.flowPosition(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2) ??
+          null)
+      : null;
+  }
+  // Finder drops: every dropped path is offered for admission, and the ones that
+  // are granted folders land where they were dropped. Anything else stays out.
+  onMount(() => {
+    let stop: (() => void) | null = null;
+    let live = true;
+    void import("@tauri-apps/api/webview")
+      .then((webview) => webview.getCurrentWebview())
+      .then((surface) =>
+        surface.onDragDropEvent((event) => {
+          if (event.payload.type !== "drop" || !event.payload.paths.length) return;
+          const ratio = window.devicePixelRatio || 1;
+          const at = canvasRef?.flowPosition(
+            event.payload.position.x / ratio,
+            event.payload.position.y / ratio,
+          );
+          void dropFolders(event.payload.paths.slice(0, 8), at ?? null);
+        }),
+      )
+      .then((unlisten) => {
+        if (live) stop = unlisten;
+        else unlisten();
+      })
+      .catch(() => {
+        /* Without the native drop bridge, the palette is the way in. */
+      });
+    return () => {
+      live = false;
+      stop?.();
+      clearTimeout(folderNotice);
+    };
+  });
+  async function dropFolders(paths: readonly string[], at: CanvasPosition | null) {
+    let index = 0;
+    for (const path of paths) {
+      const placed = await addFolder(
+        path,
+        at ? { x: at.x + index * 24, y: at.y + index * 24 } : null,
+      );
+      if (placed) index += 1;
+    }
+  }
   /** Only an explicit https or http address; anything else is not a link. */
   function linkUrl(raw: string): string | null {
     const text = raw.trim();
@@ -685,6 +796,17 @@
         ],
       });
   }
+  /** Every folder on this canvas is granted to the runs it starts. */
+  const grantedFolders = $derived(
+    snapshot?.elements.flatMap((element) =>
+      element.reference.kind === "folder" ? [element.reference.path] : [],
+    ) ?? [],
+  );
+  $effect(() => {
+    const current = objectiveSession;
+    const folders = grantedFolders;
+    if (current) current.folders = folders;
+  });
   const busy = $derived(!!session.pending || session.loading || objectivePending);
   const attachedTabs = $derived(
     snapshot?.elements.flatMap((element) =>
@@ -1194,8 +1316,36 @@
       {@render segment("document", File01Icon, m.work_env_documents())}
       {@render segment("image", Image01Icon, m.work_env_images())}
       {@render segment("link", Link04Icon, m.work_env_links())}
+      {@render segment("folder", FolderAddIcon, m.work_env_folders())}
     </div>
-    {#if mediaKind === "link"}
+    {#if mediaKind === "folder"}
+      <form
+        class="menu-create"
+        onsubmit={(event) => {
+          event.preventDefault();
+          void addFolder(folderDraft.trim()).then((placed) => {
+            if (placed) {
+              folderDraft = "";
+              chrome?.close();
+            }
+          });
+        }}
+      >
+        <span class="menu-icon"><Icon icon={FolderAddIcon} /></span>
+        <input
+          aria-label={m.work_env_folder_placeholder()}
+          placeholder={m.work_env_folder_placeholder()}
+          bind:value={folderDraft}
+          maxlength="1024"
+          disabled={busy || folderPending}
+        /><Button
+          type="submit"
+          size="compact"
+          disabled={busy || folderPending || !folderDraft.trim()}>{m.work_env_folder_add()}</Button
+        >
+      </form>
+      <p class="menu-status">{m.work_env_folder_hint()}</p>
+    {:else if mediaKind === "link"}
       <form
         class="menu-create"
         onsubmit={(event) => {
@@ -1230,7 +1380,11 @@
     {/if}
   </div>
 {/snippet}
-{#snippet segment(key: "document" | "image" | "link", icon: typeof File01Icon, label: string)}
+{#snippet segment(
+  key: "document" | "image" | "link" | "folder",
+  icon: typeof File01Icon,
+  label: string,
+)}
   <button
     type="button"
     class="segment"
@@ -1464,13 +1618,18 @@
       {/key}{:else}<div class="welcome">
         <p>{session.loading ? m.surface_loading() : m.work_env_preparing()}</p>
       </div>{/if}
-    {#if session.failure || session.pending || session.viewDraft}<div class="status" role="status">
+    {#if session.failure || session.pending || session.viewDraft || folderRefused}<div
+        class="status"
+        role="status"
+      >
         <span
           >{session.failure
             ? m.work_request_failed()
             : session.pending
               ? m.work_env_pending()
-              : m.work_env_unsaved_view()}</span
+              : session.viewDraft
+                ? m.work_env_unsaved_view()
+                : m.work_env_folder_refused()}</span
         >{#if session.delivery === "unknown"}<Button
             size="compact"
             onclick={() => void session.retry()}>{m.work_reconcile()}</Button
@@ -1566,6 +1725,13 @@
                 : ""}
             />{/snippet}</LazyView
         >
+      {:else if liftedElement?.reference.kind === "folder"}
+        <div class="lift-plain">
+          <span class="kind">{liftedItem?.kind}</span>
+          <h2>{liftedItem?.title}</h2>
+          <p class="lift-path">{homePath(liftedElement.reference.path)}</p>
+          <p>{m.work_env_folder_grant_note()}</p>
+        </div>
       {:else if liftedElement?.reference.kind === "objective" && objectiveSession}
         <LazyView
           loader={loadDetail}
@@ -1760,6 +1926,13 @@
     position: absolute;
     inset-block-start: 16px;
     inset-inline-end: 16px;
+  }
+
+  .lift-path {
+    color: var(--color-muted);
+    font-family: var(--font-mono);
+    font-size: var(--text-label);
+    overflow-wrap: anywhere;
   }
 
   .lift-result h2,

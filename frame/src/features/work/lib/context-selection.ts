@@ -39,6 +39,9 @@ export function contextSelection(
         revision = tab ? (tab.url ?? "") : null;
         break;
       }
+      case "link":
+        revision = reference.url;
+        break;
       case "objective":
         revision = known.objectives.get(reference.objective)?.work.revision ?? null;
         break;

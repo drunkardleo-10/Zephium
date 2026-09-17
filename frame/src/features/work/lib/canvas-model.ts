@@ -13,6 +13,7 @@ type CanvasKind =
   | "finding"
   | "sources"
   | "folder"
+  | "link"
   | "page"
   | "agent";
 type RelationKind = "supports" | "uses" | "depends_on" | "same_as" | "contradicts";
@@ -125,6 +126,7 @@ export function defaultSize(item: CanvasItem): { width: number; height: number }
   }
   switch (item.type) {
     case "tab":
+    case "link":
       return { width: 280, height: 96 };
     case "subject":
       return { width: 240, height: 136 };
