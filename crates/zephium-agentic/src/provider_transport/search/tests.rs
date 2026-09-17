@@ -95,7 +95,7 @@ fn malformed_identity_tools_and_usage_cannot_become_evidence() {
             json!(SEARCH_CONTEXT_TOKENS + MAX_REQUEST_BYTES + 1),
         ),
         ("/usage/total_tokens", json!(1)),
-        ("/output/0/action/type", json!("open_page")),
+        ("/output/0/action/type", json!("code_interpreter")),
         ("/output/1/role", json!("user")),
     ] {
         let mut r = response();
@@ -171,16 +171,89 @@ async fn insufficient_budget_is_not_dispatched() {
     assert!(!provider.transport.shared.shutdown.is_cancelled());
 }
 #[tokio::test]
-async fn dispatched_transport_failure_is_unknown_and_seals_transport() {
+async fn dispatched_transport_failure_is_charged_at_ceiling_and_keeps_transport() {
     let provider = adapter("http://127.0.0.1:9/v1/responses");
+    let ceiling = provider
+        .config
+        .reservation(
+            u32::try_from(
+                request(&provider.config, "public query", &[])
+                    .unwrap()
+                    .len(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
     assert!(matches!(
         provider.search("public query", &[], limits()).await,
-        Err(WorkPublicSearchError::OutcomeUnknown)
+        Err(WorkPublicSearchError::Rejected(usage)) if usage == ceiling
     ));
-    assert!(provider.transport.shared.shutdown.is_cancelled());
+    assert!(!provider.transport.shared.shutdown.is_cancelled());
+}
+#[tokio::test]
+async fn unadmitted_response_body_is_charged_at_ceiling_and_keeps_transport() {
+    let mut body = response();
+    body["output"][0]["action"]["type"] = json!("code_interpreter");
+    let (endpoint, server, _seen, _release) =
+        server_with(false, serde_json::to_vec(&body).unwrap());
+    let provider = adapter(&endpoint);
+    let ceiling = provider
+        .config
+        .reservation(
+            u32::try_from(
+                request(&provider.config, "public query", &[])
+                    .unwrap()
+                    .len(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(matches!(
+        provider.search("public query", &[], limits()).await,
+        Err(WorkPublicSearchError::Rejected(usage)) if usage == ceiling
+    ));
+    server.join().unwrap();
+    assert!(!provider.transport.shared.shutdown.is_cancelled());
+}
+#[test]
+fn several_search_calls_in_one_response_each_carry_a_fee() {
+    let mut r = response();
+    let mut second = r["output"][0].clone();
+    second["id"] = json!("ws_second");
+    second["action"] = json!({"type":"open_page","url":"https://example.com/source"});
+    r["output"].as_array_mut().unwrap().insert(1, second);
+    let result = decode(&serde_json::to_vec(&r).unwrap(), &config(), 1000)
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.search_call_id, "ws_public");
+    assert_eq!(
+        u64::from(result.usage.cost_micro_usd),
+        config()
+            .call
+            .planning_cost_ceiling(1000 + 2 * BILLED_SEARCH_INPUT_TOKENS, 100)
+            .unwrap()
+            + 2 * SEARCH_FEE_MICRO_USD
+    );
+    for _ in 0..MAX_SEARCH_CALLS {
+        let mut extra = r["output"][0].clone();
+        extra["id"] = json!(format!("ws_extra{}", r["output"].as_array().unwrap().len()));
+        r["output"].as_array_mut().unwrap().insert(0, extra);
+    }
+    assert!(decode(&serde_json::to_vec(&r).unwrap(), &config(), 1000).is_none());
 }
 fn server(
     hold: bool,
+) -> (
+    String,
+    std::thread::JoinHandle<Vec<u8>>,
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::Sender<()>,
+) {
+    server_with(hold, serde_json::to_vec(&response()).unwrap())
+}
+fn server_with(
+    hold: bool,
+    response: Vec<u8>,
 ) -> (
     String,
     std::thread::JoinHandle<Vec<u8>>,
@@ -225,7 +298,6 @@ fn server(
         if hold {
             release_rx.recv_timeout(Duration::from_secs(30)).unwrap();
         }
-        let response = serde_json::to_vec(&response()).unwrap();
         let head = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             response.len()

@@ -218,7 +218,11 @@ impl WorkProviders {
                         search_config,
                     )?;
                     #[cfg(feature = "work-development-traces")]
-                    let search = search.with_public_response_retention();
+                    let search = search.with_public_response_retention().with_diagnostic(|event| {
+                        if let zephium_core::work::synthesis::WorkSynthesisDiagnostic::ProviderTransport { http_status, body_bytes, decoded, elapsed_millis } = event {
+                            record_diagnostic(format_args!("work: phase=search provider_transport http_status={http_status:?} body_bytes={body_bytes} decoded={decoded} elapsed_ms={elapsed_millis}"));
+                        }
+                    });
                     let callback = shell.callback_handle();
                     let work = command.work;
                     let started = std::time::Instant::now();
