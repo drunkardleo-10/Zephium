@@ -346,25 +346,48 @@
     clearTimeout(folderNotice);
     folderNotice = setTimeout(() => (folderRefused = false), 6000);
   }
-  /** A folder becomes a card only after the application admits its path. */
-  async function addFolder(path: string, at?: CanvasPosition | null) {
+  /** A folder becomes a card only after the application admits its path. A file
+   * among dropped paths is not a refusal a person needs to hear about. */
+  async function addFolder(path: string, at?: CanvasPosition | null, dropped = false) {
     if (folderPending || busy) return false;
     folderPending = true;
     try {
       const admitted = await commands.workAdmitFolder(session.profile, path).catch(() => null);
       if (admitted?.status !== "ok" || admitted.data.kind !== "admitted") {
-        refuseFolder();
+        const file =
+          admitted?.status === "ok" &&
+          admitted.data.kind === "refused" &&
+          admitted.data.not_a_folder;
+        if (!(dropped && file)) refuseFolder();
         return false;
       }
-      const reference = {
-        kind: "folder" as const,
-        path: admitted.data.path,
-        name: admitted.data.name,
-      };
-      return await place(reference, "folder", at ?? null);
+      return await placeFolder(admitted.data, at ?? null);
     } finally {
       folderPending = false;
     }
+  }
+  function placeFolder(folder: { path: string; name: string }, at: CanvasPosition | null) {
+    return place({ kind: "folder", path: folder.path, name: folder.name }, "folder", at);
+  }
+  /** The native folder picker; a cancelled choice says nothing. */
+  async function chooseFolder() {
+    if (folderPending || busy) return;
+    folderPending = true;
+    try {
+      const chosen = await commands.workPickFolder(session.profile).catch(() => null);
+      if (chosen?.status !== "ok" || !chosen.data) return;
+      if (chosen.data.kind !== "admitted") {
+        refuseFolder();
+        return;
+      }
+      if (await placeFolder(chosen.data, null)) chrome?.close();
+    } finally {
+      folderPending = false;
+    }
+  }
+  /** Shows an admitted folder, or a file inside one, where it lives. */
+  function reveal(path: string) {
+    void commands.workRevealPath(session.profile, path).catch(() => null);
   }
   /** Adds an element and stands it where the person put it, or in the middle. */
   async function place(
@@ -401,34 +424,25 @@
           null)
       : null;
   }
-  // Finder drops: every dropped path is offered for admission, and the ones that
-  // are granted folders land where they were dropped. Anything else stays out.
+  // Finder drops: the application hands the frame the dropped paths and the drop
+  // point in CSS pixels. Granted folders land where they were dropped; a file
+  // among them is simply not a folder, and says nothing.
   onMount(() => {
-    let stop: (() => void) | null = null;
-    let live = true;
-    void import("@tauri-apps/api/webview")
-      .then((webview) => webview.getCurrentWebview())
-      .then((surface) =>
-        surface.onDragDropEvent((event) => {
-          if (event.payload.type !== "drop" || !event.payload.paths.length) return;
-          const ratio = window.devicePixelRatio || 1;
-          const at = canvasRef?.flowPosition(
-            event.payload.position.x / ratio,
-            event.payload.position.y / ratio,
-          );
-          void dropFolders(event.payload.paths.slice(0, 8), at ?? null);
-        }),
-      )
-      .then((unlisten) => {
-        if (live) stop = unlisten;
-        else unlisten();
-      })
-      .catch(() => {
-        /* Without the native drop bridge, the palette is the way in. */
-      });
+    const dropped = (event: Event) => {
+      const detail = (event as CustomEvent<{ paths?: unknown; x?: unknown; y?: unknown }>).detail;
+      const paths = Array.isArray(detail?.paths)
+        ? detail.paths.filter((path): path is string => typeof path === "string")
+        : [];
+      if (!paths.length) return;
+      const at =
+        typeof detail?.x === "number" && typeof detail?.y === "number"
+          ? canvasRef?.flowPosition(detail.x, detail.y)
+          : null;
+      void dropFolders(paths.slice(0, 8), at ?? null);
+    };
+    window.addEventListener("zephium:work-paths-dropped", dropped);
     return () => {
-      live = false;
-      stop?.();
+      window.removeEventListener("zephium:work-paths-dropped", dropped);
       clearTimeout(folderNotice);
     };
   });
@@ -438,6 +452,7 @@
       const placed = await addFolder(
         path,
         at ? { x: at.x + index * 24, y: at.y + index * 24 } : null,
+        true,
       );
       if (placed) index += 1;
     }
@@ -1354,6 +1369,11 @@
           disabled={busy || folderPending || !folderDraft.trim()}>{m.work_env_folder_add()}</Button
         >
       </form>
+      <div class="menu-footer">
+        <Button size="compact" disabled={busy || folderPending} onclick={() => void chooseFolder()}
+          >{m.work_env_folder_choose()}</Button
+        >
+      </div>
       <p class="menu-status">{m.work_env_folder_hint()}</p>
     {:else if mediaKind === "link"}
       <form
@@ -1705,6 +1725,7 @@
           retryLabel={m.surface_retry()}
           >{#snippet children(FileView)}<FileView
               file={liftFile!}
+              onreveal={reveal}
               onback={liftedItem?.sources ? () => (liftFile = null) : undefined}
             />{/snippet}</LazyView
         >
@@ -1770,11 +1791,13 @@
             />{/snippet}</LazyView
         >
       {:else if liftedElement?.reference.kind === "folder"}
+        {@const folder = liftedElement.reference.path}
         <div class="lift-plain">
           <span class="kind">{liftedItem?.kind}</span>
           <h2>{liftedItem?.title}</h2>
-          <p class="lift-path">{homePath(liftedElement.reference.path)}</p>
+          <p class="lift-path">{homePath(folder)}</p>
           <p>{m.work_env_folder_grant_note()}</p>
+          <Button size="compact" onclick={() => reveal(folder)}>{m.work_env_reveal()}</Button>
         </div>
       {:else if liftedElement?.reference.kind === "objective" && objectiveSession}
         <LazyView

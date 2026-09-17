@@ -8,6 +8,7 @@
     file,
     proposal,
     onback,
+    onreveal,
     ondecided,
   }: {
     /** What one settled file step disclosed: a listing, an excerpt, hits, or a diff. */
@@ -15,6 +16,8 @@
     /** A change a run is proposing, with the session that can answer it. */
     proposal?: { session: WorkSession; step: string };
     onback?: () => void;
+    /** Shows the file where it lives; silent when the application declines. */
+    onreveal?: (path: string) => void;
     /** The person approved or declined; the lift closes on their word. */
     ondecided?: () => void;
   } = $props();
@@ -73,7 +76,12 @@
           ></span>{m.work_env_file_truncated()}{/if}</span
       >
     </span>
-    {#if onback}<Button size="compact" onclick={onback}>{m.work_env_back()}</Button>{/if}
+    <span class="actions">
+      {#if onreveal && path}<Button size="compact" onclick={() => onreveal?.(path)}
+          >{m.work_env_reveal()}</Button
+        >{/if}
+      {#if onback}<Button size="compact" onclick={onback}>{m.work_env_back()}</Button>{/if}
+    </span>
   </header>
   {#if shown}
     {#if shown.text}<pre class="body">{shown.text}</pre>{:else}<p class="empty">
@@ -135,6 +143,13 @@
     flex-direction: column;
     gap: 2px;
     min-inline-size: 0;
+  }
+
+  .actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: none;
   }
 
   .path {
