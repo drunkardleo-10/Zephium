@@ -462,7 +462,9 @@ impl Driver {
                     (disclosure.resolve(result.output).ok(), result.usage)
                 }
                 Ok(Err(WorkSynthesisError::NotDispatched(_))) => (None, WorkUsage::default()),
-                Ok(Err(WorkSynthesisError::Rejected(usage))) => {
+                Ok(Err(
+                    WorkSynthesisError::Rejected(usage) | WorkSynthesisError::Stalled(usage),
+                )) => {
                     self.charge(usage);
                     (None, usage)
                 }

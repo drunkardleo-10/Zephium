@@ -569,6 +569,7 @@ impl From<planning::WorkPlanningError> for WorkPlanningFailureV1 {
             WorkPlanningError::ProviderOutcomeUnknown => {
                 WorkPlanningFailureV1::ProviderOutcomeUnknown
             }
+            WorkPlanningError::ProviderStalled(_) => WorkPlanningFailureV1::Timeout,
             WorkPlanningError::ProviderRefused(_) => WorkPlanningFailureV1::ProviderRefused,
             WorkPlanningError::Store(error) => WorkPlanningFailureV1::Store {
                 error: error.into(),

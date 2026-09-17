@@ -147,7 +147,7 @@ impl WorkNodeAttempt {
             Err(WorkSynthesisError::NotDispatched(_)) => {
                 empty(WorkAttemptStatus::Failed, Some(WorkUsage::default()))
             }
-            Err(WorkSynthesisError::Rejected(usage))
+            Err(WorkSynthesisError::Rejected(usage) | WorkSynthesisError::Stalled(usage))
                 if usage.within(self.specification().limits) =>
             {
                 empty(WorkAttemptStatus::Failed, Some(usage))

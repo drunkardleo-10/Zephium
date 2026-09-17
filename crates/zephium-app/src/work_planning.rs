@@ -83,7 +83,9 @@ impl WorkPlanningService {
                 },
             ),
             Err(error) => (
-                if let WorkPlanningError::ProviderRefused(usage) = error {
+                if let WorkPlanningError::ProviderRefused(usage)
+                | WorkPlanningError::ProviderStalled(usage) = error
+                {
                     Some(usage_view(usage))
                 } else {
                     None
@@ -234,7 +236,9 @@ impl WorkPlanningService {
                 )
             }
             Err(error) => {
-                let usage = if let WorkPlanningError::ProviderRefused(usage) = error {
+                let usage = if let WorkPlanningError::ProviderRefused(usage)
+                | WorkPlanningError::ProviderStalled(usage) = error
+                {
                     Some(usage_view(usage))
                 } else {
                     None
