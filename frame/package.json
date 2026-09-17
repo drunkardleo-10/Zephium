@@ -39,7 +39,6 @@
     "@tiptap/pm": "3.31.3",
     "@xyflow/svelte": "1.6.6",
     "bits-ui": "2.18.1",
-    "layerchart": "2.5.0",
     "svelte": "5.56.8"
   },
   "devDependencies": {

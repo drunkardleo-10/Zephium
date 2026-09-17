@@ -67,8 +67,7 @@ export function bootstrapReport(): Plugin {
           for (const id of Object.keys(item.modules)) {
             if (
               root.surface &&
-              (/\/(?:features|domain)\/work\//u.test(id) ||
-                /\/(?:@xyflow|layerchart|@tiptap)\//u.test(id))
+              (/\/(?:features|domain)\/work\//u.test(id) || /\/(?:@xyflow|@tiptap)\//u.test(id))
             )
               this.error(`Work code in ${name} startup: ${id}`);
             const at = id.indexOf("/src/");

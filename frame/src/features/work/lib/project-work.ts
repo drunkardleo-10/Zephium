@@ -69,7 +69,14 @@ function content(data: WorkArtifactDataV1, refs: Refs): ArtifactContent {
         kind: "chart",
         xLabel: data.x_label,
         yLabel: data.y_label,
-        series: data.series,
+        series: data.series.map((entry) => ({
+          name: entry.name,
+          points: entry.points.map((point) => ({
+            label: point.label,
+            value: point.value,
+            ...(point.evidence?.length ? { evidence: refs(point.evidence) } : {}),
+          })),
+        })),
         ...(data.basis
           ? {
               basis: {

@@ -56,6 +56,7 @@
       <Artifact
         artifact={item.artifact}
         embedded
+        compact
         onevidence={evidence?.open ? (reference) => evidence.open?.(id, reference) : undefined}
         onlink={openLink}
       />

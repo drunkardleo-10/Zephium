@@ -24,7 +24,6 @@ export default defineConfig({
         plugins: [tailwindcss(), svelte()],
         optimizeDeps: {
           include: [
-            "layerchart/svg",
             "@xyflow/svelte",
             "@tiptap/core",
             "@tiptap/extension-document",

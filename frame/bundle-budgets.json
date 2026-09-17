@@ -139,12 +139,9 @@
     "description": "Measured 540141 JS and 115667 CSS bytes with folder and link cards in the node graph."
   },
   "lazy:shared/ui/data/Chart/Chart.svelte": {
-    "js": 415000,
-    "css": 8000
-  },
-  "lazy:dependency/d3-quadtree/src/index.js": {
-    "js": 6000,
-    "css": 0
+    "js": 70000,
+    "css": 4000,
+    "description": "Measured 65242 JS and 2553 CSS bytes: a hand-written SVG plot with no chart library."
   },
   "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
     "js": 587000,

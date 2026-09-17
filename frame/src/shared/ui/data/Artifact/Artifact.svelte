@@ -19,12 +19,15 @@
     onevidence,
     onlink,
     embedded = false,
+    compact = false,
   }: {
     artifact: ArtifactView;
     onevidence?: (reference: EvidenceReference) => void;
     /** Prose links open through a native intent (the Work pane or a tab). */
     onlink?: (href: string) => void;
     embedded?: boolean;
+    /** The card version of a plot: no readout, no values table. */
+    compact?: boolean;
   } = $props();
   let valid = $derived(artifactRenderable(artifact));
   let content = $derived(artifact.content);
@@ -116,6 +119,10 @@
           xLabel={content.xLabel}
           yLabel={content.yLabel}
           series={content.series}
+          basis={content.basis}
+          generalKnowledge={content.generalKnowledge}
+          {compact}
+          {onevidence}
         />{/snippet}</LazyView
     >
   {:else if content.kind === "checklist"}<ul class="checklist">
