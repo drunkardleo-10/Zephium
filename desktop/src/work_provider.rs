@@ -257,6 +257,9 @@ impl WorkProviders {
                                         settings.compile_diagnostic = Some(|stage| {
                                             record_diagnostic(format_args!("work: phase=agent_browser compile_refused={stage}"));
                                         });
+                                        settings.resource_diagnostic = Some(|cause| {
+                                            record_diagnostic(format_args!("work: phase=agent_browser resource_failure={cause:?}"));
+                                        });
                                         settings
                                     };
                                     let result = self.browser.run_agent_step(callback, &probe, request, settings).await;
