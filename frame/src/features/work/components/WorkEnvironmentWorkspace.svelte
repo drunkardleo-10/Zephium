@@ -2,7 +2,7 @@
   import { untrack, onMount } from "svelte";
   import { SvelteSet } from "svelte/reactivity";
   import { WorkEnvironmentContext, type WorkEnvironmentSession } from "$domain/work-environment";
-  import { commandId, workSession, AGENT_LIMITS, type WorkSession } from "$domain/work";
+  import { commandId, workSession, type WorkSession } from "$domain/work";
   import { resourceSession, type ResourceSession } from "$domain/resources";
   import type {
     TabView,
@@ -907,8 +907,6 @@
     if (!current || !execution || current.pending) return;
     await current.execute({ kind: "cancel", execution: execution.id });
   }
-  const dollars = (micro: number) =>
-    new Intl.NumberFormat("en", { style: "currency", currency: "USD" }).format(micro / 1_000_000);
   const needsDecision = $derived(
     !!objectiveSession?.projection?.work.questions.some((question) => question.state === "active"),
   );
@@ -1260,16 +1258,7 @@
   {/if}
 {/snippet}
 {#snippet composerFooter()}
-  {#if session.accountScope}
-    <span class="disclosure">{m.work_account_disclosure()}</span>
-  {:else}
-    <span class="disclosure"
-      >{m.work_agent_disclosure({
-        cost: dollars(AGENT_LIMITS.cost_micro_usd),
-        minutes: AGENT_LIMITS.timeout_seconds / 60,
-      })}</span
-    >
-  {/if}
+  <span class="disclosure">{m.work_account_disclosure()}</span>
 {/snippet}
 
 <div
@@ -1606,7 +1595,7 @@
         {busy}
         above={composerAbove}
         context={contextSel || session.accountScope ? composerContext : undefined}
-        footer={composerFooter}
+        footer={session.accountScope ? composerFooter : undefined}
         canStop={activeExecution}
         onsubmit={() => void createObjective()}
         onstop={() => void stopObjective()}

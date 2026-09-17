@@ -1131,7 +1131,6 @@
   "work_account_update_invalid": "Enter the current value and a different temporary value before sending.",
   "work_activity_searching": "Searching the web",
   "work_env_status_done": "Done",
-  "work_agent_disclosure": "Researches the public web for you. Up to {cost} and {minutes} minutes; accounts and purchases always ask first.",
   "work_step_searched": "Searched: {query}",
   "work_step_read": "Read {host}",
   "work_step_browsed": "Browsed: {query}",
