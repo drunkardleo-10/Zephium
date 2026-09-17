@@ -254,6 +254,9 @@ impl WorkProviders {
                                         settings.diagnostic = Some(|attempt, snapshot| {
                                             record_diagnostic(format_args!("work: attempt={attempt} phase=agent_browser state={:?} failure={:?} persistence_failure={:?}", snapshot.phase, snapshot.failure, snapshot.persistence_failure));
                                         });
+                                        settings.model_diagnostic = Some(|event| {
+                                            record_diagnostic(format_args!("work: phase=agent_browser event={event:?}"));
+                                        });
                                         settings.stage_diagnostic = Some(|stage| {
                                             record_diagnostic(format_args!("work: phase=agent_browser stage={stage}"));
                                         });
