@@ -195,7 +195,7 @@ test("opening an objective lifts it over the canvas and returns on close", async
   await expect.poll(() => screen.container.querySelectorAll(".work-drag-handle").length).toBe(2);
   await screen.container.querySelector<HTMLElement>(".work-drag-handle")!.click();
   await screen.getByRole("button", { name: "Open", exact: true }).click();
-  const panel = screen.getByRole("dialog", { name: "Objective", exact: true });
+  const panel = screen.getByRole("dialog", { name: "Request", exact: true });
   await expect.element(panel).toBeVisible();
   await expect.element(panel).toHaveFocus();
   expect(screen.container.querySelector(".inspector")).toBeNull();

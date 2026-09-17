@@ -1318,6 +1318,7 @@
               {items}
               {links}
               areas={snapshot.areas}
+              author={profileLabel}
               initialView={canvasView}
               {remoteView}
               {authoritative}

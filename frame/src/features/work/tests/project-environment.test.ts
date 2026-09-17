@@ -31,22 +31,25 @@ test("joins exact objective and historical artifact identities without replacing
   ).toBeUndefined();
 });
 
-test("objective status follows the latest durable execution and native interruption truth", () => {
+test("the request card carries the person's sentence and never a status line", () => {
   const completed = projection.executions[0]!;
   const failed = { ...completed, id: "latest", status: "failed" as const };
   const items = (state: typeof projection) =>
     environmentItems(snapshot, [], [], new Map([["objective", state]]));
-  expect(items({ ...projection, executions: [completed, failed] })[0]?.detail).toBe(
-    "Status: Failed",
-  );
-  expect(
-    items({
+  for (const state of [
+    { ...projection, executions: [completed, failed] },
+    {
       ...projection,
-      executions: [{ ...failed, status: "running" }],
+      executions: [{ ...failed, status: "running" as const }],
       interrupted: ["latest"],
-    })[0]?.detail,
-  ).toBe("Status: Interrupted");
-  expect(items({ ...projection, executions: [] })[0]?.detail).toBe("Status: Plan ready");
+    },
+    { ...projection, executions: [] },
+  ]) {
+    const request = items(state)[0]!;
+    expect(request.title).toBe("Investigate dependencies");
+    expect(request.detail).toBe("");
+    expect(request.kind).toBe("Request");
+  }
 });
 
 test("a subject takes its picture from a uses relation and the image is not a card", async () => {

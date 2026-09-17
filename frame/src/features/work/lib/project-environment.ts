@@ -51,30 +51,6 @@ import type { CanvasItem, CanvasLink, CanvasPosition, CanvasView } from "./canva
 import type { MediaAssetV1 } from "$domain/resources";
 import * as m from "$shared/i18n/messages";
 
-function objectiveStatus(projection: WorkRuntimeProjection): string {
-  const execution = projection.executions.at(-1);
-  if (execution) {
-    if (projection.interrupted.includes(execution.id)) return m.work_interrupted();
-    const agent = isAgentExecution(execution);
-    const labels = {
-      approved: m.work_env_status_approved,
-      running: m.work_env_status_running,
-      cancel_requested: m.work_env_status_stopping,
-      completed: agent ? m.work_env_status_done : m.work_env_status_completed,
-      needs_review: agent ? m.work_env_status_done : m.work_review_required,
-      cancelled: m.work_env_status_cancelled,
-      failed: m.work_env_status_failed,
-      interrupted: m.work_interrupted,
-    };
-    return labels[execution.status]();
-  }
-  return projection.work.status === "draft"
-    ? m.work_env_status_draft()
-    : projection.work.status === "needs_input"
-      ? m.work_env_status_needs_input()
-      : m.work_env_status_plan_ready();
-}
-
 /**
  * Media elements a subject admitted its picture into: Rust records the origin
  * as a `uses` relation from the subject to the media element. The picture
@@ -271,17 +247,14 @@ function elementItems(
         layout: "artifact",
       };
     }
+    // The person's sentence, carried plainly: state belongs to the agent line.
     return {
       id: element.id,
       type: "objective",
       area: element.area,
-      kind: m.work_env_objective(),
-      title: projection?.work.objective.slice(0, 512) ?? m.work_env_objective(),
-      detail: projection
-        ? m.work_env_objective_status({
-            status: objectiveStatus(projection),
-          })
-        : m.work_env_open_to_load(),
+      kind: m.work_env_request(),
+      title: projection?.work.objective.slice(0, 512) ?? m.work_env_request(),
+      detail: "",
       status: area,
     };
   });

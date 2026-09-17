@@ -11,6 +11,7 @@
     canvasOpen,
     canvasOpenLink,
     canvasAreas,
+    canvasAuthor,
   } from "../lib/canvas-context";
   import CanvasNode from "./CanvasNode.svelte";
   import AreaNode from "./AreaNode.svelte";
@@ -38,6 +39,7 @@
     items,
     links,
     areas = [],
+    author = "",
     initialView,
     remoteView,
     authoritative,
@@ -57,6 +59,8 @@
     items: readonly CanvasItem[];
     links: readonly CanvasLink[];
     areas?: readonly CanvasArea[];
+    /** The person whose request starts a path on this canvas. */
+    author?: string;
     initialView?: CanvasView;
     remoteView?: { sequence: number; view: CanvasView };
     authoritative: ReadonlySet<string>;
@@ -86,6 +90,11 @@
   setContext(canvasAreas, {
     get list() {
       return areas;
+    },
+  });
+  setContext(canvasAuthor, {
+    get initial() {
+      return author.slice(0, 1).toLocaleUpperCase();
     },
   });
   let resizing = $state(false);

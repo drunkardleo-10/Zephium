@@ -118,7 +118,7 @@
         if (text) void session.saveDraft("objective", text.trim());
       }}
     >
-      <label for={`${id}-objective`}>{m.work_objective()}</label><textarea
+      <label for={`${id}-objective`}>{m.work_env_objective()}</label><textarea
         id={`${id}-objective`}
         rows="3"
         value={session.draft("objective") ?? work.objective}

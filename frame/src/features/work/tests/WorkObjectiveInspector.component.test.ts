@@ -58,14 +58,12 @@ test("compact objective inspection joins historical plans and keeps exact result
     .element(screen.getByText("Original approved investigation", { exact: true }))
     .toBeVisible();
   expect(plan).toHaveBeenCalledExactlyOnceWith("2");
-  await expect
-    .element(screen.getByRole("heading", { name: "Objective", exact: true }))
-    .toBeVisible();
+  await expect.element(screen.getByRole("heading", { name: "Request", exact: true })).toBeVisible();
   expect(screen.container.querySelector("h2")?.textContent).not.toContain(
     projection.work.objective,
   );
   await expect
-    .element(screen.getByRole("textbox", { name: "Objective", exact: true }))
+    .element(screen.getByRole("textbox", { name: "Request", exact: true }))
     .toHaveValue(projection.work.objective);
   expect(screen.container.querySelector(".work-canvas")).toBeNull();
   await screen.getByRole("button", { name: "Add result to canvas" }).click();
