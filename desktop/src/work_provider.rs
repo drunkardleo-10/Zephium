@@ -520,7 +520,7 @@ async fn credential() -> Result<zephium_agentic::AgentProviderCredential, WorkEr
 
 // Only this module's closed facts enter the development log; generic application
 // diagnostics may contain page/provider text and are deliberately excluded.
-fn record_diagnostic(arguments: std::fmt::Arguments<'_>) {
+pub(crate) fn record_diagnostic(arguments: std::fmt::Arguments<'_>) {
     #[cfg(feature = "work-development-traces")]
     super::work_diagnostics::record(arguments);
     #[cfg(not(feature = "work-development-traces"))]

@@ -278,7 +278,13 @@ fn serve_page_frame(
         };
         match state.page_frame(attempt, step) {
             Some(png) => respond(200, png.as_ref().clone(), "image/png"),
-            None => respond(404, Vec::new(), "text/plain"),
+            None => {
+                #[cfg(feature = "work-development-traces")]
+                super::work_provider::record_diagnostic(format_args!(
+                    "work: phase=page_frame served=false attempt={attempt} step={step}"
+                ));
+                respond(404, Vec::new(), "text/plain")
+            }
         }
     }
     #[cfg(not(feature = "work-product"))]
