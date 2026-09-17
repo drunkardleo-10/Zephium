@@ -1711,6 +1711,7 @@
             />{/snippet}</LazyView
         >
       {:else if liftedItem?.sources}
+        {#if liftedItem.detail}<p class="lift-request">{liftedItem.detail}</p>{/if}
         <ul class="lift-sources">
           {#each liftedItem.sources as row (row.key)}
             <li>
@@ -1971,6 +1972,11 @@
     position: absolute;
     inset-block-start: 16px;
     inset-inline-end: 16px;
+  }
+
+  .lift-request {
+    margin: 0 28px 12px 0;
+    color: var(--color-muted);
   }
 
   .lift-path {

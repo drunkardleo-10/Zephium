@@ -534,6 +534,9 @@ export function environmentSources(
         if (record) admit(fileRow(`file:${record.id}`, record));
       }
       if (!rows.length) continue;
+      // A continuation served an earlier request; the stage keeps saying which.
+      const request = execution.spec.request?.trim() ?? "";
+      const served = request && request !== projection.work.objective.trim() ? request : "";
       const id = `sources:${element.id}:${execution.id}`;
       items.push({
         id,
@@ -543,7 +546,7 @@ export function environmentSources(
           rows.length === 1
             ? m.work_env_source_one()
             : m.work_env_sources_count({ count: rows.length }),
-        detail: "",
+        detail: served.slice(0, 240),
         status: "",
         sources: rows.slice(0, SOURCE_ROWS),
       });

@@ -194,7 +194,7 @@ test("catalogue rows enrich the hub a detail read created without becoming cards
   ]);
 });
 
-test("a turn's searches become one Sources card the request and its pages join", async () => {
+test("a run's searches become one Sources card the request and its pages join", async () => {
   const { environmentSources } = await import("../lib/project-environment");
   const state = structuredClone(projection);
   const execution = state.executions[0]!;
@@ -210,6 +210,7 @@ test("a turn's searches become one Sources card the request and its pages join",
       browse_hops: 4,
     },
   };
+  execution.spec.request = "Compare quiet keyboards";
   execution.provider_evidence = [
     {
       id: "record",
@@ -302,6 +303,8 @@ test("a turn's searches become one Sources card the request and its pages join",
   expect(sources.items).toHaveLength(1);
   const group = sources.items[0]!;
   expect(group.title).toBe("1 source");
+  // The stage keeps the request it served; the request card keeps the latest one.
+  expect(group.detail).toBe("Compare quiet keyboards");
   expect(group.sources).toEqual([
     {
       key: "record:1",
