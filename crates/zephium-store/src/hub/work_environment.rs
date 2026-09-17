@@ -171,6 +171,8 @@ fn validate_reference(
         // Native tab ownership is validated by the application actor. The Store
         // retains only the ID; it neither opens a URL nor constructs a context.
         WorkEnvironmentReference::Browser { .. } => {}
+        // Admitted by the application before placement; the run re-checks it.
+        WorkEnvironmentReference::Folder { .. } => {}
     }
     Ok(())
 }

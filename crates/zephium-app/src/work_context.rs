@@ -136,6 +136,8 @@ impl WorkContextAdmission {
             WorkEnvironmentReference::Resource { resource } => {
                 self.resource(profile, id, resource.to_string()).await
             }
+            // A folder reaches the agent as a grant, never as context text.
+            WorkEnvironmentReference::Folder { .. } => Err(WorkError::Invalid),
             WorkEnvironmentReference::Browser { tab } => {
                 let tab = *tab;
                 let handle = self.handle.clone();

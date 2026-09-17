@@ -80,6 +80,10 @@ impl WorkFileGrant {
     pub fn is_empty(&self) -> bool {
         self.roots.is_empty()
     }
+    /// Canonical admitted roots, in grant order.
+    pub fn roots(&self) -> &[PathBuf] {
+        &self.roots
+    }
     /// The canonical target when the path (or, for a new file, its parent)
     /// lies inside a granted root.
     fn resolve(&self, path: &str, may_create: bool) -> Result<PathBuf, WorkFileError> {

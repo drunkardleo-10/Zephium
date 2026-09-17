@@ -16,12 +16,15 @@ export const commands = {
 	 *  profile's own snapshot; nothing outside the media store is reachable.
 	 */
 	mediaOpen: (expectedProfile: string, id: string) => typedError<boolean, null>(__TAURI_INVOKE("media_open", { expectedProfile, id })),
+	mediaAdmitRemote: (expectedProfile: string, environment: string, element: string, url: string) => typedError<MediaAdmitV1, null>(__TAURI_INVOKE("media_admit_remote", { expectedProfile, environment, element, url })),
 	/**
 	 *  Admits one public image for a subject already on the canvas: fetch
 	 *  without cookies, bound and decode in the store, mint the Media resource,
 	 *  add it next to the subject, and relate subject → media.
+	 *  Admits a folder the person dropped or chose so the canvas can hold it
+	 *  and later runs can read inside it. The same policy governs the run.
 	 */
-	mediaAdmitRemote: (expectedProfile: string, environment: string, element: string, url: string) => typedError<MediaAdmitV1, null>(__TAURI_INVOKE("media_admit_remote", { expectedProfile, environment, element, url })),
+	workAdmitFolder: (expectedProfile: string, path: string) => typedError<WorkFolderAdmitV1, null>(__TAURI_INVOKE("work_admit_folder", { expectedProfile, path })),
 	workActivity: (expectedProfile: string, work: WorkId) => __TAURI_INVOKE<WorkActivityResponseV1>("work_activity", { expectedProfile, work }),
 	tabsBootstrap: () => __TAURI_INVOKE<void>("tabs_bootstrap"),
 	tabsOpen: () => __TAURI_INVOKE<OperationAdmission>("tabs_open"),
@@ -1904,7 +1907,13 @@ export type WorkEnvironmentReference = { kind: "browser"; tab: ItemId } | { kind
  *  One cited source entry inside an immutable sources artifact. A card,
  *  never a navigation grant: opening it goes through the ordinary pane.
  */
-{ kind: "source"; objective: WorkId; execution: WorkExecutionId; artifact: WorkArtifactId; index: number };
+{ kind: "source"; objective: WorkId; execution: WorkExecutionId; artifact: WorkArtifactId; index: number } | 
+/**
+ *  A folder the person placed on this canvas. Runs started here may
+ *  read and, with approval, change files inside it; the application
+ *  admitted the path before it was placed.
+ */
+{ kind: "folder"; path: string; name: string };
 
 export type WorkEnvironmentReply = WorkEnvironmentReply_Serialize | WorkEnvironmentReply_Deserialize;
 
@@ -2183,6 +2192,13 @@ export type WorkFinding_Serialize = {
 	detail?: string | null,
 	general_knowledge?: boolean,
 };
+
+/**  Outcome of admitting one folder the person dropped or named for a canvas. */
+export type WorkFolderAdmitV1 = 
+/**  The canonical path and display name to place as a Folder element. */
+{ kind: "admitted"; path: string; name: string } | 
+/**  Outside the home folder, protected, missing, or not a folder. */
+{ kind: "refused" };
 
 /** Durable profile-owned Work identity; never an execution capability. */
 export type WorkId = string;

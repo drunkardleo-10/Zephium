@@ -648,6 +648,16 @@ pub enum MediaAdmitV1 {
     },
 }
 
+/// Outcome of admitting one folder the person dropped or named for a canvas.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkFolderAdmitV1 {
+    /// The canonical path and display name to place as a Folder element.
+    Admitted { path: String, name: String },
+    /// Outside the home folder, protected, missing, or not a folder.
+    Refused,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 pub struct LayoutState {
     pub dividers: Vec<DividerView>,

@@ -749,7 +749,13 @@ export type WorkEnvironmentReference = { kind: "browser"; tab: ItemId } | { kind
  *  One cited source entry inside an immutable sources artifact. A card,
  *  never a navigation grant: opening it goes through the ordinary pane.
  */
-{ kind: "source"; objective: WorkId; execution: WorkExecutionId; artifact: WorkArtifactId; index: number };
+{ kind: "source"; objective: WorkId; execution: WorkExecutionId; artifact: WorkArtifactId; index: number } |
+/**
+ *  A folder the person placed on this canvas. Runs started here may
+ *  read and, with approval, change files inside it; the application
+ *  admitted the path before it was placed.
+ */
+{ kind: "folder"; path: string; name: string };
 
 export type WorkEnvironmentReply = WorkEnvironmentReply_Serialize | WorkEnvironmentReply_Deserialize;
 

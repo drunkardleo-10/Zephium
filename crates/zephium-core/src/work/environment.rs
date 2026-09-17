@@ -53,6 +53,13 @@ pub enum WorkEnvironmentReference {
         artifact: WorkArtifactId,
         index: u16,
     },
+    /// A folder the person placed on this canvas. Runs started here may
+    /// read and, with approval, change files inside it; the application
+    /// admitted the path before it was placed.
+    Folder {
+        path: String,
+        name: String,
+    },
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -485,6 +492,13 @@ impl WorkEnvironmentEdit {
             | Self::RenameArea { title, .. } => validate_text(title, MAX_ENVIRONMENT_TITLE_BYTES),
             Self::Decide { choice, .. } => validate_text(choice, MAX_DECISION_BYTES),
             Self::Relate { from, to, .. } if from == to => Err(WorkError::Invalid),
+            Self::Add {
+                reference: WorkEnvironmentReference::Folder { path, name },
+                ..
+            } => {
+                super::runtime::validate_file_path(path)?;
+                validate_text(name, 255)
+            }
             _ => Ok(()),
         }
     }

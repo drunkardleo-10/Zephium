@@ -416,6 +416,48 @@ async fn environment_edit(
 /// Admits one public image for a subject already on the canvas: fetch
 /// without cookies, bound and decode in the store, mint the Media resource,
 /// add it next to the subject, and relate subject → media.
+/// Admits a folder the person dropped or chose so the canvas can hold it
+/// and later runs can read inside it. The same policy governs the run.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn work_admit_folder(
+    caller: WebviewWindow,
+    app: AppHandle,
+    expected_profile: String,
+    path: String,
+) -> Result<zephium_ipc::WorkFolderAdmitV1, ()> {
+    use zephium_ipc::WorkFolderAdmitV1;
+    if !super::authorize(&caller, super::CallerPolicy::Main, "work_admit_folder")
+        || super::shutdown_started(&app)
+        || profile_of(&expected_profile).is_none()
+    {
+        return Ok(WorkFolderAdmitV1::Refused);
+    }
+    #[cfg(not(feature = "work-product"))]
+    {
+        let _ = path;
+        Ok(WorkFolderAdmitV1::Refused)
+    }
+    #[cfg(feature = "work-product")]
+    {
+        let (grant, _) = zephium_app::work_files::WorkFileGrant::admit(&[path]);
+        let Some(root) = grant.roots().first() else {
+            return Ok(WorkFolderAdmitV1::Refused);
+        };
+        let name = root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if name.is_empty() {
+            return Ok(WorkFolderAdmitV1::Refused);
+        }
+        Ok(WorkFolderAdmitV1::Admitted {
+            path: root.to_string_lossy().into_owned(),
+            name,
+        })
+    }
+}
+
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn media_admit_remote(
