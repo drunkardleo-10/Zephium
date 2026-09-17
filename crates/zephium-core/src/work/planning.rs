@@ -204,6 +204,9 @@ pub enum WorkPlanningError {
     /// Generation may have been billed. No proposal is accepted and no retry
     /// happens automatically, including after lost or malformed responses.
     ProviderOutcomeUnknown,
+    /// The call was dispatched and no readable terminal arrived in time. Its
+    /// ceiling is charged, so a caller may try again within its budget.
+    ProviderStalled(WorkPlanningUsage),
     ProviderRefused(WorkPlanningUsage),
     Store(WorkError),
 }

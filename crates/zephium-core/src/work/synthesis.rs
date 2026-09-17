@@ -291,6 +291,9 @@ pub enum WorkSynthesisError {
     Rejected(WorkUsage),
     /// An accepted call may have been billed; never refund or auto-retry.
     OutcomeUnknown,
+    /// A dispatched call produced no readable terminal; its ceiling is
+    /// charged and the caller may try again within its budget.
+    Stalled(WorkUsage),
 }
 pub type WorkSynthesisFuture<'a> =
     Pin<Box<dyn Future<Output = Result<WorkSynthesisResult, WorkSynthesisError>> + Send + 'a>>;
