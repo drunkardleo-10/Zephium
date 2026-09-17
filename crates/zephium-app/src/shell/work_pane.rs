@@ -9,6 +9,8 @@ pub(super) struct WorkPane {
     pub(super) tab: ItemId,
     pub(super) rect: Rect,
     pub(super) generation: u32,
+    /// The pane created this tab for a page; it closes with the pane.
+    pub(super) owned: bool,
 }
 
 impl Shell {
@@ -86,7 +88,21 @@ impl Shell {
         if valid {
             return false;
         }
-        self.clear_work_pane()
+        self.retire_work_pane()
+    }
+
+    /// Clears the pane and closes a page tab the pane opened itself.
+    pub(super) fn retire_work_pane(&mut self) -> bool {
+        let owned = self
+            .work_pane
+            .as_ref()
+            .filter(|pane| pane.owned)
+            .map(|pane| pane.tab);
+        let cleared = self.clear_work_pane();
+        if let Some(tab) = owned {
+            let _ = self.close(tab);
+        }
+        cleared
     }
 
     pub(super) fn operation_work_pane_show(
@@ -107,6 +123,7 @@ impl Shell {
         let Some(rect) = layout::clamp_work_pane_rect(size, rect) else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
         };
+        let owned = matches!(target, WorkPaneTarget::Url(_));
         let (tab, effects, discard_closing) = match target {
             WorkPaneTarget::Tab(id) => {
                 if !self.item_in_scope(id, profile, space) {
@@ -157,6 +174,7 @@ impl Shell {
             tab,
             rect,
             generation,
+            owned,
         });
         self.touch(tab);
         self.cancel_page_permission_if_not_foreground();
@@ -172,11 +190,17 @@ impl Shell {
     }
 
     pub(super) fn operation_work_pane_hide(&mut self) -> OperationDisposition {
+        let owned = self
+            .work_pane
+            .as_ref()
+            .filter(|pane| pane.owned)
+            .map(|pane| pane.tab);
         if !self.clear_work_pane() {
             return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
         }
         self.cancel_page_permission_if_not_foreground();
-        let mut native = NativeWork::default();
+        // A page the pane opened itself leaves with it; nothing lands in the tab strip.
+        let mut native = owned.map_or_else(NativeWork::default, |tab| self.close(tab));
         native.record(self.relayout());
         self.maintain_views();
         mutation_result(native)

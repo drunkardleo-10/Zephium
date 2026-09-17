@@ -147,6 +147,43 @@ fn a_url_target_opens_an_unfocused_space_tab_in_the_pane() {
 }
 
 #[test]
+fn hiding_the_pane_closes_a_page_it_opened_but_keeps_a_space_tab() {
+    let (mut shell, _engine, screen, layouts) = setup_with_layout_sink();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    navigate_and_commit(&mut shell, first, "example.com");
+    enter_work(&mut shell);
+
+    shell.operation_work_pane_show(
+        WorkPaneTarget::Url("https://docs.example/page".into()),
+        rect(),
+    );
+    let opened = pane(&layouts).expect("pane projected").tab;
+    assert!(last(&screen).tabs.iter().any(|tab| tab.id == opened));
+    shell.operation_work_pane_hide();
+    assert!(shell.work_pane.is_none());
+    assert!(!last(&screen).tabs.iter().any(|tab| tab.id == opened));
+
+    shell.operation_work_pane_show(
+        WorkPaneTarget::Url("https://docs.example/other".into()),
+        rect(),
+    );
+    let opened = pane(&layouts).expect("pane projected").tab;
+    shell.handle(Command::ShowBrowserPage(None));
+    assert!(shell.work_pane.is_none());
+    assert!(!last(&screen).tabs.iter().any(|tab| tab.id == opened));
+
+    enter_work(&mut shell);
+    shell.operation_work_pane_show(WorkPaneTarget::Tab(first), rect());
+    shell.operation_work_pane_hide();
+    assert!(shell.work_pane.is_none());
+    assert!(last(&screen)
+        .tabs
+        .iter()
+        .any(|tab| tab.id == first.to_string()));
+}
+
+#[test]
 fn the_pane_is_cleared_by_return_page_switch_and_tab_close() {
     let (mut shell, engine, screen, layouts) = setup_with_layout_sink();
     shell.handle(Command::Bootstrap);
