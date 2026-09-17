@@ -6,7 +6,7 @@
 
 use objc2::rc::{Retained, Weak};
 use objc2_app_kit::{
-    NSApplication, NSResponder, NSView, NSWindow, NSWindowOcclusionState, NSWindowOrderingMode,
+    NSApplication, NSView, NSWindow, NSWindowOcclusionState, NSWindowOrderingMode,
 };
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 use objc2_web_kit::WKWebView;
@@ -79,7 +79,6 @@ pub(crate) struct WorkObservationPresentation {
     failure_diagnostic: Rc<dyn Fn(PresentationFailure)>,
     app: Retained<NSApplication>,
     main: Retained<NSWindow>,
-    responder: Retained<NSResponder>,
     page: Retained<WKWebView>,
     parent: Retained<NSView>,
     original_frame: NSRect,
@@ -114,14 +113,9 @@ impl WorkObservationPresentation {
         let app = NSApplication::sharedApplication(mtm);
         let page = super::native_webview(view);
         let main = page.window().ok_or(PresentationState::Unavailable)?;
-        let responder = main
-            .firstResponder()
-            .ok_or(PresentationState::Unavailable)?;
-        if !foreground(
+        if !window_present(
             &app,
             &main,
-            &responder,
-            true,
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             failure_diagnostic.as_ref(),
         ) {
@@ -141,7 +135,7 @@ impl WorkObservationPresentation {
         let resting_facts = [
             page.isHidden(),
             original_frame.size == viewport().size,
-            Retained::as_ptr(&responder).addr() != Retained::as_ptr(&page).addr(),
+            !responder_inside(&main, &page),
         ];
         if !resting_facts.into_iter().all(|fact| fact) {
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
@@ -158,7 +152,6 @@ impl WorkObservationPresentation {
             failure_diagnostic,
             app,
             main,
-            responder,
             page,
             parent,
             original_frame,
@@ -181,13 +174,9 @@ impl WorkObservationPresentation {
             self.state = PresentationState::Failed;
             return self.state;
         }
-        // Bind the exact responder before this owner changes the hierarchy.
-        // Later responder churn does not transfer this noninteractive page.
-        if !foreground(
+        if !window_present(
             &self.app,
             &self.main,
-            &self.responder,
-            true,
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             self.failure_diagnostic.as_ref(),
         ) {
@@ -209,14 +198,19 @@ impl WorkObservationPresentation {
     }
 
     pub(crate) fn renew(&mut self, deadline: Instant) -> bool {
-        if self.state != PresentationState::Ready
-            || !self.human_current()
+        if !matches!(
+            self.state,
+            PresentationState::Ready | PresentationState::Acquiring
+        ) || !self.human_current()
             || Instant::now() >= deadline
         {
             return false;
         }
         self.deadline = deadline;
-        self.poll() == PresentationState::Ready
+        matches!(
+            self.poll(),
+            PresentationState::Ready | PresentationState::Acquiring
+        )
     }
 
     pub(crate) fn poll(&mut self) -> PresentationState {
@@ -234,7 +228,12 @@ impl WorkObservationPresentation {
         ) {
             return self.state;
         }
-        if !self.human_current() {
+        if !window_present(
+            &self.app,
+            &self.main,
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            self.failure_diagnostic.as_ref(),
+        ) {
             self.state = PresentationState::Unavailable;
             return self.state;
         }
@@ -252,10 +251,13 @@ impl WorkObservationPresentation {
             !responder_inside(&self.main, &self.page),
         ];
         let exact = poll_facts.into_iter().all(|fact| fact);
-        let visible = self
-            .main
-            .occlusionState()
-            .contains(NSWindowOcclusionState::Visible)
+        // A hidden or minimized window pauses the page (Acquiring) until it is
+        // shown again; the deadline bounds the pause. Only a broken hierarchy fails.
+        let visible = !self.main.isMiniaturized()
+            && self
+                .main
+                .occlusionState()
+                .contains(NSWindowOcclusionState::Visible)
             && !self.page.visibleRect().is_empty();
         #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
         if let Some(failure) = classify_predicates(poll_facts, POLL_FAILURES) {
@@ -265,10 +267,8 @@ impl WorkObservationPresentation {
             PresentationState::Failed
         } else if visible {
             PresentationState::Ready
-        } else if self.state == PresentationState::Acquiring {
-            PresentationState::Acquiring
         } else {
-            PresentationState::Unavailable
+            PresentationState::Acquiring
         };
         self.state
     }
@@ -311,15 +311,13 @@ impl WorkObservationPresentation {
         !self.page.isHidden()
     }
     pub(crate) fn human_current(&self) -> bool {
-        let foreground = foreground(
+        let present = window_present(
             &self.app,
             &self.main,
-            &self.responder,
-            self.state == PresentationState::Prepared,
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             self.failure_diagnostic.as_ref(),
         );
-        foreground
+        present
             && match self.state {
                 PresentationState::Prepared
                 | PresentationState::Retiring
@@ -338,18 +336,15 @@ impl WorkObservationPresentation {
     pub(crate) fn human_fence(&self) -> Box<dyn Fn() -> bool> {
         let app = self.app.clone();
         let main = self.main.clone();
-        let responder = self.responder.clone();
         // A fence observes these owners; it must not prolong their native
         // retirement while the semantic channel drains its original callback.
         let page = Weak::from_retained(&self.page);
         #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
         let failure_diagnostic = self.failure_diagnostic.clone();
         Box::new(move || {
-            foreground(
+            window_present(
                 &app,
                 &main,
-                &responder,
-                false,
                 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
                 failure_diagnostic.as_ref(),
             ) && page.load().is_some_and(|page| hosted_current(&page, &main))
@@ -370,44 +365,43 @@ fn viewport() -> NSRect {
     NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1280.0, 800.0))
 }
 
-fn foreground(
+/// The human window must still exist, shown or minimized. Activation, key
+/// status and the responder are not required: the page sits beneath the chrome,
+/// so no input reaches it whichever window the human is using.
+fn window_present(
     app: &NSApplication,
     main: &NSWindow,
-    responder: &NSResponder,
-    require_original_responder: bool,
     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")] diagnostic: &dyn Fn(
         PresentationFailure,
     ),
 ) -> bool {
-    let facts = [
-        app.isActive(),
-        main.isVisible(),
-        !main.isMiniaturized(),
-        app.keyWindow()
-            .is_some_and(|window| std::ptr::eq(&*window, main)),
-        app.mainWindow()
-            .is_some_and(|window| std::ptr::eq(&*window, main)),
-        main.firstResponder()
-            .is_some_and(|current| std::ptr::eq(&*current, responder)),
-    ];
+    let facts = [main.isVisible(), main.isMiniaturized()];
+    let present = present_facts(facts);
+    #[cfg(not(feature = "native-agentic-work-lifetime-diagnostic"))]
+    let _ = app;
     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
-    if !foreground_facts(facts, require_original_responder) {
+    if !present {
         invoke_failure_diagnostic(
             diagnostic,
             PresentationFailure::HumanOwnership {
-                app_active: facts[0],
-                main_visible: facts[1],
-                main_not_minimized: facts[2],
-                key_window_matches: facts[3],
-                main_window_matches: facts[4],
-                responder_matches: facts[5],
+                app_active: app.isActive(),
+                main_visible: facts[0],
+                main_not_minimized: !facts[1],
+                key_window_matches: app
+                    .keyWindow()
+                    .is_some_and(|window| std::ptr::eq(&*window, main)),
+                main_window_matches: app
+                    .mainWindow()
+                    .is_some_and(|window| std::ptr::eq(&*window, main)),
+                responder_matches: true,
             },
         );
     }
-    foreground_facts(facts, require_original_responder)
+    present
 }
-fn foreground_facts(facts: [bool; 6], require_original_responder: bool) -> bool {
-    facts[..5].iter().all(|fact| *fact) && (!require_original_responder || facts[5])
+
+const fn present_facts([visible, miniaturized]: [bool; 2]) -> bool {
+    visible || miniaturized
 }
 
 /// Tolerate a changed human responder, never routing the human window's
@@ -487,13 +481,10 @@ mod tests {
     }
 
     #[test]
-    fn initial_admission_requires_exact_responder_without_repairing_focus() {
-        assert!(foreground_facts([true; 6], true));
-        for index in 0..6 {
-            let mut facts = [true; 6];
-            facts[index] = false;
-            assert!(!foreground_facts(facts, true));
-        }
+    fn a_shown_or_minimized_window_keeps_the_page_without_repairing_focus() {
+        assert!(present_facts([true, false]));
+        assert!(present_facts([false, true]));
+        assert!(!present_facts([false, false]));
         let source = include_str!("work_observation_presentation.rs")
             .split("\n#[cfg(test)]")
             .next()
@@ -518,16 +509,17 @@ mod tests {
     }
 
     #[test]
-    fn responder_churn_does_not_grant_application_or_window_takeover() {
-        // Observed Notion Search transition: only the firstResponder changes.
-        let mut churn = [true; 6];
-        churn[5] = false;
-        assert!(foreground_facts(churn, false));
-        assert!(!foreground_facts(churn, true));
-        for lost_owner in 0..5 {
-            let mut facts = churn;
-            facts[lost_owner] = false;
-            assert!(!foreground_facts(facts, false));
+    fn deactivation_and_key_loss_never_end_a_hosted_page() {
+        let source = include_str!("work_observation_presentation.rs")
+            .split("\n#[cfg(test)]")
+            .next()
+            .unwrap();
+        let gates = source
+            .split("fn window_present(")
+            .next()
+            .unwrap();
+        for forbidden in ["isActive()", "keyWindow()", "mainWindow()", "firstResponder()"] {
+            assert!(!gates.contains(forbidden), "{forbidden}");
         }
     }
 }
