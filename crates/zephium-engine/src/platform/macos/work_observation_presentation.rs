@@ -5,8 +5,6 @@
 #![deny(unsafe_op_in_unsafe_fn, clippy::undocumented_unsafe_blocks)]
 
 use objc2::rc::{Retained, Weak};
-use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
-use objc2::sel;
 use objc2_app_kit::{
     NSApplication, NSView, NSWindow, NSWindowOcclusionState, NSWindowOrderingMode,
 };
@@ -14,7 +12,6 @@ use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 use objc2_web_kit::WKWebView;
 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
 use std::rc::Rc;
-use std::sync::OnceLock;
 use std::time::Instant;
 
 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
@@ -85,8 +82,6 @@ pub(crate) struct WorkObservationPresentation {
     page: Retained<WKWebView>,
     parent: Retained<NSView>,
     original_frame: NSRect,
-    /// The page class before it was made passive; restored on retirement.
-    original_class: Option<&'static AnyClass>,
     deadline: Instant,
     state: PresentationState,
     cleanup_failed: bool,
@@ -160,7 +155,6 @@ impl WorkObservationPresentation {
             page,
             parent,
             original_frame,
-            original_class: None,
             deadline,
             state: PresentationState::Prepared,
             cleanup_failed: false,
@@ -194,16 +188,10 @@ impl WorkObservationPresentation {
             return self.state;
         }
         // A page that requests focus must never take the keyboard from the
-        // human window: refuse first responder for the presentation lifetime.
-        let Some(passive) = passive_class(&self.page) else {
+        // human window: the window refuses it for the presentation lifetime.
+        if !super::passive_page::register(&self.page) {
             self.state = PresentationState::Failed;
             return self.state;
-        };
-        if !std::ptr::eq(self.page.class(), passive) {
-            let page: &AnyObject = &self.page;
-            // SAFETY: the subclass adds no ivars and only overrides
-            // acceptsFirstResponder; the original class is restored on retire.
-            self.original_class = Some(unsafe { AnyObject::set_class(page, passive) });
         }
         self.state = PresentationState::Acquiring;
         // Re-adding beneath every sibling keeps the page under the chrome and
@@ -303,11 +291,7 @@ impl WorkObservationPresentation {
         self.state = PresentationState::Retiring;
         self.page.setHidden(true);
         self.page.setFrame(self.original_frame);
-        if let Some(class) = self.original_class.take() {
-            let page: &AnyObject = &self.page;
-            // SAFETY: restores the exact class the page had before presentation.
-            unsafe { AnyObject::set_class(page, class) };
-        }
+        super::passive_page::unregister(&self.page);
         // SAFETY: the retained native page and original parent remain alive on
         // the main thread. No pointer escapes this identity comparison.
         let original_parent = unsafe { self.page.superview() }
@@ -382,30 +366,6 @@ impl Drop for WorkObservationPresentation {
     fn drop(&mut self) {
         let _ = self.retire();
     }
-}
-
-/// Runtime subclass of the page's own class that refuses first responder.
-fn passive_class(page: &WKWebView) -> Option<&'static AnyClass> {
-    static CLASS: OnceLock<Option<&'static AnyClass>> = OnceLock::new();
-    *CLASS.get_or_init(|| {
-        let name = c"ZephiumPassiveAgentPage";
-        if let Some(existing) = AnyClass::get(name) {
-            return Some(existing);
-        }
-        extern "C-unwind" fn refuse(_this: &AnyObject, _cmd: Sel) -> Bool {
-            Bool::NO
-        }
-        let mut builder = ClassBuilder::new(name, page.class())?;
-        // SAFETY: acceptsFirstResponder takes no arguments and returns BOOL,
-        // matching this implementation.
-        unsafe {
-            builder.add_method(
-                sel!(acceptsFirstResponder),
-                refuse as extern "C-unwind" fn(_, _) -> _,
-            );
-        }
-        Some(builder.register())
-    })
 }
 
 fn viewport() -> NSRect {
@@ -551,7 +511,7 @@ mod tests {
             assert!(!source.contains(forbidden));
         }
         assert!(source.contains("NSWindowOrderingMode::Below"));
-        assert!(source.contains("sel!(acceptsFirstResponder)"));
+        assert!(source.contains("passive_page::register(&self.page)"));
         assert!(source.contains("self.cleanup_failed |="));
         assert!(source.contains("human_owners(&self.app) != before"));
     }

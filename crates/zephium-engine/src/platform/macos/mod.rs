@@ -29,6 +29,8 @@ mod semantic_screenshot;
 #[cfg(feature = "agentic-browser")]
 pub(crate) use semantic_screenshot::capture_work_frame;
 #[cfg(feature = "agentic-browser")]
+mod passive_page;
+#[cfg(feature = "agentic-browser")]
 mod work_observation_presentation;
 #[cfg(feature = "native-agentic-work-resource-probe")]
 pub(crate) use work_observation_presentation::retained_page_hidden;
