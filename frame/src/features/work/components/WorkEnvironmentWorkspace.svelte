@@ -51,7 +51,7 @@
     environmentView,
   } from "../lib/project-environment";
   import { organizeExecution, pendingOrganize, elementFor } from "../lib/organize";
-  import { subjectImageCandidates } from "../lib/subjects";
+  import { subjectImageCandidates, subjectsOf } from "../lib/subjects";
   import { environmentResults, type ResultReference } from "../lib/project-environment-results";
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
   import type { CanvasView, CanvasItem } from "../lib/canvas-model";
@@ -463,35 +463,45 @@
   }
   // Subjects may name public image candidates from their cited sources. Rust
   // fetches, bounds, decodes, and stores an admitted copy; the canvas only ever
-  // renders that copy. Bounded per execution, once per subject element.
+  // renders that copy. One admission per candidate URL per environment.
   const imageAdmissions = new SvelteSet<string>();
+  function canonicalImageUrl(url: string): string {
+    try {
+      return new URL(url).toString();
+    } catch {
+      return url;
+    }
+  }
+  /** Candidates this environment already holds an admitted copy of. */
+  function admittedImageUrls(): string[] {
+    return [...context.media.values()].flatMap((asset) =>
+      asset.origin.kind === "fetched" ? [canonicalImageUrl(asset.origin.url)] : [],
+    );
+  }
   async function admitSubjectImages(
     projection: WorkRuntimeProjection,
     execution: WorkExecutionFact,
     placed: WorkEnvironmentSnapshot,
   ) {
+    const admitted = admittedImageUrls();
     let budget = 6;
     for (const element of placed.elements) {
       if (budget <= 0) break;
       const reference = element.reference;
       if (reference.kind !== "subject" || reference.execution !== execution.id) continue;
-      if (imageAdmissions.has(element.id)) continue;
       const related = (placed.relations ?? []).some(
         (relation) => relation.from === element.id && relation.kind === "uses",
       );
       if (related) continue;
       const run = projection.executions.find((entry) => entry.id === reference.execution);
       const artifact = run?.artifacts.find((entry) => entry.id === reference.artifact);
-      const subjects =
-        artifact?.data.kind === "comparison_matrix" ||
-        artifact?.data.kind === "findings" ||
-        artifact?.data.kind === "evidence_collection"
-          ? artifact.data.subjects
-          : [];
-      const subject = subjects?.[reference.index];
+      const subject = artifact ? subjectsOf(artifact)[reference.index] : undefined;
       const candidate = subject && run ? subjectImageCandidates(run, subject)[0] : undefined;
       if (!candidate) continue;
-      imageAdmissions.add(element.id);
+      const canonical = canonicalImageUrl(candidate);
+      const key = `${placed.id} ${canonical}`;
+      if (imageAdmissions.has(key) || admitted.includes(canonical)) continue;
+      imageAdmissions.add(key);
       budget -= 1;
       try {
         await commands.mediaAdmitRemote(session.profile, placed.id, element.id, candidate);
