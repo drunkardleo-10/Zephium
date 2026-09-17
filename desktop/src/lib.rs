@@ -4635,6 +4635,10 @@ pub fn run() {
                 app.manage(media::MediaBlobs(zephium_store::MediaStore::new(
                     data_dir.join("media"),
                 )));
+                #[cfg(feature = "work-product")]
+                app.manage(work_product::WorkFrames(Arc::new(
+                    zephium_store::WorkFrameStore::new(data_dir.join("work-frames")),
+                )));
                 let startup_store = app.try_state::<StartupStore>().ok_or_else(|| {
                     std::io::Error::other("startup storage cleanup owner is unavailable")
                 })?;
@@ -5172,7 +5176,12 @@ pub fn run() {
                 return Err(error.into());
             }
             #[cfg(feature = "work-product")]
-            if !work_product::install(app.handle(), engine.clone(), store.clone()) {
+            if !work_product::install(
+                app.handle(),
+                engine.clone(),
+                store.clone(),
+                app.try_state::<work_product::WorkFrames>().map(|frames| frames.0.clone()),
+            ) {
                 let error = std::io::Error::other("Work product owner is already installed");
                 shutdown.request_terminal_startup_failure(
                     app.handle().clone(),

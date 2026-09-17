@@ -20,11 +20,15 @@ impl WorkProductState {
         self.providers.activity.frame(attempt, step)
     }
 }
+/// Durable last frames of pages the agent read, managed beside the media blobs.
+pub(crate) struct WorkFrames(pub(crate) std::sync::Arc<zephium_store::WorkFrameStore>);
+
 #[cfg(feature = "work-product")]
 pub(crate) fn install(
     app: &tauri::AppHandle,
     engine: std::sync::Arc<zephium_engine::WebviewEngine>,
     store: std::sync::Arc<zephium_store::SqliteStore>,
+    frames: Option<std::sync::Arc<zephium_store::WorkFrameStore>>,
 ) -> bool {
     use zephium_core::ports::store::Store;
     #[cfg(feature = "work-development-traces")]
@@ -36,7 +40,9 @@ pub(crate) fn install(
             ai_enabled,
             work_enabled,
         ),
-        providers: std::sync::Arc::new(super::work_provider::WorkProviders::new(engine, store)),
+        providers: std::sync::Arc::new(super::work_provider::WorkProviders::new(
+            engine, store, frames,
+        )),
     })
 }
 

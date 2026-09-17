@@ -13,11 +13,12 @@ impl WorkProviders {
     pub(crate) fn new(
         engine: Arc<zephium_engine::WebviewEngine>,
         store: Arc<zephium_store::SqliteStore>,
+        frames: Option<Arc<zephium_store::WorkFrameStore>>,
     ) -> Self {
         #[cfg(not(target_os = "macos"))]
         let _ = (engine, store);
         Self {
-            activity: Default::default(),
+            activity: super::work_activity::WorkActivity::new(frames),
             #[cfg(target_os = "macos")]
             browser: zephium_work_composition::MacosWorkComposition::new(engine, store),
         }

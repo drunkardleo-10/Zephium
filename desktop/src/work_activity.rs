@@ -1,22 +1,38 @@
 //! Bounded observers of original attempts. No resource, task or execution owner.
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
 };
 use zephium_app::work_runtime::{WorkAttemptObserver, WorkPageFrame};
-use zephium_core::work::{runtime::*, WorkAttemptId, WorkExecutionId, WorkStepId};
+use zephium_core::ids::ProfileId;
+use zephium_core::work::{runtime::*, WorkAttemptId, WorkExecutionId, WorkId, WorkStepId};
 use zephium_ipc::work::{WorkPageFrameV1, WorkPageV1, WorkSignalV1};
+use zephium_store::{WorkFrameRecord, WorkFrameStore};
 
 const MAX_PAGE_ATTEMPTS: usize = 8;
+const MAX_STORED_WORKS: usize = 8;
 
-#[derive(Default)]
 pub(crate) struct WorkActivity {
     observers: Mutex<BTreeMap<WorkAttemptId, WorkAttemptObserver>>,
     /// Pages of recent attempts, kept after the attempt ends so their last
     /// frame outlives the run for this app session.
     pages: Mutex<BTreeMap<WorkAttemptId, (WorkExecutionId, Vec<WorkPageFrame>)>>,
+    frames: Option<Arc<WorkFrameStore>>,
+    /// Frames already written this session, by attempt, step and generation.
+    persisted: Mutex<BTreeSet<(WorkAttemptId, WorkStepId, u64)>>,
+    /// Stored frames of recently read works, listed once per session.
+    stored: Mutex<BTreeMap<WorkId, (ProfileId, Vec<WorkFrameRecord>)>>,
 }
 impl WorkActivity {
+    pub(crate) fn new(frames: Option<Arc<WorkFrameStore>>) -> Self {
+        Self {
+            observers: Mutex::default(),
+            pages: Mutex::default(),
+            frames,
+            persisted: Mutex::default(),
+            stored: Mutex::default(),
+        }
+    }
     pub(crate) fn track(&self, observer: WorkAttemptObserver) {
         let Ok(mut observers) = self.observers.lock() else {
             return;
@@ -57,7 +73,9 @@ impl WorkActivity {
         }
         let executions: Vec<_> = state.executions.iter().map(|e| e.id).collect();
         pages.retain(|_, (execution, _)| executions.contains(execution));
-        pages
+        let profile = state.work.profile;
+        let work = state.work.id;
+        let mut live: Vec<WorkPageV1> = pages
             .iter()
             .flat_map(|(attempt, (execution, opened))| {
                 opened.iter().map(|page| WorkPageV1 {
@@ -73,17 +91,116 @@ impl WorkActivity {
                     }),
                 })
             })
-            .collect()
+            .collect();
+        self.persist(profile, work, &pages);
+        let mut stored = self.stored_records(profile, work);
+        stored.retain(|record| {
+            executions.contains(&record.execution)
+                && !live
+                    .iter()
+                    .any(|page| page.attempt == record.attempt && page.step == record.step)
+        });
+        live.extend(stored.into_iter().map(|record| WorkPageV1 {
+            execution: record.execution,
+            attempt: record.attempt,
+            step: record.step,
+            url: record.url,
+            live: false,
+            frame: Some(WorkPageFrameV1 {
+                generation: record.generation,
+                width: record.width,
+                height: record.height,
+            }),
+        }));
+        live
+    }
+    /// Writes the last frame of every settled page once, then remembers it.
+    fn persist(
+        &self,
+        profile: ProfileId,
+        work: WorkId,
+        pages: &BTreeMap<WorkAttemptId, (WorkExecutionId, Vec<WorkPageFrame>)>,
+    ) {
+        let Some(frames) = &self.frames else {
+            return;
+        };
+        let Ok(mut persisted) = self.persisted.lock() else {
+            return;
+        };
+        for (attempt, (execution, opened)) in pages {
+            for page in opened.iter().filter(|page| !page.live) {
+                let Some(frame) = &page.frame else {
+                    continue;
+                };
+                let key = (*attempt, page.step, frame.generation);
+                if persisted.contains(&key) {
+                    continue;
+                }
+                persisted.insert(key);
+                let record = WorkFrameRecord {
+                    work,
+                    execution: *execution,
+                    attempt: *attempt,
+                    step: page.step,
+                    url: page.url.clone(),
+                    generation: u32::try_from(frame.generation).unwrap_or(u32::MAX),
+                    width: frame.width,
+                    height: frame.height,
+                };
+                if frames.put(profile, &record, &frame.png).is_ok() {
+                    if let Ok(mut stored) = self.stored.lock() {
+                        if let Some((_, records)) = stored.get_mut(&work) {
+                            records.retain(|r| {
+                                !(r.attempt == record.attempt && r.step == record.step)
+                            });
+                            records.push(record);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    fn stored_records(&self, profile: ProfileId, work: WorkId) -> Vec<WorkFrameRecord> {
+        let Some(frames) = &self.frames else {
+            return Vec::new();
+        };
+        let Ok(mut stored) = self.stored.lock() else {
+            return Vec::new();
+        };
+        if let Some((_, records)) = stored.get(&work) {
+            return records.clone();
+        }
+        if stored.len() >= MAX_STORED_WORKS {
+            let oldest = stored.keys().next().copied();
+            if let Some(oldest) = oldest {
+                stored.remove(&oldest);
+            }
+        }
+        let records = frames.list(profile, work);
+        stored.insert(work, (profile, records.clone()));
+        records
     }
     pub(crate) fn frame(&self, attempt: WorkAttemptId, step: WorkStepId) -> Option<Arc<Vec<u8>>> {
-        let pages = self.pages.lock().ok()?;
-        let (_, opened) = pages.get(&attempt)?;
-        opened
-            .iter()
-            .find(|page| page.step == step)?
-            .frame
-            .as_ref()
-            .map(|frame| frame.png.clone())
+        if let Some(png) = self.pages.lock().ok().and_then(|pages| {
+            pages
+                .get(&attempt)?
+                .1
+                .iter()
+                .find(|page| page.step == step)?
+                .frame
+                .as_ref()
+                .map(|frame| frame.png.clone())
+        }) {
+            return Some(png);
+        }
+        let frames = self.frames.as_ref()?;
+        let stored = self.stored.lock().ok()?;
+        let (profile, _) = stored.values().find(|(_, records)| {
+            records
+                .iter()
+                .any(|record| record.attempt == attempt && record.step == step)
+        })?;
+        frames.read(*profile, attempt, step).map(Arc::new)
     }
 }
 
