@@ -417,3 +417,74 @@ test("browser steps become page cards with frames, working links and subject lin
     },
   ]);
 });
+
+test("file steps join their run's Sources card as file rows the lift can open", async () => {
+  const { environmentSources, fileEvidence } = await import("../lib/project-environment");
+  const state = structuredClone(projection);
+  const execution = state.executions[0]!;
+  execution.status = "running";
+  execution.authorization = "user_directed_agent";
+  execution.artifacts = [];
+  execution.spec.nodes[0]!.capability = {
+    kind: "agent",
+    grant: {
+      provider: "open_ai",
+      model: "gpt-5.6-luna",
+      max_turns: 10,
+      max_steps: 32,
+      browse_hops: 4,
+      folders: ["/Users/reader/notes"],
+    },
+  };
+  execution.file_evidence = [
+    {
+      id: "record",
+      node: "node",
+      attempt: "attempt",
+      file: {
+        path: "/Users/reader/notes/plan.md",
+        name: "plan.md",
+        kind: "text",
+        bytes: 24,
+        digest: "abc",
+        text: "Plan for the week",
+        truncated: false,
+      },
+    },
+  ];
+  execution.steps = [
+    {
+      id: "read-file",
+      turn: 1,
+      kind: { kind: "read_file", path: "/Users/reader/notes/plan.md" },
+      status: "succeeded",
+      evidence: "record",
+    },
+  ];
+  const objectiveElement = snapshot.elements.find(
+    (element) => element.reference.kind === "objective",
+  )!;
+  const withFiles = {
+    ...snapshot,
+    elements: [objectiveElement],
+    view: {
+      ...snapshot.view,
+      placements: [{ element: objectiveElement.id, x: 0, y: 0, width: 320, height: 150 }],
+    },
+  };
+  const objectives = new Map([["objective", state]]);
+  const sources = environmentSources(withFiles, objectives);
+  expect(sources.items).toHaveLength(1);
+  expect(sources.items[0]?.sources).toEqual([
+    {
+      key: "file:record",
+      url: "",
+      where: "~/notes",
+      title: "plan.md",
+      file: { record: "record", path: "/Users/reader/notes/plan.md", kind: "text" },
+    },
+  ]);
+  // The row opens what the run recorded, not a page the pane could load.
+  expect(fileEvidence(objectives, "record")?.text).toBe("Plan for the week");
+  expect(sources.groups.size).toBe(0);
+});

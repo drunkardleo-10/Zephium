@@ -161,6 +161,11 @@
     "css": 19500,
     "description": "Account-scoped approvals, the signed-in composer chip, and intervention controls add to the Work graph and message catalog."
   },
+  "lazy:features/work/components/WorkFileInspector.svelte": {
+    "js": 64000,
+    "css": 5000,
+    "description": "Measured 62019 JS and 4485 CSS bytes: one file record or proposed change, opened from the lift."
+  },
   "lazy:features/work/components/WorkResultInspector.svelte": {
     "js": 74000,
     "css": 5000,

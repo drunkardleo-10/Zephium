@@ -4,6 +4,7 @@
   import { currentActivity } from "$domain/work";
   import { agentLine } from "../lib/agent-steps";
   import { preparationFailure } from "../lib/preparation-failure";
+  import { fileName } from "../lib/work-files";
   import type { CanvasItem } from "../lib/canvas-model";
   import AgentAvatar from "./cards/AgentAvatar.svelte";
   import Icon from "$shared/ui/Icon";
@@ -55,14 +56,13 @@
       return "";
     }
   });
-  const fileName = (path: string) => path.split(/[/\\]/u).filter(Boolean).at(-1) ?? path;
   /** What the agent is doing in a granted folder, when it is doing that. */
   const fileState = $derived.by(() => {
     for (const step of execution?.steps ?? []) {
       if (step.status !== "running") continue;
       switch (step.kind.kind) {
         case "list":
-          return m.work_line_listing_files();
+          return m.work_line_listing_files({ name: fileName(step.kind.path) });
         case "read_file":
           return m.work_line_reading_file({ name: fileName(step.kind.path) });
         case "search_files":
@@ -98,7 +98,7 @@
     recovering: m.work_line_recovering,
     comparing: m.work_line_comparing,
     producing_artifact: m.work_line_writing,
-    paused: m.work_line_waiting_for_you,
+    paused: m.work_line_paused,
     waiting_for_approval: m.work_line_waiting,
     waiting_for_human: m.work_line_waiting_for_you,
     cancelling: m.work_line_stopping,

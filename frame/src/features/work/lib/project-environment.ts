@@ -1,5 +1,7 @@
 import type {
   WorkArtifactV1,
+  WorkFileEvidenceV1,
+  WorkFileRecordV1,
   WorkEnvironmentSnapshot,
   TabView,
   ResourceSummary,
@@ -11,10 +13,13 @@ import { artifactView } from "./project-work";
 import { agentLine, isAgentExecution } from "./agent-steps";
 import { subjectFacts, subjectKey, subjectsOf } from "./subjects";
 import { COLUMNS, SOURCES_SIZE } from "./organize";
+import { fileFolder } from "./work-files";
 import { pageFrameUrl } from "$domain/resources";
 
 /** How many cited pages one Sources card lists; the lift shows the rest. */
 const SOURCE_ROWS = 24;
+/** Steps that work inside a granted folder; each settles onto a file record. */
+const FILE_STEPS = ["list", "read_file", "search_files", "write_file", "edit_file"];
 
 function host(url: string | undefined): string {
   if (!url) return "";
@@ -29,8 +34,18 @@ type SourceRow = {
   url: string;
   where: string;
   title: string;
-  file?: boolean;
+  file?: { record: string; path: string; kind: string };
 };
+/** A file a step disclosed: the folder it sits in stands where a host would. */
+function fileRow(key: string, record: WorkFileRecordV1, title?: string): SourceRow {
+  return {
+    key,
+    url: "",
+    where: fileFolder(record.file.path),
+    title: title || record.file.name,
+    file: { record: record.id, path: record.file.path, kind: record.file.kind },
+  };
+}
 /** The pages and files behind one evidence collection, in the order it cites them. */
 function collectionRows(execution: WorkExecutionFact, artifact: WorkArtifactV1): SourceRow[] {
   if (artifact.data.kind !== "evidence_collection") return [];
@@ -38,15 +53,18 @@ function collectionRows(execution: WorkExecutionFact, artifact: WorkArtifactV1):
     const link = artifact.evidence[entry.evidence];
     if (!link) return [];
     const key = `${link.extraction_id}:${link.source_id}`;
-    const record = execution.provider_evidence?.find((record) => record.id === link.extraction_id);
-    const citation = record?.evidence.citations[link.source_id - 1];
+    const search = execution.provider_evidence?.find(
+      (candidate) => candidate.id === link.extraction_id,
+    );
+    const citation = search?.evidence.citations[link.source_id - 1];
     const url = cleanUrl(citation?.url);
     if (url)
       return [{ key, url, where: host(url), title: entry.title || citation?.title || host(url) }];
     // A granted folder is not a place the pane can open: the row names the file.
-    const file = execution.file_evidence?.find((record) => record.id === link.extraction_id)?.file;
-    if (!file) return [];
-    return [{ key, url: "", where: file.path, title: entry.title || file.name, file: true }];
+    const record = execution.file_evidence?.find(
+      (candidate) => candidate.id === link.extraction_id,
+    );
+    return record ? [fileRow(key, record, entry.title)] : [];
   });
 }
 /** The provider's tracking parameter is not part of the page the card opens. */
@@ -290,6 +308,16 @@ function elementItems(
     };
   });
 }
+/** What a run recorded of one file, by record id, across the canvas's works. */
+export function fileEvidence(
+  objectives: ReadonlyMap<string, WorkRuntimeProjection>,
+  record: string,
+): WorkFileEvidenceV1 | undefined {
+  for (const projection of objectives.values())
+    for (const execution of projection.executions)
+      for (const entry of execution.file_evidence ?? []) if (entry.id === record) return entry.file;
+  return undefined;
+}
 export function environmentView(snapshot: WorkEnvironmentSnapshot): CanvasView {
   return {
     areas: Object.fromEntries(
@@ -456,9 +484,9 @@ export function environmentAgents(
 }
 
 /**
- * One Sources card per fetch stage: the pages a turn's searches cited, counted
- * and listed together. Individual sources are rows, never cards, and later
- * objects connect to the group that established them.
+ * One Sources card per execution: the pages its searches cited and the files
+ * its steps opened, counted and listed together. Individual sources are rows,
+ * never cards, and later objects connect to the stage that established them.
  */
 export function environmentSources(
   snapshot: WorkEnvironmentSnapshot,
@@ -477,34 +505,36 @@ export function environmentSources(
   for (const element of snapshot.elements) {
     if (element.reference.kind !== "objective") continue;
     const projection = objectives.get(element.reference.objective);
-    const execution = projection?.executions.at(-1);
-    if (!projection || !execution || !isAgentExecution(execution)) continue;
-    const stages = new Map<number, WorkArtifactV1[]>();
-    for (const step of execution.steps ?? []) {
-      if (step.kind.kind !== "search") continue;
-      for (const id of step.artifacts ?? []) {
-        const artifact = execution.artifacts.find((entry) => entry.id === id);
-        if (artifact?.data.kind !== "evidence_collection") continue;
-        const stage = stages.get(step.turn) ?? [];
-        if (!stage.includes(artifact)) stage.push(artifact);
-        stages.set(step.turn, stage);
-      }
-    }
-    if (!stages.size) continue;
+    if (!projection) continue;
     const anchor = snapshot.view.placements.find((place) => place.element === element.id);
     const home = anchor ? { x: anchor.x, y: anchor.y + anchor.height + 48 } : { x: 80, y: 320 };
     let index = 0;
-    for (const [turn, artifacts] of [...stages].sort(([a], [b]) => a - b)) {
+    for (const execution of projection.executions) {
+      if (!isAgentExecution(execution)) continue;
       const seen = new Set<string>();
+      const files = new Set<string>();
       const rows: SourceRow[] = [];
-      for (const artifact of artifacts)
-        for (const row of collectionRows(execution, artifact)) {
-          if (seen.has(row.key)) continue;
-          seen.add(row.key);
-          rows.push(row);
+      const admit = (row: SourceRow) => {
+        if (seen.has(row.key) || (row.file && files.has(row.file.record))) return;
+        seen.add(row.key);
+        if (row.file) files.add(row.file.record);
+        rows.push(row);
+      };
+      for (const step of execution.steps ?? []) {
+        if (step.kind.kind === "search") {
+          for (const id of step.artifacts ?? []) {
+            const artifact = execution.artifacts.find((entry) => entry.id === id);
+            if (artifact?.data.kind !== "evidence_collection") continue;
+            for (const row of collectionRows(execution, artifact)) admit(row);
+          }
+          continue;
         }
+        if (!FILE_STEPS.includes(step.kind.kind) || !step.evidence) continue;
+        const record = execution.file_evidence?.find((candidate) => candidate.id === step.evidence);
+        if (record) admit(fileRow(`file:${record.id}`, record));
+      }
       if (!rows.length) continue;
-      const id = `sources:${element.id}:${turn}`;
+      const id = `sources:${element.id}:${execution.id}`;
       items.push({
         id,
         type: "sources",
@@ -526,7 +556,7 @@ export function environmentSources(
         kind: "uses",
         label: m.work_env_relation_uses(),
       });
-      for (const row of rows) groups.set(row.url, id);
+      for (const row of rows) if (row.url) groups.set(row.url, id);
       // Findings and published objects hang off the stage whose pages they cite.
       for (const candidate of snapshot.elements) {
         const reference = candidate.reference;
@@ -568,6 +598,8 @@ export function environmentPages(
   pages: (objective: string) => readonly WorkPageV1[],
   /** The Sources card each cited page came from, so a page joins its stage. */
   groups: ReadonlyMap<string, string> = new Map(),
+  /** The run's current activity, so a page held for a hidden window says so. */
+  activity: (objective: string) => string | undefined = () => undefined,
 ): { items: CanvasItem[]; links: CanvasLink[]; positions: Record<string, CanvasPosition> } {
   const items: CanvasItem[] = [];
   const links: CanvasLink[] = [];
@@ -578,6 +610,7 @@ export function environmentPages(
     const execution = projection?.executions.at(-1);
     if (!projection || !execution || !isAgentExecution(execution)) continue;
     const opened = pages(projection.work.id).filter((page) => page.execution === execution.id);
+    const paused = activity(projection.work.id) === "paused";
     // One card per page: every step that opened the same URL folds into it.
     const byUrl = new Map<
       string,
@@ -626,7 +659,9 @@ export function environmentPages(
         title: pageHost || m.work_env_page(),
         detail: url,
         status: live
-          ? m.work_env_page_live()
+          ? paused
+            ? m.work_line_paused()
+            : m.work_env_page_live()
           : succeeded
             ? m.work_env_page_read()
             : m.work_env_status_failed(),

@@ -46,7 +46,8 @@ export type CanvasItem = {
     url: string;
     where: string;
     title: string;
-    file?: boolean;
+    /** A file a step disclosed; the lift shows what the run recorded of it. */
+    file?: { record: string; path: string; kind: string };
   }[];
   /** A page a browser step opened: its newest frame while the agent works there. */
   page?: { url: string; host: string; frame: string | null; live: boolean };

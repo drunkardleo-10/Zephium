@@ -11,7 +11,7 @@
   <ul class="rows">
     {#each rows.slice(0, 6) as row (row.key)}
       <li>
-        <HostGlyph host={row.where} file={row.file} />
+        <HostGlyph host={row.where} file={!!row.file} />
         <span class="text">
           <span class="where">{row.where}</span>
           <span class="title">{row.title}</span>

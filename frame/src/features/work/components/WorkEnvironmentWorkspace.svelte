@@ -6,6 +6,7 @@
   import { resourceSession, type ResourceSession } from "$domain/resources";
   import type {
     TabView,
+    WorkFileEvidenceV1,
     WorkAccountEffectV1,
     WorkEnvironmentSnapshot,
     WorkExecutionFact,
@@ -59,6 +60,7 @@
     environmentPages,
     environmentSources,
     environmentView,
+    fileEvidence,
   } from "../lib/project-environment";
   import { organizeExecution, pendingOrganize, elementFor } from "../lib/organize";
   import { subjectImageCandidates, subjectsOf } from "../lib/subjects";
@@ -495,13 +497,14 @@
       ? environmentResults(snapshot, scene.items, objectiveSession?.projection ?? null)
       : { items: scene.items, references: new Map<string, ResultReference>(), remaining: null },
   );
+  /** What the run this canvas is watching is doing right now. */
+  const signalOf = (objective: string) =>
+    objectiveSession?.selected === objective
+      ? objectiveSession.activity.at(-1)?.activity
+      : undefined;
   const agents = $derived(
     snapshot
-      ? environmentAgents(snapshot, context.objectives, (objective) =>
-          objectiveSession?.selected === objective
-            ? objectiveSession.activity.at(-1)?.activity
-            : undefined,
-        )
+      ? environmentAgents(snapshot, context.objectives, signalOf)
       : { items: [], links: [], positions: {} },
   );
   const sources = $derived(
@@ -516,6 +519,7 @@
           context.objectives,
           (objective) => (objectiveSession?.selected === objective ? objectiveSession.pages : []),
           sources.groups,
+          signalOf,
         )
       : { items: [], links: [], positions: {} },
   );
@@ -699,6 +703,9 @@
   const authoritative = $derived(new Set(snapshot?.elements.map((element) => element.id) ?? []));
   let liftSource = $state.raw<EvidenceReference | null>(null);
   const loadResult = () => import("./WorkResultInspector.svelte");
+  const loadFile = () => import("./WorkFileInspector.svelte");
+  /** The file a source row opened, shown as the run recorded it. */
+  let liftFile = $state.raw<WorkFileEvidenceV1 | null>(null);
   /** One surface: a result opens in the lift, on the run that produced it. */
   async function openResult(id: string, source: EvidenceReference | null = null) {
     const reference = results.references.get(id);
@@ -1667,21 +1674,37 @@
       onclose={() => {
         lifted = null;
         liftSource = null;
+        liftFile = null;
       }}
     >
-      {#if liftedItem?.sources}
+      {#if liftFile}
+        <LazyView
+          loader={loadFile}
+          loadingLabel={m.surface_loading()}
+          failureLabel={m.surface_render_failed()}
+          retryLabel={m.surface_retry()}
+          >{#snippet children(FileView)}<FileView
+              file={liftFile!}
+              onback={liftedItem?.sources ? () => (liftFile = null) : undefined}
+            />{/snippet}</LazyView
+        >
+      {:else if liftedItem?.sources}
         <ul class="lift-sources">
           {#each liftedItem.sources as row (row.key)}
             <li>
               <button
                 type="button"
                 onclick={() => {
+                  if (row.file) {
+                    liftFile = fileEvidence(context.objectives, row.file.record) ?? null;
+                    return;
+                  }
                   const url = row.url;
                   lifted = null;
                   openPane({ kind: "url", url }, null);
                 }}
               >
-                <HostGlyph host={row.where} file={row.file} size={22} />
+                <HostGlyph host={row.where} file={!!row.file} size={22} />
                 <span class="source-text">
                   <strong>{row.title}</strong>
                   <span>{row.where}</span>
