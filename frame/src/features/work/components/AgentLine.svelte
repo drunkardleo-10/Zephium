@@ -16,6 +16,7 @@
     draft = "",
     onfocusagent,
     onopenpage,
+    onreview,
     onsteered,
   }: {
     session: WorkSession;
@@ -26,6 +27,8 @@
     onfocusagent?: (id: string) => void;
     /** Presents the signed-in page for sign-in handoff or takeover. */
     onopenpage?: (tab: string) => void;
+    /** Opens the change the run is proposing, so the person can read it whole. */
+    onreview?: (step: string) => void;
     /** The draft was handed to the agent or queued; clear the composer. */
     onsteered?: () => void;
   } = $props();
@@ -83,8 +86,7 @@
       if (step.status !== "running") continue;
       const kind = step.kind;
       if (kind.kind !== "write_file" && kind.kind !== "edit_file") continue;
-      if (kind.decision === undefined || kind.decision === null)
-        return { id: step.id, path: kind.path, name: fileName(kind.path) };
+      if (kind.decision === undefined || kind.decision === null) return { id: step.id };
     }
     return undefined;
   });
@@ -199,7 +201,7 @@
   let answer = $state("");
   let host = $state<HTMLElement>();
   $effect(() => {
-    if (!question && !proposal) expanded = false;
+    if (!question) expanded = false;
   });
   $effect(() => {
     if (!live) open = false;
@@ -218,11 +220,6 @@
       answer = "";
       expanded = false;
     }
-  }
-  async function decide(approve: boolean) {
-    const waiting = proposal;
-    if (!waiting || blocked) return;
-    if (await session.approveStep(waiting.id, approve)) expanded = false;
   }
   async function steer() {
     const text = draft.trim();
@@ -283,32 +280,9 @@
         {:else}<li class="none">{m.work_line_no_agents()}</li>{/each}
       </ul>
     {/if}
-    <div
-      class="expand"
-      class:shown={expanded && (!!question || !!proposal)}
-      aria-hidden={!expanded}
-    >
+    <div class="expand" class:shown={expanded && !!question} aria-hidden={!expanded}>
       <div class="expand-inner">
-        {#if proposal}
-          <div class="change">
-            <span class="label">{proposal.name}</span>
-            <span class="path">{proposal.path}</span>
-            <div class="options">
-              <button
-                type="button"
-                class="chip"
-                disabled={blocked}
-                onclick={() => void decide(true)}>{m.work_line_approve_change()}</button
-              >
-              <button
-                type="button"
-                class="chip"
-                disabled={blocked}
-                onclick={() => void decide(false)}>{m.work_line_reject_change()}</button
-              >
-            </div>
-          </div>
-        {:else if question}
+        {#if question}
           <form
             onsubmit={(event) => {
               event.preventDefault();
@@ -369,9 +343,12 @@
             title={m.work_line_steer_hint()}
             onclick={() => void steer()}>{m.work_line_steer()}</button
           >
-        {:else if proposal && !expanded}
-          <button type="button" class="action" onclick={() => (expanded = true)}
-            >{m.work_line_review()}</button
+        {:else if proposal}
+          <button
+            type="button"
+            class="action"
+            disabled={blocked}
+            onclick={() => onreview?.(proposal.id)}>{m.work_line_review()}</button
           >
         {:else if question && !expanded}
           <button type="button" class="action" onclick={() => (expanded = true)}
@@ -584,28 +561,8 @@
     box-shadow: var(--shadow-float);
   }
 
-  label,
-  .label {
+  label {
     font-size: var(--text-label);
-  }
-
-  .change {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 12px 14px;
-    border-radius: var(--radius-control);
-    background: var(--color-menu);
-    backdrop-filter: blur(12px) saturate(1.2);
-    box-shadow: var(--shadow-float);
-  }
-
-  .path {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--color-faint);
-    font-size: var(--text-caption);
   }
 
   .options,

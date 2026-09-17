@@ -147,9 +147,9 @@
     "css": 0
   },
   "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
-    "js": 585000,
+    "js": 587000,
     "css": 119000,
-    "description": "Measured 583662 JS bytes with folder admission, Finder drops, and link elements beside agent-run organization."
+    "description": "Measured 585517 JS bytes with folder admission, Finder drops, link elements, and the file lift beside agent-run organization."
   },
   "lazy:features/work/components/AgentLine.svelte": {
     "js": 110000,
@@ -162,9 +162,9 @@
     "description": "Account-scoped approvals, the signed-in composer chip, and intervention controls add to the Work graph and message catalog."
   },
   "lazy:features/work/components/WorkFileInspector.svelte": {
-    "js": 64000,
-    "css": 5000,
-    "description": "Measured 62019 JS and 4485 CSS bytes: one file record or proposed change, opened from the lift."
+    "js": 66000,
+    "css": 6000,
+    "description": "Measured 64732 JS and 5077 CSS bytes: one file record or proposed change, opened from the lift."
   },
   "lazy:features/work/components/WorkResultInspector.svelte": {
     "js": 74000,

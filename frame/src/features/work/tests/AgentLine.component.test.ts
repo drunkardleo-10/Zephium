@@ -197,7 +197,7 @@ test("a refused steer queues the draft and the queue rides on when the run close
   session.dispose();
 });
 
-test("a proposed file change waits on the person and its decision reaches the run", async () => {
+test("a proposed file change waits on the person and hands the review to the canvas", async () => {
   const session = new WorkSession("profile");
   session.selected = "objective";
   const execution = agentRun("running");
@@ -211,19 +211,13 @@ test("a proposed file change waits on the person and its decision reaches the ru
     },
   ];
   session.projection = { ...structuredClone(projection), executions: [execution] };
-  const execute = vi.spyOn(session, "execute").mockResolvedValue(true);
-  const screen = await render(AgentLine, { session });
-  await expect
-    .element(screen.getByText("A change to plan.md needs you", { exact: true }))
-    .toBeVisible();
+  const onreview = vi.fn();
+  const screen = await render(AgentLine, { session, onreview });
+  await expect.element(screen.getByText("Wants to change plan.md", { exact: true })).toBeVisible();
+  // The line never holds the change itself: it opens where the person can read it.
   await screen.getByRole("button", { name: "Review", exact: true }).click();
-  await screen.getByRole("button", { name: "Approve", exact: true }).click();
-  expect(execute).toHaveBeenCalledExactlyOnceWith({
-    kind: "approve_step",
-    execution: "execution",
-    step: "edit-1",
-    approve: true,
-  });
+  expect(onreview).toHaveBeenCalledExactlyOnceWith("edit-1");
+  expect(screen.container.textContent).not.toContain("/Users/reader/notes/plan.md");
   await screen.unmount();
   session.dispose();
 });

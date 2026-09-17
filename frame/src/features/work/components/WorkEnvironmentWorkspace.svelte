@@ -116,7 +116,12 @@
   });
   let objectiveSession = $state.raw<WorkSession | null>(null);
   let inspected = $state<string | null>(null);
-  let lifted = $state.raw<{ id: string; origin: DOMRect | null } | null>(null);
+  let lifted = $state.raw<{
+    id: string;
+    origin: DOMRect | null;
+    /** A change the run proposed: the lift opens on the step, not on a card. */
+    proposal?: string;
+  } | null>(null);
   let canvasRef = $state<{
     screenRect: (id: string) => DOMRect | null;
     flowPosition: (clientX: number, clientY: number) => CanvasPosition | null;
@@ -1499,6 +1504,12 @@
           session={objectiveSession!}
           agents={agents.items}
           draft={session.composer}
+          onreview={(step: string) => {
+            chrome?.close();
+            inspected = null;
+            liftFile = null;
+            lifted = { id: "", origin: null, proposal: step };
+          }}
           onfocusagent={(id) => canvasRef?.center(id)}
           onsteered={() => (session.composer = "")}
           onopenpage={(tab) => {
@@ -1670,14 +1681,25 @@
       origin={lifted.origin}
       bounds={cardBounds}
       preferred={liftSize(liftedItem)}
-      title={liftedItem?.title ?? ""}
+      title={lifted.proposal ? m.work_line_review() : (liftedItem?.title ?? "")}
       onclose={() => {
         lifted = null;
         liftSource = null;
         liftFile = null;
       }}
     >
-      {#if liftFile}
+      {#if lifted.proposal && objectiveSession}
+        <LazyView
+          loader={loadFile}
+          loadingLabel={m.surface_loading()}
+          failureLabel={m.surface_render_failed()}
+          retryLabel={m.surface_retry()}
+          >{#snippet children(FileView)}<FileView
+              proposal={{ session: objectiveSession!, step: lifted!.proposal! }}
+              ondecided={() => (lifted = null)}
+            />{/snippet}</LazyView
+        >
+      {:else if liftFile}
         <LazyView
           loader={loadFile}
           loadingLabel={m.surface_loading()}

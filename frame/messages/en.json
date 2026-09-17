@@ -1153,6 +1153,10 @@
   "work_env_file_listing": "Listing",
   "work_env_file_search": "Matches",
   "work_env_file_written": "Applied change",
+  "work_env_file_removed": "Now",
+  "work_env_file_added": "After the change",
+  "work_env_file_proposed": "Proposed contents",
+  "work_env_file_declined": "Declined.",
   "work_env_file_empty": "Nothing was recorded for this file.",
   "work_env_folder_grant_note": "Runs started on this canvas can read files here, and change them when you approve.",
   "work_line_reading_file": "Reading {name}",
@@ -1160,9 +1164,9 @@
   "work_line_searching_files": "Searching files",
   "work_line_listing_files": "Looking in {name}",
   "work_line_writing_file": "Writing {name}",
-  "work_line_change_waiting": "A change to {name} needs you",
+  "work_line_change_waiting": "Wants to change {name}",
   "work_line_review": "Review",
   "work_line_approve_change": "Approve",
-  "work_line_reject_change": "Reject",
+  "work_line_reject_change": "Decline",
   "work_activity_paused": "Paused"
 }
