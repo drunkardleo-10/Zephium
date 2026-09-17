@@ -6,6 +6,7 @@
   import { resourceSession, type ResourceSession } from "$domain/resources";
   import type {
     TabView,
+    WorkEnvironmentReference,
     WorkFileEvidenceV1,
     WorkAccountEffectV1,
     WorkEnvironmentSnapshot,
@@ -360,37 +361,38 @@
         path: admitted.data.path,
         name: admitted.data.name,
       };
-      if (session.snapshot && elementFor(session.snapshot, reference)) return true;
-      if (!(await session.flushView())) return false;
-      if (!(await session.edit({ kind: "add", reference, area: null }))) return false;
-      const current = session.snapshot;
-      const element = current ? elementFor(current, reference) : undefined;
-      const point = at ?? canvasCentre();
-      if (!current || !element || !point) return true;
-      const size = defaultSize({
-        id: element.id,
-        title: reference.name,
-        kind: "",
-        detail: reference.path,
-        status: "",
-        type: "folder",
-      });
-      session.checkpoint({
-        ...current.view,
-        placements: [
-          ...current.view.placements.filter((place) => place.element !== element.id),
-          {
-            element: element.id,
-            x: Math.round(point.x - size.width / 2),
-            y: Math.round(point.y - size.height / 2),
-            ...size,
-          },
-        ],
-      });
-      return true;
+      return await place(reference, "folder", at ?? null);
     } finally {
       folderPending = false;
     }
+  }
+  /** Adds an element and stands it where the person put it, or in the middle. */
+  async function place(
+    reference: WorkEnvironmentReference,
+    type: "folder" | "link",
+    at: CanvasPosition | null,
+  ) {
+    if (session.snapshot && elementFor(session.snapshot, reference)) return true;
+    if (!(await session.flushView())) return false;
+    if (!(await session.edit({ kind: "add", reference, area: null }))) return false;
+    const current = session.snapshot;
+    const element = current ? elementFor(current, reference) : undefined;
+    const point = at ?? canvasCentre();
+    if (!current || !element || !point) return true;
+    const size = defaultSize({ id: element.id, title: "", kind: "", detail: "", status: "", type });
+    session.checkpoint({
+      ...current.view,
+      placements: [
+        ...current.view.placements.filter((place) => place.element !== element.id),
+        {
+          element: element.id,
+          x: Math.round(point.x - size.width / 2),
+          y: Math.round(point.y - size.height / 2),
+          ...size,
+        },
+      ],
+    });
+    return true;
   }
   function canvasCentre(): CanvasPosition | null {
     const bounds = cardBounds;
@@ -451,34 +453,30 @@
       return null;
     }
   }
-  /** A pasted link becomes a card: the page opens as a Space tab this Work holds. */
+  /** A pasted link becomes a card of its own; it opens in the pane, like a source. */
   async function addLink() {
     const url = linkUrl(linkDraft);
     if (!url || linkPending || busy) return;
     linkPending = true;
     linkFailure = false;
     try {
-      const known = new Set(tabs.map((tab) => tab.id));
-      const admitted = await commands.tabsOpenUrl(url).catch(() => null);
-      const opened = admitted?.accepted ? await freshTab(known) : null;
-      if (!opened) {
+      const title = host(url);
+      if (!(await place({ kind: "link", url, title }, "link", null))) {
         linkFailure = true;
         return;
       }
-      await attach([opened]);
       linkDraft = "";
       chrome?.close();
     } finally {
       linkPending = false;
     }
   }
-  async function freshTab(known: ReadonlySet<string>): Promise<string | null> {
-    for (let attempt = 0; attempt < 30; attempt++) {
-      const fresh = tabs.find((tab) => !known.has(tab.id));
-      if (fresh) return fresh.id;
-      await new Promise((resolve) => setTimeout(resolve, 100));
+  function host(url: string): string {
+    try {
+      return new URL(url).host.replace(/^www\./u, "");
+    } catch {
+      return "";
     }
-    return null;
   }
   const snapshot = $derived(session.snapshot);
   const baseItems = $derived(
