@@ -116,6 +116,70 @@ test("a fact never restates the subject's own identity", () => {
   ]);
 });
 
+test("a detail read outranks the catalogue row for the same criterion", () => {
+  const execution = run();
+  const text = (value: string) => ({
+    value: { kind: "text", text: value },
+    evidence: [],
+    general_knowledge: false,
+  });
+  const matrix = (id: string, subjects: object[], cells: object[][]) => ({
+    ...execution.artifacts[0]!,
+    id,
+    title: id,
+    data: {
+      kind: "comparison_matrix",
+      subjects,
+      criteria: [
+        { name: "product url", kind: { kind: "text" } },
+        { name: "displayed price", kind: { kind: "text" } },
+        { name: "piece count", kind: { kind: "text" } },
+      ],
+      cells,
+      notes: [],
+    },
+  });
+  execution.artifacts = [
+    // The catalogue lists nine sets in listing prose, and one cell is only the
+    // set's own name dressed up with a trademark mark.
+    matrix(
+      "catalog",
+      [{ name: "New York City" }, { name: "Himeji Castle" }],
+      [
+        [text("https://shop.example/p/1"), text("$349.99 New"), text("LEGO® New York City!")],
+        [text("https://shop.example/p/2"), text("$199.99 New"), text("2125 pieces")],
+      ],
+    ),
+    // The product page read is one row, and it read the real values.
+    matrix("detail", [{ name: "New York City" }], [[text(""), text("$349.99"), text("3745")]]),
+  ] as Artifacts;
+  execution.steps = [
+    {
+      id: "read-1",
+      turn: 1,
+      kind: { kind: "read", url: "https://shop.example/catalog", collection: null },
+      status: "succeeded",
+      artifacts: ["catalog"],
+    },
+    {
+      id: "read-2",
+      turn: 2,
+      kind: { kind: "read", url: "https://shop.example/p/1", collection: null },
+      status: "succeeded",
+      artifacts: ["detail"],
+    },
+  ] as WorkExecutionFact["steps"];
+  expect(subjectFacts(execution, { name: "New York City" })).toEqual([
+    { label: "displayed price", value: "$349.99" },
+    { label: "piece count", value: "3745" },
+  ]);
+  // A set no detail read covered still keeps the catalogue's answer.
+  expect(subjectFacts(execution, { name: "Himeji Castle" })).toEqual([
+    { label: "displayed price", value: "$199.99 New" },
+    { label: "piece count", value: "2125 pieces" },
+  ]);
+});
+
 test("pictures a browser step recorded outrank the ones a table claims", () => {
   const execution = run();
   const artifact = (id: string, subjects: object[], kind: string) => ({

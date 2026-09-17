@@ -42,6 +42,15 @@ function factLabel(name: string): string {
   return name.normalize("NFKC").toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
+/**
+ * A value reduced to its letters and digits, for asking whether a cell only
+ * repeats the subject's own name. Trademark marks, punctuation and spacing
+ * differ between a catalogue row and the name it names.
+ */
+function identityText(value: string): string {
+  return normalizeName(value).replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
 /** Columns that restate who the subject is, or link to it rather than describe it. */
 function identityColumn(label: string): boolean {
   return (
@@ -89,16 +98,26 @@ export function listingArtifacts(execution: WorkExecutionFact): Set<string> {
   return ids;
 }
 
-function rows(execution: WorkExecutionFact, key: string): { matrix: Matrix; index: number }[] {
-  const out: { matrix: Matrix; index: number }[] = [];
+type Row = { matrix: Matrix; index: number; rank: number };
+/**
+ * Rows about one subject, best evidence first: a detail page read, then what
+ * the run published, then catalogue rows. A listing cell says "$349.99 New"
+ * where the product page says "$349.99", so it may only fill a criterion no
+ * better artifact answered.
+ */
+function rows(execution: WorkExecutionFact, key: string): Row[] {
+  const listings = listingArtifacts(execution);
+  const records = recordArtifacts(execution);
+  const out: Row[] = [];
   for (const artifact of execution.artifacts) {
     const matrix = artifact.data;
     if (matrix.kind !== "comparison_matrix") continue;
+    const rank = listings.has(artifact.id) ? 2 : records.has(artifact.id) ? 0 : 1;
     matrix.subjects.forEach((subject, index) => {
-      if (subjectKey(subject) === key && matrix.cells[index]) out.push({ matrix, index });
+      if (subjectKey(subject) === key && matrix.cells[index]) out.push({ matrix, index, rank });
     });
   }
-  return out;
+  return out.sort((a, b) => a.rank - b.rank);
 }
 
 /** Everything the run has established about one subject, price first. */
@@ -106,7 +125,7 @@ export function subjectFacts(execution: WorkExecutionFact, subject: Subject): Su
   const money: SubjectFact[] = [];
   const other: SubjectFact[] = [];
   const seen = new Set<string>();
-  const identity = normalizeName(subject.name);
+  const identity = identityText(subject.name);
   for (const { matrix, index } of rows(execution, subjectKey(subject))) {
     matrix.criteria.forEach((criterion, column) => {
       const label = factLabel(criterion.name);
@@ -136,7 +155,7 @@ export function subjectFacts(execution: WorkExecutionFact, subject: Subject): Su
         default:
           break;
       }
-      if (!text || normalizeName(text) === identity) return;
+      if (!text || identityText(text) === identity) return;
       seen.add(label);
       (value.kind === "money" ? money : other).push({
         label: criterion.name,
