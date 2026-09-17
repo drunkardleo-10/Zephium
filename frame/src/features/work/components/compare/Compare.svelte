@@ -1,23 +1,38 @@
 <script lang="ts">
-  import type { Snippet } from "svelte";
   import { mediaUrl } from "$domain/resources";
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
   import HostGlyph from "../cards/HostGlyph.svelte";
   import Icon from "$shared/ui/Icon";
   import { Cancel01Icon, Tick02Icon } from "../../lib/icons";
-  import type { CompareCell, CompareModel } from "../../lib/compare";
+  import { cellText, type CompareCell, type CompareModel } from "../../lib/compare";
   import * as m from "$shared/i18n/messages";
   let {
     model,
+    correctable = false,
     onevidence,
-    correcting,
+    oncorrect,
   }: {
     model: CompareModel;
+    /** Whether this result can still be corrected by the person reading it. */
+    correctable?: boolean;
     /** A chip opens its source: the pane for a page, the lift for a file. */
     onevidence?: (reference: EvidenceReference) => void;
-    /** The quiet per-cell correction, when this result can still be edited. */
-    correcting?: Snippet<[CompareCell]>;
+    /** Enter commits the cell the person retyped; Escape leaves it as it was. */
+    oncorrect?: (cell: CompareCell, text: string) => void;
   } = $props();
+  let editing = $state<string | null>(null);
+  let draft = $state("");
+  const at = (cell: CompareCell) => `${cell.subject}:${cell.criterion}`;
+  function start(cell: CompareCell) {
+    editing = at(cell);
+    draft = cellText(cell.value, m.work_yes(), m.work_no());
+  }
+  function commit(cell: CompareCell) {
+    const text = draft;
+    editing = null;
+    if (text.trim() !== cellText(cell.value, m.work_yes(), m.work_no()).trim())
+      oncorrect?.(cell, text);
+  }
 </script>
 
 <div class="compare" tabindex="-1">
@@ -50,7 +65,27 @@
           {#each row.cells as cell (cell.subject)}
             <td class:numeric={row.numeric} class:unknown={cell.value.kind === "unknown"}>
               <span class="cell">
-                {#if cell.value.kind === "unknown"}<span class="dash" aria-hidden="true">—</span
+                {#if editing === at(cell)}
+                  <!-- svelte-ignore a11y_autofocus -->
+                  <input
+                    class="editor"
+                    autofocus
+                    bind:value={draft}
+                    aria-label={`${row.label}, ${model.columns[cell.subject]?.name ?? ""}`}
+                    maxlength="512"
+                    onkeydown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        commit(cell);
+                      } else if (event.key === "Escape") {
+                        event.preventDefault();
+                        editing = null;
+                      }
+                    }}
+                    onblur={() => (editing = null)}
+                  />
+                {:else if cell.value.kind === "unknown"}<span class="dash" aria-hidden="true"
+                    >—</span
                   ><span class="sr-only">{m.work_cell_unknown()}</span>
                 {:else if cell.value.kind === "mark"}<span
                     class="glyph"
@@ -75,7 +110,11 @@
                       <span>{reference.origin || reference.label}</span>
                     </button>
                   {/each}
-                  {#if correcting}{@render correcting(cell)}{/if}
+                  {#if correctable && editing !== at(cell)}<button
+                      type="button"
+                      class="correct"
+                      onclick={() => start(cell)}>{m.work_env_correct()}</button
+                    >{/if}
                 </span>
               </span>
             </td>
@@ -269,6 +308,40 @@
   }
 
   .chip:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 1px;
+  }
+
+  .editor {
+    inline-size: 100%;
+    box-sizing: border-box;
+    padding: 2px 6px;
+    border: 0;
+    border-radius: var(--radius-xs);
+    background: var(--color-field);
+    color: var(--color-text);
+    font: inherit;
+    outline: 2px solid var(--color-ring);
+  }
+
+  .correct {
+    padding: 1px 8px;
+    border: 0;
+    border-radius: var(--radius-capsule);
+    background: transparent;
+    box-shadow: inset 0 0 0 1px var(--color-border-strong);
+    color: var(--color-muted);
+    font: inherit;
+    font-size: var(--text-caption);
+    cursor: default;
+  }
+
+  .correct:hover {
+    background: var(--color-fill-hover);
+    color: var(--color-text);
+  }
+
+  .correct:focus-visible {
     outline: 2px solid var(--color-ring);
     outline-offset: 1px;
   }

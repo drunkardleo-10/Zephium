@@ -5,8 +5,10 @@
   import Artifact from "$shared/ui/data/Artifact";
   import Evidence, { type EvidenceView } from "$shared/ui/data/Evidence";
   import Compare from "./compare/Compare.svelte";
+  import Button from "$shared/ui/Button";
   import { artifactView } from "../lib/project-work";
-  import { compareModel, type ComparePicture } from "../lib/compare";
+  import { compareModel, type CompareCell, type ComparePicture } from "../lib/compare";
+  import { correctedMatrix } from "../lib/correct";
   import { untrack } from "svelte";
   import * as m from "$shared/i18n/messages";
   let {
@@ -40,6 +42,39 @@
     execution?.user_artifacts?.find((value) => value.artifact === reference.artifact),
   );
   const links = $derived(user?.edited_data ? user.evidence : (artifact?.evidence ?? []));
+  /** A settled result can still be corrected; a running one cannot. */
+  const settled = $derived(
+    !!execution && ["needs_review", "completed"].includes(execution.status) && !session.pending,
+  );
+  /** Rust keeps the run in review until the person accepts what it published. */
+  const accepting = $derived(
+    execution?.status === "needs_review" && user?.decision !== "accepted" && !session.pending,
+  );
+  async function correct(cell: CompareCell, text: string) {
+    const current = execution;
+    const original = artifact;
+    if (!current || !original || !settled) return;
+    const next = correctedMatrix(
+      user?.edited_data ?? original.data,
+      cell.subject,
+      cell.criterion,
+      text,
+    );
+    if (!next) return;
+    session.editArtifact(current.id, original.id, next);
+    if (!(await session.saveArtifact(original.id))) session.discardArtifact(original.id);
+  }
+  function accept() {
+    const current = execution;
+    const original = artifact;
+    if (!current || !original || !accepting) return;
+    void session.execute({
+      kind: "review_artifact",
+      execution: current.id,
+      artifact: original.id,
+      decision: "accepted",
+    });
+  }
   let evidence = $state.raw<EvidenceView | null>(null);
   let selectedSource = $derived(source);
   /** One click, one destination: a page opens in the pane, a file in the lift,
@@ -95,9 +130,17 @@
 {#if view}
   <section class="result">
     <h2>{view.title}</h2>
-    {#if compare}<Compare model={compare} onevidence={pick} />
+    {#if compare}<Compare
+        model={compare}
+        correctable={settled}
+        onevidence={pick}
+        oncorrect={(cell, text) => void correct(cell, text)}
+      />
     {:else}<Artifact artifact={view} embedded onevidence={pick} onlink={onopen} />{/if}
     {#if evidence}<Evidence {evidence} {onopen} />{/if}
+    {#if accepting}<footer>
+        <Button size="compact" onclick={accept}>{m.work_env_accept_result()}</Button>
+      </footer>{/if}
   </section>
 {:else}<p role="status">{m.work_artifact_unavailable()}</p>{/if}
 
@@ -107,6 +150,11 @@
     flex-direction: column;
     gap: 16px;
     min-inline-size: 0;
+  }
+
+  footer {
+    display: flex;
+    justify-content: flex-end;
   }
 
   h2 {

@@ -164,9 +164,9 @@
     "description": "Measured 64732 JS and 5077 CSS bytes: one file record or proposed change, opened from the lift."
   },
   "lazy:features/work/components/WorkResultInspector.svelte": {
-    "js": 138000,
-    "css": 18500,
-    "description": "Measured 135356 JS and 17786 CSS bytes: the lift renders the result itself (product compare or artifact) beside its retained evidence, not only a source list."
+    "js": 141000,
+    "css": 19000,
+    "description": "Measured 138362 JS and 18482 CSS bytes: the lift renders the result itself, the quiet per-cell correction and the one Accept the review state needs."
   },
   "lazy:features/notes/components/NoteEditorHost.svelte": {
     "js": 96000,

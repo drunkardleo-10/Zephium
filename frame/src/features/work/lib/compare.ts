@@ -184,3 +184,16 @@ export function compareModel(
   });
   return { columns, rows, notes: matrix.notes };
 }
+
+/** The text a correction starts from: what the cell says now. */
+export function cellText(value: CompareCell["value"], yes: string, no: string): string {
+  switch (value.kind) {
+    case "text":
+    case "number":
+      return value.text;
+    case "mark":
+      return value.yes ? yes : no;
+    default:
+      return "";
+  }
+}
