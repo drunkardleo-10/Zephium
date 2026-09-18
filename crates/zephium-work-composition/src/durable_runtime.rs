@@ -723,7 +723,7 @@ fn intervention_note(intervention: Option<&WorkInterventionV1>) -> Option<&'stat
     use zephium_core::work::runtime::WorkInterventionKindV1 as Kind;
     Some(match intervention?.kind {
         Kind::SignIn => "The page asked to sign in",
-        Kind::Challenge => "The page asked for a human check",
+        Kind::Challenge => zephium_core::work::runtime::read_note::HUMAN_CHECK,
         Kind::Permission => "The page asked for a permission",
         Kind::UnsupportedInteraction => "The page needs an interaction the agent cannot perform",
         Kind::Review => "The page needs a person's review",
@@ -735,7 +735,7 @@ fn failure_note(failure: AgentWorkFailure) -> &'static str {
     use zephium_agent_controller::AgentBrowserProviderError as Browser;
     match failure {
         AgentWorkFailure::Deadline => "The page took too long",
-        AgentWorkFailure::ContextLost => "The page changed while it was being read",
+        AgentWorkFailure::ContextLost => zephium_core::work::runtime::read_note::UNSETTLED,
         AgentWorkFailure::Browser(Browser::TurnLimit | Browser::ActionLimit) => {
             "The page needed more steps than one read allows"
         }

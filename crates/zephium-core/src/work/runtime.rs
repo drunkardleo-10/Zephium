@@ -645,6 +645,12 @@ pub(crate) fn validate_public_url(value: &str) -> Result<url::Url, WorkError> {
     Ok(url)
 }
 
+/// Closed words for why a page read ended; the loop and the person read them.
+pub mod read_note {
+    pub const HUMAN_CHECK: &str = "The page asked for a human check";
+    pub const UNSETTLED: &str = "The page did not settle while it was being read";
+}
+
 pub(crate) fn validate_public_reference_url(value: &str) -> Result<url::Url, WorkError> {
     validate_text(value, 4096)?;
     let url = url::Url::parse(value).map_err(|_| WorkError::Invalid)?;

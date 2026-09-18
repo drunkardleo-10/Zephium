@@ -15,6 +15,7 @@ use zephium_ipc::work::WorkActivityV1;
 
 /// A browser read or discovery the loop admitted for one step. The host
 /// compiles it into an anonymous, read-only public browsing task.
+#[derive(Clone)]
 pub struct WorkAgentBrowseRequest {
     pub id: WorkStepId,
     pub step: WorkStepKindV1,
@@ -72,6 +73,8 @@ pub enum WorkAgentDiagnostic {
         turn: u8,
         reason: zephium_core::work::agent::WorkAgentArtifactRefusal,
     },
+    /// A page whose check may have passed in the background is loaded once more.
+    ReadRetried,
     CommitRefused {
         kind: &'static str,
         error: WorkError,
@@ -904,7 +907,27 @@ impl Driver {
                         ..self.remaining()
                     },
                 };
-                Fetched::Browse(id, browser(self.probe.clone(), request).await)
+                let mut outcome = browser(self.probe.clone(), request.clone()).await;
+                // A bot check the page ran in the background has settled by
+                // now, and its cookie lives in this session: one more load
+                // reads through it. A second refusal stands.
+                let retry = matches!(
+                    &outcome,
+                    Ok(WorkBrowserOutcome { status: WorkStepStatus::Failed, note: Some(note), .. })
+                        if note == read_note::HUMAN_CHECK || note == read_note::UNSETTLED
+                );
+                if retry && !self.cancelled().await {
+                    if let Ok(WorkBrowserOutcome { usage: Some(usage), .. }) = &outcome {
+                        self.charge(*usage);
+                    }
+                    self.report(WorkAgentDiagnostic::ReadRetried);
+                    let limits = WorkExecutionLimits {
+                        max_workers: 1,
+                        ..self.remaining()
+                    };
+                    outcome = browser(self.probe.clone(), WorkAgentBrowseRequest { limits, ..request }).await;
+                }
+                Fetched::Browse(id, outcome)
             };
             if let Some(terminal) = self.settle_fetched(attempt, fetched).await? {
                 return Ok(Some(terminal));
