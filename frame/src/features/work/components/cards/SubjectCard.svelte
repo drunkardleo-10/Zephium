@@ -1,22 +1,22 @@
 <script lang="ts">
   import CardFrame from "./CardFrame.svelte";
+  import SubjectPicture from "./SubjectPicture.svelte";
   import { displayHost } from "$shared/ui/data/Artifact";
-  import { mediaUrl } from "$domain/resources";
   import type { CanvasItem } from "../../lib/canvas-model";
   let { item, selected }: { item: CanvasItem; selected: boolean } = $props();
   const host = $derived(displayHost(item.subject?.homepage));
-  const picture = $derived(item.image ? mediaUrl(item.image.profile, item.image.digest) : null);
-  let failed = $state(false);
+  // The card is sized for a picture as soon as the run found one to admit:
+  // until one is, the tile stands quietly in its place.
+  const pictured = $derived(!!item.image || !!item.subject?.imageCandidates?.length);
 </script>
 
 <CardFrame kind={item.kind} title={item.title} {selected} unavailable={item.unavailable} dense>
-  {#snippet leading()}{#if picture && !failed}<img
-        class="picture"
-        src={picture}
-        alt=""
-        onerror={() => (failed = true)}
-      />{:else}<span class="mark" aria-hidden="true">{item.title.slice(0, 1)}</span>{/if}{/snippet}
-  {#if picture && !failed}<div class="hero"><img src={picture} alt={item.title} /></div>{/if}
+  {#snippet leading()}<span class="picture">
+      <SubjectPicture picture={item.image} name={item.title} />
+    </span>{/snippet}
+  {#if pictured}<div class="hero">
+      <SubjectPicture picture={item.image} name={item.title} large />
+    </div>{/if}
   {#if item.facts?.length}
     <dl class="facts">
       {#each item.facts as fact, index (fact.label)}
@@ -32,36 +32,19 @@
 
 <style>
   .picture {
+    display: block;
+    flex: none;
     inline-size: 28px;
     block-size: 28px;
     border-radius: var(--radius-sm);
-    object-fit: cover;
-  }
-
-  .hero {
-    margin-block-end: 6px;
-    border-radius: var(--radius-sm);
-    background: var(--color-fill);
     overflow: hidden;
   }
 
-  .hero img {
-    display: block;
-    inline-size: 100%;
-    max-block-size: 120px;
-    object-fit: cover;
-  }
-
-  .mark {
-    display: grid;
-    place-items: center;
-    inline-size: 28px;
-    block-size: 28px;
+  .hero {
+    block-size: 120px;
+    margin-block-end: 6px;
     border-radius: var(--radius-sm);
-    background: var(--color-accent-soft);
-    color: var(--color-text);
-    font-weight: 700;
-    text-transform: uppercase;
+    overflow: hidden;
   }
 
   .facts {

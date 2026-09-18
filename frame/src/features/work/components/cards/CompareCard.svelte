@@ -2,7 +2,7 @@
   import { getContext } from "svelte";
   import CardFrame from "./CardFrame.svelte";
   import Icon from "$shared/ui/Icon";
-  import { mediaUrl } from "$domain/resources";
+  import SubjectPicture from "./SubjectPicture.svelte";
   import { Cancel01Icon, GitCompareIcon, Tick02Icon } from "../../lib/icons";
   import { canvasPictures } from "../../lib/canvas-context";
   import { compareModel, type ComparePicture } from "../../lib/compare";
@@ -27,10 +27,7 @@
         {#each model.columns.slice(0, 4) as column (column.key)}
           <li>
             <span class="picture">
-              {#if column.picture}<img
-                  src={mediaUrl(column.picture.profile, column.picture.digest)}
-                  alt=""
-                />{:else}<span class="mark" aria-hidden="true">{column.name.slice(0, 1)}</span>{/if}
+              <SubjectPicture picture={column.picture} name={column.name} />
             </span>
             <span class="name">{column.name}</span>
             {#if column.price}<span class="price">{column.price}</span>{/if}
@@ -107,22 +104,6 @@
     border-radius: var(--radius-xs);
     background: var(--color-fill);
     overflow: hidden;
-  }
-
-  .picture img {
-    inline-size: 100%;
-    block-size: 100%;
-    object-fit: cover;
-  }
-
-  .mark {
-    display: grid;
-    place-items: center;
-    inline-size: 100%;
-    block-size: 100%;
-    background: var(--color-accent-soft);
-    font-weight: 700;
-    text-transform: uppercase;
   }
 
   .name,
