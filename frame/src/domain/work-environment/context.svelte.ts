@@ -5,6 +5,7 @@ import type {
   WorkRuntimeProjection,
   WorkPlanRevision,
   ResourceSummary,
+  WorkPageV1,
   MediaAssetV1_Deserialize as MediaAssetV1,
 } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
@@ -16,6 +17,13 @@ import { validRevision } from "$domain/work";
 export class WorkEnvironmentContext {
   readonly objectives = new SvelteMap<string, WorkRuntimeProjection>();
   readonly plans = new SvelteMap<string, WorkPlanRevision>();
+  /**
+   * The pages each attached work opened, with the last frame recorded for
+   * every one. A page card is drawn from the run's steps, which arrive with
+   * the projection; without this its frame would wait for whichever work the
+   * Work session happens to be on.
+   */
+  readonly pages = new SvelteMap<string, WorkPageV1[]>();
   notes = $state.raw<ResourceSummary[]>([]);
   /** Admitted media assets for resource elements that are not notes. */
   readonly media = new SvelteMap<string, MediaAssetV1>();
@@ -74,6 +82,7 @@ export class WorkEnvironmentContext {
       if (!wanted.includes(id)) {
         this.objectives.delete(id);
         this.plans.delete(id);
+        this.pages.delete(id);
       }
     for (const id of [...this.unavailable.keys()])
       if (!wanted.includes(id)) this.unavailable.delete(id);
@@ -136,6 +145,8 @@ export class WorkEnvironmentContext {
       ) {
         this.objectives.set(id, next);
         this.unavailable.delete(id);
+        if (next.executions.length) await this.readPages(id, generation);
+        if (!this.active || generation !== this.generation || !this.wanted.includes(id)) return;
         const revision = next.executions.at(-1)?.spec.plan_revision ?? next.work.plan?.revision;
         if (revision && next.work.plan?.revision === revision) this.plans.set(id, next.work.plan);
         else if (revision && this.plans.get(id)?.revision !== revision) {
@@ -163,6 +174,23 @@ export class WorkEnvironmentContext {
       }
     }
     this.unavailable.set(id, true);
+  }
+  /** The frames one work recorded, so its page cards are pictures on arrival. */
+  private async readPages(id: string, generation: number) {
+    const response = await observe(
+      Promise.resolve().then(() => commands.workActivity(this.profile, id)),
+      9000,
+      this.lifetime.signal,
+    );
+    if (!this.active || generation !== this.generation || !this.wanted.includes(id)) return;
+    if (
+      response.state === "received" &&
+      response.value.version === 1 &&
+      response.value.profile === this.profile &&
+      response.value.work === id &&
+      !response.value.error
+    )
+      this.pages.set(id, response.value.pages ?? []);
   }
   private readNotes(): Promise<void> {
     if (this.notesTask) {
@@ -237,6 +265,7 @@ export class WorkEnvironmentContext {
     this.objectives.clear();
     this.media.clear();
     this.plans.clear();
+    this.pages.clear();
     this.unavailable.clear();
     this.notes = [];
   }

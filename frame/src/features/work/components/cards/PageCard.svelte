@@ -24,7 +24,14 @@
   </header>
   <div class="frame">
     {#if frame && !failed}
-      <img src={frame} alt={item.title} draggable="false" onerror={() => (failedFrame = frame)} />
+      <img
+        src={frame}
+        alt={item.title}
+        draggable="false"
+        loading="eager"
+        decoding="async"
+        onerror={() => (failedFrame = frame)}
+      />
     {:else}
       <span class="placeholder" aria-hidden="true">{(item.page?.host || "?").slice(0, 1)}</span>
     {/if}

@@ -553,7 +553,12 @@
           snapshot,
           context.objectives,
           stages,
-          (objective) => (objectiveSession?.selected === objective ? objectiveSession.pages : []),
+          // The live session has the newest frames for the work it is on; every
+          // other work on the canvas keeps the frames the context read for it.
+          (objective) =>
+            objectiveSession?.selected === objective && objectiveSession.pages.length
+              ? objectiveSession.pages
+              : (context.pages.get(objective) ?? []),
           sources.cards,
           signalOf,
           new Set(agents.items.map((item) => item.id)),
