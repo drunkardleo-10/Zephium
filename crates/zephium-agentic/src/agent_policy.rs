@@ -49,6 +49,7 @@ use crate::{
     SemanticObservationAcknowledgement, SemanticObservationGeneration, SemanticObservationId,
     SemanticOrigin, SemanticReadDeliveryReceipt, SemanticReadModelPayload, SemanticReadResult,
     SemanticReferenceId, SemanticScreenshotDeliveryReceipt, SemanticSensitivity, SemanticTrust,
+    SemanticValueSummary,
 };
 
 /// Maximum model calls reserved or active in one run policy.
@@ -2503,6 +2504,7 @@ fn observation_taints(
     if account.context() != context {
         return Err(AgentPolicyError::Authority);
     }
+    let anonymous = account.account() == AgentAccountScope::Anonymous;
     let mut cohorts = Vec::with_capacity(observation.frames().len());
     for frame in observation.frames() {
         if frame.frame().context() != context {
@@ -2512,10 +2514,14 @@ fn observation_taints(
             .nodes()
             .iter()
             .map(|node| match node.sensitivity() {
+                SemanticSensitivity::Public => SemanticSensitivity::Public,
+                // Nobody typed into an anonymous page: a labelled control
+                // that holds no text discloses nothing and stays public;
+                // sensitive page text keeps its taint.
+                _ if anonymous && !holds_text(node) => SemanticSensitivity::Public,
                 // Secret values are mechanically absent/redacted. Remaining
                 // page labels/metadata are conservatively private taint.
-                SemanticSensitivity::Secret => SemanticSensitivity::Sensitive,
-                other => other,
+                _ => SemanticSensitivity::Sensitive,
             })
             .max()
             .unwrap_or(SemanticSensitivity::Public);
@@ -2538,6 +2544,11 @@ fn observation_taints(
         );
     }
     Ok(cohorts)
+}
+
+fn holds_text(node: &crate::SemanticNode) -> bool {
+    node.text().is_some_and(|text| !text.is_empty())
+        || matches!(node.value(), Some(SemanticValueSummary::Text(text)) if !text.is_empty())
 }
 
 fn screenshot_taints(
@@ -4139,6 +4150,44 @@ mod tests {
                 effect_dispatch_request(attempt, binding, automation),
             )
             .expect("effect dispatch")
+    }
+
+    #[test]
+    fn anonymous_empty_controls_stay_public_taint_while_signed_in_pages_keep_it() {
+        let source = origin("form");
+        let context = make_context(7, 8, 9);
+        let page = observation(
+            context,
+            source,
+            1,
+            vec![
+                json!({"k": 1, "r": "document", "o": 16}),
+                json!({"k": 2, "p": 0, "r": "textbox", "n": "Email", "q": "sensitive", "o": 2}),
+                json!({"k": 3, "p": 0, "r": "password", "n": "Password", "q": "secret", "o": 2}),
+            ],
+        );
+        let anonymous = observation_taints(&page, account(context, NOW - 1)).unwrap();
+        assert_eq!(anonymous[0].sensitivity(), SemanticSensitivity::Public);
+        let signed_in = AgentContextAccountBinding::new(
+            AgentAccountAttestationId::from_raw(5),
+            context,
+            AgentAccountScope::Authenticated(AgentAccountId::from_raw(999)),
+            AgentPolicyInstant::from_millis(NOW - 1),
+        );
+        let authenticated = observation_taints(&page, signed_in).unwrap();
+        assert_eq!(authenticated[0].sensitivity(), SemanticSensitivity::Sensitive);
+        let typed = observation(
+            context,
+            origin("typed"),
+            2,
+            vec![
+                json!({"k": 1, "r": "document", "o": 16}),
+                json!({"k": 2, "p": 0, "r": "textbox", "n": "Email", "q": "sensitive", "o": 2,
+                    "v": {"k": "text", "value": "someone@example.test"}}),
+            ],
+        );
+        let filled = observation_taints(&typed, account(context, NOW - 1)).unwrap();
+        assert_eq!(filled[0].sensitivity(), SemanticSensitivity::Sensitive);
     }
 
     #[test]
