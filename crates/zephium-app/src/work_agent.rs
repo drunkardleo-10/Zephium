@@ -556,6 +556,7 @@ impl Driver {
             )
             .await;
             let mut reported = false;
+            let mut failed_note = "The model did not answer";
             let (turn, usage) = match result {
                 Ok(Ok(result)) => {
                     if !result.usage.within(self.remaining()) {
@@ -571,6 +572,12 @@ impl Driver {
                                 reason: Some(refusal),
                             });
                             reported = true;
+                            failed_note = match refusal {
+                                WorkAgentTurnRefusal::Empty => "The agent did nothing this turn",
+                                WorkAgentTurnRefusal::Oversized => {
+                                    "The agent's turn was too large to use"
+                                }
+                            };
                             None
                         }
                     };
@@ -599,10 +606,11 @@ impl Driver {
                 },
             );
             record.usage = Some(usage);
-            record.note = turn
-                .as_ref()
-                .filter(|turn| !turn.finish)
-                .and_then(|turn| turn.say.clone());
+            record.note = match &turn {
+                Some(turn) if turn.finish => None,
+                Some(turn) => turn.say.clone(),
+                None => Some(failed_note.to_owned()),
+            };
             self.begin(record, vec![], None).await?;
             match &turn {
                 Some(turn) => self.report(WorkAgentDiagnostic::TurnAdmitted {
