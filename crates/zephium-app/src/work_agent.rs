@@ -525,28 +525,35 @@ impl Driver {
                 .chain(execution.artifacts.iter())
                 .cloned()
                 .collect();
-            let disclosure = match WorkAgentTurnDisclosure::try_new(
-                &self.objective,
-                self.decisions.clone(),
-                self.bodies.clone(),
-                &execution.steps,
-                &self.previews,
-                &artifacts,
-                WorkAgentBudget {
-                    turns_left: self.grant.max_turns.saturating_sub(self.turn),
-                    steps_left: u8::try_from(
-                        u32::from(self.grant.max_steps).saturating_sub(self.steps + 2),
-                    )
-                    .unwrap_or(u8::MAX),
-                    browse_available: true,
-                },
-                self.remaining(),
-                std::mem::take(&mut self.notices),
-            )
-            .and_then(|disclosure| disclosure.with_thread(self.thread.clone()))
-            {
-                Ok(disclosure) => disclosure,
-                Err(_) => return Ok(WorkAttemptStatus::Failed),
+            let budget = WorkAgentBudget {
+                turns_left: self.grant.max_turns.saturating_sub(self.turn),
+                steps_left: u8::try_from(
+                    u32::from(self.grant.max_steps).saturating_sub(self.steps + 2),
+                )
+                .unwrap_or(u8::MAX),
+                browse_available: true,
+            };
+            let notices = std::mem::take(&mut self.notices);
+            // A context that no longer fits sheds its oldest uncited sources
+            // first; the canvas keeps them, the model keeps what it cited.
+            let disclosure = loop {
+                let disclosed = WorkAgentTurnDisclosure::try_new(
+                    &self.objective,
+                    self.decisions.clone(),
+                    self.bodies.clone(),
+                    &execution.steps,
+                    &self.previews,
+                    &artifacts,
+                    budget,
+                    self.remaining(),
+                    notices.clone(),
+                )
+                .and_then(|disclosure| disclosure.with_thread(self.thread.clone()));
+                match disclosed {
+                    Ok(disclosure) => break disclosure,
+                    Err(WorkError::Capacity) if self.evict_previews(&artifacts) => continue,
+                    Err(_) => return Ok(WorkAttemptStatus::Failed),
+                }
             };
             let trace = WorkSynthesisTrace {
                 work: self.probe.work(),
@@ -586,7 +593,13 @@ impl Driver {
                     };
                     (turn, result.usage)
                 }
-                Ok(Err(WorkSynthesisError::NotDispatched(_))) => (None, WorkUsage::default()),
+                Ok(Err(WorkSynthesisError::NotDispatched(error))) => {
+                    failed_note = match error {
+                        WorkError::Capacity => "The request grew too large for the model",
+                        _ => "The model could not be reached",
+                    };
+                    (None, WorkUsage::default())
+                }
                 Ok(Err(
                     WorkSynthesisError::Rejected(usage) | WorkSynthesisError::Stalled(usage),
                 )) => {
@@ -1360,6 +1373,24 @@ impl Driver {
                 },
             });
         }
+    }
+    /// Drops the oldest sources no current object cites; false when none can go.
+    fn evict_previews(&mut self, artifacts: &[WorkArtifactV1]) -> bool {
+        let cited: Vec<&WorkEvidenceLink> = artifacts
+            .iter()
+            .flat_map(|artifact| artifact.evidence.iter())
+            .collect();
+        let before = self.previews.len();
+        let mut dropped = 0;
+        self.previews.retain(|preview| {
+            if dropped < 16 && !cited.iter().any(|link| **link == preview.link) {
+                dropped += 1;
+                false
+            } else {
+                true
+            }
+        });
+        self.previews.len() < before
     }
     fn keep_preview(&mut self, preview: WorkEvidencePreviewV1) {
         if let Some(index) = self.previews.iter().position(|p| p.link == preview.link) {
