@@ -7,6 +7,7 @@ type CanvasKind =
   | "note"
   | "media"
   | "objective"
+  | "request"
   | "responsibility"
   | "result"
   | "subject"
@@ -146,6 +147,7 @@ export function defaultSize(item: CanvasItem): { width: number; height: number }
     case "media":
       return { width: 280, height: 230 };
     case "objective":
+    case "request":
       return { width: 320, height: 150 };
     case "responsibility":
       return { width: 280, height: 150 };

@@ -64,6 +64,7 @@
     environmentView,
     fileEvidence,
   } from "../lib/project-environment";
+  import { environmentRequests, environmentStages } from "../lib/project-environment-thread";
   import { organizeExecution, pendingOrganize, elementFor } from "../lib/organize";
   import { subjectImageCandidates, subjectsOf } from "../lib/subjects";
   import { environmentResults, type ResultReference } from "../lib/project-environment-results";
@@ -534,14 +535,16 @@
   const pictures = $derived(
     snapshot ? environmentPictures(snapshot, context.objectives, context.media) : new Map(),
   );
+  /** Every message of the thread, in order, with the card its run hangs from. */
+  const stages = $derived(snapshot ? environmentStages(snapshot, context.objectives) : []);
   const agents = $derived(
     snapshot
-      ? environmentAgents(snapshot, context.objectives, signalOf)
+      ? environmentAgents(snapshot, context.objectives, signalOf, stages)
       : { items: [], links: [], positions: {} },
   );
   const sources = $derived(
     snapshot
-      ? environmentSources(snapshot, context.objectives)
+      ? environmentSources(snapshot, context.objectives, stages)
       : { items: [], links: [], positions: {}, groups: new Map<string, string>() },
   );
   const pages = $derived(
@@ -553,13 +556,26 @@
           sources.groups,
           signalOf,
           new Set(agents.items.map((item) => item.id)),
+          stages,
         )
       : { items: [], links: [], positions: {} },
   );
-  const items = $derived([...results.items, ...sources.items, ...pages.items, ...agents.items]);
+  const requests = $derived(
+    snapshot
+      ? environmentRequests(snapshot, stages, new Set(sources.items.map((item) => item.id)))
+      : { items: [], links: [], positions: {} },
+  );
+  const items = $derived([
+    ...results.items,
+    ...requests.items,
+    ...sources.items,
+    ...pages.items,
+    ...agents.items,
+  ]);
   const links = $derived([
     ...scene.links,
     ...(snapshot ? environmentLinks(snapshot) : []),
+    ...requests.links,
     ...sources.links,
     ...pages.links,
     ...agents.links,
@@ -596,7 +612,9 @@
       const execution = pendingOrganize(current, projection);
       if (!execution || organizing.has(execution.id)) continue;
       organizing.add(execution.id);
-      const place = current.view.placements.find((place) => place.element === element.id);
+      const stage = stages.find((stage) => stage.executions.includes(execution.id));
+      const place =
+        stage?.place ?? current.view.placements.find((place) => place.element === element.id);
       const anchor = place ? { x: place.x, y: place.y + place.height + 48 } : { x: 80, y: 320 };
       void untrack(() =>
         organize(projection, execution, anchor).finally(() => organizing.delete(execution.id)),
@@ -840,6 +858,7 @@
           ...environmentView(snapshot),
           positions: {
             ...scene.positions,
+            ...requests.positions,
             ...sources.positions,
             ...pages.positions,
             ...agents.positions,
@@ -1804,7 +1823,6 @@
             />{/snippet}</LazyView
         >
       {:else if liftedItem?.sources}
-        {#if liftedItem.detail}<p class="lift-request">{liftedItem.detail}</p>{/if}
         <ul class="lift-sources">
           {#each liftedItem.sources as row (row.key)}
             <li>
@@ -2085,11 +2103,6 @@
     position: absolute;
     inset-block-start: 16px;
     inset-inline-end: 16px;
-  }
-
-  .lift-request {
-    margin: 0 28px 12px 0;
-    color: var(--color-muted);
   }
 
   .lift-path {

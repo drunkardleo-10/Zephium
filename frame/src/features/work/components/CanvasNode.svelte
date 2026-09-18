@@ -35,6 +35,8 @@
   let { id, data, selected }: NodeProps<WorkItemNode> = $props();
   let root = $state<HTMLDivElement>();
   const type = $derived(data.type ?? (data.artifact ? "result" : "objective"));
+  /** A card the run drew, not an element the person placed: it takes no orders. */
+  const inert = $derived(["responsibility", "agent", "page", "sources", "request"].includes(type));
 </script>
 
 <Handle
@@ -70,11 +72,9 @@
       >
         <Icon icon={Target01Icon} size={14} />{m.work_env_focus_result()}
       </button>{/if}
-    {#if type !== "responsibility" && type !== "agent" && type !== "page" && type !== "sources"}<button
-        type="button"
-        onclick={() => action(id, "ask")}>{m.work_env_ask()}</button
+    {#if !inert}<button type="button" onclick={() => action(id, "ask")}>{m.work_env_ask()}</button
       >{/if}
-    {#if type !== "responsibility" && type !== "agent" && type !== "page" && type !== "sources" && !data.actionLabel}<button
+    {#if !inert && !data.actionLabel}<button
         type="button"
         class:on={!!data.decision}
         onclick={() => action(id, data.decision ? "unchoose" : "choose")}
@@ -92,9 +92,11 @@
         type="button"
         onclick={() => action(id, "account")}>{m.work_account_ask()}</button
       >{/if}
-    {#if type !== "responsibility" && type !== "agent" && type !== "page" && type !== "sources" && !data.actionLabel}<span
-        class="separator"
-      ></span><button type="button" class="danger" onclick={() => action(id, "remove")}>
+    {#if !inert && !data.actionLabel}<span class="separator"></span><button
+        type="button"
+        class="danger"
+        onclick={() => action(id, "remove")}
+      >
         <Icon icon={MinusSignIcon} size={14} />{m.work_env_remove()}
       </button>{/if}
   </div>
@@ -113,6 +115,7 @@
   {:else if type === "note"}<NoteCard item={data} {selected} />
   {:else if type === "media"}<MediaCard item={data} {selected} />
   {:else if type === "responsibility"}<ResponsibilityCard item={data} {selected} />
+  {:else if type === "request"}<ObjectiveCard item={data} {selected} onaction={() => {}} />
   {:else if data.artifact?.content.kind === "matrix"}<CompareCard item={data} {selected} />
   {:else if type === "result" || data.artifact}<ResultCard
       {id}

@@ -13,6 +13,7 @@ import { artifactView } from "./project-work";
 import { agentLine, isAgentExecution } from "./agent-steps";
 import { subjectFacts, subjectKey, subjectsOf } from "./subjects";
 import { COLUMNS, SOURCES_SIZE } from "./organize";
+import { firstRequest, STAGE_DROP, type WorkStage } from "./project-environment-thread";
 import { fileFolder } from "./work-files";
 import { pageFrameUrl } from "$domain/resources";
 
@@ -353,7 +354,7 @@ function elementItems(
       type: "objective",
       area: element.area,
       kind: m.work_env_request(),
-      title: clipText(projection?.work.objective ?? m.work_env_request(), TITLE_TEXT),
+      title: clipText(projection ? firstRequest(projection) : m.work_env_request(), TITLE_TEXT),
       detail: "",
       status: area,
     };
@@ -444,6 +445,8 @@ export function environmentAgents(
   snapshot: WorkEnvironmentSnapshot,
   objectives: ReadonlyMap<string, WorkRuntimeProjection>,
   activity: (objective: string) => string | undefined,
+  /** The message the live run serves; the agent waits beside that request. */
+  stages: readonly WorkStage[] = [],
 ): { items: CanvasItem[]; links: CanvasLink[]; positions: Record<string, CanvasPosition> } {
   const items: CanvasItem[] = [];
   const links: CanvasLink[] = [];
@@ -486,7 +489,9 @@ export function environmentAgents(
         ...(line ? { line } : {}),
       },
     });
-    const anchor = snapshot.view.placements.find((place) => place.element === element.id);
+    const stage = stages.find((stage) => stage.executions.includes(execution.id));
+    const anchor =
+      stage?.place ?? snapshot.view.placements.find((place) => place.element === element.id);
     const placement = (target: string) =>
       snapshot.view.placements.find((place) => place.element === target);
     const home = anchor ? { x: anchor.x + anchor.width + 48, y: anchor.y } : undefined;
@@ -547,6 +552,8 @@ export function environmentAgents(
 export function environmentSources(
   snapshot: WorkEnvironmentSnapshot,
   objectives: ReadonlyMap<string, WorkRuntimeProjection>,
+  /** The message each run served; its Sources card hangs off that request. */
+  stages: readonly WorkStage[],
 ): {
   items: CanvasItem[];
   links: CanvasLink[];
@@ -558,15 +565,14 @@ export function environmentSources(
   const links: CanvasLink[] = [];
   const positions: Record<string, CanvasPosition> = {};
   const groups = new Map<string, string>();
-  for (const element of snapshot.elements) {
-    if (element.reference.kind !== "objective") continue;
-    const projection = objectives.get(element.reference.objective);
+  for (const stage of stages) {
+    const projection = objectives.get(stage.objective);
     if (!projection) continue;
-    const anchor = snapshot.view.placements.find((place) => place.element === element.id);
-    const home = anchor ? { x: anchor.x, y: anchor.y + anchor.height + 48 } : { x: 80, y: 320 };
+    const home = { x: stage.place.x, y: stage.place.y + stage.place.height + STAGE_DROP };
     let index = 0;
-    for (const execution of projection.executions) {
-      if (!isAgentExecution(execution)) continue;
+    for (const id of stage.executions) {
+      const execution = projection.executions.find((entry) => entry.id === id);
+      if (!execution || !isAgentExecution(execution)) continue;
       const running =
         ["running", "cancel_requested", "approved"].includes(execution.status) &&
         !projection.interrupted.includes(execution.id);
@@ -593,33 +599,30 @@ export function environmentSources(
         if (record) admit(fileRow(`file:${record.id}`, record));
       }
       if (!rows.length) continue;
-      // A continuation served an earlier request; the stage keeps saying which.
-      const request = execution.spec.request?.trim() ?? "";
-      const served = request && request !== projection.work.objective.trim() ? request : "";
-      const id = `sources:${element.id}:${execution.id}`;
+      const card = `sources:${stage.element}:${execution.id}`;
       items.push({
-        id,
+        id: card,
         type: "sources",
         kind: m.work_env_sources(),
         title:
           rows.length === 1
             ? m.work_env_source_one()
             : m.work_env_sources_count({ count: rows.length }),
-        detail: served.slice(0, 240),
+        detail: "",
         status: "",
         ...(running ? { active: true } : {}),
         sources: rows.slice(0, SOURCE_ROWS),
       });
-      positions[id] = { x: home.x, y: home.y + index * (SOURCES_SIZE.height + 24) };
+      positions[card] = { x: home.x, y: home.y + index * (SOURCES_SIZE.height + 24) };
       index += 1;
       links.push({
-        id: `sources-of:${id}`,
-        source: element.id,
-        target: id,
+        id: `sources-of:${card}`,
+        source: stage.card,
+        target: card,
         kind: "uses",
         label: m.work_env_relation_uses(),
       });
-      for (const row of rows) if (row.url) groups.set(row.url, id);
+      for (const row of rows) if (row.url) groups.set(row.url, card);
       // Findings and published objects hang off the stage whose pages they cite.
       for (const candidate of snapshot.elements) {
         const reference = candidate.reference;
@@ -641,8 +644,8 @@ export function environmentSources(
               );
         if (!cited.some((link) => seen.has(`${link.extraction_id}:${link.source_id}`))) continue;
         links.push({
-          id: `sources-support:${id}:${candidate.id}`,
-          source: id,
+          id: `sources-support:${card}:${candidate.id}`,
+          source: card,
           target: candidate.id,
           kind: "supports",
           label: m.work_env_relation_supports(),
@@ -665,6 +668,8 @@ export function environmentPages(
   activity: (objective: string) => string | undefined = () => undefined,
   /** The agent presences the scene already has; a tie to an absent one is no tie. */
   present: ReadonlySet<string> = new Set(),
+  /** The message the run serves; its pages stand beside that request. */
+  stages: readonly WorkStage[] = [],
 ): { items: CanvasItem[]; links: CanvasLink[]; positions: Record<string, CanvasPosition> } {
   const items: CanvasItem[] = [];
   const links: CanvasLink[] = [];
@@ -694,9 +699,11 @@ export function environmentPages(
       byUrl.set(url, entry);
     }
     if (!byUrl.size) continue;
-    const anchor = snapshot.view.placements.find((place) => place.element === element.id);
+    const stage = stages.find((stage) => stage.executions.includes(execution.id));
+    const anchor =
+      stage?.place ?? snapshot.view.placements.find((place) => place.element === element.id);
     const home = anchor
-      ? { x: COLUMNS.pages(anchor.x), y: anchor.y + anchor.height + 48 }
+      ? { x: COLUMNS.pages(anchor.x), y: anchor.y + anchor.height + STAGE_DROP }
       : { x: COLUMNS.pages(80), y: 320 };
     const hubs = new Map<string, string>();
     for (const candidate of snapshot.elements) {

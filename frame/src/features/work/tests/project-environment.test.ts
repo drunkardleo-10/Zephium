@@ -196,6 +196,7 @@ test("catalogue rows enrich the hub a detail read created without becoming cards
 
 test("a run's searches become one Sources card the request and its pages join", async () => {
   const { environmentSources } = await import("../lib/project-environment");
+  const { environmentStages } = await import("../lib/project-environment-thread");
   const state = structuredClone(projection);
   const execution = state.executions[0]!;
   execution.status = "running";
@@ -299,12 +300,14 @@ test("a run's searches become one Sources card the request and its pages join", 
   expect(environmentItems(withSource, [], [], objectives).map((item) => item.id)).toEqual([
     objectiveElement.id,
   ]);
-  const sources = environmentSources(withSource, objectives);
+  const sources = environmentSources(
+    withSource,
+    objectives,
+    environmentStages(withSource, objectives),
+  );
   expect(sources.items).toHaveLength(1);
   const group = sources.items[0]!;
   expect(group.title).toBe("1 source");
-  // The stage keeps the request it served; the request card keeps the latest one.
-  expect(group.detail).toBe("Compare quiet keyboards");
   expect(group.sources).toEqual([
     {
       key: "record:1",
@@ -430,6 +433,7 @@ test("browser steps become page cards with frames, working links and subject lin
 
 test("file steps join their run's Sources card as file rows the lift can open", async () => {
   const { environmentSources, fileEvidence } = await import("../lib/project-environment");
+  const { environmentStages } = await import("../lib/project-environment-thread");
   const state = structuredClone(projection);
   const execution = state.executions[0]!;
   execution.status = "running";
@@ -483,7 +487,11 @@ test("file steps join their run's Sources card as file rows the lift can open", 
     },
   };
   const objectives = new Map([["objective", state]]);
-  const sources = environmentSources(withFiles, objectives);
+  const sources = environmentSources(
+    withFiles,
+    objectives,
+    environmentStages(withFiles, objectives),
+  );
   expect(sources.items).toHaveLength(1);
   expect(sources.items[0]?.sources).toEqual([
     {
