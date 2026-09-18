@@ -409,6 +409,19 @@ impl ProductWork {
     pub(crate) fn is_closed(&self) -> bool {
         self.signal.closed.load(Ordering::Acquire)
     }
+    /// The durable runtime gave this work up while its coordinator cannot
+    /// prove a clean close. It keeps its debt and its shutdown duty, but it
+    /// must not hold the one retained slot against fresh pages.
+    pub(crate) fn is_stuck(&self) -> bool {
+        self.signal.close.load(Ordering::Acquire)
+            && !self.is_closed()
+            && self.signal.projection.lock().is_ok_and(|projection| {
+                matches!(
+                    projection.snapshot.phase,
+                    RetainedWorkPhase::Uncertain | RetainedWorkPhase::Refused
+                )
+            })
+    }
     pub(crate) fn take(attachment: &RetainedWorkAttachment) -> Option<Self> {
         attachment.0.lock().ok()?.take()
     }

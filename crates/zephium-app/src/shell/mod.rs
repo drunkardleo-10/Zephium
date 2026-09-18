@@ -190,6 +190,10 @@ pub struct Shell {
     work: Option<Box<crate::work::ApplicationWork>>,
     #[cfg(feature = "work-execution")]
     retained_work: Option<Box<crate::work_resources::product::ProductWork>>,
+    /// Retained works the runtime gave up on before they could close; they
+    /// keep polling and shut down with the shell, out of the live slot.
+    #[cfg(feature = "work-execution")]
+    retained_graveyard: Vec<crate::work_resources::product::ProductWork>,
     profiles: Profiles,
     spaces: Spaces,
     items: Items,
@@ -486,6 +490,8 @@ impl Shell {
             work: None,
             #[cfg(feature = "work-execution")]
             retained_work: None,
+            #[cfg(feature = "work-execution")]
+            retained_graveyard: Vec::new(),
             extension_service: Some(extension_service),
             extension_startup_ready: false,
             extension_browser_surfaces: ExtensionBrowserSurfaceState::default(),
@@ -566,6 +572,15 @@ impl Shell {
                 if let Some(mut work) =
                     crate::work_resources::product::ProductWork::take(&attachment)
                 {
+                    if self
+                        .retained_work
+                        .as_ref()
+                        .is_some_and(|work| work.is_stuck())
+                    {
+                        if let Some(stuck) = self.retained_work.take() {
+                            self.retained_graveyard.push(*stuck);
+                        }
+                    }
                     if self.work.is_some()
                         || self
                             .retained_work
@@ -1085,6 +1100,13 @@ impl Shell {
                 queue.schedule_work(work.next_deadline());
             }
         }
+        self.retained_graveyard.retain(|work| !work.is_closed());
+        for work in &mut self.retained_graveyard {
+            work.poll();
+            if let Some(queue) = &self.self_queue {
+                queue.schedule_work(work.next_deadline());
+            }
+        }
         if let Some(work) = &mut self.work {
             work.poll();
             if let Some(queue) = &self.self_queue {
@@ -1096,6 +1118,10 @@ impl Shell {
     fn shutdown_until(&mut self, deadline: std::time::Instant, ack: SyncSender<ShutdownOutcome>) {
         #[cfg(feature = "work-execution")]
         if let Some(work) = &mut self.retained_work {
+            work.begin_shutdown();
+        }
+        #[cfg(feature = "work-execution")]
+        for work in &mut self.retained_graveyard {
             work.begin_shutdown();
         }
         #[cfg(feature = "work-execution")]
@@ -1334,8 +1360,18 @@ impl Shell {
     #[cfg(feature = "agentic-browser")]
     fn shutdown_agent_lifecycle_until(&mut self, deadline: std::time::Instant) -> bool {
         #[cfg(feature = "work-execution")]
+        let mut buried = true;
+        #[cfg(feature = "work-execution")]
+        for work in &mut self.retained_graveyard {
+            buried &= work.shutdown_until(deadline);
+        }
+        #[cfg(feature = "work-execution")]
         if let Some(work) = &mut self.retained_work {
-            return work.shutdown_until(deadline);
+            return work.shutdown_until(deadline) && buried;
+        }
+        #[cfg(feature = "work-execution")]
+        if !buried {
+            return false;
         }
         #[cfg(feature = "work-execution")]
         if let Some(work) = &mut self.work {
