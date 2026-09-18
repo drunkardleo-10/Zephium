@@ -25,13 +25,12 @@
   <div class="frame">
     {#if frame && !failed}
       <img src={frame} alt={item.title} draggable="false" onerror={() => (failedFrame = frame)} />
-    {:else if item.unavailable}
-      <!-- A read that gave up says so in Rust's words, not with a shrug. -->
-      <p class="reason">{item.status}</p>
     {:else}
       <span class="placeholder" aria-hidden="true">{(item.page?.host || "?").slice(0, 1)}</span>
     {/if}
   </div>
+  <!-- A read that gave up says so in Rust's words, not with a shrug. -->
+  {#if item.unavailable}<p class="reason">{item.status}</p>{/if}
 </article>
 
 <style>
@@ -114,13 +113,17 @@
   }
 
   .reason {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    flex: none;
     margin: 0;
-    padding: 0 16px;
+    padding: 0 12px 10px;
     color: var(--color-muted);
     font-size: var(--text-label);
     line-height: 17px;
-    text-align: center;
-    text-wrap: balance;
+    text-wrap: pretty;
     overflow: hidden;
   }
 

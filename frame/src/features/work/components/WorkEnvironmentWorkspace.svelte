@@ -1944,8 +1944,8 @@
         <div class="lift-plain">
           <span class="kind">{liftedItem.kind}</span>
           <h2>{liftedItem.title}</h2>
-          <p>{liftedItem.detail}</p>
-          <p>{liftedItem.status}</p>
+          {#if liftedItem.detail}<p>{liftedItem.detail}</p>{/if}
+          {#if liftedItem.status}<p>{liftedItem.status}</p>{/if}
           {#if liftedElement?.reference.kind === "browser"}<Button
               size="compact"
               onclick={() => {
