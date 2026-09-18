@@ -2810,9 +2810,43 @@ impl AgentWorkController {
             // Native ownership starts at dispatch, before fallible policy
             // accounting. Recovery must drain even if that accounting fails.
             state.native.action_pending = matches!(dispatch, ContextDispatch::Scheduled);
-            session
-                .account_action_dispatch(dispatch)
-                .map_err(AgentWorkFailure::Browser)?;
+            let rejected = match session.account_action_dispatch(dispatch) {
+                Ok(()) => None,
+                Err(AgentBrowserProviderError::ActionRejected(_)) => {
+                    Some(session.take_rejected_refusal())
+                }
+                Err(error) => return Err(AgentWorkFailure::Browser(error)),
+            };
+            if let Some(refusal) = rejected {
+                let refusal = refusal.ok_or(AgentWorkFailure::Contract)?;
+                state.native.action_pending = false;
+                state.native.check_control(worker, browser)?;
+                state.refresh_account(worker, browser)?;
+                state
+                    .journal_mut()?
+                    .emit(AgentWorkEventKind::ActionProposalRefused(refusal.reason()))?;
+                if let Some(key) = refusal.key() {
+                    if action_refusals.contains(&key) {
+                        return Err(AgentWorkFailure::Browser(
+                            AgentBrowserProviderError::ActionProposalLoop,
+                        ));
+                    }
+                    action_refusals
+                        .try_reserve(1)
+                        .map_err(|_| AgentWorkFailure::Contract)?;
+                    action_refusals.push(key);
+                }
+                let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+                turn = Self::provider(
+                    &mut state.native,
+                    worker,
+                    browser,
+                    session.cancellation.clone(),
+                    session.continue_after_action_refusal(refusal, &observation),
+                )
+                .await?;
+                continue;
+            }
             let terminal = match state
                 .native
                 .next_action_event(worker, browser, action_deadline)

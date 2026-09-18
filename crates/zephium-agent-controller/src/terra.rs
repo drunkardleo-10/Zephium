@@ -1956,6 +1956,7 @@ pub struct AgentBrowserSession {
     action_admission_failure: Option<zephium_agentic::AgentFailedSemanticEffect>,
     action_proposal_failure: Option<crate::action::AgentBrowserActionProposalRefusal>,
     action_terminal: Option<zephium_agentic::SemanticActionBatchResult>,
+    rejected_refusal: Option<zephium_agentic::AgentProviderActionRefusal>,
     failure: Option<AgentBrowserProviderError>,
     deadline: Instant,
     turns: u8,
@@ -2181,6 +2182,7 @@ impl AgentBrowserSession {
             action_admission_failure: None,
             action_proposal_failure: None,
             action_terminal: None,
+            rejected_refusal: None,
             failure: None,
             deadline,
             turns: 0,
@@ -3274,12 +3276,15 @@ impl AgentBrowserSession {
             .action
             .take()
             .ok_or(AgentBrowserProviderError::ActionPending)?;
-        let terminal = match action.into_rejected_batch() {
-            Ok(terminal) => terminal,
-            Err(action) => {
-                self.action = Some(*action);
-                return Err(original);
-            }
+        let (terminal, refusal) = match action.into_rejected_refusal() {
+            Ok((terminal, refusal)) => (terminal, Some(refusal)),
+            Err(action) => match action.into_rejected_batch() {
+                Ok(terminal) => (terminal, None),
+                Err(action) => {
+                    self.action = Some(*action);
+                    return Err(original);
+                }
+            },
         };
         // Preserve the exact batch before any fallible reducer/audit work. A
         // partial journal update remains Recovery and is never replayed.
@@ -3294,9 +3299,19 @@ impl AgentBrowserSession {
             return Err(AgentBrowserProviderError::Journal);
         }
         self.action_terminal.take();
-        // Accounting a refusal closes debt, not the failed task. The sticky
-        // failure prevents another provider turn or any automatic retry.
+        // A rejected read never ran: the model may choose again on a fresh
+        // observation. Any other rejection closes its debt and stays fatal.
+        if let Some(refusal) = refusal {
+            self.failure = None;
+            self.rejected_refusal = Some(refusal);
+            return Err(AgentBrowserProviderError::ActionRejected(error));
+        }
         Err(original)
+    }
+    pub(crate) fn take_rejected_refusal(
+        &mut self,
+    ) -> Option<zephium_agentic::AgentProviderActionRefusal> {
+        self.rejected_refusal.take()
     }
 
     /// Independently verifies and accounts the pending action before continuation.
@@ -3852,6 +3867,10 @@ pub enum AgentBrowserProviderError {
     /// The exact action policy or native pipeline refused execution.
     #[error("browser action failed")]
     Action(crate::AgentBrowserActionError),
+    /// The page rejected a read-effect action at dispatch; nothing ran, the
+    /// debt is closed, and the session holds a refusal for the model.
+    #[error("browser action was rejected at dispatch")]
+    ActionRejected(crate::AgentBrowserActionError),
     /// This driver has no adapter for the proposed bounded tool.
     #[error("browser tool is not supported by this driver")]
     UnsupportedTool(zephium_agentic::AgentBrowserToolKind),

@@ -443,6 +443,48 @@ impl AgentBrowserAction {
         self.into_failed_batch()
     }
 
+    /// A rejected read-effect batch keeps its continuation: the model hears
+    /// the refusal and chooses again on a fresh observation.
+    pub(crate) fn into_rejected_refusal(
+        self,
+    ) -> Result<(SemanticActionBatchResult, AgentProviderActionRefusal), Box<Self>> {
+        if self.proposal.action.effect() != SemanticEffectClass::Read {
+            return Err(Box::new(self));
+        }
+        let mut this = *self.into_rejected_batch_keeping()?;
+        let failed = this.failed.take().expect("checked original failed owner");
+        match this.proposal.batch.fail(&this.proposal.action, failed) {
+            Ok(terminal) => Ok((
+                terminal,
+                AgentProviderActionRefusal::unissued(
+                    this.proposal.continuation,
+                    SemanticActionBindingError::DispatchRejected,
+                    this.proposal.refusal_context,
+                ),
+            )),
+            Err(refusal) => {
+                let (batch, failed, _) = refusal.into_parts();
+                this.proposal.batch = batch;
+                this.failed = Some(failed);
+                Err(Box::new(this))
+            }
+        }
+    }
+    fn into_rejected_batch_keeping(self) -> Result<Box<Self>, Box<Self>> {
+        if !self.finished
+            || self.native.is_some()
+            || self.pending.is_some()
+            || self.terminal.is_some()
+            || self.journal_failed
+            || self.failed.as_ref().is_none_or(|failed| {
+                failed.execution().is_some() || self.receipt != Some(failed.receipt())
+            })
+        {
+            return Err(Box::new(self));
+        }
+        Ok(Box::new(self))
+    }
+
     pub(crate) fn into_failed_read_scroll_batch(
         self,
     ) -> Result<SemanticActionBatchResult, Box<Self>> {

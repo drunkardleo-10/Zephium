@@ -296,6 +296,10 @@ impl AgentProviderActionRefusal {
                 "budget_exhausted",
                 "Nothing executed. The operation budget for this page cannot cover another action and its settlement. Extract now from the current observation; report what is missing rather than acting further.",
             ),
+            SemanticActionBindingError::DispatchRejected => (
+                "target_changed",
+                "Nothing executed. The page changed between the observation and the action, so the target no longer matched. Request a fresh observation with snapshot(initial), then act on the current refs; if a dialog just opened, work within it first. Do not repeat the rejected proposal against the old observation.",
+            ),
             _ => return Err(AgentProviderContinuationError::ToolKind),
         };
         let mut result = serde_json::json!({

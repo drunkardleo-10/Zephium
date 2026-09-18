@@ -2266,6 +2266,10 @@ pub enum SemanticActionBindingError {
     /// The run's operation budget cannot cover another action and its settlement.
     #[error("semantic action budget is exhausted")]
     BudgetExhausted,
+    /// The page refused the action at dispatch, before anything ran: its
+    /// reference no longer matched the current document.
+    #[error("semantic action was rejected at dispatch")]
+    DispatchRejected,
 }
 
 /// Typed structural refusal before backend visibility/occlusion revalidation.

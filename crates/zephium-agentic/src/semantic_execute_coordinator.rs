@@ -805,6 +805,7 @@ impl SemanticActionQualificationError {
                 }
                 crate::SemanticActionBindingError::AssignmentDenied => "binding_assignment_denied",
                 crate::SemanticActionBindingError::BudgetExhausted => "binding_budget_exhausted",
+                crate::SemanticActionBindingError::DispatchRejected => "binding_dispatch_rejected",
             },
             Self::Checkpoint(error) => match error {
                 crate::SemanticActionPreparationError::IncompleteSnapshot => {
