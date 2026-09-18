@@ -306,6 +306,30 @@ pub fn enforce_navigation_pending(view: &wry::WebView) -> bool {
 
 pub(crate) type WebsiteDataStore = Retained<WKWebsiteDataStore>;
 
+/// The user agent Safari sends on this machine. WebKit's bare default names
+/// no browser, which bot checks treat as an unknown client; Safari's version
+/// keeps the string true to the engine actually rendering the page.
+pub(crate) fn safari_user_agent() -> &'static str {
+    static USER_AGENT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    USER_AGENT.get_or_init(|| {
+        let version = installed_safari_version().unwrap_or_else(|| "26.0".into());
+        format!(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/{version} Safari/605.1.15"
+        )
+    })
+}
+
+fn installed_safari_version() -> Option<String> {
+    use objc2_foundation::{ns_string, NSBundle, NSString};
+    let bundle = NSBundle::bundleWithPath(ns_string!("/Applications/Safari.app"))?;
+    let value = bundle.objectForInfoDictionaryKey(ns_string!("CFBundleShortVersionString"))?;
+    let version = value.downcast_ref::<NSString>()?.to_string();
+    (!version.is_empty()
+        && version.len() <= 16
+        && version.chars().all(|c| c.is_ascii_digit() || c == '.'))
+    .then_some(version)
+}
+
 /// Allocate one non-persistent store for a private profile. The host retains
 /// this object independently of every view so all tabs in that profile share
 /// cookies and origin storage, while a construction failure cannot make the

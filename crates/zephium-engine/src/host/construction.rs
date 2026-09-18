@@ -945,6 +945,10 @@ impl EngineHost {
                 !script.all_frames,
             );
         }
+        #[cfg(target_os = "macos")]
+        {
+            builder = builder.with_user_agent(crate::platform::imp::safari_user_agent());
+        }
 
         #[cfg(target_os = "windows")]
         {

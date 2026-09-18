@@ -670,6 +670,7 @@ where
         .with_download_policy(DownloadPolicy::DenyWithoutMetadata)
         .with_page_close_policy(PageClosePolicy::Ignore)
         .with_allow_link_preview(false)
+        .with_user_agent(super::safari_user_agent())
         .with_webview_configuration(configuration);
 
     let builder = if storage_class == ContextProfileStorageClass::Ephemeral {
