@@ -9,6 +9,8 @@ use zephium_core::work::{artifact::*, runtime::*, search::*, *};
 pub(crate) struct WorkSearchOutcome {
     pub(crate) status: WorkAttemptStatus,
     pub(crate) usage: Option<WorkUsage>,
+    /// Why a decoded answer was not admitted; closed words for the step.
+    pub(crate) note: Option<&'static str>,
     pub(crate) record: Option<WorkProviderSearchRecordV1>,
 }
 
@@ -27,6 +29,7 @@ impl WorkAttemptProbe {
             return Ok(WorkSearchOutcome {
                 status: WorkAttemptStatus::Cancelled,
                 usage: Some(WorkUsage::default()),
+                note: None,
                 record: None,
             });
         }
@@ -47,45 +50,70 @@ impl WorkAttemptProbe {
                 result = provider.search(scope, context, limits) => result,
             }
         };
+        // A response that arrived is a known outcome: what it lacks is a
+        // failed step with a reason. Only a lost outcome stays unknown.
+        let failed = |usage: WorkUsage, note: &'static str| WorkSearchOutcome {
+            status: WorkAttemptStatus::Failed,
+            usage: Some(clamp(usage, limits)),
+            note: Some(note),
+            record: None,
+        };
         Ok(match result {
-            Ok(result)
-                if result.usage.within(limits)
-                    && result.evidence.validate().is_ok()
-                    && result.evidence.provider == scope.provider
-                    && result.evidence.model == scope.model
-                    && u64::from(result.usage.model_tokens)
-                        == u64::from(result.evidence.actual_input_tokens)
-                            + u64::from(result.evidence.actual_output_tokens) =>
-            {
-                WorkSearchOutcome {
-                    status: WorkAttemptStatus::Succeeded,
-                    usage: Some(result.usage),
-                    record: Some(WorkProviderSearchRecordV1 {
-                        id: WorkArtifactId::generate(),
-                        node: self.node(),
-                        attempt: self.attempt(),
-                        evidence: result.evidence,
-                    }),
+            Ok(result) => {
+                let refused = if !result.usage.within(limits) {
+                    Some("The search exceeded the step budget")
+                } else if result.evidence.validate().is_err() {
+                    Some("The search results could not be admitted")
+                } else if result.evidence.provider != scope.provider
+                    || result.evidence.model != scope.model
+                {
+                    Some("The search came from another provider")
+                } else if u64::from(result.usage.model_tokens)
+                    != u64::from(result.evidence.actual_input_tokens)
+                        + u64::from(result.evidence.actual_output_tokens)
+                {
+                    Some("The search usage did not reconcile")
+                } else {
+                    None
+                };
+                match refused {
+                    None => WorkSearchOutcome {
+                        status: WorkAttemptStatus::Succeeded,
+                        usage: Some(result.usage),
+                        note: None,
+                        record: Some(WorkProviderSearchRecordV1 {
+                            id: WorkArtifactId::generate(),
+                            node: self.node(),
+                            attempt: self.attempt(),
+                            evidence: result.evidence,
+                        }),
+                    },
+                    Some(note) => failed(result.usage, note),
                 }
             }
-            Err(WorkPublicSearchError::NotDispatched(_)) => WorkSearchOutcome {
-                status: WorkAttemptStatus::Failed,
-                usage: Some(WorkUsage::default()),
-                record: None,
-            },
-            Err(WorkPublicSearchError::Rejected(usage)) if usage.within(limits) => {
-                WorkSearchOutcome {
-                    status: WorkAttemptStatus::Failed,
-                    usage: Some(usage),
-                    record: None,
-                }
+            Err(WorkPublicSearchError::NotDispatched(_)) => {
+                failed(WorkUsage::default(), "The search could not be sent")
             }
-            _ => WorkSearchOutcome {
+            Err(WorkPublicSearchError::Rejected(usage)) => {
+                failed(usage, "The search gave no usable sources")
+            }
+            Err(WorkPublicSearchError::OutcomeUnknown) => WorkSearchOutcome {
                 status: WorkAttemptStatus::OutcomeUnknown,
                 usage: None,
+                note: None,
                 record: None,
             },
         })
+    }
+}
+
+/// A charge never exceeds what the step was allowed to spend.
+fn clamp(usage: WorkUsage, limits: WorkExecutionLimits) -> WorkUsage {
+    WorkUsage {
+        model_tokens: usage.model_tokens.min(limits.model_tokens),
+        cost_micro_usd: usage.cost_micro_usd.min(limits.cost_micro_usd),
+        operations: usage.operations.min(limits.operations),
+        accounting: usage.accounting,
     }
 }
 

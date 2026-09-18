@@ -317,11 +317,18 @@ async fn search_case(mode: u8) {
     } else {
         assert!(execution.artifacts.is_empty());
         assert!(execution.provider_evidence.is_empty());
-        assert_eq!(
-            execution.attempts[0].status,
-            WorkAttemptStatus::OutcomeUnknown
-        );
-        assert!(execution.attempts[0].usage.is_none());
+        // A decoded answer that cannot be admitted is a known, charged
+        // failure; a cancelled or never-answered search stays unknown.
+        if mode >= 4 {
+            assert_eq!(
+                execution.attempts[0].status,
+                WorkAttemptStatus::OutcomeUnknown
+            );
+            assert!(execution.attempts[0].usage.is_none());
+        } else {
+            assert_eq!(execution.attempts[0].status, WorkAttemptStatus::Failed);
+            assert!(execution.attempts[0].usage.is_some());
+        }
     }
     assert!(store.flush());
     drop(runtime);

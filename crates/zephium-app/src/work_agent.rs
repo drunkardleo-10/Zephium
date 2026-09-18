@@ -62,6 +62,8 @@ pub enum WorkAgentDiagnostic {
         /// None when the provider returned nothing to resolve.
         reason: Option<zephium_core::work::agent::WorkAgentTurnRefusal>,
     },
+    /// A search answered but nothing in it could be admitted.
+    SearchRefused { note: &'static str },
     /// The loop stopped because the durable state says so.
     Stopped {
         cause: crate::work_runtime::WorkCancelCause,
@@ -291,6 +293,7 @@ enum Fetched {
 struct WorkSearchOutcomeOwned {
     status: WorkAttemptStatus,
     usage: Option<WorkUsage>,
+    note: Option<&'static str>,
     record: Option<WorkProviderSearchRecordV1>,
 }
 
@@ -819,11 +822,13 @@ impl Driver {
                                 Ok(outcome) => WorkSearchOutcomeOwned {
                                     status: outcome.status,
                                     usage: outcome.usage,
+                                    note: outcome.note,
                                     record: outcome.record,
                                 },
                                 Err(_) => WorkSearchOutcomeOwned {
                                     status: WorkAttemptStatus::OutcomeUnknown,
                                     usage: None,
+                                    note: None,
                                     record: None,
                                 },
                             },
@@ -1118,13 +1123,19 @@ impl Driver {
                             terminal = Some(WorkAttemptStatus::OutcomeUnknown);
                         }
                         (status, _) => {
+                            if let Some(note) = outcome.note {
+                                self.report(WorkAgentDiagnostic::SearchRefused { note });
+                                self.notice(&format!(
+                                    "A search failed: {note}. Try one differently worded search or read a listed page."
+                                ));
+                            }
                             self.settle(
                                 id,
                                 step_status(status),
                                 outcome.usage.or(Some(WorkUsage::default())),
                                 vec![],
                                 None,
-                                None,
+                                outcome.note.map(str::to_owned),
                             )
                             .await?;
                         }
