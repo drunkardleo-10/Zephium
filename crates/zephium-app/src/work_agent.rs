@@ -40,6 +40,8 @@ pub struct WorkAgentProviders<'a> {
 /// Tokens a turn must still be able to spend before the loop stops itself.
 const TURN_TOKEN_FLOOR: u32 = 12_000;
 /// Consecutive refused, idle or dropped turns before the run gives up.
+/// Cancellation polls the store may fail to answer in a row before a run stops.
+const MAX_UNREADABLE_POLLS: u8 = 12;
 const MAX_FAILED_TURNS: u8 = 3;
 const STEPS_EXHAUSTED: &str = "The step budget is used up: no more searches or reads will run. Publish the result from the sources already collected and finish.";
 const ASK_POLL: Duration = Duration::from_millis(500);
@@ -75,6 +77,8 @@ pub enum WorkAgentDiagnostic {
     },
     /// A page whose check may have passed in the background is loaded once more.
     ReadRetried,
+    /// The loop ended on an error the run reports as interrupted.
+    LoopFailed { error: WorkError },
     CommitRefused {
         kind: &'static str,
         error: WorkError,
@@ -236,7 +240,10 @@ impl WorkAgentService {
         let (status, usage) = match outcome {
             Ok(status) => (status, driver.settled_usage(status)),
             Err(WorkError::OutcomeUnknown) => (WorkAttemptStatus::OutcomeUnknown, None),
-            Err(error) => return Err(error),
+            Err(error) => {
+                driver.report(WorkAgentDiagnostic::LoopFailed { error });
+                return Err(error);
+            }
         };
         let settlement = attempt
             .settle_owned(WorkAdapterResult {
@@ -474,13 +481,23 @@ impl Driver {
         Ok(())
     }
     async fn cancelled(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        // One poll the store could not answer is not a stop; a run only ends
+        // as unreadable when the answer stays out of reach.
         let cause = match self.probe.cancellation_cause().await {
             Ok(Some(cause)) => Some(cause),
             Ok(None) if Instant::now() >= self.probe.deadline() => {
                 Some(crate::work_runtime::WorkCancelCause::Deadline)
             }
-            Ok(None) => None,
-            Err(_) => Some(crate::work_runtime::WorkCancelCause::Unreadable),
+            Ok(None) => {
+                self.unreadable_polls.store(0, Ordering::Relaxed);
+                None
+            }
+            Err(_) => {
+                let polls = self.unreadable_polls.fetch_add(1, Ordering::Relaxed) + 1;
+                (polls >= MAX_UNREADABLE_POLLS)
+                    .then_some(crate::work_runtime::WorkCancelCause::Unreadable)
+            }
         };
         if let Some(cause) = cause {
             self.report(WorkAgentDiagnostic::Stopped { cause });
@@ -844,10 +861,11 @@ impl Driver {
                                     note: outcome.note,
                                     record: outcome.record,
                                 },
+                                // Nothing was sent: a failed step, not a lost one.
                                 Err(_) => WorkSearchOutcomeOwned {
-                                    status: WorkAttemptStatus::OutcomeUnknown,
-                                    usage: None,
-                                    note: None,
+                                    status: WorkAttemptStatus::Failed,
+                                    usage: Some(WorkUsage::default()),
+                                    note: Some("The search could not be run"),
                                     record: None,
                                 },
                             },

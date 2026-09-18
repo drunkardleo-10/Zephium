@@ -38,7 +38,8 @@ impl WorkAttemptProbe {
             let cancelled = async {
                 loop {
                     tokio::time::sleep(Duration::from_millis(250)).await;
-                    if self.cancellation_requested().await.unwrap_or(true) {
+                    // A poll the store could not answer is not a stop.
+                    if self.cancellation_requested().await.unwrap_or(false) {
                         break;
                     }
                 }
