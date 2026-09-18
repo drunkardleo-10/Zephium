@@ -72,38 +72,55 @@ impl OpenAiWorkAgent {
                 let _ = std::fs::write("target/work-runtime-proof/agent-turn-request.json", bytes);
             }
         }
+        let reject = |reason: WorkAgentTurnRejection| {
+            if let Some(diagnostic) = self.planner.diagnostic {
+                diagnostic(WorkSynthesisDiagnostic::TurnRejected { reason });
+            }
+        };
         let (text, charged) = self
             .planner
             .run_bounded(body, Some(limits), decode_first_message)
             .await
-            .map_err(map_error)?;
+            .map_err(|error| {
+                if matches!(error, WorkPlanningError::ProviderRefused(_)) {
+                    reject(WorkAgentTurnRejection::Refused);
+                }
+                map_error(error)
+            })?;
         #[cfg(feature = "probe-harness")]
         if self.retain_public_responses {
             let _ = std::fs::write("target/work-runtime-proof/agent-turn-response.json", &text);
         }
         let usage = usage(charged)?;
-        let wire = serde_json::from_str::<WireTurn>(&text)
-            .map_err(|_| WorkSynthesisError::Rejected(usage))?;
+        let wire = serde_json::from_str::<WireTurn>(&text).map_err(|_| {
+            reject(WorkAgentTurnRejection::Wire);
+            WorkSynthesisError::Rejected(usage)
+        })?;
         if wire.artifacts.len() > MAX_AGENT_ARTIFACTS_PER_TURN
             || wire.fetch.len() > MAX_AGENT_FETCHES_PER_TURN
             || !usage.within(limits)
         {
+            reject(WorkAgentTurnRejection::Limits);
             return Err(WorkSynthesisError::Rejected(usage));
         }
+        // An object outside every schema is dropped and refused by name; the
+        // rest of the turn still runs.
+        let mut malformed = 0;
         let artifacts = wire
             .artifacts
             .into_iter()
-            .map(|artifact| {
-                Ok(WorkAgentArtifactOutput {
+            .filter_map(|artifact| match artifact.data.resolve() {
+                Ok(data) => Some(WorkAgentArtifactOutput {
                     title: artifact.title,
-                    data: artifact
-                        .data
-                        .resolve()
-                        .map_err(|()| WorkSynthesisError::Rejected(usage))?,
+                    data,
                     evidence: artifact.evidence,
-                })
+                }),
+                Err(()) => {
+                    malformed += 1;
+                    None
+                }
             })
-            .collect::<Result<Vec<_>, WorkSynthesisError>>()?;
+            .collect();
         Ok(WorkAgentTurnResult {
             output: WorkAgentTurnOutput {
                 say: wire.say,
@@ -112,6 +129,7 @@ impl OpenAiWorkAgent {
                 ask: wire.ask,
                 finish: wire.finish,
                 followups: wire.followups,
+                malformed,
             },
             usage,
         })

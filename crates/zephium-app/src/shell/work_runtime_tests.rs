@@ -731,6 +731,7 @@ async fn rejected_final_output_cannot_finish_on_earlier_partial_artifacts() {
                         ask: None,
                         finish: turn > 0,
                         followups: vec![],
+                        malformed: 0,
                     },
                     usage: WorkUsage::default(),
                 })

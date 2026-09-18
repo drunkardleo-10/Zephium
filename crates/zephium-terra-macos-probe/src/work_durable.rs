@@ -1526,6 +1526,7 @@ impl zephium_core::work::agent::WorkAgentTurnProvider for CollectionAssignment {
                     artifacts: vec![],
                     finish: fetch.is_empty(),
                     followups: vec![],
+                    malformed: 0,
                     fetch,
                     ask: None,
                 },

@@ -600,9 +600,12 @@ impl Driver {
                     };
                     (None, WorkUsage::default())
                 }
-                Ok(Err(
-                    WorkSynthesisError::Rejected(usage) | WorkSynthesisError::Stalled(usage),
-                )) => {
+                Ok(Err(WorkSynthesisError::Rejected(usage))) => {
+                    failed_note = "The model's turn could not be used";
+                    self.charge(usage);
+                    (None, usage)
+                }
+                Ok(Err(WorkSynthesisError::Stalled(usage))) => {
                     self.charge(usage);
                     (None, usage)
                 }

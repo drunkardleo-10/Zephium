@@ -347,15 +347,18 @@ impl WorkAgentTurnDisclosure {
             .map(|say| clip_text(&say, MAX_WORK_STEP_NOTE_BYTES));
         // An uncited or malformed object is dropped on its own; the turn's
         // other operations still run and the next turn shows what landed.
-        let proposed = output.artifacts.len();
-        if proposed > MAX_AGENT_ARTIFACTS_PER_TURN {
+        let proposed = output.artifacts.len() + output.malformed;
+        if output.artifacts.len() > MAX_AGENT_ARTIFACTS_PER_TURN {
             notices.push(format!(
                 "Only the first {MAX_AGENT_ARTIFACTS_PER_TURN} objects of a turn are placed; {} were dropped. Propose them next turn.",
-                proposed - MAX_AGENT_ARTIFACTS_PER_TURN
+                output.artifacts.len() - MAX_AGENT_ARTIFACTS_PER_TURN
             ));
         }
         let mut artifacts = Vec::new();
-        let mut refusals = Vec::new();
+        let mut refusals = vec![
+            WorkAgentArtifactRefusal::Malformed;
+            output.malformed.min(MAX_AGENT_ARTIFACTS_PER_TURN)
+        ];
         for artifact in output
             .artifacts
             .into_iter()
@@ -531,6 +534,18 @@ impl WorkAgentTurnRefusal {
             Self::Oversized => "The last turn was too large to admit. Place fewer or smaller objects per turn and keep cells and claims short.",
         }
     }
+}
+
+/// Why the transport could not admit a decoded turn; a closed fact for the
+/// diagnostics, never model text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkAgentTurnRejection {
+    /// The model returned a refusal instead of a turn.
+    Refused,
+    /// The message did not match the turn shape.
+    Wire,
+    /// The turn exceeded the per-turn counts or the attempt's limits.
+    Limits,
 }
 
 /// Truncates at a character boundary, marking the cut with an ellipsis.
@@ -893,6 +908,10 @@ pub struct WorkAgentTurnOutput {
     /// Next requests offered with a finishing turn; ignored otherwise.
     #[serde(default)]
     pub followups: Vec<String>,
+    /// Proposed objects the transport could not decode into any object
+    /// schema; each is refused as malformed so the model hears about it.
+    #[serde(default)]
+    pub malformed: usize,
 }
 /// An admitted turn. Fetches are step kinds ready to begin.
 pub struct WorkAgentTurn {

@@ -47,6 +47,7 @@ fn native_link_handoff_admits_exact_observed_targets_without_promoting_prose() {
         ask: None,
         finish: false,
         followups: vec![],
+        malformed: 0,
         fetch: vec![WorkAgentFetch::Read {
             url: url.into(),
             collection: None,
@@ -926,6 +927,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
         ask,
         finish,
         followups: vec![],
+        malformed: 0,
     };
     let turn = disclosure
         .resolve(output(
@@ -989,6 +991,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
             ask: None,
             finish: false,
             followups: vec![],
+            malformed: 0,
         })
         .unwrap();
     assert_eq!(direct_turn.fetch.len(), 1);
@@ -1035,6 +1038,24 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
     only_uncited.artifacts[0].evidence.clear();
     let idle = disclosure.resolve(only_uncited).unwrap();
     assert!(idle.artifacts.is_empty() && idle.refusals.len() == 1 && idle.fetch.is_empty());
+    // An object the transport could not decode is refused by name, and the
+    // turn's fetch still runs.
+    let mut undecodable = output(vec![], None, false);
+    undecodable.artifacts.clear();
+    undecodable.malformed = 2;
+    undecodable.fetch = vec![WorkAgentFetch::Search {
+        query: "svelte flow".into(),
+    }];
+    let admitted = disclosure.resolve(undecodable).unwrap();
+    assert_eq!(admitted.dropped, 2);
+    assert_eq!(
+        admitted.refusals,
+        vec![
+            WorkAgentArtifactRefusal::Malformed,
+            WorkAgentArtifactRefusal::Malformed
+        ]
+    );
+    assert_eq!(admitted.fetch.len(), 1);
     assert_eq!(
         disclosure
             .resolve(WorkAgentTurnOutput {
@@ -1044,6 +1065,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
                 ask: None,
                 finish: false,
                 followups: vec![],
+                malformed: 0,
             })
             .err(),
         Some(WorkAgentTurnRefusal::Empty)
@@ -1116,6 +1138,7 @@ fn agent_citations_round_trip_source_keys_without_model_renumbering() {
             ask: None,
             finish: true,
             followups: vec![],
+            malformed: 0,
             artifacts: vec![WorkAgentArtifactOutput {
                 title: "Comparison".into(),
                 data: serde_json::from_value(data.clone()).unwrap(),
@@ -1239,6 +1262,7 @@ fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
         }],
         ask: None,
         finish,
+        malformed: 0,
         followups: vec![
             " Add to cart ".into(),
             "".into(),

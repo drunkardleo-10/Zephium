@@ -327,6 +327,10 @@ pub enum WorkSynthesisDiagnostic {
         decoded: bool,
         elapsed_millis: u64,
     },
+    /// A decoded agent turn the transport could not admit.
+    TurnRejected {
+        reason: super::agent::WorkAgentTurnRejection,
+    },
 }
 /// Per-call attribution only, never worker authority or permission to retrieve Work.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
