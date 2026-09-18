@@ -2077,6 +2077,57 @@ impl AgentWorkController {
         Ok(())
     }
 
+    /// A bot check shown instead of the page gets a few seconds to pass on
+    /// its own. If it stays, the person is asked without spending a model
+    /// call; a task that cannot ask a person leaves the page to the model.
+    async fn settle_human_challenge(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        mut observation: SemanticObservation,
+    ) -> Result<(SemanticObservation, bool), AgentWorkFailure> {
+        if !state.human_request || !looks_like_human_challenge(&observation) {
+            return Ok((observation, false));
+        }
+        for millis in HUMAN_CHALLENGE_SETTLE_MILLIS {
+            let wake = Instant::now()
+                .checked_add(Duration::from_millis(millis))
+                .ok_or(AgentWorkFailure::Deadline)?;
+            if wake >= state.native.deadline {
+                break;
+            }
+            tokio::select! {
+                biased;
+                event = state.native.next_event(worker, browser) => {
+                    state.native.retain(event?)?;
+                    return Err(AgentWorkFailure::Mailbox);
+                }
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
+            }
+            state.refresh_account(worker, browser)?;
+            observation = Self::fit_model_observation(Self::observe(state, worker, browser).await?)?;
+            if !looks_like_human_challenge(&observation) {
+                return Ok((observation, false));
+            }
+        }
+        let reason = AgentBrowserHumanReason::HumanChallenge;
+        state
+            .journal_mut()?
+            .emit(AgentWorkEventKind::ModelRequestedHuman(reason))?;
+        state.model_human_request = Some(AgentWorkHumanRequest {
+            context: observation.request().context(),
+            observation: observation.request().id(),
+            generation: observation.request().generation(),
+            reason,
+            retained_resource: state
+                .native
+                .retained
+                .as_ref()
+                .map(|browser| browser.binding().lease().resource().identity()),
+        });
+        Ok((observation, true))
+    }
+
     async fn observe(
         state: &mut WorkState,
         worker: &mut AgentRuntimeWorker,
@@ -2332,9 +2383,15 @@ impl AgentWorkController {
         browser: &WorkBrowser<'_>,
     ) -> Result<(), AgentWorkFailure> {
         let state = self.state.as_mut().ok_or(AgentWorkFailure::Contract)?;
-        let mut observation = Self::fit_model_observation(
+        let observation = Self::fit_model_observation(
             Self::observe_initial_ready(state, worker, browser).await?,
         )?;
+        let (mut observation, challenged) =
+            Self::settle_human_challenge(state, worker, browser, observation).await?;
+        if challenged {
+            state.observation = Some(observation);
+            return Ok(());
+        }
         let mut captured_at = SemanticCaptureInstant::from_millis(
             state
                 .journal_mut()?
@@ -4249,6 +4306,58 @@ impl Drop for AgentWorkController {
 /// Maximum undrained product events. Saturation pauses execution; events are
 /// never silently overwritten and the terminal owner has a separate slot.
 pub const MAX_AGENT_WORK_EVENTS: usize = 64;
+
+/// Closed phrases a bot check shows in place of the page. They are matched
+/// against short node names and texts; page text is never kept or shown.
+const HUMAN_CHALLENGE_PHRASES: [&str; 18] = [
+    "just a moment",
+    "performing security verification",
+    "verify you are human",
+    "verifying you are human",
+    "please verify you are human",
+    "checking your browser",
+    "checking if the site connection is secure",
+    "enable javascript and cookies to continue",
+    "let's confirm you are human",
+    "confirm you are human",
+    "pardon our interruption",
+    "attention required",
+    "access denied",
+    "please complete the security check",
+    "press & hold",
+    "human verification",
+    "are you a human",
+    "prove you are human",
+];
+/// Bot-check pages are small; a real page that mentions these words is not one.
+const MAX_HUMAN_CHALLENGE_NODES: usize = 48;
+/// How long a script-only check gets to pass on its own before a person is asked.
+const HUMAN_CHALLENGE_SETTLE_MILLIS: [u64; 3] = [2_000, 3_000, 4_000];
+
+fn looks_like_human_challenge(observation: &SemanticObservation) -> bool {
+    let mut nodes = 0;
+    let mut matched = false;
+    for snapshot in observation.frames() {
+        for node in snapshot.nodes() {
+            nodes += 1;
+            if nodes > MAX_HUMAN_CHALLENGE_NODES {
+                return false;
+            }
+            matched |= [node.name(), node.text()]
+                .into_iter()
+                .flatten()
+                .map(|text| text.as_str().trim())
+                .filter(|text| text.len() <= 96)
+                .any(|text| {
+                    let lower = text.to_ascii_lowercase();
+                    HUMAN_CHALLENGE_PHRASES
+                        .iter()
+                        .any(|phrase| lower.starts_with(phrase))
+                });
+        }
+    }
+    matched
+}
 
 /// Content-free product phase. Model text never declares task completion.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
