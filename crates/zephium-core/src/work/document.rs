@@ -62,35 +62,27 @@ pub struct WorkDocumentBlock {
 pub fn compile_blocks(
     blocks: &[WorkDocumentBlock],
 ) -> Result<(Vec<String>, NoteDocument), WorkError> {
-    if blocks.is_empty() || blocks.len() > MAX_DOCUMENT_BLOCKS {
-        return Err(WorkError::Invalid);
-    }
+    // A model's stray level, empty span or bad link is normalized or skipped;
+    // only a document with nothing left to show is refused.
     let mut paragraphs = Vec::with_capacity(blocks.len());
     let mut content = Vec::with_capacity(blocks.len());
-    for block in blocks {
+    for block in blocks.iter().take(MAX_DOCUMENT_BLOCKS) {
         match block.kind {
             WorkBlockKind::Paragraph | WorkBlockKind::Heading | WorkBlockKind::Quote => {
-                if !block.items.is_empty() {
-                    return Err(WorkError::Invalid);
-                }
-                let (text, inline) = compile_spans(&block.spans)?;
+                let Some((text, inline)) = compile_spans(&block.spans) else {
+                    continue;
+                };
                 let node = match block.kind {
-                    WorkBlockKind::Heading => {
-                        let level = block.level.ok_or(WorkError::Invalid)?;
-                        if !(1..=3).contains(&level) {
-                            return Err(WorkError::Invalid);
-                        }
-                        DocumentNode {
-                            kind: "heading".into(),
-                            content: inline,
-                            text: None,
-                            attrs: Some(crate::resources::DocumentAttrs {
-                                level: Some(level),
-                                ..Default::default()
-                            }),
-                            marks: vec![],
-                        }
-                    }
+                    WorkBlockKind::Heading => DocumentNode {
+                        kind: "heading".into(),
+                        content: inline,
+                        text: None,
+                        attrs: Some(crate::resources::DocumentAttrs {
+                            level: Some(block.level.unwrap_or(2).clamp(1, 3)),
+                            ..Default::default()
+                        }),
+                        marks: vec![],
+                    },
                     WorkBlockKind::Quote => DocumentNode {
                         kind: "blockquote".into(),
                         content: vec![paragraph(inline)],
@@ -98,28 +90,29 @@ pub fn compile_blocks(
                         attrs: None,
                         marks: vec![],
                     },
-                    _ => {
-                        if block.level.is_some() {
-                            return Err(WorkError::Invalid);
-                        }
-                        paragraph(inline)
-                    }
+                    _ => paragraph(inline),
                 };
                 paragraphs.push(text);
                 content.push(node);
             }
             WorkBlockKind::Bullets | WorkBlockKind::Numbered => {
-                if block.items.is_empty()
-                    || block.items.len() > MAX_DOCUMENT_ITEMS
-                    || !block.spans.is_empty()
-                    || block.level.is_some()
-                {
-                    return Err(WorkError::Invalid);
-                }
+                // A list written as spans without items is one item.
+                let lines: Vec<&[WorkDocumentSpan]> = if block.items.is_empty() {
+                    vec![block.spans.as_slice()]
+                } else {
+                    block
+                        .items
+                        .iter()
+                        .take(MAX_DOCUMENT_ITEMS)
+                        .map(|item| item.spans.as_slice())
+                        .collect()
+                };
                 let mut text = String::new();
-                let mut items = Vec::with_capacity(block.items.len());
-                for item in &block.items {
-                    let (line, inline) = compile_spans(&item.spans)?;
+                let mut items = Vec::with_capacity(lines.len());
+                for spans in lines {
+                    let Some((line, inline)) = compile_spans(spans) else {
+                        continue;
+                    };
                     if !text.is_empty() {
                         text.push('\n');
                     }
@@ -131,6 +124,9 @@ pub fn compile_blocks(
                         attrs: None,
                         marks: vec![],
                     });
+                }
+                if items.is_empty() {
+                    continue;
                 }
                 let ordered = block.kind == WorkBlockKind::Numbered;
                 paragraphs.push(text);
@@ -146,6 +142,9 @@ pub fn compile_blocks(
                 });
             }
         }
+    }
+    if content.is_empty() {
+        return Err(WorkError::Invalid);
     }
     let document = NoteDocument {
         version: 1,
@@ -173,15 +172,21 @@ fn paragraph(inline: Vec<DocumentNode>) -> DocumentNode {
     }
 }
 
-fn compile_spans(spans: &[WorkDocumentSpan]) -> Result<(String, Vec<DocumentNode>), WorkError> {
-    if spans.is_empty() || spans.len() > MAX_DOCUMENT_SPANS {
-        return Err(WorkError::Invalid);
-    }
+/// None when the spans show no text. Overlong text is clipped, a span with
+/// control characters is skipped and a disallowed link keeps its text only.
+fn compile_spans(spans: &[WorkDocumentSpan]) -> Option<(String, Vec<DocumentNode>)> {
     let mut text = String::new();
     let mut inline = Vec::with_capacity(spans.len());
-    for span in spans {
-        validate_text(&span.text, MAX_WORK_TEXT_BYTES)?;
-        text.push_str(&span.text);
+    for span in spans.iter().take(MAX_DOCUMENT_SPANS) {
+        let value = super::agent::clip_text(&span.text, MAX_WORK_TEXT_BYTES);
+        if value.is_empty()
+            || value
+                .chars()
+                .any(|c| c.is_control() && c != '\n' && c != '\t')
+        {
+            continue;
+        }
+        text.push_str(&value);
         let mut marks = Vec::new();
         let style = match span.style {
             WorkSpanStyle::Plain => None,
@@ -195,29 +200,30 @@ fn compile_spans(spans: &[WorkDocumentSpan]) -> Result<(String, Vec<DocumentNode
                 attrs: None,
             });
         }
-        if let Some(href) = &span.href {
-            if !crate::navigation::is_allowed_str(href) || href.len() > 2048 {
-                return Err(WorkError::Invalid);
-            }
+        if let Some(href) = span
+            .href
+            .as_deref()
+            .filter(|href| href.len() <= 2048 && crate::navigation::is_allowed_str(href))
+        {
             marks.push(DocumentMark {
                 kind: "link".into(),
                 attrs: Some(DocumentMarkAttrs {
-                    href: Some(href.clone()),
+                    href: Some(href.to_owned()),
                 }),
             });
         }
         inline.push(DocumentNode {
             kind: "text".into(),
             content: vec![],
-            text: Some(span.text.clone()),
+            text: Some(value),
             attrs: None,
             marks,
         });
     }
     if text.trim().is_empty() {
-        return Err(WorkError::Invalid);
+        return None;
     }
-    Ok((text, inline))
+    Some((text, inline))
 }
 
 /// Every link target inside a formatted document.
@@ -315,31 +321,45 @@ mod tests {
     }
 
     #[test]
-    fn blocks_refuse_bad_links_levels_and_empty_text() {
+    fn blocks_normalize_bad_links_and_levels_and_skip_empty_text() {
         assert!(compile_blocks(&[]).is_err());
-        assert!(compile_blocks(&[block(
-            WorkBlockKind::Paragraph,
-            vec![span("x", WorkSpanStyle::Plain, Some("javascript:alert(1)"))],
-        )])
-        .is_err());
-        assert!(compile_blocks(&[block(
-            WorkBlockKind::Paragraph,
-            vec![span("x", WorkSpanStyle::Plain, Some("file:///etc/hosts"))],
-        )])
-        .is_err());
-        assert!(compile_blocks(&[WorkDocumentBlock {
-            level: Some(4),
-            ..block(
-                WorkBlockKind::Heading,
-                vec![span("x", WorkSpanStyle::Plain, None)],
-            )
-        }])
-        .is_err());
+        let (paragraphs, document) = compile_blocks(&[
+            block(
+                WorkBlockKind::Paragraph,
+                vec![span("x", WorkSpanStyle::Plain, Some("javascript:alert(1)"))],
+            ),
+            WorkDocumentBlock {
+                level: Some(4),
+                ..block(
+                    WorkBlockKind::Heading,
+                    vec![span("file", WorkSpanStyle::Plain, Some("file:///etc/hosts"))],
+                )
+            },
+            WorkDocumentBlock {
+                level: Some(1),
+                ..block(
+                    WorkBlockKind::Paragraph,
+                    vec![span("   ", WorkSpanStyle::Plain, None)],
+                )
+            },
+            block(WorkBlockKind::Bullets, vec![]),
+            block(
+                WorkBlockKind::Bullets,
+                vec![span("one item", WorkSpanStyle::Plain, None)],
+            ),
+        ])
+        .unwrap();
+        assert_eq!(paragraphs, vec!["x", "file", "one item"]);
+        assert!(document_links(&document).is_empty());
+        assert_eq!(
+            document.document.content[1].attrs.as_ref().unwrap().level,
+            Some(3)
+        );
+        assert_eq!(document.document.content[2].kind, "bulletList");
         assert!(compile_blocks(&[block(
             WorkBlockKind::Paragraph,
             vec![span("   ", WorkSpanStyle::Plain, None)],
         )])
         .is_err());
-        assert!(compile_blocks(&[block(WorkBlockKind::Bullets, vec![])]).is_err());
     }
 }
