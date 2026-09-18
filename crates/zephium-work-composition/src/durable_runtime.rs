@@ -12,7 +12,7 @@ use std::{
     collections::BTreeSet,
     time::{Duration, Instant},
 };
-use zephium_agent_controller::{AgentBrowserModel, AgentWorkEventKind};
+use zephium_agent_controller::{AgentBrowserModel, AgentWorkEventKind, AgentWorkFailure};
 use zephium_agent_provider_transport::AgentProviderCredential;
 use zephium_agentic::*;
 use zephium_app::{
@@ -224,6 +224,7 @@ impl MacosWorkComposition {
                 usage: Some(WorkUsage::default()),
                 artifacts: vec![],
                 intervention: None,
+                note: None,
             });
         }
         let diagnostics = Diagnostics::from(&settings);
@@ -280,6 +281,7 @@ impl MacosWorkComposition {
             usage: run.usage,
             artifacts: run.artifacts,
             intervention: run.intervention,
+            note: run.note,
         })
     }
 
@@ -519,6 +521,7 @@ impl MacosWorkComposition {
                         usage: Some(WorkUsage::default()),
                         artifacts: vec![],
                         intervention: None,
+                        note: Some("The browser was not ready for this page".into()),
                     });
                 }
                 RetainedWorkPhase::Uncertain if anonymous => {
@@ -527,6 +530,12 @@ impl MacosWorkComposition {
                         status: WorkAttemptStatus::Failed,
                         usage: Some(uncertain_usage(settled, model_in_flight, limits)),
                         artifacts: vec![],
+                        note: Some(
+                            intervention_note(intervention.as_ref())
+                                .or_else(|| snapshot.failure.map(failure_note))
+                                .unwrap_or("The page could not be read reliably")
+                                .into(),
+                        ),
                         intervention,
                     });
                 }
@@ -634,7 +643,24 @@ impl MacosWorkComposition {
                     ) => Ok((WorkAttemptStatus::Failed, vec![])),
                     _ => Err(WorkError::OutcomeUnknown),
                 };
-                return Ok(BrowserRun::closed(result, usage, intervention));
+                let note = match disposition {
+                    Some(AgentWorkDisposition::Succeeded | AgentWorkDisposition::Cancelled) => None,
+                    Some(AgentWorkDisposition::WaitingForHuman) => Some(
+                        intervention_note(intervention.as_ref())
+                            .unwrap_or("The page needs a person"),
+                    ),
+                    _ => Some(
+                        snapshot
+                            .failure
+                            .map_or("The page could not be read", failure_note),
+                    ),
+                };
+                return Ok(BrowserRun::closed(
+                    result,
+                    usage,
+                    intervention,
+                    note.map(str::to_owned),
+                ));
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -646,6 +672,46 @@ struct BrowserRun {
     usage: Option<WorkUsage>,
     artifacts: Vec<WorkArtifactDraft>,
     intervention: Option<WorkInterventionV1>,
+    note: Option<String>,
+}
+/// Closed words for why a page needs a person; shown on the step and read by the model.
+fn intervention_note(intervention: Option<&WorkInterventionV1>) -> Option<&'static str> {
+    use zephium_core::work::runtime::WorkInterventionKindV1 as Kind;
+    Some(match intervention?.kind {
+        Kind::SignIn => "The page asked to sign in",
+        Kind::Challenge => "The page asked for a human check",
+        Kind::Permission => "The page asked for a permission",
+        Kind::UnsupportedInteraction => "The page needs an interaction the agent cannot perform",
+        Kind::Review => "The page needs a person's review",
+        Kind::HumanTakeover => "The page was handed to a person",
+    })
+}
+/// Closed words for a page read that ended in failure; never page or model text.
+fn failure_note(failure: AgentWorkFailure) -> &'static str {
+    use zephium_agent_controller::AgentBrowserProviderError as Browser;
+    match failure {
+        AgentWorkFailure::Deadline => "The page took too long",
+        AgentWorkFailure::ContextLost => "The page changed while it was being read",
+        AgentWorkFailure::Browser(Browser::TurnLimit | Browser::ActionLimit) => {
+            "The page needed more steps than one read allows"
+        }
+        AgentWorkFailure::Browser(Browser::ActionProposalLoop) => {
+            "The page agent kept proposing an action the page refuses"
+        }
+        AgentWorkFailure::Browser(Browser::NoExtractionEvidence | Browser::Extraction(_)) => {
+            "The page showed nothing usable for the request"
+        }
+        AgentWorkFailure::Browser(Browser::Navigation(_)) => {
+            "The page led somewhere the read may not follow"
+        }
+        AgentWorkFailure::Browser(Browser::Action(_)) => "An action on the page did not work",
+        AgentWorkFailure::Browser(Browser::Authority) => "The read ran out of page operations",
+        AgentWorkFailure::Browser(_) => "The page could not be read",
+        AgentWorkFailure::TaskPhase { .. } | AgentWorkFailure::Contract => {
+            "The page agent broke the reading rules"
+        }
+        _ => "The page could not be read",
+    }
 }
 fn settled_model_usage(settled: WorkUsage, tokens: u64, cost_micro_usd: u64) -> WorkUsage {
     WorkUsage {
@@ -693,6 +759,7 @@ impl BrowserRun {
         result: Result<(WorkAttemptStatus, Vec<WorkArtifactDraft>), WorkError>,
         usage: Option<WorkUsage>,
         intervention: Option<WorkInterventionV1>,
+        note: Option<String>,
     ) -> Self {
         let (status, artifacts) = match result {
             Ok(result) => result,
@@ -704,6 +771,7 @@ impl BrowserRun {
             usage,
             artifacts,
             intervention,
+            note: note.filter(|_| status != WorkAttemptStatus::Succeeded),
         }
     }
 }
@@ -760,7 +828,7 @@ mod closed_result_tests {
             (WorkError::Capacity, WorkAttemptStatus::Failed),
             (WorkError::OutcomeUnknown, WorkAttemptStatus::OutcomeUnknown),
         ] {
-            let run = BrowserRun::closed(Err(error), Some(usage), None);
+            let run = BrowserRun::closed(Err(error), Some(usage), None, None);
             assert_eq!(run.status, expected);
             assert_eq!(run.usage, Some(usage));
             assert!(run.artifacts.is_empty());

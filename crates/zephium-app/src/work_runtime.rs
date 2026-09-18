@@ -387,6 +387,24 @@ impl WorkAttemptObserver {
             .unwrap_or_default()
     }
 }
+/// Closed reason an attempt must stop; a development log fact, never text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkCancelCause {
+    /// Another owner or attempt holds this execution now.
+    Unowned,
+    /// The store marked the execution interrupted.
+    Interrupted,
+    /// The person asked to stop.
+    Requested,
+    /// The execution already settled.
+    ExecutionSettled,
+    /// Some attempt of this execution is no longer running or succeeded.
+    AttemptSettled,
+    /// The attempt's own deadline passed.
+    Deadline,
+    /// The durable state could not be read.
+    Unreadable,
+}
 #[derive(Clone)]
 pub struct WorkAttemptProbe {
     browser_session: zephium_agentic::WorkBrowserSession,
@@ -476,6 +494,11 @@ impl WorkAttemptProbe {
         read(&self.handle, self.profile, self.work).await
     }
     pub async fn cancellation_requested(&self) -> Result<bool, WorkError> {
+        self.cancellation_cause().await.map(|cause| cause.is_some())
+    }
+    /// Why this attempt must stop, from a fresh durable read; None while it
+    /// still owns a running execution.
+    pub async fn cancellation_cause(&self) -> Result<Option<WorkCancelCause>, WorkError> {
         let state = read(&self.handle, self.profile, self.work).await?;
         let execution = state
             .executions
@@ -503,20 +526,28 @@ impl WorkAttemptProbe {
                 }
             }
         }
-        let cancelled = !owned
-            || state.interrupted.contains(&self.execution)
-            || execution.status == WorkExecutionStatus::CancelRequested
-            || execution.status.terminal()
-            || execution.attempts.iter().any(|attempt| {
-                !matches!(
-                    attempt.status,
-                    WorkAttemptStatus::Running | WorkAttemptStatus::Succeeded
-                )
-            });
-        if cancelled {
+        let cause = if !owned {
+            Some(WorkCancelCause::Unowned)
+        } else if state.interrupted.contains(&self.execution) {
+            Some(WorkCancelCause::Interrupted)
+        } else if execution.status == WorkExecutionStatus::CancelRequested {
+            Some(WorkCancelCause::Requested)
+        } else if execution.status.terminal() {
+            Some(WorkCancelCause::ExecutionSettled)
+        } else if execution.attempts.iter().any(|attempt| {
+            !matches!(
+                attempt.status,
+                WorkAttemptStatus::Running | WorkAttemptStatus::Succeeded
+            )
+        }) {
+            Some(WorkCancelCause::AttemptSettled)
+        } else {
+            None
+        };
+        if cause.is_some() {
             self.browser_session.close();
         }
-        Ok(cancelled)
+        Ok(cause)
     }
     pub(crate) async fn read_evidence(
         &self,

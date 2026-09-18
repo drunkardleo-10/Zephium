@@ -797,6 +797,7 @@ async fn rejected_final_output_cannot_finish_on_earlier_partial_artifacts() {
                     status: WorkStepStatus::Succeeded,
                     usage: Some(WorkUsage::default()),
                     intervention: None,
+                    note: None,
                     artifacts: vec![WorkArtifactDraft {
                         output: request.output,
                         title: "Earlier partial result".into(),

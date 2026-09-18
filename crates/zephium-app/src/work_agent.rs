@@ -28,6 +28,8 @@ pub struct WorkBrowserOutcome {
     pub usage: Option<WorkUsage>,
     pub artifacts: Vec<WorkArtifactDraft>,
     pub intervention: Option<WorkInterventionV1>,
+    /// Why the page gave nothing, in closed words the model and the person read.
+    pub note: Option<String>,
 }
 pub struct WorkAgentProviders<'a> {
     pub turn: &'a dyn WorkAgentTurnProvider,
@@ -36,6 +38,9 @@ pub struct WorkAgentProviders<'a> {
 
 /// Tokens a turn must still be able to spend before the loop stops itself.
 const TURN_TOKEN_FLOOR: u32 = 12_000;
+/// Consecutive refused, idle or dropped turns before the run gives up.
+const MAX_FAILED_TURNS: u8 = 3;
+const STEPS_EXHAUSTED: &str = "The step budget is used up: no more searches or reads will run. Publish the result from the sources already collected and finish.";
 const ASK_POLL: Duration = Duration::from_millis(500);
 const MAX_PREVIEWS: usize = 96;
 const INHERITED_PREVIEWS: usize = 64;
@@ -54,6 +59,12 @@ pub enum WorkAgentDiagnostic {
     },
     TurnRefused {
         turn: u8,
+        /// None when the provider returned nothing to resolve.
+        reason: Option<zephium_core::work::agent::WorkAgentTurnRefusal>,
+    },
+    /// The loop stopped because the durable state says so.
+    Stopped {
+        cause: crate::work_runtime::WorkCancelCause,
     },
     ArtifactRefused {
         turn: u8,
@@ -375,10 +386,17 @@ impl Driver {
         self.steps += 1;
         Ok(id)
     }
+    /// Notices reach the model next turn: at most eight, each within the
+    /// disclosure's limit, never repeated.
     fn notice(&mut self, text: &str) {
-        if !self.notices.iter().any(|n| n == text) && self.notices.len() < 8 {
-            self.notices.push(text.to_owned());
+        let text = zephium_core::work::agent::clip_text(text, 512);
+        if self.notices.contains(&text) {
+            return;
         }
+        if self.notices.len() == 8 {
+            self.notices.remove(0);
+        }
+        self.notices.push(text);
     }
     /// Settles a file step with what it disclosed, or with why it failed.
     async fn settle_file(
@@ -450,8 +468,18 @@ impl Driver {
         Ok(())
     }
     async fn cancelled(&self) -> bool {
-        self.probe.cancellation_requested().await.unwrap_or(true)
-            || Instant::now() >= self.probe.deadline()
+        let cause = match self.probe.cancellation_cause().await {
+            Ok(Some(cause)) => Some(cause),
+            Ok(None) if Instant::now() >= self.probe.deadline() => {
+                Some(crate::work_runtime::WorkCancelCause::Deadline)
+            }
+            Ok(None) => None,
+            Err(_) => Some(crate::work_runtime::WorkCancelCause::Unreadable),
+        };
+        if let Some(cause) = cause {
+            self.report(WorkAgentDiagnostic::Stopped { cause });
+        }
+        cause.is_some()
     }
 
     async fn drive<B, Fut>(
@@ -527,13 +555,26 @@ impl Driver {
                 providers.turn.turn(&disclosure, trace),
             )
             .await;
+            let mut reported = false;
             let (turn, usage) = match result {
                 Ok(Ok(result)) => {
                     if !result.usage.within(self.remaining()) {
                         return Err(WorkError::OutcomeUnknown);
                     }
                     self.charge(result.usage);
-                    (disclosure.resolve(result.output).ok(), result.usage)
+                    let turn = match disclosure.resolve(result.output) {
+                        Ok(turn) => Some(turn),
+                        Err(refusal) => {
+                            self.notice(refusal.notice());
+                            self.report(WorkAgentDiagnostic::TurnRefused {
+                                turn: self.turn,
+                                reason: Some(refusal),
+                            });
+                            reported = true;
+                            None
+                        }
+                    };
+                    (turn, result.usage)
                 }
                 Ok(Err(WorkSynthesisError::NotDispatched(_))) => (None, WorkUsage::default()),
                 Ok(Err(
@@ -572,40 +613,66 @@ impl Driver {
                     asks: turn.ask.is_some(),
                     finish: turn.finish,
                 }),
-                None => self.report(WorkAgentDiagnostic::TurnRefused { turn: self.turn }),
+                None => {
+                    if !reported {
+                        self.report(WorkAgentDiagnostic::TurnRefused {
+                            turn: self.turn,
+                            reason: None,
+                        });
+                    }
+                }
             }
             let Some(mut turn) = turn else {
                 self.failed_turns += 1;
-                if self.failed_turns >= 2 {
+                if self.failed_turns >= MAX_FAILED_TURNS {
                     return Ok(WorkAttemptStatus::Failed);
                 }
                 continue;
             };
-            self.failed_turns = 0;
+            for notice in std::mem::take(&mut turn.notices) {
+                self.notice(&notice);
+            }
+            // A turn that only proposed refused objects is idle: the refusal
+            // notices go back, but idle turns end the run like refused ones.
+            let idle = !turn.finish
+                && turn.ask.is_none()
+                && turn.fetch.is_empty()
+                && turn.artifacts.is_empty();
+            if idle {
+                self.failed_turns += 1;
+            } else {
+                self.failed_turns = 0;
+            }
             let proposed_artifacts = turn.artifacts.len() + turn.dropped;
             let mut published_this_turn = 0;
+            let mut repeated = false;
             turn.fetch.retain(|kind| {
-                if execution.steps.iter().any(|step| reuses_completed_read(kind, step)) {
-                    if self.notices.len() < 8 {
-                        self.notices.push("Repeated read skipped: this page and record schema already produced the cited canvas results shown in artifacts. Use those results, follow an observed source link_destination for missing details, or finish. No new browser work was dispatched.".into());
-                    }
+                if execution
+                    .steps
+                    .iter()
+                    .any(|step| reuses_completed_read(kind, step))
+                {
+                    repeated = true;
                     false
                 } else {
                     true
                 }
             });
+            if repeated {
+                self.notice("Repeated read skipped: this page and record schema already produced the cited canvas results shown in artifacts. Use those results, follow an observed source link_destination for missing details, or finish. No new browser work was dispatched.");
+            }
             for refusal in &turn.refusals {
                 self.report(WorkAgentDiagnostic::ArtifactRefused {
                     turn: self.turn,
                     reason: *refusal,
                 });
-                let notice = format!(
+                self.notice(&format!(
                     "A proposed object was refused last turn: it {}.",
                     refusal.notice()
-                );
-                if !self.notices.contains(&notice) && self.notices.len() < 8 {
-                    self.notices.push(notice);
-                }
+                ));
+            }
+            if idle && self.failed_turns >= MAX_FAILED_TURNS {
+                return Ok(WorkAttemptStatus::Failed);
             }
             if !turn.artifacts.is_empty() {
                 self.probe
@@ -644,6 +711,10 @@ impl Driver {
                 });
                 if leaked {
                     self.failed_turns += 1;
+                    self.notice("A search query repeated private context and was not sent. Rephrase the query without that text.");
+                    if self.failed_turns >= MAX_FAILED_TURNS {
+                        return Ok(WorkAttemptStatus::Failed);
+                    }
                     continue;
                 }
                 let status = self.fetch(attempt, providers, browser, turn.fetch).await?;
@@ -665,11 +736,7 @@ impl Driver {
                     return Ok(WorkAttemptStatus::Failed);
                 }
                 self.finish_refusals += 1;
-                self.notices.truncate(7);
-                self.notices.push(
-                    "Finish was refused: the requested result has not been published successfully. Repair the refused object using the existing sources and publish it before finishing. Earlier partial results do not replace that object."
-                        .into(),
-                );
+                self.notice("Finish was refused: the requested result has not been published successfully. Repair the refused object using the existing sources and publish it before finishing. Earlier partial results do not replace that object.");
                 continue;
             }
             if turn.finish {
@@ -714,6 +781,7 @@ impl Driver {
             let mut running = Vec::new();
             for kind in batch {
                 if self.steps + 2 > u32::from(self.grant.max_steps) {
+                    self.notice(STEPS_EXHAUSTED);
                     break;
                 }
                 let WorkStepKindV1::Search { query } = kind else {
@@ -774,13 +842,11 @@ impl Driver {
             if matches!(kind, WorkStepKindV1::Discover { .. }) {
                 // Provider search covers the web here; a native search engine
                 // page is never dispatched from the agent loop.
-                let notice = "Native discovery is not available in this run: provider search covers the web. Use search for facts and read for exact URLs listed in sources.".to_owned();
-                if !self.notices.contains(&notice) && self.notices.len() < 8 {
-                    self.notices.push(notice);
-                }
+                self.notice("Native discovery is not available in this run: provider search covers the web. Use search for facts and read for exact URLs listed in sources.");
                 continue;
             }
             if self.steps + 2 > u32::from(self.grant.max_steps) {
+                self.notice(STEPS_EXHAUSTED);
                 break;
             }
             let step = self.step(kind.clone(), WorkStepStatus::Running);
@@ -793,6 +859,7 @@ impl Driver {
                         usage: Some(WorkUsage::default()),
                         artifacts: vec![],
                         intervention: None,
+                        note: None,
                     }),
                 )
             } else {
@@ -828,6 +895,7 @@ impl Driver {
             return Ok(None);
         };
         if self.steps + 2 > u32::from(self.grant.max_steps) {
+            self.notice(STEPS_EXHAUSTED);
             return Ok(None);
         }
         let step = self.step(kind.clone(), WorkStepStatus::Running);
@@ -1074,8 +1142,17 @@ impl Driver {
                         } else {
                             (outcome.status, vec![])
                         };
-                        let note =
-                            (status == WorkStepStatus::Succeeded).then(|| read_note(&artifacts));
+                        let note = if status == WorkStepStatus::Succeeded {
+                            Some(read_note(&artifacts))
+                        } else {
+                            outcome.note.clone()
+                        };
+                        if status == WorkStepStatus::Failed {
+                            self.notice(&format!(
+                                "A page read failed: {}. Use another listed source or finish with what the canvas has; do not reopen that page.",
+                                outcome.note.as_deref().unwrap_or("the page gave nothing")
+                            ));
+                        }
                         let links = browser_preview_links(&artifacts);
                         let published = artifacts.len();
                         self.settle(id, status, usage, artifacts, None, note)
@@ -1097,10 +1174,9 @@ impl Driver {
                         if outcome.status == WorkStepStatus::OutcomeUnknown {
                             terminal = Some(WorkAttemptStatus::OutcomeUnknown);
                         }
-                        if let Some(intervention) = outcome.intervention {
-                            self.intervention = Some(intervention);
-                            terminal = terminal.or(Some(WorkAttemptStatus::Failed));
-                        }
+                        // An anonymous read that needs a person is one failed
+                        // page, not the end of the run: its note says why.
+                        let _ = outcome.intervention;
                     }
                     Err(WorkError::OutcomeUnknown) => {
                         self.settle(id, WorkStepStatus::OutcomeUnknown, None, vec![], None, None)
