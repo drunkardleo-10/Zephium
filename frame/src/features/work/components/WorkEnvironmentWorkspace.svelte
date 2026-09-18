@@ -1841,7 +1841,7 @@
                 <HostGlyph host={row.where} file={!!row.file} size={22} />
                 <span class="source-text">
                   <strong>{row.title}</strong>
-                  <span>{row.where}</span>
+                  <span>{row.note || row.where}</span>
                 </span>
               </button>
             </li>

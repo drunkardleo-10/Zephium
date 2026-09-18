@@ -23,6 +23,7 @@ const SOURCE_ROWS = 24;
 const TITLE_TEXT = 512;
 const DETAIL_TEXT = 2048;
 const ROW_TEXT = 200;
+const STATUS_TEXT = 256;
 /** Steps that work inside a granted folder; each settles onto a file record. */
 const FILE_STEPS = ["list", "read_file", "search_files", "write_file", "edit_file"];
 
@@ -39,6 +40,7 @@ type SourceRow = {
   url: string;
   where: string;
   title: string;
+  note?: string;
   file?: { record: string; path: string; kind: string };
 };
 /** A file a step disclosed: the folder it sits in stands where a host would. */
@@ -585,7 +587,15 @@ export function environmentSources(
         if (row.file) files.add(row.file.record);
         rows.push(row);
       };
+      // A page that would not be read says why, on the row that cites it.
+      const read = new Set<string>();
+      const refusals = new Map<string, string>();
       for (const step of execution.steps ?? []) {
+        if (step.kind.kind === "read") {
+          if (step.status === "succeeded") read.add(step.kind.url);
+          else if (step.status === "failed" && step.note?.trim())
+            refusals.set(step.kind.url, step.note.trim());
+        }
         if (step.kind.kind === "search") {
           for (const id of step.artifacts ?? []) {
             const artifact = execution.artifacts.find((entry) => entry.id === id);
@@ -611,7 +621,10 @@ export function environmentSources(
         detail: "",
         status: "",
         ...(running ? { active: true } : {}),
-        sources: rows.slice(0, SOURCE_ROWS),
+        sources: rows.slice(0, SOURCE_ROWS).map((row) => {
+          const refusal = row.url && !read.has(row.url) ? refusals.get(row.url) : undefined;
+          return refusal ? { ...row, note: clipText(refusal, ROW_TEXT) } : row;
+        }),
       });
       positions[card] = { x: home.x, y: home.y + index * (SOURCES_SIZE.height + 24) };
       index += 1;
@@ -720,6 +733,11 @@ export function environmentPages(
       const pageHost = host(url);
       const live = entry.running;
       const succeeded = entry.steps.some((step) => step.status === "succeeded");
+      // Rust says why a read gave up; the card says it instead of "Failed".
+      const refused =
+        !succeeded && entry.steps.every((step) => step.status === "failed")
+          ? (entry.steps.at(-1)?.note?.trim() ?? "")
+          : "";
       const frame = entry.page?.frame
         ? pageFrameUrl(entry.page.attempt, entry.page.step, entry.page.frame.generation)
         : null;
@@ -736,8 +754,9 @@ export function environmentPages(
             : m.work_env_page_live()
           : succeeded
             ? m.work_env_page_read()
-            : m.work_env_status_failed(),
+            : clipText(refused, STATUS_TEXT) || m.work_env_status_failed(),
         page: { url, host: pageHost, frame, live },
+        ...(live || succeeded ? {} : { unavailable: true }),
       });
       positions[id] = { x: home.x, y: home.y + index * 260 };
       index += 1;

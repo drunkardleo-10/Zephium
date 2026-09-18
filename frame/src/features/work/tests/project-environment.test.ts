@@ -506,3 +506,77 @@ test("file steps join their run's Sources card as file rows the lift can open", 
   expect(fileEvidence(objectives, "record")?.text).toBe("Plan for the week");
   expect(sources.groups.size).toBe(0);
 });
+
+test("a read that gave up says why, on its page card and on the row that cites it", async () => {
+  const { environmentPages, environmentSources } = await import("../lib/project-environment");
+  const { environmentStages } = await import("../lib/project-environment-thread");
+  const state = structuredClone(projection);
+  const execution = state.executions[0]!;
+  execution.spec.nodes[0]!.capability = {
+    kind: "agent",
+    grant: {
+      provider: "open_ai",
+      model: "gpt-5.6-luna",
+      max_turns: 10,
+      max_steps: 32,
+      browse_hops: 4,
+    },
+  };
+  execution.provider_evidence = [
+    {
+      id: "record",
+      node: "node",
+      attempt: "attempt",
+      evidence: {
+        version: 1,
+        provider: "open_ai",
+        model: "gpt-5.6-luna",
+        response_model: "gpt-5.6-luna",
+        response_id: "resp_1",
+        search_call_id: "ws_1",
+        answer: "One review",
+        citations: [
+          { url: "https://a.example/review", title: "Review A", start_index: 0, end_index: 3 },
+        ],
+        actual_input_tokens: 10,
+        actual_output_tokens: 5,
+      },
+    },
+  ];
+  execution.artifacts = [
+    {
+      ...execution.artifacts[0]!,
+      id: "sources",
+      data: {
+        kind: "evidence_collection",
+        summary: "One review",
+        subjects: [],
+        entries: [{ evidence: 0, title: "Review A", role: "source", subject: null }],
+      },
+      evidence: [{ extraction_id: "record", source_id: 1 }],
+    },
+  ];
+  execution.steps = [
+    {
+      id: "search",
+      turn: 1,
+      kind: { kind: "search", query: "keyboards" },
+      status: "succeeded",
+      artifacts: ["sources"],
+      evidence: "record",
+    },
+    {
+      id: "read",
+      turn: 2,
+      kind: { kind: "read", url: "https://a.example/review" },
+      status: "failed",
+      note: "The page asked for a human check",
+    },
+  ];
+  const objectives = new Map([["objective", state]]);
+  const scene = { ...snapshot, elements: snapshot.elements.slice(0, 1) };
+  const sources = environmentSources(scene, objectives, environmentStages(scene, objectives));
+  expect(sources.items[0]?.sources?.[0]?.note).toBe("The page asked for a human check");
+  const page = environmentPages(scene, objectives, () => []).items[0];
+  expect([page?.status, page?.unavailable]).toEqual(["The page asked for a human check", true]);
+});

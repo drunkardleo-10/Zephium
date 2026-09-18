@@ -166,10 +166,12 @@
   /** A signed-in page the person may need: to finish a challenge, or to take over. */
   const pageHandoff = $derived(!!accountScope && !!onopenpage && (live || !!intervention));
   const closing = $derived(execution ? agentLine(execution) : null);
+  /** Why the run gave up, in Rust's words: the note the last step left. */
+  const gaveUp = $derived((execution?.steps ?? []).at(-1)?.note?.trim() || m.work_line_failed());
   /** Two or three words while it works; one quiet sentence once it stops. */
   const headline = $derived.by(() => {
     if (intervention) return interventionLabel;
-    if (failure || session.failure) return m.work_line_failed();
+    if (failure || session.failure) return gaveUp;
     if (interrupted) return m.work_line_stopped();
     if (live) {
       if (fileState) return fileState;
@@ -187,7 +189,7 @@
       case "interrupted":
         return m.work_line_stopped();
       case "failed":
-        return m.work_line_failed();
+        return gaveUp;
       default:
         return run?.state.kind === "pending" ? m.work_line_thinking() : m.work_line_ready();
     }

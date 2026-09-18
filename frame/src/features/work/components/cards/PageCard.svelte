@@ -18,13 +18,16 @@
 <article class="page" class:selected class:live={item.page?.live}>
   <header class="work-drag-handle">
     <span class="host">{item.page?.host || item.kind}</span>
-    <span class="state">
-      {#if item.page?.live}<span class="dot" aria-hidden="true"></span>{/if}{item.status}
-    </span>
+    {#if !item.unavailable}<span class="state">
+        {#if item.page?.live}<span class="dot" aria-hidden="true"></span>{/if}{item.status}
+      </span>{/if}
   </header>
   <div class="frame">
     {#if frame && !failed}
       <img src={frame} alt={item.title} draggable="false" onerror={() => (failedFrame = frame)} />
+    {:else if item.unavailable}
+      <!-- A read that gave up says so in Rust's words, not with a shrug. -->
+      <p class="reason">{item.status}</p>
     {:else}
       <span class="placeholder" aria-hidden="true">{(item.page?.host || "?").slice(0, 1)}</span>
     {/if}
@@ -108,6 +111,17 @@
     object-fit: cover;
     object-position: top;
     pointer-events: none;
+  }
+
+  .reason {
+    margin: 0;
+    padding: 0 16px;
+    color: var(--color-muted);
+    font-size: var(--text-label);
+    line-height: 17px;
+    text-align: center;
+    text-wrap: balance;
+    overflow: hidden;
   }
 
   .placeholder {

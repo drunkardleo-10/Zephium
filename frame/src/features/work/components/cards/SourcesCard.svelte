@@ -21,7 +21,9 @@
         <HostGlyph host={row.where} file={!!row.file} />
         <span class="text">
           <span class="where">{row.where}</span>
-          <span class="title">{row.title}</span>
+          <span class="title" class:refused={!!row.note} title={row.title}
+            >{row.note || row.title}</span
+          >
         </span>
       </li>
     {/each}
@@ -71,5 +73,9 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     font-size: var(--text-label);
+  }
+
+  .title.refused {
+    color: var(--color-muted);
   }
 </style>

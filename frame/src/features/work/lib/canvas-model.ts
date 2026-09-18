@@ -47,6 +47,8 @@ export type CanvasItem = {
     url: string;
     where: string;
     title: string;
+    /** Why the read gave up, when it did; the row says so instead of the title. */
+    note?: string;
     /** A file a step disclosed; the lift shows what the run recorded of it. */
     file?: { record: string; path: string; kind: string };
   }[];

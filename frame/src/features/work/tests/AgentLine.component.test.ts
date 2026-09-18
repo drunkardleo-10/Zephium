@@ -221,3 +221,34 @@ test("a proposed file change waits on the person and hands the review to the can
   await screen.unmount();
   session.dispose();
 });
+
+test("a failed run says why it gave up, and a stopped one just stops", async () => {
+  const session = new WorkSession("profile");
+  session.selected = "objective";
+  const failed = agentRun("failed");
+  failed.steps = [
+    ...failed.steps!,
+    {
+      id: "read-1",
+      turn: 2,
+      kind: { kind: "read", url: "https://lego.com/sets" },
+      status: "failed",
+      note: "The page asked for a human check",
+    },
+  ];
+  session.projection = { ...structuredClone(projection), executions: [failed] };
+  const screen = await render(AgentLine, { session });
+  await expect
+    .element(screen.getByText("The page asked for a human check", { exact: true }))
+    .toBeVisible();
+  expect(screen.container.textContent).not.toContain("Something went wrong");
+  await screen.unmount();
+  const stopped = new WorkSession("profile");
+  stopped.selected = "objective";
+  stopped.projection = { ...structuredClone(projection), executions: [agentRun("cancelled")] };
+  const cancelled = await render(AgentLine, { session: stopped });
+  await expect.element(cancelled.getByText("Stopped.", { exact: true })).toBeVisible();
+  await cancelled.unmount();
+  session.dispose();
+  stopped.dispose();
+});
