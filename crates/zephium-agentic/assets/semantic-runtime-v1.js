@@ -891,6 +891,7 @@
     if (tag === "img" && attribute(node, "alt", 1) !== null) {
       return { role: "image", tag, inputType };
     }
+    if (isPageImageMeta(node, tag)) return { role: "image", tag, inputType, pageImage: true };
     if (tag === "progress" || tag === "meter") return { role: "progress", tag, inputType };
     if (tag === "output") return { role: "status", tag, inputType };
     return genericTextDescriptor(node, tag, inputType);
@@ -903,13 +904,71 @@
       tag === "style" ||
       tag === "template" ||
       tag === "noscript" ||
-      tag === "head" ||
-      tag === "meta" ||
+      tag === "title" ||
+      (tag === "meta" && !isPageImageMeta(element, tag)) ||
       tag === "link" ||
       has(element, "hidden") ||
       has(element, "inert") ||
-      lower(attribute(element, "aria-hidden", 16) || "") === "true"
+      (lower(attribute(element, "aria-hidden", 16) || "") === "true" && !isRenderedPhoto(element, tag))
     );
+  }
+
+  // The page's own picture (og:image) is the one image every product or
+  // listing page names for itself; it is projected as a document-level image.
+  function isPageImageMeta(element, tag) {
+    return tag === "meta" && lower(attribute(element, "property", 32) || "") === "og:image";
+  }
+
+  // An aria-hidden wrapper around a gallery photo hides it from assistive
+  // tech only because its button carries the label. The photos inside stay
+  // image nodes; everything else in the wrapper stays hidden.
+  function pushHiddenPhotos(stack, item, state) {
+    const node = item.node;
+    if (tagName(node) === "img" || has(node, "hidden") || has(node, "inert")) return;
+    if (lower(attribute(node, "aria-hidden", 16) || "") !== "true") return;
+    const photos = [];
+    const pending = [{ node, depth: 0 }];
+    let visited = 0;
+    while (pending.length !== 0 && visited < 64 && photos.length < 8) {
+      const current = pending.pop();
+      visited += 1;
+      const list = childNodes(current.node);
+      const count = listLength(list);
+      for (let index = 0; index < count && visited + pending.length < 64; index += 1) {
+        const child = listItem(list, index);
+        if (child === null || nodeType(child) !== 1) continue;
+        const tag = tagName(child);
+        if (tag === "img") {
+          if (isRenderedPhoto(child, tag)) photos.push(child);
+        } else if (current.depth < 5 && !has(child, "hidden")) {
+          pending.push({ node: child, depth: current.depth + 1 });
+        }
+      }
+    }
+    for (let index = photos.length - 1; index >= 0; index -= 1) {
+      stack.push({ node: photos[index], parent: item.parent, sink: null, depth: item.depth + 1, disabled: item.disabled, nameAncestors: item.nameAncestors });
+    }
+  }
+
+  // A gallery photo is often aria-hidden because the button around it
+  // carries the label; a photo drawn at a real size stays an image node,
+  // while hidden icons and spacers still drop out.
+  function isRenderedPhoto(element, tag) {
+    if (tag !== "img") return false;
+    const rect = elementRect(element);
+    return rect !== null && rect.width >= 64 && rect.height >= 64;
+  }
+
+  // The label of the button or link an unnamed photo sits in.
+  function ancestorLabel(element, state) {
+    let current = element;
+    for (let depth = 0; depth < 3; depth += 1) {
+      current = read(nodeParentGetter, current);
+      if (current === null || nodeType(current) !== 1) return null;
+      const label = attribute(current, "aria-label", MAX_NAME_BYTES * 4, state);
+      if (label !== null && label !== "") return label;
+    }
+    return null;
   }
 
   function styleIsVisible(element) {
@@ -1700,16 +1759,18 @@
     if (!isDocument) {
       const sensitivity = sensitivityFor(element);
       if (sensitivity !== "public") setSensitivity(record, sensitivity);
-      const name = labelledText(element, descriptor, state);
+      let name = descriptor.pageImage === true ? "Page image" : labelledText(element, descriptor, state);
+      if ((name === null || name === "") && descriptor.role === "image") name = ancestorLabel(element, state);
       if (name !== null && name !== "") addName(record, name, state);
       record.sink = recordSink(descriptor, wire.n !== undefined);
       if (record.sink === "value") record.sinkBytes = 0;
-      const imageSource = descriptor.role === "image" && descriptor.tag === "img";
+      const imageSource = descriptor.role === "image" && (descriptor.tag === "img" || descriptor.pageImage === true);
       if (((descriptor.role === "link" && descriptor.tag === "a") || imageSource) && record.sensitivity === "public") {
         let destination;
         try {
-          destination = read(imageSource ? imageCurrentSrcGetter : anchorHrefGetter, element);
-          if (imageSource && !destination) destination = read(imageSrcGetter, element);
+          if (descriptor.pageImage === true) destination = attribute(element, "content", 2048) || undefined;
+          else destination = read(imageSource ? imageCurrentSrcGetter : anchorHrefGetter, element);
+          if (imageSource && !destination && descriptor.pageImage !== true) destination = read(imageSrcGetter, element);
         } catch (_) { destination = undefined; }
         if (typeof destination === "string" && destination !== "" &&
             utf8Length(destination, 2049) <= 2048 &&
@@ -1818,7 +1879,10 @@
         continue;
       }
       if (type !== 1 && type !== 9 && type !== 11) continue;
-      if (type === 1 && shouldSkipSubtree(item.node)) continue;
+      if (type === 1 && shouldSkipSubtree(item.node)) {
+        pushHiddenPhotos(stack, item, state);
+        continue;
+      }
 
       let descriptor = classify(item.node);
       // Inline wrappers retain their existing prose/control source.
@@ -1837,7 +1901,7 @@
         }
         disabled = disabledState(item.node, item.disabled);
         if (descriptor !== null) {
-          const visibleStyle = styleIsVisible(item.node);
+          const visibleStyle = descriptor.pageImage === true || styleIsVisible(item.node);
           const rect = visibleStyle ? elementRect(item.node) : null;
           const optionInExpansion = descriptor.role === "option" && anchored;
           // Closed native options lack geometry. Admit only under a retained
@@ -1851,14 +1915,14 @@
             nodeType(records[parent].element) === 1 &&
             tagName(records[parent].element) === "select";
           const visible =
-            visibleStyle && (rect !== null || optionInExpansion || optionOfAdmittedSelect);
+            visibleStyle && (rect !== null || optionInExpansion || optionOfAdmittedSelect || descriptor.pageImage === true);
           const initialPriority =
             descriptor.role === "dialog" ||
             descriptor.role === "landmark" ||
             focused.has(item.node);
           const admitted = visible && (
             !anchored
-              ? optionOfAdmittedSelect || (rect !== null && (initialPriority || inViewport(rect)))
+              ? optionOfAdmittedSelect || descriptor.pageImage === true || (rect !== null && (initialPriority || inViewport(rect)))
               : true
           );
           if (!anchored && !admitted && visible &&
