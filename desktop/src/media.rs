@@ -605,10 +605,18 @@ pub(crate) async fn media_admit_remote(
         let area = subject.area;
         let bytes = match zephium_agentic::public_asset::fetch_public_image(parsed.as_str()).await {
             Ok(bytes) => bytes,
-            Err(zephium_agentic::public_asset::PublicAssetError::TooLarge) => {
-                return refused(ResourceError::Capacity)
+            Err(error) => {
+                #[cfg(feature = "work-development-traces")]
+                super::work_provider::record_diagnostic(format_args!(
+                    "work: phase=media fetch={error:?}"
+                ));
+                return refused(match error {
+                    zephium_agentic::public_asset::PublicAssetError::TooLarge => {
+                        ResourceError::Capacity
+                    }
+                    _ => ResourceError::Unavailable,
+                });
             }
-            Err(_) => return refused(ResourceError::Unavailable),
         };
         let receiver = shell.import_media(
             profile,
