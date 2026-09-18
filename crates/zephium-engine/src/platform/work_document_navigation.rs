@@ -414,6 +414,21 @@ impl WorkDocumentNavigation {
             state.bootstrap_available = false;
             return true;
         }
+        // Frames inside a loading or ready document are page content, not a
+        // new document: embeds and bot-check widgets load through them.
+        if action.target_is_main_frame == Some(false)
+            && matches!(
+                state.phase,
+                Phase::Armed
+                    | Phase::Loading
+                    | Phase::Committed
+                    | Phase::Finalizing
+                    | Phase::Sampling
+                    | Phase::Ready
+            )
+        {
+            return true;
+        }
         let cause_matches = match state.admission_kind {
             Some(AdmissionKind::ProgrammaticGet) => {
                 action.navigation_type == AppleNavigationType::Other
@@ -825,7 +840,10 @@ mod tests {
         assert!(!gate.allows_apple_action(target, apple_action(T::BackForward, false)));
         let mut child = apple_action(T::BackForward, true);
         child.target_is_main_frame = Some(false);
-        assert!(!gate.allows_apple_action(target, child));
+        assert!(
+            gate.allows_apple_action("https://embed.example/widget", child),
+            "a frame inside the ready document is page content"
+        );
         assert!(gate.allows_apple_action(target, apple_action(T::BackForward, true)));
         assert!(!gate.allows_apple_action(target, apple_action(T::BackForward, true)));
 
