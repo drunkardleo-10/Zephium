@@ -6,7 +6,8 @@ import {
   type CanvasPosition,
   type CanvasSize,
 } from "./canvas-model";
-import { SOURCES_SIZE } from "./organize";
+import { FILE_STEPS, isAgentExecution } from "./agent-steps";
+import { CARD_GAP, PAGE_SIZE, REQUEST_SIZE, SOURCES_SIZE } from "./organize";
 import * as m from "$shared/i18n/messages";
 
 /**
@@ -28,11 +29,8 @@ export type WorkStage = {
   place: CanvasPosition & CanvasSize;
 };
 const REQUEST_TEXT = 512;
-const REQUEST_SIZE = { width: 320, height: 150 } as const;
 /** The air between one stage and the next request that follows it. */
 const STAGE_GAP = 72;
-/** The drop from a request card to the Sources card of its run. */
-export const STAGE_DROP = 48;
 
 /** The sentence a work began with; the objective element keeps saying it. */
 export function firstRequest(projection: WorkRuntimeProjection): string {
@@ -73,7 +71,11 @@ export function environmentStages(
           card: `request:${element.id}:${execution.id}`,
           request,
           executions: [],
-          place: { x: place.x, y: extent(snapshot, stage) + STAGE_GAP, ...REQUEST_SIZE },
+          place: {
+            x: place.x,
+            y: extent(snapshot, projection, stage) + STAGE_GAP,
+            ...REQUEST_SIZE,
+          },
         };
         stages.push(stage);
       }
@@ -83,10 +85,45 @@ export function environmentStages(
   return stages;
 }
 
-/** How far down a stage reaches: its card, the Sources band under it, and
- * whatever its runs have already placed. */
-function extent(snapshot: WorkEnvironmentSnapshot, stage: WorkStage): number {
-  let bottom = stage.place.y + stage.place.height + STAGE_DROP + SOURCES_SIZE.height;
+/** How many cards a stage's runs stack in the Sources and page columns. The
+ * count follows the same rules the two projections do, and never undercounts:
+ * the next request must clear the tallest column, not land in it. */
+function columnCards(
+  projection: WorkRuntimeProjection,
+  stage: WorkStage,
+): { sources: number; pages: number } {
+  let sources = 0;
+  let pages = 0;
+  for (const id of stage.executions) {
+    const execution = projection.executions.find((entry) => entry.id === id);
+    if (!execution || !isAgentExecution(execution)) continue;
+    const opened = new Set<string>();
+    let cited = false;
+    for (const step of execution.steps ?? []) {
+      if (step.kind.kind === "read") opened.add(step.kind.url);
+      else if (step.kind.kind === "discover") opened.add(`discover:${step.id}`);
+      if (step.kind.kind === "search" || FILE_STEPS.includes(step.kind.kind)) cited = true;
+    }
+    if (cited) sources += 1;
+    pages += opened.size;
+  }
+  return { sources, pages };
+}
+
+/** How far down a stage reaches: the tallest of its columns. */
+function extent(
+  snapshot: WorkEnvironmentSnapshot,
+  projection: WorkRuntimeProjection,
+  stage: WorkStage,
+): number {
+  const cards = columnCards(projection, stage);
+  const column = (count: number, height: number) =>
+    count ? stage.place.y + count * (height + CARD_GAP) - CARD_GAP : 0;
+  let bottom = Math.max(
+    stage.place.y + stage.place.height,
+    column(cards.sources, SOURCES_SIZE.height),
+    column(cards.pages, PAGE_SIZE.height),
+  );
   for (const element of snapshot.elements) {
     const reference = element.reference;
     if (!("execution" in reference) || !stage.executions.includes(reference.execution)) continue;

@@ -14,6 +14,9 @@ export function agentLine(execution: WorkExecutionFact): string | null {
   return null;
 }
 
+/** Steps that work inside a granted folder; each settles onto a file record. */
+export const FILE_STEPS = ["list", "read_file", "search_files", "write_file", "edit_file"];
+
 /** Whether an execution ran under the routine agent grant. */
 export function isAgentExecution(execution: WorkExecutionFact): boolean {
   return execution.spec.nodes.some((node) => node.capability.kind === "agent");

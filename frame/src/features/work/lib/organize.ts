@@ -34,13 +34,22 @@ const SIZES = {
   page: { width: 320, height: 236 },
 } as const;
 const GAP = 24;
+/** The air between two cards stacked in the same column. */
+export const CARD_GAP = GAP;
+/** The air between two columns of a stage. */
+const COLUMN_GAP = 48;
+/** The request card every stage opens with; the columns follow it rightwards. */
+export const REQUEST_SIZE = { width: 320, height: 150 } as const;
 /** One Sources card stands where a stage's cited pages were found. */
 export const SOURCES_SIZE = { width: 300, height: 208 } as const;
-/** Column origins of the agent-run flow, shared with the transient cards. */
+/** One page card, sized for the frame it keeps. */
+export const PAGE_SIZE = SIZES.page;
+/** A stage reads left to right: request, Sources, pages, subjects, result. */
 export const COLUMNS = {
-  pages: (x: number) => x + SOURCES_SIZE.width + GAP * 2,
-  subjects: (x: number) => COLUMNS.pages(x) + SIZES.page.width + GAP * 2,
-  objects: (x: number) => COLUMNS.subjects(x) + SIZES.pictured.width + GAP * 2,
+  sources: (x: number) => x + REQUEST_SIZE.width + COLUMN_GAP,
+  pages: (x: number) => COLUMNS.sources(x) + SOURCES_SIZE.width + COLUMN_GAP,
+  subjects: (x: number) => COLUMNS.pages(x) + SIZES.page.width + COLUMN_GAP,
+  objects: (x: number) => COLUMNS.subjects(x) + SIZES.pictured.width + COLUMN_GAP,
 } as const;
 
 function roots(execution: WorkExecutionFact): WorkArtifactV1[] {
@@ -159,8 +168,9 @@ function organizeReviewedRun(
     findings.find((artifact) => (artifact.data.subjects?.length ?? 0) > 0) ??
     sources.find((artifact) => (artifact.data.subjects?.length ?? 0) > 0);
   const subjects = subjectOwner ? (subjectOwner.data.subjects ?? []) : [];
+  // A reviewed run stands beside its request, not under it.
   let y = anchor.y;
-  const x0 = anchor.x;
+  const x0 = COLUMNS.sources(anchor.x);
   const subjectRefs: WorkEnvironmentReference[] = [];
   if (subjects.length) {
     subjects.forEach((_, index) => {

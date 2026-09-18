@@ -10,10 +10,10 @@ import type {
   WorkRuntimeProjection,
 } from "$shared/ipc/bindings";
 import { artifactView } from "./project-work";
-import { agentLine, isAgentExecution } from "./agent-steps";
+import { agentLine, isAgentExecution, FILE_STEPS } from "./agent-steps";
 import { subjectFacts, subjectKey, subjectsOf } from "./subjects";
-import { COLUMNS, SOURCES_SIZE } from "./organize";
-import { firstRequest, STAGE_DROP, type WorkStage } from "./project-environment-thread";
+import { CARD_GAP, COLUMNS, PAGE_SIZE, SOURCES_SIZE } from "./organize";
+import { firstRequest, type WorkStage } from "./project-environment-thread";
 import { fileFolder } from "./work-files";
 import { pageFrameUrl } from "$domain/resources";
 
@@ -24,8 +24,6 @@ const TITLE_TEXT = 512;
 const DETAIL_TEXT = 2048;
 const ROW_TEXT = 200;
 const STATUS_TEXT = 256;
-/** Steps that work inside a granted folder; each settles onto a file record. */
-const FILE_STEPS = ["list", "read_file", "search_files", "write_file", "edit_file"];
 
 function host(url: string | undefined): string {
   if (!url) return "";
@@ -496,7 +494,9 @@ export function environmentAgents(
       stage?.place ?? snapshot.view.placements.find((place) => place.element === element.id);
     const placement = (target: string) =>
       snapshot.view.placements.find((place) => place.element === target);
-    const home = anchor ? { x: anchor.x + anchor.width + 48, y: anchor.y } : undefined;
+    // The columns to the right belong to the run's own cards: the agent waits
+    // under the request it serves until it has something to stand beside.
+    const home = anchor ? { x: anchor.x, y: anchor.y + anchor.height + CARD_GAP } : undefined;
     const steps = execution.steps ?? [];
     // A cited source and a subject's picture are rows and pictures, not cards:
     // the agent never ties itself to one.
@@ -560,17 +560,18 @@ export function environmentSources(
   items: CanvasItem[];
   links: CanvasLink[];
   positions: Record<string, CanvasPosition>;
-  /** The group each cited page belongs to, so a page card joins the same stage. */
-  groups: Map<string, string>;
+  /** The Sources card of each run, so its pages hang off the same card. */
+  cards: Map<string, string>;
 } {
   const items: CanvasItem[] = [];
   const links: CanvasLink[] = [];
   const positions: Record<string, CanvasPosition> = {};
-  const groups = new Map<string, string>();
+  const cards = new Map<string, string>();
   for (const stage of stages) {
     const projection = objectives.get(stage.objective);
     if (!projection) continue;
-    const home = { x: stage.place.x, y: stage.place.y + stage.place.height + STAGE_DROP };
+    // The Sources column stands to the right of the request, at its own top.
+    const home = { x: COLUMNS.sources(stage.place.x), y: stage.place.y };
     let index = 0;
     for (const id of stage.executions) {
       const execution = projection.executions.find((entry) => entry.id === id);
@@ -626,8 +627,9 @@ export function environmentSources(
           return refusal ? { ...row, note: clipText(refusal, ROW_TEXT) } : row;
         }),
       });
-      positions[card] = { x: home.x, y: home.y + index * (SOURCES_SIZE.height + 24) };
+      positions[card] = { x: home.x, y: home.y + index * (SOURCES_SIZE.height + CARD_GAP) };
       index += 1;
+      cards.set(execution.id, card);
       links.push({
         id: `sources-of:${card}`,
         source: stage.card,
@@ -635,7 +637,6 @@ export function environmentSources(
         kind: "uses",
         label: m.work_env_relation_uses(),
       });
-      for (const row of rows) if (row.url) groups.set(row.url, card);
       // Findings and published objects hang off the stage whose pages they cite.
       for (const candidate of snapshot.elements) {
         const reference = candidate.reference;
@@ -666,127 +667,130 @@ export function environmentSources(
       }
     }
   }
-  return { items, links, positions, groups };
+  return { items, links, positions, cards };
 }
 
-/** Pages the agent opened: transient cards beside the goal that show the newest
- * frame while a step works there and keep the last one after it settles. */
+/** Pages the agent opened, one column per stage: every run of the stage keeps
+ * the last frame it recorded, and a live page still shows the live one. */
 export function environmentPages(
   snapshot: WorkEnvironmentSnapshot,
   objectives: ReadonlyMap<string, WorkRuntimeProjection>,
+  /** Every message of the thread; a run's pages stand in its stage's column. */
+  stages: readonly WorkStage[],
   pages: (objective: string) => readonly WorkPageV1[],
-  /** The Sources card each cited page came from, so a page joins its stage. */
-  groups: ReadonlyMap<string, string> = new Map(),
+  /** The Sources card of each run, so its pages hang off the same card. */
+  cards: ReadonlyMap<string, string> = new Map(),
   /** The run's current activity, so a page held for a hidden window says so. */
   activity: (objective: string) => string | undefined = () => undefined,
   /** The agent presences the scene already has; a tie to an absent one is no tie. */
   present: ReadonlySet<string> = new Set(),
-  /** The message the run serves; its pages stand beside that request. */
-  stages: readonly WorkStage[] = [],
 ): { items: CanvasItem[]; links: CanvasLink[]; positions: Record<string, CanvasPosition> } {
   const items: CanvasItem[] = [];
   const links: CanvasLink[] = [];
   const positions: Record<string, CanvasPosition> = {};
-  for (const element of snapshot.elements) {
-    if (element.reference.kind !== "objective") continue;
-    const projection = objectives.get(element.reference.objective);
-    const execution = projection?.executions.at(-1);
-    if (!projection || !execution || !isAgentExecution(execution)) continue;
-    const opened = pages(projection.work.id).filter((page) => page.execution === execution.id);
+  for (const stage of stages) {
+    const projection = objectives.get(stage.objective);
+    if (!projection) continue;
+    const recorded = pages(projection.work.id);
     const paused = activity(projection.work.id) === "paused";
-    // One card per page: every step that opened the same URL folds into it.
-    const byUrl = new Map<
-      string,
-      { steps: typeof execution.steps & object; page?: WorkPageV1; running: boolean }
-    >();
-    for (const step of execution.steps ?? []) {
-      if (step.kind.kind !== "read" && step.kind.kind !== "discover") continue;
-      const page = opened.find((page) => page.step === step.id);
-      const url = page?.url || (step.kind.kind === "read" ? step.kind.url : "");
-      if (!url) continue;
-      const entry = byUrl.get(url) ?? { steps: [], running: false };
-      entry.steps.push(step);
-      if (page?.frame && (!entry.page?.frame || page.live)) entry.page = page;
-      else entry.page ??= page;
-      entry.running ||= step.status === "running";
-      byUrl.set(url, entry);
-    }
-    if (!byUrl.size) continue;
-    const stage = stages.find((stage) => stage.executions.includes(execution.id));
-    const anchor =
-      stage?.place ?? snapshot.view.placements.find((place) => place.element === element.id);
-    const home = anchor
-      ? { x: COLUMNS.pages(anchor.x), y: anchor.y + anchor.height + STAGE_DROP }
-      : { x: COLUMNS.pages(80), y: 320 };
-    const hubs = new Map<string, string>();
-    for (const candidate of snapshot.elements) {
-      const reference = candidate.reference;
-      if (reference.kind !== "subject" || reference.execution !== execution.id) continue;
-      const artifact = execution.artifacts.find((artifact) => artifact.id === reference.artifact);
-      const subject = artifact ? subjectsOf(artifact)[reference.index] : undefined;
-      if (subject) hubs.set(subjectKey(subject), candidate.id);
-    }
-    const agent = `agent:${element.id}`;
+    const agent = `agent:${stage.element}`;
+    const home = { x: COLUMNS.pages(stage.place.x), y: stage.place.y };
     let index = 0;
-    for (const [url, entry] of byUrl) {
-      const first = entry.steps[0]!;
-      const pageHost = host(url);
-      const live = entry.running;
-      const succeeded = entry.steps.some((step) => step.status === "succeeded");
-      // Rust says why a read gave up; the card says it instead of "Failed".
-      const refused =
-        !succeeded && entry.steps.every((step) => step.status === "failed")
-          ? (entry.steps.at(-1)?.note?.trim() ?? "")
-          : "";
-      const frame = entry.page?.frame
-        ? pageFrameUrl(entry.page.attempt, entry.page.step, entry.page.frame.generation)
-        : null;
-      const id = `page:${element.id}:${first.id}`;
-      items.push({
-        id,
-        type: "page",
-        kind: m.work_env_page(),
-        title: pageHost || m.work_env_page(),
-        detail: clipText(url, DETAIL_TEXT),
-        status: live
-          ? paused
-            ? m.work_line_paused()
-            : m.work_env_page_live()
-          : succeeded
-            ? m.work_env_page_read()
-            : clipText(refused, STATUS_TEXT) || m.work_env_status_failed(),
-        page: { url, host: pageHost, frame, live },
-        ...(live || succeeded ? {} : { unavailable: true }),
-      });
-      positions[id] = { x: home.x, y: home.y + index * 260 };
-      index += 1;
-      const group = groups.get(url);
-      if (group)
-        links.push({
-          id: `sources-page:${group}:${id}`,
-          source: group,
-          target: id,
-          kind: "uses",
-          label: m.work_env_relation_uses(),
+    for (const id of stage.executions) {
+      const execution = projection.executions.find((entry) => entry.id === id);
+      if (!execution || !isAgentExecution(execution)) continue;
+      // Only the run that is still going marks its pages live; an earlier
+      // stage keeps its last frames and says nothing about now.
+      const running =
+        ["running", "cancel_requested", "approved"].includes(execution.status) &&
+        !projection.interrupted.includes(execution.id);
+      const opened = recorded.filter((page) => page.execution === execution.id);
+      // One card per page: every step that opened the same URL folds into it.
+      const byUrl = new Map<
+        string,
+        { steps: typeof execution.steps & object; page?: WorkPageV1; running: boolean }
+      >();
+      for (const step of execution.steps ?? []) {
+        if (step.kind.kind !== "read" && step.kind.kind !== "discover") continue;
+        const page = opened.find((page) => page.step === step.id);
+        const url = page?.url || (step.kind.kind === "read" ? step.kind.url : "");
+        if (!url) continue;
+        const entry = byUrl.get(url) ?? { steps: [], running: false };
+        entry.steps.push(step);
+        if (page?.frame && (!entry.page?.frame || page.live)) entry.page = page;
+        else entry.page ??= page;
+        entry.running ||= running && step.status === "running";
+        byUrl.set(url, entry);
+      }
+      if (!byUrl.size) continue;
+      const hubs = new Map<string, string>();
+      for (const candidate of snapshot.elements) {
+        const reference = candidate.reference;
+        if (reference.kind !== "subject" || reference.execution !== execution.id) continue;
+        const artifact = execution.artifacts.find((artifact) => artifact.id === reference.artifact);
+        const subject = artifact ? subjectsOf(artifact)[reference.index] : undefined;
+        if (subject) hubs.set(subjectKey(subject), candidate.id);
+      }
+      for (const [url, entry] of byUrl) {
+        const first = entry.steps[0]!;
+        const pageHost = host(url);
+        const live = entry.running;
+        const succeeded = entry.steps.some((step) => step.status === "succeeded");
+        // Rust says why a read gave up; the card says it instead of "Failed".
+        const refused =
+          !succeeded && entry.steps.every((step) => step.status === "failed")
+            ? (entry.steps.at(-1)?.note?.trim() ?? "")
+            : "";
+        const frame = entry.page?.frame
+          ? pageFrameUrl(entry.page.attempt, entry.page.step, entry.page.frame.generation)
+          : null;
+        const id = `page:${execution.id}:${first.id}`;
+        items.push({
+          id,
+          type: "page",
+          kind: m.work_env_page(),
+          title: pageHost || m.work_env_page(),
+          detail: clipText(url, DETAIL_TEXT),
+          status: live
+            ? paused
+              ? m.work_line_paused()
+              : m.work_env_page_live()
+            : succeeded
+              ? m.work_env_page_read()
+              : clipText(refused, STATUS_TEXT) || m.work_env_status_failed(),
+          page: { url, host: pageHost, frame, live },
+          ...(live || succeeded ? {} : { unavailable: true }),
         });
-      if (live && present.has(agent))
-        links.push({ id: `working:${id}`, source: agent, target: id, kind: "working" });
-      const linked = new Set<string>();
-      for (const step of entry.steps)
-        for (const artifactId of step.artifacts ?? []) {
-          const artifact = execution.artifacts.find((artifact) => artifact.id === artifactId);
-          for (const subject of artifact ? subjectsOf(artifact) : []) {
-            const hub = hubs.get(subjectKey(subject));
-            if (!hub || linked.has(hub)) continue;
-            linked.add(hub);
-            links.push({
-              id: `page-subject:${id}:${hub}`,
-              source: id,
-              target: hub,
-              kind: "supports",
-            });
+        positions[id] = { x: home.x, y: home.y + index * (PAGE_SIZE.height + CARD_GAP) };
+        index += 1;
+        const card = cards.get(execution.id);
+        if (card)
+          links.push({
+            id: `sources-page:${card}:${id}`,
+            source: card,
+            target: id,
+            kind: "uses",
+            label: m.work_env_relation_uses(),
+          });
+        if (live && present.has(agent))
+          links.push({ id: `working:${id}`, source: agent, target: id, kind: "working" });
+        const linked = new Set<string>();
+        for (const step of entry.steps)
+          for (const artifactId of step.artifacts ?? []) {
+            const artifact = execution.artifacts.find((artifact) => artifact.id === artifactId);
+            for (const subject of artifact ? subjectsOf(artifact) : []) {
+              const hub = hubs.get(subjectKey(subject));
+              if (!hub || linked.has(hub)) continue;
+              linked.add(hub);
+              links.push({
+                id: `page-subject:${id}:${hub}`,
+                source: id,
+                target: hub,
+                kind: "supports",
+              });
+            }
           }
-        }
+      }
     }
   }
   return { items, links, positions };

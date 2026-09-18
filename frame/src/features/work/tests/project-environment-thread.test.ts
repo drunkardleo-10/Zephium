@@ -43,7 +43,7 @@ test("every message keeps its own request card, laid out down the roadmap", () =
   expect(stages.map((stage) => [stage.card, stage.request, stage.place.y])).toEqual([
     ["objective-card", "Compare quiet keyboards", 0],
     ["request:objective-card:continuation-1", "Show me the quietest one", 732],
-    ["request:objective-card:continuation-2", "And the wireless ones", 1210],
+    ["request:objective-card:continuation-2", "And the wireless ones", 954],
   ]);
   // The request card the work began with keeps the first sentence, not the last.
   expect(environmentItems(scene, [], [], objectives)[0]?.title).toBe("Compare quiet keyboards");
@@ -58,6 +58,32 @@ test("every message keeps its own request card, laid out down the roadmap", () =
     ["request:objective-card:continuation-1", "request:objective-card:continuation-2"],
   ]);
   expect(requests.positions["request:objective-card:continuation-1"]).toEqual({ x: 0, y: 732 });
+});
+
+test("the next request clears the tallest column of the stage above it", () => {
+  const { snapshot: scene, objectives } = thread();
+  const state = objectives.get("objective")!;
+  const first = state.executions[0]!;
+  first.spec.nodes[0]!.capability = {
+    kind: "agent",
+    grant: {
+      provider: "open_ai",
+      model: "gpt-5.6-luna",
+      max_turns: 10,
+      max_steps: 32,
+      browse_hops: 4,
+    },
+  };
+  // Four pages stand 260 apart: the column reaches further than the result.
+  first.steps = Array.from({ length: 4 }, (_, index) => ({
+    id: `read-${index}`,
+    turn: 1,
+    kind: { kind: "read" as const, url: `https://a.example/${index}` },
+    status: "succeeded" as const,
+  }));
+  const stages = environmentStages(scene, objectives);
+  expect(stages[1]!.place.y).toBe(1088);
+  expect(stages[1]!.place.x).toBe(stages[0]!.place.x);
 });
 
 test("running the same sentence again continues the stage it began", () => {

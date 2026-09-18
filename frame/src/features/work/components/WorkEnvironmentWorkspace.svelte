@@ -545,18 +545,18 @@
   const sources = $derived(
     snapshot
       ? environmentSources(snapshot, context.objectives, stages)
-      : { items: [], links: [], positions: {}, groups: new Map<string, string>() },
+      : { items: [], links: [], positions: {}, cards: new Map<string, string>() },
   );
   const pages = $derived(
     snapshot
       ? environmentPages(
           snapshot,
           context.objectives,
+          stages,
           (objective) => (objectiveSession?.selected === objective ? objectiveSession.pages : []),
-          sources.groups,
+          sources.cards,
           signalOf,
           new Set(agents.items.map((item) => item.id)),
-          stages,
         )
       : { items: [], links: [], positions: {} },
   );
@@ -615,7 +615,8 @@
       const stage = stages.find((stage) => stage.executions.includes(execution.id));
       const place =
         stage?.place ?? current.view.placements.find((place) => place.element === element.id);
-      const anchor = place ? { x: place.x, y: place.y + place.height + 48 } : { x: 80, y: 320 };
+      // What a run places stands beside its request, in the stage's columns.
+      const anchor = place ? { x: place.x, y: place.y } : { x: 80, y: 120 };
       void untrack(() =>
         organize(projection, execution, anchor).finally(() => organizing.delete(execution.id)),
       );

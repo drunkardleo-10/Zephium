@@ -319,15 +319,24 @@ test("a run's searches become one Sources card the request and its pages join", 
   expect(sources.links.map((link) => [link.source, link.target])).toEqual([
     [objectiveElement.id, group.id],
   ]);
-  expect(sources.positions[group.id]).toEqual({ x: 0, y: 198 });
-  expect(sources.groups.get("https://a.example/review")).toBe(group.id);
-  // The page the run read joins the stage that cited it, not a source card.
-  const pages = environmentPages(withSource, objectives, () => [], sources.groups);
+  // The Sources card stands to the right of the request, level with it.
+  expect(sources.positions[group.id]).toEqual({ x: 368, y: 0 });
+  expect(sources.cards.get("execution")).toBe(group.id);
+  // The page the run read hangs off the Sources card of the same run.
+  const pages = environmentPages(
+    withSource,
+    objectives,
+    environmentStages(withSource, objectives),
+    () => [],
+    sources.cards,
+  );
+  expect(pages.positions[pages.items[0]!.id]).toEqual({ x: 716, y: 0 });
   expect(pages.links.some((link) => link.source === group.id)).toBe(true);
 });
 
 test("browser steps become page cards with frames, working links and subject links", async () => {
   const { environmentPages } = await import("../lib/project-environment");
+  const { environmentStages } = await import("../lib/project-environment-thread");
   const state = structuredClone(projection);
   const execution = state.executions[0]!;
   execution.status = "running";
@@ -392,9 +401,11 @@ test("browser steps become page cards with frames, working links and subject lin
       },
     ],
   };
+  const objectives = new Map([["objective", state]]);
   const pages = environmentPages(
     withHub,
-    new Map([["objective", state]]),
+    objectives,
+    environmentStages(withHub, objectives),
     () => [
       {
         execution: "execution",
@@ -410,22 +421,22 @@ test("browser steps become page cards with frames, working links and subject lin
     new Set([`agent:${objectiveElement.id}`]),
   );
   expect(pages.items.map((item) => [item.id, item.page?.host, item.page?.live])).toEqual([
-    [`page:${objectiveElement.id}:read-1`, "shop.example", false],
-    [`page:${objectiveElement.id}:read-2`, "shop.example", true],
+    ["page:execution:read-1", "shop.example", false],
+    ["page:execution:read-2", "shop.example", true],
   ]);
   expect(pages.items[1]!.page?.frame).toMatch(/frame\/attempt\/read-2\/3$/);
   expect(pages.items[0]!.page?.frame).toBeNull();
   expect(pages.links).toEqual([
     {
-      id: `page-subject:page:${objectiveElement.id}:read-1:hub`,
-      source: `page:${objectiveElement.id}:read-1`,
+      id: "page-subject:page:execution:read-1:hub",
+      source: "page:execution:read-1",
       target: "hub",
       kind: "supports",
     },
     {
-      id: `working:page:${objectiveElement.id}:read-2`,
+      id: "working:page:execution:read-2",
       source: `agent:${objectiveElement.id}`,
-      target: `page:${objectiveElement.id}:read-2`,
+      target: "page:execution:read-2",
       kind: "working",
     },
   ]);
@@ -504,7 +515,7 @@ test("file steps join their run's Sources card as file rows the lift can open", 
   ]);
   // The row opens what the run recorded, not a page the pane could load.
   expect(fileEvidence(objectives, "record")?.text).toBe("Plan for the week");
-  expect(sources.groups.size).toBe(0);
+  expect(sources.cards.size).toBe(1);
 });
 
 test("a read that gave up says why, on its page card and on the row that cites it", async () => {
@@ -577,6 +588,82 @@ test("a read that gave up says why, on its page card and on the row that cites i
   const scene = { ...snapshot, elements: snapshot.elements.slice(0, 1) };
   const sources = environmentSources(scene, objectives, environmentStages(scene, objectives));
   expect(sources.items[0]?.sources?.[0]?.note).toBe("The page asked for a human check");
-  const page = environmentPages(scene, objectives, () => []).items[0];
+  const page = environmentPages(scene, objectives, environmentStages(scene, objectives), () => [])
+    .items[0];
   expect([page?.status, page?.unavailable]).toEqual(["The page asked for a human check", true]);
+});
+
+test("every stage keeps the pages its own run read", async () => {
+  const { environmentPages } = await import("../lib/project-environment");
+  const { environmentStages } = await import("../lib/project-environment-thread");
+  const state = structuredClone(projection);
+  const first = state.executions[0]!;
+  first.spec.request = "Compare quiet keyboards";
+  first.spec.nodes[0]!.capability = {
+    kind: "agent",
+    grant: {
+      provider: "open_ai",
+      model: "gpt-5.6-luna",
+      max_turns: 10,
+      max_steps: 32,
+      browse_hops: 4,
+    },
+  };
+  first.artifacts = [];
+  // A step the run never finished must not make a settled stage look alive.
+  first.steps = [
+    {
+      id: "read",
+      turn: 1,
+      kind: { kind: "read", url: "https://a.example/one" },
+      status: "running",
+    },
+  ];
+  const second = structuredClone(first);
+  second.id = "follow-up";
+  second.status = "running";
+  second.spec.request = "Sort these sets by price per piece";
+  second.steps = [
+    {
+      id: "read",
+      turn: 1,
+      kind: { kind: "read", url: "https://b.example/two" },
+      status: "running",
+    },
+  ];
+  state.executions = [first, second];
+  const scene = {
+    ...snapshot,
+    elements: snapshot.elements.slice(0, 1),
+    view: {
+      ...snapshot.view,
+      placements: [{ element: "objective-card", x: 40, y: 60, width: 320, height: 150 }],
+    },
+  };
+  const objectives = new Map([["objective", state]]);
+  const stages = environmentStages(scene, objectives);
+  const pages = environmentPages(scene, objectives, stages, () => [
+    {
+      execution: "follow-up",
+      attempt: "attempt",
+      step: "read",
+      url: "https://b.example/two",
+      live: true,
+      frame: { generation: 2, width: 640, height: 400 },
+    },
+  ]);
+  expect(pages.items.map((item) => [item.id, item.page?.host, item.page?.live])).toEqual([
+    ["page:execution:read", "a.example", false],
+    ["page:follow-up:read", "b.example", true],
+  ]);
+  // Each card stands in the page column of the stage its run served.
+  expect(pages.positions["page:execution:read"]).toEqual({
+    x: 756,
+    y: stages[0]!.place.y,
+  });
+  expect(pages.positions["page:follow-up:read"]).toEqual({
+    x: 756,
+    y: stages[1]!.place.y,
+  });
+  expect(stages[1]!.place.y).toBeGreaterThan(stages[0]!.place.y);
 });
