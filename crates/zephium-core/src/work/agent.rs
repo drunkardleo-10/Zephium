@@ -326,56 +326,65 @@ impl WorkAgentTurnDisclosure {
         }
         Ok(self)
     }
-    pub fn resolve(&self, output: WorkAgentTurnOutput) -> Result<WorkAgentTurn, WorkError> {
+    /// Admits what a turn can do and says what it dropped. Only a turn that
+    /// cannot be understood at all is refused; everything else is clipped or
+    /// dropped with a notice the model reads next turn.
+    pub fn resolve(
+        &self,
+        output: WorkAgentTurnOutput,
+    ) -> Result<WorkAgentTurn, WorkAgentTurnRefusal> {
         let bytes = serde_json::to_vec(&output)
-            .map_err(|_| WorkError::Invalid)?
+            .map_err(|_| WorkAgentTurnRefusal::Oversized)?
             .len();
-        if bytes > MAX_SYNTHESIS_OUTPUT_BYTES
-            || output.artifacts.len() > MAX_AGENT_ARTIFACTS_PER_TURN
-            || output.fetch.len() > MAX_AGENT_FETCHES_PER_TURN
-            || (output.finish && (output.ask.is_some() || !output.fetch.is_empty()))
-            || (!output.finish
-                && output.ask.is_none()
-                && output.fetch.is_empty()
-                && output.artifacts.is_empty())
-        {
-            return Err(WorkError::Invalid);
+        if bytes > MAX_SYNTHESIS_OUTPUT_BYTES {
+            return Err(WorkAgentTurnRefusal::Oversized);
         }
-        let say = match output.say {
-            Some(say) if !say.trim().is_empty() => {
-                validate_text(&say, MAX_WORK_STEP_NOTE_BYTES)?;
-                Some(say)
-            }
-            _ => None,
-        };
+        let mut notices = Vec::new();
+        let say = output
+            .say
+            .map(|say| say.trim().to_owned())
+            .filter(|say| !say.is_empty() && validate_text(say, MAX_SYNTHESIS_OUTPUT_BYTES).is_ok())
+            .map(|say| clip_text(&say, MAX_WORK_STEP_NOTE_BYTES));
         // An uncited or malformed object is dropped on its own; the turn's
         // other operations still run and the next turn shows what landed.
         let proposed = output.artifacts.len();
+        if proposed > MAX_AGENT_ARTIFACTS_PER_TURN {
+            notices.push(format!(
+                "Only the first {MAX_AGENT_ARTIFACTS_PER_TURN} objects of a turn are placed; {} were dropped. Propose them next turn.",
+                proposed - MAX_AGENT_ARTIFACTS_PER_TURN
+            ));
+        }
         let mut artifacts = Vec::new();
         let mut refusals = Vec::new();
-        for artifact in output.artifacts {
+        for artifact in output
+            .artifacts
+            .into_iter()
+            .take(MAX_AGENT_ARTIFACTS_PER_TURN)
+        {
             match self.resolve_artifact(artifact) {
                 Ok(artifact) => artifacts.push(artifact),
                 Err(refusal) => refusals.push(refusal),
             }
         }
         let dropped = proposed - artifacts.len();
-        if artifacts.is_empty()
-            && proposed > 0
-            && !output.finish
-            && output.ask.is_none()
-            && output.fetch.is_empty()
-        {
-            return Err(WorkError::Invalid);
-        }
         let mut fetch = Vec::new();
         for operation in output.fetch {
+            if fetch.len() == MAX_AGENT_FETCHES_PER_TURN {
+                notices.push(format!(
+                    "Only {MAX_AGENT_FETCHES_PER_TURN} fetches run per turn; the rest were dropped. Request them next turn."
+                ));
+                break;
+            }
             let kind = match operation {
                 WorkAgentFetch::Search { query } => WorkStepKindV1::Search { query },
                 WorkAgentFetch::Read { url, collection } => {
-                    if !self.urls.contains(&url) && !self.context.requested_pages.contains(&url) {
-                        return Err(WorkError::Invalid);
-                    }
+                    let Some(url) = self.readable(&url) else {
+                        notices.push(format!(
+                            "Read of {} was refused: only a source url, a link_destination or a requested page can be read. Search for it, or read a listed page.",
+                            clip_text(&url, 160)
+                        ));
+                        continue;
+                    };
                     WorkStepKindV1::Read { url, collection }
                 }
                 WorkAgentFetch::Discover { query, collection } => {
@@ -408,36 +417,68 @@ impl WorkAgentTurnDisclosure {
                 evidence: None,
                 note: None,
             };
-            probe.validate()?;
+            if probe.validate().is_err() {
+                notices.push(
+                    "A fetch was refused: its arguments were empty, too long or malformed (queries and paths have limits; a records schema needs distinct column names)."
+                        .into(),
+                );
+                continue;
+            }
             if fetch.contains(&kind) {
-                return Err(WorkError::Invalid);
+                continue;
             }
             fetch.push(kind);
         }
-        let ask = match output.ask {
-            Some(question) => {
-                let probe = WorkStepFact {
-                    id: WorkStepId::from(1),
-                    turn: 1,
-                    kind: WorkStepKindV1::Ask {
-                        prompt: question.prompt.clone(),
-                        options: question.options.clone(),
-                        answer: None,
-                    },
-                    status: WorkStepStatus::Running,
-                    usage: None,
-                    artifacts: vec![],
-                    evidence: None,
-                    note: None,
-                };
-                probe.validate()?;
-                Some(question)
+        let ask = output.ask.and_then(|question| {
+            let prompt = clip_text(question.prompt.trim(), MAX_WORK_TEXT_BYTES);
+            let mut options: Vec<String> = Vec::new();
+            for option in question.options {
+                let option = clip_text(option.trim(), 512);
+                if option.is_empty() || options.contains(&option) || options.len() == 8 {
+                    continue;
+                }
+                options.push(option);
             }
-            None => None,
-        };
+            let probe = WorkStepFact {
+                id: WorkStepId::from(1),
+                turn: 1,
+                kind: WorkStepKindV1::Ask {
+                    prompt: prompt.clone(),
+                    options: options.clone(),
+                    answer: None,
+                },
+                status: WorkStepStatus::Running,
+                usage: None,
+                artifacts: vec![],
+                evidence: None,
+                note: None,
+            };
+            if probe.validate().is_err() {
+                notices.push("The question was dropped: it needs a prompt.".into());
+                return None;
+            }
+            Some(WorkAgentQuestion { prompt, options })
+        });
+        let mut finish = output.finish;
+        if finish && (ask.is_some() || !fetch.is_empty()) {
+            finish = false;
+            notices.push(
+                "Finish was ignored because the turn also fetched or asked; finish in a turn of its own once the canvas answers the request."
+                    .into(),
+            );
+        }
+        if !finish
+            && ask.is_none()
+            && fetch.is_empty()
+            && artifacts.is_empty()
+            && proposed == 0
+            && notices.is_empty()
+        {
+            return Err(WorkAgentTurnRefusal::Empty);
+        }
         // Follow-ups ride only on a finishing turn; malformed ones are dropped.
         let mut followups: Vec<String> = Vec::new();
-        if output.finish {
+        if finish {
             for followup in output.followups {
                 let followup = followup.trim().to_owned();
                 if followups.len() == MAX_WORK_FOLLOWUPS
@@ -457,10 +498,60 @@ impl WorkAgentTurnDisclosure {
             refusals,
             fetch,
             ask,
-            finish: output.finish,
+            finish,
             followups,
+            notices,
         })
     }
+    /// A page the agent may open: a listed source, an observed link
+    /// destination, or a page the person named. A trailing slash or fragment
+    /// does not make a listed page unknown.
+    fn readable(&self, url: &str) -> Option<String> {
+        let listed = |candidate: &String| candidate == url || same_page(candidate, url);
+        self.urls
+            .iter()
+            .chain(self.context.requested_pages.iter())
+            .find(|candidate| listed(candidate))
+            .cloned()
+    }
+}
+
+/// Why a whole turn was refused; the loop tells the model in a notice.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkAgentTurnRefusal {
+    /// The turn did not fetch, ask, place an object or finish.
+    Empty,
+    /// The turn exceeded the output size the application admits.
+    Oversized,
+}
+impl WorkAgentTurnRefusal {
+    pub fn notice(self) -> &'static str {
+        match self {
+            Self::Empty => "The last turn did nothing: every turn must fetch, ask, place an object, or finish. Say is only a line for the person.",
+            Self::Oversized => "The last turn was too large to admit. Place fewer or smaller objects per turn and keep cells and claims short.",
+        }
+    }
+}
+
+/// Truncates at a character boundary, marking the cut with an ellipsis.
+pub fn clip_text(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    let keep = max.saturating_sub(3);
+    let mut end = keep;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\u{2026}", &text[..end])
+}
+
+fn same_page(listed: &str, url: &str) -> bool {
+    let strip = |value: &str| {
+        let value = value.split('#').next().unwrap_or(value);
+        value.strip_suffix('/').unwrap_or(value).to_owned()
+    };
+    strip(listed) == strip(url)
 }
 
 fn requested_pages(objective: &str) -> Vec<String> {
@@ -814,6 +905,8 @@ pub struct WorkAgentTurn {
     pub ask: Option<WorkAgentQuestion>,
     pub finish: bool,
     pub followups: Vec<String>,
+    /// What the application clipped or dropped; shown to the model next turn.
+    pub notices: Vec<String>,
 }
 pub struct WorkAgentTurnResult {
     pub output: WorkAgentTurnOutput,

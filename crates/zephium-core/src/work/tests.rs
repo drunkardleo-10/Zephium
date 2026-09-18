@@ -59,9 +59,14 @@ fn native_link_handoff_admits_exact_observed_targets_without_promoting_prose() {
         Some(target)
     );
     assert!(disclosed.resolve(read(target)).is_ok());
-    assert!(disclosed
+    // An unlisted page is dropped with a notice; the turn itself stands.
+    let unlisted = disclosed
         .resolve(read("https://shop.example.test/products/42"))
-        .is_err());
+        .unwrap();
+    assert!(unlisted.fetch.is_empty() && unlisted.notices.len() == 1);
+    assert!(disclosed
+        .resolve(read(&format!("{target}/#details")))
+        .is_ok_and(|turn| turn.fetch.len() == 1));
     preview.truncated = true;
     assert!(disclose(&preview).is_err());
     preview.truncated = false;
@@ -69,7 +74,10 @@ fn native_link_handoff_admits_exact_observed_targets_without_promoting_prose() {
     assert!(disclose(&preview).is_err());
     preview.link_destination = None;
     preview.role = "paragraph".into();
-    assert!(disclose(&preview).unwrap().resolve(read(target)).is_err());
+    assert!(disclose(&preview)
+        .unwrap()
+        .resolve(read(target))
+        .is_ok_and(|turn| turn.fetch.is_empty()));
     let legacy = serde_json::to_value(&preview).unwrap();
     assert!(legacy.get("link_destination").is_none());
     assert_eq!(
@@ -995,54 +1003,59 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
     let WorkAgentFetch::Read { collection, .. } = collect else {
         panic!()
     };
-    assert!(disclosure
+    let unseen = disclosure
         .resolve(output(
             vec![WorkAgentFetch::Read {
                 url: "https://unseen.example/".into(),
-                collection
-            }],
-            None,
-            false
-        ))
-        .is_err());
-    assert!(disclosure
-        .resolve(output(
-            vec![WorkAgentFetch::Read {
-                url: "https://example.test/unseen".into(),
-                collection: None,
+                collection,
             }],
             None,
             false,
         ))
-        .is_err());
-    assert!(disclosure
+        .unwrap();
+    assert!(unseen.fetch.is_empty() && unseen.artifacts.len() == 1 && unseen.notices.len() == 1);
+    // Finish yields to a fetch in the same turn; the model is told.
+    let fetching = disclosure
         .resolve(output(
             vec![WorkAgentFetch::Search {
-                query: "more".into()
+                query: "more".into(),
             }],
             None,
             true,
         ))
-        .is_err());
+        .unwrap();
+    assert!(!fetching.finish && fetching.fetch.len() == 1 && fetching.notices.len() == 1);
     // An uncited object is dropped on its own; a turn made only of dropped
-    // objects is refused.
+    // objects is admitted idle so its refusal reaches the model.
     let mut uncited = output(vec![], None, true);
     uncited.artifacts[0].evidence.clear();
     let finished = disclosure.resolve(uncited).unwrap();
     assert!(finished.artifacts.is_empty() && finished.finish && finished.dropped == 1);
     let mut only_uncited = output(vec![], None, false);
     only_uncited.artifacts[0].evidence.clear();
-    assert!(disclosure.resolve(only_uncited).is_err());
-    assert!(disclosure
-        .resolve(WorkAgentTurnOutput {
-            say: None,
-            artifacts: vec![],
-            fetch: vec![],
-            ask: None,
-            finish: false,
-            followups: vec![],
-        })
-        .is_err());
+    let idle = disclosure.resolve(only_uncited).unwrap();
+    assert!(idle.artifacts.is_empty() && idle.refusals.len() == 1 && idle.fetch.is_empty());
+    assert_eq!(
+        disclosure
+            .resolve(WorkAgentTurnOutput {
+                say: Some("x".repeat(600)),
+                artifacts: vec![],
+                fetch: vec![],
+                ask: None,
+                finish: false,
+                followups: vec![],
+            })
+            .err(),
+        Some(WorkAgentTurnRefusal::Empty)
+    );
+    let mut long_say = output(vec![], None, true);
+    long_say.say = Some("x".repeat(600));
+    let long = disclosure
+        .resolve(long_say)
+        .map(|turn| turn.say.unwrap())
+        .unwrap();
+    assert!(long.len() <= MAX_WORK_STEP_NOTE_BYTES);
+    assert_eq!(clip_text("héllo wörld", 8), "héll\u{2026}");
 }
 
 #[test]
