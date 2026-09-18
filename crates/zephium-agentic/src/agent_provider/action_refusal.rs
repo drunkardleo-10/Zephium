@@ -20,8 +20,10 @@ pub struct AgentProviderActionRefusalKey {
     pub(super) error: SemanticActionBindingError,
 }
 
+/// The one resolvable target of a proposal, kept so a refusal decided after
+/// binding still carries the exact key that stops repeated retries.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct AgentProviderActionRefusalContext {
+pub struct AgentProviderActionRefusalContext {
     observation: SemanticObservationId,
     generation: SemanticObservationGeneration,
     kind: SemanticActionKind,
@@ -45,8 +47,13 @@ impl AgentProviderActionRefusalContext {
 /// Binding either produces an unapproved batch or proves no action was admitted.
 #[must_use]
 pub enum AgentProviderActionResolution {
-    /// Bound references still require preparation and independent effect policy.
-    Bound(SemanticActionBatch, AgentProviderContinuation),
+    /// Bound references still require preparation and independent effect
+    /// policy; the context keys a refusal the host may still decide.
+    Bound(
+        SemanticActionBatch,
+        AgentProviderContinuation,
+        Option<AgentProviderActionRefusalContext>,
+    ),
     /// A correctable model proposal failed before preparation or native dispatch.
     Refused(AgentProviderActionRefusal),
 }
@@ -183,7 +190,11 @@ impl super::super::AgentProviderSettledToolTurn {
                         },
                     ));
                 }
-                Ok(AgentProviderActionResolution::Bound(batch, continuation))
+                Ok(AgentProviderActionResolution::Bound(
+                    batch,
+                    continuation,
+                    refusal_context,
+                ))
             }
             Err(
                 error @ (SemanticActionBindingError::Reference(
@@ -212,6 +223,19 @@ pub struct AgentProviderActionRefusal {
 }
 
 impl AgentProviderActionRefusal {
+    /// A bound action the host declines before any permit or dispatch: the
+    /// continuation proves nothing was issued, and the model hears why.
+    pub fn unissued(
+        continuation: AgentProviderContinuation,
+        error: SemanticActionBindingError,
+        context: Option<AgentProviderActionRefusalContext>,
+    ) -> Self {
+        Self {
+            continuation,
+            error,
+            context,
+        }
+    }
     /// Content-free rejection reason for auditing.
     pub const fn reason(&self) -> SemanticActionBindingError {
         self.error
@@ -259,6 +283,18 @@ impl AgentProviderActionRefusal {
             SemanticActionBindingError::TargetIncomplete => (
                 "target_incomplete",
                 "Nothing executed. The supplied observation omits fields needed to prepare this target. Capture snapshot(subtree) of the target or its containing dialog or section, then use the fresh refs and advertised operations. Repeating the action against this unchanged observation cannot succeed. You can also read or extract the available evidence without acting.",
+            ),
+            SemanticActionBindingError::UnsupportedVerification => (
+                "verification_not_supported",
+                "Nothing executed. This host verifies only in-page outcomes (page_dialog_closed, selected, expanded, scroll_position_changed) with wait=immediate or a mutation-quiet wait; it cannot verify navigation or dialogs. Do not click links or submit forms here: other pages are separate assignments the coordinator opens from cited link destinations. Inspect, scroll, dismiss, or extract what this page already shows.",
+            ),
+            SemanticActionBindingError::AssignmentDenied => (
+                "outside_assignment",
+                "Nothing executed. This reading assignment permits only dismissing a notice, choosing a tab, expanding a disclosure, or scrolling, each with its supported verification. Links, forms, purchases and account changes are outside it. Inspect or extract the evidence this page already shows; cite link destinations for the coordinator instead of following them.",
+            ),
+            SemanticActionBindingError::BudgetExhausted => (
+                "budget_exhausted",
+                "Nothing executed. The operation budget for this page cannot cover another action and its settlement. Extract now from the current observation; report what is missing rather than acting further.",
             ),
             _ => return Err(AgentProviderContinuationError::ToolKind),
         };

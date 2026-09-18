@@ -2257,6 +2257,15 @@ pub enum SemanticActionBindingError {
     /// Externally consequential effect classes require one verified action at a time.
     #[error("semantic effect class permits only one action per batch")]
     EffectBatchLimit,
+    /// The declared verification or wait needs evidence this host cannot supply.
+    #[error("semantic action verification is not supported by this host")]
+    UnsupportedVerification,
+    /// The trusted task's own policy does not permit this action in this assignment.
+    #[error("semantic action is outside the assignment")]
+    AssignmentDenied,
+    /// The run's operation budget cannot cover another action and its settlement.
+    #[error("semantic action budget is exhausted")]
+    BudgetExhausted,
 }
 
 /// Typed structural refusal before backend visibility/occlusion revalidation.

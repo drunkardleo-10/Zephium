@@ -98,9 +98,13 @@ fn open_objective_interleaves_verified_local_actions_and_navigation_in_both_orde
 fn open_objective_corrects_unissued_action_and_bounds_repeated_invalid_proposals() {
     let _serial = lock(&SERIAL);
     for repeat in [false, true] {
-        for effect_mismatch in [false, true] {
+        for refusal in [
+            ActionRefusal::OperationDenied,
+            ActionRefusal::EffectMismatch,
+            ActionRefusal::UnsupportedWait,
+        ] {
             provider_fixture(ProviderFault::Navigation(
-                NavigationFault::DiscoveryActionRefusal(repeat, effect_mismatch),
+                NavigationFault::DiscoveryActionRefusal(repeat, refusal),
             ));
         }
     }
@@ -295,11 +299,19 @@ impl TerraControllerClock for NavigationClock {
     }
 }
 
+/// How the fixture's first action proposal gets refused before dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ActionRefusal {
+    OperationDenied,
+    EffectMismatch,
+    /// A wait this host cannot evidence; the model is told and continues.
+    UnsupportedWait,
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum NavigationFault {
     Discovery,
     DiscoveryAction(bool),
-    DiscoveryActionRefusal(bool, bool),
+    DiscoveryActionRefusal(bool, ActionRefusal),
     DiscoveryBudget(u8, bool, u32),
     DiscoveryEvidence(bool),
     DiscoveryScopeRefusal(u8),
@@ -444,14 +456,19 @@ impl NavigationFault {
                 .replace("Arrival certificate", "Departure certificate");
         }
 
-        if let Self::DiscoveryActionRefusal(repeat, effect_mismatch) = self {
+        if let Self::DiscoveryActionRefusal(repeat, refusal) = self {
             if turn == 1 || repeat {
-                return if effect_mismatch {
-                    tool_stream(turn, true)
+                return match refusal {
+                    ActionRefusal::EffectMismatch => tool_stream(turn, true)
                         .replace("@a2", "@a3")
-                        .replace("local_write", "read")
-                } else {
-                    tool_stream(turn, true).replace("@a2", "@a1")
+                        .replace("local_write", "read"),
+                    ActionRefusal::OperationDenied => tool_stream(turn, true).replace("@a2", "@a1"),
+                    ActionRefusal::UnsupportedWait => tool_stream(turn, true)
+                        .replace("@a2", "@a3")
+                        .replace(
+                            r#"\"wait\":{\"kind\":\"immediate\"}"#,
+                            r#"\"wait\":{\"kind\":\"target_state\",\"state\":\"focused\",\"present\":true}"#,
+                        ),
                 };
             }
             let phase = turn - 1;
@@ -679,7 +696,7 @@ impl NavigationFault {
             return;
         }
 
-        if let Self::DiscoveryActionRefusal(repeat, effect_mismatch) = self {
+        if let Self::DiscoveryActionRefusal(repeat, refusal) = self {
             if turns == 1 || (repeat && turns > 0) {
                 let body: serde_json::Value = serde_json::from_slice(bytes).unwrap();
                 let result = body["input"]
@@ -693,13 +710,13 @@ impl NavigationFault {
                     serde_json::from_str(result["output"].as_str().unwrap()).unwrap();
                 assert_eq!(
                     error["code"],
-                    if effect_mismatch {
-                        "task_effect_mismatch"
-                    } else {
-                        "operation_not_supported"
+                    match refusal {
+                        ActionRefusal::EffectMismatch => "task_effect_mismatch",
+                        ActionRefusal::OperationDenied => "operation_not_supported",
+                        ActionRefusal::UnsupportedWait => "verification_not_supported",
                     }
                 );
-                if effect_mismatch {
+                if refusal == ActionRefusal::EffectMismatch {
                     assert_eq!(error["required_effect"], "local_write");
                     assert_eq!(error["rejected"]["target"], "@a3");
                 }

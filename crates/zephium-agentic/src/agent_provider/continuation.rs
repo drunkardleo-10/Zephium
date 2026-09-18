@@ -45,8 +45,8 @@ mod observation_checkpoint;
 #[cfg(any(test, feature = "provider-transport"))]
 use super::{AgentCommittedProviderInput, AgentProviderInputEvidence};
 pub use action_refusal::{
-    AgentProviderActionRefusal, AgentProviderActionRefusalKey, AgentProviderActionResolution,
-    AgentProviderActionResolutionError,
+    AgentProviderActionRefusal, AgentProviderActionRefusalContext, AgentProviderActionRefusalKey,
+    AgentProviderActionResolution, AgentProviderActionResolutionError,
 };
 pub(super) use observation_checkpoint::AgentInspectionProgress;
 pub use observation_checkpoint::{

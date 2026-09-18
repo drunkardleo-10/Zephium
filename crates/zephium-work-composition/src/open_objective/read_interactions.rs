@@ -279,7 +279,7 @@ impl AgentWorkLocalActionPolicy for ReadingInteractionPolicy {
             _ => false,
         };
         if !permitted || action.effect() != SemanticEffectClass::Read {
-            return Err(AgentWorkFailure::Contract);
+            return Err(AgentWorkFailure::ActionDenied);
         }
         Ok(AgentEffectAssessment::new(
             action,

@@ -81,11 +81,23 @@ pub struct AgentBrowserActionProposal {
     action: SemanticPreparedAction,
     continuation: AgentProviderContinuation,
     batch: SemanticActionBatchExecution,
+    refusal_context: Option<AgentProviderActionRefusalContext>,
 }
 
 pub(crate) enum AgentBrowserActionBinding {
     Prepared(Box<AgentBrowserActionProposal>),
     Refused(Box<AgentProviderActionRefusal>),
+}
+
+impl AgentBrowserActionProposal {
+    /// Declines a bound action before any permit: the continuation carries
+    /// the refusal back to the model and nothing was issued.
+    pub(crate) fn into_refusal(
+        self,
+        error: SemanticActionBindingError,
+    ) -> AgentProviderActionRefusal {
+        AgentProviderActionRefusal::unissued(self.continuation, error, self.refusal_context)
+    }
 }
 
 /// Original refused proposal, including its non-replayable continuation. Only
@@ -120,18 +132,21 @@ impl AgentBrowserActionProposal {
         if actions.actions().len() != 1 {
             return Err(AgentBrowserActionError::ActionCount);
         }
-        let (batch, continuation) = match turn.resolve_action(batch, observation, frames, config) {
-            Ok(AgentProviderActionResolution::Bound(batch, continuation)) => (batch, continuation),
-            Ok(AgentProviderActionResolution::Refused(refusal)) => {
-                return Ok(AgentBrowserActionBinding::Refused(Box::new(refusal)));
-            }
-            Err(AgentProviderActionResolutionError::Binding(error)) => {
-                return Err(AgentBrowserActionError::Binding(error));
-            }
-            Err(AgentProviderActionResolutionError::Continuation(_)) => {
-                return Err(AgentBrowserActionError::State);
-            }
-        };
+        let (batch, continuation, context) =
+            match turn.resolve_action(batch, observation, frames, config) {
+                Ok(AgentProviderActionResolution::Bound(batch, continuation, context)) => {
+                    (batch, continuation, context)
+                }
+                Ok(AgentProviderActionResolution::Refused(refusal)) => {
+                    return Ok(AgentBrowserActionBinding::Refused(Box::new(refusal)));
+                }
+                Err(AgentProviderActionResolutionError::Binding(error)) => {
+                    return Err(AgentBrowserActionError::Binding(error));
+                }
+                Err(AgentProviderActionResolutionError::Continuation(_)) => {
+                    return Err(AgentBrowserActionError::State);
+                }
+            };
         let bound = batch
             .actions()
             .first()
@@ -144,25 +159,29 @@ impl AgentBrowserActionProposal {
         let action = bound
             .prepare(snapshot)
             .map_err(AgentBrowserActionError::Checkpoint)?;
-        if !AGENT_BROWSER_SNAPSHOT_ACTION_KINDS.contains(&action.kind()) {
-            return Err(AgentBrowserActionError::UnsupportedInteraction);
+        // This vertical admits only independently snapshot-verifiable effects.
+        // Native navigation/dialog evidence needs its own host adapter; the
+        // model is told so and chooses again, nothing having been issued.
+        let unsupported = !AGENT_BROWSER_SNAPSHOT_ACTION_KINDS.contains(&action.kind())
+            || matches!(
+                action.verification(),
+                SemanticVerification::NavigationCommitted | SemanticVerification::Dialog(_)
+            )
+            || !matches!(
+                action.wait(),
+                SemanticWaitCondition::Immediate | SemanticWaitCondition::MutationQuiet(_)
+            );
+        if unsupported {
+            return Ok(AgentBrowserActionBinding::Refused(Box::new(
+                AgentProviderActionRefusal::unissued(
+                    continuation,
+                    SemanticActionBindingError::UnsupportedVerification,
+                    context,
+                ),
+            )));
         }
         let batch =
             SemanticActionBatchExecution::new(&batch).map_err(AgentBrowserActionError::Batch)?;
-        // This vertical admits only independently snapshot-verifiable effects.
-        // Native navigation/dialog evidence needs its own host adapter.
-        if matches!(
-            action.verification(),
-            SemanticVerification::NavigationCommitted | SemanticVerification::Dialog(_)
-        ) {
-            return Err(AgentBrowserActionError::EvidenceRequired);
-        }
-        if !matches!(
-            action.wait(),
-            SemanticWaitCondition::Immediate | SemanticWaitCondition::MutationQuiet(_)
-        ) {
-            return Err(AgentBrowserActionError::EvidenceRequired);
-        }
         // A model cannot shorten the allowance below the current native
         // snapshot capability. Never extend a deadline after dispatch instead.
         if action.settle_budget().millis() < MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS {
@@ -172,6 +191,7 @@ impl AgentBrowserActionProposal {
             action,
             continuation,
             batch,
+            refusal_context: context,
         })))
     }
 

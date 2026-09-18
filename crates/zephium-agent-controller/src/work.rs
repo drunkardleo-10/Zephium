@@ -2642,7 +2642,7 @@ impl AgentWorkController {
             }
             let navigation_incomplete = state.has_navigation() && !state.navigation_complete();
             let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
-            let proposal = match step.turn.proposal().kind() {
+            let (proposal, assessment) = match step.turn.proposal().kind() {
                 AgentBrowserToolKind::Extract => {
                     if !state.task.terminal_extraction_ready() {
                         return Err(AgentWorkFailure::TaskPhase {
@@ -2675,21 +2675,6 @@ impl AgentWorkController {
                     return Ok(());
                 }
                 AgentBrowserToolKind::Act => {
-                    // Reserve the effect, the next decision and terminal mapping
-                    // before starting a mutation in an open objective.
-                    if state.navigation_discovery.is_some()
-                        && session
-                            .policy
-                            .remaining_operations(session.lease.lease())
-                            .map_err(|_| {
-                                AgentWorkFailure::Browser(AgentBrowserProviderError::Authority)
-                            })?
-                            < 3
-                    {
-                        return Err(AgentWorkFailure::Browser(
-                            AgentBrowserProviderError::TurnLimit,
-                        ));
-                    }
                     if state.extraction_schema.is_some() && !state.actions_before_extraction {
                         return Err(AgentWorkFailure::Contract);
                     }
@@ -2699,12 +2684,44 @@ impl AgentWorkController {
                             proposed: AgentBrowserToolKind::Act,
                         });
                     }
-                    match session
+                    let binding = session
                         .bind_action_turn(step, &observation, &frames)
-                        .map_err(AgentWorkFailure::Browser)?
-                    {
-                        crate::action::AgentBrowserActionBinding::Prepared(proposal) => *proposal,
-                        crate::action::AgentBrowserActionBinding::Refused(refusal) => {
+                        .map_err(AgentWorkFailure::Browser)?;
+                    // Reserve the effect, the next decision and terminal mapping
+                    // before starting a mutation in an open objective. A page
+                    // that cannot afford them, or an action the assignment
+                    // does not permit, is refused to the model, not failed.
+                    let admitted = match binding {
+                        crate::action::AgentBrowserActionBinding::Prepared(proposal) => {
+                            let starved = state.navigation_discovery.is_some()
+                                && session
+                                    .policy
+                                    .remaining_operations(session.lease.lease())
+                                    .map_err(|_| {
+                                        AgentWorkFailure::Browser(
+                                            AgentBrowserProviderError::Authority,
+                                        )
+                                    })?
+                                    < 3;
+                            if starved {
+                                Err(proposal
+                                    .into_refusal(SemanticActionBindingError::BudgetExhausted))
+                            } else {
+                                match state.task.assess_observed(proposal.action(), &observation) {
+                                    Ok(assessment) => Ok((*proposal, assessment)),
+                                    Err(AgentWorkFailure::ActionDenied) => Err(proposal
+                                        .into_refusal(
+                                            SemanticActionBindingError::AssignmentDenied,
+                                        )),
+                                    Err(failure) => return Err(failure),
+                                }
+                            }
+                        }
+                        crate::action::AgentBrowserActionBinding::Refused(refusal) => Err(*refusal),
+                    };
+                    match admitted {
+                        Ok(admitted) => admitted,
+                        Err(refusal) => {
                             state.native.check_control(worker, browser)?;
                             state.refresh_account(worker, browser)?;
                             state.journal_mut()?.emit(
@@ -2728,7 +2745,7 @@ impl AgentWorkController {
                                 worker,
                                 browser,
                                 session.cancellation.clone(),
-                                session.continue_after_action_refusal(*refusal, &observation),
+                                session.continue_after_action_refusal(refusal, &observation),
                             )
                             .await?;
                             continue;
@@ -2763,9 +2780,6 @@ impl AgentWorkController {
                         })?;
                 }
             }
-            let assessment = state
-                .task
-                .assess_observed(proposal.action(), &observation)?;
             state.refresh_account(worker, browser)?;
             let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
             let id = state.native.identity.id();
@@ -4361,6 +4375,9 @@ pub enum AgentWorkFailure {
     Shutdown,
     /// Trusted input, clock, state, or task contract was invalid.
     Contract,
+    /// The task's own policy declines this one proposed action; the model
+    /// may choose another, nothing having been issued.
+    ActionDenied,
 }
 
 pub(super) struct WorkEvents {

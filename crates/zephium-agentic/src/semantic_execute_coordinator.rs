@@ -800,6 +800,11 @@ impl SemanticActionQualificationError {
                     "binding_mixed_effect_boundary"
                 }
                 crate::SemanticActionBindingError::EffectBatchLimit => "binding_effect_batch_limit",
+                crate::SemanticActionBindingError::UnsupportedVerification => {
+                    "binding_unsupported_verification"
+                }
+                crate::SemanticActionBindingError::AssignmentDenied => "binding_assignment_denied",
+                crate::SemanticActionBindingError::BudgetExhausted => "binding_budget_exhausted",
             },
             Self::Checkpoint(error) => match error {
                 crate::SemanticActionPreparationError::IncompleteSnapshot => {
