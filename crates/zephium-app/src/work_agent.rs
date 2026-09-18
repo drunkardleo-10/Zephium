@@ -215,6 +215,7 @@ impl WorkAgentService {
             private,
             inherited: Vec::new(),
             thread: Vec::new(),
+            unreadable_polls: std::sync::atomic::AtomicU8::new(0),
             files: None,
             previews: Vec::new(),
             used: WorkUsage::default(),
@@ -278,7 +279,9 @@ struct Driver {
     /// Earlier executions of this work: their cards stay on the canvas and
     /// their sources stay citable.
     inherited: Vec<WorkArtifactV1>,
-    thread: Vec<String>,
+    thread: Vec<WorkAgentThreadEntry>,
+    /// Consecutive cancellation polls the store could not answer.
+    unreadable_polls: std::sync::atomic::AtomicU8,
     /// Folders the person granted, once admitted by policy.
     files: Option<crate::work_files::WorkFileGrant>,
     private: Vec<String>,
@@ -1369,15 +1372,21 @@ impl Driver {
         }
         artifacts.reverse();
         self.inherited = artifacts;
-        let mut thread: Vec<String> = Vec::new();
+        let mut thread: Vec<WorkAgentThreadEntry> = Vec::new();
         for execution in projection.executions.iter().filter(|e| e.id != current) {
-            if let Some(request) = &execution.spec.request {
-                if thread.last() != Some(request) {
-                    thread.push(request.clone());
-                }
+            let Some(request) = &execution.spec.request else {
+                continue;
+            };
+            if thread.last().is_some_and(|entry| entry.request == *request) {
+                continue;
             }
+            thread.push(WorkAgentThreadEntry {
+                request: request.clone(),
+                ended: execution_ended(execution.status),
+                summary: execution_summary(execution),
+            });
         }
-        if thread.last() == Some(&self.objective) {
+        if thread.last().is_some_and(|entry| entry.request == self.objective) {
             thread.pop();
         }
         self.thread = thread.into_iter().rev().take(16).rev().collect();
@@ -1787,4 +1796,51 @@ mod tests {
         assert!(!query_discloses("best canvas libraries 2026", &private));
         assert!(!query_discloses("hiring freeze", &private));
     }
+}
+
+fn execution_ended(status: WorkExecutionStatus) -> &'static str {
+    match status {
+        WorkExecutionStatus::Completed | WorkExecutionStatus::NeedsReview => "completed",
+        WorkExecutionStatus::Cancelled | WorkExecutionStatus::CancelRequested => "stopped",
+        WorkExecutionStatus::Failed => "failed",
+        WorkExecutionStatus::Interrupted => "interrupted",
+        WorkExecutionStatus::Approved | WorkExecutionStatus::Running => "running",
+    }
+}
+
+/// The run's last line for the person, or the note of the step that ended
+/// it, plus what it did; the model reads it, so it is clipped.
+fn execution_summary(execution: &WorkExecutionFact) -> Option<String> {
+    let last = execution
+        .steps
+        .iter()
+        .rev()
+        .find_map(|step| step.note.as_deref().filter(|note| !note.trim().is_empty()));
+    let searches = execution
+        .steps
+        .iter()
+        .filter(|step| matches!(step.kind, WorkStepKindV1::Search { .. }))
+        .count();
+    let reads = execution
+        .steps
+        .iter()
+        .filter(|step| {
+            matches!(
+                step.kind,
+                WorkStepKindV1::Read { .. } | WorkStepKindV1::Discover { .. }
+            ) && step.status == WorkStepStatus::Succeeded
+        })
+        .count();
+    let mut summary = last.map(str::to_owned).unwrap_or_default();
+    if !summary.is_empty() {
+        summary.push(' ');
+    }
+    summary.push_str(&format!(
+        "({searches} searches, {reads} pages read, {} objects placed)",
+        execution.artifacts.len()
+    ));
+    Some(zephium_core::work::agent::clip_text(
+        &summary,
+        MAX_WORK_STEP_NOTE_BYTES,
+    ))
 }

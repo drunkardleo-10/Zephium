@@ -46,13 +46,24 @@ pub struct WorkAgentBudget {
     pub steps_left: u8,
     pub browse_available: bool,
 }
+/// One earlier request of this work and how it ended, for the model's
+/// sense of where the conversation stands.
+#[derive(Clone, Serialize)]
+pub struct WorkAgentThreadEntry {
+    pub request: String,
+    /// Closed word: completed, stopped, failed, interrupted or running.
+    pub ended: &'static str,
+    /// The run's last line for the person, or why it ended, clipped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
 #[derive(Serialize)]
 pub struct WorkAgentTurnContext {
     pub citation_space: &'static str,
     pub objective: String,
     /// The person's earlier requests in this work, oldest first.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub thread: Vec<String>,
+    pub thread: Vec<WorkAgentThreadEntry>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub requested_pages: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -310,12 +321,15 @@ impl WorkAgentTurnDisclosure {
     /// Admit the whole turn or none of it. Evidence keys resolve to links the
     /// model was shown; a read targets a shown source or an explicit requested page.
     /// Earlier requests of the same work, oldest first; the objective stays the latest.
-    pub fn with_thread(mut self, thread: Vec<String>) -> Result<Self, WorkError> {
+    pub fn with_thread(mut self, thread: Vec<WorkAgentThreadEntry>) -> Result<Self, WorkError> {
         if thread.len() > MAX_WORK_THREAD {
             return Err(WorkError::Capacity);
         }
-        for request in &thread {
-            validate_text(request, MAX_WORK_TEXT_BYTES)?;
+        for entry in &thread {
+            validate_text(&entry.request, MAX_WORK_TEXT_BYTES)?;
+            if let Some(summary) = &entry.summary {
+                validate_text(summary, MAX_WORK_STEP_NOTE_BYTES)?;
+            }
         }
         self.context.thread = thread;
         let bytes = serde_json::to_vec(&self.context)
