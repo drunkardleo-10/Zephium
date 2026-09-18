@@ -4,6 +4,7 @@ import {
   containingArea,
   nodesBounds,
   reconcileNodes,
+  sanitizeScene,
   validScene,
   validViewport,
   type CanvasItem,
@@ -39,6 +40,23 @@ test("rejects duplicate identities, oversized scenes and dangling relationships"
       [{ id: "link", source: "one", target: "missing", kind: "reference" }],
     ),
   ).toBe(false);
+});
+test("a scene the canvas could not draw is repaired instead of hidden", () => {
+  const long = { ...item("finding"), title: "t".repeat(900), detail: "d".repeat(5000) };
+  const scene = sanitizeScene(
+    [long, item("one"), item("one"), { ...item(""), title: "nameless" }],
+    [
+      { id: "dangling", source: "one", target: "gone", kind: "reference" },
+      { id: "self", source: "one", target: "one", kind: "reference" },
+      { id: "kept", source: "finding", target: "one", kind: "supports" },
+      { id: "kept", source: "one", target: "finding", kind: "supports" },
+    ],
+  );
+  expect(scene.items.map((entry) => entry.id)).toEqual(["finding", "one"]);
+  expect(scene.items[0]!.title).toHaveLength(512);
+  expect(scene.items[0]!.detail).toHaveLength(2048);
+  expect(scene.links.map((link) => [link.id, link.source])).toEqual([["kept", "finding"]]);
+  expect(validScene(scene.items, scene.links)).toBe(true);
 });
 test("invalid persisted geometry cannot reach the canvas", () => {
   expect(validViewport({ x: Infinity, y: 0, zoom: 1 })).toBeUndefined();

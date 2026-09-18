@@ -18,6 +18,10 @@ import { pageFrameUrl } from "$domain/resources";
 
 /** How many cited pages one Sources card lists; the lift shows the rest. */
 const SOURCE_ROWS = 24;
+/** What a card may carry: Rust admits far longer prose than a card can hold. */
+const TITLE_TEXT = 512;
+const DETAIL_TEXT = 2048;
+const ROW_TEXT = 200;
 /** Steps that work inside a granted folder; each settles onto a file record. */
 const FILE_STEPS = ["list", "read_file", "search_files", "write_file", "edit_file"];
 
@@ -41,8 +45,8 @@ function fileRow(key: string, record: WorkFileRecordV1, title?: string): SourceR
   return {
     key,
     url: "",
-    where: fileFolder(record.file.path),
-    title: title || record.file.name,
+    where: clipText(fileFolder(record.file.path), ROW_TEXT),
+    title: clipText(title || record.file.name, ROW_TEXT),
     file: { record: record.id, path: record.file.path, kind: record.file.kind },
   };
 }
@@ -59,7 +63,14 @@ function collectionRows(execution: WorkExecutionFact, artifact: WorkArtifactV1):
     const citation = search?.evidence.citations[link.source_id - 1];
     const url = cleanUrl(citation?.url);
     if (url)
-      return [{ key, url, where: host(url), title: entry.title || citation?.title || host(url) }];
+      return [
+        {
+          key,
+          url: clipText(url, DETAIL_TEXT),
+          where: host(url),
+          title: clipText(entry.title || citation?.title || host(url), ROW_TEXT),
+        },
+      ];
     // A granted folder is not a place the pane can open: the row names the file.
     const record = execution.file_evidence?.find(
       (candidate) => candidate.id === link.extraction_id,
@@ -78,7 +89,13 @@ function cleanUrl(url: string | undefined): string | undefined {
     return url;
   }
 }
-import type { CanvasItem, CanvasLink, CanvasPosition, CanvasView } from "./canvas-model";
+import {
+  clipText,
+  type CanvasItem,
+  type CanvasLink,
+  type CanvasPosition,
+  type CanvasView,
+} from "./canvas-model";
 import type { MediaAssetV1 } from "$domain/resources";
 import * as m from "$shared/i18n/messages";
 
@@ -289,8 +306,8 @@ function elementItems(
           type: "subject",
           area: element.area,
           kind: m.work_env_subject(),
-          title: subject?.name ?? m.work_artifact_unavailable(),
-          detail: subject?.descriptor ?? "",
+          title: clipText(subject?.name ?? m.work_artifact_unavailable(), TITLE_TEXT),
+          detail: clipText(subject?.descriptor ?? "", DETAIL_TEXT),
           status: area,
           subject,
           ...(facts.length ? { facts } : {}),
@@ -304,8 +321,8 @@ function elementItems(
         type: "finding",
         area: element.area,
         kind: m.work_env_finding(),
-        title: finding?.claim ?? m.work_artifact_unavailable(),
-        detail: finding?.detail ?? "",
+        title: clipText(finding?.claim ?? m.work_artifact_unavailable(), TITLE_TEXT),
+        detail: clipText(finding?.detail ?? "", DETAIL_TEXT),
         status: area,
         finding,
         unavailable: !finding,
@@ -323,7 +340,7 @@ function elementItems(
         type: "result",
         area: element.area,
         kind: m.work_env_result(),
-        title: artifact?.title ?? m.work_artifact_unavailable(),
+        title: clipText(artifact?.title ?? m.work_artifact_unavailable(), TITLE_TEXT),
         detail: "",
         status: view?.reviewLabel ?? m.work_env_open_to_load(),
         artifact: view,
@@ -336,7 +353,7 @@ function elementItems(
       type: "objective",
       area: element.area,
       kind: m.work_env_request(),
-      title: projection?.work.objective.slice(0, 512) ?? m.work_env_request(),
+      title: clipText(projection?.work.objective ?? m.work_env_request(), TITLE_TEXT),
       detail: "",
       status: area,
     };
@@ -431,6 +448,7 @@ export function environmentAgents(
   const items: CanvasItem[] = [];
   const links: CanvasLink[] = [];
   const positions: Record<string, CanvasPosition> = {};
+  const pictures = subjectPictures(snapshot);
   for (const element of snapshot.elements) {
     if (element.reference.kind !== "objective") continue;
     const projection = objectives.get(element.reference.objective);
@@ -473,10 +491,14 @@ export function environmentAgents(
       snapshot.view.placements.find((place) => place.element === target);
     const home = anchor ? { x: anchor.x + anchor.width + 48, y: anchor.y } : undefined;
     const steps = execution.steps ?? [];
+    // A cited source and a subject's picture are rows and pictures, not cards:
+    // the agent never ties itself to one.
     const elementsOf = (artifacts: readonly string[]) =>
       snapshot.elements.filter(
         (candidate) =>
           "artifact" in candidate.reference &&
+          candidate.reference.kind !== "source" &&
+          !pictures.has(candidate.id) &&
           candidate.reference.execution === execution.id &&
           artifacts.includes(candidate.reference.artifact),
       );
@@ -641,6 +663,8 @@ export function environmentPages(
   groups: ReadonlyMap<string, string> = new Map(),
   /** The run's current activity, so a page held for a hidden window says so. */
   activity: (objective: string) => string | undefined = () => undefined,
+  /** The agent presences the scene already has; a tie to an absent one is no tie. */
+  present: ReadonlySet<string> = new Set(),
 ): { items: CanvasItem[]; links: CanvasLink[]; positions: Record<string, CanvasPosition> } {
   const items: CanvasItem[] = [];
   const links: CanvasLink[] = [];
@@ -698,7 +722,7 @@ export function environmentPages(
         type: "page",
         kind: m.work_env_page(),
         title: pageHost || m.work_env_page(),
-        detail: url,
+        detail: clipText(url, DETAIL_TEXT),
         status: live
           ? paused
             ? m.work_line_paused()
@@ -719,7 +743,8 @@ export function environmentPages(
           kind: "uses",
           label: m.work_env_relation_uses(),
         });
-      if (live) links.push({ id: `working:${id}`, source: agent, target: id, kind: "working" });
+      if (live && present.has(agent))
+        links.push({ id: `working:${id}`, source: agent, target: id, kind: "working" });
       const linked = new Set<string>();
       for (const step of entry.steps)
         for (const artifactId of step.artifacts ?? []) {

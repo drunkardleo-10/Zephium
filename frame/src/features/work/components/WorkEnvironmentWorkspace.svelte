@@ -552,6 +552,7 @@
           (objective) => (objectiveSession?.selected === objective ? objectiveSession.pages : []),
           sources.groups,
           signalOf,
+          new Set(agents.items.map((item) => item.id)),
         )
       : { items: [], links: [], positions: {} },
   );

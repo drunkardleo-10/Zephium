@@ -160,6 +160,53 @@ export function defaultSize(item: CanvasItem): { width: number; height: number }
   }
 }
 const CANVAS_LINK_LIMIT = 2000;
+const TEXT_LIMIT = { id: 128, title: 512, detail: 2048, kind: 128, status: 256 } as const;
+
+/** Clips to a whole character: a cut never splits a surrogate pair. */
+export function clipText(value: string, max: number): string {
+  if (value.length <= max) return value;
+  const cut = value.slice(0, max);
+  const last = cut.charCodeAt(max - 1);
+  return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
+}
+
+/**
+ * Whatever a producer hands over becomes a scene the canvas can draw: long text
+ * is clipped, repeated and empty identities are dropped, links that lead
+ * nowhere are left out, and the counts stop at the limits. One bad item costs
+ * that item, never the canvas.
+ */
+export function sanitizeScene(
+  items: readonly CanvasItem[],
+  links: readonly CanvasLink[],
+): { items: CanvasItem[]; links: CanvasLink[] } {
+  const ids = new Set<string>();
+  const kept: CanvasItem[] = [];
+  for (const item of items) {
+    if (kept.length >= CANVAS_ITEM_LIMIT) break;
+    if (!item.id || item.id.length > TEXT_LIMIT.id || ids.has(item.id)) continue;
+    ids.add(item.id);
+    const title = clipText(item.title, TEXT_LIMIT.title);
+    const detail = clipText(item.detail, TEXT_LIMIT.detail);
+    const kind = clipText(item.kind, TEXT_LIMIT.kind);
+    const status = clipText(item.status, TEXT_LIMIT.status);
+    kept.push(
+      title === item.title && detail === item.detail && kind === item.kind && status === item.status
+        ? item
+        : { ...item, title, detail, kind, status },
+    );
+  }
+  const seen = new Set<string>();
+  const edges: CanvasLink[] = [];
+  for (const link of links) {
+    if (edges.length >= CANVAS_LINK_LIMIT) break;
+    if (!link.id || link.id.length > TEXT_LIMIT.id || seen.has(link.id)) continue;
+    if (link.source === link.target || !ids.has(link.source) || !ids.has(link.target)) continue;
+    seen.add(link.id);
+    edges.push(link);
+  }
+  return { items: kept, links: edges };
+}
 
 export function validScene(items: readonly CanvasItem[], links: readonly CanvasLink[]): boolean {
   if (items.length > CANVAS_ITEM_LIMIT || links.length > CANVAS_LINK_LIMIT) return false;
@@ -169,17 +216,17 @@ export function validScene(items: readonly CanvasItem[], links: readonly CanvasL
     items.every(
       (item) =>
         item.id.length > 0 &&
-        item.id.length <= 128 &&
-        item.title.length <= 512 &&
-        item.detail.length <= 2048 &&
-        item.kind.length <= 128 &&
-        item.status.length <= 256,
+        item.id.length <= TEXT_LIMIT.id &&
+        item.title.length <= TEXT_LIMIT.title &&
+        item.detail.length <= TEXT_LIMIT.detail &&
+        item.kind.length <= TEXT_LIMIT.kind &&
+        item.status.length <= TEXT_LIMIT.status,
     ) &&
     new Set(links.map((link) => link.id)).size === links.length &&
     links.every(
       (link) =>
         link.id.length > 0 &&
-        link.id.length <= 128 &&
+        link.id.length <= TEXT_LIMIT.id &&
         ids.has(link.source) &&
         ids.has(link.target) &&
         link.source !== link.target,

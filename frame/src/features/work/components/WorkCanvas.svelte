@@ -24,6 +24,7 @@
     containingArea,
     isAreaNode,
     nodesBounds,
+    sanitizeScene,
     validScene,
     validViewport,
     type CanvasArea,
@@ -129,15 +130,17 @@
   setContext(canvasFocusResult, center);
   const restoredViewport = untrack(() => validViewport(initialView?.viewport));
   let viewport = $state(restoredViewport ?? { x: 0, y: 0, zoom: 1 });
-  let valid = $derived(validScene(items, links));
+  // One bad card never hides the canvas: the scene is repaired, then guarded.
+  const scene = $derived(sanitizeScene(items, links));
+  let valid = $derived(validScene(scene.items, scene.links));
   const nodeTypes = { work: CanvasNode, area: AreaNode };
   let selection: string[] = [];
   let selectedIds = $state.raw<ReadonlySet<string>>(new Set());
   let edges = $derived<Edge[]>(
     valid
-      ? links.map((link) => {
+      ? scene.links.map((link) => {
           const active = selectedIds.has(link.source) || selectedIds.has(link.target);
-          const title = (id: string) => items.find((item) => item.id === id)?.title ?? "";
+          const title = (id: string) => scene.items.find((item) => item.id === id)?.title ?? "";
           return {
             id: link.id,
             source: link.source,
@@ -166,7 +169,7 @@
       : [],
   );
   $effect(() => {
-    const next = items;
+    const next = scene.items;
     const grouping = areas;
     const ready = valid;
     nodes = untrack(() =>
@@ -308,7 +311,7 @@
       {edges}
       {nodeTypes}
       bind:viewport
-      fitView={items.length > 0 && !restoredViewport}
+      fitView={scene.items.length > 0 && !restoredViewport}
       fitViewOptions={{ padding: 0.2, duration: 0 }}
       minZoom={0.2}
       maxZoom={2}
@@ -330,7 +333,7 @@
       elevateNodesOnSelect
       nodeDragThreshold={3}
       ariaLabelConfig={{ "edge.a11yDescription.default": m.work_env_edge_readonly() }}
-      onlyRenderVisibleElements={items.length >= virtualizeFrom}
+      onlyRenderVisibleElements={scene.items.length >= virtualizeFrom}
       elementsSelectable
       deleteKey={[]}
       onnodeclick={({ node, event }) => {

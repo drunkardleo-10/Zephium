@@ -389,16 +389,23 @@ test("browser steps become page cards with frames, working links and subject lin
       },
     ],
   };
-  const pages = environmentPages(withHub, new Map([["objective", state]]), () => [
-    {
-      execution: "execution",
-      attempt: "attempt",
-      step: "read-2",
-      url: "https://shop.example/p/1",
-      live: true,
-      frame: { generation: 3, width: 640, height: 400 },
-    },
-  ]);
+  const pages = environmentPages(
+    withHub,
+    new Map([["objective", state]]),
+    () => [
+      {
+        execution: "execution",
+        attempt: "attempt",
+        step: "read-2",
+        url: "https://shop.example/p/1",
+        live: true,
+        frame: { generation: 3, width: 640, height: 400 },
+      },
+    ],
+    new Map(),
+    () => undefined,
+    new Set([`agent:${objectiveElement.id}`]),
+  );
   expect(pages.items.map((item) => [item.id, item.page?.host, item.page?.live])).toEqual([
     [`page:${objectiveElement.id}:read-1`, "shop.example", false],
     [`page:${objectiveElement.id}:read-2`, "shop.example", true],
