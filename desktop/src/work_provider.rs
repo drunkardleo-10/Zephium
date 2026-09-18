@@ -397,6 +397,7 @@ impl WorkProviders {
                                     WorkSynthesisDiagnostic::ProviderRefused { attempt, error } => record_diagnostic(format_args!("work: attempt={attempt} phase=synthesis provider_refused error={error:?}")),
                                     WorkSynthesisDiagnostic::InputCounted { tokens, maximum, request_bytes } => record_diagnostic(format_args!("work: phase=synthesis input_counted tokens={tokens} maximum={maximum} request_bytes={request_bytes}")),
                                     WorkSynthesisDiagnostic::ProviderTransport { http_status, body_bytes, decoded, elapsed_millis } => record_diagnostic(format_args!("work: phase=synthesis provider_transport http_status={http_status:?} body_bytes={body_bytes} decoded={decoded} elapsed_ms={elapsed_millis}")),
+                                    WorkSynthesisDiagnostic::TurnRejected { .. } => {}
                                 }
                             });
                     let callback = shell.callback_handle();
