@@ -2270,6 +2270,10 @@ pub enum SemanticActionBindingError {
     /// reference no longer matched the current document.
     #[error("semantic action was rejected at dispatch")]
     DispatchRejected,
+    /// The action ran, but the fresh page no longer showed its target, so
+    /// its outcome was not observed.
+    #[error("semantic action outcome was not observed")]
+    Unverified,
 }
 
 /// Typed structural refusal before backend visibility/occlusion revalidation.

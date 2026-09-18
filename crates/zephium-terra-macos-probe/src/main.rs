@@ -224,6 +224,9 @@ impl ProbeFailure {
             Self::Provider(TerraProbeProviderError::ActionRejected(_)) => {
                 "controller_action_rejected"
             }
+            Self::Provider(TerraProbeProviderError::ActionUnverified) => {
+                "controller_action_unverified"
+            }
             Self::Provider(TerraProbeProviderError::UnsupportedTool(_)) => {
                 "controller_tool_unsupported"
             }

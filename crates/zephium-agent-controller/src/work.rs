@@ -2961,13 +2961,50 @@ impl AgentWorkController {
             let current = Self::observe(state, worker, browser).await?;
             let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
             let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
-            let (_, transition) = session
-                .verify_action_settlement(
-                    &observation,
-                    &current,
-                    SemanticSettleInstant::from_millis(now.millis()),
-                )
-                .map_err(AgentWorkFailure::Browser)?;
+            let verified = session.verify_action_settlement(
+                &observation,
+                &current,
+                SemanticSettleInstant::from_millis(now.millis()),
+            );
+            let (_, transition) = match verified {
+                Ok(verified) => verified,
+                // The action ran but its target left the page: the model
+                // hears so against the observation it holds and looks again.
+                Err(AgentBrowserProviderError::ActionUnverified) => {
+                    let refusal = state
+                        .session
+                        .as_mut()
+                        .and_then(|session| session.take_rejected_refusal())
+                        .ok_or(AgentWorkFailure::Contract)?;
+                    state.native.check_control(worker, browser)?;
+                    state.refresh_account(worker, browser)?;
+                    state
+                        .journal_mut()?
+                        .emit(AgentWorkEventKind::ActionProposalRefused(refusal.reason()))?;
+                    if let Some(key) = refusal.key() {
+                        if action_refusals.contains(&key) {
+                            return Err(AgentWorkFailure::Browser(
+                                AgentBrowserProviderError::ActionProposalLoop,
+                            ));
+                        }
+                        action_refusals
+                            .try_reserve(1)
+                            .map_err(|_| AgentWorkFailure::Contract)?;
+                        action_refusals.push(key);
+                    }
+                    let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+                    turn = Self::provider(
+                        &mut state.native,
+                        worker,
+                        browser,
+                        session.cancellation.clone(),
+                        session.continue_after_action_refusal(refusal, &observation),
+                    )
+                    .await?;
+                    continue;
+                }
+                Err(error) => return Err(AgentWorkFailure::Browser(error)),
+            };
             observation = current;
             captured_at = SemanticCaptureInstant::from_millis(now.millis());
             state.task.accept_verified_action(

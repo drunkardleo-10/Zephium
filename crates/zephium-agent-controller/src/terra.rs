@@ -3415,6 +3415,10 @@ impl AgentBrowserSession {
         match result {
             Ok(accounted) => self.finish_action(accounted, baseline, current, observed_at),
             Err(error) => {
+                if let Some(refusal) = self.unverified_read_refusal(error)? {
+                    self.rejected_refusal = Some(refusal);
+                    return Err(AgentBrowserProviderError::ActionUnverified);
+                }
                 if error
                     == crate::AgentBrowserActionError::Verification(
                         zephium_agentic::SemanticVerificationError::OutcomeNotObserved,
@@ -3433,6 +3437,44 @@ impl AgentBrowserSession {
                 Err(error)
             }
         }
+    }
+
+    /// A read-effect action that ran but whose outcome was not observed
+    /// settles as unverified and hands the model a refusal instead of
+    /// ending the read. Anything still pending keeps its original owner.
+    fn unverified_read_refusal(
+        &mut self,
+        error: crate::AgentBrowserActionError,
+    ) -> Result<Option<zephium_agentic::AgentProviderActionRefusal>, AgentBrowserProviderError> {
+        if !matches!(error, crate::AgentBrowserActionError::Verification(_))
+            || self.action_executions.status().pending() != 0
+            || self.action_settlements.status().pending() != 0
+            || self.action_terminal.is_some()
+        {
+            return Ok(None);
+        }
+        let Some(action) = self.action.take() else {
+            return Ok(None);
+        };
+        let (terminal, refusal) = match action.into_unverified_refusal() {
+            Ok(parts) => parts,
+            Err(action) => {
+                self.action = Some(*action);
+                return Ok(None);
+            }
+        };
+        self.action_terminal = Some(terminal);
+        let recorded = self.journal.as_mut().is_some_and(|journal| {
+            journal
+                .action_unverified(self.action_terminal.as_ref().expect("retained terminal"))
+                .is_ok()
+        });
+        if !recorded {
+            self.failure = Some(AgentBrowserProviderError::Journal);
+            return Err(AgentBrowserProviderError::Journal);
+        }
+        self.action_terminal.take();
+        Ok(Some(refusal))
     }
 
     fn close_failed_read_scroll(&mut self) -> Result<(), AgentBrowserProviderError> {
@@ -3831,6 +3873,10 @@ pub enum AgentBrowserProviderError {
     /// Closed policy refusal before model input reaches the provider.
     #[error("browser provider policy admission was refused")]
     RequestPolicy(zephium_agentic::AgentPolicyError),
+    /// A read-effect action ran, but its outcome was not observed; the
+    /// session holds a refusal the model continues from.
+    #[error("browser action outcome was not observed")]
+    ActionUnverified,
     /// Fixed request configuration did not fit its exact admission contract.
     #[error("browser provider request contract was refused")]
     RequestContract(zephium_agentic::AgentProviderContractError),

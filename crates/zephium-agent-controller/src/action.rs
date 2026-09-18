@@ -470,6 +470,42 @@ impl AgentBrowserAction {
             }
         }
     }
+    /// A read-effect action that ran but whose outcome was not observed:
+    /// its batch fails with that reason and the model hears why.
+    pub(crate) fn into_unverified_refusal(
+        self,
+    ) -> Result<(SemanticActionBatchResult, AgentProviderActionRefusal), Box<Self>> {
+        if !self.finished
+            || self.native.is_some()
+            || self.pending.is_some()
+            || self.terminal.is_some()
+            || self.journal_failed
+            || self.proposal.action.effect() != SemanticEffectClass::Read
+            || self.failed.as_ref().is_none_or(|failed| {
+                self.receipt != Some(failed.receipt()) || failed.verification_error().is_none()
+            })
+        {
+            return Err(Box::new(self));
+        }
+        let mut this = self;
+        let failed = this.failed.take().expect("checked original failed owner");
+        match this.proposal.batch.fail(&this.proposal.action, failed) {
+            Ok(terminal) => Ok((
+                terminal,
+                AgentProviderActionRefusal::unissued(
+                    this.proposal.continuation,
+                    SemanticActionBindingError::Unverified,
+                    this.proposal.refusal_context,
+                ),
+            )),
+            Err(refusal) => {
+                let (batch, failed, _) = refusal.into_parts();
+                this.proposal.batch = batch;
+                this.failed = Some(failed);
+                Err(Box::new(this))
+            }
+        }
+    }
     fn into_rejected_batch_keeping(self) -> Result<Box<Self>, Box<Self>> {
         if !self.finished
             || self.native.is_some()
@@ -674,16 +710,33 @@ impl AgentBrowserAction {
         snapshot: &SemanticSnapshot,
         observed_at: SemanticSettleInstant,
     ) -> Result<AgentVerifiedSemanticEffect, AgentBrowserActionError> {
-        let evidence = prepare_semantic_action_snapshot_evidence(
+        let evidence = match prepare_semantic_action_snapshot_evidence(
             &self.proposal.action,
             self.reservation.attempt(),
             observed_at,
             snapshot,
-        )
-        .map_err(|_| AgentBrowserActionError::EvidenceRequired)?;
+        ) {
+            Ok(evidence) => Ok(evidence),
+            // The target left the page or changed after the action ran: the
+            // terminal settles as refused with that exact reason.
+            Err(SemanticSnapshotEvidenceError::Revalidation(error)) => Err(error),
+            Err(SemanticSnapshotEvidenceError::NonSnapshotEvidenceRequired) => {
+                return Err(AgentBrowserActionError::EvidenceRequired);
+            }
+        };
         let terminal = self.terminal.take().ok_or(AgentBrowserActionError::State)?;
+        let verified = match evidence {
+            Ok(evidence) => {
+                verify_semantic_action_terminal(*terminal, &self.proposal.action, evidence)
+            }
+            Err(error) => Err(SemanticActionVerificationRefusal::unobserved(
+                *terminal,
+                observed_at,
+                error,
+            )),
+        };
         let verified =
-            match verify_semantic_action_terminal(*terminal, &self.proposal.action, evidence) {
+            match verified {
                 Ok(verified) => verified,
                 Err(refusal) => {
                     let reason = refusal.error();

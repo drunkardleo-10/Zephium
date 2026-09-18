@@ -527,6 +527,21 @@ pub struct SemanticActionVerificationRefusal {
 }
 
 impl SemanticActionVerificationRefusal {
+    /// A terminal whose fresh snapshot no longer holds its target: the action
+    /// ran, its outcome is simply not observed. The terminal's authority
+    /// returns through the same path as a failed verification.
+    pub fn unobserved(
+        terminal: SemanticActionSettlementTerminal,
+        observed_at: SemanticSettleInstant,
+        error: SemanticActionRevalidationError,
+    ) -> Self {
+        Self {
+            terminal: Box::new(terminal),
+            observed_at,
+            error: map_target_error(error),
+        }
+    }
+
     /// Closed independent-verification failure.
     pub const fn error(&self) -> SemanticVerificationError {
         self.error

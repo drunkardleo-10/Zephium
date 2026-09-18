@@ -300,11 +300,16 @@ impl AgentProviderActionRefusal {
                 "target_changed",
                 "Nothing executed. The page changed between the observation and the action, so the target no longer matched. Request a fresh observation with snapshot(initial), then act on the current refs; if a dialog just opened, work within it first. Do not repeat the rejected proposal against the old observation.",
             ),
+            SemanticActionBindingError::Unverified => (
+                "outcome_not_observed",
+                "The action ran, but the page no longer showed its target afterwards, so its outcome was not verified: a dismissed notice or a control that left the page. The observation you hold is stale. Request snapshot(initial) to see the page as it is now, then continue from that; do not repeat this action.",
+            ),
             _ => return Err(AgentProviderContinuationError::ToolKind),
         };
+        let executed = self.error == SemanticActionBindingError::Unverified;
         let mut result = serde_json::json!({
-            "status": "refused", "code": code, "executed": false,
-            "guidance": guidance, "observation_unchanged": true,
+            "status": "refused", "code": code, "executed": executed,
+            "guidance": guidance, "observation_unchanged": !executed,
         });
         if let SemanticActionBindingError::TaskEffectMismatch(expected) = self.error {
             result["required_effect"] = serde_json::json!(effect_label(expected));
