@@ -577,7 +577,8 @@ impl Shell {
                         .as_ref()
                         .is_some_and(|work| work.is_stuck())
                     {
-                        if let Some(stuck) = self.retained_work.take() {
+                        if let Some(mut stuck) = self.retained_work.take() {
+                            stuck.begin_shutdown();
                             self.retained_graveyard.push(*stuck);
                         }
                     }

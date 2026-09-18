@@ -331,6 +331,11 @@ impl MacosWorkComposition {
         let mut settled = WorkUsage::default();
         let mut model_in_flight = false;
         let mut paused = false;
+        // A page that never reaches its loop is failed, not waited on.
+        let ready_deadline = Instant::now() + Duration::from_secs(45);
+        let mut running_seen = false;
+        let mut not_ready = false;
+        let mut last_phase: Option<RetainedWorkPhase> = None;
         #[cfg(feature = "public-qualification")]
         let trace = |label: &str| {
             if let Some(diagnostic) = stage_diagnostic {
@@ -484,9 +489,47 @@ impl MacosWorkComposition {
                 requested_close = true;
             }
             if now >= cleanup_deadline {
+                if anonymous {
+                    // Nothing was written anywhere: a resource that cannot
+                    // close is one failed page, charged with what settled.
+                    trace("close:abandoned");
+                    return Ok(BrowserRun {
+                        status: WorkAttemptStatus::Failed,
+                        usage: Some(uncertain_usage(settled, model_in_flight, limits)),
+                        artifacts: vec![],
+                        intervention: None,
+                        note: Some(
+                            if not_ready {
+                                "The browser was not ready for this page"
+                            } else {
+                                "The page could not be closed cleanly"
+                            }
+                            .into(),
+                        ),
+                    });
+                }
                 return Err(WorkError::OutcomeUnknown);
             }
             let snapshot = guard.0.snapshot();
+            if last_phase != Some(snapshot.phase) {
+                last_phase = Some(snapshot.phase);
+                trace(&format!("phase:{:?}", snapshot.phase));
+            }
+            if matches!(
+                snapshot.phase,
+                RetainedWorkPhase::Running
+                    | RetainedWorkPhase::Closing
+                    | RetainedWorkPhase::Terminal
+                    | RetainedWorkPhase::Uncertain
+                    | RetainedWorkPhase::Refused
+            ) {
+                running_seen = true;
+            }
+            if !running_seen && !requested_close && now >= ready_deadline {
+                trace("close:not_ready");
+                not_ready = true;
+                requested_close = true;
+            }
             // A hidden window holds the page; say so, and resume quietly.
             if (snapshot.phase == RetainedWorkPhase::Acquiring) != paused {
                 paused = !paused;
@@ -644,6 +687,7 @@ impl MacosWorkComposition {
                     _ => Err(WorkError::OutcomeUnknown),
                 };
                 let note = match disposition {
+                    _ if not_ready => Some("The browser was not ready for this page"),
                     Some(AgentWorkDisposition::Succeeded | AgentWorkDisposition::Cancelled) => None,
                     Some(AgentWorkDisposition::WaitingForHuman) => Some(
                         intervention_note(intervention.as_ref())
