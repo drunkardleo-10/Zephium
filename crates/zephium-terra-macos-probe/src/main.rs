@@ -221,6 +221,9 @@ impl ProbeFailure {
             Self::Provider(TerraProbeProviderError::ActionPending) => "controller_action_pending",
             Self::Provider(TerraProbeProviderError::ActionLimit) => "controller_action_limit",
             Self::Provider(TerraProbeProviderError::Action(_)) => "controller_action_refused",
+            Self::Provider(TerraProbeProviderError::ActionRejected(_)) => {
+                "controller_action_rejected"
+            }
             Self::Provider(TerraProbeProviderError::UnsupportedTool(_)) => {
                 "controller_tool_unsupported"
             }
