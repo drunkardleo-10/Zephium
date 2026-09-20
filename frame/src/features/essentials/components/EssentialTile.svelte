@@ -1,4 +1,5 @@
 <script lang="ts">
+  import * as m from "$shared/i18n/messages";
   import { Globe02Icon } from "@hugeicons/core-free-icons";
   import type { TabView } from "$shared/ipc/bindings";
   import FavIcon from "$shared/ui/FavIcon";
@@ -29,22 +30,30 @@
   } = $props();
 </script>
 
+<!--
+  Essentials share the row's width evenly, so one kept site fills the row and
+  four divide it. The tile is wide rather than square: a wide plate leaves the
+  mark plenty of quiet ground around it, which is what keeps a handful of
+  unrelated brand colours from reading as a block of noise.
+-->
+<!--
+  The presentation sentinels belong to the row, not to the tile's styling.
+  Native resolves the tab by id and verifies its url and revision through
+  this element before it will reveal page content, so a tile without them
+  activates nothing at all.
+-->
 <li
   data-zephium-tab-id={tab.id}
   data-zephium-tab-url={tab.url ?? ""}
   data-zephium-projection-revision={tab.projection_revision}
-  class={["min-w-0", className]}
+  class={["essential", className]}
+  data-split-candidate={splitCandidate}
 >
   <button
     type="button"
     aria-current={active ? "page" : undefined}
-    aria-label={tab.title || "Untitled essential"}
-    title={tab.title || "Untitled essential"}
-    class="flex aspect-square w-full cursor-default items-center justify-center rounded-lg bg-fill transition-[background-color,box-shadow] duration-[var(--motion-fast)] ease-[var(--ease-out-quiet)] outline-none hover:bg-fill-hover"
-    class:bg-fill-active={active}
-    class:shadow-raised={active}
-    class:ring-1={splitCandidate}
-    class:ring-accent={splitCandidate}
+    aria-label={tab.title || m.untitled_tab()}
+    title={tab.title || m.untitled_tab()}
     oncontextmenu={(event) => onContextMenu(event, tab)}
     onpointerdown={(event) => onPointerDown(event, tab)}
     onpointermove={onPointerMove}
@@ -56,10 +65,55 @@
       image={favicons.image(tab.icon)}
       tone={favicons.tone(tab.icon)}
       loading={tab.loading}
-      size={22}
-      lit={active}
+      size={18}
+      lit
       fallback={Globe02Icon}
     />
     <span data-zephium-tab-label class="sr-only">{tab.title}</span>
   </button>
 </li>
+
+<style>
+  .essential {
+    min-width: 0;
+  }
+
+  /* A plate, not a swatch: a hairline ring around a quiet ground is what
+     lets a handful of unrelated brand colours sit in one row without the
+     row turning into noise. */
+  .essential > button {
+    display: grid;
+    place-items: center;
+    width: 100%;
+    height: var(--dock-tile);
+    border: 0;
+    border-radius: var(--radius-lg);
+    background: var(--color-card);
+    box-shadow: inset 0 0 0 1px var(--color-border);
+    cursor: default;
+    outline: none;
+    transition:
+      background-color var(--motion-fast) var(--ease-out-quiet),
+      box-shadow var(--motion-fast) var(--ease-out-quiet),
+      scale var(--motion-slow) var(--ease-out-quiet);
+  }
+
+  .essential > button:hover {
+    background: var(--row-hover);
+    box-shadow: inset 0 0 0 1px var(--color-border-strong);
+  }
+
+  .essential > button:active {
+    scale: 0.96;
+    transition-duration: var(--motion-instant);
+  }
+
+  .essential > button[aria-current="page"] {
+    background: var(--row-active);
+    box-shadow: var(--shadow-raised);
+  }
+
+  .essential[data-split-candidate="true"] > button {
+    box-shadow: inset 0 0 0 1px var(--color-accent);
+  }
+</style>

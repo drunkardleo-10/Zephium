@@ -33,9 +33,8 @@
           title={tab.title || "Untitled essential"}
           aria-current={active ? "page" : undefined}
           aria-label={tab.title || "Untitled essential"}
-          class="flex h-10 w-10 cursor-default items-center justify-center rounded-lg bg-fill transition-[background-color,box-shadow] duration-[var(--motion-fast)] ease-[var(--ease-out-quiet)] outline-none hover:bg-fill-hover"
-          class:bg-fill-active={active}
-          class:shadow-raised={active}
+          class="essential-rail-tile flex h-10 w-10 cursor-default items-center justify-center rounded-full transition-[background-color,box-shadow] duration-[var(--motion-fast)] ease-[var(--ease-out-quiet)] outline-none"
+          class:essential-rail-current={active}
           oncontextmenu={(event) => handleContextMenu(event, tab)}
           onclick={() => onSelect(tab.id)}
         >
@@ -43,7 +42,7 @@
             image={favicons.image(tab.icon)}
             tone={favicons.tone(tab.icon)}
             loading={tab.loading}
-            size={20}
+            size={18}
             lit={active}
             fallback={Globe02Icon}
           />
@@ -53,3 +52,22 @@
     {/each}
   </ul>
 {/if}
+
+<style>
+  /* The same plate the dock's tiles wear, at the rail's size: a hairline ring
+     around a quiet ground, so a row of unrelated brand marks stays calm. */
+  .essential-rail-tile {
+    background: var(--color-card);
+    box-shadow: inset 0 0 0 1px var(--color-border);
+  }
+
+  .essential-rail-tile:hover {
+    background: var(--row-hover);
+    box-shadow: inset 0 0 0 1px var(--color-border-strong);
+  }
+
+  .essential-rail-current {
+    background: var(--row-active);
+    box-shadow: var(--shadow-raised);
+  }
+</style>

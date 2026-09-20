@@ -167,14 +167,13 @@
 </script>
 
 {#if entries.length > 0}
-  <nav class="px-1.5 py-0.5" aria-label={label}>
+  <nav class={["tab-list", variant === "essentials" && "tab-list-flush"]} aria-label={label}>
     <ul
-      class:grid={variant === "essentials"}
-      class:grid-cols-[repeat(auto-fill,minmax(46px,1fr))]={variant === "essentials"}
-      class:gap-1.5={variant === "essentials"}
       class:flex={variant === "list"}
+      class:dock-row={variant === "essentials"}
+      style:--dock-columns={`repeat(${Math.min(Math.max(displayUnits.length, 1), 4)}, minmax(0, 1fr))`}
       class:flex-col={variant === "list"}
-      class:gap-px={variant === "list"}
+      class:tab-list-rows={variant === "list"}
       role="list"
     >
       {#each displayUnits as unit, index (unit.key)}
@@ -261,3 +260,29 @@
     {ghost.title}
   </div>
 {/if}
+
+<style>
+  .tab-list {
+    padding-inline: var(--sidebar-inset);
+    padding-block: 2px;
+  }
+
+  /* The dock owns the band's inset, so its site row adds none of its own. */
+  .tab-list-flush {
+    padding: 0;
+  }
+
+  /* The site row divides its width evenly, so one kept site fills the row and
+     four share it. The track list arrives whole through the variable: a var()
+     inside repeat() is not reliably substituted. */
+  .dock-row {
+    display: grid;
+    grid-template-columns: var(--dock-columns, repeat(4, minmax(0, 1fr)));
+    gap: var(--dock-gap);
+  }
+
+  /* One pixel between rows read as a stack of stripes rather than a list. */
+  .tab-list-rows {
+    gap: var(--sidebar-row-gap);
+  }
+</style>

@@ -1490,8 +1490,8 @@
     grid-template-columns: 1fr;
   }
 }
-:root[data-density="compact"] .browse-tab {
-  height: 30px;
+:root[data-density="compact"] .browser-sidebar {
+  --row-sidebar: 32px;
 }
 :root[data-contrast="true"] :is(.browser-sidebar, .settings-shell) {
   --color-muted: var(--color-text);
@@ -1501,19 +1501,24 @@
   outline: 1px solid var(--color-border-strong);
 }
 :root[data-text="large"]
-  :is(.settings-nav-item, .browse-tab, .ui-input, .ui-button, .settings-page .ui-settings-copy h3) {
+  :is(.settings-nav-item, .ui-input, .ui-button, .settings-page .ui-settings-copy h3) {
   font-size: 14px;
 }
 :root[data-text="small"]
-  :is(.settings-nav-item, .browse-tab, .ui-input, .ui-button, .settings-page .ui-settings-copy h3) {
+  :is(.settings-nav-item, .ui-input, .ui-button, .settings-page .ui-settings-copy h3) {
   font-size: 12px;
+}
+:root[data-text="large"] .browser-sidebar {
+  --sidebar-row-text: 14px;
+}
+:root[data-text="small"] .browser-sidebar {
+  --sidebar-row-text: 12px;
 }
 /* Sidebar labels sit a step below full white so they belong to the material;
    only the current item is fully lit. */
 .settings-sidebar-navigation .settings-nav-item,
 .settings-sidebar-navigation .settings-back,
-.browser-sidebar .folder-row,
-.browser-sidebar .compact-mode-word {
+.browser-sidebar .folder-row {
   color: var(--color-label-secondary);
 }
 .settings-sidebar-navigation .settings-nav-item:hover,
