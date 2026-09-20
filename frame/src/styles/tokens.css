@@ -19,6 +19,13 @@
   --color-border: rgb(255 255 255 / 0.08);
   --color-border-strong: var(--white-a14);
 
+  /* Sidebar rows. Hover is a whisper and the active row is a real plate, so
+     the two can never be confused. The generic fills stay where they are:
+     an icon button needs a heavier hover than a 34px row does. */
+  --row-hover: rgb(255 255 255 / 0.05);
+  --row-active: rgb(255 255 255 / 0.13);
+  --row-pressed: rgb(255 255 255 / 0.17);
+
   --color-text: #f4f4f6;
   --color-label-secondary: #d6d7dc;
   --color-muted: rgb(244 244 246 / 0.68);
@@ -115,7 +122,13 @@
   --shadow-thumb-grab:
     0 2px 4px rgb(0 0 0 / 0.32), 0 6px 16px rgb(0 0 0 / 0.3), 0 0 0 0.5px rgb(0 0 0 / 0.16);
   --shadow-track: inset 0 1px 2px rgb(0 0 0 / 0.28), inset 0 0 0 1px rgb(255 255 255 / 0.05);
-  --shadow-raised: 0 0 0 0 rgb(0 0 0 / 0);
+
+  /* The active row is the one thing in the column that is physically above
+     the column. On a dark ground that needs a cast shadow, a rim and a catch
+     of light on the top edge; a few points of extra white is not elevation. */
+  --shadow-raised:
+    0 1px 2px 0 rgb(0 0 0 / 0.36), 0 0 0 0.5px rgb(255 255 255 / 0.1),
+    inset 0 1px 0 0 rgb(255 255 255 / 0.07);
   --shadow-float:
     0 0 0 1px rgb(0 0 0 / 0.4), 0 2px 6px rgb(0 0 0 / 0.24), 0 8px 32px rgb(0 0 0 / 0.32),
     inset 0 1px 0 0 rgb(255 255 255 / 0.06);
@@ -143,8 +156,30 @@
   --control-regular: 30px;
   --control-large: 34px;
   --field-height: 30px;
-  --row-sidebar: 34px;
+  --row-sidebar: 36px;
   --row-page: 50px;
+
+  /* One optical axis for the whole chrome column. Every band measures its
+     horizontal position from this, so glyphs line up from the address field
+     down to the dock instead of each band inventing its own inset. It is
+     zero: the window already holds the chrome off its own edge, and a second
+     margin inside the first only makes the column look inset twice. */
+  --sidebar-inset: 0px;
+  --sidebar-row-gap: 4px;
+
+  /* Antialiased text on a dark ground renders a step lighter than its
+     nominal weight, so the column's rows carry medium and the current one
+     carries semibold. At 400 the list reads as a caption, not as chrome. */
+  --sidebar-row-text: 13px;
+  --sidebar-row-weight: 500;
+  --sidebar-row-weight-current: 550;
+
+  /* The dock's site tiles are wide rather than square, and share the row's
+     width evenly, so a single kept site fills the row. The shelf that leads
+     the row is the one square in it. */
+  --dock-tile: 44px;
+  --dock-gap: 6px;
+  --dock-shelf-gap: 10px;
 
   /* Motion. Presses land instantly and release softly; anything that moves a
      thumb or an indicator gets a whisper of spring. */
@@ -162,6 +197,11 @@
   --ease-out-quiet: var(--ease-out);
   --ease-inout-quiet: var(--ease-in-out);
   --ease-out-soft: var(--ease-out);
+
+  /* A clipped label dissolves into its row's edge instead of ending in an
+     ellipsis. Only the alpha ramp matters; the colour is never painted. */
+  --mask-fade-end: linear-gradient(to right, #000 calc(100% - 26px), transparent);
+  --mask-fade-end-rtl: linear-gradient(to left, #000 calc(100% - 26px), transparent);
 
   /* Favicon plate. Inactive rows desaturate so mixed-brightness site icons
      stop competing with each other and with the surface. */
@@ -189,6 +229,12 @@
 
   --color-border: var(--ink-a7);
   --color-border-strong: rgb(20 22 30 / 0.13);
+
+  /* Light chrome gains elevation by getting brighter, so the active row is a
+     white plate rather than a heavier overlay. */
+  --row-hover: rgb(20 22 30 / 0.05);
+  --row-active: rgb(255 255 255 / 0.96);
+  --row-pressed: rgb(20 22 30 / 0.09);
 
   --color-text: #1b1c21;
   --color-label-secondary: #555862;
@@ -255,7 +301,9 @@
     0 2px 4px rgb(20 22 30 / 0.18), 0 6px 16px rgb(20 22 30 / 0.16),
     0 0 0 0.5px rgb(20 22 30 / 0.08);
   --shadow-track: inset 0 1px 2px rgb(20 22 30 / 0.1), inset 0 0 0 1px rgb(20 22 30 / 0.04);
-  --shadow-raised: 0 1px 2px rgb(20 22 30 / 0.08), 0 0 0 1px rgb(20 22 30 / 0.04);
+  --shadow-raised:
+    0 1px 2px rgb(20 22 30 / 0.1), 0 0 0 0.5px rgb(20 22 30 / 0.07),
+    inset 0 1px 0 0 rgb(255 255 255 / 0.85);
   --shadow-float:
     0 0 0 1px rgb(0 0 0 / 0.06), 0 2px 6px rgb(0 0 0 / 0.05), 0 8px 32px rgb(0 0 0 / 0.08);
   --shadow-popover:

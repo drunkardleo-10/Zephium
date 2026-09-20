@@ -245,14 +245,11 @@ kbd {
 }
 
 /* Live Browse adopts the same focus, selection and control vocabulary. */
-.browse-tab:not([data-selected="true"]) {
-  color: var(--color-text);
-}
 .browse-tab:focus-within {
-  background: var(--color-fill-hover);
+  background: var(--row-hover);
 }
 .browse-tab[data-selected="true"]:focus-within {
-  background: var(--color-fill-active);
+  background: var(--row-active);
 }
 @media (forced-colors: active) {
   .browse-tab[data-selected="true"] {
