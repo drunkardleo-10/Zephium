@@ -1575,6 +1575,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tab_menu_popup,
             profile_menu_popup,
             sidebar_menu_popup,
+            tools_menu_popup,
             newtab_search_context,
             newtab_search,
             newtab_run,
@@ -3961,6 +3962,36 @@ fn profile_menu_popup(caller: WebviewWindow, app: tauri::AppHandle, x: f64, y: f
 
 #[tauri::command]
 #[specta::specta]
+fn tools_menu_popup(caller: WebviewWindow, app: tauri::AppHandle, x: f64, y: f64) -> bool {
+    if !authorize(&caller, CallerPolicy::Main, "tools_menu_popup") {
+        return false;
+    }
+    let Ok(inner_size) = caller.inner_size() else {
+        return false;
+    };
+    let Ok(scale_factor) = caller.scale_factor() else {
+        return false;
+    };
+    if !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return false;
+    }
+    let Some(anchor) = menu_popup_anchor(
+        x,
+        y,
+        f64::from(inner_size.width) / scale_factor,
+        f64::from(inner_size.height) / scale_factor,
+    ) else {
+        return false;
+    };
+    let keymap = load_keymap();
+    let Ok(menu) = build_tools_menu(&app, &keymap) else {
+        return false;
+    };
+    caller.popup_menu_at(&menu, anchor).is_ok()
+}
+
+#[tauri::command]
+#[specta::specta]
 fn panel_hide(caller: WebviewWindow, app: tauri::AppHandle) {
     if !authorize(&caller, CallerPolicy::Panel, "panel_hide") {
         return;
@@ -4321,6 +4352,30 @@ fn build_tab_menu(
 }
 
 /// Identity and browser destinations use a native menu at every sidebar width.
+fn build_tools_menu(
+    handle: &tauri::AppHandle,
+    _overrides: &std::collections::HashMap<String, String>,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem};
+    let notes = MenuItemBuilder::with_id("tool.notes", "Notes").build(handle)?;
+    let tasks = MenuItemBuilder::with_id("tool.tasks", "Tasks").build(handle)?;
+    let activity = MenuItemBuilder::with_id("tool.time", "Activity").build(handle)?;
+    let ai = MenuItemBuilder::with_id("tool.ai", "Ask").build(handle)?;
+    let first = PredefinedMenuItem::separator(handle)?;
+    let history = MenuItemBuilder::with_id("tool.history", "History").build(handle)?;
+    let downloads = MenuItemBuilder::with_id("tool.downloads", "Downloads").build(handle)?;
+    let second = PredefinedMenuItem::separator(handle)?;
+    let settings = MenuItemBuilder::with_id("browser.settings", "Settings…")
+        .accelerator("CmdOrCtrl+,")
+        .build(handle)?;
+    Menu::with_items(
+        handle,
+        &[
+            &notes, &tasks, &activity, &ai, &first, &history, &downloads, &second, &settings,
+        ],
+    )
+}
+
 fn build_profile_menu(
     handle: &tauri::AppHandle,
     _overrides: &std::collections::HashMap<String, String>,

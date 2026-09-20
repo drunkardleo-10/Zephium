@@ -105,6 +105,7 @@ export const commands = {
 	tabMenuPopup: (id: string, x: number | null, y: number | null, canSplit: boolean) => __TAURI_INVOKE<boolean>("tab_menu_popup", { id, x, y, canSplit }),
 	profileMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("profile_menu_popup", { x, y }),
 	sidebarMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("sidebar_menu_popup", { x, y }),
+	toolsMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("tools_menu_popup", { x, y }),
 	/**
 	 *  New Tab has its own main-only entry. The actor revalidates the bound blank
 	 *  tab and focused profile/space before searching or executing any result.
