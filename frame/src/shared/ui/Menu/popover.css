@@ -1,19 +1,12 @@
-/* The one surface that floats inside a page. Shared by Menu and Select, which
-   both portal their content, so these classes are global by necessity. The
-   blur is the only one in the chrome: a menu sits over our own document, so
-   sampling it is cheap and reads as the native menu material. */
+/* What a portalled menu adds to the shared surface: floating geometry, the
+   mount animation, and the list parts only a command menu has. Shared by Menu
+   and Select, which both portal their content, so these classes are global by
+   necessity. */
+@import "./surface.css";
+
 .ui-menu {
-  z-index: 50;
-  box-sizing: border-box;
   min-width: max(180px, var(--bits-floating-anchor-width, 0px));
   max-height: var(--bits-floating-available-height, 360px);
-  padding: 6px;
-  border-radius: var(--radius-menu);
-  background: var(--color-menu);
-  backdrop-filter: blur(8px) saturate(1.15);
-  box-shadow: var(--shadow-popover);
-  outline: none;
-  overflow: hidden;
   transform-origin: var(--bits-floating-transform-origin, top);
   animation: ui-menu-in var(--motion-slow) var(--ease-smooth);
 }
@@ -46,49 +39,6 @@
   display: none;
 }
 
-.ui-menu-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  box-sizing: border-box;
-  min-height: 34px;
-  padding: 6px 8px 6px 12px;
-  border-radius: var(--radius-control-compact);
-  transition: background-color var(--motion-instant) ease;
-  color: var(--color-text);
-  font-size: var(--text-body);
-  line-height: 20px;
-  outline: none;
-  cursor: default;
-  /* stylelint-disable-next-line property-no-vendor-prefix */
-  -webkit-user-select: none;
-  user-select: none;
-}
-
-.ui-menu-item[data-highlighted] {
-  background: var(--color-control-hover);
-}
-
-.ui-menu-item[data-highlighted]:active {
-  background: var(--color-control-pressed);
-}
-
-.ui-menu-item[data-disabled] {
-  opacity: 0.45;
-}
-
-.ui-menu-item[data-danger="true"] {
-  color: var(--color-danger);
-}
-
-.ui-menu-icon {
-  display: grid;
-  place-items: center;
-  flex: none;
-  width: 16px;
-  color: var(--color-muted);
-}
-
 .ui-menu-check {
   display: grid;
   place-items: center;
@@ -98,10 +48,6 @@
   margin-inline: auto 2px;
   padding-inline-start: 12px;
   box-sizing: content-box;
-  color: var(--color-text);
-}
-
-.ui-menu-item[data-highlighted] .ui-menu-icon {
   color: var(--color-text);
 }
 
@@ -143,17 +89,4 @@
   font-weight: 500;
   line-height: 1;
   font-variant-numeric: tabular-nums;
-}
-
-@media (forced-colors: active) {
-  .ui-menu {
-    border: 1px solid ButtonText;
-    box-shadow: none;
-    backdrop-filter: none;
-  }
-
-  .ui-menu-item[data-highlighted] {
-    background: Highlight;
-    color: HighlightText;
-  }
 }
