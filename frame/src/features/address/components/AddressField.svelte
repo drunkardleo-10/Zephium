@@ -1,15 +1,22 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
-  import { Alert02Icon, LockIcon, Search01Icon } from "@hugeicons/core-free-icons";
+  import { Alert02Icon } from "@hugeicons/core-free-icons";
   import { settle } from "$domain/operations";
   import { tabs } from "$domain/tabs";
   import { uiCommands as ui } from "$domain/ui-commands";
   import { commands } from "$shared/ipc/bindings";
   import Icon from "$shared/ui/Icon";
-  import { addressSecurity, editingAddress, restingAddress } from "../lib/address-model";
   import type { Snippet } from "svelte";
+  import { addressSecurity, editingAddress, restingAddress } from "../lib/address-model";
 
-  let { compact = false, shield }: { compact?: boolean; shield: Snippet } = $props();
+  let {
+    compact = false,
+    trailing,
+  }: {
+    compact?: boolean;
+    /** Controls that act on the page, at the far end of the field. */
+    trailing?: Snippet;
+  } = $props();
 
   let input: HTMLInputElement;
   let editing = $state(false);
@@ -21,13 +28,10 @@
   let authoritativeValue = $derived(restingAddress(activeUrl));
   let value = $derived(editing ? draft : authoritativeValue);
   let security = $derived(addressSecurity(activeUrl));
-  let leading = $derived(
-    editing || security === "none"
-      ? { icon: Search01Icon, label: "Search or enter an address", danger: false }
-      : security === "secure"
-        ? { icon: LockIcon, label: "Connection is encrypted", danger: false }
-        : { icon: Alert02Icon, label: "Connection is not encrypted", danger: true },
-  );
+  // Only a problem earns a glyph. A padlock on every encrypted page is the
+  // default state of the web and says nothing; the field reads cleaner
+  // without it, and the one case worth interrupting for still shows.
+  let warning = $derived(!editing && security === "insecure");
 
   $effect(() => {
     const command = ui.uiCommand();
@@ -81,26 +85,12 @@
   visible way to reach it.
 -->
 <form
-  class="shrink-0"
-  class:px-1.5={!compact}
+  class="shrink-0 !pl-0"
+  class:pe-1.5={!compact}
   class:pb-2={!compact}
   onsubmit={submit}
   role="search"
 >
-  {#if compact}
-    <div class="flex justify-center pb-1">
-      <button
-        type="button"
-        class="chrome-button"
-        aria-label={m.ui_search_or_enter_an_address()}
-        title={m.ui_search_or_enter_an_address()}
-        onclick={() => void commands.runCommand("launcher.toggle")}
-      >
-        <Icon icon={Search01Icon} size={16} />
-      </button>
-    </div>
-  {/if}
-
   <!--
     A refused navigation rings the field, following the shared Field
     convention. The message is announced rather than drawn: a block of text
@@ -110,21 +100,26 @@
     class:sr-only={compact}
     class:flex={!compact}
     class:shadow-[inset_0_0_0_1px_var(--color-danger)]={failed}
-    class="focus-within:shadow-focus h-[34px] items-center gap-2 rounded-md bg-fill ps-2.5 pe-2 shadow-field transition-[background-color,box-shadow] duration-[var(--motion-fast)] ease-[var(--ease-out-quiet)] focus-within:bg-fill-hover hover:bg-fill-hover"
+    class="address-field focus-within:shadow-focus h-[34px] items-center gap-2 rounded-md bg-fill ps-2.5 pe-1 shadow-field transition-[background-color,box-shadow] duration-[var(--motion-fast)] ease-[var(--ease-out-quiet)] [--address-centering:20px] focus-within:bg-fill-hover hover:bg-fill-hover"
   >
-    {#if !compact}
+    {#if !compact && warning}
       <span
-        class="flex h-4 w-4 shrink-0 items-center justify-center"
-        class:text-faint={!leading.danger}
-        class:text-danger={leading.danger}
-        title={leading.label}
+        class="flex h-4 w-4 shrink-0 items-center justify-center text-danger"
+        title={m.address_insecure()}
         role="img"
-        aria-label={leading.label}
+        aria-label={m.address_insecure()}
       >
-        <Icon icon={leading.icon} size={14} />
+        <Icon icon={Alert02Icon} size={14} />
       </span>
     {/if}
 
+    <!--
+      Resting, the text centres on the field rather than on the input. The
+      trailing tray takes 26px and the field's own gutters differ by 6px, so
+      the input's centre sits 10px left of the field's; padding twice that on
+      the leading edge puts it back. Editing drops it and returns to the
+      start, where a long URL has to begin.
+    -->
     <input
       bind:this={input}
       data-zephium-address
@@ -133,7 +128,7 @@
       autocomplete="off"
       autocapitalize="off"
       enterkeyhint="go"
-      placeholder={m.ui_search_or_enter_an_address()}
+      placeholder={m.ui_enter_an_address()}
       spellcheck="false"
       {value}
       oninput={handleInput}
@@ -150,12 +145,12 @@
       aria-describedby={failed ? "address-error" : undefined}
       onfocus={beginEditing}
       onblur={() => (editing = false)}
-      class="min-w-0 flex-1 bg-transparent text-[13.5px] text-text outline-none placeholder:text-faint"
+      style:text-align={editing ? "start" : "center"}
+      style:padding-inline-start={editing ? "0" : "var(--address-centering)"}
+      class="min-w-0 flex-1 bg-transparent text-[13.5px] text-label-secondary outline-none placeholder:text-faint focus:text-text"
     />
 
-    {#if !compact && activeUrl && security !== "none"}
-      {@render shield()}
-    {/if}
+    {#if !compact && trailing}{@render trailing()}{/if}
   </div>
   {#if failed}<p id="address-error" role="alert" class="sr-only">{m.browser_nav_failed()}</p>{/if}
 </form>

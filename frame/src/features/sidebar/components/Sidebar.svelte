@@ -7,7 +7,6 @@
   import { untrack } from "svelte";
   import { effectiveWidth, isCompact, toggleMode } from "$session/sidebar-mode.svelte";
   import { uiCommands as ui } from "$domain/ui-commands";
-  import SidebarFooter from "./SidebarFooter.svelte";
   import SidebarHeader from "./SidebarHeader.svelte";
   import SidebarResizeHandle from "./SidebarResizeHandle.svelte";
 
@@ -15,10 +14,12 @@
     settingsNavigation,
     toolPanel,
     browserBody,
+    dock,
   }: {
     settingsNavigation: Snippet;
     toolPanel: Snippet<[tools.ToolKind]>;
     browserBody: Snippet<[boolean]>;
+    dock: Snippet<[boolean]>;
   } = $props();
   let settings = $derived(browserPage.currentPage() === "settings");
   let compact = $derived(!settings && (isCompact() || tools.activeTool() !== null));
@@ -56,12 +57,12 @@
   {#if !settings && tools.activeTool() === null}<SidebarResizeHandle {width} />{/if}
   <SidebarHeader
     compact={compact && tools.activeTool() === null}
+    launcher={!settings && tools.activeTool() !== null}
     ontoggle={toggleShape}
     navigation={!settings}
   />
   {#if settings}
     {@render settingsNavigation()}
-    <SidebarFooter showMode={false} />
   {:else}
     <div
       class="sidebar-columns"
@@ -70,7 +71,7 @@
     >
       <div class="sidebar-browser-column" class:sidebar-tool-rail={tools.activeTool() !== null}>
         {@render browserBody(compact)}
-        <SidebarFooter {compact} />
+        {@render dock(compact)}
       </div>
       {#if tools.activeTool() !== null}<div class="sidebar-tool-host">
           {@render toolPanel(tools.activeTool()!)}

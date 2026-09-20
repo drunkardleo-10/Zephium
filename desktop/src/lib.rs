@@ -6038,14 +6038,14 @@ mod tests {
     #[test]
     fn svelte_sidebar_routes_add_and_split_selection_through_trusted_native_state() {
         let sidebar = crate::frame_sources::SRC_APP_SHELL_SVELTE;
-        let footer = crate::frame_sources::SRC_FEATURES_SIDEBAR_FOOTER_SIDEBARFOOTER_SVELTE;
+        let shelf = crate::frame_sources::SRC_FEATURES_DOCK_TOOLSHELF_SVELTE;
 
-        // The avatar is the single native menu entry point at either width.
-        // Its actions still return through the trusted command dispatcher.
-        assert!(footer.contains(r#"aria-haspopup="menu""#));
-        assert!(footer.contains("profileMenuPopup"));
-        assert!(!footer.contains("tabs.split("));
-        assert!(!footer.contains("addMenuPopup"));
+        // The tool shelf is the dock's native menu entry point. Its actions
+        // still return through the trusted command dispatcher.
+        assert!(shelf.contains(r#"aria-haspopup="menu""#));
+        assert!(shelf.contains("toolsMenuPopup"));
+        assert!(!shelf.contains("tabs.split("));
+        assert!(!shelf.contains("addMenuPopup"));
         let native_menu = include_str!("lib.rs")
             .split("fn build_profile_menu(")
             .nth(1)
@@ -6084,9 +6084,13 @@ mod tests {
     }
 
     #[test]
-    fn runtime_advisory_listener_precedes_bootstrap_and_stays_in_the_sidebar() {
+    fn runtime_advisory_listener_precedes_bootstrap() {
+        // The advisories have no chrome surface at present: the notification
+        // dialog left with the sidebar footer and their next home is not
+        // decided. The projection ordering it depended on is still a native
+        // contract, because runtime status shares the actor-ordered bootstrap
+        // that supplies tabs.
         let app = crate::frame_sources::SRC_APP_APP_SVELTE;
-        let footer = crate::frame_sources::SRC_FEATURES_SIDEBAR_FOOTER_SIDEBARFOOTER_SVELTE;
         let runtime_listener = app
             .find("const runtimeReady = runtime.init()")
             .expect("runtime projection listener");
@@ -6095,15 +6099,6 @@ mod tests {
             .expect("tab bootstrap");
 
         assert!(runtime_listener < tab_bootstrap);
-        assert!(footer.contains("runtimeNotifications(runtime.status())"));
-        assert!(footer.contains(r#"haspopup="dialog""#));
-        assert!(footer.contains(r#"id="runtime-notifications""#));
-        assert!(footer.contains(r#"aria-modal="true""#));
-        assert!(footer.contains(r#"event.key === "Tab""#));
-        assert!(footer.contains("closeNotifications(true)"));
-        assert!(footer.contains("profileMenuPopup"));
-        assert!(!footer.contains("http://"));
-        assert!(!footer.contains("https://"));
     }
 
     #[test]

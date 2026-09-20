@@ -6,9 +6,9 @@
   import { loadSettings } from "$features/settings";
   import { EssentialTile } from "$features/essentials";
   import { AddressField } from "$features/address";
+  import { Dock } from "$features/dock";
   import { EssentialsRail } from "$features/essentials";
   import { ExtensionActions } from "$features/extensions";
-  import { SpaceHeader } from "$features/spaces";
   import { sidebarTree } from "$features/tabs";
   import { SidebarBody } from "$features/tabs";
   import { TabList } from "$features/tabs";
@@ -31,7 +31,7 @@
   import { loadHistoryPage } from "$features/history";
   import { loadNewTabSearch } from "$features/search";
   import { loadNewTab } from "$features/newtab";
-  import { Sidebar } from "$features/sidebar";
+  import { ModePicker, ModeTabs, Sidebar, UtilityTray } from "$features/sidebar";
   import { IS_MAC } from "$shared/platform";
   import { tabs } from "$domain/tabs";
   onMount(() => {
@@ -106,43 +106,64 @@
 >
   <Sidebar
     >{#snippet browserBody(compact)}
-      <AddressField {compact}>{#snippet shield()}<BlockerShield />{/snippet}</AddressField>
       {#if compact}
-        <ExtensionActions compact />
-        <EssentialsRail entries={railEssentials} onSelect={selectTab} />
+        <AddressField {compact} />
+        {#if toolHost.activeTool() !== null}<ModePicker standalone />{/if}
         <TabRail entries={railTabs} onSelect={selectTab} />
       {:else}
-        <ExtensionActions />
-        {#if tree.favorites.length > 0 || tabDrag.draggedId() !== null}<div
-            class="essentials-drop-zone shrink-0 pb-1"
-            data-essentials-drop
-            data-over={tabDrag.overEssentials()}
-          >
-            {#if tree.favorites.length === 0}<div class="essential-drop-hint">
-                {m.essential_drop_hint()}
-              </div>{/if}
-            <TabList
-              entries={tree.favorites}
-              section="favorites"
-              variant="essentials"
-              label={m.essentials()}
-              {splitting}
-              onSelect={selectTab}
-              >{#snippet essentialTile(props)}<EssentialTile {...props} />{/snippet}</TabList
-            >
-          </div>{/if}
-        {#if tabDrag.moveFailed()}<p class="sidebar-move-error" role="alert">
-            {m.essential_move_failed()}
-          </p>{/if}
-        <SpaceHeader />
+        <!--
+          The switch sits above the address field because it governs the
+          whole column, field included; the tray rides the field itself,
+          because everything in it acts on the page the field names.
+        -->
+        <div class="sidebar-head"><ModeTabs /></div>
+        <AddressField {compact}>
+          {#snippet trailing()}
+            <UtilityTray>
+              <div class="utility-panel">
+                <BlockerShield />
+                <ExtensionActions />
+              </div>
+            </UtilityTray>
+          {/snippet}
+        </AddressField>
         {#if splitting}<p class="shrink-0 px-3 pb-1 text-[12px] text-accent" aria-live="polite">
             {m.choose_split()}
           </p>{/if}
         <SidebarBody pinned={tree.pinned} today={tree.today} {splitting} onSelect={selectTab} />
       {/if}
-    {/snippet}{#snippet settingsNavigation()}<SettingsNavigation />{/snippet}{#snippet toolPanel(
-      kind,
-    )}<LazyView
+    {/snippet}{#snippet dock(compact)}{#if compact}<Dock compact>
+          {#snippet sites()}<EssentialsRail
+              entries={railEssentials}
+              onSelect={selectTab}
+            />{/snippet}
+        </Dock>{:else}<Dock>
+          {#snippet sites()}
+            <div
+              class="dock-sites"
+              data-essentials-drop
+              data-over={tabDrag.overEssentials()}
+              data-empty={tree.favorites.length === 0}
+            >
+              {#if tree.favorites.length === 0}<span class="dock-sites-hint"
+                  >{m.essential_drop_hint()}</span
+                >{/if}
+              <TabList
+                entries={tree.favorites}
+                section="favorites"
+                variant="essentials"
+                label={m.essentials()}
+                {splitting}
+                onSelect={selectTab}
+                >{#snippet essentialTile(props)}<EssentialTile {...props} />{/snippet}</TabList
+              >
+            </div>
+            {#if tabDrag.moveFailed()}<p class="sidebar-move-error" role="alert">
+                {m.essential_move_failed()}
+              </p>{/if}
+          {/snippet}
+        </Dock>{/if}{/snippet}{#snippet settingsNavigation()}<SettingsNavigation
+      />{/snippet}{#snippet toolPanel(kind)}<LazyView
         loader={loadToolSlot}
         loadingLabel={m.surface_loading()}
         failureLabel={m.surface_render_failed()}
