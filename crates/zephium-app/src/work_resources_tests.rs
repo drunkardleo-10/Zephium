@@ -55,6 +55,10 @@ impl Native {
                 self.acquisitions.fetch_add(1, Ordering::SeqCst);
                 WorkBrowserResourceNativeOutcome::Acquired
             }
+            WorkBrowserResourceOperation::PresentHuman
+            | WorkBrowserResourceOperation::ContinueAfterHuman => {
+                WorkBrowserResourceNativeOutcome::Refused
+            }
             WorkBrowserResourceOperation::Revoke => {
                 *self.delivery.lock().unwrap() = request.take_lease_delivery_completion();
                 WorkBrowserResourceNativeOutcome::Revoked {

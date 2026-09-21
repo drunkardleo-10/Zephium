@@ -120,6 +120,12 @@ pub enum WorkBrowserResourcePhase {
     Constructing,
     /// Native resource is retained with no executing actor lease.
     Retained,
+    /// Agent admission is sealed while native human presentation is pending.
+    PresentingHuman,
+    /// Only the person may interact with this exact retained page.
+    PresentedHuman,
+    /// Native hiding and document rebinding must finish before agent admission.
+    ContinuingAfterHuman,
     /// One exact native lease binding is awaiting acknowledgement.
     Acquiring,
     /// The exact acknowledged execution lease is active.
@@ -199,6 +205,10 @@ pub enum WorkBrowserResourceOperation {
     Revoke,
     /// Explicitly destroy the exact resource and its resource-owned channels.
     Destroy,
+    /// Present the drained page under an explicit bounded human-control request.
+    PresentHuman,
+    /// Hide the human page and bind its final document without starting an actor.
+    ContinueAfterHuman,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -219,8 +229,9 @@ pub struct WorkBrowserResourceRequest {
     isolated_public: bool,
     document: Option<Arc<ContextNavigationTarget>>,
     document_policy: crate::WorkBrowserDocumentPolicy,
-    delivery: Option<delivery::DeliveryDispatch>,
+    delivery: Option<Box<delivery::DeliveryDispatch>>,
     health: Option<Box<WorkBrowserResourceHealthReporter>>,
+    human: Option<Box<human::HumanWindow>>,
 }
 impl WorkBrowserResourceRequest {
     /// Attaches attempt-owned storage only to exact anonymous construction.
@@ -288,6 +299,31 @@ impl WorkBrowserResourceRequest {
     /// Immutable construction policy, never supplied by a page or model.
     pub const fn document_policy(&self) -> crate::WorkBrowserDocumentPolicy {
         self.document_policy
+    }
+    /// Frozen native presentation operands; absent from ordinary actor operations.
+    pub fn human_region(&self) -> Option<WorkBrowserHumanRegion> {
+        self.human.as_ref().map(|human| human.region)
+    }
+    /// Native document-change reporting without page content or URL disclosure.
+    pub fn human_progress(&self) -> Option<WorkBrowserHumanProgress> {
+        self.human.as_ref().map(|human| human.progress.clone())
+    }
+    /// Original absolute human wait deadline, never renewed by presentation.
+    pub fn human_deadline(&self) -> Option<AgentPolicyInstant> {
+        self.human.as_ref().map(|human| human.deadline)
+    }
+    /// Exact source whose origin bounds human navigation; it grants no actor scope.
+    pub fn human_source(&self) -> Option<&ContextNavigationTarget> {
+        self.human.as_ref().map(|human| human.source.as_ref())
+    }
+    /// Native proof that the page is hidden and its final document is frozen.
+    pub fn complete_human_document(
+        self,
+        effective: ContextNavigationTarget,
+    ) -> WorkBrowserResourceCompletion {
+        let mut completion = self.complete(WorkBrowserResourceNativeOutcome::HumanContinued);
+        completion.effective_document = Some(Arc::new(effective));
+        completion
     }
     /// Attest the frozen native location after the exact initial navigation.
     /// The original operation owner binds the requested/effective lineage.
@@ -376,6 +412,10 @@ pub enum WorkBrowserResourceNativeOutcome {
     Destroyed,
     /// No exact successful native result could be proven.
     Refused,
+    /// Exact drained page is presented in the requested human-owned region.
+    HumanPresented,
+    /// Native human input is retired and the current document is frozen.
+    HumanContinued,
 }
 
 /// Non-cloneable native terminal; ordinary audits cannot mint this receipt.
@@ -411,6 +451,10 @@ impl WorkBrowserLeaseEnded {
 pub enum WorkBrowserResourceEvent {
     /// Resource construction is acknowledged without actor authority.
     Retained(WorkBrowserResourceJoin),
+    /// Native presentation acknowledged; no execution lease exists.
+    HumanPresented(WorkBrowserResourceJoin),
+    /// Human input retired and document rebound; fresh actor admission is separate.
+    HumanContinued(WorkBrowserResourceJoin),
     /// An exact native lease binding was acknowledged.
     Acquired(WorkBrowserExecutionLease),
     /// Exact binding exists but was not activated because expiry or shutdown
@@ -451,6 +495,7 @@ struct Resource {
     document_policy: crate::WorkBrowserDocumentPolicy,
     effective_document: Option<Arc<ContextNavigationTarget>>,
     current_requested_document: Option<Arc<ContextNavigationTarget>>,
+    admission_document: Option<Arc<ContextNavigationTarget>>,
     navigation_epoch: crate::NavigationEpoch,
     frame_generation: crate::FrameGeneration,
     document_available: bool,
@@ -459,6 +504,7 @@ struct Resource {
     action: Option<action::ActionJoin>,
     observation_sequence: u16,
     observation: Option<observation::ObservationJoin>,
+    human: Option<Box<human::HumanWindow>>,
 }
 impl Resource {
     fn quarantine(&mut self, failure: WorkBrowserResourceFailure) {
@@ -665,6 +711,7 @@ impl WorkBrowserResources {
                 document_policy,
                 effective_document: None,
                 current_requested_document: None,
+                admission_document: document.clone(),
                 navigation_epoch: crate::NavigationEpoch::INITIAL,
                 frame_generation: crate::FrameGeneration::INITIAL,
                 document_available: false,
@@ -673,6 +720,7 @@ impl WorkBrowserResources {
                 action: None,
                 observation_sequence: 0,
                 observation: None,
+                human: None,
             },
         );
         Ok(WorkBrowserResourceRequest {
@@ -684,6 +732,7 @@ impl WorkBrowserResources {
             document_policy,
             delivery: None,
             health: None,
+            human: None,
         })
     }
     /// Reserve one run-bound native lease without transferring page ownership.
@@ -744,6 +793,7 @@ impl WorkBrowserResources {
             document_policy: row.document_policy,
             delivery: None,
             health: None,
+            human: None,
         })
     }
     /// Check exact current native-lease membership and immutable deadline.
@@ -806,6 +856,7 @@ impl WorkBrowserResources {
             document_policy: row.document_policy,
             delivery: None,
             health: None,
+            human: None,
         })
     }
     /// Revokes the exact lease and additionally tracks physical delivery of its
@@ -821,7 +872,7 @@ impl WorkBrowserResources {
     > {
         let mut request = self.revoke(lease)?;
         let (delivery, ticket) = delivery::track(lease.clone());
-        request.delivery = Some(delivery);
+        request.delivery = Some(Box::new(delivery));
         Ok((request, ticket))
     }
     /// Quarantine one resource without discarding callback or capacity debt.
@@ -850,7 +901,11 @@ impl WorkBrowserResources {
         }
         if !matches!(
             row.phase,
-            WorkBrowserResourcePhase::Retained | WorkBrowserResourcePhase::Quarantined
+            WorkBrowserResourcePhase::Retained
+                | WorkBrowserResourcePhase::Quarantined
+                | WorkBrowserResourcePhase::PresentingHuman
+                | WorkBrowserResourcePhase::PresentedHuman
+                | WorkBrowserResourcePhase::ContinuingAfterHuman
         ) {
             return Err(WorkBrowserResourceError::Phase);
         }
@@ -872,6 +927,7 @@ impl WorkBrowserResources {
             document_policy: row.document_policy,
             delivery: None,
             health: None,
+            human: None,
         })
     }
     /// Settle the exact owned terminal. Wrong authority/phase cannot be replaced
@@ -930,6 +986,13 @@ impl WorkBrowserResources {
         if let Some(failure) = row.failure {
             row.phase = WorkBrowserResourcePhase::Quarantined;
             return Ok(WorkBrowserResourceEvent::Quarantined(failure));
+        }
+        if matches!(
+            completion.operation.kind,
+            WorkBrowserResourceOperation::PresentHuman
+                | WorkBrowserResourceOperation::ContinueAfterHuman
+        ) {
+            return Ok(human::settle(row, completion, now, sealed));
         }
         let failure = match (completion.operation.kind, completion.outcome) {
             (
@@ -1048,6 +1111,8 @@ impl WorkBrowserResources {
                         row.phase = WorkBrowserResourcePhase::Retained;
                     }
                     WorkBrowserResourceOperation::Revoke
+                    | WorkBrowserResourceOperation::PresentHuman
+                    | WorkBrowserResourceOperation::ContinueAfterHuman
                     | WorkBrowserResourceOperation::Destroy => {
                         row.quarantine(WorkBrowserResourceFailure::NativeRefused)
                     }
@@ -1137,6 +1202,13 @@ impl WorkBrowserResources {
             .ok_or(WorkBrowserResourceError::Stale)
     }
 }
+
+#[path = "work_browser_human.rs"]
+mod human;
+pub use human::{
+    same_work_human_site, WorkBrowserHumanProgress, WorkBrowserHumanRegion,
+    MAX_WORK_HUMAN_WAIT_MILLIS,
+};
 
 #[path = "work_browser_observation.rs"]
 mod observation;

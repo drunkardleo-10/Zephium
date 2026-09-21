@@ -80,12 +80,13 @@ impl WorkBrowserReadBinding {
     pub fn document(&self) -> &ContextNavigationTarget {
         &self.document
     }
-    /// Original user/task-authored request; never replaced by finalization.
+    /// This actor's admission document; native finalization never replaces it.
+    /// A completed human handoff establishes a fresh admission document.
     pub fn requested_document(&self) -> &ContextNavigationTarget {
         &self.requested_document
     }
     /// Exact request that produced this current document. The initial resource
-    /// request remains separately available through `requested_document`.
+    /// admission document remains separately available through `requested_document`.
     pub fn current_requested_document(&self) -> &ContextNavigationTarget {
         &self.current_requested_document
     }
@@ -229,7 +230,7 @@ impl WorkBrowserResources {
                 .cloned()
                 .ok_or(WorkBrowserResourceError::Phase)?,
             requested_document: row
-                .document
+                .admission_document
                 .clone()
                 .ok_or(WorkBrowserResourceError::Phase)?,
             document_policy: row.document_policy,

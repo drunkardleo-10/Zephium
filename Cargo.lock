@@ -3331,9 +3331,9 @@ dependencies = [
 
 [[package]]
 name = "psl"
-version = "2.1.220"
+version = "2.1.230"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de177021aa731f88221b3ae411cb89d70f66e51487c26ef9c9f65fc7250c22e8"
+checksum = "a99fa29240e16db91189226cb4f423432499a019cb659c655556778b61988f2f"
 dependencies = [
  "psl-types",
 ]
@@ -6524,6 +6524,7 @@ dependencies = [
  "crc32fast",
  "futures-util",
  "proptest",
+ "psl",
  "reqwest",
  "rig-core",
  "security-framework",
