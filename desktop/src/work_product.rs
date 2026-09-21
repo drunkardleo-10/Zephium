@@ -35,14 +35,29 @@ pub(crate) fn install(
     super::work_diagnostics::install(app);
     let ai_enabled = store.app_setting("ai.enabled").as_deref() != Some("false");
     let work_enabled = store.app_setting("work.enabled").as_deref() != Some("false");
+    let providers = std::sync::Arc::new(super::work_provider::WorkProviders::new(
+        engine, store, frames,
+    ));
+    #[cfg(target_os = "macos")]
+    {
+        let app = app.clone();
+        providers
+            .browser
+            .set_human_page_observer(std::sync::Arc::new(move |change| {
+                super::emit_to_privileged(
+                    &app,
+                    super::MAIN_LABEL,
+                    "zephium:work-human-changed",
+                    &change,
+                );
+            }));
+    }
     app.manage(WorkProductState {
         operations: super::work_operations::WorkOperations::with_enablement(
             ai_enabled,
             work_enabled,
         ),
-        providers: std::sync::Arc::new(super::work_provider::WorkProviders::new(
-            engine, store, frames,
-        )),
+        providers,
     })
 }
 
@@ -316,4 +331,16 @@ pub(crate) async fn work_call(
         Ok(response) => response,
         Err(_) => failed(WorkError::OutcomeUnknown),
     }
+}
+
+#[path = "work_human.rs"]
+pub(crate) mod human;
+
+pub(crate) fn release_human_presentations(app: &tauri::AppHandle) {
+    #[cfg(all(feature = "work-product", target_os = "macos"))]
+    if let Some(owner) = app.try_state::<WorkProductState>() {
+        owner.providers.browser.release_presented_human_pages();
+    }
+    #[cfg(not(all(feature = "work-product", target_os = "macos")))]
+    let _ = app;
 }

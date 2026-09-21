@@ -37,6 +37,10 @@ export const commands = {
 	/**  Reveals an admitted folder, or a file inside one, in Finder. */
 	workRevealPath: (expectedProfile: string, path: string) => typedError<boolean, null>(__TAURI_INVOKE("work_reveal_path", { expectedProfile, path })),
 	workActivity: (expectedProfile: string, work: WorkId) => __TAURI_INVOKE<WorkActivityResponseV1>("work_activity", { expectedProfile, work }),
+	workHumanPages: (expectedProfile: string, work: WorkId) => __TAURI_INVOKE<WorkHumanResponseV1>("work_human_pages", { expectedProfile, work }),
+	workHumanPresent: (expectedProfile: string, work: WorkId, page: WorkHumanPageIdV1, region: WorkHumanRegionV1) => __TAURI_INVOKE<WorkHumanResponseV1>("work_human_present", { expectedProfile, work, page, region }),
+	workHumanContinue: (expectedProfile: string, work: WorkId, page: WorkHumanPageIdV1, account: WorkHumanAccountV1) => __TAURI_INVOKE<WorkHumanResponseV1>("work_human_continue", { expectedProfile, work, page, account }),
+	workHumanRelease: (expectedProfile: string, work: WorkId, page: WorkHumanPageIdV1) => __TAURI_INVOKE<WorkHumanResponseV1>("work_human_release", { expectedProfile, work, page }),
 	tabsBootstrap: () => __TAURI_INVOKE<void>("tabs_bootstrap"),
 	tabsOpen: () => __TAURI_INVOKE<OperationAdmission>("tabs_open"),
 	/**
@@ -183,6 +187,7 @@ export const events = {
 	uiCommand: makeEvent<UiCommand>("ui-command"),
 	workChanged: makeEvent<WorkChanged>("work-changed"),
 	workEnvironmentChanged: makeEvent<WorkEnvironmentChanged>("work-environment-changed"),
+	zephiumWorkHumanChanged: makeEvent<WorkHumanChanged>("zephium:work-human-changed"),
 };
 
 /* Types */
@@ -2220,6 +2225,53 @@ export type WorkFolderAdmitV1 =
  *  or an existing path that is not a folder.
  */
 { kind: "refused"; not_a_folder: boolean };
+
+/**  Explicit user attestation; neither choice permits sensitive provider disclosure. */
+export type WorkHumanAccountV1 = "anonymous" | "signed_in_public_only";
+
+export type WorkHumanChanged = WorkHumanChangedV1;
+
+/**  Invalidation, including document changes; read current pages after delivery. */
+export type WorkHumanChangedV1 = {
+	profile: string,
+	work: WorkId,
+};
+
+export type WorkHumanPageIdV1 = {
+	attempt: WorkAttemptId,
+	step: WorkStepId,
+	generation: number,
+};
+
+export type WorkHumanPageV1 = {
+	id: WorkHumanPageIdV1,
+	phase: WorkHumanPhaseV1,
+	reason: WorkHumanReasonV1,
+	remaining_millis: number,
+	document_revision: string,
+	can_continue: boolean,
+};
+
+export type WorkHumanPhaseV1 = "reading" | "waiting_for_human" | "presenting" | "presented" | "continuing" | "released";
+
+export type WorkHumanReasonV1 = "sign_in" | "challenge" | "permission" | "verification" | "user_decision" | "sensitive_effect" | "unsupported_interaction";
+
+/**  Logical points relative to the native content view's top-left corner. */
+export type WorkHumanRegionV1 = {
+	x: number,
+	y: number,
+	width: number,
+	height: number,
+};
+
+export type WorkHumanResponseV1 = {
+	version: number,
+	profile: string,
+	work: WorkId,
+	accepted: boolean,
+	pages: WorkHumanPageV1[],
+	error: WorkFailureV1 | null,
+};
 
 /** Durable profile-owned Work identity; never an execution capability. */
 export type WorkId = string;

@@ -7,7 +7,7 @@ use zephium_ipc::work::{WorkOperationStateV1, WorkOperationV1, WorkReplyV1, Work
 pub(crate) struct WorkProviders {
     pub(crate) activity: super::work_activity::WorkActivity,
     #[cfg(target_os = "macos")]
-    browser: zephium_work_composition::MacosWorkComposition,
+    pub(crate) browser: zephium_work_composition::MacosWorkComposition,
 }
 impl WorkProviders {
     pub(crate) fn new(

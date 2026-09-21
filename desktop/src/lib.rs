@@ -1346,6 +1346,10 @@ fn request_unrecoverable_native_failure(app: &tauri::AppHandle, reason: &str) {
 struct WorkChanged(zephium_ipc::work::WorkChangedV1);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+#[tauri_specta(event_name = "zephium:work-human-changed")]
+struct WorkHumanChanged(zephium_ipc::work::WorkHumanChangedV1);
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct WorkEnvironmentChanged(zephium_ipc::work::WorkEnvironmentChangedV1);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
@@ -1593,6 +1597,10 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             media::work_pick_folder,
             media::work_reveal_path,
             work_product::work_activity,
+            work_product::human::work_human_pages,
+            work_product::human::work_human_present,
+            work_product::human::work_human_continue,
+            work_product::human::work_human_release,
             tabs_bootstrap,
             tabs_open,
             tabs_open_url,
@@ -1659,6 +1667,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         .events(collect_events![
             WorkEnvironmentChanged,
             WorkChanged,
+            WorkHumanChanged,
             ItemsChanged,
             ResourceChanged,
             TabChanged,
@@ -2614,6 +2623,7 @@ fn work_pane_hide(
     if !authorize(&caller, CallerPolicy::Main, "work_pane_hide") {
         return rejected_operation();
     }
+    work_product::release_human_presentations(caller.app_handle());
     dispatch_operation(caller.app_handle(), &shell, Command::WorkPaneHide)
 }
 
